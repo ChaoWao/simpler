@@ -43,6 +43,7 @@ __attribute__((visibility("default"))) void reduce_scatter_orchestration(const C
     params.add_inout(scratch);
     params.add_scalar(orch_args.scalar(0));  // nranks
     params.add_scalar(orch_args.scalar(1));  // CommContext
+    params.add_scalar(orch_args.scalar(2));  // reduce_op
     rt_submit_aiv_task(0, params);
 }
 
