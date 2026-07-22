@@ -1047,6 +1047,8 @@ int ChipSwimlaneCollector::export_swimlane_json() {
                 return "drain_publish";
             case ChipSwimlaneSchedPhaseKind::AsyncPoll:
                 return "async_poll";
+            case ChipSwimlaneSchedPhaseKind::GraphPrepare:
+                return "graph_prepare";
             }
             return "unknown";
         };
@@ -1071,6 +1073,11 @@ int ChipSwimlaneCollector::export_swimlane_json() {
                     pr.kind == ChipSwimlaneSchedPhaseKind::PredicatedSkip) {
                     uint64_t task_id = (static_cast<uint64_t>(pr.phase_data.dummy_task.ring_id) << 32) |
                                        pr.phase_data.dummy_task.local_id;
+                    outfile << ", \"task_id\": " << task_id;
+                }
+                if (pr.kind == ChipSwimlaneSchedPhaseKind::GraphPrepare) {
+                    uint64_t task_id = (static_cast<uint64_t>(pr.phase_data.graph_task.ring_id) << 32) |
+                                       pr.phase_data.graph_task.local_id;
                     outfile << ", \"task_id\": " << task_id;
                 }
                 // Queue-depth snapshots — [AIC, AIV, MIX] per ChipSwimlaneAicpuSchedPhaseRecord docstring.

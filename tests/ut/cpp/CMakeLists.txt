@@ -747,6 +747,10 @@ add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_gra
 add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
+add_a2a3_hbg_runtime_test(test_graph_cache a2a3/test_graph_cache.cpp)
+target_sources(test_graph_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/scheduler/graph_execution.cpp
+)
 # PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE

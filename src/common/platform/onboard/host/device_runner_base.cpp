@@ -171,6 +171,53 @@ void DeviceRunnerBase::set_retained_temp_buffer(uint32_t pipeline_slot, void *ad
     retained_temp_sizes_[pipeline_slot] = size;
 }
 
+void *DeviceRunnerBase::acquire_graph_execution_buffer(
+    uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
+) {
+    if (pipeline_slot >= graph_execution_buffers_.size() || bytes == 0 || alignment == 0 ||
+        (alignment & (alignment - 1)) != 0 || bytes > SIZE_MAX - (alignment - 1)) {
+        return nullptr;
+    }
+    std::vector<RetainedGraphExecutionBuffer> &buffers = graph_execution_buffers_[pipeline_slot][graph_key];
+    if (occurrence >= buffers.size()) buffers.resize(static_cast<size_t>(occurrence) + 1);
+    RetainedGraphExecutionBuffer &buffer = buffers[occurrence];
+    if (buffer.aligned_addr != nullptr && buffer.capacity >= bytes &&
+        reinterpret_cast<uintptr_t>(buffer.aligned_addr) % alignment == 0) {
+        return buffer.aligned_addr;
+    }
+
+    const size_t allocation_bytes = bytes + alignment - 1;
+    void *allocation = mem_alloc_.alloc(allocation_bytes);
+    if (allocation == nullptr) return nullptr;
+    const uintptr_t raw = reinterpret_cast<uintptr_t>(allocation);
+    if (raw > UINTPTR_MAX - (alignment - 1)) {
+        mem_alloc_.free(allocation);
+        return nullptr;
+    }
+    void *aligned_addr = reinterpret_cast<void *>((raw + alignment - 1) & ~(alignment - 1));
+    if (device_memset(aligned_addr, 0, bytes) != 0) {
+        mem_alloc_.free(allocation);
+        return nullptr;
+    }
+    if (buffer.allocation != nullptr && mem_alloc_.free(buffer.allocation) != 0) {
+        mem_alloc_.free(allocation);
+        return nullptr;
+    }
+    buffer = RetainedGraphExecutionBuffer{allocation, aligned_addr, bytes};
+    return aligned_addr;
+}
+
+void DeviceRunnerBase::release_graph_execution_buffers() {
+    for (GraphExecutionBufferMap &by_key : graph_execution_buffers_) {
+        for (auto &entry : by_key) {
+            for (RetainedGraphExecutionBuffer &buffer : entry.second) {
+                if (buffer.allocation != nullptr) mem_alloc_.free(buffer.allocation);
+            }
+        }
+        by_key.clear();
+    }
+}
+
 void DeviceRunnerBase::clear_temporary_buffer() {
     for (size_t slot = 0; slot < retained_temp_addrs_.size(); ++slot) {
         if (retained_temp_addrs_[slot] == nullptr) continue;
@@ -1119,6 +1166,7 @@ int DeviceRunnerBase::finalize_common() {
     prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
     prebuilt_runtime_arena_cache_image_.clear();
 
+    release_graph_execution_buffers();
     clear_temporary_buffer();
 
     // Free the 8-byte device_wall buffer (allocated lazily in run()) while

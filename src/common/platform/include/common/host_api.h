@@ -51,6 +51,17 @@ struct HostApiOps {
     // {nullptr, 0} when nothing is retained yet.
     void (*get_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void *addr, size_t size);
+    // Runner-owned Graph execution storage. The platform keeps one grow-only
+    // block per (pipeline slot, Graph key, occurrence index), allocates it
+    // through the tracked device MemoryAllocator, and releases every block at
+    // Worker finalization. `alignment` must be a power of two. Repeated calls
+    // return the same aligned GM address while the retained capacity is large
+    // enough; a growth request replaces only that entry. Unused by runtimes
+    // without host-built Graph execution.
+    void *(*acquire_graph_execution_buffer)(
+        void *runner_ctx, uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes,
+        size_t alignment
+    );
     // Commit the three pooled regions (GM heap, runtime shared memory, and
     // prebuilt runtime arena) of the arena bank selected by this run, as three
     // independent device allocations. `runtime_arena_size == 0` skips the
@@ -137,6 +148,13 @@ public:
     }
     void set_retained_temp_buffer(void *addr, size_t size) const {
         ops_->set_retained_temp_buffer(runner_ctx_, pipeline_slot_, addr, size);
+    }
+    void *
+    acquire_graph_execution_buffer(uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment) const {
+        if (ops_->acquire_graph_execution_buffer == nullptr) return nullptr;
+        return ops_->acquire_graph_execution_buffer(
+            runner_ctx_, pipeline_slot_, graph_key, occurrence, bytes, alignment
+        );
     }
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) const {
         return ops_->setup_static_arena(runner_ctx_, arena_bank_, gm_heap_size, gm_sm_size, runtime_arena_size);

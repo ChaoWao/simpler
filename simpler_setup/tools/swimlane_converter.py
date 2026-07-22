@@ -119,6 +119,99 @@ def format_task_display(task_id):
     return f"r{ring}t{local}"
 
 
+def _decode_graph_node_task_id(task_id):
+    """Decode Scheduler-owned ring-1 Graph-node ids.
+
+    Graph nodes use ``local=(outer_local << 10) | node_index`` while the
+    stream-visible outer Graph task remains on ring 0.
+    """
+    tid = normalize_pto2_task_id_int(task_id)
+    if tid is None or ((tid >> 32) & 0xFFFFFFFF) != 1:
+        return None
+    local = tid & 0xFFFFFFFF
+    return local >> 10, local & 0x3FF
+
+
+def _collect_graph_execution_instances(tasks, scheduler_phases):  # noqa: PLR0912
+    """Join Graph-node rows to their outer GraphPrepare records."""
+    prepare_by_outer = defaultdict(list)
+    dummy_rows = []
+    for thread_idx, records in enumerate(scheduler_phases or []):
+        for record in records:
+            phase = record.get("phase")
+            if phase == "graph_prepare":
+                outer_task_id = normalize_pto2_task_id_int(record.get("task_id"))
+                if outer_task_id is not None and (outer_task_id >> 32) == 0:
+                    prepare_by_outer[outer_task_id].append(record)
+            elif phase == "dummy_task":
+                dummy_rows.append((record, thread_idx))
+
+    rows_by_outer = defaultdict(list)
+    for task in tasks:
+        decoded = _decode_graph_node_task_id(task.get("task_id"))
+        if decoded is not None:
+            outer_task_id, node_index = decoded
+            rows_by_outer[outer_task_id].append((task, node_index))
+
+    dummy_by_outer = defaultdict(list)
+    for record, thread_idx in dummy_rows:
+        decoded = _decode_graph_node_task_id(record.get("task_id"))
+        if decoded is not None:
+            outer_task_id, node_index = decoded
+            dummy_by_outer[outer_task_id].append((record, node_index, thread_idx))
+
+    instances = []
+    for outer_task_id, prepare_records in prepare_by_outer.items():
+        rows = rows_by_outer.get(outer_task_id, [])
+        aicpu_rows = dummy_by_outer.get(outer_task_id, [])
+        if not rows and not aicpu_rows:
+            continue
+        node_indices = {node_index for _, node_index in rows}
+        node_indices.update(node_index for _, node_index, _ in aicpu_rows)
+        starts = [
+            task.get("dispatch_time_us", _task_slice_start_us(task))
+            if task.get("dispatch_time_us", -1) >= 0
+            else _task_slice_start_us(task)
+            for task, _ in rows
+        ]
+        starts.extend(record["start_time_us"] for record, _, _ in aicpu_rows)
+        ends = [
+            task.get("finish_time_us", 0) if task.get("finish_time_us", 0) > 0 else task["end_time_us"]
+            for task, _ in rows
+        ]
+        ends.extend(record["end_time_us"] for record, _, _ in aicpu_rows)
+        prepare_start_us = min(record["start_time_us"] for record in prepare_records)
+        instances.append(
+            {
+                "outer_task_id": outer_task_id,
+                "rows": rows,
+                "aicpu_rows": aicpu_rows,
+                "visible_node_indices": sorted(node_indices),
+                "execution_start_us": min(starts),
+                "execution_end_us": max(ends),
+                "prepare_start_us": prepare_start_us,
+                "prepare_end_us": max(record["end_time_us"] for record in prepare_records),
+                "prepare_duration_us": sum(
+                    record["end_time_us"] - record["start_time_us"] for record in prepare_records
+                ),
+                "prepare_slice_count": len(prepare_records),
+            }
+        )
+
+    instances.sort(key=lambda instance: instance["prepare_start_us"])
+    lane_finish_us = []
+    for instance_idx, instance in enumerate(instances):
+        start_us = instance["prepare_start_us"]
+        lane_idx = next((idx for idx, finish_us in enumerate(lane_finish_us) if finish_us <= start_us), -1)
+        if lane_idx < 0:
+            lane_idx = len(lane_finish_us)
+            lane_finish_us.append(0.0)
+        lane_finish_us[lane_idx] = instance["execution_end_us"]
+        instance["instance_idx"] = instance_idx
+        instance["lane_idx"] = lane_idx
+    return instances
+
+
 def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     """Read performance data from a swimlane JSON file.
 
@@ -1113,6 +1206,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         core_to_thread: Optional list mapping core_id (index) to scheduler thread index (-1 = unassigned)
 
     Generates processes in the trace:
+        - pid=5 "Graph Execution": one end-to-end envelope per Graph task
         - pid=1 "AICPU Orchestrator": orchestrator phase bars (chip_swimlane_level >= 4)
         - pid=2 "AICPU Scheduler": scheduler phase bars (chip_swimlane_level >= 3)
         - pid=3 "Scheduler View": dispatch_time_us to finish_time_us (AICPU perspective)
@@ -1150,12 +1244,15 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 if resolved >= 0:
                     task["func_id"] = resolved
 
+    graph_instances = _collect_graph_execution_instances(tasks, scheduler_phases)
+
     # Step 2: Generate JSON events
     events = []
 
     # Metadata event: Process names and sort order.
     # pid is renumbered in pipeline order (top → bottom in Perfetto):
     #   pid=1  AICPU Orchestrator  (submits tasks — earliest)
+    #   pid=5  Graph Execution     (Scheduler-local expansion + execution)
     #   pid=2  AICPU Scheduler     (pops ready, dispatches, completes)
     #   pid=3  Scheduler View      (AICPU-eye view of each worker's dispatch→finish)
     #   pid=4  Worker View         (physical AIC/AIV execution rows)
@@ -1164,6 +1261,51 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     for t in tasks:
         task_map[t["task_id"]].append(t)
     spmd_task_ids = _identify_spmd_task_ids(task_map, deps_block_map)
+
+    if graph_instances:
+        events.append(
+            {"args": {"name": "Graph Execution"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 5}
+        )
+        events.append(
+            {"args": {"sort_index": 1}, "cat": "__metadata", "name": "process_sort_index", "ph": "M", "pid": 5}
+        )
+        for lane_idx in sorted({instance["lane_idx"] for instance in graph_instances}):
+            events.append(
+                {
+                    "args": {"name": f"Graph_{lane_idx}"},
+                    "cat": "__metadata",
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": 5,
+                    "tid": 5000 + lane_idx,
+                }
+            )
+        for instance in graph_instances:
+            outer_display = format_task_display(instance["outer_task_id"])
+            node_indices = instance["visible_node_indices"]
+            events.append(
+                {
+                    "args": {
+                        "outer_task_id": instance["outer_task_id"],
+                        "visible_node_count": len(node_indices),
+                        "visible_node_index_min": min(node_indices),
+                        "visible_node_index_max": max(node_indices),
+                        "prepare_slice_count": instance["prepare_slice_count"],
+                        "prepare_duration_us": instance["prepare_duration_us"],
+                        "execution_start_us": instance["execution_start_us"],
+                        "execution_duration_us": instance["execution_end_us"] - instance["execution_start_us"],
+                        "synthetic_id_layout": "ring1:(outer_task_id << 10) | node_index",
+                    },
+                    "cat": "graph_execution",
+                    "cname": "rail_animation",
+                    "name": f"GraphExecution({outer_display}, {len(node_indices)} visible nodes)",
+                    "ph": "X",
+                    "pid": 5,
+                    "tid": 5000 + instance["lane_idx"],
+                    "ts": instance["prepare_start_us"],
+                    "dur": instance["execution_end_us"] - instance["prepare_start_us"],
+                }
+            )
 
     events.append({"args": {"name": "Worker View"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 4})
     events.append({"args": {"sort_index": 4}, "cat": "__metadata", "name": "process_sort_index", "ph": "M", "pid": 4})
@@ -1433,6 +1575,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             "drain": "cq_build_running",  # handle_drain_mode outer
             "drain_prepare": "cq_build_attempt_runnable",  # inner: cluster scan + build_payload
             "drain_publish": "cq_build_attempt_passed",  # inner: MMIO write_reg per subtask (the cohort launch)
+            "graph_prepare": "rail_animation",  # bounded Scheduler-side Definition expansion
             # Inner phase — nests inside Complete or Dummy via time containment
             "resolve": "vsync_highlight_color",  # on_task_complete: walk consumer list
             # Separate-lane (Worker View AICPU_N) — fallback color if it ever lands on Sched
@@ -1593,6 +1736,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     "drain",
                     "drain_prepare",
                     "drain_publish",
+                    "graph_prepare",
                 ):
                     continue
                 start_us = record["start_time_us"]
