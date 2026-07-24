@@ -11,6 +11,8 @@
 
 #include "chip_worker.h"
 
+#include "pipeline_contract.h"
+
 #include <dlfcn.h>
 
 #include <cstring>
@@ -34,6 +36,14 @@ T load_symbol(void *handle, const char *name) {
         msg += err;
         throw std::runtime_error(msg);
     }
+    return reinterpret_cast<T>(sym);
+}
+
+template <typename T>
+T load_optional_symbol(void *handle, const char *name) {
+    dlerror();
+    void *sym = dlsym(handle, name);
+    if (dlerror() != nullptr) return nullptr;
     return reinterpret_cast<T>(sym);
 }
 
@@ -71,6 +81,7 @@ void ChipWorker::init(
     if (device_id < 0) {
         throw std::runtime_error("ChipWorker::init requires a non-negative device_id");
     }
+    pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
 
     // libsimpler_log.so (RTLD_GLOBAL, with HostLogger already seeded via
     // simpler_log_init) and — on sim — libcpu_sim_context.so (RTLD_GLOBAL) must
@@ -94,6 +105,7 @@ void ChipWorker::init(
         throw std::runtime_error(err);
     }
 
+    GetPipelineContractFn get_pipeline_contract_fn = nullptr;
     try {
         create_device_context_fn_ = load_symbol<CreateDeviceContextFn>(handle, "create_device_context");
         destroy_device_context_fn_ = load_symbol<DestroyDeviceContextFn>(handle, "destroy_device_context");
@@ -105,6 +117,7 @@ void ChipWorker::init(
         simpler_init_fn_ = load_symbol<SimplerInitFn>(handle, "simpler_init");
         register_callable_fn_ = load_symbol<SimplerRegisterCallableFn>(handle, "simpler_register_callable");
         run_fn_ = load_symbol<SimplerRunFn>(handle, "simpler_run");
+        get_pipeline_contract_fn = load_optional_symbol<GetPipelineContractFn>(handle, "get_pipeline_contract");
         unregister_callable_fn_ = load_symbol<SimplerUnregisterCallableFn>(handle, "simpler_unregister_callable");
         get_aicpu_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_aicpu_dlopen_count");
         get_host_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_host_dlopen_count");
@@ -132,6 +145,16 @@ void ChipWorker::init(
     } catch (...) {
         dlclose(handle);
         throw;
+    }
+
+    PipelineContract resolved_contract{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
+    if (get_pipeline_contract_fn != nullptr) {
+        const PipelineContract *contract = get_pipeline_contract_fn();
+        if (!is_valid_depth1_pipeline_contract(contract)) {
+            dlclose(handle);
+            throw std::runtime_error("host runtime returned a PipelineContract this build cannot accept");
+        }
+        resolved_contract = *contract;
     }
 
     lib_handle_ = handle;
@@ -252,6 +275,10 @@ void ChipWorker::init(
     }
 
     device_id_ = device_id;
+    // Published only once the runtime is up: the rollback paths above leave the
+    // default K=1 contract in place, so a failed init never reports the counts
+    // of a runtime this worker is not bound to.
+    pipeline_contract_ = resolved_contract;
     initialized_ = true;
 
     // Provision async-DMA workspaces (SDMA) once, now that the device is up. The
@@ -313,6 +340,7 @@ void ChipWorker::finalize() {
     comm_barrier_fn_ = nullptr;
     comm_destroy_fn_ = nullptr;
     runtime_buf_.clear();
+    pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     initialized_ = false;
     device_id_ = -1;
     finalized_ = true;
