@@ -500,9 +500,7 @@ struct PTO2SchedulerState {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (ring.completion_flags[p.fanin_local_ids[i] & ring.task_window_mask].load(std::memory_order_acquire) ==
-                0)
-                return false;
+            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return false;
         }
         return true;
     }
@@ -515,9 +513,7 @@ struct PTO2SchedulerState {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (ring.completion_flags[p.fanin_local_ids[i] & ring.task_window_mask].load(std::memory_order_acquire) ==
-                0)
-                return i;
+            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return i;
         }
         return -1;
     }
@@ -558,7 +554,7 @@ struct PTO2SchedulerState {
         PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
 
         slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)
-        ring.completion_flags[my_id & ring.task_window_mask].store(1, std::memory_order_release);
+        ring.set_completion_flag(my_id);
 
         PTO2TaskSlotState *waiter = slot_state.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
         while (waiter != nullptr && waiter != WAKE_LIST_SENTINEL) {
@@ -588,7 +584,7 @@ struct PTO2SchedulerState {
         int32_t w = ring.completed_watermark.load(std::memory_order_acquire);
         while (w + 1 < submitted) {
             int32_t next = w + 1;
-            if (ring.completion_flags[next & ring.task_window_mask].load(std::memory_order_acquire) == 0) break;
+            if (!ring.is_completion_flag_set(next)) break;
             if (ring.completed_watermark.compare_exchange_weak(
                     w, next, std::memory_order_acq_rel, std::memory_order_acquire
                 )) {
