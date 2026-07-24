@@ -618,6 +618,12 @@ size_t get_aicpu_dlopen_count(DeviceContextHandle ctx) {
     }
 }
 
+size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
+    // Simulation has no ACL streams, so it owns no run stream sets.
+    (void)ctx;
+    return 0;
+}
+
 int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
     // Simulation provides no async-DMA workspaces; a non-empty request fails
     // fast so an SDMA-enabled Worker cannot come up on sim.

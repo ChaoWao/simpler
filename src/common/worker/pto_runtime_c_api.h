@@ -25,6 +25,7 @@
  *                   copy_to_device_ctx, copy_from_device_ctx
  *   - prepared run: simpler_register_callable, simpler_run, unregister_callable,
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
+ *                   get_run_stream_set_create_count,
  *                   simpler_provision_dma_workspace
  *   - ACL/stream:   ensure_acl_ready_ctx, create_comm_stream_ctx,
  *                   destroy_comm_stream_ctx
@@ -304,6 +305,15 @@ size_t get_aicpu_dlopen_count(DeviceContextHandle ctx);
  * the device.
  */
 size_t get_host_dlopen_count(DeviceContextHandle ctx);
+
+/**
+ * Number of run stream sets the runner bound to `ctx` has created. A set
+ * belongs to a pipeline slot and is reused for every run on that slot, so a
+ * runner that has served any number of runs on one slot reports 1. Returns 0
+ * on platforms whose runs use the persistent bootstrap pair. Used by tests to
+ * assert that repeated `simpler_run` calls do not rebuild the set per run.
+ */
+size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
 
 /**
  * Provision the async-DMA workspaces named in `required_mask` (a bitmask of

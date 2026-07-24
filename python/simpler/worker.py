@@ -5955,6 +5955,19 @@ class Worker:
             return 0
         return self._chip_worker.host_dlopen_count
 
+    @property
+    def run_stream_set_create_count(self) -> int:
+        """L2 only: number of run stream sets the bound runner has created.
+
+        A set belongs to a pipeline slot and is reused for every run on that
+        slot, so a worker that has served any number of runs reports 1.
+        Returns 0 on non-L2 workers and on platforms whose runs use the
+        persistent bootstrap stream pair (simulation, a5).
+        """
+        if self.level != 2 or self._chip_worker is None:
+            return 0
+        return self._chip_worker.run_stream_set_create_count
+
     # ------------------------------------------------------------------
     # close
     # ------------------------------------------------------------------
