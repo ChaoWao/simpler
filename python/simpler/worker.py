@@ -1925,6 +1925,27 @@ class _StartupCancelled(BaseException):
     cancellable (``close()`` fails fast while INITIALIZING)."""
 
 
+@dataclass
+class _RunResources:
+    """Python resources whose lifetime ends at one native run fence."""
+
+    remote_slot_refs: list[RemoteBufferHandle] = field(default_factory=list)
+    live_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
+    pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
+    l3_l2_regions: list[Any] = field(default_factory=list)
+    l3_l2_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
+    # True once the owning run's fence has claimed the domains above. A release
+    # that arrives after this has no fence left to run behind and frees inline.
+    # Read and written only under `domain_lock`.
+    retired: bool = False
+    # Serializes one domain's release transition against the fence that retires
+    # this run. Without it a release can read `retired` as False, be preempted,
+    # and append to a queue the fence has already drained for the last time —
+    # unreachable from the fence and from close(), which the release itself
+    # made blind by dropping the handle from `_live_domains`.
+    domain_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 class RunHandle:
     """Completion handle returned by :meth:`Worker.submit`.
 
@@ -1933,10 +1954,17 @@ class RunHandle:
     up. Waiting is idempotent; every waiter observes the same terminal result.
     """
 
-    def __init__(self, worker: Worker, run_id: int, keepalive: tuple[Any, ...]) -> None:
+    def __init__(
+        self,
+        worker: Worker,
+        run_id: int,
+        keepalive: tuple[Any, ...],
+        resources: _RunResources | None = None,
+    ) -> None:
         self._worker = worker
         self._run_id: int | None = run_id
         self._keepalive: tuple[Any, ...] | None = keepalive
+        self._resources = resources if resources is not None else _RunResources()
         self._cv = threading.Condition()
         self._wait_in_progress = False
         self._terminal = False
@@ -1948,6 +1976,7 @@ class RunHandle:
         handle._worker = worker
         handle._run_id = None
         handle._keepalive = None
+        handle._resources = _RunResources()
         handle._cv = threading.Condition()
         handle._wait_in_progress = False
         handle._terminal = True
@@ -2232,6 +2261,10 @@ class Worker:
         # orchestration callback can enqueue work and retired after fence-owned
         # cleanup, so close() can drain the exact accepted set.
         self._accepted_run_handles: set[RunHandle] = set()
+        # submit graph construction is serialized by _submit_mu. Resource
+        # creation helpers use this pointer to bind new objects to the handle
+        # being built; the pointer is cleared before submit() returns.
+        self._building_run_resources: _RunResources | None = None
         # Absolute time.monotonic() deadline for the current startup epoch, set
         # once at init() and shared by every child group and recursive descendant
         # so the whole tree comes up within a single startup_timeout_s budget.
@@ -2267,6 +2300,8 @@ class Worker:
         self._remote_worker_ids: list[int] = []
         self._remote_sessions: list[_RemoteSession] = []
         self._next_level_worker_id_count: int = 0
+        # Fallback ownership for private helpers used outside Worker.submit.
+        # Normal orchestration-owned refs live in RunHandle._resources.
         self._active_remote_slot_refs: list[RemoteBufferHandle] = []
         self._pending_remote_buffer_frees: list[RemoteBufferHandle] = []
         self._pending_remote_import_releases: list[RemoteBufferHandle] = []
@@ -2275,15 +2310,19 @@ class Worker:
         # among live handles).  ``orch.allocate_domain`` adds entries here;
         # ``release()`` removes them and queues a deferred backend free.
         self._live_domains: dict[str, CommDomainHandle] = {}
-        # Handles whose `release()` has been called inside an orch function.
-        # The backend free is deferred until the current Worker.run completes so that
-        # tasks already submitted with this domain's device_ctx / buffer_ptrs
-        # see live memory through execution.
-        self._pending_release_domains: list[CommDomainHandle] = []
         # Monotonic per-Worker counter; mixed into IPC barrier filenames so
         # two concurrent allocations don't share a marker file.  Wraps after
         # 2^64 allocations — far beyond any realistic Worker lifetime.
         self._next_alloc_id: int = 0
+        # Exactly one caller drives CTRL_RELEASE_DOMAIN for a given allocation,
+        # and every other caller waits for its outcome. Several paths can reach
+        # one handle at once — an end-of-run or close() sweep working from its
+        # snapshot, and a release on an already retired run — where a second
+        # release of a live allocation is a backend double free, and returning
+        # before the first one finishes would let close() tear the mailboxes
+        # down under an in-flight release.
+        self._domain_free_mu = threading.Lock()
+        self._domain_free_results: dict[int, BaseException | None] = {}
         self._alloc_id_lock = threading.Lock()
         # Base HCCL/sim communicator is built lazily on the first
         # ``orch.allocate_domain`` call (see ``_ensure_comm_base``).  We
@@ -2960,15 +2999,23 @@ class Worker:
         return captured
 
     def _adopt_remote_slot_refs(self, handles: list[RemoteBufferHandle]) -> None:
-        self._active_remote_slot_refs.extend(handles)
+        resources = self._building_run_resources
+        if resources is None:
+            self._active_remote_slot_refs.extend(handles)
+        else:
+            resources.remote_slot_refs.extend(handles)
 
     def _release_remote_slot_refs(self, handles: list[RemoteBufferHandle]) -> None:
         for handle in handles:
             handle._release_slot_ref()
 
-    def _release_active_remote_slot_refs(self) -> None:
-        refs = self._active_remote_slot_refs
-        self._active_remote_slot_refs = []
+    def _release_active_remote_slot_refs(self, resources: _RunResources | None = None) -> None:
+        if resources is None:
+            refs = self._active_remote_slot_refs
+            self._active_remote_slot_refs = []
+        else:
+            refs = resources.remote_slot_refs
+            resources.remote_slot_refs = []
         self._release_remote_slot_refs(refs)
 
     def _flush_pending_remote_frees(self) -> None:
@@ -4785,7 +4832,9 @@ class Worker:
         if worker_id < 0 or worker_id >= len(device_ids):
             raise ValueError(f"create_l3_l2_region: worker_id {worker_id} outside [0, {len(device_ids)})")
 
-    def _poison_l3_l2_region_from_endpoint_error(self, exc: BaseException) -> bool:
+    def _poison_l3_l2_region_from_endpoint_error(
+        self, exc: BaseException, resources: _RunResources | None = None
+    ) -> bool:
         match = _L3_L2_ENDPOINT_ERROR_REGION_RE.search(str(exc))
         if match is None:
             return False
@@ -4793,7 +4842,8 @@ class Worker:
         if region_id == 0:
             return False
         poisoned = False
-        for region in self._live_l3_l2_regions:
+        regions = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
+        for region in regions:
             if int(region.region_id) == region_id:
                 region._poison()
                 poisoned = True
@@ -4810,8 +4860,10 @@ class Worker:
         nbytes = int(tensor.nbytes())
         if base <= 0 or nbytes <= 0:
             return
-        self._l3_l2_orch_comm_host_buffers[base] = max(
-            int(self._l3_l2_orch_comm_host_buffers.get(base, 0)),
+        resources = self._building_run_resources
+        buffers = self._l3_l2_orch_comm_host_buffers if resources is None else resources.l3_l2_orch_comm_host_buffers
+        buffers[base] = max(
+            int(buffers.get(base, 0)),
             nbytes,
         )
 
@@ -4826,7 +4878,9 @@ class Worker:
         nbytes = int(tensor.nbytes())
         if base <= 0 or nbytes <= 0:
             raise ValueError("L3-L2 payload buffer must have a nonzero address and size")
-        registered_nbytes = self._l3_l2_orch_comm_host_buffers.get(base)
+        resources = self._building_run_resources
+        buffers = self._l3_l2_orch_comm_host_buffers if resources is None else resources.l3_l2_orch_comm_host_buffers
+        registered_nbytes = buffers.get(base)
         if registered_nbytes is None:
             raise ValueError("L3-L2 payload Tensor is not registered; use a tensor returned by orch.alloc(...)")
         if nbytes > int(registered_nbytes):
@@ -4840,6 +4894,7 @@ class Worker:
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
             raise ValueError("create_l3_l2_region: counter_bytes must be positive and a multiple of 4")
         self._validate_l3_l2_worker_id(int(worker_id))
+        resources = self._building_run_resources
         req_shm = SharedMemory(create=True, size=_REGION_CREATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=_REGION_CREATE_REPLY_BYTES)
         req_buf = cast(memoryview, req_shm.buf)
@@ -4889,6 +4944,8 @@ class Worker:
             )
             region = L3L2OrchRegion(self, int(worker_id), reply.desc, l3_host_mapping)
             self._live_l3_l2_regions.append(region)
+            if resources is not None:
+                resources.l3_l2_regions.append(region)
             return region
         except Exception:
             if l3_host_mapping is not None:
@@ -4913,13 +4970,15 @@ class Worker:
                 except (BufferError, FileNotFoundError, OSError):
                     pass
 
-    def _cleanup_l3_l2_regions(self) -> None:
+    def _cleanup_l3_l2_regions(self, resources: _RunResources | None = None) -> None:
         # Per-region best-effort: every region is attempted (and _expire()d) even
         # if one raises, so a failing region never strands the rest; the first
         # error is raised after all are attempted so close() reports the leak.
-        if not self._live_l3_l2_regions:
+        tracked = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
+        if not tracked:
             return
-        regions, self._live_l3_l2_regions = self._live_l3_l2_regions, []
+        regions = list(tracked)
+        tracked.clear()
         errors: list[BaseException] = []
         for region in regions:
             try:
@@ -4931,6 +4990,9 @@ class Worker:
                     region._expire()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
+            finally:
+                if resources is not None:
+                    self._live_l3_l2_regions[:] = [live for live in self._live_l3_l2_regions if live is not region]
         if errors:
             raise errors[0]
 
@@ -5024,6 +5086,11 @@ class Worker:
             raise RuntimeError("allocate_domain requires level >= 3")
         if self._worker is None:
             raise RuntimeError("allocate_domain requires a hierarchical Worker (_start_hierarchical ran)")
+        # A domain's lifetime ends at the fence of the run that allocated it,
+        # so there is no owner to charge it to outside graph construction.
+        resources = self._building_run_resources
+        if resources is None:
+            raise RuntimeError("allocate_domain is only valid while a run's graph is being built")
         if not workers:
             raise ValueError("allocate_domain: workers must be non-empty")
         if len(set(workers)) != len(workers):
@@ -5145,9 +5212,11 @@ class Worker:
             workers=workers,
             contexts=contexts,
             allocation_id=allocation_id,
-            _release_fn=self._release_domain_handle,
+            _release_fn=lambda released, owner=resources: self._release_domain_handle(released, owner),
         )
         self._live_domains[name] = handle
+        if resources is not None:
+            resources.live_domains[name] = handle
         # The backend windows are now live: record each chip's window base and
         # every carved buffer pointer so a later kind4 (child_memory) dispatch of
         # one of them is validated against its owning chip. Revoked by
@@ -5160,32 +5229,81 @@ class Worker:
                     self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id)
         return handle
 
-    def _release_domain_handle(self, handle: CommDomainHandle) -> None:
+    def _release_domain_handle(self, handle: CommDomainHandle, resources: _RunResources) -> None:
         """Mark a handle for release.  Actual backend free is deferred.
 
         Called by ``CommDomainHandle.release()``.  We do NOT drive
         ``CTRL_RELEASE_DOMAIN`` here because the orch function is allowed
         to have already submitted DAG tasks that capture the handle's
         ``device_ctx`` / ``buffer_ptrs``.  Those tasks must see live
-        memory through execution; ``Worker.run`` calls
-        ``_execute_pending_domain_releases`` only after the run-specific wait.
+        memory through execution; the queue is drained by
+        ``_execute_pending_domain_releases`` once the owning run's fence fires.
+
+        ``resources`` is the run that allocated the handle, bound at
+        allocation; a handle released after that run's fence has no drain left
+        and is reported rather than silently queued.
         """
         if self._worker is None:
             return
-        # Pop from live_domains so a subsequent allocate_domain(name=...)
-        # call within the same run can reuse the name.  The actual memory
-        # is still live until _execute_pending_domain_releases runs.
-        self._live_domains.pop(handle.name, None)
-        self._pending_release_domains.append(handle)
+        with resources.domain_lock:
+            resources.live_domains.pop(handle.name, None)
+            # Pop from live_domains so a subsequent allocate_domain(name=...)
+            # call within the same run can reuse the name.  The actual memory
+            # is still live until _execute_pending_domain_releases runs.
+            if self._live_domains.get(handle.name) is handle:
+                self._live_domains.pop(handle.name)
+            if not resources.retired:
+                resources.pending_release_domains.append(handle)
+                return
+        # Deferral exists so tasks that captured this domain still see live
+        # memory; the owning run's fence has passed, so there is nothing left
+        # to defer behind. Freed outside the lock — it is a backend call.
+        self._free_domain_after_fence(handle)
 
-    def _execute_pending_domain_releases(self) -> None:
+    def _retire_run_domains(self, resources: _RunResources) -> None:
+        """Close this run's deferred-release path and free anything left on it.
+
+        A release that read `retired` as False contends for `domain_lock`, so
+        it has either already appended (and is drained here) or observes
+        retirement and frees itself.
+        """
+        with resources.domain_lock:
+            resources.retired = True
+            stragglers = list(resources.pending_release_domains)
+            resources.pending_release_domains.clear()
+        for handle in stragglers:
+            self._free_domain_after_fence(handle)
+
+    def _free_domain_after_fence(self, handle: CommDomainHandle) -> None:
+        """Back-end free for a handle whose owning run has retired.
+
+        Tolerates a handle the end-of-run sweep already freed: the sweep works
+        from a snapshot, so a release taken after that snapshot reaches here
+        for a domain that is already gone.
+        """
+        if handle.freed:
+            return
+        try:
+            self._release_domain_now(handle)
+            handle._freed = True  # noqa: SLF001 -- runtime owns this transition
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(
+                f"Worker._free_domain_after_fence: {handle.name!r} "
+                f"(allocation_id={handle.allocation_id}) released after its run's fence, "
+                f"immediate free failed: {type(e).__name__}: {e}\n"
+            )
+            sys.stderr.flush()
+
+    def _execute_pending_domain_releases(self, resources: _RunResources) -> None:
         """Drive CTRL_RELEASE_DOMAIN for every queued handle.  Must run
         after ``self._orch._wait_run()`` so chip-side tasks have completed
         their use of the domain memory.
         """
-        if not self._pending_release_domains:
+        pending_releases = resources.pending_release_domains
+        if not pending_releases:
             return
-        pending, self._pending_release_domains = self._pending_release_domains, []
+        pending = list(pending_releases)
+        pending_releases.clear()
         for handle in pending:
             try:
                 self._release_domain_now(handle)
@@ -5203,10 +5321,36 @@ class Worker:
                 sys.stderr.flush()
 
     def _release_domain_now(self, handle: CommDomainHandle) -> None:
-        """Synchronous backend release for one handle.  Used by the
-        deferred-release path and by the abort/close cleanup helpers."""
+        """Synchronous backend release for one handle, exactly once.
+
+        Used by the deferred-release path and by the abort/close cleanup
+        helpers. The first caller drives the release; a second caller for the
+        same allocation blocks until that release finishes and then sees its
+        outcome, so it never issues a duplicate CTRL_RELEASE_DOMAIN and never
+        reports success early. Returning before the owner finished would let a
+        caller mark the handle freed, drop it from ``_live_domains`` and — on
+        the close() path — tear down the mailboxes the release is still using.
+
+        A failure is replayed to every later caller rather than retried, so the
+        sweeps keep the handle in ``_live_domains`` as a detectable residual.
+        """
         if self._worker is None:
             return
+        with self._domain_free_mu:
+            if handle.allocation_id in self._domain_free_results:
+                failure = self._domain_free_results[handle.allocation_id]
+                if failure is not None:
+                    raise failure
+                return
+            try:
+                self._release_domain_claimed(handle)
+            except BaseException as exc:
+                self._domain_free_results[handle.allocation_id] = exc
+                raise
+            self._domain_free_results[handle.allocation_id] = None
+
+    def _release_domain_claimed(self, handle: CommDomainHandle) -> None:
+        """Drive CTRL_RELEASE_DOMAIN. Caller holds this allocation's claim."""
         # Revoke provenance BEFORE the physical free: once release begins the
         # domain's pointers are no longer dispatchable. Revoking after the
         # backend free would leave a use-after-free window (a concurrent
@@ -5254,7 +5398,8 @@ class Worker:
                     shm.unlink()
                 except Exception:  # noqa: BLE001
                     pass
-        self._live_domains.pop(handle.name, None)
+        if self._live_domains.get(handle.name) is handle:
+            self._live_domains.pop(handle.name)
 
     def _dispatch_control_domain(
         self,
@@ -5299,25 +5444,28 @@ class Worker:
                 f"{len(errors)}/{len(workers)} chips; first error chip={first[0]}: {first[1]}"
             )
 
-    def _release_all_live_domains(self) -> None:
+    def _release_all_live_domains(self, resources: _RunResources | None = None) -> None:
         """Best-effort release of every still-live domain handle (LIFO).
 
-        Called from ``Worker.run`` end-of-run sweep (after pending releases)
-        and ``Worker.close``.  Skips the deferred-release machinery
-        (``_pending_release_domains``) because by the time this runs, drain
-        has already happened — synchronous release of leftover handles is
-        safe.  Falls back to immediate backend free + drop from
-        ``_live_domains`` on each handle; logs and moves on if one fails.
+        Called from the end-of-run sweep (after the owning run's pending
+        releases) and from ``Worker.close``.  Skips the deferred-release
+        queue because by the time this runs, drain has already happened —
+        synchronous release of leftover handles is safe.  Falls back to
+        immediate backend free + drop from ``_live_domains`` on each handle;
+        logs and moves on if one fails.
         """
-        for handle in list(self._live_domains.values())[::-1]:
+        live_domains = self._live_domains if resources is None else resources.live_domains
+        for handle in list(live_domains.values())[::-1]:
             try:
                 # Mark released first (flips handle._released so further
                 # indexing raises), then synchronously free.  The handle is
-                # not in _pending_release_domains, so we use the direct path.
+                # not in the deferred-release queue, so we use the direct path.
                 if not handle.released:
                     handle._released = True  # noqa: SLF001 -- runtime owns the transition
                 self._release_domain_now(handle)
                 handle._freed = True  # noqa: SLF001
+                if live_domains.get(handle.name) is handle:
+                    live_domains.pop(handle.name)
             except Exception as e:  # noqa: BLE001
                 sys.stderr.write(
                     f"Worker._release_all_live_domains: {handle.name!r} release failed: {type(e).__name__}: {e}\n"
@@ -5882,12 +6030,14 @@ class Worker:
         assert self._orch is not None
         assert self._worker is not None
         run_id = self._orch._begin_run()
-        handle = RunHandle(self, run_id, (callable, args, cfg))
+        resources = _RunResources()
+        handle = RunHandle(self, run_id, (callable, args, cfg), resources)
         with self._hierarchical_start_cv:
             self._accepted_run_handles.add(handle)
             self._hierarchical_start_cv.notify_all()
 
         scope_open = False
+        self._building_run_resources = resources
         try:
             self._orch._scope_begin()
             scope_open = True
@@ -5912,8 +6062,11 @@ class Worker:
                     # Graph-construction failures remain synchronous, but any
                     # tasks already submitted still own their resources until
                     # the run fence fires.
+                    self._building_run_resources = None
                     handle._wait_for_serialization()
             raise
+        finally:
+            self._building_run_resources = None
         return handle
 
     def _run_handle_done(self, run_id: int) -> bool:
@@ -5941,17 +6094,19 @@ class Worker:
                 if result is None:
                     result = exc
 
+        resources = handle._resources
         if native_error is not None:
-            _step(lambda: self._poison_l3_l2_region_from_endpoint_error(native_error))
-        _step(self._release_active_remote_slot_refs)
+            _step(lambda: self._poison_l3_l2_region_from_endpoint_error(native_error, resources))
+        _step(lambda: self._release_active_remote_slot_refs(resources))
         _step(self._flush_pending_remote_frees)
         try:
-            _step(self._cleanup_l3_l2_regions)
+            _step(lambda: self._cleanup_l3_l2_regions(resources))
         finally:
-            self._l3_l2_orch_comm_host_buffers.clear()
-        _step(self._execute_pending_domain_releases)
-        if self._live_domains:
-            _step(self._release_all_live_domains)
+            resources.l3_l2_orch_comm_host_buffers.clear()
+        _step(lambda: self._execute_pending_domain_releases(resources))
+        if resources.live_domains:
+            _step(lambda: self._release_all_live_domains(resources))
+        _step(lambda: self._retire_run_domains(resources))
         orch = self._orch
         if orch is None:
             if result is None:
