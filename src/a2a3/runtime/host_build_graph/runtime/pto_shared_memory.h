@@ -89,7 +89,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     alignas(64) std::atomic<int32_t> completed_watermark;
 
     // Layout metadata (set once at init)
-    uint64_t task_window_size;
+    alignas(64) uint64_t task_window_size;
     int32_t task_window_mask;
     uint64_t heap_size;
     uint64_t task_descriptors_offset;  // Offset from SM base, in bytes
