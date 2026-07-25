@@ -634,6 +634,28 @@ Key fields:
 - `runtime`: which runtime to use
 - `CALLABLE.orchestration.source` / `CALLABLE.incores[].source`: paths relative to the test file
 
+### Output Validation
+
+By default every output tensor is compared against `compute_golden` with
+`torch.allclose` at the class `RTOL` / `ATOL`. Two hooks cover the cases that
+don't fit:
+
+- **`CASES[].skip_golden`** (defaults to the class attribute `SKIP_GOLDEN`,
+  itself `False`) — the case has no host-computable expected output and passes
+  by running clean; `compute_golden` is never called for it. Use it when the
+  output depends on a shape only the device knows, such as the SPMD grid width
+  the runtime resolved. `--skip-golden` on the command line forces this on for
+  every case (benchmark mode).
+- **`compare_outputs(self, test_args, golden_args, output_names, params)`** —
+  override to compare a subset of the outputs, apply a per-tensor tolerance, or
+  derive the valid extent from the output itself (a task that writes one slot
+  per SPMD block reports the grid width it actually ran with, and only that
+  prefix is defined). Call `super().compare_outputs(...)` with the names you
+  still want checked the default way.
+
+Prefer a `compare_outputs` override to `skip_golden`: a self-describing output
+still gets checked, whereas a skipped case only proves the run didn't crash.
+
 ### Case Selection and Manual Cases
 
 `--case` is repeatable and accepts compound forms (useful when a test file declares multiple `SceneTestCase` classes):
