@@ -75,7 +75,7 @@ class TestPreparedCallableHbgA5(SceneTestCase):
         ],
     }
 
-    _COMMON_CONFIG = {"aicpu_thread_num": 3, "block_dim": 3}
+    _COMMON_CONFIG = {"aicpu_thread_num": 3}
     _PLATFORMS = ["a5sim", "a5"]
 
     CASES = [

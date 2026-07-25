@@ -184,9 +184,8 @@ worker.init()
 # Register the ChipCallable to obtain an opaque callable handle.
 handle = worker.register(chip_callable)
 
-# Execute the registered callable on device. Omitting block_dim uses the
-# default 0 = auto, which DeviceRunner resolves to the max the AICore
-# stream allows. Pass block_dim=<n> to pin a smaller value.
+# Execute the registered callable on device. A run always takes the whole
+# device; orchestration reads the resulting width via rt_available_cluster_count().
 worker.run(handle, orch_args)
 
 # Cleanup
@@ -216,7 +215,6 @@ Runtime behavior is configured via `kernel_config.py` in each example:
 RUNTIME_CONFIG = {
     "runtime": "host_build_graph",    # Runtime to use
     "aicpu_thread_num": 3,            # Number of AICPU scheduler threads
-    "block_dim": 3,                   # Number of AICore blocks (1 block = 1 AIC + 2 AIV)
 }
 ```
 

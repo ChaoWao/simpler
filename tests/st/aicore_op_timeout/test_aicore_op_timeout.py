@@ -72,7 +72,6 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 1
         # >=2 so the orchestration thread and the scheduler thread don't fight
         # for a single AICPU; smaller configs may not dispatch the AIC task.
         config.aicpu_thread_num = 2

@@ -13,19 +13,15 @@ The orchestration reports what `rt_available_*_count()` gave it in `shape` and
 spends it: a MIX cohort of exactly `cluster_count` blocks, each writing its
 block index into `blocks`.
 
-Two cases, because neither alone is sufficient:
+An **over**-reported count fails: the cohort asks for `require_sync_start`,
+so it needs every block co-resident and the deadlock guard fires on device.
 
-- **Pinned** fixes `block_dim`, so the host independently knows the answer and
-  asserts the exact value. This is the only case that can catch an
-  **under**-reported count — the Auto case derives its expectation from the
-  reported number, so a count that is too small is self-consistent there.
-- **Auto** takes whatever the platform resolves (sim and onboard differ, and
-  onboard's comes from the driver) and checks the count is in range, that
-  `aiv == 2 * clusters`, and that every one of those blocks really ran.
-
-An **over**-reported count fails in both: the cohort asks for
-`require_sync_start`, so it needs every block co-resident and the deadlock
-guard fires on device.
+An **under**-reported count is NOT detected. Catching one needs an expectation
+the host holds independently of what the device said, and the only such handle
+was a pinned `block_dim` — a knob that no longer exists now that a run always
+takes the whole device. Everything here derives from the reported number, so a
+count that is too small is self-consistent: fewer blocks launch, fewer slots are
+expected, and the tail is zero on both sides.
 """
 
 import torch
@@ -39,9 +35,6 @@ SLOTS_PER_BLOCK = 3
 MAX_CLUSTERS = 24
 AIV_PER_CLUSTER = 2
 TOTAL_CL = MAX_CLUSTERS * SLOTS_PER_BLOCK
-# Differs from every platform's auto width (8 on sim, the driver's answer
-# onboard), so a count sourced from the ceiling instead of this run fails too.
-PINNED_BLOCK_DIM = 4
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -84,13 +77,7 @@ class TestAvailableAicoreCounts(SceneTestCase):
 
     CASES = [
         {
-            "name": "Pinned",
-            "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": PINNED_BLOCK_DIM},
-            "params": {"expect_clusters": PINNED_BLOCK_DIM},
-        },
-        {
-            "name": "Auto",
+            "name": "Default",
             "platforms": ["a2a3sim", "a2a3"],
             "config": {"aicpu_thread_num": 4},
             "params": {},
@@ -111,11 +98,6 @@ class TestAvailableAicoreCounts(SceneTestCase):
     def compare_outputs(self, test_args, golden_args, output_names, params):
         clusters = int(test_args.shape[0])
         aivs = int(test_args.shape[1])
-        # Only a pinned block_dim gives the host an expectation independent of
-        # what the runtime reported, so only it can catch an under-count.
-        expect = params.get("expect_clusters")
-        if expect is not None:
-            assert clusters == expect, f"cluster_count {clusters} != pinned block_dim {expect}"
         assert 1 <= clusters <= MAX_CLUSTERS, f"cluster_count {clusters} outside [1, {MAX_CLUSTERS}]"
         assert aivs == clusters * AIV_PER_CLUSTER, f"aiv_count {aivs} != {clusters} * {AIV_PER_CLUSTER}"
 

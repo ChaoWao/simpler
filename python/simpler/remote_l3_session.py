@@ -43,6 +43,7 @@ from .callable_identity import (
     validate_hashid,
 )
 from .remote_l3_protocol import (
+    PROTOCOL_VERSION,
     CallableKind,
     ChipCallableBlobLocation,
     ControlName,
@@ -547,7 +548,7 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
     hello = HelloPayload(
         session_id=session_id,
         worker_id=worker_id,
-        protocol_version=1,
+        protocol_version=PROTOCOL_VERSION,
         comm_profile=str(manifest["transport"]),
         feature_flags=0,
         ready_state=ReadyState.READY,

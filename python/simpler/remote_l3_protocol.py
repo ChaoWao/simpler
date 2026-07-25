@@ -17,7 +17,9 @@ from dataclasses import dataclass
 
 from .task_interface import MAX_TENSOR_DIMS, CallConfig, DataType, Tensor
 
-PROTOCOL_VERSION = 1
+# 2: CallConfig lost its block_dim field — a run always takes the whole
+# device, so the payload is one int32 shorter than v1's.
+PROTOCOL_VERSION = 2
 MAX_FRAME_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_STRING_BYTES = 1024
 MAX_ERROR_BYTES = 4096
@@ -415,7 +417,6 @@ def encode_hello(payload: HelloPayload) -> bytes:
 
 def decode_call_config(reader: _Reader) -> CallConfig:
     cfg = CallConfig()
-    cfg.block_dim = reader.i32()
     cfg.aicpu_thread_num = reader.i32()
     cfg.enable_l2_swimlane = reader.i32()
     cfg.enable_dump_args = reader.i32()

@@ -155,7 +155,6 @@ def test_prepare_new_identity_after_start_then_run(st_platform, st_device_ids):
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 3
         config.aicpu_thread_num = 4
 
         # 1. Run pre_handle once against the snapshot-prepared chip callable.
@@ -228,7 +227,6 @@ def test_prepare_new_identity_after_start_parallel_broadcast(st_platform, st_dev
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 3
         config.aicpu_thread_num = 4
 
         def orch_pre(o, _a, _c):
@@ -285,7 +283,6 @@ def test_prepare_capacity_overflow_post_start(st_platform, st_device_ids):
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 3
         config.aicpu_thread_num = 4
 
         def orch_pre(o, _a, _c):
@@ -335,7 +332,6 @@ def test_duplicate_prepare_same_hashid_survives_one_unregister(st_platform, st_d
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 3
         config.aicpu_thread_num = 4
 
         # 1. Trigger fork via pre_handle to put the chip child into the main loop.
@@ -406,7 +402,6 @@ def test_unregister_last_handle_allows_reprepare_same_hashid(st_platform, st_dev
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 3
         config.aicpu_thread_num = 4
 
         def orch_one(o, _args, _cfg):

@@ -930,7 +930,7 @@ class ChipWorker:
         worker = ChipWorker()
         worker.init(device_id=0, bins=bins)
         handle = worker.register_callable(chip_callable)
-        worker.run(handle, args=orch_args, config=CallConfig())  # block_dim defaults to 0 = auto
+        worker.run(handle, args=orch_args, config=CallConfig())
         worker.unregister_callable(handle)
         worker.finalize()
     """
@@ -1145,11 +1145,10 @@ class ChipWorker:
             handle: ``CallableHandle`` returned by ``register_callable``.
             args: ChipStorageTaskArgs for this invocation.
             config: Optional CallConfig. If None, a default is created.
-            **kwargs: Overrides applied to config (e.g. ``block_dim=8`` to
-                pin a smaller value than the default). Omit ``block_dim`` (or
-                set it to 0) to have DeviceRunner auto-resolve it: every
-                cluster the AICore stream reports on onboard
-                (``aclrtGetStreamResLimit``), ``SIM_AUTO_BLOCKDIM`` on sim.
+            **kwargs: Overrides applied to config (e.g.
+                ``aicpu_thread_num=4``). A run always takes the whole device;
+                orchestration reads the resulting width back through
+                ``rt_available_cluster_count()``.
 
         Returns ``None``. Per-stage run timing is emitted as ``[STRACE]`` log
         markers by the platform — see ``docs/dfx/host-trace.md``.

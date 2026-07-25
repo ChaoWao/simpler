@@ -50,7 +50,7 @@ class TestDumpArgsExample(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a5"],
-            "config": {"aicpu_thread_num": 3, "block_dim": 3},
+            "config": {"aicpu_thread_num": 3},
             "params": {},
         },
     ]

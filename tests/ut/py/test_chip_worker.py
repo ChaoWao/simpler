@@ -21,7 +21,6 @@ class TestCallConfig:
         config = CallConfig()
         # 0 is the "auto" sentinel — DeviceRunner resolves it at run() time
         # to the max the AICore stream allows.
-        assert config.block_dim == 0
         assert config.aicpu_thread_num == 3
         assert config.enable_l2_swimlane == 0
         assert config.enable_dump_args == 0
@@ -33,10 +32,8 @@ class TestCallConfig:
         # bool. `True` maps to level 4 (preserves the pre-perf_level "fully on"
         # semantics for legacy callers); explicit ints select a specific level.
         config = CallConfig()
-        config.block_dim = 32
         config.aicpu_thread_num = 4
         config.enable_l2_swimlane = True
-        assert config.block_dim == 32
         assert config.aicpu_thread_num == 4
         assert config.enable_l2_swimlane == 4
         config.enable_l2_swimlane = 2
@@ -76,7 +73,6 @@ class TestCallConfig:
     def test_repr(self):
         config = CallConfig()
         r = repr(config)
-        assert "block_dim=0" in r
         assert "enable_l2_swimlane=0" in r
         # Ring sizing only shows in repr when set.
         assert "ring_heap" not in r
@@ -321,7 +317,6 @@ class TestMailboxConfigRoundtrip:
         )
 
         cfg = CallConfig()
-        cfg.block_dim = 7
         cfg.aicpu_thread_num = 2
         cfg.enable_l2_swimlane = 3
         cfg.enable_dump_args = 2
@@ -337,7 +332,6 @@ class TestMailboxConfigRoundtrip:
         _CFG_FMT.pack_into(
             buf,
             _OFF_CONFIG,
-            cfg.block_dim,
             cfg.aicpu_thread_num,
             cfg.enable_l2_swimlane,
             int(cfg.enable_dump_args),
@@ -351,7 +345,6 @@ class TestMailboxConfigRoundtrip:
         )
 
         decoded = _read_config_from_mailbox(memoryview(buf))
-        assert decoded.block_dim == 7
         assert decoded.aicpu_thread_num == 2
         assert decoded.enable_l2_swimlane == 3
         assert decoded.enable_dump_args == 2

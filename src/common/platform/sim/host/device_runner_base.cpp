@@ -250,17 +250,10 @@ int SimDeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig
         );
         return -1;
     }
-    // 0 is the CallConfig "auto" sentinel. Sim has no stream resource query, so
-    // auto takes SIM_AUTO_BLOCKDIM while an explicit request is bounded only by
-    // the modelled chip.
-    int block_dim = (config.block_dim == 0) ? SIM_AUTO_BLOCKDIM : config.block_dim;
-    if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
-        LOG_ERROR("block_dim (%d) must be in range [1, %d]", block_dim, PLATFORM_MAX_BLOCKDIM);
-        return -1;
-    }
-    if (config.block_dim == 0) {
-        LOG_INFO_V0("block_dim auto-resolved to %d", block_dim);
-    }
+    // A run always takes the whole simulated device; orchestration sizes its
+    // cohorts from rt_available_cluster_count() rather than a per-call width.
+    const int block_dim = SIM_AUTO_BLOCKDIM;
+    LOG_INFO_V0("block_dim resolved to %d", block_dim);
 
     int num_aicore = block_dim * cores_per_blockdim_;
     if (num_aicore > RUNTIME_MAX_WORKER) {
