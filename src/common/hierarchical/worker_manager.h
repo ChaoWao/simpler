@@ -249,7 +249,11 @@ public:
 
 class LocalMailboxEndpoint : public WorkerEndpoint {
 public:
-    LocalMailboxEndpoint(int32_t worker_id, void *mailbox);
+    // `child_pid` is the forked child servicing this mailbox, or -1 when the
+    // caller does not own a waitable child. A valid pid enables liveness
+    // checks that turn a child that dies before publishing TASK_DONE /
+    // CONTROL_DONE into a reported failure instead of an endless spin-poll.
+    LocalMailboxEndpoint(int32_t worker_id, void *mailbox, int child_pid = -1);
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
     WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
@@ -302,11 +306,22 @@ private:
     void *mailbox_{nullptr};
     std::mutex mailbox_mu_;
     bool mailbox_control_timed_out_{false};
+    int child_pid_{-1};
+    // Set once the child has been reaped or observed unwaitable; the exit
+    // status is only available from the reaping waitpid(), so it is retained
+    // here to describe every later operation on this dead mailbox.
+    bool child_dead_{false};
+    std::string child_death_reason_;
 
     char *mbox() const { return static_cast<char *>(mailbox_); }
     MailboxState read_mailbox_state() const;
     void write_mailbox_state(MailboxState s);
     void run_control_command(const char *op_name, double timeout_s = -1.0);
+
+    // Returns a description of the child's death, or an empty string while it
+    // is still running. Never throws: callers decide whether a dead child is
+    // reported as a completion outcome or an exception.
+    std::string check_child_death();
 };
 
 // =============================================================================
@@ -459,10 +474,12 @@ public:
     // Register a worker. `mailbox` is a MAILBOX_SIZE-byte MAP_SHARED
     // region; the real worker (a `ChipWorker` for NEXT_LEVEL, a Python
     // callable for SUB) lives in the forked child.
-    void add_next_level(void *mailbox);
-    void add_next_level_at(int32_t worker_id, void *mailbox);
+    // `child_pid` is the forked child servicing `mailbox`; pass -1 when the
+    // caller owns no waitable child.
+    void add_next_level(void *mailbox, int child_pid = -1);
+    void add_next_level_at(int32_t worker_id, void *mailbox, int child_pid = -1);
     void add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint);
-    void add_sub(void *mailbox);
+    void add_sub(void *mailbox, int child_pid = -1);
 
     void start(Ring *ring, const OnCompleteFn &on_complete);
     void stop();
@@ -542,9 +559,14 @@ private:
     struct LocalNextLevelEntry {
         int32_t worker_id{-1};
         void *mailbox{nullptr};
+        int child_pid{-1};
+    };
+    struct LocalSubEntry {
+        void *mailbox{nullptr};
+        int child_pid{-1};
     };
     std::vector<LocalNextLevelEntry> next_level_entries_;
-    std::vector<void *> sub_entries_;
+    std::vector<LocalSubEntry> sub_entries_;
     std::vector<std::unique_ptr<WorkerEndpoint>> next_level_endpoint_entries_;
 
     std::vector<std::unique_ptr<WorkerThread>> next_level_threads_;
