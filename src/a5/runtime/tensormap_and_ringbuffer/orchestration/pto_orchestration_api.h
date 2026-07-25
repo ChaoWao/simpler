@@ -87,6 +87,11 @@ typedef struct PTO2RuntimeOps {
     TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const L0TaskArgs &args);
     TaskOutputTensors (*submit_dummy_task)(PTO2Runtime *rt, const L0TaskArgs &args);
 
+    // This-run core geometry from runtime_finalize_after_wire: MIX clusters
+    // (one AIC each) and standalone AIV cores.
+    int32_t (*available_cluster_count)(PTO2Runtime *rt);
+    int32_t (*available_aiv_count)(PTO2Runtime *rt);
+
     // Stash the call-site of the next PTO2ScopeGuard so the [ScopeStats]
     // collector can log it. Always present to keep ops-table layout stable
     // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
@@ -223,6 +228,18 @@ static inline void rt_scope_end() {
 static inline void rt_orchestration_done() {
     PTO2Runtime *rt = current_runtime();
     rt->ops->orchestration_done(rt);
+}
+
+/** This-run MIX cluster (= AIC) count. Do not hardcode 24/36; MIX cohorts use this. */
+static inline int32_t rt_available_cluster_count() {
+    PTO2Runtime *rt = current_runtime();
+    return rt->ops->available_cluster_count(rt);
+}
+
+/** This-run standalone AIV core count. AIV-only cohorts size themselves on this. */
+static inline int32_t rt_available_aiv_count() {
+    PTO2Runtime *rt = current_runtime();
+    return rt->ops->available_aiv_count(rt);
 }
 
 static inline bool rt_is_fatal() {

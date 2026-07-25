@@ -445,11 +445,18 @@ int32_t run_host_orchestration(
         return -1;
     }
 
-    // Install the ops table (host s_runtime_ops). The SPMD core counts are
-    // re-applied with the real device values on the AICPU at boot; the values
-    // here only feed cluster spreading during this host submit and are unused
-    // by the migrated non-cluster examples.
-    runtime_finalize_after_wire(rt, /*aic*/ 24, /*aiv*/ 48);
+    // Install the ops table (host s_runtime_ops) and latch this run's cluster
+    // counts. worker_count is published by DeviceRunner::prepare_launch_shape
+    // before this bind, so the host orchestrator sees the same geometry the
+    // AICPU re-derives from the handshake at boot.
+    const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
+    if (block_dim < 1) {
+        LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
+        return -1;
+    }
+    runtime_finalize_after_wire(
+        rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
+    );
     rt->mode = PTO2_MODE_EXECUTE;
     // get_tensor_data/set_tensor_data dereference buffer.addr directly: the
     // input tensors were mapped into host address space at staging time

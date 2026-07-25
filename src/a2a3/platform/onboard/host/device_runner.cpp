@@ -195,7 +195,9 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
-    int block_dim = config.block_dim;
+    // prepare_launch_shape() resolved block_dim before the graph was built, so
+    // the geometry this run launches with is already on the runner.
+    const int block_dim = block_dim_;
     const int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
     // in-place drain could not clear it. Refuse to run rather than cascade into
@@ -224,8 +226,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     ensure_device_wall_buffer();
 
-    block_dim = resolve_block_dim(block_dim);
-    if (block_dim < 0) return -1;
+    if (block_dim < 1) {
+        LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
+        return -1;
+    }
     int num_aicore = block_dim * cores_per_blockdim_;
 
     // Scope guards for register-address cleanup on all exit paths. Declared
@@ -274,7 +278,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (enable_scope_stats_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS);
     kernel_args_.args.enable_profiling_flag = enable_profiling_flag;
 
-    if (prepare_runtime_for_launch(runtime, block_dim, launch_aicpu_num) != 0) return -1;
+    resolve_task_binary_addrs(runtime);
 
     // a2a3 onboard now uses the same host-computed, device-filtered affinity
     // shape as a5. Host probes the AICPU user pool once, chooses the active
