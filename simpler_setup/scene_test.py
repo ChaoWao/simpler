@@ -981,6 +981,13 @@ class SceneTestCase:
     CASES: list[dict] = []
     RTOL: float = 1e-5
     ATOL: float = 1e-5
+    # Class-wide default for `CASES[*]["skip_golden"]`. True means the case has
+    # no host-computable expected output — it passes by running clean, and
+    # `compute_golden` is never called. Use it for cases whose output depends on
+    # a shape only the device knows (e.g. the SPMD grid width the runtime
+    # resolved). Prefer a `compare_outputs` override when the output is
+    # self-describing enough to still be checked.
+    SKIP_GOLDEN: bool = False
     RUNTIME_ENV: dict = {}
 
     def generate_args(self, params) -> TaskArgsBuilder:
@@ -990,6 +997,17 @@ class SceneTestCase:
     def compute_golden(self, args: TaskArgsBuilder, params) -> None:
         """Compute expected outputs in-place on a cloned TaskArgsBuilder."""
         raise NotImplementedError
+
+    def compare_outputs(self, test_args, golden_args, output_names, params) -> None:
+        """Assert the run's outputs match golden. Raises AssertionError on mismatch.
+
+        The default is `torch.allclose` on every output at the class RTOL/ATOL.
+        Override to compare a subset, to apply a per-tensor tolerance, or when
+        the valid extent of an output is carried in the output itself (a task
+        that writes one slot per SPMD block reports the grid width it actually
+        ran with, and only that prefix is defined).
+        """
+        _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
     # ------------------------------------------------------------------
     # Callable compilation
@@ -1168,6 +1186,7 @@ class SceneTestCase:
     ):
         params = case.get("params", {})
         config_dict = case.get("config", {})
+        skip_golden = skip_golden or bool(case.get("skip_golden", self.SKIP_GOLDEN))
         orch_sig = self.CALLABLE.get("orchestration", {}).get("signature", [])
 
         # The L2 entry point is `Worker.run(handle, args, cfg)`. Reuse the
@@ -1223,7 +1242,7 @@ class SceneTestCase:
                 worker.run(handle, chip_args, config=config)
 
             if not skip_golden:
-                _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
+                self.compare_outputs(test_args, golden_args, output_names, params)
 
     def _run_and_validate_l3(  # noqa: PLR0913 -- threads CLI diagnostic flags + L3 ns context
         self,
@@ -1254,6 +1273,7 @@ class SceneTestCase:
 
         params = case.get("params", {})
         config_dict = case.get("config", {})
+        skip_golden = skip_golden or bool(case.get("skip_golden", self.SKIP_GOLDEN))
 
         # Build args
         test_args = self.generate_args(params)
@@ -1314,7 +1334,7 @@ class SceneTestCase:
                     worker.run(task_orch)
 
                 if not skip_golden:
-                    _compare_outputs(test_args, golden_args, all_tensor_names, self.RTOL, self.ATOL)
+                    self.compare_outputs(test_args, golden_args, all_tensor_names, params)
         finally:
             rehosted.release()
 
