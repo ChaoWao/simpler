@@ -29,7 +29,7 @@
 #include "aicpu/platform_regs.h"  // get_reg_ptr / RegId (arch header picked up via rt_objs include path)
 
 // =============================================================================
-// unified_log.h stubs (5 log-level functions)
+// unified_log.h stubs
 // =============================================================================
 
 extern "C" {
@@ -52,21 +52,26 @@ void unified_log_warn(const char *func, const char *fmt, ...) {
     va_end(args);
 }
 
-void unified_log_debug(const char * /* func */, const char * /* fmt */, ...) {
-    // Suppress debug in tests
-}
-
-void unified_log_info_v(const char *func, int v, const char *fmt, ...) {
-    // Only emit V9 (must-see) in tests; quieter tiers are suppressed.
-    if (v < 9) {
-        return;
-    }
+void unified_log_timing(const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[INFO_V%d] %s: ", v, func);
+    fprintf(stderr, "[TIMING] %s: ", func);
     vfprintf(stderr, fmt, args);
     fprintf(stderr, "\n");
     va_end(args);
+}
+
+void unified_log_info(const char *func, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    fprintf(stderr, "[INFO] %s: ", func);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
+
+void unified_log_debug(const char * /* func */, const char * /* fmt */, ...) {
+    // Suppress debug in tests
 }
 
 }  // extern "C"

@@ -73,7 +73,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     Tensor ws_aiv_slot0 = ext_ws_aiv.view(slot_shape, off_slot0);
     Tensor ws_aiv_slot1 = ext_ws_aiv.view(slot_shape, off_slot1);
 
-    LOG_INFO_V0("[chained_mix_orch] launching 3-step chained MIX (AIC + AIV)");
+    LOG_INFO("[chained_mix_orch] launching 3-step chained MIX (AIC + AIV)");
 
     // Step 1: heads of both chains read external inputs.
     {

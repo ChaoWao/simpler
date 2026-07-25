@@ -678,7 +678,7 @@ in #942, a5 still uses the legacy unified shape:
 output JSON for both. On a2a3 the orch stream replaces the per-sub-step
 records folded into ORCH_SUBMIT; there is no separate shared-memory
 aggregate. The run-window envelope is emitted to device log via
-`LOG_INFO_V9 "orch_start=… orch_end=… orch_cost=…"`.
+`LOG_INFO "orch_start=… orch_end=… orch_cost=…"`.
 
 **Producer/consumer protocol on AICore (AICore-as-producer with rotation).**
 AICore writes a slim `L2SwimlaneAicoreTaskRecord` into its currently-active per-core

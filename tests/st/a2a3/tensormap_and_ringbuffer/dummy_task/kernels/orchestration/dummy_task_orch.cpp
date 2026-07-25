@@ -68,7 +68,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     const Tensor &ext_W = orch_args.tensor(2).ref();
 
     uint64_t case_id = orch_args.scalar(0);
-    LOG_INFO_V0("[dummy_task_orch] case_id=%llu", static_cast<unsigned long long>(case_id));
+    LOG_INFO("[dummy_task_orch] case_id=%llu", static_cast<unsigned long long>(case_id));
 
     if (case_id == 1) {
         // producer writes X

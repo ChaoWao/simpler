@@ -239,11 +239,11 @@ Device logs written to `~/ascend/log/debug/device-<id>/`
 Both host and AICPU kernel code use the unified `LOG_*` macros from
 `common/unified_log.h`:
 
-- `LOG_INFO_V0` .. `LOG_INFO_V9`: INFO with verbosity tier (V0 most verbose,
-  V9 most must-see, V5 default)
 - `LOG_DEBUG`: Debug messages
+- `LOG_INFO`: Lifecycle and summary messages
+- `LOG_TIMING`: Stable timing markers such as `[STRACE]`
 - `LOG_WARN`: Warnings
 - `LOG_ERROR`: Error messages
 
 Threshold is configured from Python via the `simpler` logger:
-`logging.getLogger("simpler").setLevel(simpler.V3)`.
+`logging.getLogger("simpler").setLevel(simpler.TIMING)`.

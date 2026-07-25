@@ -455,7 +455,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         LOG_ERROR("dep_gen replay: num_records=%zu but records pointer is null", num_records);
         return -1;
     }
-    LOG_INFO_V0("dep_gen replay: processing %zu in-memory records (dual-pass)", num_records);
+    LOG_INFO("dep_gen replay: processing %zu in-memory records (dual-pass)", num_records);
 
     // Per-ring task window sizes — tensormap masks slot indices and requires
     // each to be a power of two. Auto-size from the records themselves so each
@@ -782,7 +782,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     if (!write_deps_json(deps_json_path, task_table, tensor_table, annot_edges)) {
         return -5;
     }
-    LOG_INFO_V0(
+    LOG_INFO(
         "dep_gen replay: wrote deps.json to %s (tasks=%zu, tensors=%zu, edges=%zu)", deps_json_path, task_table.size(),
         tensor_table.size(), annot_edges.size()
     );

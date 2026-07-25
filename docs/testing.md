@@ -123,14 +123,14 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 | `--dump-args` | | `0` | Dump tensors plus scalar args into unified runtime artifacts (bare flag = `1`; supports `0/1/2/3`) |
 | `--enable-pmu [EVENT_TYPE]` | | `0` | Enable a2a3 PMU CSV collection. Bare flag selects `PIPE_UTILIZATION` (`2`); pass an event type such as `4` for `MEMORY`. |
 | `--exitfirst` | `-x` | false | Stop on first failing test (fail-fast, primarily for CI) |
-| `--log-level LEVEL` | | `v5` | Simpler logger threshold. Accepts `debug` / `V0..V9` / `info` / `warn` / `error` / `null` (case-insensitive). pytest's own CLI validator does `int(getattr(logging, level.upper(), level))`, so the V tiers and `NUL`/`NULL` are exposed as attributes on the `logging` module via `setattr` (registration in `conftest.py` runs before pytest's option machinery). `logging.addLevelName` is also called so `%(levelname)s` formatters print `V3` instead of `Level 18`, but it is not what makes the CLI parser accept the value. The "simpler" Python logger is the single source of truth; the value is snapshotted into the platform SO at `Worker.init()` time (not per `Worker.run()`) and pushed to host `HostLogger`, runner state, and (onboard) CANN `dlog_setlevel`. AICPU receives it via `KernelArgs.log_info_v`. Changing the Python logger level after `Worker.init()` does not retroactively affect that worker. See [Log levels](#log-levels). |
+| `--log-level LEVEL` | | `timing` | Simpler logger threshold. Accepts `debug` / `info` / `timing` / `warn` / `error` / `null` (case-insensitive). TIMING and NUL/NULL are registered with Python logging before pytest validates the option. The "simpler" Python logger is the single source of truth; `Worker.init()` snapshots it once and pushes the threshold to HostLogger, AICPU, and the onboard CANN mapping. Changing the Python logger afterwards does not affect an existing worker. See [Log levels](#log-levels). |
 
 Profiling is enabled only on the first round to avoid overhead on subsequent iterations. Output tensors are reset to their initial values between rounds.
 
 ## Log levels
 
-Simpler ties two axes (severity + INFO sub-verbosity) into a single integer
-threshold so users only ever set one knob. For implementation details
+Simpler uses one integer threshold for host, simulation, and onboard device
+logging. For implementation details
 (`libsimpler_log.so`, multi-`.so` singleton, host vs device backends, output
 formats), see [logging.md](logging.md).
 
@@ -138,57 +138,53 @@ formats), see [logging.md](logging.md).
 
 ```text
 DEBUG   = 10                                          (Python logging.DEBUG)
-V0..V4  = 15..19   sub-INFO, more verbose
-V5      = 20  =  Python INFO   ← default threshold
-V6..V9  = 21..24   above-INFO, more must-see
+INFO    = 20                                          (Python logging.INFO)
+TIMING  = 25  ← default threshold
 WARN    = 30                                          (Python logging.WARNING)
 ERROR   = 40                                          (Python logging.ERROR)
 NUL     = 60                                          suppress all
 ```
 
 The Python `simpler` logger filters by Python's standard `level >= threshold`
-rule; the C++ side splits the threshold back into a (severity, info_v) pair
-and gates host `LOG_*` plus AICPU device logs accordingly.
+rule; C++ and AICPU use the same single-axis rule.
 
 ### Where each tier ends up
 
-| Macro | Where it goes today (post-migration) |
-| ----- | ------------------------------------ |
-| `LOG_DEBUG` | DEBUG severity (`level=10`) — debug-style trace |
-| `LOG_INFO_V0` | INFO sub-tier 0 (`level=15`) — old `LOG_INFO` lands here |
-| `LOG_INFO_V5` | INFO sub-tier 5 (`level=20`) — default threshold (= Python INFO) |
-| `LOG_INFO_V9` | INFO sub-tier 9 (`level=24`) — old `LOG_ALWAYS` lands here |
-| `LOG_WARN` | WARN severity (`level=30`) |
-| `LOG_ERROR` | ERROR severity (`level=40`) |
+| Macro | Level |
+| ----- | ----- |
+| `LOG_DEBUG` | DEBUG (`10`) — detailed diagnostics |
+| `LOG_INFO` | INFO (`20`) — lifecycle and summaries |
+| `LOG_TIMING` | TIMING (`25`) — stable performance markers such as `[STRACE]` |
+| `LOG_WARN` | WARN (`30`) |
+| `LOG_ERROR` | ERROR (`40`) |
 
-V0..V4 are silent by default; raise `--log-level v0` to see them. V5..V9 are
-visible by default; lower the threshold (e.g. `--log-level warn`) to hide them.
+At the default TIMING threshold, `[STRACE]`, warnings, and errors are visible;
+ordinary INFO and DEBUG messages are silent.
 
 ### Configuration sources
 
 - **Single source of truth**: the Python `simpler` logger
   (`logging.getLogger("simpler")`).
-- The simpler module sets this logger to V5 at import unless the user has
+- The simpler module sets this logger to TIMING at import unless the user has
   already called `setLevel`. Inheritance from the root logger is intentionally
-  not used so `import simpler` doesn't kill INFO output by inheriting Python's
+  not used so `import simpler` keeps timing markers visible despite Python's
   default `WARNING`.
-- `V0..V9` and `NUL` are registered with `logging.addLevelName` at import,
-  so name-based callers (`pytest --log-level v3`, `logger.setLevel("V3")`,
-  formatters writing `%(levelname)s`) accept and emit them.
+- `TIMING` and `NUL` are registered with `logging.addLevelName` at import, so
+  name-based callers and `%(levelname)s` formatters accept and emit them.
 - **Snapshot at `Worker.init()`, not per-run**: when a `Worker` is initialised
   it reads the current `simpler` logger level once and forwards it through
-  `ChipWorker.init(..., log_level, log_info_v)`. ChipWorker then calls
-  libsimpler_log's `simpler_log_init` (which writes the values into the
+  `ChipWorker.init(..., log_level)`. ChipWorker then calls
+  libsimpler_log's `simpler_log_init` (which writes the value into the
   process-wide `HostLogger` singleton) BEFORE `host_runtime.so` is dlopen'd;
-  the platform SO's `simpler_init` reads `HostLogger.level()` to sync CANN
-  `dlog` onboard, and per-launch the runner reads `HostLogger.level() / .info_v()`
-  directly when populating `KernelArgs`. **Subsequent `logger.setLevel(...)`
+  the platform SO's `simpler_init` maps `HostLogger.cann_level()` to CANN `dlog`
+  onboard, and AICPU receives the threshold through `InitArgs`.
+  **Subsequent `logger.setLevel(...)`
   calls are not re-pushed to that worker** — recreate the worker if you need
   to change levels mid-run.
 - L3 / L4 hierarchical workers fork chip subprocesses; the parent snapshots
-  the same `(severity, info_v)` pair before `fork()` and passes it explicitly
+  the same threshold before `fork()` and passes it explicitly
   to `_chip_process_loop` so each subprocess starts its own `ChipWorker.init`
-  with the correct values.
+  with the correct value.
 
 ### Onboard AICPU severity is CANN-owned
 
@@ -196,16 +192,13 @@ The onboard AICPU library reads severity from CANN's `dlog` (CheckLogLevel),
 not from `KernelArgs.log_level`. Configure it via
 `ASCEND_GLOBAL_LOG_LEVEL=0..4` or `dlog_setlevel(-1, level, 0)`.
 `simpler_init` (called from `ChipWorker::init` in the platform SO) issues
-`dlog_setlevel(-1, HostLogger.level(), 0)` automatically — unless
-`ASCEND_GLOBAL_LOG_LEVEL` is already set in the environment. The INFO **verbosity** sub-tier (V0..V9) is still
-controlled through the simpler logger and travels via `KernelArgs.log_info_v`.
+`dlog_setlevel(-1, HostLogger.cann_level(), 0)` automatically — unless
+`ASCEND_GLOBAL_LOG_LEVEL` is already set in the environment. The mapping is
+`debug→DEBUG`, `info→INFO`, `timing/warn→WARN`, `error→ERROR`, and
+`null→NUL`. Therefore the default TIMING threshold does not open CANN INFO.
 
-### Behaviour change since the V0..V9 migration
+### Output destinations
 
-- 30+ historical `LOG_ALWAYS` sites were rewritten to `LOG_INFO_V9` —
-  visible at default V5.
-- 200+ historical `LOG_INFO` sites were rewritten to `LOG_INFO_V0` —
-  hidden by default. Run with `--log-level v0` to bring them back.
 - All log output goes to **stderr** (host + sim AICPU). Onboard AICPU still
   routes through CANN dlog and lands wherever CANN is configured to write.
 

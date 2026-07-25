@@ -391,7 +391,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
     *out = CallableArtifacts{};
     out->signature.assign(callable->signature_, callable->signature_ + callable->sig_count());
 
-    LOG_INFO_V0("Registering %d kernel(s) in register_callable_impl", callable->child_count());
+    LOG_INFO("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(
             callable, upload_fn, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash,
             &out->aicore_image_hash
@@ -418,7 +418,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
     out->orch_so_size = orch_so_size;
     out->func_name = callable->func_name();
     out->config_name = callable->config_name();
-    LOG_INFO_V0("Orchestration SO: %zu bytes staged (host-only)", orch_so_size);
+    LOG_INFO("Orchestration SO: %zu bytes staged (host-only)", orch_so_size);
     return 0;
 }
 
@@ -494,7 +494,7 @@ static bool resolve_arena_sizing(
     const std::string task_window_log = format_ring_array(out->task_window_sizes);
     const std::string heap_log = format_ring_array(out->heap_sizes);
     const std::string dep_pool_log = format_ring_array(out->dep_pool_capacities);
-    LOG_INFO_V0(
+    LOG_INFO(
         "Ring buffer sizes: task_window=%s heap=%s dep_pool=%s", task_window_log.c_str(), heap_log.c_str(),
         dep_pool_log.c_str()
     );
@@ -598,7 +598,7 @@ static bool stage_device_args(
         out->add_scalar(orch_args->scalar(i));
     }
     int64_t t_args_end = _now_ms();
-    LOG_INFO_V0("TIMING: args_malloc_copy = %" PRId64 "ms", t_args_end - t_args_start);
+    LOG_INFO("TIMING: args_malloc_copy = %" PRId64 "ms", t_args_end - t_args_start);
     return true;
 }
 
@@ -609,7 +609,7 @@ static void apply_orch_sched_env_flags(Runtime *runtime) {
     const char *serial_env = std::getenv("SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE");
     runtime->dev.serial_orch_sched =
         serial_env && (serial_env[0] == '1' || serial_env[0] == 't' || serial_env[0] == 'T');
-    LOG_INFO_V0(
+    LOG_INFO(
         "Serial orchestrator-to-scheduler start gate: %s", runtime->dev.serial_orch_sched ? "enabled" : "disabled"
     );
 }
@@ -656,9 +656,9 @@ static bool ensure_static_arenas(
         return false;
     }
 
-    LOG_INFO_V0("TIMING: static_arena_setup = %" PRId64 "ms", t_setup_end - t_setup_start);
-    LOG_INFO_V0("TIMING: gm_heap_acquire = %" PRId64 "ms", t_heap_end - t_heap_start);
-    LOG_INFO_V0("TIMING: shared_mem_acquire = %" PRId64 "ms", t_sm_end - t_sm_start);
+    LOG_INFO("TIMING: static_arena_setup = %" PRId64 "ms", t_setup_end - t_setup_start);
+    LOG_INFO("TIMING: gm_heap_acquire = %" PRId64 "ms", t_heap_end - t_heap_start);
+    LOG_INFO("TIMING: shared_mem_acquire = %" PRId64 "ms", t_sm_end - t_sm_start);
     return true;
 }
 
@@ -836,7 +836,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     int tensor_count = orch_args->tensor_count();
     int scalar_count = orch_args->scalar_count();
-    LOG_INFO_V0("RT2 bind: %d tensors + %d scalars, device orchestration mode", tensor_count, scalar_count);
+    LOG_INFO("RT2 bind: %d tensors + %d scalars, device orchestration mode", tensor_count, scalar_count);
     runtime->tensor_leases_.clear();
 
     int64_t t_total_start = _now_ms();
@@ -898,11 +898,11 @@ extern "C" int bind_callable_to_runtime_impl(
     }
     int64_t t_prebuilt_end = _now_ms();
 
-    LOG_INFO_V0("Device orchestration ready: %d tensors + %d scalars", tensor_count, scalar_count);
+    LOG_INFO("Device orchestration ready: %d tensors + %d scalars", tensor_count, scalar_count);
 
     int64_t t_total_end = _now_ms();
-    LOG_INFO_V0("TIMING: prebuilt_runtime_arena = %" PRId64 "ms", t_prebuilt_end - t_prebuilt_start);
-    LOG_INFO_V0("TIMING: total_init_runtime_impl = %" PRId64 "ms", t_total_end - t_total_start);
+    LOG_INFO("TIMING: prebuilt_runtime_arena = %" PRId64 "ms", t_prebuilt_end - t_prebuilt_start);
+    LOG_INFO("TIMING: total_init_runtime_impl = %" PRId64 "ms", t_total_end - t_total_start);
 
     bind_cleanup.dismiss();
     return 0;
@@ -958,13 +958,13 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     int rc = 0;
 
-    LOG_INFO_V0("=== Copying Results Back to Host ===");
+    LOG_INFO("=== Copying Results Back to Host ===");
 
     // Copy all recorded tensors from device back to host
     TensorLease *tensor_leases = runtime->tensor_leases_.data();
     int tensor_lease_count = static_cast<int>(runtime->tensor_leases_.size());
 
-    LOG_INFO_V0("Tensor leases to process: %d", tensor_lease_count);
+    LOG_INFO("Tensor leases to process: %d", tensor_lease_count);
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
@@ -1035,10 +1035,10 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     }
 
     // Cleanup device tensors
-    LOG_INFO_V0("=== Cleaning Up ===");
+    LOG_INFO("=== Cleaning Up ===");
     release_tensor_leases(runtime, api);
 
-    LOG_INFO_V0("=== Finalize Complete ===");
+    LOG_INFO("=== Finalize Complete ===");
 
     if (rc == 0 && runtime_status != 0) {
         rc = runtime_status;

@@ -87,7 +87,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         base_cl += block_nums[i] * 3;
     }
 
-    LOG_INFO_V9("[spmd_sync_start_edge] Submitted 5 tasks over %d units", clusters);
+    LOG_INFO("[spmd_sync_start_edge] Submitted 5 tasks over %d units", clusters);
 }
 
 }  // extern "C"

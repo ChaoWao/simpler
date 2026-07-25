@@ -181,8 +181,9 @@ int copy_from_device_ctx(DeviceContextHandle ctx, void *host_ptr, const void *de
  * One-shot platform-side init. Called once by ChipWorker::init() right
  * after dlopen, before any other entry. Three responsibilities, in order:
  *
- *   1. (Onboard only) Sync CANN dlog with HostLogger::get_instance().level()
- *      via dlog_setlevel(-1, level, 0), unless ASCEND_GLOBAL_LOG_LEVEL was
+ *   1. (Onboard only) Sync CANN dlog with
+ *      HostLogger::get_instance().cann_level() via
+ *      dlog_setlevel(-1, level, 0), unless ASCEND_GLOBAL_LOG_LEVEL was
  *      externally configured, in which case CANN keeps the user's choice.
  *      This must run before step 2 because CANN snapshots the device-side
  *      log session's level at context-open time (rtSetDevice); a later

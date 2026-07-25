@@ -91,7 +91,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     idx[0] = 1;
     set_tensor_data<int32_t>(layout, 1, idx, consumer_blocks);
 
-    LOG_INFO_V9(
+    LOG_INFO(
         "[spmd_sync_start_mix_spill] early_on=%d AIV producer (%d) + sync_start MIX consumer (%d) submitted",
         early_on ? 1 : 0, producer_blocks, consumer_blocks
     );

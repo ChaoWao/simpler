@@ -141,10 +141,10 @@ bool platform_aicpu_affinity_gate_filter(const int32_t *allowed_cpus, int32_t al
 
         // Diagnostic: dump the allowed table once.
         // (Lower-volume than a per-thread line; cheaper at INFO.)
-        LOG_INFO_V0("AICPU filter gate: allowed_count=%d total_launched=%d", allowed_count, total_launched);
+        LOG_INFO("AICPU filter gate: allowed_count=%d total_launched=%d", allowed_count, total_launched);
         for (int32_t a = 0; a < allowed_count; ++a) {
             const char *role = (a == allowed_count - 1) ? "orch" : "sched";
-            LOG_INFO_V0("AICPU filter gate:   allowed[%d] = cpu_id %d  role=%s", a, allowed_cpus[a], role);
+            LOG_INFO("AICPU filter gate:   allowed[%d] = cpu_id %d  role=%s", a, allowed_cpus[a], role);
         }
 
         s_filter_classify_ready.store(1, std::memory_order_release);
@@ -172,9 +172,9 @@ bool platform_aicpu_affinity_gate_filter(const int32_t *allowed_cpus, int32_t al
 
     if (survive) {
         const char *role = (tl_exec_idx == allowed_count - 1) ? "orch" : "sched";
-        LOG_INFO_V0("AICPU filter gate: thread idx=%d cpu=%d exec_idx=%d ACTIVE(%s)", idx, cpu, tl_exec_idx, role);
+        LOG_INFO("AICPU filter gate: thread idx=%d cpu=%d exec_idx=%d ACTIVE(%s)", idx, cpu, tl_exec_idx, role);
     } else {
-        LOG_INFO_V0("AICPU filter gate: thread idx=%d cpu=%d DROPPED", idx, cpu);
+        LOG_INFO("AICPU filter gate: thread idx=%d cpu=%d DROPPED", idx, cpu);
     }
     return survive;
 }

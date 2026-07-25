@@ -28,7 +28,7 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     int64_t block_dim = static_cast<int64_t>(orch_args.scalar(0));
 
-    LOG_INFO_V1("SPMD PA highperf: block_dim=%" PRId64, block_dim);
+    LOG_INFO("SPMD PA highperf: block_dim=%" PRId64, block_dim);
 
     const Tensor &query = orch_args.tensor(0).ref();
     const Tensor &key_cache = orch_args.tensor(1).ref();

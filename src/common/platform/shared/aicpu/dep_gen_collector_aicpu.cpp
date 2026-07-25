@@ -156,7 +156,7 @@ void dep_gen_aicpu_init() {
     if (head != tail) {
         (void)try_pop_dep_gen_buffer(0);
         uint64_t buf_ptr = s_dep_gen_state->current_buf_ptr;
-        LOG_INFO_V0("dep_gen: popped initial buffer addr=0x%lx", buf_ptr);
+        LOG_INFO("dep_gen: popped initial buffer addr=0x%lx", buf_ptr);
     } else {
         LOG_ERROR("dep_gen: free_queue empty during init");
         s_dep_gen_state->current_buf_ptr = 0;
@@ -400,7 +400,7 @@ void dep_gen_aicpu_flush() {
     uint32_t seq = s_dep_gen_state->current_buf_seq;
     int rc = enqueue_dep_gen_ready_buffer(buf_ptr, seq);
     if (rc == 0) {
-        LOG_INFO_V0("dep_gen: flushed buffer with %u records", buf->count);
+        LOG_INFO("dep_gen: flushed buffer with %u records", buf->count);
         s_dep_gen_state->current_buf_ptr = 0;
         wmb();
     } else {

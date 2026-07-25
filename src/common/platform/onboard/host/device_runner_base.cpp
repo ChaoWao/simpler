@@ -390,7 +390,7 @@ void DeviceRunnerBase::configure_aicore_op_timeout() {
             rc
         );
     } else {
-        LOG_INFO_V0(
+        LOG_INFO(
             "aclrtSetOpExecuteTimeOutV2: requested=%llu us, actual=%llu us",
             (unsigned long long)timeout_config_.op_execute_timeout_us, (unsigned long long)actual_timeout
         );
@@ -434,14 +434,14 @@ int DeviceRunnerBase::ensure_device_initialized() {
         aicore_created_here = true;
     }
     if (aicpu_created_here || aicore_created_here) {
-        LOG_INFO_V0("DeviceRunner: device=%d set, streams created", device_id_);
+        LOG_INFO("DeviceRunner: device=%d set, streams created", device_id_);
     }
 
     // Latch the AICore stream's block_dim ceiling. resolve_block_dim() is then
     // pure arithmetic and can run before any per-run stream work.
     if (max_block_dim_ == 0) {
         max_block_dim_ = query_max_block_dim(stream_aicore_, &max_cube_cores_, &max_vector_cores_);
-        LOG_INFO_V0(
+        LOG_INFO(
             "DeviceRunner: device=%d max_block_dim=%d (cube=%u, vector=%u)", device_id_, max_block_dim_,
             max_cube_cores_, max_vector_cores_
         );
@@ -461,7 +461,6 @@ int DeviceRunnerBase::ensure_aicpu_init_launched() {
     InitArgs init_args{};
     init_args.device_id = static_cast<uint32_t>(device_id_);
     init_args.log_level = static_cast<uint32_t>(HostLogger::get_instance().level());
-    init_args.log_info_v = static_cast<uint32_t>(HostLogger::get_instance().info_v());
     // Per-device scheduler watchdog override, resolved once at attach into
     // timeout_config_. 0 -> the AICPU scheduler keeps its compile-time default.
     init_args.scheduler_timeout_ms = timeout_config_.scheduler_timeout_ms;
@@ -473,7 +472,7 @@ int DeviceRunnerBase::ensure_aicpu_init_launched() {
         init_args.dma_workspace_addr[kind] = dma_workspace_addr_[kind];
     }
 
-    LOG_INFO_V0("=== launch_aicpu_payload %s ===", host::KernelNames::InitName);
+    LOG_INFO("=== launch_aicpu_payload %s ===", host::KernelNames::InitName);
     int rc = launch_aicpu_payload(
         stream_aicpu_, &init_args, sizeof(init_args), host::KernelNames::InitName, /*aicpu_num=*/1
     );
@@ -527,7 +526,7 @@ int DeviceRunnerBase::ensure_binaries_loaded() {
         LOG_ERROR("LoadAicpuOp::BootstrapDispatcher failed: %d", rc);
         return rc;
     }
-    LOG_INFO_V2("DeviceRunner: inner SO uploaded to preinstall via dispatcher bootstrap");
+    LOG_INFO("DeviceRunner: inner SO uploaded to preinstall via dispatcher bootstrap");
 
     // JSON-register the inner SO and resolve its runtime entry handles. The
     // runtime reports any AICPU entries it exports beyond the base set so the
@@ -543,7 +542,7 @@ int DeviceRunnerBase::ensure_binaries_loaded() {
         LOG_ERROR("LoadAicpuOp::Init failed: %d", rc);
         return rc;
     }
-    LOG_INFO_V2("DeviceRunner: inner SO registered (runtime entry handles ready)");
+    LOG_INFO("DeviceRunner: inner SO registered (runtime entry handles ready)");
 
     // Release host bytes — bootstrap is done. Per-task launches go through
     // the cached rtFuncHandle owned by LoadAicpuOp; dispatcher SO bytes are
@@ -556,7 +555,7 @@ int DeviceRunnerBase::ensure_binaries_loaded() {
     aicpu_so_binary_.shrink_to_fit();
 
     binaries_loaded_ = true;
-    LOG_INFO_V0("DeviceRunner: binaries loaded");
+    LOG_INFO("DeviceRunner: binaries loaded");
     return 0;
 }
 
@@ -719,7 +718,7 @@ int DeviceRunnerBase::commit_device_register(int32_t cid) {
     const bool inserted = aicpu_seen_callable_ids_.insert(cid).second;
     if (inserted) {
         ++aicpu_dlopen_total_;
-        LOG_INFO_V0("AICPU callable load committed cid=%d (count=%zu)", cid, aicpu_dlopen_total_);
+        LOG_INFO("AICPU callable load committed cid=%d (count=%zu)", cid, aicpu_dlopen_total_);
     }
     return 0;
 }
@@ -753,7 +752,7 @@ int DeviceRunnerBase::launch_device_register(int32_t callable_id) {
         reg_args.device_orch_config_name, sizeof(reg_args.device_orch_config_name), "%s", state.config_name.c_str()
     );
 
-    LOG_INFO_V0("=== launch_aicpu_payload %s ===", host::KernelNames::RegisterCallableName);
+    LOG_INFO("=== launch_aicpu_payload %s ===", host::KernelNames::RegisterCallableName);
     rc = launch_aicpu_payload(
         stream_aicpu_, &reg_args, sizeof(reg_args), host::KernelNames::RegisterCallableName, /*aicpu_num=*/1
     );
@@ -820,7 +819,7 @@ int DeviceRunnerBase::record_device_orch_callable(
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
-    LOG_INFO_V0(
+    LOG_INFO(
         "record_device_orch_callable: cid=%d orch_hash=0x%lx chip_hash=0x%lx %zu bytes", callable_id, hash,
         chip_buffer_hash, orch_so_size
     );
@@ -859,7 +858,7 @@ int DeviceRunnerBase::record_host_orch_callable(
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
     ++host_dlopen_total_;
-    LOG_INFO_V0("record_host_orch_callable: cid=%d (host dlopen #%zu)", callable_id, host_dlopen_total_);
+    LOG_INFO("record_host_orch_callable: cid=%d (host dlopen #%zu)", callable_id, host_dlopen_total_);
     return 0;
 }
 
@@ -1260,7 +1259,7 @@ int DeviceRunnerBase::resolve_block_dim() {
         return -1;
     }
     block_dim_ = max_block_dim_;
-    LOG_INFO_V0("block_dim resolved to %d (cube=%u, vector=%u)", block_dim_, max_cube_cores_, max_vector_cores_);
+    LOG_INFO("block_dim resolved to %d (cube=%u, vector=%u)", block_dim_, max_cube_cores_, max_vector_cores_);
     return block_dim_;
 }
 
@@ -1312,7 +1311,7 @@ void DeviceRunnerBase::resolve_task_binary_addrs(Runtime &runtime) {
 int DeviceRunnerBase::sync_run_streams() { return sync_stream_pair(stream_aicpu_, stream_aicore_); }
 
 int DeviceRunnerBase::sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicore_stream) {
-    LOG_INFO_V0("=== aclrtSynchronizeStreamWithTimeout AICPU stream ===");
+    LOG_INFO("=== aclrtSynchronizeStreamWithTimeout AICPU stream ===");
     int rc = aclrtSynchronizeStreamWithTimeout(aicpu_stream, timeout_config_.stream_sync_timeout_ms);
     if (rc == ACL_ERROR_RT_STREAM_SYNC_TIMEOUT) {
         LOG_ERROR(
@@ -1328,7 +1327,7 @@ int DeviceRunnerBase::sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicor
         return rc;
     }
 
-    LOG_INFO_V0("=== aclrtSynchronizeStreamWithTimeout AICore stream ===");
+    LOG_INFO("=== aclrtSynchronizeStreamWithTimeout AICore stream ===");
     rc = aclrtSynchronizeStreamWithTimeout(aicore_stream, timeout_config_.stream_sync_timeout_ms);
     if (rc == ACL_ERROR_RT_STREAM_SYNC_TIMEOUT) {
         LOG_ERROR(

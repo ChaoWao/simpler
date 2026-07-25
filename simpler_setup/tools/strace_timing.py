@@ -12,7 +12,7 @@
 The host runtime emits one ``[STRACE]`` line per span on scope exit (RAII
 markers in ``src/common/log/include/common/strace.h``), gated by the
 compile-time ``SIMPLER_HOST_STRACE`` macro (on by default) and emitted at
-``LOG_INFO_V9``. Device-domain phases (AICPU subdivision of the on-NPU wall)
+``LOG_TIMING``. Device-domain phases (AICPU subdivision of the on-NPU wall)
 are emitted by the host after readback as ``clk=dev`` spans nested under
 ``simpler_run.runner_run.device_wall``.
 

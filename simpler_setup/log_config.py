@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Shared CLI log-level helper.
 
-The CLI accepts a string from {debug, V0..V9, info, warn, error, null} or a
+The CLI accepts a string from {debug, info, timing, warn, error, null} or a
 raw integer; we map it to a Python `logging` level and call
 `logging.getLogger("simpler").setLevel(...)`. The C++ side picks up the same
 level via `simpler_init` at `Worker.init()` time (one-shot snapshot) — there
@@ -22,53 +22,28 @@ from __future__ import annotations
 
 import logging
 
+TIMING = 25
+
 # Recognised level names → Python integer level.
-# V0..V9 are simpler's INFO sub-tiers (15..24); INFO == V5 == 20.
 _NAME_TO_LEVEL = {
     "debug": logging.DEBUG,
     "info": logging.INFO,
+    "timing": TIMING,
     "warn": logging.WARNING,
     "warning": logging.WARNING,
     "error": logging.ERROR,
     "null": 60,
-    "v0": 15,
-    "v1": 16,
-    "v2": 17,
-    "v3": 18,
-    "v4": 19,
-    "v5": 20,
-    "v6": 21,
-    "v7": 22,
-    "v8": 23,
-    "v9": 24,
 }
 
-LOG_LEVEL_CHOICES = [
-    "debug",
-    "v0",
-    "v1",
-    "v2",
-    "v3",
-    "v4",
-    "v5",
-    "v6",
-    "v7",
-    "v8",
-    "v9",
-    "info",
-    "warn",
-    "error",
-    "null",
-]
-DEFAULT_LOG_LEVEL = "v5"  # = INFO = simpler default threshold
+LOG_LEVEL_CHOICES = ["debug", "info", "timing", "warn", "error", "null"]
+DEFAULT_LOG_LEVEL = "timing"
 
 
 def parse_level(level: str | int) -> int:
     """Translate a CLI-style level into a Python logger level integer.
 
     Accepts either a name from `LOG_LEVEL_CHOICES` (case-insensitive) or a
-    raw integer. Unknown names fall back to V5 (INFO) — silently — to match
-    the previous behaviour that mapped unknown strings to INFO.
+    raw integer. Unknown names fall back to TIMING.
     """
     if isinstance(level, int):
         return level

@@ -12,9 +12,8 @@
  * @file device_log.cpp (sim)
  * @brief Simulation Platform Log Implementation
  *
- * Severity and verbosity flags are populated by host via set_log_level() /
- * set_log_info_v() at AICPU kernel init (see kernel.cpp / aicpu_executor.cpp);
- * this file does not read env vars.
+ * Level flags are populated by host via set_log_level() at AICPU kernel init
+ * (see kernel.cpp / aicpu_executor.cpp); this file does not read env vars.
  */
 
 #include "aicpu/device_log.h"
@@ -23,37 +22,26 @@
 #include <cstdio>
 
 // =============================================================================
-// Severity enable flags + verbosity threshold (mutated by setters below)
+// Level enable flags (mutated by the setter below)
 // =============================================================================
 
 bool g_is_log_enable_debug = false;
-bool g_is_log_enable_info = true;  // default INFO+ on
+bool g_is_log_enable_info = false;
+bool g_is_log_enable_timing = true;
 bool g_is_log_enable_warn = true;
 bool g_is_log_enable_error = true;
-
-// Default V5 (matches HostLogger / Python defaults).
-int g_log_info_v = 5;
 
 // =============================================================================
 // Setters (called by AICPU init from KernelArgs)
 // =============================================================================
 
 extern "C" void set_log_level(int level) {
-    // CANN-aligned: DEBUG=0, INFO=1, WARN=2, ERROR=3, NUL=4. Floor semantics:
-    // messages with severity >= floor are kept.
-    g_is_log_enable_debug = (level <= 0) && (level != 4);
-    g_is_log_enable_info = (level <= 1) && (level != 4);
-    g_is_log_enable_warn = (level <= 2) && (level != 4);
-    g_is_log_enable_error = (level <= 3) && (level != 4);
+    g_is_log_enable_debug = level <= 10;
+    g_is_log_enable_info = level <= 20;
+    g_is_log_enable_timing = level <= 25;
+    g_is_log_enable_warn = level <= 30;
+    g_is_log_enable_error = level <= 40;
 }
-
-extern "C" void set_log_info_v(int v) {
-    if (v < 0) v = 0;
-    if (v > 9) v = 9;
-    g_log_info_v = v;
-}
-
-extern "C" int get_log_info_v() { return g_log_info_v; }
 
 // =============================================================================
 // init_log_switch: sim respects host-pushed config — this is now a no-op
@@ -62,7 +50,7 @@ extern "C" int get_log_info_v() { return g_log_info_v; }
 
 void init_log_switch() {
     // Sim has no env / dlog to consult. Defaults already applied at static
-    // init; host overrides via set_log_level()/set_log_info_v() before this
+    // init; host overrides via set_log_level() before this
     // is called.
 }
 
@@ -76,6 +64,18 @@ void dev_vlog_debug(const char *func, const char *fmt, va_list args) {
     fputc('\n', stderr);
 }
 
+void dev_vlog_info(const char *func, const char *fmt, va_list args) {
+    fprintf(stderr, "[INFO] %s: ", func);
+    vfprintf(stderr, fmt, args);
+    fputc('\n', stderr);
+}
+
+void dev_vlog_timing(const char *func, const char *fmt, va_list args) {
+    fprintf(stderr, "[TIMING] %s: ", func);
+    vfprintf(stderr, fmt, args);
+    fputc('\n', stderr);
+}
+
 void dev_vlog_warn(const char *func, const char *fmt, va_list args) {
     fprintf(stderr, "[WARN] %s: ", func);
     vfprintf(stderr, fmt, args);
@@ -84,12 +84,6 @@ void dev_vlog_warn(const char *func, const char *fmt, va_list args) {
 
 void dev_vlog_error(const char *func, const char *fmt, va_list args) {
     fprintf(stderr, "[ERROR] %s: ", func);
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
-}
-
-void dev_vlog_info_v(int v, const char *func, const char *fmt, va_list args) {
-    fprintf(stderr, "[INFO_V%d] %s: ", v, func);
     vfprintf(stderr, fmt, args);
     fputc('\n', stderr);
 }

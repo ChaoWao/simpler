@@ -43,7 +43,7 @@
  *          comparable. STRACE_A appends caller-supplied "k=v" attrs verbatim.
  *
  * Gated on SIMPLER_HOST_STRACE (default on, see profiling_config.h — no env var)
- * and emitted at LOG_INFO_V9 (the must-see tier, default-visible). In a
+ * and emitted at LOG_TIMING (the default-visible timing tier). In a
  * non-profiling build the macros compile to nothing.
  */
 
@@ -128,7 +128,7 @@ public:
         // depth printed is the scope's own level (post-decrement so the
         // outermost scope prints depth=0).
         const int d = --depth();
-        LOG_INFO_V9(
+        LOG_TIMING(
             "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s",
             static_cast<int>(getpid()), strace_tid(), inv(), static_cast<unsigned long long>(hid()), d, name_, ts, dur,
             attrs_
@@ -181,7 +181,7 @@ private:
  */
 inline void
 emit_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, const char *attrs = "clk=dev") {
-    LOG_INFO_V9(
+    LOG_TIMING(
         "[STRACE] v=1 pid=%d tid=%ld inv=%u hid=%llx depth=%d name=%s ts=%lld dur=%lld %s", static_cast<int>(getpid()),
         strace_tid(), StraceScope::current_inv(), static_cast<unsigned long long>(StraceScope::current_hid()), depth,
         name, ts_ns, dur_ns, attrs

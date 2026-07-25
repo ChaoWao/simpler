@@ -190,7 +190,7 @@ bool probe_aicpu_topology(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_
         return false;
     }
 
-    LOG_INFO_V0("AICPU topology probed for device %u: %zu user-schedulable cpu_ids (cached)", device_id, probed.size());
+    LOG_INFO("AICPU topology probed for device %u: %zu user-schedulable cpu_ids (cached)", device_id, probed.size());
 
     {
         std::lock_guard<std::mutex> lk(s_topo_cache_mu);

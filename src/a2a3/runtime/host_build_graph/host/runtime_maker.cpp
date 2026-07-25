@@ -556,7 +556,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
     *out = CallableArtifacts{};
     out->signature.assign(callable->signature_, callable->signature_ + callable->sig_count());
 
-    LOG_INFO_V0("Registering %d kernel(s) in register_callable_impl", callable->child_count());
+    LOG_INFO("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(
             callable, upload_fn, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash,
             &out->aicore_image_hash
@@ -628,9 +628,9 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
         eps->bind = reinterpret_cast<OrchestrationBindFunc>(bind_sym);
         out->host_dlopen_handle = handle;
         out->host_orch_func_ptr = eps;
-        LOG_INFO_V0("host-orch: loaded orchestration entry '%s' on host", orch_func_name);
+        LOG_INFO("host-orch: loaded orchestration entry '%s' on host", orch_func_name);
     }
-    LOG_INFO_V0("Orchestration SO: %zu bytes staged", orch_so_size);
+    LOG_INFO("Orchestration SO: %zu bytes staged", orch_so_size);
     return 0;
 }
 
@@ -670,7 +670,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // it is run below (after the arena is built) against a host SM mirror.
     int tensor_count = orch_args->tensor_count();
     int scalar_count = orch_args->scalar_count();
-    LOG_INFO_V0("RT2 bind: %d tensors + %d scalars, host orchestration mode", tensor_count, scalar_count);
+    LOG_INFO("RT2 bind: %d tensors + %d scalars, host orchestration mode", tensor_count, scalar_count);
 
     int64_t t_total_start = _now_ms();
 
@@ -681,7 +681,7 @@ extern "C" int bind_callable_to_runtime_impl(
     }
     const std::string task_window_log = format_ring_array(eff_task_window_sizes);
     const std::string heap_log = format_ring_array(eff_heap_sizes);
-    LOG_INFO_V0("Ring buffer sizes: task_window=%s heap=%s", task_window_log.c_str(), heap_log.c_str());
+    LOG_INFO("Ring buffer sizes: task_window=%s heap=%s", task_window_log.c_str(), heap_log.c_str());
 
     // Build device args: copy from input, replace host tensor pointers with device pointers
     ChipStorageTaskArgs device_args;
@@ -856,7 +856,7 @@ extern "C" int bind_callable_to_runtime_impl(
             return -1;
         }
         runtime->host_total_tasks = total_tasks;
-        LOG_INFO_V0("host-orch: submitted %d tasks on host", total_tasks);
+        LOG_INFO("host-orch: submitted %d tasks on host", total_tasks);
     }
 
     // Stash the layout inside the PTO2Runtime image so the AICPU can recover
@@ -874,15 +874,15 @@ extern "C" int bind_callable_to_runtime_impl(
     runtime->set_prebuilt_arena(runtime_arena_dev, layout.off_runtime);
     int64_t t_prebuilt_end = _now_ms();
 
-    LOG_INFO_V0("Device orchestration ready: %d tensors + %d scalars", tensor_count, scalar_count);
+    LOG_INFO("Device orchestration ready: %d tensors + %d scalars", tensor_count, scalar_count);
 
     int64_t t_total_end = _now_ms();
-    LOG_INFO_V0("TIMING: args_malloc_copy = %" PRId64 "ms", t_args_end - t_args_start);
-    LOG_INFO_V0("TIMING: static_arena_setup = %" PRId64 "ms", t_setup_end - t_setup_start);
-    LOG_INFO_V0("TIMING: gm_heap_acquire = %" PRId64 "ms", t_heap_end - t_heap_start);
-    LOG_INFO_V0("TIMING: shared_mem_acquire = %" PRId64 "ms", t_sm_end - t_sm_start);
-    LOG_INFO_V0("TIMING: prebuilt_runtime_arena = %" PRId64 "ms", t_prebuilt_end - t_prebuilt_start);
-    LOG_INFO_V0("TIMING: total_init_runtime_impl = %" PRId64 "ms", t_total_end - t_total_start);
+    LOG_INFO("TIMING: args_malloc_copy = %" PRId64 "ms", t_args_end - t_args_start);
+    LOG_INFO("TIMING: static_arena_setup = %" PRId64 "ms", t_setup_end - t_setup_start);
+    LOG_INFO("TIMING: gm_heap_acquire = %" PRId64 "ms", t_heap_end - t_heap_start);
+    LOG_INFO("TIMING: shared_mem_acquire = %" PRId64 "ms", t_sm_end - t_sm_start);
+    LOG_INFO("TIMING: prebuilt_runtime_arena = %" PRId64 "ms", t_prebuilt_end - t_prebuilt_start);
+    LOG_INFO("TIMING: total_init_runtime_impl = %" PRId64 "ms", t_total_end - t_total_start);
 
     return 0;
 }
@@ -911,13 +911,13 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
     int rc = 0;
 
-    LOG_INFO_V0("=== Copying Results Back to Host ===");
+    LOG_INFO("=== Copying Results Back to Host ===");
 
     // Copy all recorded tensors from device back to host
     TensorPair *tensor_pairs = runtime->tensor_pairs_.data();
     int tensor_pair_count = static_cast<int>(runtime->tensor_pairs_.size());
 
-    LOG_INFO_V0("Tensor pairs to process: %d", tensor_pair_count);
+    LOG_INFO("Tensor pairs to process: %d", tensor_pair_count);
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
@@ -970,7 +970,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     }
 
     // Cleanup device tensors
-    LOG_INFO_V0("=== Cleaning Up ===");
+    LOG_INFO("=== Cleaning Up ===");
     for (int i = 0; i < tensor_pair_count; i++) {
         if (tensor_pairs[i].dev_ptr != nullptr) {
             // Release the SVM host mapping installed at staging time before
@@ -980,7 +980,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
             api->device_free(tensor_pairs[i].dev_ptr);
         }
     }
-    LOG_INFO_V0("Freed %d device allocations", tensor_pair_count);
+    LOG_INFO("Freed %d device allocations", tensor_pair_count);
 
     // Clear the per-run dispatch-table entries staged by register_callable_impl.
     // The underlying chip-callable device buffer is pool-managed by
@@ -993,14 +993,14 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
         runtime->set_function_bin_addr(func_id, 0);
     }
     if (kernel_count > 0) {
-        LOG_INFO_V0("Cleared %d kernel dispatch-table entries", kernel_count);
+        LOG_INFO("Cleared %d kernel dispatch-table entries", kernel_count);
     }
     runtime->clear_registered_kernels();
 
     // Clear tensor pairs
     runtime->tensor_pairs_.clear();
 
-    LOG_INFO_V0("=== Finalize Complete ===");
+    LOG_INFO("=== Finalize Complete ===");
 
     if (rc == 0 && runtime_status != 0) {
         rc = runtime_status;

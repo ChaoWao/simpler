@@ -334,38 +334,38 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 #ifdef ENABLE_PROFILING
     uint64_t total = g_prof.param_extract + g_prof.ext_tensor + g_prof.make_tensor + g_prof.tensor_view +
                      g_prof.param_setup + g_prof.submit_task + g_prof.scope_and_loop;
-    LOG_INFO_V9(
+    LOG_INFO(
         "=== PagedAttn Orch Profiling: %d submits, %d makes, %d views, total=%.3fus ===", g_prof.submit_count,
         g_prof.make_count, g_prof.view_count, cycles_to_us(total)
     );
     if (total > 0) {
-        LOG_INFO_V9(
+        LOG_INFO(
             "  param_extract    : %7.3fus (%5.1f%%)", cycles_to_us(g_prof.param_extract),
             g_prof.param_extract * 100.0 / total
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "  ext_tensor(x4)   : %7.3fus (%5.1f%%)", cycles_to_us(g_prof.ext_tensor), g_prof.ext_tensor * 100.0 / total
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "  create_info(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", g_prof.make_count, cycles_to_us(g_prof.make_tensor),
             g_prof.make_tensor * 100.0 / total,
             g_prof.make_count > 0 ? cycles_to_us(g_prof.make_tensor) / g_prof.make_count : 0.0
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "  tensor_view(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", g_prof.view_count, cycles_to_us(g_prof.tensor_view),
             g_prof.tensor_view * 100.0 / total,
             g_prof.view_count > 0 ? cycles_to_us(g_prof.tensor_view) / g_prof.view_count : 0.0
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "  param_setup      : %7.3fus (%5.1f%%)", cycles_to_us(g_prof.param_setup),
             g_prof.param_setup * 100.0 / total
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "  submit_task(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", g_prof.submit_count, cycles_to_us(g_prof.submit_task),
             g_prof.submit_task * 100.0 / total,
             g_prof.submit_count > 0 ? cycles_to_us(g_prof.submit_task) / g_prof.submit_count : 0.0
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "  scope_and_loop   : %7.3fus (%5.1f%%)", cycles_to_us(g_prof.scope_and_loop),
             g_prof.scope_and_loop * 100.0 / total
         );

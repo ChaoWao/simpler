@@ -17,8 +17,7 @@
  * dev_vlog_* is a single vfprintf (buffer-free); on onboard, it still
  * buffers internally because CANN's dlog has no va_list variant.
  *
- * Severity flags and verbosity threshold come from device_log.cpp's globals
- * (set at init time from KernelArgs).
+ * Level flags come from device_log.cpp's globals (set at init time).
  */
 
 #include "common/unified_log.h"
@@ -46,6 +45,26 @@ void unified_log_warn(const char *func, const char *fmt, ...) {
     va_end(args);
 }
 
+void unified_log_timing(const char *func, const char *fmt, ...) {
+    if (!is_log_enable_timing()) {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    dev_vlog_timing(func, fmt, args);
+    va_end(args);
+}
+
+void unified_log_info(const char *func, const char *fmt, ...) {
+    if (!is_log_enable_info()) {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    dev_vlog_info(func, fmt, args);
+    va_end(args);
+}
+
 void unified_log_debug(const char *func, const char *fmt, ...) {
     if (!is_log_enable_debug()) {
         return;
@@ -53,15 +72,5 @@ void unified_log_debug(const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     dev_vlog_debug(func, fmt, args);
-    va_end(args);
-}
-
-void unified_log_info_v(const char *func, int v, const char *fmt, ...) {
-    if (!is_log_enable_info() || v < g_log_info_v) {
-        return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    dev_vlog_info_v(v, func, fmt, args);
     va_end(args);
 }

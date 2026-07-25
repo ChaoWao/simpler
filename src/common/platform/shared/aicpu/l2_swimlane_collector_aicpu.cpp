@@ -211,12 +211,12 @@ struct L2SwimlaneDeviceModule {
             return;
         }
         if (is_phase(ctx)) {
-            LOG_INFO_V0(
+            LOG_INFO(
                 "Thread %d: switched to new %s phase buffer for pool %u (addr=0x%lx)", ctx.thread_idx,
                 phase_label(ctx.kind), ctx.core_index, reinterpret_cast<uint64_t>(buffer)
             );
         } else {
-            LOG_INFO_V0(
+            LOG_INFO(
                 "Thread %d: Core %u switched to new buffer (addr=0x%lx)", ctx.thread_idx, ctx.core_index,
                 reinterpret_cast<uint64_t>(buffer)
             );
@@ -311,7 +311,7 @@ void l2_swimlane_aicpu_init(int worker_count) {
     // the binary g_enable_l2_swimlane via the bitmask bit.
     g_l2_swimlane_level = static_cast<L2SwimlaneLevel>(s_l2_swimlane_header->l2_swimlane_level);
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "Initializing performance profiling for %d cores (free queue), l2_swimlane_level=%u", worker_count,
         static_cast<uint32_t>(g_l2_swimlane_level)
     );
@@ -394,7 +394,7 @@ void l2_swimlane_aicpu_init(int worker_count) {
 
     wmb();
 
-    LOG_INFO_V0("Performance profiling initialized for %d cores (with AICore rotation)", worker_count);
+    LOG_INFO("Performance profiling initialized for %d cores (with AICore rotation)", worker_count);
 }
 
 /**
@@ -413,7 +413,7 @@ static void switch_task_buffer(int core_id, int thread_idx) {
     if (full_buf == nullptr) {
         return;
     }
-    LOG_INFO_V0("Thread %d: Core %d buffer is full (count=%u)", thread_idx, core_id, full_buf->count);
+    LOG_INFO("Thread %d: Core %d buffer is full (count=%u)", thread_idx, core_id, full_buf->count);
     L2SwimlaneTaskEngine::switch_buffer(
         l2_task_context(
             thread_idx, static_cast<uint32_t>(core_id), L2SwimlaneBufferKind::AicpuTask,
@@ -657,7 +657,7 @@ void l2_swimlane_aicpu_flush(int thread_idx, const int *cur_thread_cores, int co
 
     rmb();
 
-    LOG_INFO_V0("Thread %d: Flushing performance buffers for %d cores", thread_idx, core_num);
+    LOG_INFO("Thread %d: Flushing performance buffers for %d cores", thread_idx, core_num);
 
     int flushed_count = 0;
 
@@ -678,7 +678,7 @@ void l2_swimlane_aicpu_flush(int thread_idx, const int *cur_thread_cores, int co
                     s_l2_swimlane_header, thread_idx, core_id, buf_ptr, seq, L2SwimlaneBufferKind::AicpuTask
                 );
                 if (rc == 0) {
-                    LOG_INFO_V0("Thread %d: Core %d flushed buffer with %u records", thread_idx, core_id, buf->count);
+                    LOG_INFO("Thread %d: Core %d flushed buffer with %u records", thread_idx, core_id, buf->count);
                     flushed_count++;
                     state->head.current_buf_ptr = 0;
                     s_current_aicpu_task_buffers[core_id] = nullptr;
@@ -752,7 +752,7 @@ void l2_swimlane_aicpu_flush(int thread_idx, const int *cur_thread_cores, int co
             s_l2_swimlane_header, thread_idx, core_id, ac_buf_ptr, ac_seq, L2SwimlaneBufferKind::AicoreTask
         );
         if (rc == 0) {
-            LOG_INFO_V0(
+            LOG_INFO(
                 "Thread %d: Core %d flushed AICore buffer (seq=%u, count=%u)", thread_idx, core_id, ac_seq, ac_mark
             );
             ac_state->head.current_buf_ptr = 0;
@@ -767,7 +767,7 @@ void l2_swimlane_aicpu_flush(int thread_idx, const int *cur_thread_cores, int co
 
     wmb();
 
-    LOG_INFO_V0("Thread %d: Performance buffer flush complete, %d buffers flushed", thread_idx, flushed_count);
+    LOG_INFO("Thread %d: Performance buffer flush complete, %d buffers flushed", thread_idx, flushed_count);
 }
 
 // Pop the first buffer from a pool's free_queue and cache it as the current
@@ -843,7 +843,7 @@ void l2_swimlane_aicpu_init_phase(int worker_count, int num_sched_phase_threads,
 
     wmb();
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "Phase profiling initialized: %d sched threads, %d orch threads, %d records/thread", num_sched_phase_threads,
         num_orch_phase_threads, PLATFORM_PHASE_RECORDS_PER_THREAD
     );
@@ -867,7 +867,7 @@ static void switch_phase_buffer(
     Buffer *full_buf = *current_buf_out;
     if (state == nullptr || full_buf == nullptr) return;
 
-    LOG_INFO_V0("Thread %d: %s phase buffer is full (count=%u)", thread_idx, kind_label, full_buf->count);
+    LOG_INFO("Thread %d: %s phase buffer is full (count=%u)", thread_idx, kind_label, full_buf->count);
 
     auto ctx = l2_buffer_context(thread_idx, pool_idx, kind, current_buf_out);
     profiling_device::DeviceProfilerEngine<L2SwimlaneDeviceModule<Buffer>>::switch_buffer(ctx, state);
@@ -889,7 +889,7 @@ static Record *acquire_phase_slot(
             ctx, state, state->head.current_buf_seq
         );
         if (buf != nullptr) {
-            LOG_INFO_V0("Thread %d: recovered %s phase buffer", thread_idx, kind_label);
+            LOG_INFO("Thread %d: recovered %s phase buffer", thread_idx, kind_label);
         }
         if (buf == nullptr) return nullptr;
     }
@@ -1034,7 +1034,7 @@ static void flush_phase_pool(
     uint32_t seq = state->head.current_buf_seq;
     int rc = enqueue_ready_buffer(s_l2_swimlane_header, thread_idx, pool_idx, buf_ptr, seq, kind);
     if (rc == 0) {
-        LOG_INFO_V0("Thread %d: flushed %s phase buffer with %u records", thread_idx, kind_label, *count_ptr);
+        LOG_INFO("Thread %d: flushed %s phase buffer with %u records", thread_idx, kind_label, *count_ptr);
     } else {
         LOG_ERROR(
             "Thread %d: failed to enqueue %s phase buffer (queue full), %u records lost!", thread_idx, kind_label,
@@ -1073,7 +1073,7 @@ void l2_swimlane_aicpu_init_core_assignments(int total_cores) {
     memset(s_l2_swimlane_header->core_to_thread, -1, sizeof(s_l2_swimlane_header->core_to_thread));
     s_l2_swimlane_header->num_phase_cores = static_cast<uint32_t>(total_cores);
     wmb();
-    LOG_INFO_V0("Core-to-thread mapping init: %d cores", total_cores);
+    LOG_INFO("Core-to-thread mapping init: %d cores", total_cores);
 }
 
 void l2_swimlane_aicpu_write_core_assignments_for_thread(int thread_idx, const int *core_ids, int core_num) {

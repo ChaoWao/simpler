@@ -90,7 +90,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
   `sched_*` and `Scheduler summary` by `SIMPLER_SCHED_PROFILING` (Level 2).
   Level 1 only feeds the host-side `Orch` / `Sched` `[STRACE]` timeline.
 
-**LOG_INFO_V9 count (normal run):**
+**LOG_INFO count (normal run):**
 
 - `0` (device-side profiling logs). The timeline is delivered host-side via the
   phase windows, not through per-thread device logs.
@@ -397,8 +397,8 @@ definitions to runtime headers.
 
 > Example: `paged_attention` on Ascend hardware, 2 sched threads + 2 orch threads, normal run (no stall/timeout).
 
-| Level | Macro Settings | LOG_INFO_V9 Count | Description |
-| ----- | -------------- | ----------------- | ----------- |
+| Level | Macro Settings | LOG_INFO Count | Description |
+| ----- | -------------- | -------------- | ----------- |
 | 0 | `SIMPLER_DFX=0` | 0 | No timing output |
 | 1 | `SIMPLER_DFX=1` | 0 | Host-side `Orch`/`Sched` `[STRACE]` windows only; no device logs |
 | 2 | `+SIMPLER_SCHED_PROFILING=1` | per sched thread | `sched_start` + phase breakdown + `Scheduler summary` |

@@ -85,7 +85,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     p_mul.add_output(f);
     rt_submit_aiv_task(FUNC_MUL, p_mul);
 
-    LOG_INFO_V9("[example_orch] Submitted 4 tasks for f = (a + b + 1) * (a + b + 2)");
+    LOG_INFO("[example_orch] Submitted 4 tasks for f = (a + b + 1) * (a + b + 2)");
 }
 
 }  // extern "C"

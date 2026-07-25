@@ -103,7 +103,7 @@ AICPU thread schedules its own core slice, so `N_sched == aicpu_thread_num`.
 - `Thread %d: Scheduler summary: total_time=%.3fus, loops=%llu, tasks_scheduled=%d` — each scheduler thread
 - `Thread %d: sched_start=%llu sched_end(timeout)=%llu sched_cost=%.3fus` — timeout path only (replaces normal `sched_end`)
 
-**LOG_INFO_V9 count (normal run):**
+**LOG_INFO count (normal run):**
 
 - `N_sched*2` (sched_timing + Scheduler_summary per scheduler thread)
 
@@ -140,7 +140,7 @@ Thread 3: Scheduler summary: total_time=147.940us, loops=3402, tasks_scheduled=3
 - Phase-specific statistics (complete, scan, dispatch, idle)
 - Hit rate tracking (complete poll, ready queue pop)
 
-**Log output:** 18 LOG_INFO_V9 logs (11 debug + 2 basic + 7 scheduler detailed - 2 replaced)
+**Log output:** 18 LOG_INFO logs (11 debug + 2 basic + 7 scheduler detailed - 2 replaced)
 
 - Replaces scheduler summary with detailed breakdown
 
@@ -184,7 +184,7 @@ captured at l2_swimlane_level >= 3) and `deps.json`; consume them via
 - Atomic operation counters
 - Wait time tracking
 
-**Log output:** 30 LOG_INFO_V9 logs (11 debug + 2 basic + 1 scheduler summary + 17 orchestrator detailed - 1 replaced)
+**Log output:** 30 LOG_INFO logs (11 debug + 2 basic + 1 scheduler summary + 17 orchestrator detailed - 1 replaced)
 
 - Replaces basic orchestration completion with detailed breakdown
 
@@ -219,7 +219,7 @@ Thread X:   avg/task       : XXXus
 - Hash chain walk tracking
 - Overlap check counters
 
-**Log output:** 34 LOG_INFO_V9 logs (30 from Level 3 + 4 tensormap)
+**Log output:** 34 LOG_INFO logs (30 from Level 3 + 4 tensormap)
 
 **TensorMap output:**
 
@@ -417,8 +417,8 @@ definitions to runtime headers.
 > run (no stall/timeout). host_build_graph boots scheduler-only, so the Level-1
 > count is `N_sched*2` with no orchestrator lines (`N_sched == aicpu_thread_num`).
 
-| Level | Macro Settings | LOG_INFO_V9 Count | Description |
-| ----- | -------------- | ----------------- | ----------- |
+| Level | Macro Settings | LOG_INFO Count | Description |
+| ----- | -------------- | -------------- | ----------- |
 | 0 | `SIMPLER_DFX=0` | 0 | No timing output |
 | 1 | `SIMPLER_DFX=1` | 8 | Scheduler timing + summary (4 threads × 2) |
 | 2 | `+SIMPLER_SCHED_PROFILING=1` | — | Scheduler detailed phase breakdown |
