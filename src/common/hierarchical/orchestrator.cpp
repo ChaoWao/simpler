@@ -11,6 +11,7 @@
 
 #include "orchestrator.h"
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -110,10 +111,10 @@ void Orchestrator::fail_run_submission(RunId run_id, std::exception_ptr error) {
     if (error) record_run_error(run_id, std::move(error));
     {
         std::lock_guard<std::mutex> runs_lk(runs_mu_);
-        if (building_run_id_ != run_id) {
-            throw std::logic_error("Orchestrator::fail_run_submission: run is not building");
-        }
-        building_run_id_ = INVALID_RUN_ID;
+        // Failing a run closes it out from whatever state submission reached,
+        // so the fence always becomes reachable. Refusing a run that is no
+        // longer building would leave its waiter blocked forever.
+        if (building_run_id_ == run_id) building_run_id_ = INVALID_RUN_ID;
     }
     {
         std::lock_guard<std::mutex> lk(run->completion_mu);
@@ -137,6 +138,22 @@ void Orchestrator::wait_run(RunId run_id) {
         error = run->first_error;
     }
     if (error) std::rethrow_exception(error);
+}
+
+bool Orchestrator::wait_run_for(RunId run_id, double timeout_seconds) {
+    auto run = get_run(run_id);
+    std::exception_ptr error;
+    {
+        std::unique_lock<std::mutex> lk(run->completion_mu);
+        if (!run->completion_cv.wait_for(lk, std::chrono::duration<double>(timeout_seconds), [&run] {
+                return is_terminal(run->phase.load(std::memory_order_acquire));
+            })) {
+            return false;
+        }
+        error = run->first_error;
+    }
+    if (error) std::rethrow_exception(error);
+    return true;
 }
 
 bool Orchestrator::run_done(RunId run_id) const {

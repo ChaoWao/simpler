@@ -443,6 +443,15 @@ TEST_F(OrchestratorFixture, EmptyRunCompletesWhenSubmissionCloses) {
     orch.release_run(run_id);
 }
 
+TEST_F(OrchestratorFixture, TimedWaitCanRetryAfterTimeout) {
+    EXPECT_FALSE(orch.wait_run_for(run_id, 0.0));
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    orch.close_run_submission(run_id);
+    EXPECT_TRUE(orch.wait_run_for(run_id, 0.0));
+    orch.release_run(run_id);
+}
+
 TEST_F(OrchestratorFixture, OneTaskRunCompletesAfterConsumption) {
     auto result = orch.submit_next_level(C(80), single_tensor_args(0x8000, TensorArgType::OUTPUT), cfg, 0);
     EXPECT_EQ(S(result.task_slot).run_id, run_id);
@@ -538,6 +547,25 @@ TEST_F(OrchestratorFixture, ConsumingASlotOwnedByAReleasedRunIsIgnored) {
 
     // The decrement landed on no run at all, so the live run still owes a task.
     EXPECT_FALSE(orch.run_done(run_id));
+}
+
+// Failing a run is the recovery path: refusing a run whose submission already
+// closed would leave the caller's fence wait blocked forever.
+TEST_F(OrchestratorFixture, FailingAnAlreadyClosedRunStillResolvesTheFence) {
+    auto task = orch.submit_next_level(C(86), single_tensor_args(0x8600, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("late submission failure")))
+    );
+
+    S(task.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(task.task_slot));
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_TRUE(orch.run_failed(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
 }
 
 TEST_F(OrchestratorFixture, FailedSubmissionCarriesItsMessageToTheFence) {
