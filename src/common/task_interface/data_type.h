@@ -44,6 +44,12 @@ enum class DataType : uint8_t {
     UINT16,    // 2 bytes
     UINT32,    // 4 bytes
     BOOL,      // 1 byte (stored as 1/0 in uint64_t slot)
+    // MX block-scale dtypes — A5 only (consumed by the A5-only pto.tquant.mx /
+    // tmatmul.mx ops). Host transfer itself is arch-agnostic (1 byte/element).
+    // FP8E5M2 is intentionally omitted: MX paths use E4M3FN (+ E8M0 scale), not E5M2.
+    FP8E4M3FN,  // 1 byte — MXFP8 E4M3FN (A5 only)
+    FP8E8M0,    // 1 byte — MXFP8 E8M0 shared exponent (A5 only)
+    FP4E2M1,    // 1 byte — MXFP4 E2M1, 2 values packed (torch float4_e2m1fn_x2) (A5 only)
     DATA_TYPE_NUM,
 };
 
@@ -70,6 +76,9 @@ inline uint64_t get_element_size(DataType dtype) {
         2,  // DataType::UINT16
         4,  // DataType::UINT32
         1,  // DataType::BOOL
+        1,  // DataType::FP8E4M3FN (A5 only)
+        1,  // DataType::FP8E8M0 (A5 only)
+        1,  // DataType::FP4E2M1 (A5 only)
     };
     return data_type_size[static_cast<int>(dtype)];
 }
@@ -106,6 +115,12 @@ inline const char *get_dtype_name(DataType dtype) {
         return "UINT32";
     case DataType::BOOL:
         return "BOOL";
+    case DataType::FP8E4M3FN:  // A5 only
+        return "FP8E4M3FN";
+    case DataType::FP8E8M0:  // A5 only
+        return "FP8E8M0";
+    case DataType::FP4E2M1:  // A5 only
+        return "FP4E2M1";
     default:
         return "UNKNOWN";
     }

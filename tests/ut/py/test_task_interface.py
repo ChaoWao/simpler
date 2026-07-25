@@ -57,6 +57,11 @@ class TestDataType:
         assert DataType.UINT64 is not None
         assert DataType.UINT16 is not None
         assert DataType.UINT32 is not None
+        # A5-only MX block-scale dtypes (no FP8E5M2 — MX uses E4M3FN).
+        assert DataType.FP8E4M3FN is not None  # A5 only
+        assert DataType.FP8E8M0 is not None  # A5 only
+        assert DataType.FP4E2M1 is not None  # A5 only
+        assert not hasattr(DataType, "FP8E5M2")
 
     def test_enum_int_values(self):
         assert DataType.FLOAT32.value == 0
@@ -70,6 +75,9 @@ class TestDataType:
         assert DataType.UINT64.value == 8
         assert DataType.UINT16.value == 9
         assert DataType.UINT32.value == 10
+        assert DataType.FP8E4M3FN.value == 12  # A5 only (11 is BOOL)
+        assert DataType.FP8E8M0.value == 13  # A5 only
+        assert DataType.FP4E2M1.value == 14  # A5 only
 
 
 class TestTaskState:
@@ -94,6 +102,9 @@ class TestGetElementSize:
             (DataType.UINT64, 8),
             (DataType.UINT16, 2),
             (DataType.UINT32, 4),
+            (DataType.FP8E4M3FN, 1),  # A5 only
+            (DataType.FP8E8M0, 1),  # A5 only
+            (DataType.FP4E2M1, 1),  # A5 only
         ],
     )
     def test_element_sizes(self, dtype, expected):
@@ -115,6 +126,9 @@ class TestGetDtypeName:
             (DataType.UINT64, "UINT64"),
             (DataType.UINT16, "UINT16"),
             (DataType.UINT32, "UINT32"),
+            (DataType.FP8E4M3FN, "FP8E4M3FN"),  # A5 only
+            (DataType.FP8E8M0, "FP8E8M0"),  # A5 only
+            (DataType.FP4E2M1, "FP4E2M1"),  # A5 only
         ],
     )
     def test_dtype_names(self, dtype, expected):
@@ -164,6 +178,39 @@ class TestTorchInterop:
         assert arg.shapes == (4, 8)
         assert arg.dtype == DataType.FLOAT32
         assert arg.nbytes() == 4 * 8 * 4
+
+    def test_torch_dtype_fp8_fp4_and_make_tensor_arg(self):
+        import torch  # pyright: ignore[reportMissingImports]
+
+        from simpler_setup.torch_interop import make_tensor_arg, torch_dtype_to_datatype
+
+        # A5-only MX dtypes (no float8_e5m2). float8_e4m3fn needs torch >= 2.1;
+        # float8_e8m0fnu >= 2.7; float4_e2m1fn_x2 (MXFP4 packed) needs a recent
+        # torch too. Collect available attrs; skip the whole test if none exist
+        # so a silent empty pass cannot hide missing coverage.
+        cases = [
+            ("float8_e4m3fn", DataType.FP8E4M3FN),  # A5 only
+            ("float8_e8m0fnu", DataType.FP8E8M0),  # A5 only
+            ("float4_e2m1fn_x2", DataType.FP4E2M1),  # A5 only
+        ]
+        available = [
+            (attr, expected, getattr(torch, attr)) for attr, expected in cases if getattr(torch, attr, None) is not None
+        ]
+        if not available:
+            pytest.skip(
+                "torch lacks float8_e4m3fn / float8_e8m0fnu / float4_e2m1fn_x2 "
+                "(need a recent torch, ideally >= 2.7 for E8M0/FP4)"
+            )
+        for attr, expected, torch_dt in available:
+            assert torch_dtype_to_datatype(torch_dt) == expected
+            # Regression: make_tensor_arg used to raise
+            # "Unsupported tensor dtype for Tensor: torch.<attr>".
+            t = torch.zeros(2, 4, dtype=torch_dt)
+            arg = make_tensor_arg(t)
+            assert arg.dtype == expected
+            # Each of these dtypes is 1 byte per torch element (FP4 packs 2
+            # E2M1 values per byte), so a [2, 4] tensor is 8 bytes.
+            assert arg.nbytes() == 2 * 4
 
 
 class TestScalarToUint64:
