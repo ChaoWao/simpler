@@ -67,9 +67,11 @@ comment on the load-bearing line.
 
 ## 6. Keep docs maintainable — length and structure
 
-Line length is already enforced by `markdownlint-cli2` (MD013, 80 cols) via
-pre-commit. The rules below are the file-level counterparts that tooling
-cannot enforce for you.
+Markdown style is checked by `markdownlint-cli2` via pre-commit, configured in
+[`tests/lint/.markdownlint.yaml`](../../tests/lint/.markdownlint.yaml). Note
+that line length (MD013) is **disabled** there — keep lines readable by
+convention, but no tool will fail the commit for a long one. The rules below
+are the file-level counterparts that tooling cannot enforce for you.
 
 - **Soft size target.** Past roughly **300 lines** or **5 H2 sections**,
   the reader has to scroll to orient. Treat that as a trigger to split or
