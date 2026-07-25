@@ -19,11 +19,13 @@
  * (`l2_swimlane_records.json` / `args_dump/` / `pmu.csv` / `deps.json` /
  * `scope_stats/scope_stats.jsonl`).
  *
- * `block_dim == 0` is a sentinel for "auto" — DeviceRunner resolves it at
- * run() time to the max block_dim the AICore stream allows
- * (aclrtGetStreamResLimit on onboard; PLATFORM_MAX_BLOCKDIM on sim).
- * Any positive value is taken as an explicit cap and validated against
- * the same stream-resource limits.
+ * `block_dim == 0` is a sentinel for "auto": onboard takes every cluster the
+ * AICore stream reports (aclrtGetStreamResLimit, capped by
+ * PLATFORM_MAX_BLOCKDIM); sim takes SIM_AUTO_BLOCKDIM, which is deliberately
+ * narrower than the modelled chip because sim runs one OS thread per AICore.
+ * Any positive value is taken as an explicit request and range-checked against
+ * the same ceiling. DeviceRunner::prepare_launch_shape() resolves this before
+ * the graph is built, so a host-side orchestrator sees the real core count.
  *
  * Lives here (rather than chip_worker.h) so distributed task slot state
  * can store it directly without pulling in the full ChipWorker header

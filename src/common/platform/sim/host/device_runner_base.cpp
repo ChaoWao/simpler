@@ -243,6 +243,47 @@ int SimDeviceRunnerBase::ensure_device_initialized() {
     return ensure_binaries_loaded();
 }
 
+int SimDeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig &config) {
+    if (config.aicpu_thread_num < 1 || config.aicpu_thread_num > PLATFORM_MAX_AICPU_THREADS) {
+        LOG_ERROR(
+            "launch_aicpu_num (%d) must be in range [1, %d]", config.aicpu_thread_num, PLATFORM_MAX_AICPU_THREADS
+        );
+        return -1;
+    }
+    // 0 is the CallConfig "auto" sentinel. Sim has no stream resource query, so
+    // auto takes SIM_AUTO_BLOCKDIM while an explicit request is bounded only by
+    // the modelled chip.
+    int block_dim = (config.block_dim == 0) ? SIM_AUTO_BLOCKDIM : config.block_dim;
+    if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
+        LOG_ERROR("block_dim (%d) must be in range [1, %d]", block_dim, PLATFORM_MAX_BLOCKDIM);
+        return -1;
+    }
+    if (config.block_dim == 0) {
+        LOG_INFO_V0("block_dim auto-resolved to %d", block_dim);
+    }
+
+    int num_aicore = block_dim * cores_per_blockdim_;
+    if (num_aicore > RUNTIME_MAX_WORKER) {
+        LOG_ERROR("num_aicore (%d) exceeds RUNTIME_MAX_WORKER (%d)", num_aicore, RUNTIME_MAX_WORKER);
+        return -1;
+    }
+
+    block_dim_ = block_dim;
+    runtime.set_worker_count(num_aicore);
+    worker_count_ = num_aicore;
+    runtime.set_aicpu_thread_num(config.aicpu_thread_num);
+
+    // First `block_dim` cores are AIC; remaining ~2/3 are AIV.
+    Handshake *workers = runtime.get_workers();
+    for (int i = 0; i < num_aicore; i++) {
+        workers[i].aicpu_ready = 0;
+        workers[i].aicore_done = 0;
+        workers[i].task = 0;
+        workers[i].core_type = (i < block_dim) ? CoreType::AIC : CoreType::AIV;
+    }
+    return 0;
+}
+
 void *SimDeviceRunnerBase::allocate_tensor(size_t bytes) { return mem_alloc_.alloc(bytes); }
 
 void SimDeviceRunnerBase::free_tensor(void *dev_ptr) {

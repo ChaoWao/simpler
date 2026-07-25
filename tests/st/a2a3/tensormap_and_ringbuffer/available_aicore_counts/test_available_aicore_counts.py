@@ -7,12 +7,19 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""available_aicore_counts: rt_available_cluster_count() returns the run's AIC cluster count.
+"""available_aicore_counts: the runtime's core counts are real and spendable.
 
-The orchestration reads the this-run MIX cluster (= AIC) count through the ops
-table and writes it into a single int32 output tensor; the host compares it
-against the count the a2a3 sim platform exposes. A regression that returns the
-host placeholder, 0, or a stale ratio fails the comparison.
+The counts have no host-side equivalent — sim and onboard resolve different
+values, and onboard's comes from the driver — so there is no constant to pin.
+The orchestration instead reports what it saw in `shape` and spends it: a MIX
+cohort of exactly `cluster_count` blocks, each writing its block index into
+`blocks`. This test reads the width back out of `shape` and checks that many
+block slots, so it holds on every platform without knowing any of their numbers.
+
+What would fail: a count of 0 or one exceeding the platform ceiling (checked
+here), a count larger than the run really has (the cohort's require_sync_start
+needs every block co-resident, so the deadlock guard fires on device), and a
+count smaller than it should be (the untouched tail slots stay zero).
 """
 
 import torch
@@ -20,14 +27,17 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
-# a2a3sim exposes a fixed AIC cluster count (cores_total_num / 3); pinned from
-# the value the orchestration surfaces on this platform.
-EXPECTED_AIC_COUNT = 1
+FLOATS_PER_CACHE_LINE = 16
+SLOTS_PER_BLOCK = 3
+# Cover the largest cohort the platform can launch (PLATFORM_MAX_BLOCKDIM).
+MAX_CLUSTERS = 24
+AIV_PER_CLUSTER = 2
+TOTAL_CL = MAX_CLUSTERS * SLOTS_PER_BLOCK
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
 class TestAvailableAicoreCounts(SceneTestCase):
-    """rt_available_cluster_count() surfaces the this-run AIC cluster count."""
+    """rt_available_cluster_count() / rt_available_aiv_count() report a spendable width."""
 
     RTOL = 0
     ATOL = 0
@@ -36,26 +46,68 @@ class TestAvailableAicoreCounts(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/available_aicore_counts_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT],
+            "signature": [D.INOUT, D.INOUT],
         },
-        "incores": [],
+        "incores": [
+            {
+                "func_id": 0,
+                "name": "SPMD_MIX_AIC",
+                "source": "../spmd_multiblock_mix/kernels/aic/kernel_spmd_mix.cpp",
+                "core_type": "aic",
+                "signature": [D.INOUT],
+            },
+            {
+                "func_id": 1,
+                "name": "SPMD_MIX_AIV0",
+                "source": "../spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
+                "core_type": "aiv",
+                "signature": [D.INOUT],
+            },
+            {
+                "func_id": 2,
+                "name": "SPMD_MIX_AIV1",
+                "source": "../spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
+                "core_type": "aiv",
+                "signature": [D.INOUT],
+            },
+        ],
     }
 
     CASES = [
         {
             "name": "Default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 2, "block_dim": 1},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]
 
     def generate_args(self, params):
-        out = torch.zeros((1,), dtype=torch.int32)
-        return TaskArgsBuilder(Tensor("out", out))
+        return TaskArgsBuilder(
+            Tensor("blocks", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            Tensor("shape", torch.zeros(2, dtype=torch.int32)),
+        )
 
     def compute_golden(self, args, params):
-        args.out[0] = EXPECTED_AIC_COUNT
+        # Both outputs are checked against the reported width in
+        # compare_outputs; nothing here is host-computable.
+        pass
+
+    def compare_outputs(self, test_args, golden_args, output_names, params):
+        clusters = int(test_args.shape[0])
+        aivs = int(test_args.shape[1])
+        assert 1 <= clusters <= MAX_CLUSTERS, f"cluster_count {clusters} outside [1, {MAX_CLUSTERS}]"
+        assert aivs == clusters * AIV_PER_CLUSTER, f"aiv_count {aivs} != {clusters} * {AIV_PER_CLUSTER}"
+
+        blocks = test_args.blocks.reshape(TOTAL_CL, FLOATS_PER_CACHE_LINE)[:, 0]
+        expected = torch.zeros(TOTAL_CL, dtype=torch.float32)
+        for block_idx in range(clusters):
+            for slot in range(SLOTS_PER_BLOCK):
+                expected[block_idx * SLOTS_PER_BLOCK + slot] = float(block_idx)
+        assert torch.equal(blocks, expected), (
+            f"block slots disagree with the reported cluster_count {clusters}: "
+            f"got {blocks.tolist()}, expected {expected.tolist()}"
+        )
 
 
 if __name__ == "__main__":

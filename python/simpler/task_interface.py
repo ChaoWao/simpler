@@ -1147,9 +1147,9 @@ class ChipWorker:
             config: Optional CallConfig. If None, a default is created.
             **kwargs: Overrides applied to config (e.g. ``block_dim=8`` to
                 pin a smaller value than the default). Omit ``block_dim`` (or
-                set it to 0) to have DeviceRunner auto-resolve it to the max
-                the AICore stream allows (``aclrtGetStreamResLimit`` on
-                onboard, ``PLATFORM_MAX_BLOCKDIM`` on sim).
+                set it to 0) to have DeviceRunner auto-resolve it: every
+                cluster the AICore stream reports on onboard
+                (``aclrtGetStreamResLimit``), ``SIM_AUTO_BLOCKDIM`` on sim.
 
         Returns ``None``. Per-stage run timing is emitted as ``[STRACE]`` log
         markers by the platform — see ``docs/dfx/host-trace.md``.

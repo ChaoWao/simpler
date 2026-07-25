@@ -1127,8 +1127,9 @@ int32_t SchedulerContext::pre_handshake_init(
     // ratio makes these exact pre-handshake, so scheduler threads can self-assign
     // their owned clusters (assign_own_clusters) without the post-handshake
     // discovery pass and its all-thread barrier.
-    aic_count_ = cores_total_num_ / 3;
-    aiv_count_ = (cores_total_num_ * 2) / 3;
+    const int32_t cluster_num = cores_total_num_ / PLATFORM_CORES_PER_BLOCKDIM;
+    aic_count_ = cluster_num * PLATFORM_AIC_CORES_PER_BLOCKDIM;
+    aiv_count_ = cluster_num * PLATFORM_AIV_CORES_PER_BLOCKDIM;
     active_sched_threads_ = (sched_thread_num_ > 0) ? sched_thread_num_ : aicpu_thread_num_;
     handshake_failed_.store(false, std::memory_order_release);
 

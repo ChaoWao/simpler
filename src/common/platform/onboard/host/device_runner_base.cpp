@@ -392,6 +392,16 @@ int DeviceRunnerBase::ensure_device_initialized() {
         LOG_INFO_V0("DeviceRunner: device=%d set, streams created", device_id_);
     }
 
+    // Latch the AICore stream's block_dim ceiling. resolve_block_dim() is then
+    // pure arithmetic and can run before any per-run stream work.
+    if (max_block_dim_ == 0) {
+        max_block_dim_ = query_max_block_dim(stream_aicore_, &max_cube_cores_, &max_vector_cores_);
+        LOG_INFO_V0(
+            "DeviceRunner: device=%d max_block_dim=%d (cube=%u, vector=%u)", device_id_, max_block_dim_,
+            max_cube_cores_, max_vector_cores_
+        );
+    }
+
     rc = ensure_binaries_loaded();
     if (rc != 0) return rc;
 
@@ -523,30 +533,6 @@ int DeviceRunnerBase::query_max_block_dim(rtStream_t stream, uint32_t *out_cube,
         return std::min(from_stream, PLATFORM_MAX_BLOCKDIM);
     }
     return PLATFORM_MAX_BLOCKDIM;
-}
-
-int DeviceRunnerBase::validate_block_dim(rtStream_t stream, int block_dim) {
-    if (block_dim < 1) {
-        LOG_ERROR("block_dim (%d) must be >= 1", block_dim);
-        return -1;
-    }
-    uint32_t cube_limit = 0, vector_limit = 0;
-    int max_bd = query_max_block_dim(stream, &cube_limit, &vector_limit);
-    if (block_dim > max_bd) {
-        if (cube_limit > 0 && vector_limit > 0) {
-            LOG_ERROR(
-                "block_dim (%d) exceeds available cores (max_block_dim=%d, cube=%u, vector=%u)", block_dim, max_bd,
-                cube_limit, vector_limit
-            );
-        } else {
-            LOG_ERROR(
-                "aclrtGetStreamResLimit unavailable; block_dim (%d) exceeds static cap PLATFORM_MAX_BLOCKDIM (%d)",
-                block_dim, PLATFORM_MAX_BLOCKDIM
-            );
-        }
-        return -1;
-    }
-    return 0;
 }
 
 void DeviceRunnerBase::print_handshake_results() {
@@ -1100,6 +1086,11 @@ int DeviceRunnerBase::finalize_common() {
 
     block_dim_ = 0;
     worker_count_ = 0;
+    // Tied to stream_aicore_, destroyed above: a re-provisioned runner
+    // re-queries rather than trusting the previous stream's limits.
+    max_block_dim_ = 0;
+    max_cube_cores_ = 0;
+    max_vector_cores_ = 0;
     aicore_kernel_binary_.clear();
     cached_gm_heap_size_ = 0;
     cached_gm_sm_size_ = 0;
@@ -1208,28 +1199,42 @@ void DeviceRunnerBase::ensure_device_wall_buffer() {
 }
 
 int DeviceRunnerBase::resolve_block_dim(int requested_block_dim) {
-    // Auto sentinel (block_dim == 0) is resolved directly from
-    // query_max_block_dim; explicit values still go through validate. The
-    // auto branch skips validate so we don't pay the ACL syscalls twice.
-    int resolved = requested_block_dim;
-    if (resolved == 0) {
-        resolved = query_max_block_dim(stream_aicore_);
+    if (max_block_dim_ < 1) {
+        LOG_ERROR("block_dim ceiling not resolved (ensure_device_initialized must run first)");
+        return -1;
+    }
+    // 0 is the CallConfig "auto" sentinel: take the whole device.
+    int resolved = (requested_block_dim == 0) ? max_block_dim_ : requested_block_dim;
+    if (resolved < 1 || resolved > max_block_dim_) {
+        if (max_cube_cores_ > 0 && max_vector_cores_ > 0) {
+            LOG_ERROR(
+                "block_dim (%d) outside [1, %d] available cores (cube=%u, vector=%u)", resolved, max_block_dim_,
+                max_cube_cores_, max_vector_cores_
+            );
+        } else {
+            LOG_ERROR(
+                "aclrtGetStreamResLimit unavailable; block_dim (%d) outside [1, %d] static cap PLATFORM_MAX_BLOCKDIM",
+                resolved, max_block_dim_
+            );
+        }
+        return -1;
+    }
+    if (requested_block_dim == 0) {
         LOG_INFO_V0("block_dim auto-resolved to %d", resolved);
-        if (resolved < 1) {
-            LOG_ERROR("block_dim auto-resolved to invalid value %d", resolved);
-            return -1;
-        }
-    } else {
-        int rc = validate_block_dim(stream_aicore_, resolved);
-        if (rc != 0) {
-            return -1;
-        }
     }
     block_dim_ = resolved;
     return resolved;
 }
 
-int DeviceRunnerBase::prepare_runtime_for_launch(Runtime &runtime, int block_dim, int launch_aicpu_num) {
+int DeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig &config) {
+    if (validate_launch_aicpu_num(config.aicpu_thread_num) != 0) {
+        return -1;
+    }
+    int block_dim = resolve_block_dim(config.block_dim);
+    if (block_dim < 0) {
+        return -1;
+    }
+
     int num_aicore = block_dim * cores_per_blockdim_;
     if (num_aicore > RUNTIME_MAX_WORKER) {
         LOG_ERROR("block_dim (%d) exceeds RUNTIME_MAX_WORKER (%d)", block_dim, RUNTIME_MAX_WORKER);
@@ -1238,7 +1243,7 @@ int DeviceRunnerBase::prepare_runtime_for_launch(Runtime &runtime, int block_dim
 
     runtime.set_worker_count(num_aicore);
     worker_count_ = num_aicore;  // Stored for print_handshake_results in destructor
-    runtime.set_aicpu_thread_num(launch_aicpu_num);
+    runtime.set_aicpu_thread_num(config.aicpu_thread_num);
 
     // First `block_dim` cores are AIC; remaining ~2/3 are AIV.
     int num_aic = block_dim;
@@ -1249,11 +1254,13 @@ int DeviceRunnerBase::prepare_runtime_for_launch(Runtime &runtime, int block_dim
         workers[i].task = 0;
         workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
     }
+    return 0;
+}
 
-    // Set function_bin_addr for all tasks: Runtime::func_id_to_addr_[] stores
-    // a CoreCallable device address; the binary code address is one
-    // compile-time offset further in. The dispatch path then reads
-    // resolved_addr_ from the on-device CoreCallable header.
+void DeviceRunnerBase::resolve_task_binary_addrs(Runtime &runtime) {
+    // Runtime::func_id_to_addr_[] stores a CoreCallable device address; the
+    // binary code address is one compile-time offset further in. The dispatch
+    // path then reads resolved_addr_ from the on-device CoreCallable header.
     LOG_DEBUG("Setting function_bin_addr for Tasks");
     for (int i = 0; i < runtime.get_task_count(); i++) {
         Task *task = runtime.get_task(i);
@@ -1264,7 +1271,6 @@ int DeviceRunnerBase::prepare_runtime_for_launch(Runtime &runtime, int block_dim
         }
     }
     LOG_DEBUG("");
-    return 0;
 }
 
 int DeviceRunnerBase::sync_run_streams() {

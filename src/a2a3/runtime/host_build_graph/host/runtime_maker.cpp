@@ -445,11 +445,18 @@ int32_t run_host_orchestration(
         return -1;
     }
 
-    // Install the ops table (host s_runtime_ops) and latch the this-run cluster
-    // counts from worker_count (the driver-reported core count) so host-orch
-    // sees the real value. The AICPU re-derives the same counts at boot.
-    int32_t wc = runtime->get_worker_count();
-    runtime_finalize_after_wire(rt, wc / 3, (wc * 2) / 3);
+    // Install the ops table (host s_runtime_ops) and latch this run's cluster
+    // counts. worker_count is published by DeviceRunner::prepare_launch_shape
+    // before this bind, so the host orchestrator sees the same geometry the
+    // AICPU re-derives from the handshake at boot.
+    const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
+    if (block_dim < 1) {
+        LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
+        return -1;
+    }
+    runtime_finalize_after_wire(
+        rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
+    );
     rt->mode = PTO2_MODE_EXECUTE;
     // get_tensor_data/set_tensor_data dereference buffer.addr directly: the
     // input tensors were mapped into host address space at staging time

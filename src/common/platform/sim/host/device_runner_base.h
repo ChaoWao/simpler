@@ -55,6 +55,15 @@
 struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
 struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
 
+// Width sim resolves the CallConfig "auto" sentinel to, deliberately below
+// PLATFORM_MAX_BLOCKDIM (24 on a2a3, 36 on a5). The simulator runs one OS
+// thread per AICore, so taking the whole modelled chip would be 72-108 threads
+// per case; under xdist that is several hundred threads for no added coverage.
+// It is not a ceiling: an explicit block_dim is still honoured up to
+// PLATFORM_MAX_BLOCKDIM. Onboard is unaffected — it auto-resolves from the real
+// per-stream core limits.
+constexpr int SIM_AUTO_BLOCKDIM = 8;
+
 class SimDeviceRunnerBase {
 public:
     SimDeviceRunnerBase() :
@@ -129,6 +138,15 @@ public:
         Runtime &runtime, int32_t callable_id, const HostApi *api, const void *orch_args,
         const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
     );
+
+    // Publish this run's core geometry onto `Runtime` before the graph is
+    // built: resolves block_dim (SIM_AUTO_BLOCKDIM on auto), derives num_aicore,
+    // and publishes worker_count / aicpu_thread_num plus the AIC/AIV-typed
+    // handshake array. Callers run this before bind_callable_to_runtime so a
+    // host-side orchestrator sees the real core count while it submits, rather
+    // than the zeros a freshly constructed Runtime carries. Returns 0 on
+    // success, -1 on a bad block_dim / aicpu_thread_num.
+    int prepare_launch_shape(Runtime &runtime, const CallConfig &config);
     uint64_t upload_chip_callable_buffer(const ChipCallable *callable);
     int release_chip_callable_buffer(uint64_t hash);
     int launch_device_register(int32_t callable_id);
