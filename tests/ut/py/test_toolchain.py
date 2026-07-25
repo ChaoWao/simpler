@@ -185,3 +185,41 @@ class TestShlexJoinSafety:
         flags_arg = next(a for a in args if a.startswith("-DCMAKE_C_FLAGS="))
         # shlex.join must re-quote the path so CMake re-parses it as one token.
         assert "'/opt/my compilers/compat'" in flags_arg
+
+
+class TestCCECToolchainCompileFlags:
+    """A5 must disable SIMD VF fusion; A2/A3 must be left untouched.
+
+    VF fusion can reorder same-V vector ops (expand/abs/sinkhorn) and silently
+    break DeepSeek-V4 numerics on Ascend950. The failure mode is a wrong result
+    rather than a compile error, so guard the flag explicitly.
+    """
+
+    @pytest.fixture
+    def ccec(self, monkeypatch):
+        """Build a CCECToolchain without needing a real CANN install."""
+
+        def _make(platform):
+            # Constructor probes ASCEND_HOME_PATH and the ccec/ld.lld binaries.
+            monkeypatch.setattr(
+                "simpler_setup.toolchain.env_manager.get", lambda _k: "/nonexistent/ascend"
+            )
+            monkeypatch.setattr("simpler_setup.toolchain.os.path.isfile", lambda _p: True)
+            from simpler_setup.toolchain import CCECToolchain  # noqa: PLC0415
+
+            return CCECToolchain(platform)
+
+        return _make
+
+    @pytest.mark.parametrize("platform", ["a5", "a5sim"])
+    def test_a5_disables_vf_fusion(self, ccec, platform):
+        assert "--cce-simd-vf-fusion=false" in ccec(platform).get_compile_flags()
+
+    @pytest.mark.parametrize("platform", ["a2a3", "a2a3sim"])
+    def test_a2a3_keeps_vf_fusion(self, ccec, platform):
+        assert "--cce-simd-vf-fusion=false" not in ccec(platform).get_compile_flags()
+
+    def test_a5_flag_applies_to_both_core_types(self, ccec):
+        toolchain = ccec("a5")
+        for core_type in ("aiv", "aic"):
+            assert "--cce-simd-vf-fusion=false" in toolchain.get_compile_flags(core_type)
