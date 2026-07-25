@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -52,6 +53,26 @@ std::string format_digest(const uint8_t *digest) {
         out.push_back(kHex[v & 0x0F]);
     }
     return out;
+}
+
+// Task-dispatch spin iterations between child liveness samples. Paired with
+// the loop's 50 us sleep this is a ~10 ms sampling period.
+constexpr int kChildLivenessPollInterval = 200;
+
+// Wall-clock period between child liveness samples on spin loops that do not
+// sleep between iterations.
+constexpr std::chrono::milliseconds kChildLivenessPollPeriod{10};
+
+std::string child_status_message(int child_pid, int status) {
+    std::string msg = "child process pid=" + std::to_string(child_pid) + " exited before mailbox completion";
+    if (WIFEXITED(status)) {
+        msg += " (exit_status=" + std::to_string(WEXITSTATUS(status)) + ")";
+    } else if (WIFSIGNALED(status)) {
+        msg += " (signal=" + std::to_string(WTERMSIG(status)) + ")";
+    } else {
+        msg += " (status=" + std::to_string(status) + ")";
+    }
+    return msg;
 }
 
 }  // namespace
@@ -126,10 +147,39 @@ void WorkerEndpoint::control_l3_l2_region_release(uint64_t) {
 // LocalMailboxEndpoint — mailbox helpers
 // =============================================================================
 
-LocalMailboxEndpoint::LocalMailboxEndpoint(int32_t worker_id, void *mailbox) :
-    mailbox_(mailbox) {
+LocalMailboxEndpoint::LocalMailboxEndpoint(int32_t worker_id, void *mailbox, int child_pid) :
+    mailbox_(mailbox),
+    child_pid_(child_pid) {
     if (mailbox == nullptr) throw std::invalid_argument("LocalMailboxEndpoint: null mailbox");
     caps_.worker_id = worker_id;
+}
+
+std::string LocalMailboxEndpoint::check_child_death() {
+    if (child_dead_) return child_death_reason_;
+    if (child_pid_ <= 0) return {};
+
+    int status = 0;
+    pid_t r = 0;
+    do {
+        r = waitpid(static_cast<pid_t>(child_pid_), &status, WNOHANG);
+    } while (r < 0 && errno == EINTR);
+
+    if (r == 0) return {};
+
+    if (r < 0 && errno != ECHILD) {
+        // Any other waitpid() failure says nothing about the child, so the
+        // caller keeps polling rather than tearing down a live worker.
+        return {};
+    }
+
+    child_dead_ = true;
+    if (r < 0) {
+        child_death_reason_ = "child process pid=" + std::to_string(child_pid_) +
+                              " is no longer waitable (reaped elsewhere) before mailbox completion";
+    } else {
+        child_death_reason_ = child_status_message(child_pid_, status);
+    }
+    return child_death_reason_;
 }
 
 MailboxState LocalMailboxEndpoint::read_mailbox_state() const {
@@ -318,8 +368,21 @@ WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, const WorkerDispatch &dis
     // Signal child process.
     write_mailbox_state(MailboxState::TASK_READY);
 
-    // Spin-poll until child signals TASK_DONE.
+    // Spin-poll until child signals TASK_DONE. A child that dies without
+    // publishing TASK_DONE would otherwise leave this loop spinning forever,
+    // so its liveness is sampled every kChildLivenessPollInterval iterations
+    // (~10 ms at the 50 us sleep below), amortizing the waitpid() syscall.
+    int poll_count = 0;
     while (read_mailbox_state() != MailboxState::TASK_DONE) {
+        if (++poll_count >= kChildLivenessPollInterval) {
+            poll_count = 0;
+            std::string death = check_child_death();
+            if (!death.empty()) {
+                completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+                completion.error_message = "LocalMailboxEndpoint::run: " + death;
+                return completion;
+            }
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 
@@ -348,13 +411,13 @@ WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, const WorkerDispatch &dis
 // WorkerManager
 // =============================================================================
 
-void WorkerManager::add_next_level(void *mailbox) {
-    add_next_level_at(static_cast<int32_t>(next_level_entries_.size()), mailbox);
+void WorkerManager::add_next_level(void *mailbox, int child_pid) {
+    add_next_level_at(static_cast<int32_t>(next_level_entries_.size()), mailbox, child_pid);
 }
 
-void WorkerManager::add_next_level_at(int32_t worker_id, void *mailbox) {
+void WorkerManager::add_next_level_at(int32_t worker_id, void *mailbox, int child_pid) {
     if (worker_id < 0) throw std::invalid_argument("WorkerManager::add_next_level_at: negative worker_id");
-    next_level_entries_.push_back(LocalNextLevelEntry{worker_id, mailbox});
+    next_level_entries_.push_back(LocalNextLevelEntry{worker_id, mailbox, child_pid});
 }
 
 void WorkerManager::add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint) {
@@ -362,7 +425,7 @@ void WorkerManager::add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endp
     next_level_endpoint_entries_.push_back(std::move(endpoint));
 }
 
-void WorkerManager::add_sub(void *mailbox) { sub_entries_.push_back(mailbox); }
+void WorkerManager::add_sub(void *mailbox, int child_pid) { sub_entries_.push_back(LocalSubEntry{mailbox, child_pid}); }
 
 void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete) {
     if (ring == nullptr) throw std::invalid_argument("WorkerManager::start: null ring");
@@ -391,16 +454,18 @@ void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete) {
     auto make_next_level_threads = [&]() {
         for (const auto &entry : next_level_entries_) {
             auto wt = std::make_unique<WorkerThread>();
-            auto endpoint = std::make_unique<LocalMailboxEndpoint>(entry.worker_id, entry.mailbox);
+            auto endpoint = std::make_unique<LocalMailboxEndpoint>(entry.worker_id, entry.mailbox, entry.child_pid);
             wt->start(ring, on_complete, std::move(endpoint));
             next_level_threads_.push_back(std::move(wt));
         }
     };
-    auto make_sub_threads = [&](const std::vector<void *> &entries,
+    auto make_sub_threads = [&](const std::vector<LocalSubEntry> &entries,
                                 std::vector<std::unique_ptr<WorkerThread>> &threads) {
         for (size_t i = 0; i < entries.size(); ++i) {
             auto wt = std::make_unique<WorkerThread>();
-            auto endpoint = std::make_unique<LocalMailboxEndpoint>(static_cast<int32_t>(i), entries[i]);
+            auto endpoint = std::make_unique<LocalMailboxEndpoint>(
+                static_cast<int32_t>(i), entries[i].mailbox, entries[i].child_pid
+            );
             wt->start(ring, on_complete, std::move(endpoint));
             threads.push_back(std::move(wt));
         }
@@ -500,10 +565,23 @@ void LocalMailboxEndpoint::run_control_command(const char *op_name, double timeo
             std::chrono::steady_clock::now() +
             std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(timeout_s));
     }
+    auto next_liveness_check = std::chrono::steady_clock::now() + kChildLivenessPollPeriod;
     while (read_mailbox_state() != MailboxState::CONTROL_DONE) {
-        if (std::chrono::steady_clock::now() >= deadline) {
+        auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
             mailbox_control_timed_out_ = true;
             throw std::runtime_error(std::string(op_name) + " timed out waiting for CONTROL_DONE");
+        }
+        if (now >= next_liveness_check) {
+            next_liveness_check = now + kChildLivenessPollPeriod;
+            std::string death = check_child_death();
+            if (!death.empty()) {
+                // The mailbox is poisoned rather than reset to IDLE: with the
+                // child gone no later command can complete, so admitting one
+                // would restore the hang this check exists to break.
+                mailbox_control_timed_out_ = true;
+                throw std::runtime_error(std::string(op_name) + ": " + death);
+            }
         }
     }
     int32_t err = 0;

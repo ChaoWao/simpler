@@ -10,12 +10,15 @@
  */
 
 #include <gtest/gtest.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -357,6 +360,51 @@ TEST(WorkerManagerTest, StartRejectsDuplicateNextLevelWorkerId) {
     manager.stop();
     allocator.shutdown();
     EXPECT_TRUE(threw);
+}
+
+// A child that dies without publishing CONTROL_DONE must be reported, not
+// waited on forever. The mailbox stays at CONTROL_REQUEST exactly as it would
+// if the real `_chip_process_loop` had crashed mid-command. Run in a worker
+// thread with a bounded join so a regression fails the test instead of
+// hanging the suite.
+TEST(WorkerManagerTest, ControlCommandFailsWhenChildExitsBeforeCompletion) {
+    void *mailbox =
+        mmap(nullptr, MAILBOX_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, /*fd=*/-1, /*offset=*/0);
+    ASSERT_NE(mailbox, MAP_FAILED);
+    std::memset(mailbox, 0, MAILBOX_SIZE);
+
+    pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        _exit(3);
+    }
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox, static_cast<int>(child));
+
+    std::promise<std::string> result;
+    auto done = result.get_future();
+    std::thread caller([&] {
+        try {
+            endpoint.control_malloc(64);
+            result.set_value("");
+        } catch (const std::runtime_error &e) {
+            result.set_value(e.what());
+        }
+    });
+
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(10)), std::future_status::ready)
+        << "control_malloc did not observe the dead child; it is spinning on CONTROL_DONE";
+    std::string message = done.get();
+    caller.join();
+
+    EXPECT_NE(message.find("child process pid=" + std::to_string(child)), std::string::npos) << message;
+    EXPECT_NE(message.find("exit_status=3"), std::string::npos) << message;
+
+    // The endpoint is poisoned once the child is gone: a later command reports
+    // rather than resuming the spin.
+    EXPECT_THROW(endpoint.control_free(0), std::runtime_error);
+
+    ASSERT_EQ(munmap(mailbox, MAILBOX_SIZE), 0);
 }
 
 TEST(WorkerManagerTest, ControlPrepareUsesStableNextLevelWorkerId) {
