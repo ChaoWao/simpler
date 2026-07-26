@@ -21,7 +21,8 @@
  * Unlike the L2 PTO2TensorMap, this implementation:
  *   - Uses std::unordered_map (no ring buffer entry pool)
  *   - Does not perform overlap detection (each key maps to one producer)
- *   - Cleans up entries actively when a task is CONSUMED
+ *   - Cleans up a task's entries when it is CONSUMED, skipping the keys a
+ *     newer same-run producer has taken over
  *
  * Owned exclusively by the Orchestrator (main thread); no locking required.
  */
@@ -44,9 +45,11 @@ public:
     // Overwrites any existing entry (re-use of the same buffer by a new producer).
     void insert(RunId run_id, TensorKey key, TaskSlot producer);
 
-    // Remove all entries whose key appears in 'keys'.
-    // Called when a producer task transitions to CONSUMED.
-    void erase_task_outputs(RunId run_id, const std::vector<TensorKey> &keys);
+    // Remove the entries in 'keys' that still map to 'owner'.
+    // Called when a producer task transitions to CONSUMED. A key that a newer
+    // same-run producer has since re-registered belongs to that producer and
+    // is left intact.
+    void erase_task_outputs(RunId run_id, TaskSlot owner, const std::vector<TensorKey> &keys);
 
     // Number of entries currently tracked.
     int32_t size() const;

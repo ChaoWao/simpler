@@ -48,7 +48,7 @@ TEST(TensorMap, EraseTaskOutputs) {
     tm.insert(RUN1, hk(0x2000), 0);
     tm.insert(RUN1, hk(0x3000), 1);
 
-    tm.erase_task_outputs(RUN1, {hk(0x1000), hk(0x2000)});
+    tm.erase_task_outputs(RUN1, 0, {hk(0x1000), hk(0x2000)});
 
     EXPECT_EQ(tm.lookup(RUN1, hk(0x1000)), INVALID_SLOT);
     EXPECT_EQ(tm.lookup(RUN1, hk(0x2000)), INVALID_SLOT);
@@ -59,7 +59,7 @@ TEST(TensorMap, EraseTaskOutputs) {
 TEST(TensorMap, EraseWithEmptyKeyList) {
     TensorMap tm;
     tm.insert(RUN1, hk(0x1000), 2);
-    tm.erase_task_outputs(RUN1, {});
+    tm.erase_task_outputs(RUN1, 2, {});
     EXPECT_EQ(tm.lookup(RUN1, hk(0x1000)), 2);
 }
 
@@ -96,7 +96,7 @@ TEST(TensorMap, EraseChildKeyLeavesHostKey) {
     TensorMap tm;
     tm.insert(RUN1, hk(0x1000), 5);
     tm.insert(RUN1, ck(0x1000, 0), 6);
-    tm.erase_task_outputs(RUN1, {ck(0x1000, 0)});
+    tm.erase_task_outputs(RUN1, 6, {ck(0x1000, 0)});
     EXPECT_EQ(tm.lookup(RUN1, hk(0x1000)), 5);
     EXPECT_EQ(tm.lookup(RUN1, ck(0x1000, 0)), INVALID_SLOT);
     EXPECT_EQ(tm.size(), 1);
@@ -111,7 +111,22 @@ TEST(TensorMap, SameAddressIsNamespacedByRun) {
     EXPECT_EQ(tm.lookup(RUN2, hk(0x1000)), 9);
     EXPECT_EQ(tm.size(), 2);
 
-    tm.erase_task_outputs(RUN1, {hk(0x1000)});
+    tm.erase_task_outputs(RUN1, 5, {hk(0x1000)});
     EXPECT_EQ(tm.lookup(RUN1, hk(0x1000)), INVALID_SLOT);
     EXPECT_EQ(tm.lookup(RUN2, hk(0x1000)), 9);
+}
+
+TEST(TensorMap, EraseKeepsNewerSameRunProducer) {
+    TensorMap tm;
+    tm.insert(RUN1, hk(0x1000), 3);
+    tm.insert(RUN1, hk(0x1000), 7);  // unordered second writer of the same key
+
+    // Slot 3 no longer owns the key; its cleanup must not evict slot 7.
+    tm.erase_task_outputs(RUN1, 3, {hk(0x1000)});
+    EXPECT_EQ(tm.lookup(RUN1, hk(0x1000)), 7);
+    EXPECT_EQ(tm.size(), 1);
+
+    tm.erase_task_outputs(RUN1, 7, {hk(0x1000)});
+    EXPECT_EQ(tm.lookup(RUN1, hk(0x1000)), INVALID_SLOT);
+    EXPECT_EQ(tm.size(), 0);
 }

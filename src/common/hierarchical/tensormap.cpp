@@ -23,10 +23,12 @@ void TensorMap::insert(RunId run_id, TensorKey key, TaskSlot producer) {
     map_[RunTensorKey{run_id, key}] = producer;
 }
 
-void TensorMap::erase_task_outputs(RunId run_id, const std::vector<TensorKey> &keys) {
+void TensorMap::erase_task_outputs(RunId run_id, TaskSlot owner, const std::vector<TensorKey> &keys) {
     std::lock_guard<std::mutex> lk(mu_);
-    for (const auto &key : keys)
-        map_.erase(RunTensorKey{run_id, key});
+    for (const auto &key : keys) {
+        auto it = map_.find(RunTensorKey{run_id, key});
+        if (it != map_.end() && it->second == owner) map_.erase(it);
+    }
 }
 
 int32_t TensorMap::size() const {
