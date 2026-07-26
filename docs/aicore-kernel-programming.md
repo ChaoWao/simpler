@@ -219,55 +219,67 @@ thread `args` into a third-party library template.
 **Do not** bridge `get_subblockid()` with a file-scope cache:
 
 ```cpp
-// WRONG — the .o will not load. See §4.
+// WRONG — hides per-core state from the orchestrator.
 [[block_local]] static int32_t lane;   // per-core static
 #define get_subblockid() lane          // redirect the library's no-arg call
 // ... lane = get_sub_block_id(args); once in kernel_entry
 ```
 
-A `[[block_local]]` (or any non-const) static is read via a `.text` relocation
-that the AICore loader rejects (§4). If onboard `get_subblockid()` does not
-match `get_sub_block_id(args)`, prefer fixing platform/launch identity; until
-then add the lane split explicitly with `setEntryOffset` computed inline from
+The link step resolves the `.text` relocation such a static needs (§4), so this
+loads — but it is still the wrong shape: it hides per-core state the
+orchestrator cannot see, behind a macro that silently changes what a library
+template computes. If onboard `get_subblockid()` does not match
+`get_sub_block_id(args)`, prefer fixing platform/launch identity; until then add
+the lane split explicitly with `setEntryOffset` computed inline from
 `get_sub_block_id(args)` (see the `run_aiv` `setEntryOffset` call sites in
 [`spmd_paged_attention/kernels/mix/paged_attention_parallel.cpp`](../tests/st/a2a3/tensormap_and_ringbuffer/spmd_paged_attention/kernels/mix/paged_attention_parallel.cpp)).
 
 ---
 
-## 4. The AICore loader runs raw `.text` only
+## 4. The AICore loader runs a linked `.text`
 
-simpler loads a kernel by copying the **literal `.text` section bytes** out of
-the compiled `.o` and jumping to them
-([`simpler_setup/elf_parser.py`](../simpler_setup/elf_parser.py)). It does
-**not**:
+simpler loads a kernel by copying the **literal `.text` section bytes** and
+jumping to offset 0. To make those bytes self-contained,
+[`KernelCompiler.compile_incore`](../simpler_setup/kernel_compiler.py) links
+each compiled object with `ld.lld` (`-e kernel_entry`) before
+[`elf_parser.extract_text_section`](../simpler_setup/elf_parser.py) takes the
+payload. Linking is what:
 
-- apply ELF relocations (`.rela.text`), or
-- merge out-of-line template instantiations (`.text._Z*` COMDAT groups).
+- applies ELF relocations (`.rela.text`), and
+- folds out-of-line template instantiations (`.text._Z*` COMDAT groups) into
+  the single output `.text`.
 
-If a kernel `.o` carries either, the loader refuses it with
-"AICore loader cannot extract a runnable payload …" rather than load a binary
-whose `BL`/`B` targets are left as `imm26 = 0` — those would branch to garbage
-on device, producing CANN 507018 watchdog timeouts or silently-wrong partial
-output (the failure modes behind issue #900, PR #830 / issue #831). The loader
-is strict **by design**; it is not relaxed to let "benign" relocations through.
+The linked image is position-independent — `--image-base` does not change the
+emitted `.text` — so the loader can place it anywhere.
 
-Two things produce a rejected `.o`:
+`extract_text_section` still refuses an image that carries either, and also one
+whose `kernel_entry` is not at the start of `.text` (the loader would enter the
+wrong function). Reaching one of those now means the **link** left the image
+incomplete — an undefined symbol kept as a relocation, or out-of-line code the
+linker placed ahead of the entry point — not that a kernel merely needs
+inlining. The alternative, loading a binary whose `BL`/`B` targets are left as
+`imm26 = 0`, branches to garbage on device: CANN 507018 watchdog timeouts or
+silently-wrong partial output (issue #900, PR #830 / issue #831).
 
-| Cause | Why it relocates | Fix |
-| ----- | ---------------- | --- |
-| Out-of-line call to another function (a non-inlined `static` helper, or a template instantiation emitted to its own section) | `BL <fn>` needs an `R_AARCH64_CALL26` relocation the loader can't apply | Mark every function in the call chain `__attribute__((always_inline))` so the compiler folds them into one `.text` |
-| Reading a non-const global / `static` / `[[block_local]]` variable | The address load needs a relocation against the data symbol | Don't use module-level mutable data on AICore — pass the value as a function argument down from `kernel_entry` |
+What linking does and does not rescue:
 
-Verify a kernel object before chasing a device hang:
+| Cause | Why it relocates | Status |
+| ----- | ---------------- | ------ |
+| Out-of-line call to another function (a non-inlined `static` helper, or a template instantiation emitted to its own section) | `BL <fn>` needs an `R_AARCH64_CALL26` relocation | Resolved by the link, provided the linker keeps `kernel_entry` first. `__attribute__((always_inline))` on the call chain still avoids the question entirely and keeps the payload smaller |
+| Reading a non-const global / `static` / `[[block_local]]` variable | The address load needs a relocation against the data symbol | Resolved by the link: block-locals merge into one `.bl_uninit` region and each reference gets its true offset. Still prefer passing the value as an argument down from `kernel_entry` — a per-core global is state the orchestrator cannot see |
+
+That second row is why CANN AscendC kernels load at all: AscendC declares
+`g_vecTPipePtr` / `g_cubeTPipePtr` and `g_kfcClient` as block-local globals in
+separate `.bl.uninit.*` sections, and they cannot all sit at offset 0. Without
+the link, whichever one is not first silently aliases onto another's slot.
+
+Verify a kernel image before chasing a device hang:
 
 ```bash
-readelf -SW kernel.o | grep -E '\.text'  # want only ".text"; ".text._Z*" or ".rela.text" = reject
-readelf -r  kernel.o                      # want: no relocation entries
+readelf -SW kernel.elf | grep -E '\.text'   # want only ".text"
+readelf -rW kernel.elf                      # want: no relocation entries
+readelf -sW kernel.elf | grep kernel_entry  # want: value == .text address
 ```
-
-This is exactly why §3 rejects a cached `[[block_local]]` static to redirect
-`get_subblockid()`: the static would reintroduce a `.rela.text` the loader
-rejects.
 
 ---
 

@@ -8,14 +8,17 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for ``simpler_setup.elf_parser.extract_text_section``.
 
-The loader only knows how to return a literal ``.text`` section. When
-the compiler emits out-of-line template instantiations into
-``.text._Z*`` group sections (with matching relocations in
-``.rela.text``), the loader cannot produce correct bytes — and silently
-returning the raw ``.text`` causes CANN 507018 timeouts or
-silently-wrong partial output on device (issue #900, PR #830 /
-issue #831). These tests pin down the detect-and-reject behavior using
-synthetic ELF64 buffers that don't depend on the CCEC toolchain.
+The loader returns a literal ``.text`` section and jumps to offset 0, so the
+image it is handed must be complete. ``KernelCompiler.compile_incore`` links
+each object with ``ld.lld`` first, which applies ``.rela.text`` and folds
+``.text._Z*`` group sections in; these tests cover what the parser must still
+reject when that link leaves something behind — out-of-line code, surviving
+relocations, or a ``kernel_entry`` that is not first. Returning such bytes
+anyway causes CANN 507018 timeouts or silently-wrong partial output on device
+(issue #900, PR #830 / issue #831).
+
+The buffers are synthetic ELF64 so the tests don't depend on the CCEC
+toolchain.
 """
 
 import struct
@@ -28,6 +31,7 @@ _EHDR_SIZE = 64
 _SHDR_SIZE = 64
 _SHT_NULL = 0
 _SHT_PROGBITS = 1
+_SHT_SYMTAB = 2
 _SHT_STRTAB = 3
 _SHT_RELA = 4
 _SHF_ALLOC = 2
@@ -59,6 +63,7 @@ def _pack_shdr(
     sh_name: int,
     sh_type: int,
     sh_flags: int = 0,
+    sh_addr: int = 0,
     sh_offset: int = 0,
     sh_size: int = 0,
     sh_link: int = 0,
@@ -71,7 +76,7 @@ def _pack_shdr(
         sh_name,
         sh_type,
         sh_flags,
-        0,  # sh_addr
+        sh_addr,
         sh_offset,
         sh_size,
         sh_link,
@@ -79,6 +84,11 @@ def _pack_shdr(
         sh_addralign,
         sh_entsize,
     )
+
+
+def _pack_sym(*, st_name: int, st_shndx: int, st_value: int, st_size: int = 0) -> bytes:
+    """Elf64_Sym: st_name(4) st_info(1) st_other(1) st_shndx(2) st_value(8) st_size(8)."""
+    return struct.pack("<IBBHQQ", st_name, 0x12, 0, st_shndx, st_value, st_size)
 
 
 def _strtab(strings: list[str]) -> tuple[bytes, list[int]]:
@@ -142,6 +152,34 @@ class TestRejectsTextRelocations:
         with pytest.raises(ValueError) as excinfo:
             extract_text_section(elf)
         assert "2 entries" in str(excinfo.value)
+
+
+class TestEntryPointMustBeFirst:
+    """The loader jumps to offset 0 of the payload. Linking merges ``.text.*``
+    into ``.text`` and is free to order the pieces, so a kernel with out-of-line
+    code can end up with another function ahead of ``kernel_entry`` — which
+    would silently enter the wrong function."""
+
+    def test_entry_at_start_of_text_loads(self):
+        text_bytes = b"\xd6\x5f\x03\xc0" * 4
+        elf = _build_elf_with_symtab(text_bytes, text_addr=0x1000, entry_value=0x1000, entry_shndx=1)
+        assert extract_text_section(elf) == text_bytes
+
+    def test_entry_offset_into_text_raises(self):
+        elf = _build_elf_with_symtab(b"\x00" * 16, text_addr=0x1000, entry_value=0x1008, entry_shndx=1)
+        with pytest.raises(ValueError, match=r"kernel_entry is not at the start of \.text"):
+            extract_text_section(elf)
+
+    def test_entry_in_another_section_raises(self):
+        elf = _build_elf_with_symtab(b"\x00" * 16, text_addr=0x1000, entry_value=0x1000, entry_shndx=2)
+        with pytest.raises(ValueError, match=r"kernel_entry is not at the start of \.text"):
+            extract_text_section(elf)
+
+    def test_object_without_symtab_is_left_alone(self):
+        """Orchestration objects and hand-built fixtures carry no symbol table;
+        the check must not turn those into failures."""
+        text_bytes = b"\xd6\x5f\x03\xc0"
+        assert extract_text_section(_build_single_text_elf(text_bytes)) == text_bytes
 
 
 class TestMissingText:
@@ -268,6 +306,70 @@ def _build_elf_with_extra_text_section(*, extra_name: str, extra_size: int) -> b
         ]
     )
     return ehdr + shdrs + text_bytes + extra_bytes + shstr_bytes
+
+
+def _build_elf_with_symtab(text_bytes: bytes, *, text_addr: int, entry_value: int, entry_shndx: int) -> bytes:
+    """A linked-image shape: ``.text`` at a load address plus a symbol table
+    naming ``kernel_entry``."""
+    sym_bytes, [entry_name] = _strtab(["kernel_entry"])
+    symtab_bytes = _pack_sym(st_name=0, st_shndx=0, st_value=0) + _pack_sym(
+        st_name=entry_name, st_shndx=entry_shndx, st_value=entry_value, st_size=len(text_bytes)
+    )
+    shstr_bytes, [text_name, symtab_name, strtab_name, shstr_name] = _strtab(
+        [".text", ".symtab", ".strtab", ".shstrtab"]
+    )
+
+    shdr_count = 5
+    e_shoff = _EHDR_SIZE
+    cursor = e_shoff + shdr_count * _SHDR_SIZE
+
+    def place(b: bytes) -> int:
+        nonlocal cursor
+        off = cursor
+        cursor += len(b)
+        return off
+
+    text_off = place(text_bytes)
+    symtab_off = place(symtab_bytes)
+    sym_str_off = place(sym_bytes)
+    shstr_off = place(shstr_bytes)
+
+    ehdr = _pack_ehdr(e_shoff=e_shoff, e_shnum=shdr_count, e_shstrndx=4)
+    shdrs = b"".join(
+        [
+            _pack_shdr(sh_name=0, sh_type=_SHT_NULL),
+            _pack_shdr(
+                sh_name=text_name,
+                sh_type=_SHT_PROGBITS,
+                sh_flags=_SHF_ALLOC | _SHF_EXECINSTR,
+                sh_addr=text_addr,
+                sh_offset=text_off,
+                sh_size=len(text_bytes),
+                sh_addralign=4,
+            ),
+            _pack_shdr(
+                sh_name=symtab_name,
+                sh_type=_SHT_SYMTAB,
+                sh_offset=symtab_off,
+                sh_size=len(symtab_bytes),
+                sh_link=3,
+                sh_entsize=24,
+            ),
+            _pack_shdr(
+                sh_name=strtab_name,
+                sh_type=_SHT_STRTAB,
+                sh_offset=sym_str_off,
+                sh_size=len(sym_bytes),
+            ),
+            _pack_shdr(
+                sh_name=shstr_name,
+                sh_type=_SHT_STRTAB,
+                sh_offset=shstr_off,
+                sh_size=len(shstr_bytes),
+            ),
+        ]
+    )
+    return ehdr + shdrs + text_bytes + symtab_bytes + sym_bytes + shstr_bytes
 
 
 def _build_elf_with_rela_text(*, reloc_count: int) -> bytes:
