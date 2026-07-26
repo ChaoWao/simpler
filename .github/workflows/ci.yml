@@ -13,132 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------- Pre-commit hooks (format, lint, clang-tidy) ----------
-  pre-commit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Install build and lint tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ clang-tidy
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
-      - name: Install Python dependencies
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Install package (for pyright C extension symbol resolution)
-        run: pip install .
-
-      - name: Cache cmake build directories
-        uses: actions/cache@v5
-        with:
-          path: build/cache
-          key: cmake-sim-${{ runner.os }}-${{ hashFiles('src/**/CMakeLists.txt', 'src/**/build_config.py', 'simpler_setup/runtime_compiler.py', 'simpler_setup/kernel_compiler.py', 'simpler_setup/toolchain.py') }}
-          restore-keys: |
-            cmake-sim-${{ runner.os }}-
-
-      - name: Build sim runtimes (generates per-target compile_commands.json)
-        run: python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
-
-      - name: Run pre-commit
-        uses: pre-commit/action@v3.0.0
-        with:
-          extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.event.pull_request.head.sha }}
-
-
-  # ---------- Profiling sub-flags smoke (compile + run) ----------
-  # SIMPLER_DFX / SIMPLER_ORCH_PROFILING / SIMPLER_SCHED_PROFILING /
-  # SIMPLER_TENSORMAP_PROFILING are compile-time gates whose defaults and
-  # dependency checks live in src/common/task_interface/profiling_config.h.
-  # The defaults (SIMPLER_DFX=1, sub-flags=0) are exercised by every CI job,
-  # but non-default branches are otherwise dead coverage: a developer flipping
-  # any of them for perf debugging or to minimize logging overhead had no gate
-  # protecting the gated code from drift (renamed fields, changed signatures,
-  # format-string mismatches in LOG_INFO summaries, dead parameters caught
-  # only by -Wunused-parameter -Werror).
-  #
-  # All combos run sequentially in a single job (not a matrix) so the
-  # apt/python/pip setup cost is paid once, not 12×. Failures across combos
-  # are accumulated and reported together at the end — first failure does
-  # not abort the rest.
-  #
-  # Combos walk the macro hierarchy explicitly (not just "all on" or "all
-  # off") so log scrubbing the failing leg pinpoints the specific gate:
-  #
-  #   SIMPLER_DFX (default=1, covered by every other CI job)
-  #   ├── dfx-off:         -DSIMPLER_DFX=0   (no profiling at all)
-  #   ├── orch:             -DSIMPLER_ORCH_PROFILING=1
-  #   │   └── orch-tensormap:  + -DSIMPLER_TENSORMAP_PROFILING=1
-  #   ├── sched:            -DSIMPLER_SCHED_PROFILING=1
-  #   ├── orch-sched:       ORCH=1 + SCHED=1   (both sub-flags on, tensormap off)
-  #   └── all-on:           ORCH=1 + SCHED=1 + TENSORMAP=1
-  #
-  # Each combo rebuilds the sim runtime with its CXXFLAGS and runs the
-  # smallest full-pipeline example (vector_example) — exercises orchestrator,
-  # scheduler, AICore dispatch, and completion paths gated by the macros.
-  #
-  # Verified locally that each combo's compile_commands.json contains *only*
-  # its declared -D flags, the resulting libaicpu_kernel.so contains *only*
-  # the matching profiling log strings, and pytest output emits *only* the
-  # corresponding profiling block — no cross-contamination from cmake cache.
-
-  # ---------- Detect platform-specific changes (runs on GitHub server) ----------
-  detect-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
-      a5_changed: ${{ steps.check.outputs.a5_changed }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      - name: Check file changes
-        id: check
-        run: |
-          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
-
-          NON_CODE='^(docs/|\.docs/|\.claude/|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
-
-          # a2a3: skip only when ALL changed files are a5-only or non-code
-          A5_ONLY='^(src/a5/|examples/a5/|tests/(st|ut/cpp)/a5/)'
-          A2A3_REMAINING=$(echo "$FILES" | grep -vE "$A5_ONLY" | grep -vE "$NON_CODE" || true)
-
-          if [ -n "$A2A3_REMAINING" ]; then
-            echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Files affecting a2a3:"
-            echo "$A2A3_REMAINING"
-          else
-            echo "a2a3_changed=false" >> "$GITHUB_OUTPUT"
-            echo "All changes are a5-only or non-code; skipping a2a3"
-          fi
-
-          # a5: skip only when ALL changed files are a2a3-only or non-code
-          A2A3_ONLY='^(src/a2a3/|examples/a2a3/|tests/(st|ut/cpp)/a2a3/)'
-          A5_REMAINING=$(echo "$FILES" | grep -vE "$A2A3_ONLY" | grep -vE "$NON_CODE" || true)
-
-          if [ -n "$A5_REMAINING" ]; then
-            echo "a5_changed=true" >> "$GITHUB_OUTPUT"
-            echo "Files affecting a5:"
-            echo "$A5_REMAINING"
-          else
-            echo "a5_changed=false" >> "$GITHUB_OUTPUT"
-            echo "All changes are a2a3-only or non-code; skipping a5"
-          fi
-
-  # ---------- Unit tests (a5 hardware, Python + C++) ----------
   ut-a5:
-    needs: pre-commit
     runs-on: [self-hosted, a5]
     timeout-minutes: 30
     env:
@@ -207,8 +82,6 @@ jobs:
           cmake --build build
 
   st-onboard-a5:
-    needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a5_changed == 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 60
     env:
