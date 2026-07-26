@@ -1,4 +1,4 @@
-name: TESTCI
+name: TESTCI-2
 
 permissions:
   contents: read
