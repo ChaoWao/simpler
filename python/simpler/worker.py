@@ -229,6 +229,12 @@ _ROLLBACK_GRACEFUL_TIMEOUT_S = 10.0
 # joiner still re-observes `done` within this interval instead of blocking
 # forever.
 _CLOSE_JOIN_RECHECK_S = 1.0
+# Bounded re-check interval for a RunHandle waiter parked behind the elected
+# waiter. Same backstop role as _CLOSE_JOIN_RECHECK_S: if the elected waiter's
+# notify_all() is skipped (an async BaseException landing between publishing the
+# terminal state and notifying), a parked waiter re-observes that state within
+# this interval instead of blocking forever.
+_RUN_HANDLE_WAIT_RECHECK_S = 1.0
 
 # Control sub-commands (written at _OFF_CALLABLE as uint64)
 _CTRL_MALLOC = 0
@@ -1936,13 +1942,28 @@ class RunHandle:
 
     def wait(self, timeout: float | None = None) -> None:
         """Wait for completion, raising ``TimeoutError`` or the run's error."""
+        # Exactly one waiter is elected to cross the native fence; the rest park
+        # on the CV until it publishes. That election is unrecoverable if it is
+        # abandoned silently — no other path clears `_wait_in_progress`, and
+        # Worker.close() drains the handle with an untimed wait() — so every
+        # publication below (both abandonment paths and the terminal one) is a
+        # resilient publish in the shape close() uses for its _CloseAttempt:
+        # plain attribute assigns land BEFORE the CV acquire, whose only
+        # remaining work is notify_all(). An async BaseException in that
+        # interruptible acquire therefore cannot strand the handle, and a parked
+        # waiter's bounded re-check recovers the skipped notify. The only
+        # irreducible window is an async exception landing between the `_error`
+        # and `_terminal` assigns.
         deadline = self._deadline(timeout)
         with self._cv:
             while not self._terminal and self._wait_in_progress:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     raise TimeoutError("RunHandle.wait() timed out")
-                self._cv.wait(timeout=remaining)
+                recheck = (
+                    _RUN_HANDLE_WAIT_RECHECK_S if remaining is None else min(remaining, _RUN_HANDLE_WAIT_RECHECK_S)
+                )
+                self._cv.wait(timeout=recheck)
             if self._terminal:
                 error = self._error
                 if error is not None:
@@ -1960,24 +1981,30 @@ class RunHandle:
             completed = True
             native_error = exc
         except BaseException:
+            self._wait_in_progress = False
             with self._cv:
-                self._wait_in_progress = False
                 self._cv.notify_all()
             raise
 
         if not completed:
+            self._wait_in_progress = False
             with self._cv:
-                self._wait_in_progress = False
                 self._cv.notify_all()
             raise TimeoutError("RunHandle.wait() timed out")
 
-        error = self._worker._finalize_run_handle(self, run_id, native_error)
+        # Cleanup runs exactly once, on this waiter, and its outcome IS the
+        # handle's result: an interruption mid-finalize is cached like any other
+        # error rather than lost, so the publication below is unconditional.
+        try:
+            error = self._worker._finalize_run_handle(self, run_id, native_error)
+        except BaseException as exc:  # noqa: BLE001
+            error = exc
+        self._error = error
+        self._run_id = None
+        self._keepalive = None
+        self._terminal = True
+        self._wait_in_progress = False
         with self._cv:
-            self._error = error
-            self._run_id = None
-            self._keepalive = None
-            self._terminal = True
-            self._wait_in_progress = False
             self._cv.notify_all()
         if error is not None:
             raise error
@@ -5888,9 +5915,21 @@ class Worker:
                 result = RuntimeError("RunHandle cleanup lost its native Orchestrator")
         else:
             _step(lambda: orch._release_run(run_id))
-        with self._hierarchical_start_cv:
-            self._accepted_run_handles.discard(handle)
-            self._hierarchical_start_cv.notify_all()
+        # Retirement is not optional: a handle left in the accepted set keeps
+        # every later close() from completing its drain, and the lock is
+        # mandatory (the drain and the submit serializer both snapshot the set
+        # under it). An async BaseException in the interruptible acquire is
+        # delivered to this frame once, so one retry always retires the handle.
+        try:
+            with self._hierarchical_start_cv:
+                self._accepted_run_handles.discard(handle)
+                self._hierarchical_start_cv.notify_all()
+        except BaseException as exc:  # noqa: BLE001
+            if result is None:
+                result = exc
+            with self._hierarchical_start_cv:
+                self._accepted_run_handles.discard(handle)
+                self._hierarchical_start_cv.notify_all()
         return result
 
     @property
