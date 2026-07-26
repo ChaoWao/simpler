@@ -420,6 +420,14 @@ public:
     size_t host_dlopen_count() const { return host_dlopen_total_; }
 
     /**
+     * Number of run stream sets this runner has created. A set belongs to a
+     * pipeline slot and is reused for every run on that slot, so a runner that
+     * has served any number of runs on one slot reports 1. Arches whose runs
+     * use the persistent pair report 0.
+     */
+    virtual size_t run_stream_set_create_count() const { return 0; }
+
+    /**
      * Device-orchestration callable registration used internally by
      * simpler_register_callable(): launches `simpler_aicpu_register_callable` with a
      * RegisterCallableArgs descriptor so the AICPU dlopens the callable's
@@ -681,6 +689,9 @@ protected:
      */
     int sync_run_streams();
 
+    /** Wait for an explicit AICPU/AICore stream pair. */
+    int sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicore_stream);
+
     /**
      * Pull the device wall (ns) back from `device_wall_dev_ptr_` and
      * cache it on `device_wall_ns_`. D2H copy failure is a soft warn —
@@ -911,7 +922,9 @@ protected:
 
     // Persistent AICPU / AICore streams created in
     // `ensure_device_initialized()` and torn down in the subclass's
-    // `finalize()`. `nullptr` before init.
+    // `finalize()`. A2A3 reserves these for bootstrap/control operations and
+    // submits runs on its own per-slot stream sets; A5 submits runs on these.
+    // `nullptr` before init.
     rtStream_t stream_aicpu_{nullptr};
     rtStream_t stream_aicore_{nullptr};
     KernelArgsHelper kernel_args_;

@@ -1464,6 +1464,14 @@ NB_MODULE(_task_interface, m) {
             "host_build_graph variants. Mirrors aicpu_dlopen_count for the "
             "host-orchestration path; 0 on device-orch variants."
         )
+        .def_prop_ro(
+            "run_stream_set_create_count", &ChipWorker::run_stream_set_create_count,
+            "Number of run stream sets the bound runner has created. A set "
+            "belongs to a pipeline slot and is reused for every run on that "
+            "slot, so a worker that has served any number of runs reports 1; "
+            "platforms whose runs use the persistent bootstrap pair report 0. "
+            "Tests assert this to verify repeated runs do not rebuild the set."
+        )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))
         .def("copy_to", &ChipWorker::copy_to, nb::arg("dst"), nb::arg("src"), nb::arg("size"))

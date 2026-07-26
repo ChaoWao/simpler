@@ -37,6 +37,7 @@
 
 #include "callable.h"
 #include "prepare_callable_common.h"
+#include "pto_runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"
 #include "common/l2_swimlane_profiling.h"
@@ -190,6 +191,8 @@ public:
     // `aicpu_dlopen_count`, and `host_dlopen_count` are inherited from
     // `DeviceRunnerBase`.
 
+    size_t run_stream_set_create_count() const override { return run_stream_sets_created_; }
+
 private:
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
     // worker_count_, executor + dispatcher bytes, aicore_bin_handle_,
@@ -222,10 +225,26 @@ private:
     // recovery. See run() and recover_device_or_mark_unusable().
     bool device_unusable_{false};
 
-    // Keep the kernel submission boundary separate from stream synchronization
-    // and teardown. run() still invokes these back-to-back in this change.
-    int launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_num);
-    int reap_run();
+    struct RunStreamSet {
+        rtStream_t aicpu{nullptr};
+        rtStream_t aicore{nullptr};
+    };
+    // One slot per in-flight run the pipeline contract can declare.
+    static constexpr unsigned kRunStreamSetCount = PTO_PIPELINE_MAX_DEPTH;
+
+    // A stream set carries no per-run content, so it is created on first use
+    // and reused for every later run on this slot; `destroy_run_stream_sets()`
+    // in finalize() is the sole release point, as for the persistent bootstrap
+    // pair. Only slot 0 is selected while the contract is K=1.
+    RunStreamSet run_stream_sets_[kRunStreamSetCount]{};
+    size_t run_stream_sets_created_{0};
+    int ensure_run_stream_set(unsigned slot);
+    int destroy_run_stream_sets();
+
+    // The kernel submission boundary is separate from the stream wait and the
+    // post-run teardown; run() invokes the two back-to-back.
+    int launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_num, unsigned slot);
+    int reap_run(unsigned slot);
 
     // On an AICore launch/sync error, best-effort drain the device so a later
     // run() on the same DeviceRunner can recover in place; if the drain itself

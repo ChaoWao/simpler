@@ -677,6 +677,15 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx) {
     }
 }
 
+size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->run_stream_set_create_count();
+    } catch (...) {
+        return 0;
+    }
+}
+
 int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
     if (ctx == NULL) return -1;
     try {

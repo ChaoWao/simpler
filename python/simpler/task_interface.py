@@ -1195,6 +1195,11 @@ class ChipWorker:
         """Number of host-side orch SO dlopens (host_build_graph variants)."""
         return self._impl.host_dlopen_count
 
+    @property
+    def run_stream_set_create_count(self):
+        """Number of run stream sets the bound runner has created."""
+        return self._impl.run_stream_set_create_count
+
     def malloc(self, size):
         """Allocate memory. Returns a pointer (uint64)."""
         return int(self._impl.malloc(int(size)))

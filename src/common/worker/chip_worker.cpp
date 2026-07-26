@@ -121,6 +121,8 @@ void ChipWorker::init(
         unregister_callable_fn_ = load_symbol<SimplerUnregisterCallableFn>(handle, "simpler_unregister_callable");
         get_aicpu_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_aicpu_dlopen_count");
         get_host_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_host_dlopen_count");
+        get_run_stream_set_create_count_fn_ =
+            load_symbol<GetAicpuDlopenCountFn>(handle, "get_run_stream_set_create_count");
         simpler_provision_dma_workspace_fn_ =
             load_symbol<SimplerProvisionDmaWorkspaceFn>(handle, "simpler_provision_dma_workspace");
         finalize_device_fn_ = load_symbol<FinalizeDeviceFn>(handle, "finalize_device");
@@ -217,6 +219,7 @@ void ChipWorker::init(
         unregister_callable_fn_ = nullptr;
         get_aicpu_dlopen_count_fn_ = nullptr;
         get_host_dlopen_count_fn_ = nullptr;
+        get_run_stream_set_create_count_fn_ = nullptr;
         simpler_provision_dma_workspace_fn_ = nullptr;
         finalize_device_fn_ = nullptr;
         ensure_acl_ready_fn_ = nullptr;
@@ -256,6 +259,7 @@ void ChipWorker::init(
         unregister_callable_fn_ = nullptr;
         get_aicpu_dlopen_count_fn_ = nullptr;
         get_host_dlopen_count_fn_ = nullptr;
+        get_run_stream_set_create_count_fn_ = nullptr;
         simpler_provision_dma_workspace_fn_ = nullptr;
         finalize_device_fn_ = nullptr;
         ensure_acl_ready_fn_ = nullptr;
@@ -325,6 +329,7 @@ void ChipWorker::finalize() {
     unregister_callable_fn_ = nullptr;
     get_aicpu_dlopen_count_fn_ = nullptr;
     get_host_dlopen_count_fn_ = nullptr;
+    get_run_stream_set_create_count_fn_ = nullptr;
     simpler_provision_dma_workspace_fn_ = nullptr;
     finalize_device_fn_ = nullptr;
     ensure_acl_ready_fn_ = nullptr;
@@ -402,6 +407,13 @@ size_t ChipWorker::host_dlopen_count() const {
         return 0;
     }
     return get_host_dlopen_count_fn_(device_ctx_);
+}
+
+size_t ChipWorker::run_stream_set_create_count() const {
+    if (!initialized_) {
+        return 0;
+    }
+    return get_run_stream_set_create_count_fn_(device_ctx_);
 }
 
 void *ChipWorker::create_comm_stream_checked(const char *op_name) {
