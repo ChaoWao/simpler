@@ -790,7 +790,8 @@ jobs:
 
   st-onboard-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a5_changed == 'true'
+    # The a5 self-hosted runner is under repair; drop the `false &&` to re-enable.
+    if: false && needs.detect-changes.outputs.a5_changed == 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 60
     env:
