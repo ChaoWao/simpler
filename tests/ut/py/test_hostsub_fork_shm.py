@@ -300,19 +300,39 @@ class TestParallelExecution:
         pool = _SubWorkerPool(num_workers=n_workers, registry=registry)
 
         try:
+            # Per-worker timestamps, so a failure says *which* worker ran late
+            # rather than only that the total was too high. Workers are
+            # dispatched in a loop, so if the parent is descheduled between
+            # iterations the later workers start a full sleep period behind —
+            # a shape the total alone cannot distinguish from every worker
+            # being slow. See #1496.
+            dispatched: list[float] = []
+            completed: list[float] = []
+
             start = time.monotonic()
             for i in range(n_workers):
                 pool.dispatch(i, i)
+                dispatched.append(time.monotonic() - start)
             for i in range(n_workers):
                 result, err = pool.wait(i, timeout=5.0)
+                completed.append(time.monotonic() - start)
                 assert err == 0
                 assert result == int(sleep_sec * 1000)
             elapsed = time.monotonic() - start
 
             serial_time = n_workers * sleep_sec
+            timeline = ", ".join(
+                f"w{i}: dispatched +{dispatched[i] * 1000:.1f}ms, done +{completed[i] * 1000:.1f}ms"
+                for i in range(n_workers)
+            )
+            # macOS has no sched_getaffinity; cpu_count alone can overstate what
+            # a container actually lets this process run on.
+            affinity = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else "n/a"
             assert elapsed < serial_time * 0.8, (
                 f"expected parallel wall time < {serial_time * 0.8:.2f}s "
-                f"(serial would be {serial_time:.2f}s), got {elapsed:.2f}s"
+                f"(serial would be {serial_time:.2f}s), got {elapsed:.2f}s\n"
+                f"cpu_count={os.cpu_count()} affinity={affinity}\n"
+                f"{timeline}"
             )
         finally:
             pool.shutdown()
