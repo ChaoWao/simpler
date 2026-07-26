@@ -12,17 +12,18 @@ Object File Parser for AICore Kernel Binaries
 Pure Python implementation for extracting the ``.text`` section from
 ELF64 or Mach-O ``.o`` files for direct execution on AICore.
 
-The loader extracts only the literal ``.text`` section bytes; it does
-NOT apply ELF relocations or merge ``.text._Z*`` COMDAT group sections
-(out-of-line template instantiations). If a kernel ``.o`` contains
-either, the loader rejects it with an actionable diagnostic — see
-issue #900 and PR #830 / issue #831 for the failure modes that motivate
-this check (CANN 507018 watchdog timeouts and silently-wrong partial
-output, both caused by BL instructions in ``.text`` left with imm26=0).
+The loader extracts only the literal ``.text`` section bytes and jumps to
+offset 0, so the payload must already be complete: no unapplied relocations,
+no code stranded outside ``.text``, and ``kernel_entry`` first.
 
-The workaround on the kernel side is to mark every templated AICore
-function in the call chain with ``__attribute__((always_inline))`` so
-the compiler folds the call graph into a single ``.text`` section.
+``KernelCompiler.compile_incore`` links each object with ``ld.lld`` before it
+reaches this parser, which is what makes those properties hold — the linker
+applies ``.rela.text`` and folds ``.text.*`` COMDAT groups into the output
+``.text``. The checks below therefore run *after* linking: reaching one means
+the link did not produce a self-contained image, not that a kernel merely
+needs inlining. Returning the raw bytes anyway is what issue #900 and
+PR #830 / issue #831 record — CANN 507018 watchdog timeouts and
+silently-wrong partial output from BL instructions left with imm26=0.
 """
 
 import logging
@@ -45,7 +46,15 @@ _RELA_SIZE = 24
 
 # ELF section types
 _SHT_PROGBITS = 1
+_SHT_SYMTAB = 2
 _SHT_RELA = 4
+
+# Elf64_Sym: st_name(4) st_info(1) st_other(1) st_shndx(2) st_value(8) st_size(8)
+_SYM_SIZE = 24
+
+# The AICore loader jumps to offset 0 of the payload, so this symbol must be
+# the first thing in .text.
+_ENTRY_SYMBOL = "kernel_entry"
 
 # Mach-O Magic Numbers
 MH_MAGIC_64 = 0xFEEDFACF
@@ -129,6 +138,8 @@ def _extract_text_elf64(elf_data: bytes, source_name: str) -> bytes:
     # produce broken code on device.
     text_data: Union[bytes, None] = None
     text_size = 0
+    text_index = -1
+    text_addr = 0
     out_of_line: list[tuple[str, int]] = []
     text_relocs: list[tuple[str, int]] = []
 
@@ -147,6 +158,8 @@ def _extract_text_elf64(elf_data: bytes, source_name: str) -> bytes:
                 raise ValueError(f"Invalid ELF: .text section data is out of bounds in {source_name}")
             text_data = elf_data[sh_offset : sh_offset + sh_size]
             text_size = sh_size
+            text_index = i
+            text_addr = struct.unpack("<Q", elf_data[section_offset + 16 : section_offset + 24])[0]
         elif sh_type == _SHT_PROGBITS and section_name.startswith(".text."):
             # `.text._Z*` group sections hold out-of-line template instantiations
             # (and similar inline-but-not-inlined emissions). `.text.startup`
@@ -161,8 +174,65 @@ def _extract_text_elf64(elf_data: bytes, source_name: str) -> bytes:
     if text_data is None:
         raise ValueError(f".text section not found in: {source_name}")
 
+    _check_entry_is_first(elf_data, source_name, e_shoff, e_shnum, text_index, text_addr)
+
     logger.debug(f"Loaded .text section from {source_name} (size: {text_size} bytes)")
     return text_data
+
+
+def _check_entry_is_first(
+    elf_data: bytes,
+    source_name: str,
+    e_shoff: int,
+    e_shnum: int,
+    text_index: int,
+    text_addr: int,
+) -> None:
+    """Reject an image whose ``kernel_entry`` is not at the start of ``.text``.
+
+    The loader jumps to offset 0 of the extracted payload. In an unlinked object
+    that is ``kernel_entry`` by construction, but linking merges ``.text.*``
+    COMDAT groups into ``.text`` and is free to order them, so a kernel with
+    out-of-line code can end up with another function first. Objects carrying no
+    symbol table, or none naming ``kernel_entry``, are left alone — orchestration
+    and hand-built test fixtures both take that path.
+    """
+    for i in range(e_shnum):
+        section_offset = e_shoff + i * _SHDR_SIZE
+        if struct.unpack("<I", elf_data[section_offset + 4 : section_offset + 8])[0] != _SHT_SYMTAB:
+            continue
+        sym_offset = struct.unpack("<Q", elf_data[section_offset + 24 : section_offset + 32])[0]
+        sym_size = struct.unpack("<Q", elf_data[section_offset + 32 : section_offset + 40])[0]
+        link = struct.unpack("<I", elf_data[section_offset + 40 : section_offset + 44])[0]
+        if link >= e_shnum or sym_size > len(elf_data) or sym_offset > len(elf_data) - sym_size:
+            continue
+
+        str_header = e_shoff + link * _SHDR_SIZE
+        str_offset = struct.unpack("<Q", elf_data[str_header + 24 : str_header + 32])[0]
+        str_size = struct.unpack("<Q", elf_data[str_header + 32 : str_header + 40])[0]
+        if str_size > len(elf_data) or str_offset > len(elf_data) - str_size:
+            continue
+        symstr = elf_data[str_offset : str_offset + str_size]
+
+        for s in range(sym_size // _SYM_SIZE):
+            entry = sym_offset + s * _SYM_SIZE
+            st_name = struct.unpack("<I", elf_data[entry : entry + 4])[0]
+            if st_name >= len(symstr) or _extract_cstring(symstr, st_name) != _ENTRY_SYMBOL:
+                continue
+            st_shndx = struct.unpack("<H", elf_data[entry + 6 : entry + 8])[0]
+            st_value = struct.unpack("<Q", elf_data[entry + 8 : entry + 16])[0]
+            if st_shndx != text_index or st_value != text_addr:
+                raise ValueError(
+                    f"AICore loader cannot extract a runnable payload from {source_name}: "
+                    f"{_ENTRY_SYMBOL} is not at the start of .text (symbol is at section "
+                    f"{st_shndx} offset {st_value:#x}, .text is section {text_index} at "
+                    f"{text_addr:#x}). The loader jumps to offset 0 of the payload, so it "
+                    f"would enter the wrong function. This means the link placed out-of-line "
+                    f"code ahead of the entry point. Inspect with:\n"
+                    f"  readelf -SW <file> | grep '\\.text'\n"
+                    f"  readelf -sW <file> | grep {_ENTRY_SYMBOL}"
+                )
+            return
 
 
 def _raise_unresolved_text_error(
@@ -172,11 +242,12 @@ def _raise_unresolved_text_error(
 ) -> None:
     """Raise with an actionable diagnostic naming the offending sections.
 
-    See issue #900 for context: the loader does not yet merge `.text._Z*`
-    sections or apply `.rela.text*` relocations. Silently returning the
-    raw `.text` bytes in that situation produces BL/B instructions with
-    imm26=0, which on AICore manifests as CANN 507018 watchdog timeouts
-    or silently-wrong partial output (e.g. PR #830 / issue #831).
+    `KernelCompiler.compile_incore` links before extraction, so a linked image
+    reaching here still has code outside `.text` or relocations `ld.lld` could
+    not apply. Silently returning the raw `.text` bytes in that situation
+    produces BL/B instructions with imm26=0, which on AICore manifests as CANN
+    507018 watchdog timeouts or silently-wrong partial output (issue #900,
+    PR #830 / issue #831).
     """
     detail_lines = []
     if out_of_line:
@@ -189,17 +260,19 @@ def _raise_unresolved_text_error(
             detail_lines.append(f"  {name}  ({count} entries)")
     detail = "\n".join(detail_lines)
     raise ValueError(
-        f"AICore loader cannot extract a runnable payload from {source_name}: the .o file contains "
-        f"out-of-line code or unresolved .text relocations that this loader does not yet apply "
+        f"AICore loader cannot extract a runnable payload from {source_name}: it contains "
+        f"out-of-line code or relocations against .text that linking did not resolve "
         f"(see issue #900). On device the BL/B targets in .text would branch to garbage, "
         f"producing CANN 507018 watchdog timeouts or silently-wrong partial output "
         f"(historically PR #830 / issue #831).\n\n"
         f"{detail}\n\n"
-        f"Workaround until the loader applies relocations: annotate every templated AICore "
-        f"function in the call chain with __attribute__((always_inline)) so the compiler folds "
-        f"the call graph into a single .text section. Verify with:\n"
-        f"  readelf -S <file.o> | grep '\\.text'\n"
-        f"  readelf -r <file.o>"
+        f"Incore objects are linked with ld.lld before extraction, so this is a link that "
+        f"left the image incomplete — an undefined symbol the linker kept as a relocation, "
+        f"or a section it could not place. Annotating the AICore call chain with "
+        f"__attribute__((always_inline)) folds it into a single .text and sidesteps both. "
+        f"Verify with:\n"
+        f"  readelf -SW <file> | grep '\\.text'\n"
+        f"  readelf -rW <file>"
     )
 
 
