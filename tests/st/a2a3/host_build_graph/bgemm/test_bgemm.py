@@ -13,6 +13,7 @@ Computation: C = A @ B (4x4x4 grid, 64x64 tiles).
 Tests AIC (Cube) + AIV (Vector) cooperation with tile-first memory layout.
 """
 
+import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
 
@@ -27,6 +28,10 @@ GRID_N = 4
 BATCH = 1
 
 
+# The golden comparison reads memory this run never wrote: max_diff lands
+# between 1e25 and 1e36 on inputs of magnitude 1e-2, roughly one full-suite run
+# in two or three, and never when the case runs alone. Tracked in #1483.
+@pytest.mark.skip(reason="flaky: reads uninitialised device memory in full-suite runs (#1483)")
 @scene_test(level=2, runtime="host_build_graph")
 class TestBgemmHostBuildGraph(SceneTestCase):
     """BGEMM: tiled C = A @ B with AIC gemm + AIV tile add."""
