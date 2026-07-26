@@ -601,6 +601,12 @@ int simpler_run(
             return validation_rc != 0 ? validation_rc : rc;
         }
 
+        // Latch the diagnostic enables before the bind: a host-orch runtime
+        // builds its whole task graph inside it, so a diagnostic that hooks the
+        // orchestrator (dep_gen) has to be armed by now. run() latches again at
+        // its entry — the call is idempotent.
+        runner->apply_call_config(*config);
+
         {
             STRACE("simpler_run.bind");
             // One-step bind: restore kernel addrs + active_callable_id and run

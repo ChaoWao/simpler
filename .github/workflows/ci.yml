@@ -224,6 +224,17 @@ jobs:
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
+      # host_build_graph captures its graph on the host orchestrator instead of
+      # replaying a device ring, so it is a separate capture pipeline and gets
+      # its own step. One runtime per invocation: a single pytest spanning both
+      # makes the scene-test scheduler spawn a child run per runtime, and those
+      # children take xdist args that `-p no:xdist` has disabled.
+      - name: dep_gen smoke (host_build_graph)
+        run: |
+          pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-dep-gen
+
       - name: l2_swimlane smoke
         run: |
           pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
@@ -624,6 +635,24 @@ jobs:
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
               --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-dep-gen"
+          fi
+
+      # Hardware mirror of the sim job's host_build_graph dep_gen step; one
+      # runtime per invocation for the same reason (a single pytest spanning both
+      # spawns per-runtime children that `-p no:xdist` breaks).
+      - name: dep_gen smoke (host_build_graph)
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-dep-gen
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
               --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
               --require-pto-isa --enable-dep-gen"
           fi

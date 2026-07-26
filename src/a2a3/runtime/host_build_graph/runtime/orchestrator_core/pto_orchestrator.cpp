@@ -27,10 +27,9 @@
 #include <string.h>
 #include <time.h>
 
-#include "aicpu/dep_gen_collector_aicpu.h"
-#include "common/dep_gen.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "dep_gen_host_graph.h"
 #include "pto_dep_compute.h"
 #include "pto_runtime2_types.h"
 #include "pto_shared_memory.h"
@@ -43,28 +42,26 @@
 #include "aicpu/args_dump_aicpu.h"
 #endif
 
-// Verify the captured Tensor blob size in DepGenRecord matches the runtime
-// Tensor layout. The platform header defines DEP_GEN_TENSOR_SIZE without
-// including runtime/tensor.h, so this check lives at the orch callsite.
-static_assert(sizeof(Tensor) == DEP_GEN_TENSOR_SIZE, "DepGenRecord::tensors slot size out of sync with sizeof(Tensor)");
-// DEP_GEN_MAX_EXPLICIT_DEPS is a diagnostic-side capture cap only; the runtime
-// imposes no hard cap on explicit dep count. If a submit exceeds this cap,
-// dep_gen_aicpu_record_submit() logs and truncates — runtime correctness is
-// unaffected, only the captured replay record is truncated.
-
-// Weak fallbacks: dep_gen_collector_aicpu.cpp provides the strong symbols in
-// AICPU builds. Host builds (host_build_graph runtime, future dep_gen replay)
-// link these no-op stubs so the runtime translation unit is self-contained.
-// Visibility is hidden so the HOST .so doesn't export them into the global
-// dynamic symbol table where they'd shadow the AICPU .so's strong symbols
-// (same pattern as get_sys_cnt_aicpu / l2_swimlane_aicpu_record_orch_phase below).
-extern "C" __attribute__((weak, visibility("hidden"))) bool is_dep_gen_enabled() { return false; }
-__attribute__((weak, visibility("hidden"))) void dep_gen_aicpu_record_submit(
-    uint64_t, bool, bool, int, const void *const *, const uint8_t *, int, const uint64_t *, int, const int32_t[3]
+// Weak fallbacks: host/dep_gen_host_graph.cpp provides the strong symbols in the
+// HOST build, where the orchestrator runs and the graph is captured. The AICPU
+// build has no host graph and links these no-op stubs so the runtime translation
+// unit is self-contained. Visibility is hidden so the HOST .so doesn't export
+// them into the global dynamic symbol table where they'd shadow the strong
+// symbols (same pattern as get_sys_cnt_aicpu / l2_swimlane_aicpu_record_orch_phase
+// below).
+__attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_enabled() { return false; }
+__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_begin_task(
+    uint64_t, bool, bool, const int32_t[3], int32_t, int32_t, const TensorRef *, const TensorArgType *
 ) {}
+__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_end_task() {}
+__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit_edge(uint64_t) {}
+__attribute__((weak, visibility("hidden"))) void
+dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const Tensor &) {}
+__attribute__((weak, visibility("hidden"))) void
+dep_gen_host_graph_add_tensormap_edge(uint64_t, int32_t, const Tensor &, const PTO2TensorMapEntry &, OverlapStatus) {}
 
 // Scope_stats enable gate, queried via the same predicate idiom as
-// is_dep_gen_enabled above. The AICPU collector links the strong definition;
+// dep_gen_host_graph_enabled above. The AICPU collector links the strong definition;
 // host builds fall back to this weak `false`. Gating here still skips the
 // cross-agent occupancy reads that feed the sample when scope_stats is disabled.
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabled() { return false; }
@@ -673,37 +670,17 @@ static TaskOutputTensors submit_task_common(
     PTO2TaskPayload &payload = *prepared.payload;
     result.set_task_id(task_id);
 
-    // dep_gen capture point: snapshot the orch submit_task inputs while the
-    // tensormap is still in its pre-lookup state for this task. Replay reads
-    // these records offline to reconstruct the complete dep graph — the sole
-    // source of truth for fanout now that the swimlane hot path no longer
-    // records it.
-    if (is_dep_gen_enabled()) {
-        const void *tensor_ptrs[MAX_TENSOR_ARGS];
-        // TensorArgType is `enum class : int32_t` (4 bytes); the on-disk record
-        // packs arg_types as uint8_t[16] (5-value enum fits in a byte). Narrow
-        // each tag here rather than letting the AICPU writer reinterpret a
-        // 4×-wider array as bytes — that path silently lost two of every three
-        // tags on little-endian and synthesized phantom self-edges in replay.
-        uint8_t arg_types_u8[MAX_TENSOR_ARGS];
-        // Clamp to MAX_TENSOR_ARGS even though the Arg builder caps adds at
-        // MAX_TENSOR_ARGS: defensive against any future builder bypass /
-        // shared-memory bit-flip that could otherwise overrun the two
-        // MAX_TENSOR_ARGS-sized stack buffers above.
-        const int tc_raw = args.tensor_count();
-        const int tc = tc_raw > MAX_TENSOR_ARGS ? MAX_TENSOR_ARGS : tc_raw;
-        for (int i = 0; i < tc; i++) {
-            // OUTPUT slots carry create_info (not yet a Tensor); skip them —
-            // they have no producer to look up and replay's per-tensor loop
-            // also skips OUTPUT.
-            tensor_ptrs[i] = (args.tag(i) == TensorArgType::OUTPUT) ? nullptr : &args.tensor(i).ref();
-            arg_types_u8[i] = static_cast<uint8_t>(args.tag(i));
-        }
+    // dep_gen capture point: open this task's graph entry before its dependency
+    // steps run, so the edges STEP 1 / STEP 3 discover attach to it. The graph
+    // is recorded from the dependency path itself, which makes it the runtime's
+    // own answer rather than a reconstruction — the sole source of truth for
+    // fanout now that the swimlane hot path no longer records it.
+    const bool capture_dep_graph = dep_gen_host_graph_enabled();
+    if (capture_dep_graph) {
         const int32_t kernel_ids_capture[3] = {aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id};
-        dep_gen_aicpu_record_submit(
-            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), tc, tensor_ptrs, arg_types_u8,
-            static_cast<int>(args.explicit_dep_count()), reinterpret_cast<const uint64_t *>(args.explicit_deps_data()),
-            args.launch_spec.block_num(), kernel_ids_capture
+        dep_gen_host_graph_begin_task(
+            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), kernel_ids_capture,
+            args.launch_spec.block_num(), args.tensor_count(), args.tensor_data(), args.tag_data()
         );
     }
 
@@ -734,6 +711,11 @@ static TaskOutputTensors submit_task_common(
             );
             return result;
         }
+        // Declared dependencies are graph edges even when the producer already
+        // retired below last_task_alive and needs no fanin wiring.
+        if (capture_dep_graph) {
+            dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
+        }
         uint8_t dep_ring_id = dep_task_id.ring();
         PTO2SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
@@ -762,8 +744,31 @@ static TaskOutputTensors submit_task_common(
         return append_fanin_or_fail(orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder);
     };
 
-    if (!compute_task_fanin(dep_inputs, orch->tensor_map, orch->in_manual_scope(), runtime_emit)) {
-        return result;
+    // The capture branch instantiates compute_task_fanin with a live Annotate;
+    // the plain branch keeps the un-annotated instantiation the hot path had.
+    if (capture_dep_graph) {
+        struct DepGraphAnnotate {
+            void creator(int32_t arg_idx, const Tensor &consumer, PTO2TaskId producer) const {
+                dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
+            }
+            void tensormap(
+                int32_t arg_idx, const Tensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
+            ) const {
+                dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
+            }
+        };
+        const bool ok =
+            compute_task_fanin(dep_inputs, orch->tensor_map, orch->in_manual_scope(), runtime_emit, DepGraphAnnotate{});
+        // STEP 3 is this task's last capture point, so the entry closes here
+        // whether or not the fanin computation succeeded.
+        dep_gen_host_graph_end_task();
+        if (!ok) {
+            return result;
+        }
+    } else {
+        if (!compute_task_fanin(dep_inputs, orch->tensor_map, orch->in_manual_scope(), runtime_emit)) {
+            return result;
+        }
     }
 
     CYCLE_COUNT_LAP(g_orch_lookup_cycle);

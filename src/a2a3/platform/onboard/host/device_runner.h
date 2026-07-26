@@ -122,12 +122,15 @@ public:
     void unregister_device_memory_from_host(void *dev_ptr) override;
 
     /**
-     * a2a3-only `dep_gen` enablement setter. The shared
-     * `set_l2_swimlane_enabled`, `set_dump_args_enabled`,
-     * `set_pmu_enabled`, `set_scope_stats_enabled`, `set_output_prefix`,
-     * `output_prefix`, and `launch_aicpu_kernel` live on `DeviceRunnerBase`.
+     * a2a3-only `dep_gen` enablement setter. Also arms the loaded runtime's
+     * host-side graph capture, which a host-orch runtime uses instead of the
+     * device collector. Defined in the .cpp so this header stays free of the
+     * runtime-provided capture symbols. The shared `set_l2_swimlane_enabled`,
+     * `set_dump_args_enabled`, `set_pmu_enabled`, `set_scope_stats_enabled`,
+     * `set_output_prefix`, `output_prefix`, and `launch_aicpu_kernel` live on
+     * `DeviceRunnerBase`.
      */
-    void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
+    void set_dep_gen_enabled(bool enable) override;
 
     /**
      * Cleanup all resources
