@@ -1014,6 +1014,13 @@ def _read_args_from_mailbox(buf) -> TaskArgs:
     return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
 
 
+# Idle mailbox polls between `getppid()` samples in a forked child. One poll
+# costs ~0.1 us, so this samples roughly every 100 us — fast enough that an
+# orphan is reaped before it is noticeable, cheap enough to be lost in the
+# noise of the poll itself.
+_PARENT_LIVENESS_POLL_INTERVAL = 1000
+
+
 def _run_mailbox_loop(
     buf,
     state_addr: int,
@@ -1038,7 +1045,14 @@ def _run_mailbox_loop(
     `on_shutdown()` runs on SHUTDOWN before the loop exits, for children that
     own a nested Worker; per-child resource teardown that must survive an
     exception belongs in the caller's own ``finally``.
+
+    A parent that dies without sending SHUTDOWN (SIGKILL from a timeout, an OOM
+    kill, a cancelled CI job) would otherwise leave this loop polling a mailbox
+    nobody writes to, for the lifetime of the machine. The loop therefore
+    samples its own parent and leaves by the SHUTDOWN path once it changes.
     """
+    parent_pid = os.getppid()
+    liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
     while True:
         state = _mailbox_load_i32(state_addr)
         if state == _TASK_READY:
@@ -1054,6 +1068,19 @@ def _run_mailbox_loop(
             if on_shutdown is not None:
                 on_shutdown()
             break
+        else:
+            liveness_countdown -= 1
+            if liveness_countdown <= 0:
+                liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+                # Comparing against the pid captured at entry rather than
+                # testing for pid 1: a subreaper (container init, systemd
+                # user session) adopts orphans instead of init, so the pid
+                # changes but never becomes 1. A live parent's pid cannot
+                # change, so this cannot fire spuriously.
+                if os.getppid() != parent_pid:
+                    if on_shutdown is not None:
+                        on_shutdown()
+                    break
 
 
 def _sub_worker_loop(
