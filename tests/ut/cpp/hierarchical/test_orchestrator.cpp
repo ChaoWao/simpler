@@ -186,6 +186,36 @@ TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
 }
 
+TEST_F(OrchestratorFixture, ConsumingASupersededProducerKeepsTheNewerMapping) {
+    // Two OUTPUT writers of one key carry no edge between them (insert-only,
+    // see OutputAndOutputExistingAreInsertOnly), so the first can reach
+    // CONSUMED while the second is still running. Its cleanup must leave the
+    // second's mapping intact -- otherwise a later INPUT reader looks up an
+    // empty slot, infers no dependency, and can be dispatched before the
+    // second writer has written the buffer.
+    auto args_a = single_tensor_args(0x5150, TensorArgType::OUTPUT);
+    auto a = orch.submit_next_level(C(42), args_a, cfg, 0);
+    TaskSlot drain;
+    ASSERT_TRUE(rq.try_pop(drain));
+
+    auto args_b = single_tensor_args(0x5150, TensorArgType::OUTPUT);
+    auto b = orch.submit_next_level(C(43), args_b, cfg, 0);
+    ASSERT_TRUE(rq.try_pop(drain));
+    ASSERT_EQ(tm.lookup(run_id, TensorKey{0x5150, -1}), b.task_slot);
+
+    S(a.task_slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
+    ASSERT_TRUE(orch.on_consumed(a.task_slot));
+
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x5150, -1}), b.task_slot);
+
+    auto args_c = single_tensor_args(0x5150, TensorArgType::INPUT);
+    auto c = orch.submit_next_level(C(44), args_c, cfg, 0);
+    EXPECT_EQ(S(c.task_slot).state.load(), TaskState::PENDING);
+    EXPECT_EQ(S(c.task_slot).fanin_count, 1);
+    ASSERT_EQ(S(c.task_slot).fanin_producers.size(), 1u);
+    EXPECT_EQ(S(c.task_slot).fanin_producers[0], b.task_slot);
+}
+
 TEST_F(OrchestratorFixture, ScopeRegistersAndReleasesRef) {
     orch.scope_begin();
     auto args_a = single_tensor_args(0x77, TensorArgType::OUTPUT);

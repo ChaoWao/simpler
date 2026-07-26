@@ -503,7 +503,7 @@ class TensorMap {
 public:
     TaskSlot lookup(RunId run_id, TensorKey key) const;
     void insert(RunId run_id, TensorKey key, TaskSlot sid);
-    void erase_task_outputs(RunId run_id,
+    void erase_task_outputs(RunId run_id, TaskSlot owner,
                             const std::vector<TensorKey> &keys);
 private:
     std::mutex mu_;
@@ -517,7 +517,11 @@ private:
   entry → fanin edge recorded.
 - **WAW (write-after-write)**: a new `OUTPUT` on the same address replaces
   the entry. The previous producer remains live (still has wire references
-  from any prior consumers); new consumers depend only on the latest.
+  from any prior consumers); new consumers depend only on the latest. The two
+  writers carry no edge between them, so the earlier one can reach CONSUMED
+  first — `erase_task_outputs` therefore drops a key only while it still maps
+  to the consumed slot, leaving the later writer's entry for new consumers to
+  find.
 - **WAR (write-after-read)** is not tracked directly. Read tasks don't
   register in TensorMap; write tasks only look up current producer. If a
   consumer reads `X` (recording fanin on producer P1) and then a later task
