@@ -72,13 +72,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     args.launch_spec.set_require_sync_start(true);
     rt_submit_task(mk, args);
 
-    // dummy_task stands in as shape's producer so set_tensor_data has a
-    // producer to wait on.
-    {
-        L0TaskArgs shape_args;
-        shape_args.add_inout(shape);
-        rt_submit_dummy_task(shape_args);
-    }
+    // shape carries no producer or consumer task, so set_tensor_data writes it
+    // straight through. Giving it one would hang host_build_graph: its
+    // orchestrator runs to completion on the host before the device executes
+    // anything, so a producer's task_state can never reach COMPLETED and
+    // wait_for_tensor_ready would spin to PTO2_TENSOR_DATA_TIMEOUT_CYCLES.
     uint32_t idx[1] = {0};
     set_tensor_data<int32_t>(shape, 1, idx, cluster_count);
     idx[0] = 1;

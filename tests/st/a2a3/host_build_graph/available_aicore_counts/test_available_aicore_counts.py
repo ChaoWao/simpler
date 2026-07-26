@@ -26,6 +26,13 @@ Two cases, because neither alone is sufficient:
 An **over**-reported count fails in both: the cohort asks for
 `require_sync_start`, so it needs every block co-resident and the deadlock
 guard fires on device.
+
+host_build_graph is where the counts are hardest to get right: its
+orchestrator runs on the host, inside the bind, so it reads `worker_count`
+off `Runtime` rather than the AICPU's handshake result. Publishing the core
+geometry any later than that hands host orchestration a zero, which the Pinned
+case catches (0 != 4) while leaving the `require_sync_start` guard it feeds
+silently disabled.
 """
 
 import torch
@@ -44,7 +51,7 @@ TOTAL_CL = MAX_CLUSTERS * SLOTS_PER_BLOCK
 PINNED_BLOCK_DIM = 4
 
 
-@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+@scene_test(level=2, runtime="host_build_graph")
 class TestAvailableAicoreCounts(SceneTestCase):
     """rt_available_cluster_count() / rt_available_aiv_count() report a spendable width."""
 
@@ -61,21 +68,21 @@ class TestAvailableAicoreCounts(SceneTestCase):
             {
                 "func_id": 0,
                 "name": "SPMD_MIX_AIC",
-                "source": "../spmd_multiblock_mix/kernels/aic/kernel_spmd_mix.cpp",
+                "source": "../../tensormap_and_ringbuffer/spmd_multiblock_mix/kernels/aic/kernel_spmd_mix.cpp",
                 "core_type": "aic",
                 "signature": [D.INOUT],
             },
             {
                 "func_id": 1,
                 "name": "SPMD_MIX_AIV0",
-                "source": "../spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
+                "source": "../../tensormap_and_ringbuffer/spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT],
             },
             {
                 "func_id": 2,
                 "name": "SPMD_MIX_AIV1",
-                "source": "../spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
+                "source": "../../tensormap_and_ringbuffer/spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT],
             },
