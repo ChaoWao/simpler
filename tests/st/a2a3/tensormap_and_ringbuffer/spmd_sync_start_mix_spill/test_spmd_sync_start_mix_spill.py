@@ -7,12 +7,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""sync_start MIX per-core pending-spill: a flagged AIV producer occupies all 48 AIV cores (and
-spins), leaving the 24 AIC cores idle. The require_sync_start MIX consumer then pre-stages with
-EVERY cluster mixed — AIC on an idle running slot, both AIVs on the producer's busy cores' gated
-pending slots. Exercises the rendezvous seed/mask counting on the MIX per-core split path
+"""sync_start MIX per-core pending-spill: a flagged AIV producer occupies every AIV core
+(and spins), leaving every AIC core idle. The require_sync_start MIX consumer then pre-stages
+with EVERY cluster mixed — AIC on an idle running slot, both AIVs on the producer's busy cores'
+gated pending slots. Exercises the rendezvous seed/mask counting on the MIX per-core split path
 (drain_stage_cores to_pending=true, mix_cluster_idle_core_count=1/cluster + Case 3.3 promote for
-the 48 pending AIVs). A counting mismatch stalls the rendezvous -> gated cores never launch ->
+every pending AIV). A counting mismatch stalls the rendezvous -> gated cores never launch ->
 allocator deadlock.
 
 The producer spans every AIV core and the consumer every cluster, so both
@@ -82,7 +82,7 @@ class TestSpmdSyncStartMixSpill(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 3, "block_dim": 24},
+            "config": {"aicpu_thread_num": 3},
             "params": {},
         }
     ]

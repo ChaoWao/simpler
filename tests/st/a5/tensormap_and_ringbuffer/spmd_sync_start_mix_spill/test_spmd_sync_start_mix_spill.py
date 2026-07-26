@@ -7,16 +7,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""sync_start MIX per-core pending-spill on a5 (36 AIC + 72 AIV).
+"""sync_start MIX per-core pending-spill on a5.
 
-A flagged AIV producer occupies all 72 AIV cores and spins; the require_sync_start
-MIX consumer (24 clusters) pre-stages with AIC on idle running slots and AIVs on
-busy pending slots. EarlyOn / EarlyOff toggle producer ``allow_early_resolve``.
-
-The producer spans every AIV core and the consumer every cluster, so both
-widths are the device's own counts — a run always takes the whole device, and
-that width differs between sim and silicon. The orchestration reports the two
-widths in `layout` and the golden is rebuilt from them.
+A flagged AIV producer occupies every AIV core and spins; the require_sync_start
+MIX consumer, one block per cluster, pre-stages with AIC on idle running slots and
+AIVs on busy pending slots. EarlyOn / EarlyOff toggle producer
+``allow_early_resolve``.
 
 The producer spans every AIV core and the consumer every cluster, so both
 widths are the device's own counts — a run always takes the whole device, and
@@ -85,13 +81,13 @@ class TestSpmdSyncStartMixSpill(SceneTestCase):
         {
             "name": "EarlyOn",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {"early_on": 1},
         },
         {
             "name": "EarlyOff",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {"early_on": 0},
         },
     ]

@@ -51,7 +51,7 @@ class TestVectorExample(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]

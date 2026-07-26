@@ -656,13 +656,12 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         from simpler.remote_l3_protocol import decode_task_payload
 
         prefix = b"/tmp/remote-scope"
-        config = struct.pack("<iiiiiii", 7, 5, 0, 0, 0, 0, 1) + struct.pack("<I", len(prefix)) + prefix
+        config = struct.pack("<iiiiii", 5, 0, 0, 0, 0, 1) + struct.pack("<I", len(prefix)) + prefix
         args = struct.pack("<III", 0, 0, 0)
         wire = (b"\xab" * 32) + config + args
 
         payload = decode_task_payload(wire)
 
-        assert payload.config.block_dim == 7
         assert payload.config.aicpu_thread_num == 5
         assert payload.config.enable_scope_stats is True
         assert payload.config.output_prefix == prefix.decode()

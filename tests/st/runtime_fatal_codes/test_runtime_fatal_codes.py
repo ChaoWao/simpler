@@ -279,7 +279,6 @@ def _make_worker(platform: str, device_id: int, case_name: str, monkeypatch):
     handle = worker.register(chip_callable)
     worker.init()
     config = CallConfig()
-    config.block_dim = 1
     config.aicpu_thread_num = 2
     for key, value in case["runtime_env"].items():
         setattr(config.runtime_env, key, value)

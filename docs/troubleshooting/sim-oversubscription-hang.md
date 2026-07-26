@@ -43,8 +43,8 @@ easy to trip on any box running concurrent sim tests.
 `--max-parallel` is the number of scene-test **cases** the scheduler runs
 concurrently (`auto` = `min(devices, nproc)`). Each case forks one chip
 subprocess per device, and each chip spawns one host thread per simulated
-AICore (`block_dim` threads) plus AICPU + scheduler threads. So N concurrent
-cases on an M-vCPU runner put roughly `N × devices × block_dim` runnable threads
+AICore (`SIM_AUTO_BLOCKDIM` threads) plus AICPU + scheduler threads. So N concurrent
+cases on an M-vCPU runner put roughly `N × devices × SIM_AUTO_BLOCKDIM` runnable threads
 on M cores — easily 10–100× oversubscription.
 
 Under that pressure two HW-correct patterns misbehave:
@@ -76,7 +76,7 @@ the sim host-thread model.
 - **Throttle parallelism**: `pytest ... --max-parallel 2` (or lower) on a
   CPU-constrained runner. This is the flag's intended use — it shrinks the
   oversubscription without changing `--device`.
-- **Shrink the per-case footprint**: a smaller `block_dim` in the case config
+- **Shrink the per-case footprint**: `SIM_AUTO_BLOCKDIM` in the sim device runner
   means fewer AICore threads per chip.
 
 ## Fix

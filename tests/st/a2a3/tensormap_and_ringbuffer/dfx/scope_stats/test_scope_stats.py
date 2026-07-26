@@ -88,13 +88,13 @@ class TestScopeStats(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
         {
             "name": "aicpu_threads_2",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 2, "block_dim": 3},
+            "config": {"aicpu_thread_num": 2},
             "params": {},
         },
     ]

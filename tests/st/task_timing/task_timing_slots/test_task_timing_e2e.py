@@ -343,7 +343,6 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
 
         config = CallConfig()
         config.enable_l2_swimlane = False
-        config.block_dim = 3
         assert worker.run(chip_handle, args, config) is None
 
         out_C = torch.zeros(_TILE_ELEMS, dtype=torch.float32)

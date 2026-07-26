@@ -35,7 +35,7 @@ Every task flowing through any level carries exactly three pieces of data:
 | ------ | ---- | ---------- |
 | `CallableHandle` / `CallableIdentity` | hash digest + kind + namespace | What the target worker should execute; targets resolve the digest to a local slot |
 | `TaskArgs` | user builder class | Tensors + scalars + per-tensor tags (IN/OUT/INOUT/etc.) |
-| `CallConfig` | small POD | Execution knobs (block_dim, aicpu_thread_num, profiling/dump/PMU flags, …) |
+| `CallConfig` | small POD | Execution knobs (aicpu_thread_num, profiling/dump/PMU flags, …) |
 
 Everything else in the engine is either plumbing (slots, ring, tensormap,
 scheduler) or target-local executable state resolved from the callable digest.
@@ -204,7 +204,6 @@ View does **not** own memory. Valid for the duration of a single
 
 ```cpp
 struct CallConfig {
-    int32_t block_dim = 0;  // 0 = auto (DeviceRunner resolves to stream max at run() time)
     int32_t aicpu_thread_num = 3;
     int32_t enable_l2_swimlane = 0;  // perf_level 0–4 (0=off, 4=full)
     int32_t enable_dump_args = 0;
@@ -537,7 +536,7 @@ w3 = Worker(level=3, child_mode=PROCESS)
 w3.add_worker(NEXT_LEVEL, chip_worker_0)
 w3.init()    # fork chip_0 here
 
-w3.run(my_orch, args, CallConfig(block_dim=3))
+w3.run(my_orch, args, CallConfig(aicpu_thread_num=3))
 ```
 
 Step-by-step (one chip worker):

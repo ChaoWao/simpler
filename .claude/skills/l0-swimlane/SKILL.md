@@ -87,7 +87,7 @@ Verified examples (slots read from source):
 ### `--spmd-block-num N` — SPMD grid width
 
 `block_num` is written into the synthesised slot-48 `LocalContext`. Default
-is the case's `block_dim`; override only for a kernel that branches or
+is 1; pass it to replay an SPMD cohort, or for a kernel that branches or
 grid-strides on `block_num` (e.g. set the real hw width `24`). `block_idx`
 is always synthesised to `0` (a representative block) and is **not** a flag —
 it has no instruction-stream branches (doc §8).
