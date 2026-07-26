@@ -88,10 +88,10 @@ that the runtime launches:
 
 | Symbol | Meaning |
 | ------ | ------- |
-| `RUNTIME_CONFIG.block_dim` (Python `CallConfig.block_dim`) | Number of physical AICore blocks the runtime launches per dispatch. |
+| `rt_available_cluster_count()` | Number of physical AICore blocks this run launches — the whole device; there is no per-call knob. |
 | `get_block_num(args)` | Logical block count the kernel partitions work across. Currently always 1; multi-logical-block (`block_num > 1`) is not yet implemented. |
 
-When you set `CallConfig.block_dim = 24` in Python and your kernel sees
+When the device reports 24 clusters and your kernel sees
 `get_block_num(args) == 1`, that is by design — every physical block
 runs the same kernel and the kernel partitions work however it likes
 using `get_block_idx()` against whatever it expects. Don't conflate

@@ -72,7 +72,7 @@ class TestPreparedCallable(SceneTestCase):
         ],
     }
 
-    _COMMON_CONFIG = {"aicpu_thread_num": 4, "block_dim": 3}
+    _COMMON_CONFIG = {"aicpu_thread_num": 4}
     _PLATFORMS = ["a5sim", "a5"]
 
     CASES = [

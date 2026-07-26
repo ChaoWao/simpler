@@ -696,9 +696,20 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             scope_stats_aicpu_set_orch_thread_idx(thread_idx);
 
             // dep_gen plugs into the orchestrator thread (single-instance subsystem):
-            // record the per-thread ready_queue index before any submit_task fires
-            // inside orch_func_.
+            // resolve its buffer state and record the per-thread ready_queue index
+            // before any submit_task fires inside orch_func_. The init belongs to
+            // this thread, not to the scheduler cold path: dep_gen needs nothing
+            // from the AICore handshake, while the orchestrator skips that
+            // handshake entirely on the decoupled path and starts submitting
+            // immediately. Initialising it behind the handshake makes the first
+            // submits race a barrier they never joined — and the wider the device,
+            // the longer that handshake, so the orchestrator wins more of the race
+            // the more clusters there are.
+            //
+            // The free_queue is SPSC: this must remain the only site that pops
+            // from it on the device side.
             if (is_dep_gen_enabled()) {
+                dep_gen_aicpu_init();
                 dep_gen_aicpu_set_orch_thread_idx(thread_idx);
             }
 #endif

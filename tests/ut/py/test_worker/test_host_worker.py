@@ -1632,6 +1632,93 @@ class TestRunHandle:
         assert observed == [True]
         assert wait_entered.is_set()
 
+    def test_interrupted_finalize_still_publishes_terminal_state(self):
+        interrupt = KeyboardInterrupt()
+
+        class FakeWorker:
+            def _wait_run_handle(self, run_id, timeout):
+                return True
+
+            def _finalize_run_handle(self, handle, run_id, error):
+                raise interrupt
+
+        handle = RunHandle(cast(Worker, FakeWorker.__new__(FakeWorker)), 1, ())
+        with pytest.raises(KeyboardInterrupt) as first:
+            handle.wait()
+        assert first.value is interrupt
+        assert handle.done
+        # The handle is terminal, so this must resolve from the cached result
+        # instead of re-electing a waiter that blocks on the native fence.
+        with pytest.raises(KeyboardInterrupt) as second:
+            handle.wait(5.0)
+        assert second.value is interrupt
+
+    def test_waiter_is_not_stranded_when_finalize_is_interrupted(self):
+        finalize_entered = threading.Event()
+        finalize_release = threading.Event()
+
+        class FakeWorker:
+            def _wait_run_handle(self, run_id, timeout):
+                return True
+
+            def _finalize_run_handle(self, handle, run_id, error):
+                finalize_entered.set()
+                assert finalize_release.wait(5.0)
+                raise KeyboardInterrupt
+
+        handle = RunHandle(cast(Worker, FakeWorker.__new__(FakeWorker)), 1, ())
+        elected: list[BaseException] = []
+        parked: list[BaseException] = []
+
+        def run(sink, timeout):
+            try:
+                handle.wait(timeout)
+            except BaseException as exc:  # noqa: BLE001
+                sink.append(exc)
+
+        elected_thread = threading.Thread(target=run, args=(elected, None))
+        elected_thread.start()
+        assert finalize_entered.wait(3.0)
+        parked_thread = threading.Thread(target=run, args=(parked, 5.0))
+        parked_thread.start()
+        finalize_release.set()
+        elected_thread.join(5.0)
+        parked_thread.join(5.0)
+        assert not elected_thread.is_alive()
+        assert not parked_thread.is_alive()
+        assert [type(exc) for exc in elected] == [KeyboardInterrupt]
+        assert [type(exc) for exc in parked] == [KeyboardInterrupt]
+        assert handle.done
+
+    def test_finalize_retires_handle_when_its_cv_acquire_is_interrupted(self):
+        interrupt = KeyboardInterrupt()
+
+        class OnceInterruptingCV:
+            def __init__(self, cv):
+                self._cv = cv
+                self._armed = True
+
+            def __enter__(self):
+                if self._armed:
+                    self._armed = False
+                    raise interrupt
+                return self._cv.__enter__()
+
+            def __exit__(self, *exc_info):
+                return self._cv.__exit__(*exc_info)
+
+            def notify_all(self):
+                self._cv.notify_all()
+
+        hw = Worker(level=3, num_sub_workers=0)
+        handle = RunHandle(hw, 1, ())
+        hw._accepted_run_handles.add(handle)
+        hw._orch = cast(object, type("FakeOrch", (), {"_release_run": lambda self, run_id: None})())
+        hw._hierarchical_start_cv = cast(threading.Condition, OnceInterruptingCV(hw._hierarchical_start_cv))
+
+        assert hw._finalize_run_handle(handle, 1, None) is interrupt
+        assert not hw._accepted_run_handles
+
 
 # ---------------------------------------------------------------------------
 # Test: multiple SUB workers execute in parallel

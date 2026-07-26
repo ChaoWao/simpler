@@ -879,7 +879,7 @@ bool Orchestrator::on_consumed(TaskSlot slot) {
     }
 
     RunId run_id = s.run_id;
-    tensormap_->erase_task_outputs(run_id, s.output_keys);
+    tensormap_->erase_task_outputs(run_id, slot, s.output_keys);
 
     // HeapRing-owned OUTPUT slabs are reclaimed implicitly when the allocator
     // advances last_alive past this slot — no per-slot munmap needed.

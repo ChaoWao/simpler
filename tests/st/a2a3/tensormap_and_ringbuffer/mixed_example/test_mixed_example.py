@@ -98,14 +98,14 @@ class TestMixedExample(SceneTestCase):
         {
             "name": "case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {"aicpu_thread_num": 4},
             "params": {"num_iters": 4},
         },
         {
             "name": "case2",
             "manual": True,
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {"aicpu_thread_num": 4},
             "params": {"num_iters": 1},
         },
     ]

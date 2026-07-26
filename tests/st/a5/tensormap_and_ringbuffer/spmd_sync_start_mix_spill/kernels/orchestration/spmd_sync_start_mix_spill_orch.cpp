@@ -36,7 +36,7 @@ extern "C" {
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 1,
+        .expected_arg_count = 3,
     };
 }
 
@@ -73,14 +73,27 @@ static void submit_mix_sync_consumer(const Tensor &out, int16_t core_num, int64_
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const Tensor &layout = orch_args.tensor(1).ref();
     const bool early_on = orch_args.scalar(0) != 0;
 
-    PTO2TaskId prod = submit_aiv_producer(ext_output, 72, 0, early_on);
-    submit_mix_sync_consumer(ext_output, 24, 72, prod);
+    // The spill this case exercises needs the producer on EVERY AIV core and the
+    // consumer on EVERY cluster, so both widths are the device's own counts
+    // rather than literals — the run always takes the whole device, and that
+    // width differs between sim and silicon.
+    const int32_t producer_blocks = rt_available_aiv_count();
+    const int32_t consumer_blocks = rt_available_cluster_count();
+
+    PTO2TaskId prod = submit_aiv_producer(ext_output, static_cast<int16_t>(producer_blocks), 0, early_on);
+    submit_mix_sync_consumer(ext_output, static_cast<int16_t>(consumer_blocks), producer_blocks, prod);
+
+    uint32_t idx[1] = {0};
+    set_tensor_data<int32_t>(layout, 1, idx, producer_blocks);
+    idx[0] = 1;
+    set_tensor_data<int32_t>(layout, 1, idx, consumer_blocks);
 
     LOG_INFO_V9(
-        "[spmd_sync_start_mix_spill] early_on=%d AIV producer(72) + MIX sync_start consumer(24) submitted",
-        early_on ? 1 : 0
+        "[spmd_sync_start_mix_spill] early_on=%d AIV producer (%d) + sync_start MIX consumer (%d) submitted",
+        early_on ? 1 : 0, producer_blocks, consumer_blocks
     );
 }
 

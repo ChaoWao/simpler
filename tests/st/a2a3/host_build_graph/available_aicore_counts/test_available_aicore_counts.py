@@ -22,6 +22,13 @@ was a pinned `block_dim` — a knob that no longer exists now that a run always
 takes the whole device. Everything here derives from the reported number, so a
 count that is too small is self-consistent: fewer blocks launch, fewer slots are
 expected, and the tail is zero on both sides.
+
+host_build_graph is where the counts are hardest to get right: its
+orchestrator runs on the host, inside the bind, so it reads `worker_count`
+off `Runtime` rather than the AICPU's handshake result. Publishing the core
+geometry any later than that hands host orchestration a zero, which the Pinned
+case catches (0 != 4) while leaving the `require_sync_start` guard it feeds
+silently disabled.
 """
 
 import torch
@@ -32,12 +39,12 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
 # Cover the largest cohort the platform can launch (PLATFORM_MAX_BLOCKDIM).
-MAX_CLUSTERS = 36
+MAX_CLUSTERS = 24
 AIV_PER_CLUSTER = 2
 TOTAL_CL = MAX_CLUSTERS * SLOTS_PER_BLOCK
 
 
-@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+@scene_test(level=2, runtime="host_build_graph")
 class TestAvailableAicoreCounts(SceneTestCase):
     """rt_available_cluster_count() / rt_available_aiv_count() report a spendable width."""
 
@@ -54,21 +61,21 @@ class TestAvailableAicoreCounts(SceneTestCase):
             {
                 "func_id": 0,
                 "name": "SPMD_MIX_AIC",
-                "source": "../spmd_multiblock_mix/kernels/aic/kernel_spmd_mix.cpp",
+                "source": "../../tensormap_and_ringbuffer/spmd_multiblock_mix/kernels/aic/kernel_spmd_mix.cpp",
                 "core_type": "aic",
                 "signature": [D.INOUT],
             },
             {
                 "func_id": 1,
                 "name": "SPMD_MIX_AIV0",
-                "source": "../spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
+                "source": "../../tensormap_and_ringbuffer/spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT],
             },
             {
                 "func_id": 2,
                 "name": "SPMD_MIX_AIV1",
-                "source": "../spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
+                "source": "../../tensormap_and_ringbuffer/spmd_multiblock_mix/kernels/aiv/kernel_spmd_mix.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT],
             },
@@ -78,7 +85,7 @@ class TestAvailableAicoreCounts(SceneTestCase):
     CASES = [
         {
             "name": "Default",
-            "platforms": ["a5sim", "a5"],
+            "platforms": ["a2a3sim", "a2a3"],
             "config": {"aicpu_thread_num": 4},
             "params": {},
         },

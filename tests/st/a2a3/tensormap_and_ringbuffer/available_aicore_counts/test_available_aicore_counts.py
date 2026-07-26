@@ -9,17 +9,19 @@
 # -----------------------------------------------------------------------------------------------------------
 """available_aicore_counts: the runtime's core counts are real and spendable.
 
-The counts have no host-side equivalent — sim and onboard resolve different
-values, and onboard's comes from the driver — so there is no constant to pin.
-The orchestration instead reports what it saw in `shape` and spends it: a MIX
-cohort of exactly `cluster_count` blocks, each writing its block index into
-`blocks`. This test reads the width back out of `shape` and checks that many
-block slots, so it holds on every platform without knowing any of their numbers.
+The orchestration reports what `rt_available_*_count()` gave it in `shape` and
+spends it: a MIX cohort of exactly `cluster_count` blocks, each writing its
+block index into `blocks`.
 
-What would fail: a count of 0 or one exceeding the platform ceiling (checked
-here), a count larger than the run really has (the cohort's require_sync_start
-needs every block co-resident, so the deadlock guard fires on device), and a
-count smaller than it should be (the untouched tail slots stay zero).
+An **over**-reported count fails: the cohort asks for `require_sync_start`,
+so it needs every block co-resident and the deadlock guard fires on device.
+
+An **under**-reported count is NOT detected. Catching one needs an expectation
+the host holds independently of what the device said, and the only such handle
+was a pinned `block_dim` — a knob that no longer exists now that a run always
+takes the whole device. Everything here derives from the reported number, so a
+count that is too small is self-consistent: fewer blocks launch, fewer slots are
+expected, and the tail is zero on both sides.
 """
 
 import torch

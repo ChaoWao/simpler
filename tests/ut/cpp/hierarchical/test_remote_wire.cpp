@@ -94,7 +94,6 @@ TEST(RemoteWire, TaskPayloadRejectsNonZeroTensorData) {
 TEST(RemoteWire, TaskPayloadPreservesScopeStatsCallConfig) {
     remote_l3::TaskPayloadWire payload;
     payload.callable_digest.fill(0xAB);
-    payload.config.block_dim = 7;
     payload.config.aicpu_thread_num = 5;
     payload.config.enable_scope_stats = 1;
     const char *prefix = "/tmp/remote-scope";
@@ -104,7 +103,6 @@ TEST(RemoteWire, TaskPayloadPreservesScopeStatsCallConfig) {
     auto encoded = remote_l3::encode_task_payload(payload);
     auto decoded = remote_l3::decode_task_payload(encoded.data(), encoded.size());
 
-    EXPECT_EQ(decoded.config.block_dim, 7);
     EXPECT_EQ(decoded.config.aicpu_thread_num, 5);
     EXPECT_EQ(decoded.config.enable_scope_stats, 1);
     EXPECT_STREQ(decoded.config.output_prefix, prefix);

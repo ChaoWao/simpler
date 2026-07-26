@@ -140,6 +140,7 @@ public:
 
     int device_id() const { return device_id_; }
     bool initialized() const { return initialized_; }
+    unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
 
 private:
     using CreateDeviceContextFn = void *(*)();
@@ -157,6 +158,7 @@ private:
     );
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
+    using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
     using SimplerProvisionDmaWorkspaceFn = int (*)(void *, uint32_t);
@@ -226,6 +228,7 @@ private:
     uint64_t base_comm_handle_ = 0;
 
     std::vector<uint8_t> runtime_buf_;
+    PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     // device_id_ is set once in init() and never modified afterward. All
     // ChipWorker callers run on the thread that called init() (the same
     // thread is the only one that subsequently calls malloc / copy_to /

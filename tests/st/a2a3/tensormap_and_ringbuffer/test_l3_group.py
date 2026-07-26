@@ -95,7 +95,7 @@ class TestL3Group(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"device_count": 2, "num_sub_workers": 1, "block_dim": 3, "aicpu_thread_num": 4},
+            "config": {"device_count": 2, "num_sub_workers": 1, "aicpu_thread_num": 4},
             "params": {},
         },
     ]

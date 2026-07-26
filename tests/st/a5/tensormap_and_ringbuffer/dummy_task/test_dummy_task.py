@@ -75,19 +75,19 @@ class TestDummyTask(SceneTestCase):
         {
             "name": "SingleDummyAutoDep",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 2, "block_dim": 1},
+            "config": {"aicpu_thread_num": 2},
             "params": {"case": 1},
         },
         {
             "name": "LongDummyChain",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 2, "block_dim": 1},
+            "config": {"aicpu_thread_num": 2},
             "params": {"case": 2},
         },
         {
             "name": "DummyExplicitDepBarrier",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 2, "block_dim": 1},
+            "config": {"aicpu_thread_num": 2},
             "params": {"case": 3},
         },
         {
@@ -96,7 +96,7 @@ class TestDummyTask(SceneTestCase):
             # Correctness is still just the copy.
             "name": "DenseFanoutFanin",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 2, "block_dim": 1},
+            "config": {"aicpu_thread_num": 2},
             "params": {"case": 4},
         },
     ]

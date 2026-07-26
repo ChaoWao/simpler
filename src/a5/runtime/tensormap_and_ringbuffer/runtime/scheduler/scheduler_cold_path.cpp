@@ -907,6 +907,19 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     int32_t own_n = 0;
     for (int32_t ci = tidx; ci < aic_n; ci += active)
         own_n++;
+    // Mirrors the check assign_cores_to_threads() makes on the serial path. A
+    // thread owning more clusters than CoreTracker can hold used to write past
+    // core_id_map_ into the next tracker, which is the orchestrator's on the
+    // decoupled path: its cluster_count_ became garbage and shutdown() then
+    // sent AICORE_EXIT to a core the scheduler was still dispatching to.
+    if (own_n > CoreTracker::MAX_CLUSTERS) {
+        LOG_ERROR(
+            "Thread %d owns %d clusters, exceeding CoreTracker capacity %d (raise aicpu_thread_num)", tidx, own_n,
+            CoreTracker::MAX_CLUSTERS
+        );
+        handshake_failed_.store(true, std::memory_order_release);
+        return;
+    }
     tracker.init(own_n);
 
     int32_t local = 0;
@@ -960,9 +973,7 @@ void SchedulerContext::post_handshake_profiling_init() {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
         LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
     }
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
-    }
+    if (is_dep_gen_enabled()) {}
 #endif
 }
 
@@ -1207,9 +1218,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // init() only pops the initial buffer from instance 0's free_queue; the
     // orchestrator thread still records its idx via
     // dep_gen_aicpu_set_orch_thread_idx() before the first record_submit.
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
-    }
+    if (is_dep_gen_enabled()) {}
 #endif
 
     // total_tasks_ is read in pre_handshake_init (before the orchestrator's early

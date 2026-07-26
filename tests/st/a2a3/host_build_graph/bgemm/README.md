@@ -5,8 +5,11 @@ Tiled matrix multiplication example demonstrating Cube (AIC) and Vector (AIV) co
 ## Computation
 
 ```text
-C = A @ B
+C = C_init + A @ B
 ```
+
+`C` is an INOUT accumulator: every output tile is read-modify-written by
+`tile_add`, starting from the host-supplied `C_init` staged to the device.
 
 Tiled computation with 4x4x4 grid:
 

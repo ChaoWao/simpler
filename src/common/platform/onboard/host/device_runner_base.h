@@ -651,18 +651,18 @@ protected:
     void ensure_device_wall_buffer();
 
     /**
-     * Resolve the caller's `requested_block_dim` into a concrete
-     * block_dim: 0 means "auto", i.e. this device's `max_block_dim_`;
-     * any other value is taken as an explicit request. Either way the
-     * result is range-checked against `max_block_dim_`.
+     * Resolve this run's block_dim: every cluster the device has, i.e.
+     * the cached `max_block_dim_`. A run is never narrower than the
+     * device — orchestration sizes its cohorts from
+     * `rt_available_cluster_count()` instead.
      *
-     * Pure arithmetic on the cached ceiling — no ACL call, so it is safe
-     * to run at bind time, before any stream work for the run.
+     * Reads the cached ceiling only — no ACL call, so it is safe to run
+     * at bind time, before any stream work for the run.
      *
-     * Returns the resolved block_dim on success, -1 on failure.
-     * Updates `block_dim_` on success.
+     * Returns the resolved block_dim on success, -1 if the ceiling was
+     * never latched. Updates `block_dim_` on success.
      */
-    int resolve_block_dim(int requested_block_dim);
+    int resolve_block_dim();
 
     /**
      * Rewrites each task's `function_bin_addr` from

@@ -69,10 +69,11 @@ Encoding rules:
 - Reserved fields must be written as zero and rejected when non-zero unless a
   later protocol version assigns them.
 
-`CallConfigWire v1` encodes the current `CallConfig` fields explicitly:
+`CallConfigWire v2` encodes the current `CallConfig` fields explicitly (v1
+carried a leading `block_dim: int32`, dropped when a run became
+whole-device):
 
 ```text
-block_dim: int32
 aicpu_thread_num: int32
 enable_l2_swimlane: int32
 enable_dump_args: int32

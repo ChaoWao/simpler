@@ -1198,39 +1198,24 @@ void DeviceRunnerBase::ensure_device_wall_buffer() {
     }
 }
 
-int DeviceRunnerBase::resolve_block_dim(int requested_block_dim) {
+int DeviceRunnerBase::resolve_block_dim() {
     if (max_block_dim_ < 1) {
-        LOG_ERROR("block_dim ceiling not resolved (ensure_device_initialized must run first)");
+        LOG_ERROR(
+            "block_dim ceiling not resolved (cube=%u, vector=%u); ensure_device_initialized must run first",
+            max_cube_cores_, max_vector_cores_
+        );
         return -1;
     }
-    // 0 is the CallConfig "auto" sentinel: take the whole device.
-    int resolved = (requested_block_dim == 0) ? max_block_dim_ : requested_block_dim;
-    if (resolved < 1 || resolved > max_block_dim_) {
-        if (max_cube_cores_ > 0 && max_vector_cores_ > 0) {
-            LOG_ERROR(
-                "block_dim (%d) outside [1, %d] available cores (cube=%u, vector=%u)", resolved, max_block_dim_,
-                max_cube_cores_, max_vector_cores_
-            );
-        } else {
-            LOG_ERROR(
-                "aclrtGetStreamResLimit unavailable; block_dim (%d) outside [1, %d] static cap PLATFORM_MAX_BLOCKDIM",
-                resolved, max_block_dim_
-            );
-        }
-        return -1;
-    }
-    if (requested_block_dim == 0) {
-        LOG_INFO_V0("block_dim auto-resolved to %d", resolved);
-    }
-    block_dim_ = resolved;
-    return resolved;
+    block_dim_ = max_block_dim_;
+    LOG_INFO_V0("block_dim resolved to %d (cube=%u, vector=%u)", block_dim_, max_cube_cores_, max_vector_cores_);
+    return block_dim_;
 }
 
 int DeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig &config) {
     if (validate_launch_aicpu_num(config.aicpu_thread_num) != 0) {
         return -1;
     }
-    int block_dim = resolve_block_dim(config.block_dim);
+    int block_dim = resolve_block_dim();
     if (block_dim < 0) {
         return -1;
     }

@@ -11,7 +11,8 @@
 /**
  * BGEMM orchestration — submit_task / TensorMap form
  *
- * Tiled C = A @ B, tile 64x64, grid 4x4x4.  Per output tile (m,n), for each k:
+ * Tiled C = C_init + A @ B, tile 64x64, grid 4x4x4.  Per output tile (m,n),
+ * for each k:
  *   P_k = A[m,k] @ B[k,n]   (gemm_tile, AIC)  — fresh runtime-allocated buffer
  *   C[m,n] += P_k           (tile_add, AIV, INOUT C tile)
  *
@@ -20,9 +21,12 @@
  *   - add_{k-1} -> add_k via the C[m,n] tile (add_inout overlap).
  * Allocating a fresh P per k (instead of reusing one P buffer per tile) removes
  * the write-after-read hazard the explicit-edge version needed an extra edge
- * for. C arrives zero-initialized (pure OUTPUT), so the accumulation is exact.
+ * for.
  *
- * Arg layout: [A (IN), B (IN), C (OUT)] — flattened 1-D tile-first tensors.
+ * Arg layout: [A (IN), B (IN), C (INOUT)] — flattened 1-D tile-first tensors.
+ * C must be declared INOUT, not OUT: the k=0 tile_add reads C before any task
+ * has written it, and the runtime stages only IN/INOUT tensors to the device
+ * (a tensor declared OUT is handed to the kernel uninitialized).
  */
 
 #include <stdint.h>

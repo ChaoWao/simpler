@@ -1235,7 +1235,6 @@ NB_MODULE(_task_interface, m) {
     // --- CallConfig ---
     nb::class_<CallConfig>(m, "CallConfig")
         .def(nb::init<>())
-        .def_rw("block_dim", &CallConfig::block_dim)
         .def_rw("aicpu_thread_num", &CallConfig::aicpu_thread_num)
         // runtime_env returns an internal reference so `cfg.runtime_env.ring_heap = X`
         // writes through to the owning CallConfig (rv_policy::reference_internal).
@@ -1322,7 +1321,7 @@ NB_MODULE(_task_interface, m) {
         )
         .def("__repr__", [append_ring_values](const CallConfig &self) -> std::string {
             std::ostringstream os;
-            os << "CallConfig(block_dim=" << self.block_dim << ", aicpu_thread_num=" << self.aicpu_thread_num
+            os << "CallConfig(aicpu_thread_num=" << self.aicpu_thread_num
                << ", enable_l2_swimlane=" << self.enable_l2_swimlane << ", enable_dump_args=" << self.enable_dump_args
                << ", enable_pmu=" << self.enable_pmu << ", enable_dep_gen=" << (self.enable_dep_gen ? "True" : "False")
                << ", enable_scope_stats=" << (self.enable_scope_stats ? "True" : "False");

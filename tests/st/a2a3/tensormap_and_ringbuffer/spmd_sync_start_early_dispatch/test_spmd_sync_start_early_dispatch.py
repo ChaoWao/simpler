@@ -11,6 +11,11 @@
 
 The consumer must not stage until every producer block range has reserved a core slot;
 otherwise it occupies every AIC slot and strands the producer's unclaimed remainder.
+
+The consumer cohort is exactly this run's cluster count: it must occupy every AIC
+slot, and require_sync_start needs every block of it co-resident. The
+orchestration reports the width it used and the golden is rebuilt from it. The
+producer stays wider than the device on purpose — it carries no sync_start.
 """
 
 import torch
@@ -20,9 +25,10 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 PRODUCER_BLOCKS = 50
-SYNC_BLOCKS = 24
 SYNC_BASE_CL = PRODUCER_BLOCKS
-TOTAL_CL = SYNC_BASE_CL + SYNC_BLOCKS * 3
+# Widest the platform allows: one consumer block per cluster.
+MAX_CLUSTERS = 24
+TOTAL_CL = SYNC_BASE_CL + MAX_CLUSTERS * 3
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -34,7 +40,7 @@ class TestSpmdSyncStartEarlyDispatch(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/spmd_sync_start_early_dispatch_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT],
+            "signature": [D.INOUT, D.INOUT],
         },
         "incores": [
             {
@@ -72,21 +78,32 @@ class TestSpmdSyncStartEarlyDispatch(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        return TaskArgsBuilder(
+            Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            Tensor("layout", torch.zeros(1, dtype=torch.int32)),
+        )
 
     def compute_golden(self, args, params):
-        out = args.output
+        # Both outputs are checked against the reported wave cap in compare_outputs.
+        pass
+
+    def compare_outputs(self, test_args, golden_args, output_names, params):
+        sync_blocks = int(test_args.layout[0])
+        assert 1 <= sync_blocks <= MAX_CLUSTERS, f"consumer width {sync_blocks} outside [1, {MAX_CLUSTERS}]"
+        expected = torch.zeros(TOTAL_CL, dtype=torch.float32)
         for block_idx in range(PRODUCER_BLOCKS):
-            out[block_idx * FLOATS_PER_CACHE_LINE] = float(block_idx)
-        for block_idx in range(SYNC_BLOCKS):
+            expected[block_idx] = float(block_idx)
+        for block_idx in range(sync_blocks):
             for slot in range(3):
-                out[(SYNC_BASE_CL + block_idx * 3 + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
+                expected[SYNC_BASE_CL + block_idx * 3 + slot] = float(block_idx)
+        actual = test_args.output.reshape(TOTAL_CL, FLOATS_PER_CACHE_LINE)[:, 0]
+        assert torch.equal(actual, expected), f"slots disagree with the reported consumer width {sync_blocks}"
 
 
 if __name__ == "__main__":

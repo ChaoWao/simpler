@@ -36,13 +36,25 @@
 #define FUNC_SPMD_MIX_AIV0 1
 #define FUNC_SPMD_MIX_AIV1 2
 
+static constexpr int32_t SLOTS_PER_BLOCK = 3;
+
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 1,
+        .expected_arg_count = 2,
     };
+}
+
+// The cohort widths are fractions of this run's cluster count rather than
+// literals: the run always takes the whole device, and that width differs
+// between sim and silicon. The shape the case exercises — two narrow cohorts,
+// one mid, one wide enough to contend for most of the device — is what matters,
+// so each is derived and clamped to at least one block.
+static int16_t cohort(int32_t clusters, int32_t divisor) {
+    int32_t n = clusters / divisor;
+    return static_cast<int16_t>(n < 1 ? 1 : n);
 }
 
 static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
@@ -61,17 +73,29 @@ static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bo
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const Tensor &layout = orch_args.tensor(1).ref();
 
-    // T0: 2 blocks, sync_start=true  (6 CL)
-    submit_mix(ext_output, 2, 0, true);
-    // T1: 8 blocks, sync_start=true  (24 CL)
-    submit_mix(ext_output, 8, 6, true);
-    // T2: 2 blocks, sync_start=false (6 CL, baseline)
-    submit_mix(ext_output, 2, 30, false);
-    // T3: 12 blocks, sync_start=true (36 CL)
-    submit_mix(ext_output, 12, 36, true);
+    const int32_t clusters = rt_available_cluster_count();
+    // T0/T2 narrow, T1 mid, T3 wide; T2 is the non-sync_start baseline.
+    const int16_t block_nums[4] = {
+        cohort(clusters, 12), cohort(clusters, 3), cohort(clusters, 12), cohort(clusters, 2)
+    };
+    const bool sync_start[4] = {true, true, false, true};
 
-    LOG_INFO_V9("[spmd_sync_start] Submitted 4 tasks (3 sync_start + 1 baseline)");
+    // layout[2i] = block_num, layout[2i+1] = base cache line. The host cannot
+    // predict either, so the run reports the geometry it used and the golden is
+    // rebuilt from it.
+    int32_t base_cl = 0;
+    for (int32_t i = 0; i < 4; i++) {
+        submit_mix(ext_output, block_nums[i], base_cl, sync_start[i]);
+        uint32_t idx[1] = {static_cast<uint32_t>(2 * i)};
+        set_tensor_data<int32_t>(layout, 1, idx, block_nums[i]);
+        idx[0] = static_cast<uint32_t>(2 * i + 1);
+        set_tensor_data<int32_t>(layout, 1, idx, base_cl);
+        base_cl += block_nums[i] * SLOTS_PER_BLOCK;
+    }
+
+    LOG_INFO_V9("[spmd_sync_start] Submitted 4 tasks over %d clusters", clusters);
 }
 
 }  // extern "C"
