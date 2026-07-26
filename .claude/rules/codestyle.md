@@ -29,7 +29,35 @@
 
 3. Prefer `volatile` decorator on struct members rather than volatile pointer casts unless necessary.
 4. Avoid using pointer arithmetic with hardcoded offsets when `offsetof` is available.
-5. **Never use `std::this_thread::yield()` or `sched_yield()` in AICPU spin-wait loops.** On the Ascend AICPU, yielding to the OS scheduler introduces unacceptable latency for tight spin-waits (ticket locks, CAS retries, etc.). Use an empty loop body or a bare architecture hint (`__asm__ volatile("yield")`) instead.
+5. **No sleeping on the dispatch path — at any tier.** A wait that a task's
+   latency passes through may only ever *spin* or *block on a wakeup
+   primitive* (semaphore, futex, condition variable, pipe/eventfd read).
+   `sleep`, `yield`, and backoff timers are all forbidden there, on the host
+   as much as on the AICPU: a sleep quantum is added to every dispatch that
+   lands mid-quantum, and it is not recoverable by tuning — the sleep
+   interval on any general-purpose OS overshoots what you asked for.
+
+   **Initialization and teardown paths are exempt** and may poll with a
+   sleep — a startup handshake or a shutdown drain costs a one-off wait,
+   not per-task latency. `_STARTUP_POLL_INTERVAL_S` in `worker.py` is the
+   sanctioned shape.
+
+   The boundary is *"does a task wait behind this?"*, not which file it is
+   in. A mailbox poll waiting for `TASK_READY`, a completion poll waiting
+   for `TASK_DONE`, a ready-queue wait, an AICPU ticket lock or CAS retry:
+   all dispatch path. Registration, device bring-up, `init()` readiness
+   barriers, `close()` reaping: all exempt.
+
+   On the AICPU specifically, **never** `std::this_thread::yield()` or
+   `sched_yield()` — yielding to the OS scheduler costs more than the wait
+   it replaces. Use an empty loop body or a bare architecture hint
+   (`__asm__ volatile("yield")`).
+
+   When an idle spin is genuinely too expensive to leave running (a forked
+   child that would hold a core for its whole lifetime), the answer is a
+   blocking wakeup primitive, **not** a sleep — blocking costs no CPU and
+   wakes in single-digit microseconds, where a sleep-based compromise pays
+   latency on every dispatch to save CPU while idle.
 6. **For cross-platform/platform-isolation preprocessor blocks, place the `__aarch64__` branch first.** Use this ordering pattern:
 
     ```cpp
