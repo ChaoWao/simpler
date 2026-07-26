@@ -47,6 +47,7 @@
 #include "../runtime/runtime.h"
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
+#include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/strace.h"
@@ -56,6 +57,28 @@
 #include "common/host_api.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
+
+extern "C" const PipelineContract *get_pipeline_contract(void) {
+    // Orchestration runs on the device, so this run's own content is confined to
+    // its task args. The three pooled regions are built and uploaded once per
+    // callable sizing and then served from the prebuilt-arena cache
+    // (build_and_cache_prebuilt_arena runs only on a miss), so a run reuses the
+    // instance the previous run left behind.
+    static const PipelineContract contract = {
+        PTO_PIPELINE_CONTRACT_ABI_VERSION,
+        6,
+        1,
+        {
+            {PTO_PIPELINE_TASK_ARGS, PTO_PIPELINE_HOST_PER_RUN, 0},
+            {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_DEVICE_SCRATCH, 0},
+            {PTO_PIPELINE_GM_SM, PTO_PIPELINE_DEVICE_SCRATCH, 0},
+            {PTO_PIPELINE_RUNTIME_IMAGE, PTO_PIPELINE_DEVICE_SCRATCH, 0},
+            {PTO_PIPELINE_AICPU_STREAM, PTO_PIPELINE_EXEC_HANDLE, 0},
+            {PTO_PIPELINE_AICORE_STREAM, PTO_PIPELINE_EXEC_HANDLE, 0},
+        },
+    };
+    return &contract;
+}
 
 static_assert(
     RUNTIME_ENV_RING_COUNT == PTO2_MAX_RING_DEPTH, "RuntimeEnv ring count must match PTO2 runtime ring depth"

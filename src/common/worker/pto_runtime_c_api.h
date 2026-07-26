@@ -15,10 +15,9 @@
  * Both the ChipWorker (consumer, resolves public symbols via dlsym) and the
  * platform implementations (producers, define all symbols) include this file.
  *
- * Public API — resolved by ChipWorker via dlsym (every host_runtime.so must
- * export ALL of these; runtimes without a real backend ship not-supported
- * stubs rather than omitting symbols, so ChipWorker can dlsym the full set
- * unconditionally without per-symbol probing):
+ * Required API — resolved by ChipWorker via dlsym (every host_runtime.so must
+ * export all of these; runtimes without a real backend ship not-supported
+ * stubs rather than omitting symbols):
  *   - lifecycle:    create_device_context, destroy_device_context,
  *                   simpler_init, finalize_device
  *   - sizing:       get_runtime_size
@@ -31,6 +30,9 @@
  *                   destroy_comm_stream_ctx
  *   - comm:         comm_init, comm_alloc_windows, comm_get_local_window_base,
  *                   comm_get_window_size, comm_barrier, comm_destroy
+ *
+ * Optional metadata:
+ *   - pipeline:     get_pipeline_contract
  *
  * Memory management: caller allocates a buffer of get_runtime_size() bytes
  * and passes it to simpler_run(). Error codes: 0 = success, negative = error.
@@ -61,6 +63,65 @@ enum {
     PTO_RUNTIME_ERR_UNSUPPORTED = -2,
 };
 
+enum {
+    PTO_PIPELINE_CONTRACT_ABI_VERSION = 1,
+    PTO_PIPELINE_MAX_RESOURCES = 8,
+    /* Ceiling on pipeline_depth once a depth above 1 is enabled. */
+    PTO_PIPELINE_MAX_DEPTH = 2,
+};
+
+/**
+ * How a resource behaves across the KernelLaunch boundary, which is what
+ * decides its copy count: HOST_PER_RUN and EXEC_HANDLE need one instance per
+ * in-flight run (`pipeline_depth`), DEVICE_SCRATCH needs exactly one.
+ */
+typedef enum PipelineResourceClass {
+    /* Carries this run's own content, so the device is still reading the
+       previous run's content while the next run is prepared. */
+    PTO_PIPELINE_HOST_PER_RUN = 0,
+    /* Not rewritten per run: whoever populates it does so once, and device ops
+       run one at a time, so a single instance is reused across runs. */
+    PTO_PIPELINE_DEVICE_SCRATCH = 1,
+    /* Execution context (stream) a run owns while its op runs and is reaped. */
+    PTO_PIPELINE_EXEC_HANDLE = 2,
+} PipelineResourceClass;
+
+typedef enum PipelineResourceKind {
+    /* Zero is not a resource: it is what an entry a runtime never filled in
+       reads as, so a declaration that overstates resource_count is rejected
+       instead of decaying into a valid-looking resource. */
+    PTO_PIPELINE_KIND_UNSPECIFIED = 0,
+    PTO_PIPELINE_GM_HEAP = 1,
+    PTO_PIPELINE_GM_SM = 2,
+    PTO_PIPELINE_RUNTIME_IMAGE = 3,
+    PTO_PIPELINE_TASK_ARGS = 4,
+    PTO_PIPELINE_AICPU_STREAM = 5,
+    PTO_PIPELINE_AICORE_STREAM = 6,
+} PipelineResourceKind;
+
+typedef struct PipelineResource {
+    uint32_t kind;
+    uint32_t resource_class;
+    /* Size of one copy. Reserved: currently declared as 0 and required to be 0. */
+    uint64_t bytes_per_copy;
+} PipelineResource;
+
+/**
+ * Runtime-owned declaration of resources that cross KernelLaunch.
+ *
+ * `pipeline_depth` is the only replication count: a resource needs
+ * `pipeline_depth` copies unless its class is DEVICE_SCRATCH, which needs one.
+ * Per-resource copy counts stay derivable from the class, so a runtime that
+ * wants a cheap resource replicated and an expensive one shared says so by
+ * classifying them, not by carrying a second global count.
+ */
+typedef struct PipelineContract {
+    uint32_t abi_version;
+    uint32_t resource_count;
+    uint32_t pipeline_depth;
+    PipelineResource resources[PTO_PIPELINE_MAX_RESOURCES];
+} PipelineContract;
+
 /* Per-stage run timing is no longer returned. The platform emits it as
  * `[STRACE]` log markers (host stages + the AICPU device-phase breakdown,
  * gated on SIMPLER_HOST_STRACE) — parse with simpler_setup.tools.strace_timing.
@@ -69,6 +130,9 @@ enum {
 /* ===========================================================================
  * Public API (resolved by ChipWorker via dlsym)
  * =========================================================================== */
+
+/** Return this runtime's immutable pipeline resource declaration. Optional. */
+const PipelineContract *get_pipeline_contract(void);
 
 /**
  * Create a new device context (heap-allocated DeviceRunner).

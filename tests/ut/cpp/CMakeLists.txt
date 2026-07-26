@@ -339,6 +339,7 @@ add_hierarchical_test(test_orchestrator hierarchical/test_orchestrator.cpp)
 add_hierarchical_test(test_scheduler  hierarchical/test_scheduler.cpp)
 add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
+add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)
 
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
