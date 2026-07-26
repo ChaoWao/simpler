@@ -14,7 +14,6 @@
 #include <cstdio>
 
 #include "common/unified_log.h"
-#include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/device_time.h"
 #include "aicpu/l2_swimlane_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
@@ -880,8 +879,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // only), so the "do it once" guarantee is structural (no CAS needed). Runs
     // after the handshake / assign_cores_to_threads because pmu_aicpu_init needs
     // physical_core_ids_ / cores_total_num_. Mirrors the l2_swimlane_aicpu_init
-    // convention above; the per-thread *_set_orch_thread_idx setters stay on the
-    // orchestrator thread (see aicpu_executor.cpp).
+    // convention above.
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
         dump_args_init(active_sched_threads_);
@@ -889,14 +887,6 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
         LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
-    }
-    // dep_gen is host-driven (SubmitTrace) — runtime-gated by the host flag —
-    // and compiles out with the other profiling subsystems at SIMPLER_DFX=0.
-    // init() only pops the initial buffer from instance 0's free_queue; the
-    // orchestrator thread still records its idx via
-    // dep_gen_aicpu_set_orch_thread_idx() before the first record_submit.
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
     }
 #endif
 

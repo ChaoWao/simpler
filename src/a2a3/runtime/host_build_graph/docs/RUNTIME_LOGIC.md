@@ -727,10 +727,12 @@ Built by the scheduler from `PTO2TaskDescriptor`:
 | ---- | ------ | --------- | ------- |
 | `runtime_init_ready_` | Thread 3 | Threads 0-2 | Runtime and SM handle initialized |
 
-Profiling-subsystem init (`dump_args` / `pmu` / `dep_gen` / `l2_swimlane`) runs
-once in `SchedulerContext::init()` on the single-threaded cold path, before any
+Profiling-subsystem init (`dump_args` / `pmu` / `l2_swimlane`) runs once in
+`SchedulerContext::init()` on the single-threaded cold path, before any
 scheduler/orchestrator thread starts — so it needs no cross-thread init
-handshake.
+handshake. `dep_gen` is not among them: it captures the graph on the host while
+the orchestrator builds it (see [docs/dfx/dep_gen.md](../../../../../docs/dfx/dep_gen.md)
+§2.2), so nothing about it is device-side.
 
 Startup sequence:
 

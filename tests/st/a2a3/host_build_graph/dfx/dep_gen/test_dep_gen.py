@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+"""dep_gen host-direct capture test for host_build_graph.
+
+Runs the same ``vector_example`` orchestration the tensormap_and_ringbuffer
+dep_gen test uses, with ``--enable-dep-gen``, and asserts the same 6 edges come
+out. host_build_graph orchestrates on the host, so its graph is captured from
+the orchestrator's own dependency path rather than replayed from a device ring —
+sharing the orchestration with the device-orch test is what makes the two
+answers comparable, and this test is where a divergence would surface.
+
+Compute correctness is delegated to the upstream ``vector_example`` tests; this
+case re-uses the orchestration purely to keep coverage on the capture pipeline.
+"""
+
+import json
+import time
+
+import torch
+from simpler.task_interface import ArgDirection as D
+
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
+
+KERNELS_BASE = "../../../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
+# The predicated_dispatch orchestration is the one host_build_graph case whose
+# graph carries all three edge sources, so it covers the tensormap (Step B) and
+# explicit (STEP 1) capture hooks the vector_example case above cannot reach.
+PREDICATED_KERNELS = "../../predicated_dispatch/kernels"
+
+
+def _load_deps(test_cls_name, case_name, run_marker):
+    """Locate this invocation's output dir and parse its deps.json."""
+    safe_label = _sanitize_for_filename(f"{test_cls_name}_{case_name}")
+    outputs = _outputs_dir()
+    matches = [p for p in outputs.glob(f"{safe_label}_*") if p.stat().st_mtime >= run_marker]
+    assert matches, (
+        f"--enable-dep-gen is on and case {case_name!r} ran, but no output dir "
+        f"was created this run — capture pipeline regression"
+    )
+    out_dir = max(matches, key=lambda p: p.stat().st_mtime)
+    deps_path = out_dir / "deps.json"
+    assert deps_path.exists(), (
+        f"--enable-dep-gen is on and {out_dir} exists, but deps.json was not produced — host-direct capture regression"
+    )
+    with deps_path.open() as f:
+        return json.load(f)
+
+
+def _edges_by_position(deps):
+    """Project edges onto (submit_index(pred), submit_index(succ), source).
+
+    tasks[] is in submit order, so position identifies a task independently of
+    which ring the runtime placed it on.
+    """
+    position = {int(t["task_id"]): i for i, t in enumerate(deps["tasks"])}
+    unknown = {
+        (e["pred"], e["succ"])
+        for e in deps["edges"]
+        if int(e["pred"]) not in position or int(e["succ"]) not in position
+    }
+    assert not unknown, f"deps.json contains edges referencing unknown task ids: {unknown}"
+    return {(position[int(e["pred"])], position[int(e["succ"])], e["source"]) for e in deps["edges"]}
+
+
+def _assert_annotations(deps):
+    """Every non-explicit edge names a registered tensor and its consumer slice."""
+    tensor_ids = {int(t["tensor_id"]) for t in deps.get("tensors", []) if "tensor_id" in t}
+    for e in deps["edges"]:
+        assert isinstance(e, dict), f"deps.json edge must be an object, got {type(e).__name__}: {e!r}"
+        if e.get("source") == "explicit":
+            continue
+        tid = e.get("tensor_id")
+        assert tid is not None and int(tid) in tensor_ids, (
+            f"edge {e.get('pred')}->{e.get('succ')} (source={e.get('source')}) "
+            f"references tensor_id {tid} absent from tensors[]"
+        )
+        assert "consumer_shape" in e and "consumer_start_offset" in e and "consumer_strides" in e, (
+            f"edge {e.get('pred')}->{e.get('succ')} (source={e.get('source')}) "
+            f"missing consumer_shape/start_offset/strides"
+        )
+
+
+@scene_test(level=2, runtime="host_build_graph")
+class TestDepGenHostBuildGraph(SceneTestCase):
+    """Vector example on host_build_graph, run with dep_gen enabled."""
+
+    CALLABLE = {
+        "orchestration": {
+            "source": f"{KERNELS_BASE}/orchestration/example_orchestration.cpp",
+            "function_name": "aicpu_orchestration_entry",
+            "signature": [D.IN, D.IN, D.OUT],
+        },
+        "incores": [
+            {
+                "func_id": 0,
+                "source": f"{KERNELS_BASE}/aiv/kernel_add.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.IN, D.OUT],
+            },
+            {
+                "func_id": 1,
+                "source": f"{KERNELS_BASE}/aiv/kernel_add_scalar.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.OUT],
+            },
+            {
+                "func_id": 2,
+                "source": f"{KERNELS_BASE}/aiv/kernel_mul.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.IN, D.OUT],
+            },
+        ],
+    }
+
+    CASES = [
+        {
+            "name": "default",
+            "platforms": ["a2a3sim", "a2a3"],
+            "config": {"aicpu_thread_num": 4},
+            "params": {},
+        },
+    ]
+
+    def generate_args(self, params):
+        SIZE = 128 * 128
+        return TaskArgsBuilder(
+            Tensor("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
+            Tensor("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
+            Tensor("f", torch.zeros(SIZE, dtype=torch.float32)),
+        )
+
+    def compute_golden(self, args, params):
+        args.f[:] = (args.a + args.b + 1) * (args.a + args.b + 2) + (args.a + args.b)
+
+    def test_run(self, st_platform, st_worker, request):
+        # Run the standard scene-test loop, then assert the captured graph for
+        # the cases that ran on this platform. Without the override the pytest
+        # path would pass while capture produced nothing. Marker taken before
+        # the run so _post_validate binds to this invocation's output dir.
+        run_marker = int(time.time())  # floor to whole seconds: safe on a coarse-mtime fs
+        super().test_run(st_platform, st_worker, request)
+        if not self._effective_enable_dep_gen(request):
+            return
+        for case in self.CASES:
+            if st_platform in case.get("platforms", []):
+                self._post_validate(case, run_marker)
+
+    def _post_validate(self, case, run_marker):
+        """Assert deps.json holds the 6 edges of example_orchestration.cpp."""
+        deps = _load_deps("TestDepGenHostBuildGraph", case["name"], run_marker)
+
+        tasks = deps.get("tasks", [])
+        assert len(tasks) == 5, f"expected 5 submitted tasks, got {len(tasks)}: {[t.get('task_id') for t in tasks]}"
+
+        # example_orchestration.cpp, in submit order:
+        #   t0: c = a + b   t1: d = c + 1   t2: e = c + 2   t3: g = d * e   t4: f = g + c
+        # Every edge is born in creator retention: the intermediates are
+        # runtime-allocated OUTPUT tensors, which register_task_outputs does not
+        # put in the tensormap, so Step B has nothing to match here.
+        got = _edges_by_position(deps)
+        expected = {
+            (0, 1, "creator"),
+            (0, 2, "creator"),
+            (1, 3, "creator"),
+            (2, 3, "creator"),
+            (0, 4, "creator"),
+            (3, 4, "creator"),
+        }
+        assert got == expected, (
+            f"captured graph differs from the orchestration's dependencies: "
+            f"missing={expected - got}, extra={got - expected}"
+        )
+
+        _assert_annotations(deps)
+
+
+@scene_test(level=2, runtime="host_build_graph")
+class TestDepGenHostBuildGraphEdgeSources(SceneTestCase):
+    """predicated_dispatch on host_build_graph: covers the tensormap + explicit hooks.
+
+    The vector_example case above only produces creator edges, so on its own it
+    leaves two of the three capture hooks unasserted. This orchestration declares
+    a dependency (`set_dependencies` → explicit) and passes INOUT tensors through
+    the tensormap (→ tensormap edges with producer-side geometry).
+    """
+
+    RTOL = 0
+    ATOL = 0
+
+    CALLABLE = {
+        "orchestration": {
+            "source": f"{PREDICATED_KERNELS}/orchestration/predicated_dispatch_orch.cpp",
+            "function_name": "aicpu_orchestration_entry",
+            "signature": [D.INOUT, D.INOUT, D.INOUT],  # X, Y, gate
+        },
+        "incores": [
+            {
+                "func_id": 0,
+                "name": "WRITE_CONST",
+                "source": f"{PREDICATED_KERNELS}/aic/kernel_write_const.cpp",
+                "core_type": "aic",
+                "signature": [D.INOUT],
+            },
+            {
+                "func_id": 1,
+                "name": "COPY_FIRST",
+                "source": f"{PREDICATED_KERNELS}/aic/kernel_copy_first.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.INOUT],
+            },
+            {
+                "func_id": 2,
+                "name": "CLOBBER",
+                "source": f"{PREDICATED_KERNELS}/aic/kernel_clobber.cpp",
+                "core_type": "aic",
+                "signature": [D.INOUT],
+            },
+            {
+                "func_id": 3,
+                "name": "WRITE_GATE",
+                "source": f"{PREDICATED_KERNELS}/aic/kernel_write_gate.cpp",
+                "core_type": "aic",
+                "signature": [D.INOUT],
+            },
+        ],
+    }
+
+    CASES = [
+        {
+            "name": "gate_open",
+            "platforms": ["a2a3sim", "a2a3"],
+            "config": {"aicpu_thread_num": 2},
+            "params": {"case": 2},
+        },
+    ]
+
+    def generate_args(self, params):
+        return TaskArgsBuilder(
+            Tensor("x", torch.full((16,), -1.0, dtype=torch.float32)),
+            Tensor("y", torch.full((16,), -1.0, dtype=torch.float32)),
+            Tensor("gate", torch.full((16,), -1, dtype=torch.int32)),
+            Scalar("case", int(params["case"])),
+        )
+
+    def compute_golden(self, args, params):
+        # case=2 opens the gate, so the clobber dispatches and X/Y end at 999.0.
+        args.gate[0] = 1
+        args.x[0] = 999.0
+        args.y[0] = 999.0
+
+    def test_run(self, st_platform, st_worker, request):
+        run_marker = int(time.time())
+        super().test_run(st_platform, st_worker, request)
+        if not self._effective_enable_dep_gen(request):
+            return
+        for case in self.CASES:
+            if st_platform in case.get("platforms", []):
+                self._post_validate(case, run_marker)
+
+    def _post_validate(self, case, run_marker):
+        deps = _load_deps("TestDepGenHostBuildGraphEdgeSources", case["name"], run_marker)
+
+        tasks = deps.get("tasks", [])
+        assert len(tasks) == 4, f"expected 4 submitted tasks, got {len(tasks)}: {[t.get('task_id') for t in tasks]}"
+
+        # predicated_dispatch_orch.cpp, in submit order:
+        #   t0 WRITE_GATE(gate)  t1 WRITE_CONST(X)
+        #   t2 CLOBBER(X, set_dependencies={t0})  t3 COPY_FIRST(X -> Y)
+        # t2 declares t0 (explicit) and reads X after t1 wrote it (tensormap);
+        # t3 reads X after t2 (tensormap).
+        got = _edges_by_position(deps)
+        expected = {(0, 2, "explicit"), (1, 2, "tensormap"), (2, 3, "tensormap")}
+        assert got == expected, (
+            f"captured graph differs from the orchestration's dependencies: "
+            f"missing={expected - got}, extra={got - expected}"
+        )
+
+        _assert_annotations(deps)
+
+        # A tensormap edge is the only one that carries the producer's slice, and
+        # it is read off the live PTO2TensorMapEntry before an INOUT+COVERED
+        # lookup removes it — an empty producer block means that ordering broke.
+        for e in deps["edges"]:
+            if e["source"] != "tensormap":
+                continue
+            assert e.get("overlap"), f"tensormap edge {e['pred']}->{e['succ']} missing overlap status"
+            assert e.get("producer_shape"), f"tensormap edge {e['pred']}->{e['succ']} missing producer_shape"
+            assert "producer_start_offset" in e and "producer_strides" in e, (
+                f"tensormap edge {e['pred']}->{e['succ']} missing producer_start_offset/producer_strides"
+            )
+
+        # An explicit edge is not tied to a tensor arg and carries no slice.
+        for e in deps["edges"]:
+            if e["source"] != "explicit":
+                continue
+            assert e["arg"] == -1, f"explicit edge {e['pred']}->{e['succ']} should have arg=-1, got {e['arg']}"
+            assert "tensor_id" not in e, f"explicit edge {e['pred']}->{e['succ']} should carry no tensor_id"
+
+
+if __name__ == "__main__":
+    SceneTestCase.run_module(__name__)

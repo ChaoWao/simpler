@@ -11,7 +11,7 @@
 
 /**
  * @file pto_dep_compute.h
- * @brief Dependency computation primitives shared by runtime submit_task and dep_gen replay.
+ * @brief Dependency computation primitives for runtime submit_task.
  *
  * Two header-only template entry points:
  *
@@ -26,7 +26,7 @@
  * `last_task_alive` shortcut + unchecked slot lookup is subtly different from the
  * `slot_state->task->task_id == producer` reuse check in STEP 3. Unifying them would
  * require two emit semantics or a marginal behavior change in transients — not worth
- * the minor structural overlap. Replay handles STEP 1 with a one-line loop of its own.
+ * the minor structural overlap.
  *
  * The Emit callback contract:
  *   bool emit(PTO2TaskId producer);
@@ -34,10 +34,19 @@
  *       producer-not-alive / dedup-hit / etc. all return true silently)
  *     - return false to signal fatal (e.g. fanin spill overflow); caller bails
  *
- * Performance: Emit is a template parameter, not std::function. Both runtime
- * (lambda capturing fanin_builder + sm_header) and replay (lambda capturing edge
- * vector) instantiate at the call site and inline through. Do NOT replace with
- * std::function — it would break the inlining and add ~5 ns/call to the orch hot path.
+ * The Annotate callback contract (dep_gen graph capture):
+ *   void annotate.creator(int32_t arg_idx, const Tensor &consumer, PTO2TaskId producer);
+ *   void annotate.tensormap(int32_t arg_idx, const Tensor &consumer,
+ *                           const PTO2TensorMapEntry &entry, OverlapStatus overlap);
+ * Both fire for exactly the producers `emit` saw, with the tensor-side context an
+ * edge needs. `tensormap` runs before the INOUT/COVERED remove_entry(), so `entry`
+ * is still live when it is read. NoDepAnnotate is the empty default and compiles
+ * away.
+ *
+ * Performance: Emit and Annotate are template parameters, not std::function. The
+ * runtime lambda (capturing fanin_builder + sm_header) instantiates at the call site
+ * and inlines through. Do NOT replace with std::function — it would break the
+ * inlining and add ~5 ns/call to the orch hot path.
  */
 
 #ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_
@@ -66,6 +75,15 @@ struct DepInputs {
 };
 
 /**
+ * Empty Annotate: every hook is a no-op, so an un-annotated compute_task_fanin
+ * costs exactly what it did before the hooks existed.
+ */
+struct NoDepAnnotate {
+    void creator(int32_t, const Tensor &, PTO2TaskId) const {}
+    void tensormap(int32_t, const Tensor &, const PTO2TensorMapEntry &, OverlapStatus) const {}
+};
+
+/**
  * Compute fanin for a task being submitted (STEP 3: Step A creator retention +
  * Step B tensormap modifier lookup).
  *
@@ -77,9 +95,10 @@ struct DepInputs {
  * @return true on success (or producer-skipped-silently); false if emit signaled
  *         fatal — caller should propagate (after any fatal bookkeeping done by emit).
  */
-template <typename Emit>
-[[nodiscard]] inline bool
-compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, Emit emit) {
+template <typename Emit, typename Annotate = NoDepAnnotate>
+[[nodiscard]] inline bool compute_task_fanin(
+    const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_manual_scope, Emit emit, Annotate annotate = Annotate{}
+) {
     if (in_manual_scope) {
         return true;
     }
@@ -100,6 +119,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
             if (!emit(owner)) {
                 return false;
             }
+            annotate.creator(i, *tensor, owner);
         }
 
         // Step B: only INPUT/INOUT need modifier dependency lookup.
@@ -116,6 +136,7 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
                 fatal = true;
                 return false;  // stop iteration
             }
+            annotate.tensormap(i, *tensor, entry, overlap_status);
             if (ptype == TensorArgType::INOUT && overlap_status == OverlapStatus::COVERED) {
                 tensor_map.remove_entry(entry);
             }

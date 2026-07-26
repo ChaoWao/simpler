@@ -44,19 +44,33 @@
 #include "host/host_regs.h"  // Register address retrieval
 #include "host/raii_scope_guard.h"
 
-// dep_gen_replay_emit_deps_json: strong symbol provided by
-// runtime/tensormap_and_ringbuffer/host/dep_gen_replay.cpp when that runtime is
-// linked into host_runtime.so. host_build_graph has no replay implementation
-// today, so its host_runtime.so falls through to this weak stub. visibility=
-// hidden keeps the stub off the global dynamic symbol table so it can't
-// accidentally shadow the strong symbol via RTLD_GLOBAL.
-// LOG_DEBUG (not WARN): runtimes that don't link dep_gen never enable it in
-// practice, so this path is unreachable for end users — the symbol exists
-// purely to keep the .so loadable.
+// dep_gen has two shapes, one per orchestration site, and each runtime provides
+// the strong symbols for the one it uses:
+//   - device orchestration (tensormap_and_ringbuffer): the AICPU writes a ring
+//     of captured submits, the host collector drains it, and
+//     `dep_gen_replay_emit_deps_json` (runtime/.../host/dep_gen_replay.cpp)
+//     replays them into deps.json.
+//   - host orchestration (host_build_graph): the graph is captured from the
+//     orchestrator's own dependency path as it runs on the host, and
+//     `dep_gen_host_graph_*` (runtime/.../host/dep_gen_host_graph.cpp) writes it
+//     out directly — no ring, no collector, nothing to reconcile.
+// A runtime links only its own half, so each half needs a weak fallback here.
+// visibility=hidden keeps the stubs off the global dynamic symbol table so they
+// can't accidentally shadow a strong symbol via RTLD_GLOBAL.
+// LOG_DEBUG (not WARN): the runner picks the shape via
+// `dep_gen_host_graph_active()`, so neither stub is reachable when dep_gen is on
+// — they exist purely to keep the .so loadable.
 extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_deps_json(
     const struct DepGenRecord * /*records*/, size_t /*num_records*/, const char * /*deps_json_path*/
 ) {
     LOG_DEBUG("dep_gen replay not implemented for this runtime — deps.json skipped");
+    return -1;
+}
+
+extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_set_enabled(bool /*enable*/) {}
+extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_emit(const char * /*deps_json_path*/) {
+    LOG_DEBUG("dep_gen host graph not implemented for this runtime — deps.json skipped");
     return -1;
 }
 
@@ -191,6 +205,15 @@ int DeviceRunner::destroy_comm_stream(void *stream) {
 // live on `DeviceRunnerBase` — see
 // `src/common/platform/onboard/host/device_runner_base.cpp`.
 
+void DeviceRunner::set_dep_gen_enabled(bool enable) {
+    enable_dep_gen_ = enable;
+    // Arms host-side capture for a host-orch runtime (no-op weak stub for the
+    // device-orch one). Enabling clears the previous run's graph, so this must
+    // stay ahead of the orchestration it captures — the c_api latches the
+    // CallConfig before the bind for exactly that reason.
+    dep_gen_host_graph_set_enabled(enable);
+}
+
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
@@ -274,7 +297,11 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (enable_dump_args_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     if (enable_l2_swimlane_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_L2_SWIMLANE);
     if (enable_pmu_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
-    if (enable_dep_gen_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
+    // The device flag drives the AICPU writer only; a host-orch runtime has no
+    // device-side dep_gen to switch on.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
+        SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
+    }
     if (enable_scope_stats_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS);
     kernel_args_.args.enable_profiling_flag = enable_profiling_flag;
 
@@ -358,7 +385,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    if (enable_dep_gen_) {
+    // A host-orch runtime already holds the graph in host memory; standing up
+    // the device ring and its collector would allocate shared memory and a
+    // drain thread for a stream that never produces a record.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         rc = init_dep_gen(launch_aicpu_num, device_id_);
         if (rc != 0) {
             LOG_ERROR("init_dep_gen failed: %d", rc);
@@ -409,7 +439,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     start_shared_collectors_for_run();
     // a2a3-only dep_gen collector — share the same thread_factory shape as base.
-    if (enable_dep_gen_) {
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         auto thread_factory = [this](std::function<void()> fn) {
             return create_thread(std::move(fn));
         };
@@ -526,15 +556,24 @@ int DeviceRunner::reap_run() {
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     teardown_shared_collectors_after_run();
 
-    // a2a3-only dep_gen teardown: stop + reconcile + replay emit.
+    // a2a3-only dep_gen teardown: host-orch emits the graph it captured during
+    // this run's orchestration; device-orch stops the collector, reconciles the
+    // ring, and replays the records.
     if (enable_dep_gen_) {
-        dep_gen_collector_.stop();
-        if (dep_gen_collector_.reconcile_counters()) {
-            const auto &records = dep_gen_collector_.records();
-            const std::string deps = make_deps_json_path(output_prefix_);
-            int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+        const std::string deps = make_deps_json_path(output_prefix_);
+        if (dep_gen_host_graph_active()) {
+            int rc = dep_gen_host_graph_emit(deps.c_str());
             if (rc != 0) {
-                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
+                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", rc);
+            }
+        } else {
+            dep_gen_collector_.stop();
+            if (dep_gen_collector_.reconcile_counters()) {
+                const auto &records = dep_gen_collector_.records();
+                int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+                if (rc != 0) {
+                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
+                }
             }
         }
     }

@@ -35,7 +35,6 @@
 #include "aicpu/l2_swimlane_collector_aicpu.h"
 #include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
-#include "aicpu/dep_gen_collector_aicpu.h"
 #include "common/l2_swimlane_profiling.h"
 #include "common/unified_log.h"
 
@@ -347,9 +346,6 @@ void AicpuExecutor::deinit(Runtime *runtime) {
 
     // Clear file-scope PTO2Runtime pointer (freed by orchestrator thread before deinit)
     rt = nullptr;
-
-    // Clear dep_gen file-local bookkeeping. No-op when dep_gen is disabled.
-    dep_gen_aicpu_finalize();
 
     LOG_INFO_V0("DeInit: Runtime execution state reset");
 

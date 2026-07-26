@@ -49,6 +49,7 @@
 
 #include "../common/pto_runtime_status.h"
 #include "../runtime/common.h"
+#include "../runtime/dep_gen_host_graph.h"
 #include "../runtime/pto_orchestrator.h"
 #include "../runtime/pto_runtime2.h"
 #include "../runtime/pto_shared_memory.h"
@@ -444,6 +445,9 @@ int32_t run_host_orchestration(
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
     void *host_orch_func_ptr, const L2TaskArgs &orch_l2
 ) {
+    // The dep_gen graph belongs to the orchestration that is about to run.
+    dep_gen_host_graph_begin_capture();
+
     std::vector<uint8_t> host_sm_buf(sm_size, 0);
     void *host_sm = host_sm_buf.data();
 
