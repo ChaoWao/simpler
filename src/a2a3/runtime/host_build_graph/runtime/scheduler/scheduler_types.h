@@ -144,19 +144,33 @@ static_assert(sizeof(CoreExecState) == 64, "CoreExecState must occupy exactly on
 
 class alignas(64) CoreTracker {
 public:
-    static inline int32_t MAX_CORE_PER_THREAD = 63;
-    static constexpr int32_t MAX_CLUSTERS = 63 / 3;
+    // The ceiling is the platform's cluster count, not the width of the backing
+    // word: a run takes the whole device, and aicpu_thread_num can leave a single
+    // scheduler thread owning all of it.
+    static constexpr int32_t MAX_CLUSTERS = PLATFORM_MAX_BLOCKDIM;
+    static constexpr int32_t MAX_CORE_PER_THREAD = MAX_CLUSTERS * PLATFORM_CORES_PER_BLOCKDIM;
 
 public:
     CoreTracker() = default;
 
     class BitStates {
     public:
+        // 3 state bits per cluster, so the backing word must hold
+        // MAX_CLUSTERS * 3 bits. 128 covers both arches (a2a3 72, a5 108) with
+        // room; a single uint64_t held only 21 clusters, fewer than either
+        // device has.
+        using Storage = unsigned __int128;
+
         BitStates() = default;
 
-        explicit BitStates(uint64_t states) :
+        explicit BitStates(Storage states) :
             states_(states) {}
         void init() { states_ = 0; }
+
+        // A mask with exactly `offset` set. The shift lives here so a caller
+        // cannot silently narrow it by writing `1ULL << offset`, which is
+        // undefined once offset reaches 64.
+        static BitStates bit(int32_t offset) { return BitStates(Storage(1) << offset); }
 
         BitStates operator~() const { return BitStates(~states_); }
         BitStates operator&(const BitStates &other) const { return BitStates(states_ & other.states_); }
@@ -169,36 +183,47 @@ public:
         void operator^=(const BitStates &other) { states_ ^= other.states_; }
 
         bool has_value() const { return states_ > 0; }
-        int32_t count() const { return __builtin_popcountll(states_); }
-        void clear_bit(int32_t offset) { states_ &= ~(1ULL << offset); }
+        int32_t count() const {
+            return __builtin_popcountll(static_cast<uint64_t>(states_)) +
+                   __builtin_popcountll(static_cast<uint64_t>(states_ >> 64));
+        }
+        void clear_bit(int32_t offset) { states_ &= ~(Storage(1) << offset); }
 
         // Extract the lowest set bit from mask, clear it, and return its position.
         // Returns -1 if mask is empty.
         int32_t pop_first() {
             if (states_ == 0) return -1;
-            int32_t pos = __builtin_ctzll(states_);
+            const uint64_t low = static_cast<uint64_t>(states_);
+            const int32_t pos =
+                (low != 0) ? __builtin_ctzll(low) : 64 + __builtin_ctzll(static_cast<uint64_t>(states_ >> 64));
             states_ &= states_ - 1;
             return pos;
         }
 
     private:
-        uint64_t states_{0};
+        Storage states_{0};
     };
 
 public:
+    static_assert(MAX_CORE_PER_THREAD <= 128, "CoreTracker state bits must fit BitStates::Storage");
+
     void init(int32_t cluster_count) {
+        always_assert(
+            cluster_count >= 0 && cluster_count <= MAX_CLUSTERS && "cluster_count outside CoreTracker capacity"
+        );
         cluster_count_ = cluster_count;
         aic_mask_.init();
         aiv_mask_.init();
         pending_occupied_.init();
         for (int32_t i = 0; i < cluster_count; i++) {
-            aic_mask_ |= BitStates(1ULL << (i * 3));
-            aiv_mask_ |= BitStates(6ULL << (i * 3));
+            aic_mask_ |= BitStates::bit(i * 3);
+            aiv_mask_ |= (BitStates::bit(i * 3 + 1) | BitStates::bit(i * 3 + 2));
         }
         core_states_ = aic_mask_ | aiv_mask_;
     }
 
     void set_cluster(int32_t cluster_idx, int32_t aic_wid, int32_t aiv0_wid, int32_t aiv1_wid) {
+        always_assert(cluster_idx >= 0 && cluster_idx < MAX_CLUSTERS && "cluster_idx outside CoreTracker capacity");
         core_id_map_[cluster_idx * 3] = aic_wid;
         core_id_map_[cluster_idx * 3 + 1] = aiv0_wid;
         core_id_map_[cluster_idx * 3 + 2] = aiv1_wid;
@@ -274,9 +299,9 @@ public:
         case PTO2ResourceShape::DUMMY:
             // DUMMY tasks never reach the core-tracker dispatch path; they are
             // completed inline by resolve_and_dispatch via dummy_ready_queue.
-            return BitStates(0ULL);
+            return {};
         }
-        return BitStates(0ULL);
+        return {};
     }
 
     int32_t get_aic_core_id(int32_t cluster_offset) const { return core_id_map_[cluster_offset]; }
@@ -288,27 +313,27 @@ public:
     int32_t get_aiv1_core_offset(int32_t cluster_offset) const { return cluster_offset + 2; }
 
     bool is_aic_core_idle(int32_t cluster_offset) const {
-        return ((core_states_ >> cluster_offset) & BitStates(1ULL)).has_value();
+        return ((core_states_ >> cluster_offset) & BitStates::bit(0)).has_value();
     }
     bool is_aiv0_core_idle(int32_t cluster_offset) const {
-        return ((core_states_ >> (cluster_offset + 1)) & BitStates(1ULL)).has_value();
+        return ((core_states_ >> (cluster_offset + 1)) & BitStates::bit(0)).has_value();
     }
     bool is_aiv1_core_idle(int32_t cluster_offset) const {
-        return ((core_states_ >> (cluster_offset + 2)) & BitStates(1ULL)).has_value();
+        return ((core_states_ >> (cluster_offset + 2)) & BitStates::bit(0)).has_value();
     }
 
     // --- State mutation ---
 
     // Toggle bit at the given bit offset (running <-> idle)
-    void change_core_state(int32_t bit_offset) { core_states_ ^= BitStates(1ULL << bit_offset); }
+    void change_core_state(int32_t bit_offset) { core_states_ ^= BitStates::bit(bit_offset); }
 
     // --- Pending-occupied tracking ---
     // Tracks whether a core's pending payload slot is occupied (awaiting hardware ACK).
     // SET on dispatch (both running-first and pending), CLEAR on idle or pending_freed.
 
-    void set_pending_occupied(int32_t bit_offset) { pending_occupied_ |= BitStates(1ULL << bit_offset); }
+    void set_pending_occupied(int32_t bit_offset) { pending_occupied_ |= BitStates::bit(bit_offset); }
     void clear_pending_occupied(int32_t bit_offset) {
-        pending_occupied_ ^= (pending_occupied_ & BitStates(1ULL << bit_offset));
+        pending_occupied_ ^= (pending_occupied_ & BitStates::bit(bit_offset));
     }
 
     // --- Two-phase dispatch queries ---
@@ -344,15 +369,15 @@ public:
     // task. REJECT only when a used core's pending slot is already occupied (no free
     // slot) or the mask is empty.
     MixPlacement classify_mix_cluster(int32_t cluster_offset, uint8_t core_mask) const {
-        BitStates used(0ULL);
+        BitStates used;
         if (core_mask & PTO2_SUBTASK_MASK_AIC) {
-            used |= BitStates(1ULL << cluster_offset);
+            used |= BitStates::bit(cluster_offset);
         }
         if (core_mask & PTO2_SUBTASK_MASK_AIV0) {
-            used |= BitStates(1ULL << (cluster_offset + 1));
+            used |= BitStates::bit(cluster_offset + 1);
         }
         if (core_mask & PTO2_SUBTASK_MASK_AIV1) {
-            used |= BitStates(1ULL << (cluster_offset + 2));
+            used |= BitStates::bit(cluster_offset + 2);
         }
         if (!used.has_value() || (pending_occupied_ & used).has_value()) {
             return MixPlacement::REJECT;
@@ -374,10 +399,10 @@ public:
 
     // Cores of `cluster_offset` named by core_mask.
     BitStates mix_used_cores(int32_t cluster_offset, uint8_t core_mask) const {
-        BitStates used(0ULL);
-        if (core_mask & PTO2_SUBTASK_MASK_AIC) used |= BitStates(1ULL << cluster_offset);
-        if (core_mask & PTO2_SUBTASK_MASK_AIV0) used |= BitStates(1ULL << (cluster_offset + 1));
-        if (core_mask & PTO2_SUBTASK_MASK_AIV1) used |= BitStates(1ULL << (cluster_offset + 2));
+        BitStates used;
+        if (core_mask & PTO2_SUBTASK_MASK_AIC) used |= BitStates::bit(cluster_offset);
+        if (core_mask & PTO2_SUBTASK_MASK_AIV0) used |= BitStates::bit(cluster_offset + 1);
+        if (core_mask & PTO2_SUBTASK_MASK_AIV1) used |= BitStates::bit(cluster_offset + 2);
         return used;
     }
 
@@ -397,12 +422,12 @@ public:
 
     // Clusters where every used core has a free slot (gated MIX split gate/iteration).
     BitStates get_mix_split_cluster_offset_states(uint8_t core_mask) const {
-        BitStates result(0ULL);
+        BitStates result;
         BitStates candidates = get_cluster_offset_states();
         while (candidates.has_value()) {
             int32_t off = candidates.pop_first();
             if (mix_cluster_all_slots(off, core_mask)) {
-                result |= BitStates(1ULL << off);
+                result |= BitStates::bit(off);
             }
         }
         return result;
@@ -413,12 +438,12 @@ public:
     }
 
     BitStates get_mix_running_cluster_offset_states(uint8_t core_mask) const {
-        BitStates result(0ULL);
+        BitStates result;
         BitStates candidates = get_cluster_offset_states();
         while (candidates.has_value()) {
             int32_t cluster_offset = candidates.pop_first();
             if (classify_mix_cluster(cluster_offset, core_mask) == MixPlacement::RUNNING) {
-                result |= BitStates(1ULL << cluster_offset);
+                result |= BitStates::bit(cluster_offset);
             }
         }
         return result;
@@ -472,7 +497,7 @@ private:
     BitStates aiv_mask_;
     BitStates core_states_;
     BitStates pending_occupied_;
-    int32_t core_id_map_[63];  // bit_position -> worker_id, max 21 clusters * 3
+    int32_t core_id_map_[MAX_CORE_PER_THREAD];  // bit position -> worker id
 };
 
 // =============================================================================

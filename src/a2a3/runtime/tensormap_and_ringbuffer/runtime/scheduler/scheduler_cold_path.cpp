@@ -903,6 +903,19 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     int32_t own_n = 0;
     for (int32_t ci = tidx; ci < aic_n; ci += active)
         own_n++;
+    // Mirrors the check assign_cores_to_threads() makes on the serial path. A
+    // thread owning more clusters than CoreTracker can hold used to write past
+    // core_id_map_ into the next tracker, which is the orchestrator's on the
+    // decoupled path: its cluster_count_ became garbage and shutdown() then
+    // sent AICORE_EXIT to a core the scheduler was still dispatching to.
+    if (own_n > CoreTracker::MAX_CLUSTERS) {
+        LOG_ERROR(
+            "Thread %d owns %d clusters, exceeding CoreTracker capacity %d (raise aicpu_thread_num)", tidx, own_n,
+            CoreTracker::MAX_CLUSTERS
+        );
+        handshake_failed_.store(true, std::memory_order_release);
+        return;
+    }
     tracker.init(own_n);
 
     int32_t local = 0;
