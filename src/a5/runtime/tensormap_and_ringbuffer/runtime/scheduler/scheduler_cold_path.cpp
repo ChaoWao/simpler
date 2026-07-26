@@ -973,9 +973,7 @@ void SchedulerContext::post_handshake_profiling_init() {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
         LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
     }
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
-    }
+    if (is_dep_gen_enabled()) {}
 #endif
 }
 
@@ -1220,9 +1218,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // init() only pops the initial buffer from instance 0's free_queue; the
     // orchestrator thread still records its idx via
     // dep_gen_aicpu_set_orch_thread_idx() before the first record_submit.
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
-    }
+    if (is_dep_gen_enabled()) {}
 #endif
 
     // total_tasks_ is read in pre_handshake_init (before the orchestrator's early
