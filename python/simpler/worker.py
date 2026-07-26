@@ -952,6 +952,28 @@ def _buffer_field_addr(buf, offset: int) -> int:
     return ctypes.addressof(ctypes.c_char.from_buffer(buf)) + offset
 
 
+# Pacing for the idle branch of the forked sub/child worker mailbox polls.
+# The first _MAILBOX_SPIN_POLLS consecutive idle passes spin, so a child that
+# is dispatched again right away still answers at spin latency; past that the
+# poll sleeps, matching the 50 us granularity the parent's dispatch poll
+# already uses (worker_manager.cpp::LocalMailboxEndpoint::run).
+_MAILBOX_SPIN_POLLS = 200
+_MAILBOX_IDLE_POLL_S = 50e-6
+
+
+def _mailbox_idle_wait(idle_polls: int) -> int:
+    """Pace one idle pass of a child mailbox poll; returns the new idle count.
+
+    A forked child whose poll never pauses holds a core for its entire
+    lifetime, so once the live sub/child workers outnumber the available cores
+    they starve each other and parallel dispatch degrades toward serial.
+    Callers reset the count to 0 whenever a pass finds work.
+    """
+    if idle_polls >= _MAILBOX_SPIN_POLLS:
+        time.sleep(_MAILBOX_IDLE_POLL_S)
+    return idle_polls + 1
+
+
 def _write_error(buf, code: int, msg: str = "") -> None:
     """Write an (error code, message) tuple into the mailbox error region.
 
@@ -1003,7 +1025,7 @@ def _read_args_from_mailbox(buf) -> TaskArgs:
     return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
 
 
-def _sub_worker_loop(
+def _sub_worker_loop(  # noqa: PLR0912 -- unified TASK_READY / CONTROL_REQUEST / SHUTDOWN / idle state machine
     buf,
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
@@ -1019,10 +1041,12 @@ def _sub_worker_loop(
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
     host_buf_ranges: list[tuple[int, int, int]] = []
+    idle_polls = 0
     try:
         while True:
             state = _mailbox_load_i32(state_addr)
             if state == _TASK_READY:
+                idle_polls = 0
                 digest = _read_task_digest(buf)
                 cid = identity_table.get(digest)
                 fn = registry.get(int(cid)) if cid is not None else None
@@ -1043,6 +1067,7 @@ def _sub_worker_loop(
                 _write_error(buf, code, msg)
                 _mailbox_store_i32(state_addr, _TASK_DONE)
             elif state == _CONTROL_REQUEST:
+                idle_polls = 0
                 sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
                 code = 0
                 msg = ""
@@ -1067,6 +1092,8 @@ def _sub_worker_loop(
                 _mailbox_store_i32(state_addr, _CONTROL_DONE)
             elif state == _SHUTDOWN:
                 break
+            else:
+                idle_polls = _mailbox_idle_wait(idle_polls)
     finally:
         for host_shm, _lo, _hi, _base in host_buf_table.values():
             try:
@@ -1739,9 +1766,11 @@ def _child_worker_loop(
     into the inner Worker (see docs section 7).
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
+    idle_polls = 0
     while True:
         state = _mailbox_load_i32(state_addr)
         if state == _TASK_READY:
+            idle_polls = 0
             digest = _read_task_digest(buf)
             cid = identity_table.get(digest)
             orch_fn = registry.get(int(cid)) if cid is not None else None
@@ -1761,6 +1790,7 @@ def _child_worker_loop(
             _write_error(buf, code, msg)
             _mailbox_store_i32(state_addr, _TASK_DONE)
         elif state == _CONTROL_REQUEST:
+            idle_polls = 0
             sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
             code = 0
             msg = ""
@@ -1821,6 +1851,8 @@ def _child_worker_loop(
         elif state == _SHUTDOWN:
             inner_worker.close()
             break
+        else:
+            idle_polls = _mailbox_idle_wait(idle_polls)
 
 
 class _Lifecycle(enum.Enum):
