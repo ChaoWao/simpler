@@ -279,6 +279,17 @@ _CTRL_PY_IMPORT_REGISTER = 12
 _CTRL_MAP_HOST = 14
 _CTRL_UNMAP_HOST = 15
 
+# Operation names a child puts in its error message when a control command
+# fails, so the parent's re-raised text names the operation and not just a
+# numeric sub-command. Absent entries fall back to the raw number.
+_CTRL_OP_NAMES = {
+    _CTRL_REGISTER: "register",
+    _CTRL_UNREGISTER: "unregister",
+    _CTRL_PY_REGISTER: "py_register",
+    _CTRL_PY_IMPORT_REGISTER: "py_register",
+    _CTRL_PY_UNREGISTER: "py_unregister",
+}
+
 # MAP_HOST payload: token (u64), parent_va (u64), nbytes (u64), then the
 # NUL-free host-buffer shm name as the trailing bytes. UNMAP_HOST payload is the
 # token alone.
@@ -1003,6 +1014,48 @@ def _read_args_from_mailbox(buf) -> TaskArgs:
     return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
 
 
+def _run_mailbox_loop(
+    buf,
+    state_addr: int,
+    *,
+    handle_task,
+    handle_control,
+    on_shutdown=None,
+) -> None:
+    """The mailbox state machine every forked child runs.
+
+    Sole waiter on a child mailbox: sub workers, nested next-level workers and
+    chip processes all reach the parent through this one loop, differing only
+    in what they do with a task and which control sub-commands they accept.
+
+    `handle_task()` and `handle_control(sub_cmd)` each return an
+    ``(error_code, message)`` pair and are responsible for catching their own
+    exceptions, because the message wording is what the parent re-raises and
+    only the caller knows its own context. The pair is published to the
+    mailbox error region *before* the DONE state, so the parent never observes
+    completion without the matching error report.
+
+    `on_shutdown()` runs on SHUTDOWN before the loop exits, for children that
+    own a nested Worker; per-child resource teardown that must survive an
+    exception belongs in the caller's own ``finally``.
+    """
+    while True:
+        state = _mailbox_load_i32(state_addr)
+        if state == _TASK_READY:
+            code, msg = handle_task()
+            _write_error(buf, code, msg)
+            _mailbox_store_i32(state_addr, _TASK_DONE)
+        elif state == _CONTROL_REQUEST:
+            sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
+            code, msg = handle_control(int(sub_cmd))
+            _write_error(buf, code, msg)
+            _mailbox_store_i32(state_addr, _CONTROL_DONE)
+        elif state == _SHUTDOWN:
+            if on_shutdown is not None:
+                on_shutdown()
+            break
+
+
 def _sub_worker_loop(
     buf,
     registry: dict[int, Any],
@@ -1019,54 +1072,43 @@ def _sub_worker_loop(
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
     host_buf_ranges: list[tuple[int, int, int]] = []
+
+    def handle_task() -> tuple[int, str]:
+        digest = _read_task_digest(buf)
+        cid = identity_table.get(digest)
+        fn = registry.get(int(cid)) if cid is not None else None
+        if fn is None:
+            return 1, f"sub_worker: callable hash {_format_digest(digest)} not registered"
+        try:
+            if host_buf_ranges:
+                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+            args = _read_args_from_mailbox(buf)
+            fn(args)
+        except Exception as e:  # noqa: BLE001
+            return 1, _format_exc("sub_worker", e)
+        return 0, ""
+
+    def handle_control(sub_cmd: int) -> tuple[int, str]:
+        try:
+            if sub_cmd == _CTRL_MAP_HOST:
+                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
+            elif sub_cmd == _CTRL_UNMAP_HOST:
+                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
+            else:
+                _handle_py_callable_control(
+                    buf,
+                    registry,
+                    identity_table,
+                    identity_refs,
+                    sub_cmd,
+                    context="sub_worker",
+                )
+        except Exception as e:  # noqa: BLE001
+            return 1, _format_exc("sub_worker control", e)
+        return 0, ""
+
     try:
-        while True:
-            state = _mailbox_load_i32(state_addr)
-            if state == _TASK_READY:
-                digest = _read_task_digest(buf)
-                cid = identity_table.get(digest)
-                fn = registry.get(int(cid)) if cid is not None else None
-                code = 0
-                msg = ""
-                if fn is None:
-                    code = 1
-                    msg = f"sub_worker: callable hash {_format_digest(digest)} not registered"
-                else:
-                    try:
-                        if host_buf_ranges:
-                            _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-                        args = _read_args_from_mailbox(buf)
-                        fn(args)
-                    except Exception as e:  # noqa: BLE001
-                        code = 1
-                        msg = _format_exc("sub_worker", e)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _TASK_DONE)
-            elif state == _CONTROL_REQUEST:
-                sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-                code = 0
-                msg = ""
-                try:
-                    if sub_cmd == _CTRL_MAP_HOST:
-                        _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-                    elif sub_cmd == _CTRL_UNMAP_HOST:
-                        _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-                    else:
-                        _handle_py_callable_control(
-                            buf,
-                            registry,
-                            identity_table,
-                            identity_refs,
-                            int(sub_cmd),
-                            context="sub_worker",
-                        )
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    msg = _format_exc("sub_worker control", e)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _CONTROL_DONE)
-            elif state == _SHUTDOWN:
-                break
+        _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
         for host_shm, _lo, _hi, _base in host_buf_table.values():
             try:
@@ -1396,7 +1438,7 @@ def _ensure_prepared(cw, registry, prepared, cid: int, *, device_id: int) -> Non
     prepared.add(cid)
 
 
-def _run_chip_main_loop(  # noqa: PLR0912, PLR0913, PLR0915 -- unified TASK_READY / CONTROL_REQUEST state machine
+def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every dependency the handlers close over crosses the fork as an explicit arg, and the control handler carries one branch per sub-command
     cw: ChipWorker,
     buf: memoryview,
     mailbox_addr: int,
@@ -1411,7 +1453,7 @@ def _run_chip_main_loop(  # noqa: PLR0912, PLR0913, PLR0915 -- unified TASK_READ
     on_task_done_success=None,
     prepared: set[int] | None = None,
 ) -> None:
-    """Unified TASK_READY / CONTROL_REQUEST / SHUTDOWN state machine.
+    """Chip-process handlers for `_run_mailbox_loop`.
 
     `on_task_done_success`, if provided, is invoked after a successful
     ``run_from_blob`` and before publishing TASK_DONE. It must
@@ -1434,165 +1476,159 @@ def _run_chip_main_loop(  # noqa: PLR0912, PLR0913, PLR0915 -- unified TASK_READ
     # rebuilt from the table on every map/unmap.
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}  # token -> (shm, lo, hi, child_base)
     host_buf_ranges: list[tuple[int, int, int]] = []  # (parent_lo, parent_hi, child_base)
-    try:
-        while True:
-            state = _mailbox_load_i32(state_addr)
-            if state == _TASK_READY:
-                digest = _read_task_digest(buf)
+
+    def handle_task() -> tuple[int, str]:
+        digest = _read_task_digest(buf)
+        cid = identity_table.get(digest)
+        cfg = _read_config_from_mailbox(buf)
+
+        code = 0
+        msg = ""
+        try:
+            if cid is None:
+                raise RuntimeError(f"callable hash {_format_digest(digest)} not registered")
+            # Run only consumes a prepared slot — it never lazily
+            # prepares. The callable must have been staged via
+            # _CTRL_PREPARE first; reaching TASK_READY without it is a
+            # control-flow bug, so fail loudly instead of masking the
+            # missing-prepare with a first-task latency spike.
+            if cid not in prepared:
+                raise RuntimeError(
+                    f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
+                    f"(register via _CTRL_PREPARE first)"
+                )
+            # Redirect any registered host pointer (a parent VA) in the
+            # blob to this child's own mapping before the runtime reads it.
+            # No-op when nothing is registered.
+            if host_buf_ranges:
+                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+            # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
+            # the blob layout is what `write_blob` already wrote, so re-parsing
+            # it in Python is N×40B of avoidable work and a permanent
+            # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
+            # is the source of truth.
+            cw._impl.run_from_blob(cid, mailbox_addr + _OFF_TASK_ARGS_BLOB, _MAILBOX_ARGS_CAPACITY, cfg)
+        except Exception as e:  # noqa: BLE001
+            code = 1
+            msg = _format_exc(f"chip_process dev={device_id}", e)
+
+        # On a successful kernel run, give the caller a chance to do
+        # post-run work (e.g. store_to_host D2H staging) before the
+        # parent sees TASK_DONE. The kernel's failure path skips the
+        # hook because the device output region is undefined and
+        # staging garbage would mask the real error in post-mortems.
+        if code == 0 and on_task_done_success is not None:
+            code, msg = on_task_done_success()
+        return code, msg
+
+    def handle_control(sub_cmd: int) -> tuple[int, str]:  # noqa: PLR0912 -- one branch per control sub-command
+        code = 0
+        msg = ""
+        try:
+            if sub_cmd == _CTRL_MALLOC:
+                size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                ptr = cw.malloc(size)
+                struct.pack_into("Q", buf, _CTRL_OFF_RESULT, ptr)
+            elif sub_cmd == _CTRL_FREE:
+                ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                cw.free(ptr)
+            elif sub_cmd == _CTRL_COPY_TO:
+                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
+                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
+                cw.copy_to(dst, src, n)
+            elif sub_cmd == _CTRL_COPY_FROM:
+                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
+                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
+                cw.copy_from(dst, src, n)
+            elif sub_cmd == _CTRL_PREPARE:
+                digest = _read_control_digest(buf)
                 cid = identity_table.get(digest)
-                cfg = _read_config_from_mailbox(buf)
-
-                code = 0
-                msg = ""
+                if cid is None:
+                    raise RuntimeError(
+                        f"prepare chip={device_id}: callable hash {_format_digest(digest)} not registered"
+                    )
+                _ensure_prepared(cw, registry, prepared, int(cid), device_id=device_id)
+            elif sub_cmd == _CTRL_REGISTER:
+                digest = _read_control_digest(buf)
+                payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                shm_name = _read_ctrl_staged_shm_name(buf)
+                shm = SharedMemory(name=shm_name)
+                shm_buf = shm.buf
+                assert shm_buf is not None
                 try:
-                    if cid is None:
-                        raise RuntimeError(f"callable hash {_format_digest(digest)} not registered")
-                    # Run only consumes a prepared slot — it never lazily
-                    # prepares. The callable must have been staged via
-                    # _CTRL_PREPARE first; reaching TASK_READY without it is a
-                    # control-flow bug, so fail loudly instead of masking the
-                    # missing-prepare with a first-task latency spike.
-                    if cid not in prepared:
+                    if payload_size <= 0 or payload_size > shm.size:
                         raise RuntimeError(
-                            f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
-                            f"(register via _CTRL_PREPARE first)"
+                            f"CTRL_REGISTER payload size mismatch: payload={payload_size}, shm={shm.size}"
                         )
-                    # Redirect any registered host pointer (a parent VA) in the
-                    # blob to this child's own mapping before the runtime reads it.
-                    # No-op when nothing is registered.
-                    if host_buf_ranges:
-                        _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-                    # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
-                    # the blob layout is what `write_blob` already wrote, so re-parsing
-                    # it in Python is N×40B of avoidable work and a permanent
-                    # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
-                    # is the source of truth.
-                    cw._impl.run_from_blob(cid, mailbox_addr + _OFF_TASK_ARGS_BLOB, _MAILBOX_ARGS_CAPACITY, cfg)
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    msg = _format_exc(f"chip_process dev={device_id}", e)
-
-                # On a successful kernel run, give the caller a chance to do
-                # post-run work (e.g. store_to_host D2H staging) before the
-                # parent sees TASK_DONE. The kernel's failure path skips the
-                # hook because the device output region is undefined and
-                # staging garbage would mask the real error in post-mortems.
-                if code == 0 and on_task_done_success is not None:
-                    code, msg = on_task_done_success()
-
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _TASK_DONE)
-            elif state == _CONTROL_REQUEST:
-                sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-                code = 0
-                msg = ""
-                try:
-                    if sub_cmd == _CTRL_MALLOC:
-                        size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        ptr = cw.malloc(size)
-                        struct.pack_into("Q", buf, _CTRL_OFF_RESULT, ptr)
-                    elif sub_cmd == _CTRL_FREE:
-                        ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        cw.free(ptr)
-                    elif sub_cmd == _CTRL_COPY_TO:
-                        dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                        n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                        cw.copy_to(dst, src, n)
-                    elif sub_cmd == _CTRL_COPY_FROM:
-                        dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                        n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                        cw.copy_from(dst, src, n)
-                    elif sub_cmd == _CTRL_PREPARE:
-                        digest = _read_control_digest(buf)
-                        cid = identity_table.get(digest)
-                        if cid is None:
-                            raise RuntimeError(
-                                f"prepare chip={device_id}: callable hash {_format_digest(digest)} not registered"
-                            )
-                        _ensure_prepared(cw, registry, prepared, int(cid), device_id=device_id)
-                    elif sub_cmd == _CTRL_REGISTER:
-                        digest = _read_control_digest(buf)
-                        payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        shm_name = _read_ctrl_staged_shm_name(buf)
-                        shm = SharedMemory(name=shm_name)
-                        shm_buf = shm.buf
-                        assert shm_buf is not None
-                        try:
-                            if payload_size <= 0 or payload_size > shm.size:
-                                raise RuntimeError(
-                                    f"CTRL_REGISTER payload size mismatch: payload={payload_size}, shm={shm.size}"
-                                )
-                            callable_obj = ChipCallable.from_bytes(bytes(shm_buf[:payload_size]))
-                            _validate_chip_payload_digest(
-                                callable_obj,
-                                digest,
-                                platform=chip_platform,
-                                runtime=chip_runtime,
-                                context=f"chip_process dev={device_id}",
-                            )
-                            if digest in identity_table:
-                                identity_refs[digest] = identity_refs.get(digest, 1) + 1
-                            else:
-                                cid = _install_local_identity(
-                                    registry, identity_table, identity_refs, digest, callable_obj
-                                )
-                                # Self-heal when a prior unregister popped the local
-                                # identity table but failed before clearing device
-                                # prepared state for the reusable private slot.
-                                if int(cid) in prepared:
-                                    try:
-                                        cw._unregister_slot(int(cid))
-                                    except Exception:  # noqa: BLE001
-                                        pass
-                                    prepared.discard(int(cid))
-                                exported = ctypes.c_char.from_buffer(shm_buf)
-                                try:
-                                    addr = ctypes.addressof(exported)
-                                    cw._impl.register_callable_from_blob(int(cid), addr)
-                                finally:
-                                    del exported
-                                prepared.add(int(cid))
-                        finally:
-                            shm_buf.release()
-                            # Release the local mmap as soon as prepare returns;
-                            # register_callable has already H2D-copied the bytes to
-                            # device GM, so the child no longer needs the shm.
-                            shm.close()
-                    elif sub_cmd == _CTRL_UNREGISTER:
-                        digest = _read_control_digest(buf)
-                        cid, removed = _remove_local_identity(registry, identity_table, identity_refs, digest)
-                        if removed and cid is not None:
-                            cw._unregister_slot(int(cid))
+                    callable_obj = ChipCallable.from_bytes(bytes(shm_buf[:payload_size]))
+                    _validate_chip_payload_digest(
+                        callable_obj,
+                        digest,
+                        platform=chip_platform,
+                        runtime=chip_runtime,
+                        context=f"chip_process dev={device_id}",
+                    )
+                    if digest in identity_table:
+                        identity_refs[digest] = identity_refs.get(digest, 1) + 1
+                    else:
+                        cid = _install_local_identity(registry, identity_table, identity_refs, digest, callable_obj)
+                        # Self-heal when a prior unregister popped the local
+                        # identity table but failed before clearing device
+                        # prepared state for the reusable private slot.
+                        if int(cid) in prepared:
+                            try:
+                                cw._unregister_slot(int(cid))
+                            except Exception:  # noqa: BLE001
+                                pass
                             prepared.discard(int(cid))
-                    elif sub_cmd == _CTRL_ALLOC_DOMAIN:
-                        _handle_ctrl_alloc_domain(cw, buf)
-                    elif sub_cmd == _CTRL_RELEASE_DOMAIN:
-                        _handle_ctrl_release_domain(cw, buf)
-                    elif sub_cmd == _CTRL_COMM_INIT:
-                        _handle_ctrl_comm_init(cw, buf)
-                    elif sub_cmd == _CTRL_MAP_HOST:
-                        _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-                    elif sub_cmd == _CTRL_UNMAP_HOST:
-                        _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-                    elif sub_cmd == _CTRL_L3_L2_REGION_CREATE:
-                        _handle_ctrl_l3_l2_region_create(cw, buf, chip_platform, l3_l2_region_store)
-                    elif sub_cmd == _CTRL_L3_L2_REGION_RELEASE:
-                        _handle_ctrl_l3_l2_region_release(buf, l3_l2_region_store)
-                    else:
-                        raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    if sub_cmd in (_CTRL_REGISTER, _CTRL_UNREGISTER):
-                        op = "register" if sub_cmd == _CTRL_REGISTER else "unregister"
-                        msg = _format_exc(f"{op} hash={_format_digest(_read_control_digest(buf))} chip={device_id}", e)
-                    else:
-                        msg = _format_exc(f"chip_process dev={device_id} ctrl={int(sub_cmd)}", e)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _CONTROL_DONE)
-            elif state == _SHUTDOWN:
-                break
+                        exported = ctypes.c_char.from_buffer(shm_buf)
+                        try:
+                            addr = ctypes.addressof(exported)
+                            cw._impl.register_callable_from_blob(int(cid), addr)
+                        finally:
+                            del exported
+                        prepared.add(int(cid))
+                finally:
+                    shm_buf.release()
+                    # Release the local mmap as soon as prepare returns;
+                    # register_callable has already H2D-copied the bytes to
+                    # device GM, so the child no longer needs the shm.
+                    shm.close()
+            elif sub_cmd == _CTRL_UNREGISTER:
+                digest = _read_control_digest(buf)
+                cid, removed = _remove_local_identity(registry, identity_table, identity_refs, digest)
+                if removed and cid is not None:
+                    cw._unregister_slot(int(cid))
+                    prepared.discard(int(cid))
+            elif sub_cmd == _CTRL_ALLOC_DOMAIN:
+                _handle_ctrl_alloc_domain(cw, buf)
+            elif sub_cmd == _CTRL_RELEASE_DOMAIN:
+                _handle_ctrl_release_domain(cw, buf)
+            elif sub_cmd == _CTRL_COMM_INIT:
+                _handle_ctrl_comm_init(cw, buf)
+            elif sub_cmd == _CTRL_MAP_HOST:
+                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
+            elif sub_cmd == _CTRL_UNMAP_HOST:
+                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
+            elif sub_cmd == _CTRL_L3_L2_REGION_CREATE:
+                _handle_ctrl_l3_l2_region_create(cw, buf, chip_platform, l3_l2_region_store)
+            elif sub_cmd == _CTRL_L3_L2_REGION_RELEASE:
+                _handle_ctrl_l3_l2_region_release(buf, l3_l2_region_store)
+            else:
+                raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
+        except Exception as e:  # noqa: BLE001
+            code = 1
+            if sub_cmd in (_CTRL_REGISTER, _CTRL_UNREGISTER):
+                op = "register" if sub_cmd == _CTRL_REGISTER else "unregister"
+                msg = _format_exc(f"{op} hash={_format_digest(_read_control_digest(buf))} chip={device_id}", e)
+            else:
+                msg = _format_exc(f"chip_process dev={device_id} ctrl={int(sub_cmd)}", e)
+        return code, msg
+
+    try:
+        _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
         _sweep_l2_host_l3_l2_regions(l3_l2_region_store)
         for host_shm, _lo, _hi, _base in host_buf_table.values():
@@ -1739,88 +1775,70 @@ def _child_worker_loop(
     into the inner Worker (see docs section 7).
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
-    while True:
-        state = _mailbox_load_i32(state_addr)
-        if state == _TASK_READY:
-            digest = _read_task_digest(buf)
-            cid = identity_table.get(digest)
-            orch_fn = registry.get(int(cid)) if cid is not None else None
-            code = 0
-            msg = ""
-            if orch_fn is None:
-                code = 1
-                msg = f"child_worker: callable hash {_format_digest(digest)} not registered"
-            else:
+
+    def handle_task() -> tuple[int, str]:
+        digest = _read_task_digest(buf)
+        cid = identity_table.get(digest)
+        orch_fn = registry.get(int(cid)) if cid is not None else None
+        if orch_fn is None:
+            return 1, f"child_worker: callable hash {_format_digest(digest)} not registered"
+        try:
+            args = _read_args_from_mailbox(buf)
+            cfg = _read_config_from_mailbox(buf)
+            inner_worker.run(orch_fn, args, cfg)
+        except Exception as e:  # noqa: BLE001
+            return 1, _format_exc(f"child_worker level={inner_worker.level}", e)
+        return 0, ""
+
+    def handle_control(sub_cmd: int) -> tuple[int, str]:
+        try:
+            if sub_cmd == _CTRL_REGISTER:
+                digest = _read_control_digest(buf)
+                payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                shm_name = _read_ctrl_staged_shm_name(buf)
+                callable_obj = _read_chip_callable_from_shm(shm_name, int(payload_size))
+                inner_registered = False
                 try:
-                    args = _read_args_from_mailbox(buf)
-                    cfg = _read_config_from_mailbox(buf)
-                    inner_worker.run(orch_fn, args, cfg)
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    msg = _format_exc(f"child_worker level={inner_worker.level}", e)
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _TASK_DONE)
-        elif state == _CONTROL_REQUEST:
-            sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-            code = 0
-            msg = ""
-            try:
-                if sub_cmd == _CTRL_REGISTER:
-                    digest = _read_control_digest(buf)
-                    payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                    shm_name = _read_ctrl_staged_shm_name(buf)
-                    callable_obj = _read_chip_callable_from_shm(shm_name, int(payload_size))
-                    inner_registered = False
-                    try:
-                        inner_worker._register_child_chip(callable_obj, digest=digest)
-                        inner_registered = True
-                        _install_local_identity(
-                            registry,
-                            identity_table,
-                            identity_refs,
-                            digest,
-                            callable_obj,
-                        )
-                    except Exception:
-                        if inner_registered:
-                            inner_worker._unregister_child_digest(digest=digest)
-                        raise
-                elif sub_cmd == _CTRL_UNREGISTER:
-                    digest = _read_control_digest(buf)
-                    inner_worker._unregister_child_digest(digest=digest)
-                    _remove_local_identity(registry, identity_table, identity_refs, digest)
-                elif sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER, _CTRL_PY_UNREGISTER):
-                    _handle_py_callable_control(
-                        buf,
+                    inner_worker._register_child_chip(callable_obj, digest=digest)
+                    inner_registered = True
+                    _install_local_identity(
                         registry,
                         identity_table,
                         identity_refs,
-                        int(sub_cmd),
-                        context=f"child_worker level={inner_worker.level}",
+                        digest,
+                        callable_obj,
                     )
-                else:
-                    raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
-            except Exception as e:  # noqa: BLE001
-                code = 1
-                op = (
-                    "register"
-                    if sub_cmd == _CTRL_REGISTER
-                    else (
-                        "unregister"
-                        if sub_cmd == _CTRL_UNREGISTER
-                        else (
-                            "py_register"
-                            if sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER)
-                            else ("py_unregister" if sub_cmd == _CTRL_PY_UNREGISTER else f"ctrl={int(sub_cmd)}")
-                        )
-                    )
+                except Exception:
+                    if inner_registered:
+                        inner_worker._unregister_child_digest(digest=digest)
+                    raise
+            elif sub_cmd == _CTRL_UNREGISTER:
+                digest = _read_control_digest(buf)
+                inner_worker._unregister_child_digest(digest=digest)
+                _remove_local_identity(registry, identity_table, identity_refs, digest)
+            elif sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER, _CTRL_PY_UNREGISTER):
+                _handle_py_callable_control(
+                    buf,
+                    registry,
+                    identity_table,
+                    identity_refs,
+                    sub_cmd,
+                    context=f"child_worker level={inner_worker.level}",
                 )
-                msg = _format_exc(f"child_worker level={inner_worker.level} {op}", e)
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _CONTROL_DONE)
-        elif state == _SHUTDOWN:
-            inner_worker.close()
-            break
+            else:
+                raise RuntimeError(f"unknown control sub-command {sub_cmd}")
+        except Exception as e:  # noqa: BLE001
+            op = _CTRL_OP_NAMES.get(sub_cmd, f"ctrl={sub_cmd}")
+            return 1, _format_exc(f"child_worker level={inner_worker.level} {op}", e)
+        return 0, ""
+
+    _run_mailbox_loop(
+        buf,
+        state_addr,
+        handle_task=handle_task,
+        handle_control=handle_control,
+        on_shutdown=inner_worker.close,
+    )
 
 
 class _Lifecycle(enum.Enum):
