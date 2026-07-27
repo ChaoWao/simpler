@@ -17,15 +17,16 @@ concurrent bootstrap on a shared file corrupted the mmap'd image and faulted
 The dispatcher SO itself is **never** persisted to disk and **never** dispatches
 at per-task launch time. After bootstrap, the host registers the preinstall
 file via `rtsBinaryLoadFromFile` (JSON load, cpuKernelMode=0) and
-resolves `simpler_aicpu_exec` once via
-`rtsFuncGetByName`; per-task launches go through `rtsLaunchCpuKernel` on the
+resolves every symbol the runtime declares it exports via
+`rtsFuncGetByName` (a miss is a build/registration error, not an optional
+gap); per-task launches go through `rtsLaunchCpuKernel` on the
 cached `rtFuncHandle`. The main `aicpu_scheduler` owns the dlopen of the
 preinstall file; the dispatcher is out of the picture once bootstrap returns.
 
 The source is runtime-agnostic. It is built per-arch under
-`build/lib/<arch>/onboard/<runtime>/libsimpler_aicpu_dispatcher.so` as a
-sibling of each runtime's host_runtime.so. A single process binding multiple
-runtimes can share one dispatcher SO on disk; the host process-level
+`build/lib/<arch>/dispatcher/libsimpler_aicpu_dispatcher.so`, one per arch and
+shared across every runtime. A single process binding multiple runtimes
+therefore shares one dispatcher SO on disk; the host process-level
 fingerprint cache deduplicates bootstrap calls by inner-SO Build-ID.
 
 ## Argument ABI boundaries
@@ -47,7 +48,8 @@ This private bootstrap structure is distinct from the platform runtime
 `KernelArgs` payload used by per-task launches. Per-task AICPU launch passes
 the front-less `KernelArgs` payload directly to `rtsLaunchCpuKernel` (no CANN
 launch front): `runtime_args` is at offset 0, followed by profiling/logging
-fields, register tables, and `device_id`. AICore receives only the same
+fields and register tables. `device_id` is not in this payload — it reaches
+the device once via `InitArgs`. AICore receives only the same
 front-less `KernelArgs` via a host-owned device copy.
 
 ## Exported entry points

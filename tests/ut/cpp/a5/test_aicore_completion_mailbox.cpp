@@ -136,8 +136,8 @@ TEST(A5AICoreCompletionMailbox, ConditionAttachesToExistingEntry) {
     wait_list.entries[0].normal_done = false;
     wait_list.count = 1;
 
-    // a5 is counter-only (no SDMA event-record backend), so both conditions
-    // are COUNTER and bind counter_addr / expected_value.
+    // Both conditions here are COUNTER and bind counter_addr / expected_value;
+    // a5 also registers SDMA event-record and URMA event-handle backends.
     constexpr uint64_t kAddr1 = 0x1000;
     constexpr uint64_t kAddr2 = 0x2000;
     ASSERT_TRUE(mb->try_push_condition(token, kAddr1, /*expected=*/3, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER));

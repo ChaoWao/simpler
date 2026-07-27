@@ -20,7 +20,7 @@
  *   - `KernelArgsHelper`: host-side `KernelArgs` wrapper with device-memory
  *     management for the H2D `Runtime` and `KernelArgs` copies.
  *
- * Future migrations (see `.docs/ONBOARD_HOST_COMMON_REFACTOR.md`):
+ * Future migrations:
  *   - `DeviceRunnerBase` (lifecycle + registration + profiling init).
  *   - C-API common shims.
  */

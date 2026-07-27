@@ -229,7 +229,7 @@ A complete `Worker::run()` call traverses all three tiers:
    - writes FIN to its completion register
 
 4. AICPU
-   - polls AICore completion registers (Device-nGnRnE MMIO)
+   - polls AICore completion registers (Device-nGnRE MMIO)
    - rmb() before reading any AICore-produced slot
                                        (see cache-coherency.md)
    - releases dependents into the ready queue

@@ -108,7 +108,7 @@ symmetric window is realized:
 
 | Aspect | Sim | HCCL (onboard) |
 | ------ | --- | -------------- |
-| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | VMM physical allocation + shareable-handle import; peer access via `aclrtDeviceEnablePeerAccess` |
+| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | a2a3: Fabric V2 handle exchange (`ACL_MEM_SHARE_HANDLE_TYPE_FABRIC`), falling back to VMM + shareable-handle IPC where Fabric is unsupported. a5: VMM shareable handles only. Cross-card P2P via `aclrtDeviceEnablePeerAccess` on both |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
 | Window init | window zeroed before the subset barrier (`memset`) | window zeroed before the handle is announced (`aclrtMemset`) |
 | Async-DMA workspace | n/a | a2a3: opt-in per Worker (`enable_sdma`); a5: optional communication overlay, gated off by default |
@@ -260,5 +260,5 @@ the child — allocate it with `create_host_buffer` instead.
 - `examples/workers/l3/dual_domain_overlap/` — overlapping domains where one
   worker participates in both.
 - `examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo/` — host
-  staging via `copy_to` + cross-rank `SdmaTget`; its producer `CoreCallable`
-  declares the SDMA workspace requirement.
+  staging via `copy_to` + cross-rank `SdmaTget`; the SDMA workspace is
+  provisioned by constructing the `Worker` with `enable_sdma=True`.

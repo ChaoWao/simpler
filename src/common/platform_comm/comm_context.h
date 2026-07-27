@@ -24,14 +24,8 @@
  *     layout is owned end-to-end by simpler.
  *   - comm_sim.cpp: same shape, filled with malloc'd host pointers.
  *
- * The earlier "HCCL MESH reinterpret_cast / RING reverse-parse of
- * HcclOpResParam" paths have been deleted along with their internal-ABI
- * coupling -- see .docs/28.l3-comm/ext.01.pr-774-review.md for context.
- *
- * Long-term private-ization of this struct (decouple from the pto-isa
- * HcclDeviceContext parallel declaration) is tracked as F4 in the same
- * doc; this file is intentionally left at the current shared layout
- * until that decision lands.
+ * The layout is shared with pto-isa's parallel HcclDeviceContext
+ * declaration and must stay byte-equivalent with it.
  */
 
 #pragma once
