@@ -19,13 +19,18 @@ import ctypes
 
 import pytest
 import torch
-from simpler.buffer_handle import BackendKind, BufferRef
+from simpler.buffer_handle import (
+    BackendKind,
+    BufferRef,
+    ImportRegistry,
+    mint_owner_instance_id,
+    pack_bufferref_blob,
+    wrap_fork_inherited,
+)
 from simpler.task_interface import (
     CallConfig,
-    ChipStorageTaskArgs,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
     read_args_from_blob,
 )
@@ -37,8 +42,15 @@ _F32 = 0  # DataType.FLOAT32 value
 def test_alloc_shared_tensor_returns_managed_fork_handle():
     hw = Worker(level=3, num_sub_workers=1)
     hw.init()
+    captured = {}
     try:
-        h = hw.alloc_shared_tensor((4, 8), DataType.FLOAT32)
+        # alloc_shared_tensor allocates from the orchestrator's HeapRing, so it must run inside
+        # an active building run — drive it through a no-submit orch fn.
+        def orch(o, _args, cfg):
+            captured["h"] = hw.alloc_shared_tensor((4, 8), DataType.FLOAT32)
+
+        hw.run(orch, args=None, config=CallConfig())
+        h = captured["h"]
         assert h.nbytes == 4 * 8 * 4  # prod(shape) * element_size
         # Backed by the orchestrator's HeapRing VA (FORK_SHM, no POSIX shm), runtime-managed.
         assert h.backend_kind == BackendKind.FORK_SHM
@@ -107,23 +119,19 @@ def test_l2_run_materializes_bufferref_to_tensor_blob():
         w._close_l2_import_registry()
 
 
-def test_l2_run_passes_legacy_chipstorage_through():
-    # A pre-BufferRef caller hands worker.run a ChipStorageTaskArgs (has tensor(), no ref()); it must
-    # route straight to the runtime, not the BufferRef materialize path.
-    routed = {}
-
-    class _FakeChip:
-        def _run_slot(self, cid, args, cfg):
-            routed["cid"] = cid
-            routed["args"] = args
-
-    w = Worker(level=2)
-    w._chip_worker = _FakeChip()  # type: ignore[assignment]
-    cs = ChipStorageTaskArgs()
-    cs.add_tensor(Tensor.make(0x1000, (4,), DataType.FLOAT32))
-    w._run_l2_materialized(5, cs, CallConfig())
-    assert routed["cid"] == 5 and routed["args"] is cs
-    assert w._l2_import_registry is None  # BufferRef path never touched
+def test_mapped_args_from_blob_delivers_tensors_and_scalars():
+    # A sub callable's args expose both the mapped tensors (args[i].buffer) and the blob's scalars
+    # (args.scalar_count() / args.scalar(i)) — a sub task built with add_ref + add_scalar reaches both.
+    backing = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
+    va = ctypes.addressof(backing)
+    ref = wrap_fork_inherited(va, 16, mint_owner_instance_id(), 1, "L3").ref((4,), _F32)
+    blob = pack_bufferref_blob([ref], (17, 99))
+    buf = ctypes.create_string_buffer(blob, len(blob))
+    args = ImportRegistry().mapped_args_from_blob(ctypes.addressof(buf), len(blob))
+    assert len(args) == 1 and args.tensor_count() == 1
+    assert args.scalar_count() == 2
+    assert args.scalar(0) == 17 and args.scalar(1) == 99
+    assert torch.frombuffer(args[0].buffer, dtype=torch.float32, count=4).tolist() == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_make_ref_arg_memoizes_handle_per_storage():

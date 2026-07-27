@@ -17,7 +17,7 @@
  *   - submit_next_level_group(CallableIdentity, vector<TaskArgs>, CallConfig, worker_ids)
  *   - submit_sub(CallableIdentity, TaskArgs)
  *   - submit_sub_group(CallableIdentity, vector<TaskArgs>)
- *   - alloc(shape, dtype) — runtime-owned intermediate buffer
+ *   - alloc(shape, dtype, identity) — runtime-owned intermediate buffer (returns its VA)
  *
  * Each TaskArgs carries per-tensor TensorArgType tags. The Orchestrator
  * walks those tags to drive dependency inference and — for OUTPUT tags with
@@ -75,20 +75,16 @@ public:
         std::function<void()> ready_notify_cb = {}
     );
 
-    // Allocate an intermediate buffer from the Worker's HeapRing (MAP_SHARED,
-    // visible to forked child workers). Returns a contiguous Tensor whose
-    // `.buffer.addr` points into the ring.
+    // Allocate an intermediate buffer from the Worker's HeapRing (MAP_SHARED, visible to forked child
+    // workers) and return its VA. Registered in the tensormap under the identity's canonical hash
+    // (matching how infer_deps keys a BufferRef), so the caller can wrap the VA as a FORK_SHM
+    // BufferHandle carrying `identity` and a ref over it dependency-wires to this slot. Backs
+    // Worker.alloc_shared_tensor / Orchestrator.alloc (Python).
     //
-    // Lifetime: aligned with a synthetic task slot. The buffer is reclaimed
-    // (FIFO, via last_alive) once every downstream consumer tagging the
-    // pointer has reached CONSUMED and scope_end has released the scope ref.
-    Tensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
-
-    // Same managed intermediate as alloc(), but registered in the tensormap under the identity's
-    // canonical hash (matching how infer_deps keys a BufferRef) instead of the raw heap VA, and
-    // returning that VA. The caller wraps the VA as a FORK_SHM BufferHandle carrying `identity`, so a
-    // ref over it dependency-wires to this slot. Backs Worker.alloc_shared_tensor.
-    uint64_t alloc_ref(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity);
+    // Lifetime: aligned with a synthetic task slot. The buffer is reclaimed (FIFO, via last_alive) once
+    // every downstream consumer tagging the ref has reached CONSUMED and scope_end has released the
+    // scope ref.
+    uint64_t alloc(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity);
 
     // Submit a NEXT_LEVEL task. `callable` is the stable identity returned
     // by Worker.register(); the child resolves its digest to a private slot.
@@ -206,9 +202,9 @@ private:
     // hold a recently-allocated slot id should always get a valid pointer.
     TaskSlotState &slot_state(TaskSlot s);
 
-    // Managed HeapRing intermediate shared by alloc / alloc_ref: claims a synthetic auto-free slot
+    // Managed HeapRing intermediate backing alloc(): claims a synthetic auto-free slot
     // (no fanin; fanout = scope ref) and returns (slot, heap VA, byte size). The caller registers the
-    // tensormap key (raw VA for alloc, identity hash for alloc_ref) and marks the slot COMPLETED.
+    // tensormap key (the identity's canonical hash) and marks the slot COMPLETED.
     struct ManagedAlloc {
         TaskSlot slot;
         uint64_t va;

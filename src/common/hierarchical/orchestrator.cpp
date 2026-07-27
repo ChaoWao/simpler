@@ -371,22 +371,7 @@ void Orchestrator::finalize_managed_slot(const ManagedAlloc &m, const TensorKey 
     increment_run_tasks(s.run_id);
 }
 
-Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
-    ManagedAlloc m = alloc_managed_slot(shape, dtype);
-    finalize_managed_slot(m, TensorKey::local_host(m.va));
-    // Build a contiguous external Tensor over the allocated buffer. va may be 0 for a 0-byte request,
-    // in which case init_external sets buffer.addr == 0 (the infer_deps "no tensor" sentinel);
-    // buffer.size carries numel*elem. shape is non-empty (rejected in the helper), so ndims >= 1.
-    Tensor t{};
-    t.init_external(
-        reinterpret_cast<void *>(m.va), m.bytes, shape.data(), static_cast<uint32_t>(shape.size()), dtype,
-        /*version=*/0
-    );
-    return t;
-}
-
-uint64_t
-Orchestrator::alloc_ref(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity) {
+uint64_t Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity) {
     ManagedAlloc m = alloc_managed_slot(shape, dtype);
     // Key by the identity's canonical hash so a BufferRef over this VA (carrying the same identity)
     // resolves to this slot in infer_deps — the alloc→BufferRef bridge.

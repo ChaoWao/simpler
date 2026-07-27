@@ -11,6 +11,7 @@
 
 import ctypes
 import gc
+import itertools
 import struct
 import weakref
 
@@ -31,6 +32,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_dtype_name,
     get_element_size,
 )
+from simpler.buffer_handle import BackendKind, BufferRef, mint_owner_instance_id, wrap_device_malloc
 from simpler.task_interface import (
     RemoteAddressSpace,
     RemoteBufferExport,
@@ -38,6 +40,28 @@ from simpler.task_interface import (
     RemoteTensorRef,
     _remote_sidecar_for,
 )
+
+_REF_BID = itertools.count(1)
+
+
+def _dev_ref(addr, shapes, dtype, tag=None):
+    """A DEVICE_MALLOC ``BufferRef`` at ``addr`` for wire-``TaskArgs`` container tests.
+
+    Each call mints a fresh identity, so refs added to one TaskArgs stay distinct. The backend body
+    carries ``addr`` (u64 LE), the container-test counterpart of the old ``Tensor.make(addr, ...)``.
+    """
+    nbytes = get_element_size(dtype)
+    for s in shapes:
+        nbytes *= int(s)
+    return wrap_device_malloc(addr, nbytes, mint_owner_instance_id(), next(_REF_BID), "L2").ref(
+        tuple(shapes), int(dtype.value)
+    )
+
+
+def _ref_addr(packed_ref) -> int:
+    """The device pointer carried in a DEVICE_MALLOC ref's backend body."""
+    return int.from_bytes(BufferRef.unpack(packed_ref).handle.body[:8], "little")
+
 
 # ============================================================================
 # DataType enum
@@ -402,26 +426,24 @@ class TestTaskArgs:
         assert args.tensor_count() == 0
         assert args.scalar_count() == 0
 
-    def test_add_tensor_default_tag(self):
+    def test_add_ref_default_tag(self):
         args = TaskArgs()
-        t = Tensor.make(0xBEEF, (4, 8), DataType.FLOAT32)
-        args.add_tensor(t)
+        args.add_ref(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32))
         assert args.tensor_count() == 1
         assert args.tag(0) == TensorArgType.INPUT
 
-    def test_add_tensor_with_tag(self):
+    def test_add_ref_with_tag(self):
         args = TaskArgs()
-        t = Tensor.make(0xBEEF, (4, 8), DataType.FLOAT32)
-        args.add_tensor(t, TensorArgType.OUTPUT)
+        args.add_ref(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32), TensorArgType.OUTPUT)
         assert args.tag(0) == TensorArgType.OUTPUT
 
-    def test_multiple_tensors_with_tags(self):
+    def test_multiple_refs_with_tags(self):
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
-        args.add_tensor(Tensor.make(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
-        args.add_tensor(Tensor.make(0x3, (4,), DataType.INT8), TensorArgType.INOUT)
-        args.add_tensor(Tensor.make(0x4, (5,), DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
-        args.add_tensor(Tensor.make(0x5, (6,), DataType.INT32), TensorArgType.NO_DEP)
+        args.add_ref(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
+        args.add_ref(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
+        args.add_ref(_dev_ref(0x3, (4,), DataType.INT8), TensorArgType.INOUT)
+        args.add_ref(_dev_ref(0x4, (5,), DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
+        args.add_ref(_dev_ref(0x5, (6,), DataType.INT32), TensorArgType.NO_DEP)
         assert args.tensor_count() == 5
         assert args.tag(0) == TensorArgType.INPUT
         assert args.tag(1) == TensorArgType.OUTPUT
@@ -431,7 +453,7 @@ class TestTaskArgs:
 
     def test_set_tag(self):
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0x1, (2,), DataType.INT32))
+        args.add_ref(_dev_ref(0x1, (2,), DataType.INT32))
         assert args.tag(0) == TensorArgType.INPUT
         args.set_tag(0, TensorArgType.INOUT)
         assert args.tag(0) == TensorArgType.INOUT
@@ -445,15 +467,15 @@ class TestTaskArgs:
 
     def test_mixed_with_tags(self):
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
-        args.add_tensor(Tensor.make(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
+        args.add_ref(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
+        args.add_ref(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
         args.add_scalar(99)
         args.add_scalar(100)
         assert args.tensor_count() == 2
         assert args.scalar_count() == 2
         assert len(args) == 4
-        assert args.tensor(0).data == 0x1
-        assert args.tensor(1).data == 0x2
+        assert _ref_addr(args.ref(0)) == 0x1
+        assert _ref_addr(args.ref(1)) == 0x2
         assert args.scalar(0) == 99
         assert args.scalar(1) == 100
 
@@ -461,16 +483,16 @@ class TestTaskArgs:
         args = TaskArgs()
         args.add_scalar(42)
         with pytest.raises(RuntimeError):
-            args.add_tensor(Tensor.make(0x1, (2,), DataType.INT32))
+            args.add_ref(_dev_ref(0x1, (2,), DataType.INT32))
 
-    def test_tensor_access(self):
+    def test_ref_access(self):
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0xA, (4,), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(0xB, (8,), DataType.INT32))
-        assert args.tensor(0).data == 0xA
-        assert args.tensor(1).data == 0xB
-        assert args.tensor(0).shapes == (4,)
-        assert args.tensor(1).shapes == (8,)
+        args.add_ref(_dev_ref(0xA, (4,), DataType.FLOAT32))
+        args.add_ref(_dev_ref(0xB, (8,), DataType.INT32))
+        assert _ref_addr(args.ref(0)) == 0xA
+        assert _ref_addr(args.ref(1)) == 0xB
+        assert BufferRef.unpack(args.ref(0)).shapes == (4,)
+        assert BufferRef.unpack(args.ref(1)).shapes == (8,)
 
     def test_scalar_access(self):
         args = TaskArgs()
@@ -482,7 +504,7 @@ class TestTaskArgs:
     def test_tensor_out_of_range(self):
         args = TaskArgs()
         with pytest.raises((IndexError, RuntimeError)):
-            args.tensor(0)
+            args.ref(0)
 
     def test_scalar_out_of_range(self):
         args = TaskArgs()
@@ -501,7 +523,7 @@ class TestTaskArgs:
 
     def test_clear(self):
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0, (1,), DataType.INT8), TensorArgType.OUTPUT)
+        args.add_ref(_dev_ref(0, (1,), DataType.INT8), TensorArgType.OUTPUT)
         args.add_scalar(42)
         args.clear()
         assert len(args) == 0
@@ -509,10 +531,10 @@ class TestTaskArgs:
         assert args.scalar_count() == 0
 
     def test_no_capacity_limit_tensors(self):
-        """TaskArgs is vector-backed — no per-class capacity limit on tensors."""
+        """TaskArgs is vector-backed — no per-class capacity limit on refs."""
         args = TaskArgs()
         for i in range(20):
-            args.add_tensor(Tensor.make(i, (1,), DataType.INT8))
+            args.add_ref(_dev_ref(i + 1, (1,), DataType.INT8))
         assert args.tensor_count() == 20
 
     def test_no_capacity_limit_scalars(self):
@@ -540,11 +562,12 @@ class TestRemoteTaskArgsSidecar:
         ref = RemoteTensorRef(handle=handle, offset=8, shape=(4,), dtype=DataType.UINT8)
 
         args = TaskArgs()
-        args.add_tensor(ref, TensorArgType.OUTPUT)
+        args.add_ref(ref, TensorArgType.OUTPUT)
         args.add_scalar(9)
 
         assert args.tensor_count() == 1
-        assert args.tensor(0).data == 0
+        # An arg destined for a remote worker carries a REMOTE_SIDECAR placeholder ref (no local backing).
+        assert BufferRef.unpack(args.ref(0)).handle.backend_kind == BackendKind.REMOTE_SIDECAR
         assert args.tag(0) == TensorArgType.OUTPUT
         assert args.scalar(0) == 9
 
@@ -576,7 +599,7 @@ class TestRemoteTaskArgsSidecar:
                 nbytes=64,
             )
             args = TaskArgs()
-            args.add_tensor(RemoteTensorRef(handle=handle, shape=(4,), dtype=DataType.UINT8))
+            args.add_ref(RemoteTensorRef(handle=handle, shape=(4,), dtype=DataType.UINT8))
             assert args in task_interface_module._REMOTE_TASK_ARGS_STORAGE  # noqa: SLF001
             assert _remote_sidecar_for(args) is not None
             return weakref.ref(args)
@@ -624,7 +647,7 @@ class TestRemoteTaskArgsSidecar:
 
     def test_host_inline_ref_uses_inline_payload_arena(self):
         args = TaskArgs()
-        args.add_tensor(
+        args.add_ref(
             RemoteTensorRef.host_inline(b"abcd", shape=(4,), dtype=DataType.UINT8),
             TensorArgType.INPUT,
         )

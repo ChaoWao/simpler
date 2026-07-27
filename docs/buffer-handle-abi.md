@@ -31,10 +31,11 @@ h  = worker.alloc_shared_tensor((M, N), dtype)    # kind3: shape-sized create_bu
 d  = orch.alloc_child_tensor(worker, (M, N), dtype)  # kind4: DEVICE_MALLOC on that chip
 ```
 
-`create_buffer` / `alloc_shared_tensor` return a `BufferHandle` whose backing is
-a born-shared POSIX shm attached into every forked child. `alloc_child_tensor`
-allocates device memory on a specific next-level worker (via `orch.malloc`) and
-wraps the pointer; its `.base` is the device pointer (the `orch.copy_to`
+`create_buffer` returns a `BufferHandle` backed by a POSIX shm the consumer maps
+lazily on first receipt of a ref over it (map-once, by identity);
+`alloc_shared_tensor` returns a runtime-managed intermediate over a FORK_SHM ring
+VA. `alloc_child_tensor` allocates device memory on a specific next-level worker
+and wraps the pointer; its `.base` is the device pointer (the `orch.copy_to`
 destination), and its ref must be dispatched only to that worker.
 
 ## Building views (the view algebra)

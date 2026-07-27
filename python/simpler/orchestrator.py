@@ -14,14 +14,14 @@ and passes the handle to the user's orch function::
 
     def my_orch(orch, args, cfg):
         # chip_handle/sub_handle come from Worker.register(...)
-        # build the args object yourself; tags drive dependency inference
+        # build the args object yourself as BufferRefs; tags drive dependency inference
         a = TaskArgs()
-        a.add_tensor(make_tensor_arg(input_tensor),  TensorArgType.INPUT)
-        a.add_tensor(make_tensor_arg(output_tensor), TensorArgType.OUTPUT)
-        orch.submit_next_level(chip_handle, a, cfg, worker=0)
+        a.add_ref(input_handle.ref(shape, dtype),  TensorArgType.INPUT)
+        a.add_ref(output_handle.ref(shape, dtype), TensorArgType.OUTPUT)
+        orch.submit_next_level(chip_handle, a, cfg, worker=0)  # handle from Worker.register(chip_callable)
 
         sub_args = TaskArgs()
-        sub_args.add_tensor(make_tensor_arg(output_tensor), TensorArgType.INPUT)
+        sub_args.add_ref(output_handle.ref(shape, dtype), TensorArgType.INPUT)
         orch.submit_sub(sub_handle, sub_args)
 
     handle = w.submit(my_orch, my_args, my_config)
@@ -41,7 +41,7 @@ from typing import Any
 
 from _task_interface import _Orchestrator as _COrchestrator  # pyright: ignore[reportMissingImports]
 
-from .buffer_handle import BufferHandle
+from .buffer_handle import AccessMode, BufferHandle, CanonicalIdentity, wrap_fork_inherited
 from .callable_identity import CallableHandle
 from .task_interface import (
     CallConfig,
@@ -51,11 +51,11 @@ from .task_interface import (
     DataType,
     RemoteAddressSpace,
     TaskArgs,
-    Tensor,
     _empty_remote_sidecar_for,
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
     _validate_remote_sidecar_access,
+    get_element_size,
 )
 
 
@@ -498,23 +498,37 @@ class Orchestrator:
             raise RuntimeError("orch.copy_from requires a Worker context")
         self._worker.copy_from(dst, src)
 
-    def alloc(self, shape: Sequence[int], dtype: DataType) -> Tensor:
-        """Allocate a runtime-managed intermediate buffer.
+    def alloc(self, shape: Sequence[int], dtype: DataType) -> BufferHandle:
+        """Allocate a runtime-managed intermediate buffer; returns a ``BufferHandle``.
 
-        Returns a ``Tensor`` whose backing memory comes from a
-        per-allocation MAP_SHARED mmap (visible to forked child workers).
-        Lifetime is bound to a synthetic task slot that the Orchestrator
-        treats as the buffer's producer; the buffer is freed when all
-        downstream consumers have completed and the run's scope ends.
+        The backing is a MAP_SHARED slab (visible to forked child workers), auto-reclaimed once every
+        downstream consumer has completed and the run's scope ends — no manual free. Name it in a task
+        arg with ``handle.ref(shape, dtype)``: the ref's canonical identity dependency-wires to this
+        alloc's synthetic producer slot (tag it OUTPUT/INOUT on the producer, INPUT on the consumer).
 
-        Use this for chip-A → chip-B intermediate buffers instead of
-        pre-allocating with ``torch.share_memory_()`` — the runtime owns
-        the lifecycle.
+        Use this for chip-A → chip-B intermediate buffers instead of pre-allocating with
+        ``torch.share_memory_()`` — the runtime owns the lifecycle. Equivalent to
+        ``worker.alloc_shared_tensor``, additionally registered as an L3-L2 orch-comm host buffer so it
+        may back an L3-L2 message-queue payload.
         """
-        tensor = self._o.alloc(list(shape), dtype)
-        if self._worker is not None:
-            self._worker._register_l3_l2_orch_comm_host_buffer(tensor)
-        return tensor
+        assert self._worker is not None, "orch.alloc requires an L3+ orchestration context"
+        shape_t = tuple(int(s) for s in shape)
+        nbytes = get_element_size(dtype)
+        for s in shape_t:
+            nbytes *= s
+        oid, buffer_id, path = (
+            self._worker._owner_instance_id,
+            self._worker._next_buffer_id(),
+            f"L{self._worker.level}",
+        )
+        identity = CanonicalIdentity(oid, buffer_id, path, 0)
+        # alloc keys the synthetic producer slot by the ref's canonical identity (not a raw VA), so a
+        # consumer named via handle.ref(...) dependency-wires to it. Same managed backing as
+        # worker.alloc_shared_tensor; additionally registered as an L3-L2 orch-comm host buffer.
+        va = int(self._o.alloc(list(shape_t), dtype, identity.pack()))
+        handle = wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, generation=0, access=AccessMode.READWRITE)
+        self._worker._register_l3_l2_orch_comm_host_buffer(handle)
+        return handle
 
     # ------------------------------------------------------------------
     # Internal (called by Worker.submit)

@@ -17,12 +17,13 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
+from .buffer_handle import BufferHandle
 from .l3_l2_orch_comm import (
     L3L2OrchRegion,
     NotifyOp,
     WaitCmp,
 )
-from .task_interface import DataType, Tensor
+from .task_interface import DataType
 
 L3L2_QUEUE_MAGIC = 0x4C335132
 L3L2_QUEUE_ABI_MAJOR = 1
@@ -173,7 +174,7 @@ def _host_byte_span(buffer: Any, nbytes: int, *, writable: bool) -> _HostByteSpa
         return _HostByteSpan(nbytes=nbytes, ptr=ptr, view=None)
 
     access = "writable" if writable else "readable"
-    raise ValueError(f"L3-L2 queue requires a registered Tensor or {access} contiguous ordinary host buffer")
+    raise ValueError(f"L3-L2 queue requires a registered BufferHandle or {access} contiguous ordinary host buffer")
 
 
 def make_l3_l2_queue_layout(depth: int, input_arena_bytes: int, output_arena_bytes: int) -> L3L2QueueLayout:
@@ -258,9 +259,9 @@ class L3L2Queue:
         orch: Any,
         region: L3L2OrchRegion,
         layout: L3L2QueueLayout,
-        desc_fields: Tensor,
-        desc_seq: Tensor,
-        desc_read: Tensor,
+        desc_fields: BufferHandle,
+        desc_seq: BufferHandle,
+        desc_read: BufferHandle,
     ) -> None:
         self._orch = orch
         self._region = region
@@ -331,16 +332,16 @@ class L3L2Queue:
             raise RuntimeError("L3-L2 queue expired after orchestration run")
         self._region._ensure_live()
 
-    def _validate_registered_buffer(self, buffer: Any, nbytes: int) -> Tensor:
-        if not isinstance(buffer, Tensor):
-            raise ValueError("L3-L2 queue requires a registered Tensor returned by orch.alloc(...)")
+    def _validate_registered_buffer(self, buffer: Any, nbytes: int) -> BufferHandle:
+        if not isinstance(buffer, BufferHandle):
+            raise ValueError("L3-L2 queue requires a registered BufferHandle returned by orch.alloc(...)")
         self._region._validate_host_buffer(buffer)
-        if int(nbytes) > int(buffer.nbytes()):
-            raise ValueError(f"L3-L2 queue nbytes={nbytes} exceeds registered Tensor size {int(buffer.nbytes())}")
+        if int(nbytes) > int(buffer.nbytes):
+            raise ValueError(f"L3-L2 queue nbytes={nbytes} exceeds registered buffer size {int(buffer.nbytes)}")
         return buffer
 
-    def _registered_buffer_or_none(self, buffer: Any, nbytes: int) -> Tensor | None:
-        if not isinstance(buffer, Tensor):
+    def _registered_buffer_or_none(self, buffer: Any, nbytes: int) -> BufferHandle | None:
+        if not isinstance(buffer, BufferHandle):
             return None
         return self._validate_registered_buffer(buffer, nbytes)
 
@@ -388,16 +389,16 @@ class L3L2Queue:
     def _write_descriptor(
         self, offset: int, seq: int, opcode: L3L2QueueOpcode, payload_offset: int, nbytes: int
     ) -> None:
-        fields_buf = (ctypes.c_uint8 * 24).from_address(int(self._desc_fields.data))
+        fields_buf = (ctypes.c_uint8 * 24).from_address(int(self._desc_fields.base))
         fields_buf[:] = _DESC.pack(0, int(opcode), int(payload_offset), int(nbytes))[8:]
-        seq_buf = (ctypes.c_uint8 * 8).from_address(int(self._desc_seq.data))
+        seq_buf = (ctypes.c_uint8 * 8).from_address(int(self._desc_seq.base))
         seq_buf[:] = struct.pack("<Q", int(seq))
         self._run_primitive(self._region.payload_write, offset + 8, self._desc_fields, nbytes=24)
         self._run_primitive(self._region.payload_write, offset, self._desc_seq, nbytes=8)
 
     def _read_descriptor(self, offset: int) -> L3L2QueueMessage:
         self._run_primitive(self._region.payload_read, offset, self._desc_read, nbytes=L3L2_QUEUE_DESC_SLOT_BYTES)
-        raw = ctypes.string_at(int(self._desc_read.data), L3L2_QUEUE_DESC_SLOT_BYTES)
+        raw = ctypes.string_at(int(self._desc_read.base), L3L2_QUEUE_DESC_SLOT_BYTES)
         seq, opcode_value, payload_offset, payload_nbytes = _DESC.unpack(raw)
         try:
             opcode = L3L2QueueOpcode(opcode_value)

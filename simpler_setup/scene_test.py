@@ -343,12 +343,13 @@ class CallableNamespace:
         callables.verify              # → CallableHandle
 
     Also provides ``keep()`` for lifetime management: L3 orch functions
-    that build transient Python objects (e.g. ChipStorageTaskArgs) whose
+    that build transient Python objects (e.g. a ``TaskArgs``) whose
     raw pointers are submitted to the C++ scheduler must register them
     via ``keep()`` so they outlive the scheduler drain::
 
         def run_dag(w, callables, task_args, config):
-            chip_args, _ = _build_chip_task_args(task_args, callables.vector_kernel_sig)
+            chip_args = TaskArgs()
+            chip_args.add_ref(_rehosted_ref(task_args, "a"), TensorArgType.INPUT)
             callables.keep(chip_args)  # survive until drain finishes
             ...
     """
@@ -376,11 +377,55 @@ class CallableNamespace:
 # ---------------------------------------------------------------------------
 
 
+def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker):
+    """Build BufferRef `TaskArgs` from `TaskArgsBuilder` for the L2 `Worker.run` path.
+
+    An L2 leaf consumes its own args: `Worker.run(handle, args, cfg)` materializes each BufferRef to a
+    local base in-process. Each tensor is named as a ref over ``worker.make_ref_arg`` (a host tensor;
+    at L2 there is no fork, so any host tensor resolves in-process); the direction tag is inert at L2
+    but set for parity with the L3 path.
+
+    Returns:
+        args: TaskArgs (BufferRef)
+        output_names: list of tensor names that are OUTPUT or INOUT
+    """
+    from simpler.task_interface import ArgDirection, TaskArgs, TensorArgType, scalar_to_uint64  # noqa: PLC0415
+
+    from simpler_setup.torch_interop import make_tensor_ref  # noqa: PLC0415
+
+    dir2tag = {
+        ArgDirection.IN: TensorArgType.INPUT,
+        ArgDirection.OUT: TensorArgType.OUTPUT_EXISTING,
+        ArgDirection.INOUT: TensorArgType.INOUT,
+    }
+    args = TaskArgs()
+    output_names: list[str] = []
+    tensor_idx = 0
+    for spec in test_args.specs:
+        if isinstance(spec, Tensor):
+            if tensor_idx >= len(orch_signature):
+                raise ValueError(
+                    f"Tensor '{spec.name}' at index {tensor_idx} has no matching entry in "
+                    f"orchestration signature (length {len(orch_signature)}). "
+                    f"Update CALLABLE['orchestration']['signature'] to match generate_args()."
+                )
+            direction = orch_signature[tensor_idx]
+            args.add_ref(make_tensor_ref(worker, spec.value), dir2tag.get(direction, TensorArgType.INPUT))
+            if direction in (ArgDirection.OUT, ArgDirection.INOUT):
+                output_names.append(spec.name)
+            tensor_idx += 1
+        elif isinstance(spec, Scalar):
+            args.add_scalar(scalar_to_uint64(spec.value))
+
+    return args, output_names
+
+
 def _build_chip_task_args(test_args: TaskArgsBuilder, orch_signature: list):
     """Build `ChipStorageTaskArgs` (POD) from `TaskArgsBuilder`.
 
-    Used by the L2 path (`ChipWorker.run(callable, chip_args, config)`): the
-    chip worker expects the runtime.so ABI-shaped POD directly (no tags).
+    Used by the direct chip API (`ChipWorker._run_slot(slot, chip_args, config)`, e.g. the
+    prepared-callable tests): the chip worker expects the runtime.so ABI-shaped POD directly (no tags).
+    The `Worker.run` L2 path instead builds BufferRef args via `_build_l2_ref_args`.
 
     Returns:
         chip_args: ChipStorageTaskArgs (POD)
@@ -1286,7 +1331,7 @@ class SceneTestCase:
 
         # Build args
         test_args = self.generate_args(params)
-        chip_args, output_names = _build_chip_task_args(test_args, orch_sig)
+        chip_args, output_names = _build_l2_ref_args(test_args, orch_sig, worker)
 
         # Compute golden (unless skip_golden)
         golden_args = None

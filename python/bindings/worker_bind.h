@@ -309,27 +309,19 @@ inline void bind_worker(nb::module_ &m) {
         )
         .def(
             "alloc",
-            [](Orchestrator &self, const std::vector<uint32_t> &shape, DataType dtype) {
-                return self.alloc(shape, dtype);
-            },
-            nb::arg("shape"), nb::arg("dtype"),
-            "Allocate an intermediate Tensor from the orchestrator's MAP_SHARED "
-            "pool (visible to forked child workers). Lifetime: until the next Worker.run() call."
-        )
-        .def(
-            "alloc_ref",
             [](Orchestrator &self, const std::vector<uint32_t> &shape, DataType dtype, nb::bytes identity) {
                 if (identity.size() != sizeof(CanonicalIdentity)) {
-                    throw std::invalid_argument("alloc_ref: identity must be sizeof(CanonicalIdentity) bytes");
+                    throw std::invalid_argument("alloc: identity must be sizeof(CanonicalIdentity) bytes");
                 }
                 CanonicalIdentity id;
                 std::memcpy(&id, identity.c_str(), sizeof(CanonicalIdentity));
-                return self.alloc_ref(shape, dtype, id);
+                return self.alloc(shape, dtype, id);
             },
             nb::arg("shape"), nb::arg("dtype"), nb::arg("identity"),
-            "Managed HeapRing intermediate registered under the identity's canonical hash; returns its "
-            "heap VA. The caller wraps the VA as a FORK_SHM BufferHandle carrying `identity` so a ref "
-            "dependency-wires to this slot (the alloc->BufferRef bridge). Backs Worker.alloc_shared_tensor."
+            "Managed HeapRing intermediate (MAP_SHARED, visible to forked children) registered under the "
+            "identity's canonical hash; returns its heap VA. The caller wraps the VA as a FORK_SHM "
+            "BufferHandle carrying `identity` so a ref dependency-wires to this slot (the alloc->BufferRef "
+            "bridge). Backs Worker.alloc_shared_tensor / Orchestrator.alloc (Python)."
         )
         .def(
             "scope_begin", &Orchestrator::scope_begin, "Open a nested scope. Max nesting depth = MAX_SCOPE_DEPTH (64)."

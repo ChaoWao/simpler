@@ -74,7 +74,7 @@ from .remote_l3_protocol import (
     read_frame,
     send_frame,
 )
-from .task_interface import ChipCallable, TaskArgs, Tensor
+from .task_interface import ChipCallable, ChipStorageTaskArgs, Tensor
 from .worker import Worker
 
 sys.modules.setdefault("simpler.remote_l3_session", sys.modules[__name__])
@@ -478,10 +478,10 @@ def _tensor_with_data(tensor: Tensor, data: int) -> Tensor:
 
 def _materialize_task_args(  # noqa: PLR0912
     args: RemoteTaskArgsWire, buffers: dict[tuple[int, ...], _RemoteBufferEntry], worker_id: int
-) -> tuple[TaskArgs, list[Any]]:
+) -> tuple[ChipStorageTaskArgs, list[Any]]:
     if len(args.remote_desc) != len(args.tensor_metadata):
         raise ValueError("remote TASK descriptor count does not match tensor metadata count")
-    task_args = TaskArgs()
+    task_args = ChipStorageTaskArgs()
     keepalive: list[Any] = []
 
     for tensor, sidecar in zip(args.tensor_metadata, args.remote_desc):

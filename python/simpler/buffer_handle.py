@@ -21,6 +21,7 @@ import ctypes
 import enum
 import os
 import struct
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
@@ -39,8 +40,18 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     DataType,
     bufferref_blob_descriptors,
     bufferref_blob_refs,
+    bufferref_blob_scalars,
     get_element_size,
 )
+
+
+def _dtype_value(dtype: Any) -> int:
+    """The int wire value of a dtype given either a ``DataType`` enum or its int value.
+
+    The nanobind ``DataType`` enum is not directly ``int()``-able, so callers historically passed
+    ``dtype.value``; accept either form here to remove that footgun.
+    """
+    return int(dtype.value) if hasattr(dtype, "value") else int(dtype)
 
 
 class AddressSpace(enum.IntEnum):
@@ -367,7 +378,7 @@ class BufferHandle:
     def ref(
         self,
         shapes: tuple[int, ...],
-        dtype: int,
+        dtype: int | DataType,
         strides: tuple[int, ...] | None = None,
         byte_offset: int = 0,
     ) -> BufferRef:
@@ -376,7 +387,7 @@ class BufferHandle:
         ``strides`` default to contiguous (row-major) — ``handle.ref(shape, dtype)`` names the whole
         buffer as a contiguous view; pass explicit element strides for a strided view (or reach one
         via the BufferRef view algebra). ``byte_offset`` must be a multiple of the dtype size (checked
-        at materialization).
+        at materialization). ``dtype`` accepts a ``DataType`` enum or its int value.
         """
         shapes = tuple(shapes)
         strides = _row_major_strides(shapes) if strides is None else tuple(strides)
@@ -385,7 +396,7 @@ class BufferHandle:
             byte_offset=byte_offset,
             shapes=shapes,
             strides=strides,
-            dtype=int(dtype),
+            dtype=_dtype_value(dtype),
         )
 
     def close(self) -> None:
@@ -643,6 +654,36 @@ class MappedArg:
         return base[self.byte_offset :]
 
 
+class MappedArgs(Sequence):
+    """A Python sub-worker's task args: the mapped tensor args plus the scalar args.
+
+    Indexes and iterates as the tensor ``MappedArg`` list (``args[i].buffer``, ``len(args)``) — the
+    common compute-leaf access — and additionally exposes the blob's scalars via ``scalar_count()`` /
+    ``scalar(i)`` (uint64, in submission order), mirroring the owner-side ``TaskArgs`` scalar API.
+    """
+
+    __slots__ = ("_tensors", "_scalars")
+
+    def __init__(self, tensors: list[MappedArg], scalars: tuple[int, ...]) -> None:
+        self._tensors = list(tensors)
+        self._scalars = tuple(int(s) for s in scalars)
+
+    def __getitem__(self, i):
+        return self._tensors[i]
+
+    def __len__(self) -> int:
+        return len(self._tensors)
+
+    def tensor_count(self) -> int:
+        return len(self._tensors)
+
+    def scalar_count(self) -> int:
+        return len(self._scalars)
+
+    def scalar(self, i: int) -> int:
+        return self._scalars[i]
+
+
 class ImportRegistry:
     """Per-consumer-endpoint lazy import cache: materialize a BufferRef's embedded descriptor to a
     local base on first receipt (map-once), keyed by canonical identity.
@@ -688,15 +729,17 @@ class ImportRegistry:
             self.materialize(desc_bytes)
         return self.materialization_map()
 
-    def mapped_args_from_blob(self, blob_ptr: int, capacity: int) -> list[MappedArg]:
-        """Materialize every ref in a BufferRef blob into a MappedArg for a Python compute callable:
-        map each backing (map-once) and expose a buffer at the view origin. This is the compute-leaf
-        map (a sub-worker reads/writes), distinct from pure forwarding (re-export, which never maps).
+    def mapped_args_from_blob(self, blob_ptr: int, capacity: int) -> MappedArgs:
+        """Materialize a BufferRef blob into a Python compute callable's args: every ref becomes a
+        MappedArg (map-once, buffer at the view origin) and the blob's scalars ride alongside. This is
+        the compute-leaf map (a sub-worker reads/writes), distinct from pure forwarding (re-export,
+        which never maps).
         """
-        return [
+        tensors = [
             MappedArg(self.materialize(ref.handle), ref.byte_offset, ref.shapes, ref.strides, ref.dtype)
             for ref in (BufferRef.unpack(rb) for rb in bufferref_blob_refs(blob_ptr, capacity))
         ]
+        return MappedArgs(tensors, tuple(bufferref_blob_scalars(blob_ptr, capacity)))
 
     def resolve(self, identity: CanonicalIdentity) -> ImportedBuffer:
         imported = self._by_identity.get(identity.pack())

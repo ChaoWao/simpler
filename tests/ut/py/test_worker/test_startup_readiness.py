@@ -689,6 +689,14 @@ class TestApiLinearizationDuringInit:
 class _FakeChipOk:
     """Stand-in for a ChipWorker whose init succeeds — no NPU touched."""
 
+    class _Impl:
+        # The L2 in-process path materializes BufferRef args to a Tensor blob and dispatches
+        # through `_impl.run_from_blob`; stub it so no NPU is touched.
+        def run_from_blob(self, *_a, **_k):
+            pass
+
+    _impl = _Impl()
+
     def init(self, *_a, **_k):
         pass
 
@@ -938,7 +946,7 @@ class TestLevel2Lifecycle:
         w._worker = types.SimpleNamespace(close=lambda: None)  # look "started" for the L3 branch
 
         # A slow pre-child cleanup step (runs before the SHUTDOWN broadcast).
-        monkeypatch.setattr(Worker, "_release_all_host_buffers", lambda self: time.sleep(0.6))
+        monkeypatch.setattr(Worker, "_release_all_buffer_handles", lambda self: time.sleep(0.6))
         captured: dict = {}
 
         def capture_reap(groups, deadline):

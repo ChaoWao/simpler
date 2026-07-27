@@ -21,7 +21,7 @@ import os
 import time
 
 import pytest
-from simpler.task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, CoreCallable
+from simpler.task_interface import CallConfig, ChipCallable, CoreCallable
 from simpler.worker import Worker
 
 from simpler_setup.elf_parser import extract_text_section
@@ -95,7 +95,7 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
         # single-digit seconds and surfaces either the device classification or
         # a valid host fallback rather than deadlocking.
         with pytest.raises(RuntimeError, match=r"run failed with code (-100|507(046|018|000))"):
-            worker.run(handle, ChipStorageTaskArgs(), config)
+            worker.run(handle, None, config)
         elapsed = time.monotonic() - t0
 
         # CI-tight env keeps the timeout chain short; default local values are

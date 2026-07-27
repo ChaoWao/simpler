@@ -26,31 +26,41 @@ import torch
 from simpler_setup.scene_test import Scalar, TaskArgsBuilder, Tensor, _RehostedTaskArgs
 
 
-class _FakeHostBuffer:
-    def __init__(self, nbytes: int):
+class _FakeHandle:
+    """Stands in for a ``create_buffer`` BufferHandle: a POSIX shm the rehost view is built over."""
+
+    def __init__(self, nbytes: int, worker: _FakeWorker):
         self.shm = SharedMemory(create=True, size=nbytes)
-        self.buffer = self.shm.buf
+        self._worker = worker
+        self._closed = False
+
+    @property
+    def buffer(self):
+        return self.shm.buf
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._worker.freed.append(self)
+        self.shm.close()
+        self.shm.unlink()
 
 
 class _FakeWorker:
-    """Stands in for a started L3 Worker's host-buffer allocator."""
+    """Stands in for a started L3 Worker's ``create_buffer`` allocator."""
 
     def __init__(self, fail_on_create: int | None = None):
-        self.created: list[_FakeHostBuffer] = []
-        self.freed: list[_FakeHostBuffer] = []
+        self.created: list[_FakeHandle] = []
+        self.freed: list[_FakeHandle] = []
         self._fail_on_create = fail_on_create
 
-    def create_host_buffer(self, nbytes: int) -> _FakeHostBuffer:
+    def create_buffer(self, nbytes: int) -> _FakeHandle:
         if self._fail_on_create is not None and len(self.created) >= self._fail_on_create:
-            raise RuntimeError("injected create_host_buffer failure")
-        buf = _FakeHostBuffer(nbytes)
-        self.created.append(buf)
-        return buf
-
-    def free_host_buffer(self, buf: _FakeHostBuffer) -> None:
-        self.freed.append(buf)
-        buf.shm.close()
-        buf.shm.unlink()
+            raise RuntimeError("injected create_buffer failure")
+        handle = _FakeHandle(nbytes, self)
+        self.created.append(handle)
+        return handle
 
 
 def test_rehost_preserves_values_and_frees_lifo():
@@ -87,7 +97,7 @@ def test_rehost_partial_failure_rolls_back():
         Tensor("c", torch.zeros(4, dtype=torch.float32)),
     )
     w = _FakeWorker(fail_on_create=2)  # third allocation fails
-    with pytest.raises(RuntimeError, match="injected create_host_buffer failure"):
+    with pytest.raises(RuntimeError, match="injected create_buffer failure"):
         _RehostedTaskArgs(w, ta)
     # The two successfully-created buffers are freed, and the builder is
     # restored to its original tensors (no half-rehosted state).

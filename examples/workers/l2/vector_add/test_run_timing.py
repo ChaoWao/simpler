@@ -27,13 +27,14 @@ import re
 
 import pytest
 from simpler._log import get_current_config
-from simpler.task_interface import CallConfig, ChipStorageTaskArgs, DataType, Tensor
+from simpler.task_interface import CallConfig, DataType, TaskArgs, TensorArgType
 from simpler.worker import Worker
 
 from simpler_setup.log_config import configure_logging
 
 from .main import N_COLS, N_ELEMS, N_ROWS, NBYTES, build_chip_callable
 
+_F32 = DataType.FLOAT32.value
 _STRACE_RE = re.compile(r"\[STRACE\] .*\bname=(?P<name>\S+)\b.*\bdur=(?P<dur>\d+)")
 
 
@@ -68,13 +69,13 @@ def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = 
         dev_a = worker.malloc(NBYTES)
         dev_b = worker.malloc(NBYTES)
         dev_out = worker.malloc(NBYTES)
-        worker.copy_to(dev_a, host_a.data_ptr(), NBYTES)
-        worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
+        worker.copy_to(dev_a, host_a)
+        worker.copy_to(dev_b, host_b)
 
-        args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args = TaskArgs()
+        args.add_ref(dev_a.ref((N_ROWS, N_COLS), _F32), TensorArgType.INPUT)
+        args.add_ref(dev_b.ref((N_ROWS, N_COLS), _F32), TensorArgType.INPUT)
+        args.add_ref(dev_out.ref((N_ROWS, N_COLS), _F32), TensorArgType.OUTPUT_EXISTING)
 
         config = CallConfig()
         config.enable_l2_swimlane = enable_l2_swimlane
@@ -85,7 +86,7 @@ def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = 
         # Verify the output is sane (so we know the kernel actually ran and
         # the markers aren't from an early-error path).
         host_out = torch.zeros(N_ROWS, N_COLS, dtype=torch.float32)
-        worker.copy_from(host_out.data_ptr(), dev_out, NBYTES)
+        worker.copy_from(host_out, dev_out)
         worker.free(dev_a)
         worker.free(dev_b)
         worker.free(dev_out)
