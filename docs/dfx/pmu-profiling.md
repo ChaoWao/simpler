@@ -300,9 +300,9 @@ reconcile_counters()            ← merge shard files into pmu.csv, then assert
 finalize(unregister, free)
 ```
 
-[`PmuCollector`](../src/a2a3/platform/include/host/pmu_collector.h)
+[`PmuCollector`](../../src/a2a3/platform/include/host/pmu_collector.h)
 inherits from
-[`profiling_common::ProfilerBase<PmuCollector, PmuModule>`](../src/common/platform/include/host/profiler_base.h):
+[`profiling_common::ProfilerBase<PmuCollector, PmuModule>`](../../src/common/platform/include/host/profiler_base.h):
 the base class owns split mgmt threads, collector shards, and the
 `BufferPoolManager<PmuModule>` they share. `PmuCollector` only supplies
 the PMU-specific pieces — the `PmuModule` trait that describes the
@@ -316,7 +316,7 @@ them in the CSV directory; the next `start()` for the same output path removes
 those stale run-scoped files before collector threads launch. The
 mgmt/collector threading, buffer pooling, and `Module` trait pattern are shared
 with ArgsDump and L2Swimlane — see
-[profiling-framework.md](../profiling-framework.md) for the framework reference.
+[profiling-framework.md](profiling-framework.md) for the framework reference.
 
 ### 5.3 a5 — same framework, host-shadow transport (DAV_3510, 10 counters)
 
@@ -427,7 +427,7 @@ PmuBuffer pool (rotated)                (BUFFERS_PER_CORE per core)
 maintains a paired host-shadow `malloc()` per device buffer and
 synchronizes via `rtMemcpy` (onboard) / `memcpy` (sim). The framework
 copy hooks `profiling_copy_to_device` / `profiling_copy_from_device`
-(in [`profiling_copy.h`](../../src/a5/platform/include/host/profiling_copy.h))
+(in [`profiling_copy.h`](../../src/common/platform/include/host/profiling_copy.h))
 abstract this difference.
 
 Each AICore worker resolves its PMU MMIO base at kernel entry from
@@ -436,7 +436,7 @@ register-base table the host already fills for AICPU) and reads its
 `PmuAicoreRing` from `KernelArgs::aicore_pmu_ring_addrs[block_idx]`
 (filled by the host in `PmuCollector::init`). Both addresses are
 forwarded by `KERNEL_ENTRY` into platform-owned per-core slots
-([`aicore_profiling_state.h`](../src/a5/platform/include/aicore/aicore_profiling_state.h));
+([`aicore_profiling_state.h`](../../src/a5/platform/include/aicore/aicore_profiling_state.h));
 the runtime `Handshake` carries no profiling fields. Because the
 resolved reg base is valid from Phase 1 onward (no AICPU-side init
 dependency), `aicore_execute` caches it once after Phase 3 alongside
@@ -478,11 +478,11 @@ tasks in flight on a single AICore. Parity on `reg_task_id & 1` keeps
 adjacent dispatches from colliding (the runtime's `dispatch_seq++`
 guarantees neighboring register tokens differ by 1 → different slots).
 
-[`PmuCollector`](../src/a5/platform/include/host/pmu_collector.h) on
+[`PmuCollector`](../../src/a5/platform/include/host/pmu_collector.h) on
 a5 inherits the same CRTP base
-([`profiling_common::ProfilerBase`](../src/common/platform/include/host/profiler_base.h))
+([`profiling_common::ProfilerBase`](../../src/common/platform/include/host/profiler_base.h))
 as a2a3 and parameterizes
-[`BufferPoolManager`](../src/common/platform/include/host/buffer_pool_manager.h)
+[`BufferPoolManager`](../../src/common/platform/include/host/buffer_pool_manager.h)
 with `PmuModule`. The only a5-specific glue is the 5-callback
 `MemoryOps` and the per-tick shm mirror.
 
@@ -561,7 +561,7 @@ Notes on this constraint:
   switches to a new buffer via the free queue. If no free buffer is
   available, records are dropped. Increase `PLATFORM_PMU_BUFFERS_PER_CORE`
   (default 4) in
-  [platform_config.h](../src/a5/platform/include/common/platform_config.h)
+  [platform_config.h](../../src/a5/platform/include/common/platform_config.h)
   if your workload produces bursts that exhaust the buffer pool.
 - A non-zero `diff` in the host's `record count mismatch` warning
   means AICPU attempted to commit `diff` records whose dual-issue
@@ -627,7 +627,7 @@ host drain/replenish path has more buffer headroom.
 
 ## 9. Related docs
 
-- [profiling-framework.md](../profiling-framework.md) — shared host-side
+- [profiling-framework.md](profiling-framework.md) — shared host-side
   collector framework.
 - [chip-level-arch.md](../chip-level-arch.md) — host / AICPU / AICore
   program boundaries the PMU path spans.
