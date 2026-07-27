@@ -15,7 +15,15 @@ hands off to the C++ `_ChipWorker.init` which dlopens host_runtime.so (whose
 `simpler_init` reads CANN dlog config off that same HostLogger, onboard only).
 The level forwarded is a one-shot snapshot of the `simpler` Python logger.
 Nothing log-related needs to happen at import time here.
+
+`Worker` and the `task_interface` submodule resolve on first attribute access
+rather than at import time: both pull in the `_task_interface` extension, so
+eager imports here would make `import simpler` fail wherever that extension is
+missing or stale, including for callers that only want the logging helpers.
 """
+
+import importlib
+from typing import Any
 
 # Importing _log auto-configures the simpler logger to V5 if unset.
 from ._log import (
@@ -37,6 +45,7 @@ from ._log import (
 
 __all__ = [
     "DEFAULT_THRESHOLD",
+    "Worker",
     "NUL",
     "V0",
     "V1",
@@ -50,4 +59,23 @@ __all__ = [
     "V9",
     "get_current_config",
     "get_logger",
+    "task_interface",
 ]
+
+# name -> (module, attribute). Resolved by __getattr__ on first access.
+_LAZY_ATTRS = {"Worker": (f"{__name__}.worker", "Worker")}
+_LAZY_SUBMODULES = ("task_interface",)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the extension-backed surface on first access (PEP 562)."""
+    if name in _LAZY_ATTRS:
+        module_name, attribute = _LAZY_ATTRS[name]
+        return getattr(importlib.import_module(module_name), attribute)
+    if name in _LAZY_SUBMODULES:
+        return importlib.import_module(f"{__name__}.{name}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

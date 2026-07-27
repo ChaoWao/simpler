@@ -36,13 +36,11 @@ Both `simpler` and `simpler_setup` are part of the surface you write against:
   `simpler_setup.tools`.
 
 You cannot compile a kernel without `simpler_setup`, so treat both as yours to
-use. Note that
-[`.claude/rules/project-layout.md`](../../.claude/rules/project-layout.md)
-describes `simpler_setup` as internal test framework — that boundary does not
-match how the examples import today, and neither does the claim that `simpler`
-is the whole user API: `simpler.__all__` currently exports only the logging
-helpers, so `Worker` must be imported as `from simpler.worker import Worker`
-rather than `from simpler import Worker`.
+use. `from simpler import Worker` works; the task and callable types come from
+`simpler.task_interface`. One name to watch:
+`simpler.task_interface.Tensor` is a device tensor descriptor while
+`simpler_setup.Tensor` is a scene-test argument spec — same name, different
+types.
 
 ## Where the worked examples live
 
