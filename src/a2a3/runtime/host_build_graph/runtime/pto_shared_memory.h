@@ -123,9 +123,13 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
             while (next + 1 < submitted && is_completion_flag_set(next + 1)) {
                 ++next;
             }
-            if (next == curr_watermark) { return; }
+            if (next == curr_watermark) {
+                return;
+            }
 
-            if (completed_watermark.compare_exchange_strong(curr_watermark, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            if (completed_watermark.compare_exchange_strong(
+                    curr_watermark, next, std::memory_order_acq_rel, std::memory_order_acquire
+                )) {
                 curr_watermark = next;
             }
         }
