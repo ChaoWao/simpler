@@ -46,7 +46,6 @@ from simpler.task_interface import (  # noqa: E402
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker  # noqa: E402
@@ -54,7 +53,9 @@ from simpler.worker import Worker  # noqa: E402
 from simpler_setup.elf_parser import extract_text_section  # noqa: E402
 from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.torch_interop import make_tensor_arg  # noqa: E402
+from simpler_setup.torch_interop import make_tensor_ref  # noqa: E402
+
+_F32 = DataType.FLOAT32.value
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -206,31 +207,23 @@ def run(
                     print(
                         f"[ffn_tp_parallel] chip {i}: rank={domain.domain_rank}/{domain.domain_size} "
                         f"window=[0x{domain.local_window_base:x} +{domain.actual_window_size}B] "
-                        f"scratch=0x{domain.buffer_ptrs['scratch']:x}"
+                        f"scratch=0x{domain.buffers['scratch'].base:x}"
                     )
                     # Stage 1: AIC matmul. partial_local is OUTPUT_EXISTING here;
-                    # the framework records its buffer.addr as a producer.
+                    # the framework records its ref identity as a producer.
                     a1 = TaskArgs()
-                    a1.add_tensor(make_tensor_arg(host_x_shards[i]), TensorArgType.INPUT)
-                    a1.add_tensor(make_tensor_arg(host_w_shards[i]), TensorArgType.INPUT)
-                    a1.add_tensor(make_tensor_arg(host_partial[i]), TensorArgType.OUTPUT_EXISTING)
+                    a1.add_ref(make_tensor_ref(worker, host_x_shards[i]), TensorArgType.INPUT)
+                    a1.add_ref(make_tensor_ref(worker, host_w_shards[i]), TensorArgType.INPUT)
+                    a1.add_ref(make_tensor_ref(worker, host_partial[i]), TensorArgType.OUTPUT_EXISTING)
                     orch.submit_next_level(ffn_handle, a1, cfg, worker=i)
 
-                    # Stage 2: AIV cross-rank sum. Tagging partial_local INPUT
-                    # with the same buffer.addr makes TensorMap auto-link this
-                    # task as a consumer of stage 1, no explicit barrier needed.
+                    # Stage 2: AIV cross-rank sum. Tagging partial_local INPUT resolves to the same
+                    # memoized ref identity as stage 1's output, so TensorMap auto-links this task as a
+                    # consumer of stage 1, no explicit barrier needed.
                     a2 = TaskArgs()
-                    a2.add_tensor(make_tensor_arg(host_partial[i]), TensorArgType.INPUT)
-                    a2.add_tensor(make_tensor_arg(host_y[i]), TensorArgType.OUTPUT_EXISTING)
-                    a2.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["scratch"],
-                            shapes=(scratch_count,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
+                    a2.add_ref(make_tensor_ref(worker, host_partial[i]), TensorArgType.INPUT)
+                    a2.add_ref(make_tensor_ref(worker, host_y[i]), TensorArgType.OUTPUT_EXISTING)
+                    a2.add_ref(domain.buffers["scratch"].ref((scratch_count,), _F32), TensorArgType.INOUT)
                     a2.add_scalar(domain.domain_size)
                     a2.add_scalar(domain.device_ctx)
                     orch.submit_next_level(allreduce_handle, a2, cfg, worker=i)

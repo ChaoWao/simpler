@@ -24,7 +24,6 @@ from simpler.task_interface import (
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker
@@ -32,7 +31,7 @@ from simpler.worker import Worker
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.pto_isa import ensure_pto_isa_root
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup.torch_interop import make_tensor_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 N = 128 * 128
@@ -136,26 +135,10 @@ def run(
                 for rank in range(nranks):
                     domain = handle[rank]
                     args = TaskArgs()
-                    args.add_tensor(make_tensor_arg(partial[rank]), TensorArgType.INPUT)
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["mailbox"],
-                            shapes=(N,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
-                    args.add_tensor(make_tensor_arg(result[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["notify_counter"],
-                            shapes=(1,),
-                            dtype=DataType.INT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INPUT,
-                    )
+                    args.add_ref(make_tensor_ref(worker, partial[rank]), TensorArgType.INPUT)
+                    args.add_ref(domain.buffers["mailbox"].ref((N,), DataType.FLOAT32.value), TensorArgType.INOUT)
+                    args.add_ref(make_tensor_ref(worker, result[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_ref(domain.buffers["notify_counter"].ref((1,), DataType.INT32.value), TensorArgType.INPUT)
                     args.add_scalar(domain.device_ctx)
                     orch.submit_next_level(chip_handle, args, cfg, worker=rank)
 

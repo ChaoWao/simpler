@@ -32,7 +32,6 @@ from simpler.task_interface import (
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker
@@ -40,7 +39,7 @@ from simpler.worker import Worker
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.pto_isa import ensure_pto_isa_root
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup.torch_interop import make_tensor_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 N = 128 * 128
@@ -170,26 +169,13 @@ def run(platform: str = "a5", device_ids: list[int] | None = None) -> int:
                 # each producer TGET_ASYNCs the *peer* rank's window, so all
                 # windows must hold real data before execution begins.
                 for rank in range(nranks):
-                    orch.copy_to(
-                        rank,
-                        dst=handle[rank].buffer_ptrs["input_window"],
-                        src=inputs[rank].data_ptr(),
-                        size=input_nbytes,
-                    )
+                    orch.copy_to(handle[rank].buffers["input_window"], inputs[rank])
                 for rank in range(nranks):
                     domain = handle[rank]
                     args = TaskArgs()
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["input_window"],
-                            shapes=(N,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INPUT,
-                    )
-                    args.add_tensor(make_tensor_arg(out[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_tensor(make_tensor_arg(result[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_ref(domain.buffers["input_window"].ref((N,), DataType.FLOAT32.value), TensorArgType.INPUT)
+                    args.add_ref(make_tensor_ref(worker, out[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_ref(make_tensor_ref(worker, result[rank]), TensorArgType.OUTPUT_EXISTING)
                     args.add_scalar(domain.device_ctx)
                     orch.submit_next_level(chip_cid, args, cfg, worker=rank)
 

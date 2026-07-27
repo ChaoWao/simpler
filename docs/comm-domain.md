@@ -43,10 +43,11 @@ allocation: if `sum(b.nbytes) > window_size`, `allocate_domain` raises
 | `device_ctx` | pointer to the device-side `CommContext` (pass as a kernel scalar) |
 | `local_window_base` | base device address of this rank's window |
 | `actual_window_size` | window size actually allocated |
-| `buffer_ptrs` | `{buffer_name: device_ptr}` for each `CommBufferSpec` |
+| `buffers` | `{buffer_name: BufferHandle}` for each `CommBufferSpec` (device `VMM_WINDOW`, owned by this chip) |
 
 Kernels read peer windows through `device_ctx` (which holds every rank's
-window base, local + imported peer); `buffer_ptrs[name]` is the local slice.
+window base, local + imported peer); `buffers[name]` is the local slice —
+name it in a task arg with `buffers[name].ref(shapes, dtype)`.
 
 ---
 
@@ -64,7 +65,7 @@ The handle is a context manager. Its lifecycle has **two distinct states**:
 This split exists because `submit_next_level()` only *enqueues* DAG work;
 `Worker.run()` does not wait for completion until the orch function returns.
 If `release()` freed memory immediately on `with`-exit, a still-queued task that
-captured the domain's `device_ctx` / `buffer_ptrs` would read freed memory. So
+captured the domain's `device_ctx` / `buffers` would read freed memory. So
 **release is deferred**: `release()` flips `released` and queues the backend
 free; the real free runs after the run fence, when every task that could
 reference the window has completed.
@@ -151,14 +152,15 @@ To preload host data (rather than have a kernel write the window), use
 `orch.copy_to`:
 
 ```python
-orch.copy_to(chip_idx, dst=handle[chip_idx].buffer_ptrs["input"], src=tensor.data_ptr(), size=n)
+orch.copy_to(handle[chip_idx].buffers["input"], tensor)
 ```
 
-`copy_to` is **synchronous** (control-mailbox round-trip + synchronous
-`rtMemcpy` H2D): when it returns, the bytes are in that rank's window. `src`
-must be device-visible from the forked chip child — e.g. a `torch` tensor moved
-to shared memory with `.share_memory_()` **before** `Worker.init()` forks the
-chips.
+`copy_to(dst_handle, src)` is **synchronous** (control-mailbox round-trip +
+synchronous `rtMemcpy` H2D): when it returns, the bytes are in that rank's
+window. `dst` is the window's `VMM_WINDOW` BufferHandle; `src` (a `torch` tensor
+or writable buffer) must be device-visible from the forked chip child — e.g. a
+tensor moved to shared memory with `.share_memory_()` **before** `Worker.init()`
+forks the chips.
 
 **Cross-rank ordering:** when a kernel reads a *peer's* staged window, stage
 **all** ranks' windows before submitting any kernel — `copy_to` is synchronous
@@ -168,7 +170,7 @@ rank's producer run before another rank has finished staging:
 ```python
 with orch.allocate_domain(...) as handle:
     for chip_idx in handle.workers:                       # stage all first
-        orch.copy_to(chip_idx, dst=handle[chip_idx].buffer_ptrs["input"], src=..., size=n)
+        orch.copy_to(handle[chip_idx].buffers["input"], tensor)
     for chip_idx in handle.workers:                       # then submit
         orch.submit_next_level(chip_handle, args, cfg, worker=chip_idx)
 ```

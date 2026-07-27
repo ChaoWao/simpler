@@ -77,7 +77,7 @@ def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
                     "domain_size": tp[chip_idx].domain_size,
                     "device_ctx": int(tp[chip_idx].device_ctx),
                     "local_window_base": int(tp[chip_idx].local_window_base),
-                    "buffer_ptrs": dict(tp[chip_idx].buffer_ptrs),
+                    "buffer_bases": {name: h.base for name, h in tp[chip_idx].buffers.items()},
                 }
                 for chip_idx in tp.workers
             }
@@ -115,7 +115,7 @@ def test_two_rank_allocate_release_round_trip(st_platform, st_device_ids):
             assert ctx["device_ctx"] != 0, f"chip {chip_idx}: device_ctx is 0"
             assert ctx["local_window_base"] != 0, f"chip {chip_idx}: local_window_base is 0"
             # Buffers are carved sequentially from the local pool.
-            ptrs = ctx["buffer_ptrs"]
+            ptrs = ctx["buffer_bases"]
             assert isinstance(ptrs, dict)
             assert ptrs["scratch"] == ctx["local_window_base"]
             assert ptrs["signal"] == ctx["local_window_base"] + 64

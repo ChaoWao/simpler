@@ -84,6 +84,12 @@ public:
     // pointer has reached CONSUMED and scope_end has released the scope ref.
     Tensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
 
+    // Same managed intermediate as alloc(), but registered in the tensormap under the identity's
+    // canonical hash (matching how infer_deps keys a BufferRef) instead of the raw heap VA, and
+    // returning that VA. The caller wraps the VA as a FORK_SHM BufferHandle carrying `identity`, so a
+    // ref over it dependency-wires to this slot. Backs Worker.alloc_shared_tensor.
+    uint64_t alloc_ref(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity);
+
     // Submit a NEXT_LEVEL task. `callable` is the stable identity returned
     // by Worker.register(); the child resolves its digest to a private slot.
     // Tags inside `args` drive dependency inference; OUTPUT tensors with
@@ -199,6 +205,17 @@ private:
     // slot's lifetime. Throws if the id is out of range — callers that
     // hold a recently-allocated slot id should always get a valid pointer.
     TaskSlotState &slot_state(TaskSlot s);
+
+    // Managed HeapRing intermediate shared by alloc / alloc_ref: claims a synthetic auto-free slot
+    // (no fanin; fanout = scope ref) and returns (slot, heap VA, byte size). The caller registers the
+    // tensormap key (raw VA for alloc, identity hash for alloc_ref) and marks the slot COMPLETED.
+    struct ManagedAlloc {
+        TaskSlot slot;
+        uint64_t va;
+        uint64_t bytes;
+    };
+    ManagedAlloc alloc_managed_slot(const std::vector<uint32_t> &shape, DataType dtype);
+    void finalize_managed_slot(const ManagedAlloc &m, const TensorKey &key);
 
     // Shared submit machinery. Takes `args_list` by value so the Orchestrator
     // can patch `tensor.data` on OUTPUT tensors flagged for auto-allocation.

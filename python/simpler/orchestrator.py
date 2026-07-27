@@ -375,7 +375,7 @@ class Orchestrator:
         the IPC handshake (HCCL: aclrtMalloc + IPC import; sim: shm + ftruncate).
         Returns a ``CommDomainHandle`` whose ``contexts[chip_idx]`` exposes
         the per-chip ``ChipDomainContext`` (``device_ctx``, ``local_window_base``,
-        ``buffer_ptrs`` by name).
+        ``buffers`` by name — each a device ``VMM_WINDOW`` BufferHandle).
 
         ``name`` is a local identifier (uniqueness checked against currently-live
         handles); peers do not need to agree on the string.  ``workers`` must be

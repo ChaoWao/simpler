@@ -24,7 +24,15 @@ import os
 import re
 
 import pytest
-from simpler.task_interface import ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs, CoreCallable
+from simpler.task_interface import (
+    ArgDirection,
+    CallConfig,
+    ChipCallable,
+    CoreCallable,
+    DataType,
+    TaskArgs,
+    TensorArgType,
+)
 from simpler.worker import Worker
 
 from simpler_setup.kernel_compiler import KernelCompiler
@@ -92,12 +100,14 @@ def test_a5hbg_task_timing_slots_emit_markers(st_platform, st_device_ids, capfd)
         out = torch.zeros(_SIZE, dtype=torch.float32)  # orch copies dev_out back here
         expected = a + 2 * b
 
-        args = ChipStorageTaskArgs()
-        from simpler_setup.torch_interop import make_tensor_arg  # noqa: PLC0415
-
-        args.add_tensor(make_tensor_arg(a))
-        args.add_tensor(make_tensor_arg(b))
-        args.add_tensor(make_tensor_arg(out))
+        # L2 runs in-process (no fork), so any host tensor's VA is valid to the materializer; name each
+        # as a FORK_SHM BufferRef via make_ref_arg. a, b are inputs; out is where the hbg runtime's D2H
+        # lands (in-process, so the parent sees it — no share_memory_ needed at L2).
+        args = TaskArgs()
+        _f32 = DataType.FLOAT32.value
+        args.add_ref(worker.make_ref_arg(a, shapes=(_SIZE,), dtype=_f32), TensorArgType.INPUT)
+        args.add_ref(worker.make_ref_arg(b, shapes=(_SIZE,), dtype=_f32), TensorArgType.INPUT)
+        args.add_ref(worker.make_ref_arg(out, shapes=(_SIZE,), dtype=_f32), TensorArgType.OUTPUT_EXISTING)
 
         config = CallConfig()
         config.enable_l2_swimlane = False  # slots must work with swimlane OFF

@@ -18,11 +18,12 @@ from __future__ import annotations
 import ctypes
 
 import torch
-from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, Tensor, TensorArgType
+from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
 
 from simpler_setup import Tensor as STensor
-from simpler_setup.scene_test import TaskArgsBuilder
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup.scene_test import TaskArgsBuilder, _rehosted_ref_for
+
+_F32 = DataType.FLOAT32.value
 
 # ---------------------------------------------------------------------------
 # Allreduce constants (must match kernel COUNT)
@@ -123,17 +124,11 @@ def allreduce_orch_fn(orch, callables, task_args, config):
         for i in range(nranks):
             domain = handle[i]
             chip_args = TaskArgs()
-            chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
-            chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING)
-            chip_args.add_tensor(
-                Tensor.make(
-                    data=domain.buffer_ptrs["scratch"],
-                    shapes=(float_elems,),
-                    dtype=DataType.FLOAT32,
-                    child_memory=True,
-                ),
-                TensorArgType.INOUT,
+            chip_args.add_ref(_rehosted_ref_for(task_args, getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
+            chip_args.add_ref(
+                _rehosted_ref_for(task_args, getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING
             )
+            chip_args.add_ref(domain.buffers["scratch"].ref((float_elems,), _F32), TensorArgType.INOUT)
             chip_args.add_scalar(domain.domain_size)
             chip_args.add_scalar(domain.device_ctx)
             orch.submit_next_level(chip, chip_args, config, worker=i)
@@ -190,17 +185,11 @@ def generic_collective_orch_fn(
         for i in range(nranks):
             domain = handle[i]
             chip_args = TaskArgs()
-            chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
-            chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING)
-            chip_args.add_tensor(
-                Tensor.make(
-                    data=domain.buffer_ptrs["scratch"],
-                    shapes=(float_elems,),
-                    dtype=DataType.FLOAT32,
-                    child_memory=True,
-                ),
-                TensorArgType.INOUT,
+            chip_args.add_ref(_rehosted_ref_for(task_args, getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
+            chip_args.add_ref(
+                _rehosted_ref_for(task_args, getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING
             )
+            chip_args.add_ref(domain.buffers["scratch"].ref((float_elems,), _F32), TensorArgType.INOUT)
             chip_args.add_scalar(domain.domain_size)
             for s in extras:
                 chip_args.add_scalar(s)

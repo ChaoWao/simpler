@@ -230,8 +230,9 @@ class _RehostedTaskArgs:
 
         self._worker = worker
         self._torch = torch
-        self._buffers: list = []  # (HostBuffer, view) in creation order
+        self._buffers: list = []  # (BufferHandle, view) in creation order
         self._originals: dict[str, Any] = {}  # name -> pre-rehost tensor
+        self._handles: dict[str, Any] = {}  # name -> owning BufferHandle (for _build_l3_task_args refs)
         self._test_args = test_args
         self._reject_aliased_tensors(test_args)
         try:
@@ -241,13 +242,17 @@ class _RehostedTaskArgs:
                 # an empty tensor is never dereferenced by the child, so it is
                 # left untouched rather than allocating a zero-length buffer.
                 if isinstance(spec, Tensor) and isinstance(spec.value, torch.Tensor) and spec.value.numel() > 0:
-                    view = self._rehost_one(spec.value)
+                    handle, view = self._rehost_one(spec.value)
                     self._originals[spec.name] = test_args._data[spec.name]
+                    self._handles[spec.name] = handle
                     test_args._data[spec.name] = view
                     new_specs.append(Tensor(spec.name, view))
                 else:
                     new_specs.append(spec)
             test_args._specs = new_specs
+            # Expose the owning handles so the L3 arg builder can name each rehosted tensor as a
+            # BufferRef (handle.ref); the L2 chip builder keeps using the raw views.
+            test_args._rehost_handles = self._handles
         except BaseException:
             self.release()
             raise
@@ -289,15 +294,17 @@ class _RehostedTaskArgs:
                 "representable — build it contiguous in generate_args()"
             )
         nbytes = t.numel() * t.element_size()
-        buf = self._worker.create_host_buffer(nbytes)
+        handle = self._worker.create_buffer(nbytes)
         try:
-            view = torch.frombuffer(buf.buffer, dtype=t.dtype, count=t.numel()).view(t.shape)
+            shm = handle.shm
+            assert shm is not None
+            view = torch.frombuffer(shm.buf, dtype=t.dtype, count=t.numel()).view(t.shape)
             view.copy_(t)
         except BaseException:
-            self._worker.free_host_buffer(buf)
+            handle.close()
             raise
-        self._buffers.append((buf, view))
-        return view
+        self._buffers.append((handle, view))
+        return handle, view
 
     def release(self) -> None:
         # Restore the builder's original entries (dropping the born-shared view
@@ -309,17 +316,16 @@ class _RehostedTaskArgs:
             for s in self._test_args._specs
         ]
         self._originals.clear()
+        self._handles.clear()
+        if hasattr(self._test_args, "_rehost_handles"):
+            self._test_args._rehost_handles = {}
         while self._buffers:
-            buf, view = self._buffers.pop()
+            handle, view = self._buffers.pop()
             del view
             try:
-                buf.buffer.release()
-            except (ValueError, BufferError):
-                pass
-            try:
-                self._worker.free_host_buffer(buf)
+                handle.close()  # drops the view above, then closes + unlinks the POSIX shm
             except Exception as exc:  # noqa: BLE001 -- best-effort cleanup; a leak here must not mask the test result, but process-control exceptions still propagate
-                logger.warning("SceneTest rehost cleanup: free_host_buffer failed: %s", exc)
+                logger.warning("SceneTest rehost cleanup: handle.close failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -411,12 +417,53 @@ def _build_chip_task_args(test_args: TaskArgsBuilder, orch_signature: list):
     return chip_args, output_names
 
 
-def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list):
-    """Build a tagged `TaskArgs` (vector-backed, with `TensorArgType` tags) from
-    `TaskArgsBuilder`.
+def _rehosted_ref_for(test_args: TaskArgsBuilder, tensor):
+    """A ``BufferRef`` over the rehosted ``tensor``'s owning handle, matched by its backing address.
 
-    Used by the L3 path (`orch.submit_next_level(callable, args, config, worker=chip_id)`):
-    the orchestrator reads the tags to drive dependency inference.
+    Like ``_rehosted_ref`` but keyed by the (rehosted) tensor object a hand-written orch already holds,
+    rather than its name — the rehosted view's ``data_ptr`` is its create_buffer handle's base.
+    """
+    from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
+
+    base = int(tensor.data_ptr())
+    for handle in getattr(test_args, "_rehost_handles", {}).values():
+        if handle.base == base:
+            return handle.ref(shapes=tuple(tensor.shape), dtype=torch_dtype_to_datatype(tensor.dtype).value)
+    raise ValueError("tensor is not a rehosted arg (no create_buffer handle with a matching base)")
+
+
+def _l3_ref(test_args: TaskArgsBuilder, name: str, worker=None):
+    """A ``BufferRef`` naming the L3 tensor arg ``name``.
+
+    Two ways a scene test's host tensor becomes child-visible: the framework rehosts it into a
+    create_buffer (POSIX shm) — use that handle; or a test pre-allocates a ``share_memory_()`` tensor
+    before ``init()`` (fork-inherited MAP_SHARED) — name it via ``worker.make_ref_arg`` (FORK_SHM).
+    """
+    from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
+
+    t = getattr(test_args, name)
+    dtype = torch_dtype_to_datatype(t.dtype).value
+    handle = getattr(test_args, "_rehost_handles", {}).get(name)
+    if handle is not None:
+        return handle.ref(shapes=tuple(t.shape), dtype=dtype)
+    if worker is not None:
+        return worker.make_ref_arg(t, shapes=tuple(t.shape), dtype=dtype)
+    raise ValueError(f"L3 tensor arg '{name}' has no rehosted handle; rehost the args or pass worker= for make_ref_arg")
+
+
+def _rehosted_ref(test_args: TaskArgsBuilder, name: str):
+    """A ``BufferRef`` over the rehosted tensor ``name`` (framework rehost only). For a hand-written
+    L3 orch naming one rehosted tensor as a task arg (e.g. the chip output as a sub-task INPUT)."""
+    return _l3_ref(test_args, name, worker=None)
+
+
+def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list, worker=None):
+    """Build a tagged `TaskArgs` (BufferRefs) from a `TaskArgsBuilder` for the L3 path
+    (`orch.submit_next_level`); the tags drive dependency inference.
+
+    Names each tensor as a BufferRef over its framework-rehosted create_buffer handle, or — for a test
+    that pre-allocates ``share_memory_()`` tensors before ``init()`` — via ``worker.make_ref_arg`` when
+    ``worker`` is passed.
 
     Returns:
         chip_args: TaskArgs (tagged)
@@ -429,14 +476,14 @@ def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list):
         scalar_to_uint64,
     )
 
-    from simpler_setup.torch_interop import make_tensor_arg  # noqa: PLC0415
-
     _DIR_TO_TAG = {
         ArgDirection.IN: TensorArgType.INPUT,
         ArgDirection.OUT: TensorArgType.OUTPUT_EXISTING,
         ArgDirection.INOUT: TensorArgType.INOUT,
     }
 
+    # Each rehosted tensor is named as a BufferRef over its owning create_buffer handle (the child
+    # maps it by canonical identity); tags drive dependency inference.
     chip_args = TaskArgs()
     output_names: list[str] = []
 
@@ -451,7 +498,7 @@ def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list):
                 )
             direction = orch_signature[tensor_idx]
             tag = _DIR_TO_TAG.get(direction, TensorArgType.INPUT)
-            chip_args.add_tensor(make_tensor_arg(spec.value), tag)
+            chip_args.add_ref(_l3_ref(test_args, spec.name, worker), tag)
             if direction in (ArgDirection.OUT, ArgDirection.INOUT):
                 output_names.append(spec.name)
             tensor_idx += 1

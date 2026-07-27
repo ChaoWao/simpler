@@ -81,31 +81,32 @@ In our orch `func_id=0` is the only value, so one child.
 dev_a   = worker.malloc(NBYTES)
 dev_b   = worker.malloc(NBYTES)
 dev_out = worker.malloc(NBYTES)
-worker.copy_to(dev_a, host_a.ctypes.data, NBYTES)
-worker.copy_to(dev_b, host_b.ctypes.data, NBYTES)
+worker.copy_to(dev_a, host_a)
+worker.copy_to(dev_b, host_b)
 ```
 
-`malloc` returns a device pointer (uint64). `copy_to(dst_dev, src_host, n)`
-does host→device DMA.
+`malloc` returns a device `BufferHandle`. `copy_to(dst_handle, src)` does
+host→device DMA (`src` is a torch tensor or any writable buffer).
 
-### 5. Build `ChipStorageTaskArgs`, run
+### 5. Build `TaskArgs` (BufferRefs), run
 
 ```python
-args = ChipStorageTaskArgs()
-args.add_tensor(Tensor.make(dev_a,   shape, DataType.FLOAT32))
-args.add_tensor(Tensor.make(dev_b,   shape, DataType.FLOAT32))
-args.add_tensor(Tensor.make(dev_out, shape, DataType.FLOAT32))
+args = TaskArgs()
+args.add_ref(dev_a.ref(shapes=shape, dtype=DataType.FLOAT32.value),   TensorArgType.INPUT)
+args.add_ref(dev_b.ref(shapes=shape, dtype=DataType.FLOAT32.value),   TensorArgType.INPUT)
+args.add_ref(dev_out.ref(shapes=shape, dtype=DataType.FLOAT32.value), TensorArgType.OUTPUT_EXISTING)
 
 worker.run(chip_handle, args, CallConfig())  # chip_handle = worker.register(chip_callable) before init()
 ```
 
-The tensor order must match `signature` order on the `ChipCallable`. `run()`
-blocks until the kernel completes.
+Each `BufferRef` is a view over its handle; `.ref(shapes, dtype)` takes the
+`DataType` int value. The ref order must match `signature` order on the
+`ChipCallable`. `run()` blocks until the kernel completes.
 
 ### 6. Pull result back, verify, free
 
 ```python
-worker.copy_from(host_out.ctypes.data, dev_out, NBYTES)
+worker.copy_from(host_out, dev_out)
 worker.free(dev_a); worker.free(dev_b); worker.free(dev_out)
 np.testing.assert_allclose(host_out, expected, rtol=1e-5, atol=1e-5)
 ```

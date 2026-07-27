@@ -498,13 +498,18 @@ def wrap_fork_inherited(
     generation: int = 0,
     access: AccessMode = AccessMode.READ,
 ) -> BufferHandle:
-    """Wrap a pre-fork, COW-inherited host allocation as a zero-copy ``FORK_SHM`` ``BufferHandle``.
+    """Wrap a pre-fork, fork-inherited host allocation as a zero-copy ``FORK_SHM`` ``BufferHandle``.
 
-    A tensor allocated before the chip children were forked is present in every child at the *same*
-    virtual address (copy-on-write). The backend body is that base VA (u64 LE); the consumer
-    materializes to the same VA with no mapping and no copy. Because COW splits a page on the child's
-    first write, this is read-only from the child's side (``access`` defaults to READ) — an output the
-    parent must read back needs a shm backing (``create_host_shared_buffer``) instead.
+    Memory allocated before the children were forked is present in every child at the *same* virtual
+    address; the backend body is that base VA (u64 LE) and the consumer materializes to the same VA
+    with no mapping and no copy. Read/write sharing depends on the underlying mmap:
+
+    * a plain allocation is ``MAP_PRIVATE`` — copy-on-write, so a child's first write splits the page
+      into a private copy the parent never sees. Read-only from the child (input); ``access`` defaults
+      to READ.
+    * a ``MAP_SHARED`` allocation (e.g. a ``torch.Tensor.share_memory_()``) is truly shared across the
+      fork — the child's writes land in the same physical pages the parent reads, so it is usable as an
+      OUTPUT the parent reads back. Pass ``access=READWRITE`` for that case.
     """
     identity = CanonicalIdentity(owner_instance_id, buffer_id, owner_worker_path, generation)
     return BufferHandle(
@@ -559,6 +564,39 @@ def wrap_device_malloc(
         visibility=Visibility.PRIVATE,
         access=access,
         backend_kind=BackendKind.DEVICE_MALLOC,
+        nbytes=nbytes,
+        body=int(device_ptr).to_bytes(8, "little"),
+        shm=None,
+        base=int(device_ptr),
+        owner_worker_id=int(owner_worker_id),
+    )
+
+
+def wrap_vmm_window(
+    device_ptr: int,
+    nbytes: int,
+    owner_instance_id: bytes,
+    buffer_id: int,
+    owner_worker_path: str = "",
+    generation: int = 0,
+    access: AccessMode = AccessMode.READWRITE,
+    owner_worker_id: int = 0,
+) -> BufferHandle:
+    """Wrap a domain-window-carved device VA as a ``VMM_WINDOW`` ``BufferHandle``.
+
+    A comm domain's per-rank window is device memory carved by ``allocate_domain``; each named buffer
+    slice is one such backing. The backend body is the device VA (u64 LE); the consumer materializes to
+    that VA with no mapping. The VA is valid only on the chip that owns the window, so a ref over this
+    handle must be dispatched only to that chip (``owner_worker_id``). Unlike ``DEVICE_MALLOC`` it is
+    not freed by ``worker.free`` — the domain owns its lifetime and reclaims it at ``release_domain``.
+    """
+    identity = CanonicalIdentity(owner_instance_id, buffer_id, owner_worker_path, generation)
+    return BufferHandle(
+        identity=identity,
+        address_space=AddressSpace.DEVICE,
+        visibility=Visibility.SHARED,
+        access=access,
+        backend_kind=BackendKind.VMM_WINDOW,
         nbytes=nbytes,
         body=int(device_ptr).to_bytes(8, "little"),
         shm=None,
@@ -626,10 +664,11 @@ class ImportRegistry:
         cached = self._by_identity.get(key)
         if cached is not None:
             return cached
-        if desc.backend_kind in (BackendKind.FORK_SHM, BackendKind.DEVICE_MALLOC):
+        if desc.backend_kind in (BackendKind.FORK_SHM, BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
             # The body is the base pointer (u64 LE), already valid in this process — no mapping.
-            # FORK_SHM: a COW-inherited host VA. DEVICE_MALLOC: a device pointer valid on the chip that
-            # allocated it (the ref must only reach that chip — a topology invariant).
+            # FORK_SHM: a COW-inherited host VA. DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on
+            # the chip that allocated / carved it (the ref must only reach that chip — a topology
+            # invariant).
             base = int.from_bytes(desc.body, "little")
             imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None)
         elif desc.backend_kind == BackendKind.POSIX_SHM:

@@ -83,7 +83,6 @@ import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAX_REGISTERED_CALLABLE_IDS,
     RUNTIME_ENV_RING_COUNT,
-    TENSOR_ADDRESS_SPACE_OFFSET,
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
@@ -98,10 +97,12 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 
 from . import _log as _simpler_log
 from .buffer_handle import (
+    AccessMode,
     BackendKind,
     BufferHandle,
     BufferHandleDescriptor,
     BufferRef,
+    CanonicalIdentity,
     ImportRegistry,
     create_host_shared_buffer,
     host_ptr_nbytes,
@@ -109,6 +110,8 @@ from .buffer_handle import (
     pack_bufferref_blob,
     re_export,
     wrap_device_malloc,
+    wrap_fork_inherited,
+    wrap_vmm_window,
 )
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
@@ -317,13 +320,6 @@ _HOST_BUF_MAP_HEADER = struct.Struct("<QQQ")
 _HOST_BUF_UNMAP = struct.Struct("<Q")
 
 # Wire layout of a Tensor inside a task-args blob, pinned by static_assert in
-# src/common/task_interface/tensor.h: each Tensor is 128 B and buffer.addr is its
-# first field (offset 0). The blob is [int32 T][int32 S][Tensor[T]][scalars], so
-# tensor i's host pointer lives at _OFF_TASK_ARGS_BLOB + 8 + i*128. The child
-# rewrites that u64 in place to redirect a registered host pointer at its own
-# mapping (the pure-Python blob-rewrite scheme, no runtime C++ change).
-_BLOB_TENSOR_STRIDE = 128
-_BLOB_HEADER_BYTES = 8
 _CTRL_L3_L2_REGION_CREATE = 16
 _CTRL_L3_L2_REGION_RELEASE = 17
 
@@ -543,35 +539,6 @@ class HostBuffer:
     data_ptr: int
     nbytes: int
     buffer: memoryview
-
-
-def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[int, int, int]]) -> None:
-    """Redirect registered host pointers in a task-args blob to child mappings.
-
-    ``ranges`` is ``(parent_lo, parent_hi, child_base)`` for each host buffer the
-    child has mapped via _CTRL_MAP_HOST. For every host tensor whose
-    ``buffer.addr`` (a parent VA) lands in a registered range, rewrite it in
-    place to ``child_base + (addr - parent_lo)`` so the runtime dereferences the
-    child's own mapping. Tensors outside every range (fork-inherited or
-    child-allocated) are left untouched. A device-memory tensor
-    (``address_space == DEVICE``) carries a child-owned device pointer, never a
-    host VA, so it is skipped even when its address numerically falls inside a
-    registered host range — rewriting it would corrupt the device pointer. See
-    _BLOB_TENSOR_STRIDE for the wire layout.
-    """
-    tensor_count = struct.unpack_from("<i", buf, blob_off)[0]
-    if tensor_count <= 0:
-        return
-    base = blob_off + _BLOB_HEADER_BYTES
-    for i in range(tensor_count):
-        addr_off = base + i * _BLOB_TENSOR_STRIDE
-        if buf[addr_off + TENSOR_ADDRESS_SPACE_OFFSET]:
-            continue
-        addr = struct.unpack_from("<Q", buf, addr_off)[0]
-        for parent_lo, parent_hi, child_base in ranges:
-            if parent_lo <= addr < parent_hi:
-                struct.pack_into("<Q", buf, addr_off, child_base + (addr - parent_lo))
-                break
 
 
 def _read_ctrl_staged_shm_name(buf: memoryview) -> str:
@@ -2472,6 +2439,9 @@ class Worker:
         # so each level's orch sees only its own handles. No map here — H' relabels the backing;
         # a compute leaf maps lazily. Lifetime is worker-scoped for now.
         self._reexport_by_source: dict[bytes, BufferHandle] = {}
+        # make_ref_arg memo: a pre-fork host tensor's storage base -> its FORK_SHM handle, so every ref
+        # over the same storage shares one canonical identity (dependencies key on it). Worker-scoped.
+        self._fork_tensor_handles: dict[int, BufferHandle] = {}
         # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own BufferRef
         # args itself (no forked child, no mailbox), resolving each ref's descriptor to a local base
         # map-once — the chip-child path minus the mailbox hop. Lazily created on first L2 run.
@@ -5353,7 +5323,17 @@ class Worker:
                     device_ctx=int(device_ctx),
                     local_window_base=int(local_window_base),
                     actual_window_size=int(window_size),
-                    buffer_ptrs={b.name: ptrs[i] for i, b in enumerate(buffers)},
+                    buffers={
+                        b.name: wrap_vmm_window(
+                            ptrs[i],
+                            int(b.nbytes),
+                            self._owner_instance_id,
+                            self._next_buffer_id(),
+                            f"L{self.level}",
+                            owner_worker_id=int(chip_idx),
+                        )
+                        for i, b in enumerate(buffers)
+                    },
                 )
         finally:
             # Close + unlink local copies regardless of outcome.  Children
@@ -5386,14 +5366,15 @@ class Worker:
         # one of them is validated against its owning chip. Revoked by
         # _release_domain_now just before the backend free (a commit barrier),
         # not by the deferred marker — so the deferred window stays dispatchable.
-        buf_nbytes = {b.name: int(b.nbytes) for b in buffers}
         with self._child_prov_lock:
             for chip_idx, ctx in contexts.items():
                 self._child_prov_record_domain(
                     chip_idx, int(ctx.local_window_base), allocation_id, int(ctx.actual_window_size)
                 )
-                for buf_name, buf_ptr in ctx.buffer_ptrs.items():
-                    self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id, buf_nbytes[buf_name])
+                # Each carved buffer's handle carries its own extent, so the copy-range check
+                # reads it straight off the handle.
+                for buf in ctx.buffers.values():
+                    self._child_prov_record_domain(chip_idx, int(buf.base), allocation_id, int(buf.nbytes))
         return handle
 
     def _release_domain_handle(self, handle: CommDomainHandle, resources: _RunResources) -> None:
@@ -5402,7 +5383,7 @@ class Worker:
         Called by ``CommDomainHandle.release()``.  We do NOT drive
         ``CTRL_RELEASE_DOMAIN`` here because the orch function is allowed
         to have already submitted DAG tasks that capture the handle's
-        ``device_ctx`` / ``buffer_ptrs``.  Those tasks must see live
+        ``device_ctx`` / ``buffers``.  Those tasks must see live
         memory through execution; the queue is drained by
         ``_execute_pending_domain_releases`` once the owning run's fence fires.
 
@@ -5755,14 +5736,14 @@ class Worker:
     def _child_ptrs_in_args(args: Any) -> list[tuple[int, int]]:
         """``(device_ptr, arg_index)`` for every device arg — used for kind4 device-pointer provenance.
 
-        A DEVICE_MALLOC ref carries the device pointer in its backend body (u64 LE); that pointer is the
-        provenance key the guard validates against ``_child_alloc_prov``. Host-backed refs (POSIX/fork
-        shm) contribute nothing.
+        A DEVICE_MALLOC (worker device malloc) or VMM_WINDOW (domain-carved) ref carries the device
+        pointer in its backend body (u64 LE); that pointer is the provenance key the guard validates
+        against ``_child_alloc_prov``. Host-backed refs (POSIX/fork shm) contribute nothing.
         """
         out: list[tuple[int, int]] = []
         for i in range(args.tensor_count()):
             desc = BufferRef.unpack(args.ref(i)).handle
-            if desc.backend_kind == BackendKind.DEVICE_MALLOC:
+            if desc.backend_kind in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
                 out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
 
@@ -5934,17 +5915,56 @@ class Worker:
             return self._create_buffer_locked(int(nbytes))
 
     def alloc_shared_tensor(self, shapes: tuple[int, ...], dtype) -> BufferHandle:
-        """Allocate a shared buffer sized for ``shapes`` × ``dtype`` (kind3; successor of ``orch.alloc``).
+        """Allocate a runtime-managed intermediate buffer (the BufferRef form of ``orch.alloc``).
 
-        A shape-sized ``create_buffer``: the returned handle backs a ``shapes``-shaped tensor. Name it
-        for a task with ``handle.ref(shapes, dtype)`` and read/write its data with
-        ``torch.frombuffer(handle.shm.buf, ...)`` at the run boundary. (Managed auto-free lifecycle is a
-        later phase; for now the handle is released at ``close()`` like ``create_buffer``.)
+        Called inside an orchestration fn. The backing comes from the orchestrator's HeapRing
+        (MAP_SHARED, visible to forked children) and is **auto-reclaimed** once every downstream consumer
+        has completed and the scope ends — no manual free. Returns a ``FORK_SHM`` ``BufferHandle`` whose
+        canonical identity is registered in the tensormap so a ref over it (``handle.ref(shapes, dtype)``)
+        dependency-wires to this producer slot. Chip-A→chip-B intermediates: name it as an OUTPUT of the
+        producing task and an INPUT of the consumer.
         """
+        assert self._orch is not None, "alloc_shared_tensor requires an L3+ orchestration context"
         nbytes = get_element_size(dtype)
         for s in shapes:
             nbytes *= int(s)
-        return self.create_buffer(int(nbytes))
+        oid, buffer_id, path = self._owner_instance_id, self._next_buffer_id(), f"L{self.level}"
+        identity = CanonicalIdentity(oid, buffer_id, path, 0)
+        va = int(self._orch._o.alloc_ref(list(int(s) for s in shapes), dtype, identity.pack()))
+        # Wrap the ring VA under the SAME identity: the child materializes to that VA (fork-inherited,
+        # MAP_SHARED read-write) and infer_deps keys the ref to the slot registered above.
+        return wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, generation=0, access=AccessMode.READWRITE)
+
+    def make_ref_arg(self, tensor, shapes: tuple[int, ...], dtype: int, *, strides: tuple[int, ...] | None = None):
+        """Name a **pre-fork** host tensor as a ``BufferRef`` over a memoized ``FORK_SHM`` handle.
+
+        The torch (or buffer-protocol) tensor MUST be allocated before ``init()`` so its VA is
+        fork-inherited by the children (the mainline "fork-inherited" contract). A ``share_memory_()``
+        tensor is MAP_SHARED — read-write across the fork, so usable as an OUTPUT the parent reads back;
+        a plain tensor is COW read-only (input only). The handle is memoized by the tensor's storage
+        base, so every ref over the same storage shares one canonical identity and dependencies key on
+        it. At L2 (no fork) any host tensor works. ``dtype`` is the ``DataType`` int value.
+        """
+        untyped_storage = getattr(tensor, "untyped_storage", None)
+        if callable(untyped_storage):
+            st = untyped_storage()
+            base, nbytes = int(st.data_ptr()), int(st.nbytes())
+            byte_offset = int(tensor.data_ptr()) - base  # the view's start within its storage
+        else:
+            base, nbytes = host_ptr_nbytes(tensor)
+            byte_offset = 0
+        handle = self._fork_tensor_handles.get(base)
+        if handle is None:
+            handle = wrap_fork_inherited(
+                base,
+                nbytes,
+                self._owner_instance_id,
+                self._next_buffer_id(),
+                f"L{self.level}",
+                access=AccessMode.READWRITE,
+            )
+            self._fork_tensor_handles[base] = handle
+        return handle.ref(shapes=tuple(shapes), dtype=int(dtype), strides=strides, byte_offset=byte_offset)
 
     def _next_buffer_id(self) -> int:
         with self._registry_lock:
@@ -6248,9 +6268,6 @@ class Worker:
           tensor is the legitimate case; an unregistered post-fork tensor reads
           stale/unmapped memory in the child — allocate it with
           ``create_host_buffer`` instead.
-
-        The child rewrites in-range host pointers to its own mapping; see
-        _rewrite_blob_host_addrs.
         """
         for i in range(args.tensor_count()):
             tensor = args.tensor(i)
@@ -6927,6 +6944,7 @@ class Worker:
         # still usable (before _worker.close()).
         _step(self._release_all_host_buffers)
         _step(self._release_all_buffer_handles)
+        _step(self._fork_tensor_handles.clear)
         _step(self._close_l2_import_registry)
 
         if self.level == 2:

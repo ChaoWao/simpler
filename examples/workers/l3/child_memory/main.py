@@ -168,13 +168,12 @@ def run(platform: str, device_id: int) -> int:
         expected = (s + 1) * (s + 2) + s
 
         def orch_fn(orch, _args, cfg):
-            # Allocate the weight on chip 0 as a DEVICE_MALLOC handle (kind4; successor of
-            # orch.malloc + child_memory=True). alloc_child_tensor rtMallocs inside the chip child's
-            # bound device context and wraps the pointer as a handle owned by this worker — NOT
-            # auto-freed at end-of-task, so both kernel calls share the same live weight (reclaimed at
-            # worker.close()). Its .base is the device pointer, the copy_to destination.
+            # Allocate the weight on chip 0 as a DEVICE_MALLOC handle (kind4; successor of the former
+            # child_memory=True Tensor). alloc_child_tensor rtMallocs inside the chip child's bound
+            # device context and wraps the pointer as a handle owned by this worker — NOT auto-freed at
+            # end-of-task, so both kernel calls share the same live weight (reclaimed at worker.close()).
             w_h = orch.alloc_child_tensor(worker_id=0, shapes=(SIZE,), dtype=DataType.FLOAT32)
-            orch.copy_to(worker_id=0, dst=w_h.base, src=host_w.data_ptr(), size=NBYTES)
+            orch.copy_to(w_h, host_w)  # H2D: host weight -> the device handle
 
             for out_h in (f1_h, f2_h):
                 ta = TaskArgs()

@@ -307,7 +307,7 @@ TaskSlotState &Orchestrator::slot_state(TaskSlot s) {
 
 uint64_t Orchestrator::output_alloc_bytes(const Tensor &t) { return align_up(t.nbytes(), HEAP_ALIGN); }
 
-Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
+Orchestrator::ManagedAlloc Orchestrator::alloc_managed_slot(const std::vector<uint32_t> &shape, DataType dtype) {
     auto run = current_building_run();
     if (shape.empty()) {
         // Rank-0 tensors are not supported across the ABI (Tensor enforces
@@ -325,11 +325,6 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     uint64_t bytes = numel * get_element_size(dtype);
     uint64_t aligned = align_up(bytes, HEAP_ALIGN);
 
-    // 0-byte request (e.g. shape with a zero dim) flows straight through the
-    // allocator as a slot-only claim — matches reserve_outputs_and_slot.
-    // Skip tensormap registration when the returned heap_ptr is nullptr,
-    // since 0 is the sentinel for "no tensor" in infer_deps.
-    //
     // Inherit the caller's scope depth so alloc buffers land in the same
     // ring as any tasks submitted inside that scope — an alloc inside a
     // nested `with orch.scope():` uses the nested ring and reclaims
@@ -342,13 +337,6 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     TaskSlotState &s = slot_state(ar.slot);
     s.reset();
     s.run_id = run->id;
-
-    uint64_t ptr = reinterpret_cast<uint64_t>(ar.heap_ptr);
-    if (ptr != 0) {
-        TensorKey key = TensorKey::local_host(ptr);
-        tensormap_->insert(run->id, key, ar.slot);
-        s.output_keys.push_back(key);
-    }
 
     // No fanin — alloc has no work to wait on.
     s.fanin_count = 0;
@@ -368,21 +356,42 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     s.fanout_released.store(1, std::memory_order_relaxed);
     if (scope_ref > 0) scope_->register_task(ar.slot);
 
+    return {ar.slot, reinterpret_cast<uint64_t>(ar.heap_ptr), bytes};
+}
+
+void Orchestrator::finalize_managed_slot(const ManagedAlloc &m, const TensorKey &key) {
+    TaskSlotState &s = slot_state(m.slot);
+    // A 0-byte request (shape with a zero dim) has heap_ptr == 0 — skip tensormap registration since
+    // 0 is the "no tensor" sentinel in infer_deps.
+    if (m.va != 0) {
+        tensormap_->insert(s.run_id, key, m.slot);
+        s.output_keys.push_back(key);
+    }
     s.state.store(TaskState::COMPLETED, std::memory_order_release);
+    increment_run_tasks(s.run_id);
+}
 
-    increment_run_tasks(run->id);
-
-    // Build a contiguous external Tensor over the allocated buffer. ptr may be
-    // 0 for a 0-byte request (a shape with a zero dim), in which case
-    // init_external sets buffer.addr == 0 — the "no tensor" sentinel honored by
-    // infer_deps; buffer.size carries numel*elem. shape is non-empty (rejected
-    // at entry), so ndims >= 1 holds for init_external's assertion.
+Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
+    ManagedAlloc m = alloc_managed_slot(shape, dtype);
+    finalize_managed_slot(m, TensorKey::local_host(m.va));
+    // Build a contiguous external Tensor over the allocated buffer. va may be 0 for a 0-byte request,
+    // in which case init_external sets buffer.addr == 0 (the infer_deps "no tensor" sentinel);
+    // buffer.size carries numel*elem. shape is non-empty (rejected in the helper), so ndims >= 1.
     Tensor t{};
     t.init_external(
-        reinterpret_cast<void *>(ptr), bytes, shape.data(), static_cast<uint32_t>(shape.size()), dtype,
+        reinterpret_cast<void *>(m.va), m.bytes, shape.data(), static_cast<uint32_t>(shape.size()), dtype,
         /*version=*/0
     );
     return t;
+}
+
+uint64_t
+Orchestrator::alloc_ref(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity) {
+    ManagedAlloc m = alloc_managed_slot(shape, dtype);
+    // Key by the identity's canonical hash so a BufferRef over this VA (carrying the same identity)
+    // resolves to this slot in infer_deps — the alloc→BufferRef bridge.
+    finalize_managed_slot(m, TensorKey::local_host(CanonicalIdentityHash{}(identity)));
+    return m.va;
 }
 
 // =============================================================================

@@ -43,10 +43,10 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipStorageTaskArgs,
     CoreCallable,
     DataType,
-    Tensor,
+    TaskArgs,
+    TensorArgType,
 )
 from simpler.worker import Worker
 
@@ -137,35 +137,34 @@ def _run(worker: Worker, chip_handle: CallableHandle):
     host_out = torch.zeros(N_ROWS, N_COLS, dtype=torch.float32)
 
     # --- 2. Allocate device buffers + H2D copy ---
-    # malloc returns a uint64 device pointer. copy_to takes (dst_dev, src_host, nbytes).
-    dev_a = worker.malloc(NBYTES)
-    dev_b = worker.malloc(NBYTES)
-    dev_out = worker.malloc(NBYTES)
-    worker.copy_to(dev_a, host_a.data_ptr(), NBYTES)
-    worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
+    # malloc returns a DEVICE_MALLOC BufferHandle. copy_to takes (dst_handle, host_tensor).
+    a_h = worker.malloc(NBYTES)
+    b_h = worker.malloc(NBYTES)
+    out_h = worker.malloc(NBYTES)
+    worker.copy_to(a_h, host_a)
+    worker.copy_to(b_h, host_b)
 
-    # --- 3. Build TaskArgs describing the tensors visible to the orchestration ---
-    # Each tensor is a Tensor(data_ptr, shape, dtype). Order must
-    # match the ``signature`` list in the ChipCallable (IN, IN, OUT).
-    args = ChipStorageTaskArgs()
-    args.add_tensor(Tensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-    args.add_tensor(Tensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-    args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+    # --- 3. Build TaskArgs naming each buffer as a BufferRef view. Order must
+    # match the ``signature`` list in the ChipCallable (IN, IN, OUT). ---
+    args = TaskArgs()
+    args.add_ref(a_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.INPUT)
+    args.add_ref(b_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.INPUT)
+    args.add_ref(out_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.OUTPUT_EXISTING)
 
     # --- 4. Run. CallConfig() defaults are fine for this kernel. ---
     config = CallConfig()
     print("[vector_add] running on device...")
-    # run() returns None; per-stage timing is emitted as [STRACE] log markers
-    # (see docs/dfx/host-trace.md) — parse with simpler_setup.tools.strace_timing.
+    # run() materializes the BufferRefs to device Tensors in-process, then dispatches. Returns None;
+    # per-stage timing is emitted as [STRACE] log markers (see docs/dfx/host-trace.md).
     worker.run(chip_handle, args, config)
 
     # --- 5. D2H copy back + verify ---
-    worker.copy_from(host_out.data_ptr(), dev_out, NBYTES)
+    worker.copy_from(host_out, out_h)
 
     # --- 6. Free device buffers. Order doesn't matter, but leaking is bad. ---
-    worker.free(dev_a)
-    worker.free(dev_b)
-    worker.free(dev_out)
+    worker.free(a_h)
+    worker.free(b_h)
+    worker.free(out_h)
 
     max_diff = float(torch.max(torch.abs(host_out - expected)))
     print(f"[vector_add] max |host_out - expected| = {max_diff:.3e}")

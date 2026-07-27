@@ -80,7 +80,6 @@ from simpler.task_interface import (  # noqa: E402
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker  # noqa: E402
@@ -88,7 +87,9 @@ from simpler.worker import Worker  # noqa: E402
 from simpler_setup.elf_parser import extract_text_section  # noqa: E402
 from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.torch_interop import make_tensor_arg  # noqa: E402
+from simpler_setup.torch_interop import make_tensor_ref  # noqa: E402
+
+_F32 = DataType.FLOAT32.value
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -553,28 +554,20 @@ def run(
                     print(
                         f"[ep_dispatch] chip {i}: rank={domain.domain_rank}/{domain.domain_size} "
                         f"window=[0x{domain.local_window_base:x} +{domain.actual_window_size}B] "
-                        f"scratch=0x{domain.buffer_ptrs['scratch']:x}"
+                        f"scratch=0x{domain.buffers['scratch'].base:x}"
                     )
                     chip_args = TaskArgs()
-                    chip_args.add_tensor(make_tensor_arg(indices_per_rank[i]), TensorArgType.INPUT)
-                    chip_args.add_tensor(make_tensor_arg(x_norms[i]), TensorArgType.INPUT)
-                    chip_args.add_tensor(make_tensor_arg(w_padded_list[i]), TensorArgType.INPUT)
-                    chip_args.add_tensor(make_tensor_arg(idx_padded_list[i]), TensorArgType.INPUT)
-                    chip_args.add_tensor(make_tensor_arg(recv_x_outs[i]), TensorArgType.OUTPUT_EXISTING)
-                    chip_args.add_tensor(make_tensor_arg(recv_w_outs[i]), TensorArgType.OUTPUT_EXISTING)
-                    chip_args.add_tensor(make_tensor_arg(recv_idx_outs[i]), TensorArgType.OUTPUT_EXISTING)
-                    chip_args.add_tensor(make_tensor_arg(recv_count_outs[i]), TensorArgType.OUTPUT_EXISTING)
-                    chip_args.add_tensor(make_tensor_arg(recv_y_outs[i]), TensorArgType.OUTPUT_EXISTING)
-                    chip_args.add_tensor(make_tensor_arg(routed_y_outs[i]), TensorArgType.OUTPUT_EXISTING)
-                    chip_args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["scratch"],
-                            shapes=(SCRATCH_NBYTES // 4,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
+                    chip_args.add_ref(make_tensor_ref(worker, indices_per_rank[i]), TensorArgType.INPUT)
+                    chip_args.add_ref(make_tensor_ref(worker, x_norms[i]), TensorArgType.INPUT)
+                    chip_args.add_ref(make_tensor_ref(worker, w_padded_list[i]), TensorArgType.INPUT)
+                    chip_args.add_ref(make_tensor_ref(worker, idx_padded_list[i]), TensorArgType.INPUT)
+                    chip_args.add_ref(make_tensor_ref(worker, recv_x_outs[i]), TensorArgType.OUTPUT_EXISTING)
+                    chip_args.add_ref(make_tensor_ref(worker, recv_w_outs[i]), TensorArgType.OUTPUT_EXISTING)
+                    chip_args.add_ref(make_tensor_ref(worker, recv_idx_outs[i]), TensorArgType.OUTPUT_EXISTING)
+                    chip_args.add_ref(make_tensor_ref(worker, recv_count_outs[i]), TensorArgType.OUTPUT_EXISTING)
+                    chip_args.add_ref(make_tensor_ref(worker, recv_y_outs[i]), TensorArgType.OUTPUT_EXISTING)
+                    chip_args.add_ref(make_tensor_ref(worker, routed_y_outs[i]), TensorArgType.OUTPUT_EXISTING)
+                    chip_args.add_ref(domain.buffers["scratch"].ref((SCRATCH_NBYTES // 4,), _F32), TensorArgType.INOUT)
                     chip_args.add_scalar(domain.domain_size)
                     chip_args.add_scalar(domain.device_ctx)
                     orch.submit_next_level(chip_handle, chip_args, cfg, worker=i)

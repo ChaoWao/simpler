@@ -113,3 +113,23 @@ def make_tensor_arg(tensor) -> Tensor:
         )
     shapes = tuple(int(s) for s in tensor.shape)
     return Tensor.make(tensor.data_ptr(), shapes, dt)
+
+
+def make_tensor_ref(worker, tensor):
+    """A ``BufferRef`` over a **pre-fork** host torch tensor — the ref counterpart of ``make_tensor_arg``.
+
+    Names ``tensor`` as a memoized ``FORK_SHM`` handle on ``worker`` (``worker.make_ref_arg``), inferring
+    shapes + dtype from the tensor. Use for standalone L3 examples whose host inputs/outputs are
+    ``share_memory_()`` tensors allocated before ``worker.init()`` (fork-inherited). A contiguous CPU
+    tensor is required (as for ``make_tensor_arg``).
+    """
+    _ensure_torch_map()
+    dt = _TORCH_DTYPE_MAP.get(tensor.dtype)  # pyright: ignore[reportOptionalMemberAccess]
+    if dt is None:
+        raise ValueError(f"Unsupported tensor dtype for BufferRef: {tensor.dtype}")
+    if tensor.device.type != "cpu":
+        raise ValueError(f"make_tensor_ref requires a CPU tensor, got device={tensor.device}.")
+    if not tensor.is_contiguous():
+        raise ValueError("make_tensor_ref requires a contiguous tensor; call tensor.contiguous() first.")
+    shapes = tuple(int(s) for s in tensor.shape)
+    return worker.make_ref_arg(tensor, shapes=shapes, dtype=int(dt.value))

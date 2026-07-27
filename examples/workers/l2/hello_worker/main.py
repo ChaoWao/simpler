@@ -75,10 +75,10 @@ def run(platform: str, device_id: int) -> int:
         #
         # We at least exercise the memory-control path: one malloc/free round
         # trip confirms the host<->device mailbox works.
-        ptr = worker.malloc(4096)
-        assert ptr != 0, "malloc returned NULL — device memory is exhausted or not mapped"
-        worker.free(ptr)
-        print(f"[hello_worker] malloc/free round-trip OK (ptr=0x{ptr:x})")
+        buf = worker.malloc(4096)
+        assert buf.base != 0, "malloc returned NULL — device memory is exhausted or not mapped"
+        worker.free(buf)
+        print(f"[hello_worker] malloc/free round-trip OK (ptr=0x{buf.base:x})")
     finally:
         # close() releases the ACL device, unloads the runtime libraries, and
         # frees all per-worker C++ state. ALWAYS call it in a finally — a

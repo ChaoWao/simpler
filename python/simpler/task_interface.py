@@ -65,6 +65,8 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     read_args_from_blob,
 )
 
+from .buffer_handle import BufferHandle
+
 
 def _assert_bindings_match_source_tree() -> None:
     """Refuse a `_task_interface` built from a different revision of this tree.
@@ -897,9 +899,8 @@ def scalar_to_uint64(value) -> int:
 class CommBufferSpec:
     """A named slice of the per-rank communicator window.
 
-    Buffers are placed sequentially inside the window in declaration order —
     Buffers are placed sequentially inside the window in declaration order.
-    The ``CommDomainHandle.contexts[chip_idx].buffer_ptrs`` dict returned by
+    The ``CommDomainHandle.contexts[chip_idx].buffers`` dict returned by
     ``Orchestrator.allocate_domain`` is keyed by ``CommBufferSpec.name``.
     """
 
@@ -923,7 +924,9 @@ class ChipDomainContext:
     device_ctx: int
     local_window_base: int
     actual_window_size: int
-    buffer_ptrs: dict[str, int]
+    # Each named window slice as a device ``VMM_WINDOW`` BufferHandle owned by this chip. Name a task
+    # arg with ``buffers[name].ref(shapes, dtype)`` and dispatch it only to this chip (``domain_rank``).
+    buffers: dict[str, BufferHandle]
 
 
 class CommDomainHandle:
@@ -972,7 +975,7 @@ class CommDomainHandle:
         if self._released:
             raise RuntimeError(
                 f"CommDomainHandle({self.name!r}) already released; do not pass it to submit_* "
-                "after release(). Submitted tasks that captured device_ctx / buffer_ptrs before "
+                "after release(). Submitted tasks that captured device_ctx / buffers before"
                 "release will still see live memory until Worker.run drains."
             )
         return self.contexts[chip_idx]

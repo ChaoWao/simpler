@@ -52,7 +52,7 @@ from simpler.worker import Worker
 
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.pto_isa import ensure_pto_isa_root
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup.torch_interop import make_tensor_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Reuse the L2 vector_add kernel verbatim — this example only varies ring sizing.
@@ -199,9 +199,9 @@ def run(platform: str, device_id: int) -> int:
             # launch, each binding its own rings.
             for i, spec in enumerate(L2_TASKS):
                 chip_args = TaskArgs()
-                chip_args.add_tensor(make_tensor_arg(host_a[i]), TensorArgType.INPUT)
-                chip_args.add_tensor(make_tensor_arg(host_b[i]), TensorArgType.INPUT)
-                chip_args.add_tensor(make_tensor_arg(host_out[i]), TensorArgType.OUTPUT_EXISTING)
+                chip_args.add_ref(make_tensor_ref(worker, host_a[i]), TensorArgType.INPUT)
+                chip_args.add_ref(make_tensor_ref(worker, host_b[i]), TensorArgType.INPUT)
+                chip_args.add_ref(make_tensor_ref(worker, host_out[i]), TensorArgType.OUTPUT_EXISTING)
                 cfg = _l2_config(_cfg, spec)
                 print(f"[per_task_runtime_env] submit '{spec['label']}': runtime_env={cfg.runtime_env!r}")
                 orch.submit_next_level(chip_handle, chip_args, cfg, worker=0)
