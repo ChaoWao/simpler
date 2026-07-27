@@ -305,10 +305,25 @@ task-submit --device auto --max-time 1800 --run "$L0a --func-id 0 --set-arg 4=4 
 
 `qwen3_14b_decode` used to serve as the "real SPMD workload" row here, driving
 its generated `fa_fused` mix with `--set-arg 0=96` on the `fa_total` work-item
-count. Its attention is now a CANN `FusedInferAttentionScore` extern whose work
-distribution comes from tiling metadata that `paged_attention_tiling_cce` builds
-at runtime, not from a replayable scalar, so there is no `--set-arg` that shrinks
-it — it is no longer an l0 target.
+count. That kernel is gone: its attention is now a CANN
+`FusedInferAttentionScore` extern, so the row was dropped.
+
+Being an extern is not what blocks it — the replay feeds `kernel_entry` and does
+not care whether the source was generated or hand-written. The blocker is that
+this one takes its work distribution from a `FAInferTilingData` **struct**, in a
+`UINT8 metadata` buffer that `paged_attention_tiling_cce` fills at runtime.
+`--set-arg` writes one integer into *every* element, so it cannot synthesize a
+coherent struct (it is not even refused — `UINT8` passes the integer-dtype
+check), and this tool dumps at level 3, which captures metadata but no payload
+([args-dump](args-dump.md) §levels). With a zeroed `metadata`,
+`fai_body.hpp` reads `tiling->needCoreNum == 0` and takes the degenerate branch,
+so the trace would be unrepresentative rather than absent.
+
+That gap is in the tooling, not the kernel: `--dump-args 2` does capture the
+buffer's real bytes. Restoring payloads for control tensors — rather than only
+uniform-filling them — would make this and any other metadata-driven extern
+replayable. Until then the "real SPMD workload" category has no representative
+here.
 
 **Not l0 targets (excluded).** Runtime-mechanics tests (`orch_so_cache`,
 `prepared_callable`, `dynamic_register`, `l3_group`, `l3_dependency`,
