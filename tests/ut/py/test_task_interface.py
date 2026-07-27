@@ -32,7 +32,15 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_dtype_name,
     get_element_size,
 )
-from simpler.buffer_handle import BackendKind, BufferRef, mint_owner_instance_id, wrap_device_malloc
+from simpler.buffer_handle import (
+    AccessMode,
+    BackendKind,
+    BufferRef,
+    create_host_shared_buffer,
+    mint_owner_instance_id,
+    wrap_device_malloc,
+    wrap_fork_inherited,
+)
 from simpler.task_interface import (
     RemoteAddressSpace,
     RemoteBufferExport,
@@ -1028,3 +1036,30 @@ class TestChildMemory:
         out = args.tensor(0)
         assert out.child_memory is True
         assert out.data == 0x2000
+
+
+class TestAddRefAccessSubset:
+    # §3 access: add_ref rejects an arg whose TensorArgType needs access the handle does not grant.
+    def test_add_ref_rejects_write_arg_on_read_only_backing(self):
+        oid = mint_owner_instance_id()
+        h = wrap_fork_inherited(0x1000, 64, owner_instance_id=oid, buffer_id=1, access=AccessMode.READ)
+        ref = h.ref((16,), DataType.FLOAT32.value)  # READ-only backing
+        args = TaskArgs()
+        with pytest.raises(ValueError, match="access"):
+            args.add_ref(ref.pack(), TensorArgType.OUTPUT_EXISTING)
+        with pytest.raises(ValueError, match="access"):
+            args.add_ref(ref.pack(), TensorArgType.INOUT)
+        args.add_ref(ref.pack(), TensorArgType.INPUT)  # READ⊆READ ok
+
+    def test_add_ref_accepts_matching_access(self):
+        oid = mint_owner_instance_id()
+        h = create_host_shared_buffer(64, oid, buffer_id=1)  # READWRITE
+        ref = h.ref((16,), DataType.FLOAT32.value)
+        try:
+            args = TaskArgs()
+            args.add_ref(ref.pack(), TensorArgType.INPUT)  # READ⊆RW
+            args.add_ref(ref.pack(), TensorArgType.OUTPUT_EXISTING)  # WRITE⊆RW
+            args.add_ref(ref.pack(), TensorArgType.INOUT)  # RW⊆RW
+            assert args.tensor_count() == 3
+        finally:
+            h.close()

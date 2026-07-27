@@ -78,6 +78,21 @@ class BackendKind(enum.IntEnum):
     DEVICE_MALLOC = 4
 
 
+# (address_space, backend_kind) capability gate (§4.1). Absent ⇒ rejected. The two REMOTE_SIDECAR rows
+# are allowed at the matrix layer; its P1 blanket reject is ImportRegistry.materialize's job (folding it
+# here would double the semantics).
+_CAPABILITY_OK: frozenset[tuple[int, int]] = frozenset(
+    {
+        (AddressSpace.HOST, BackendKind.FORK_SHM),
+        (AddressSpace.HOST, BackendKind.POSIX_SHM),
+        (AddressSpace.DEVICE, BackendKind.VMM_WINDOW),
+        (AddressSpace.DEVICE, BackendKind.DEVICE_MALLOC),
+        (AddressSpace.HOST, BackendKind.REMOTE_SIDECAR),
+        (AddressSpace.DEVICE, BackendKind.REMOTE_SIDECAR),
+    }
+)
+
+
 # ---------------------------------------------------------------------------
 # Wire struct formats — mirror buffer_handle.h; sizes pinned to the binding.
 # ---------------------------------------------------------------------------
@@ -142,6 +157,16 @@ class BufferHandleDescriptor:
     backend_kind: BackendKind
     nbytes: int
     body: bytes = b""
+
+    def __post_init__(self) -> None:
+        # §4.1 capability gate: reject an unsupported address_space×backend_kind. Runs on every
+        # construction — owner-side (wrap_* → to_descriptor) and wire decode (unpack → cls(...)) — so a
+        # bad combo fails before dispatch and can never ride the wire.
+        if (self.address_space, self.backend_kind) not in _CAPABILITY_OK:
+            raise ValueError(
+                f"unsupported address_space×backend: "
+                f"{self.address_space.name}×{self.backend_kind.name} (§4.1 capability matrix)"
+            )
 
     def pack(self) -> bytes:
         if len(self.body) > DESC_MAX_BYTES:

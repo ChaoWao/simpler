@@ -361,3 +361,39 @@ def test_materialize_rejects_unresolved_identity():
             materialize_bufferref_blob(ctypes.addressof(src), len(blob), {})  # nothing resolved
     finally:
         handle.close()
+
+
+@pytest.mark.parametrize(
+    "space,backend",
+    [
+        (AddressSpace.HOST, BackendKind.VMM_WINDOW),
+        (AddressSpace.HOST, BackendKind.DEVICE_MALLOC),
+        (AddressSpace.DEVICE, BackendKind.FORK_SHM),
+        (AddressSpace.DEVICE, BackendKind.POSIX_SHM),
+    ],
+)
+def test_descriptor_rejects_bad_capability_combo(space, backend):
+    # §4.1 capability matrix: an unsupported address_space×backend_kind fails at construction (before
+    # dispatch, before it can ride the wire).
+    with pytest.raises(ValueError, match="capability"):
+        BufferHandleDescriptor(
+            identity=_identity(),
+            address_space=space,
+            visibility=Visibility.SHARED,
+            access=AccessMode.READWRITE,
+            backend_kind=backend,
+            nbytes=64,
+            body=b"",
+        )
+
+
+def test_descriptor_accepts_legal_combos():
+    for space, backend in [
+        (AddressSpace.HOST, BackendKind.FORK_SHM),
+        (AddressSpace.HOST, BackendKind.POSIX_SHM),
+        (AddressSpace.DEVICE, BackendKind.VMM_WINDOW),
+        (AddressSpace.DEVICE, BackendKind.DEVICE_MALLOC),
+        (AddressSpace.HOST, BackendKind.REMOTE_SIDECAR),
+        (AddressSpace.DEVICE, BackendKind.REMOTE_SIDECAR),
+    ]:
+        BufferHandleDescriptor(_identity(), space, Visibility.SHARED, AccessMode.READWRITE, backend, 64, b"")
