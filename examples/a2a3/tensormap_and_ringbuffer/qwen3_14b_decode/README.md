@@ -1,12 +1,15 @@
-# `qwen3_14b_decode/` — Qwen3-14B 2-layer decode (load-balanced fused attention)
+# `qwen3_14b_decode/` — Qwen3-14B 40-layer decode (CANN fused attention)
 
 Self-contained SceneTestCase port of pypto-lib
-`models/qwen3/14b/decode_layer.py` entry `decode_fwd_layers` with
-`_CHUNK_NLAYERS == 2`: a **fused chunk of two consecutive Qwen3-14B decode
-layers** (hidden → hidden, no LM head), with the FP32 inter-layer residual
-carry. It lets a simpler developer build and run the case directly — no descent
-through pypto-lib / the JIT, no auto-built intermediate artifacts. This replaces
-the earlier single-layer `qwen3_14b_decode` example.
+`models/qwen3/14b/decode_fwd.py` entry `decode_fwd_layers` with
+`_CHUNK_NLAYERS == 40`: **the whole Qwen3-14B decode stack as one fused
+dispatch** (hidden → hidden, no LM head), with the FP32 inter-layer residual
+carry. A simpler developer builds and runs it directly — no descent through
+pypto-lib / the JIT, no auto-built intermediate artifacts.
+
+The layer loop is a real loop in the generated orchestration
+(`for (int64_t i = 0; i < 40; i += 1)`), not an unrolled one, so a 40-layer
+chunk costs one extra literal over a 2-layer chunk rather than 20× the kernels.
 
 ## Parameter regime — matches `stress_profile.py`
 
@@ -17,42 +20,124 @@ The fixture mirrors the vLLM serving stress run (`stress_profile.py`):
 | `BATCH` | 16 | `CONCURRENCY` (aligned with decode kernel BATCH=16) |
 | `MAX_SEQ` | 5500 | `max_model_len` (KV-pool / RoPE sizing) |
 | decode `seq_len` | 3500 | the ~3500-token prompt |
-| layers | 2 | fused chunk (`decode_fwd_layers` N=2) |
+| layers | 40 | full model (`decode_fwd_layers` N=40) |
 
-Per the lib's const-layer-0 stacked-fwd reference, the two layers reuse layer-0
-weights (weights + paged KV pool are stacked ×2 along dim 0, one slice per
-layer); each layer still reads/writes its own KV pool.
+Per the lib's const-layer-0 stacked-fwd reference, every layer reuses layer-0
+weights (weights + paged KV pool are stacked ×40 along dim 0, one slice per
+layer); each layer still reads and writes its own KV pool.
 
-Dataflow per layer (`_decode_layer`): input RMSNorm → split-K SPMD Q/K/V (seed +
-atomic-add) → per-head Q/K RMS-norm → RoPE + paged KV write → `fa_work_build` →
-persistent grid-stride `fa_fused` → `online_softmax` → split-K out_proj +
-residual → post-RMSNorm → SwiGLU FFN → `dcr_xgamma`. `copy_hidden` embeds the
-bf16 input; the FP32 residual is carried between layers; `copy_out` does the
-single FP32→bf16 round at the chunk tail.
+Footprint at this regime, bf16:
+
+| component | size |
+| --------- | ---: |
+| weights (×40) | 24.61 GiB |
+| paged KV pool (×40) | 13.44 GiB |
+| **total fixture** | **38.05 GiB** |
+
+Die HBM is 64 GiB, so it fits with ~26 GiB of headroom for ring heap and
+workspace. The run needs no `runtime_env` tuning — the default ring heap, task
+window and dep pool carry the 40-layer graph, because each layer's
+intermediates live inside that iteration's scope and are freed at its end, so
+the live set does not grow with layer count.
+
+## Dataflow per layer (`_decode_layer`)
+
+input RMSNorm → split-K SPMD Q/K/V (seed + atomic-add) → **`paged_attention_rope_cce`**
+→ split-K out_proj + residual → post-RMSNorm → SwiGLU FFN → `dcr_xgamma`.
+
+`copy_hidden` embeds the bf16 input; the FP32 residual is carried between
+layers; `copy_out` does the single FP32→bf16 round at the chunk tail.
+
+The attention stage is one **CANN `FusedInferAttentionScore` extern** that
+subsumes what used to be seven generated kernels — it folds per-head Q/K
+RMS-norm, RoPE, the paged KV write, the flash-attention inner loop and the
+online softmax into a single mixed (AIC + 2×AIV) task, gated by an
+`AscendC::SyncAll<false>()` FFTS barrier. `paged_attention_tiling_cce` builds
+its runtime tiling metadata first.
+
+Paged KV uses vLLM's **BSND** layout: a page holds `[BLOCK_SIZE, KV_HIDDEN]`
+ordered `[page, token, kv_head, dim]`, so `slot_mapping[b]` is directly the
+row index. (The previous harvest used NSND; the golden was updated to match.)
 
 ## Provenance — how the C++ was produced
 
-The 36 sources under `kernels/` (orchestration + 35 incores: 8 AIC + 27 AIV) and
-the golden `simpler_setup/goldens/qwen3_14b_decode.py` are **harvested pypto
-codegen** for `decode_fwd_layers` (`_CHUNK_NLAYERS=2`, `PTO2_MANUAL_MAX_SEQ=5500`):
-the orchestration + kernel `.cpp` (license header prepended, otherwise verbatim)
-and the `CALLABLE` transcribed from that run's `kernel_config.py`. The golden
-ports the per-layer `golden_decode_layer` math (RoPE θ=1e4, controlled scales,
-FP32 residual, bf16 cast points) composed over the two layers with FP32 carry +
-per-layer KV pools.
+| component | source |
+| --------- | ------ |
+| pypto-lib | `45be52c` |
+| pypto | `d64380cb` |
+| ptoas | `v0.48` |
+| pto-isa | `83d01313d9bfc247c4b7c8bcf969d1019f0d106f` (`pto_isa.pin`) |
 
-The kernels are used essentially as generated, with **one hand-edit** to
-`fa_fused_aiv`: the codegen emitted the AIV sub-block id as a `[[block_local]]
-static` (`pypto_runtime_subblock_id`) whose **non-branch** `.text` relocation
-simpler's strict `.text`-only loader rejects. The fix swaps it for
-`setEntryOffset(get_sub_block_id(args) * …)` (legacy workaround). New MIX
-kernels should prefer direct `TPUSH`/`TPOP` per
-[docs/tpush-tpop.md](../../../docs/tpush-tpop.md). See
-Status below.
+`kernels/orchestration/` + `kernels/aic/` (18) + `kernels/aiv/` (16) are
+harvested pypto codegen for `decode_fwd_layers` (`_CHUNK_NLAYERS=40`,
+`PTO2_MANUAL_MAX_SEQ=5500`) — license header prepended, otherwise verbatim.
+The `CALLABLE` is transcribed from that run's `kernel_config.py`, and
+`simpler_setup/goldens/qwen3_14b_decode.py` ports the per-layer
+`golden_decode_layer` math (RoPE θ=1e4, controlled scales, FP32 residual, bf16
+cast points) composed over 40 layers with FP32 carry + per-layer KV pools.
 
-To regenerate: in pypto-lib, set `_CHUNK_NLAYERS=2`, `PTO2_MANUAL_MAX_SEQ=5500`,
-build the ×2-stacked inputs, and `decode_fwd_layers.compile_for_test(...)`; then
-harvest `orchestration/` + `kernels/` + `kernel_config.py`. No post-edit needed.
+**There are no hand-edits.** The previous harvest patched `fa_fused_aiv` to work
+around a `[[block_local]] static`; that kernel no longer exists (attention is
+the extern now), and the current codegen emits no such construct.
+
+### `kernels/vendor/paged_attention_cce/` — the attention extern
+
+Copied verbatim from pypto-lib
+`models/qwen3/14b/kernels/paged_attention_cce/`. The tree must stay intact:
+`kernel/fai_body.hpp` reaches its dependencies through relative includes, so
+splitting it would mean patching the source and re-patching on every refresh.
+
+- `attention_rope/`, `tiling/`, `kernel/`, `generated/` — PyPTO-authored glue.
+- `vendor/fused_infer_attention_score/` — **CANN `FusedInferAttentionScore`,
+  Copyright (c) 2025 Huawei Technologies, CANN Open Software License 2.0**
+  (~16 k LOC), upstream's own vendored copy, left where upstream put it.
+- `attention/` is the non-RoPE variant of the extern. `decode_fwd_layers` does
+  not use it; it is kept so a refresh is a plain directory copy.
+
+**Why it sits under `kernels/vendor/`.** Nothing below a `vendor/` directory is
+ours to reformat: the repo's header, formatting and language lint all skip that
+path (`.pre-commit-config.yaml`, `tests/lint/check_headers.py`). Without that,
+`clang-format` rewrites the glue files and `end-of-file-fixer` touches the CANN
+headers, and the next refresh diffs against *our* reformatting instead of
+against upstream — which is how the drift this example is meant to expose starts.
+The carve-out keys on the directory, not on this operator's name, so harvesting
+another extern is a matter of dropping it in `kernels/vendor/` with no lint
+change at all.
+
+Building these needs **CANN devkit headers** (`$ASCEND_HOME_PATH/aarch64-linux/asc/…`,
+`tikcpp/…`), declared per-incore via `extra_include_dirs` in the `CALLABLE`.
+`$ASCEND_HOME_PATH` keeps them machine-independent; paths a given CANN layout
+does not ship are dropped rather than failing the build.
+
+They also depend on simpler linking incore objects before extracting `.text`
+([#1497](https://github.com/hw-native-sys/simpler/pull/1497)): AscendC declares
+`g_vecTPipePtr` / `g_kfcClient` as block-local globals, whose relocations no
+amount of inlining removes.
+
+### To regenerate
+
+From a simpler worktree with pypto + pypto-lib cloned under `build/` (see the
+[`multi-repo-setup`](../../../../.claude/skills/multi-repo-setup/SKILL.md)
+skill) and `eval "$(pypto-setup --export)"`:
+
+```python
+# PTO2_MANUAL_MAX_SEQ must be set before importing decode_fwd (read at import).
+os.environ["PTO2_MANUAL_MAX_SEQ"] = "5500"
+D = <import build/pypto-lib/models/qwen3/14b/decode_fwd.py by path>
+D._CHUNK_NLAYERS = 40          # read at trace time; rebind before the first call
+D.decode_fwd_layers(*inputs, out, config=RunConfig(
+    platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=OUT))
+```
+
+`codegen_only` needs no device. Then copy `OUT/orchestration/`, `OUT/kernels/`
+and `models/qwen3/14b/kernels/paged_attention_cce/` into `kernels/vendor/` here, and
+re-transcribe `CALLABLE` from `OUT/kernel_config.py` (which already records
+`func_id`, `core_type`, per-kernel `signature`, and `extra_include_dirs`).
+
+One deliberate deviation from `kernel_config.py`: `decode_fwd_layers` declares
+`k_cache` / `v_cache` as plain inputs, but the extern writes the current token's
+KV into them. The `CALLABLE` marks them `INOUT` so simpler copies the pools back
+and the golden can verify all 40 layers' KV writes, not just the hidden output.
 
 ## Running
 
@@ -65,42 +150,29 @@ pytest examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode \
 python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/test_qwen3_14b_decode.py -p a2a3 -d ${DEVICE}
 ```
 
-DFX (the `--enable-l2-swimlane` the lib command implies) is opt-in via the
-existing flags — no kernel changes needed:
+DFX is opt-in via the existing flags — no kernel changes needed:
 
 ```bash
 pytest .../qwen3_14b_decode --platform a2a3 --device ${DEVICE} \
     --enable-l2-swimlane 1 --enable-dep-gen
 ```
 
+Note that `--enable-dep-gen` / `--enable-l2-swimlane` on the full 40-layer graph
+can overflow the per-run SHM record buffer ("records dropped"); pypto-lib warns
+about the same thing for `decode_fwd.py --fwd-layers`. Capture on a smaller
+harvest if you need a clean trace.
+
 ## Status — PASSING
 
-The case passes deterministically on device — output and both layers' KV-cache
-match the torch reference (finite `max_abs_diff ≈ 0.03`).
+Passes on device: output **and all 40 layers' KV caches** match the torch
+reference at `RTOL=5e-2 / ATOL=1e-1`.
 
-### Sub-block-id handling (the one hand-edit)
+In CI it runs as its own `st-onboard-a2a3` step on a dedicated device, not in
+the general scene-test sweep: at ~5 min it would eat over half that sweep's 600 s
+session budget, and keeping the budget short there is what makes it a hang
+detector. See `.github/workflows/ci.yml`.
 
-The fused-attention tile-pipe (`TPUSH/TPOP<…, TILE_UP_DOWN>`) computes its per-AIV
-FIFO offset from the **no-arg** ISA `get_subblockid()`, which under this MIX
-dispatch returns **0 for both** AIV0 and AIV1 (confirmed by args dump). Left
-uncorrected, both lanes collide on the same FIFO half and attention is poisoned →
-NaN. The correct lane id (0/1) is only available from simpler's
-`get_sub_block_id(args)`.
-
-The codegen's original workaround cached that value once (in `kernel_entry`) into
-a per-core `[[block_local]]` static and `#define`d `get_subblockid()` to read it.
-That static's `.text` relocation is rejected by `elf_parser` (which rejects
-**any** `.rela.text` entry — the guard against unapplied *branch* relocations,
-issues #900 / #830 / #831), so the verbatim kernel would not load.
-
-The fix follows the `spmd_paged_attention` pattern: drop the `[[block_local]]`
-static and macro, and apply the per-lane split explicitly on the tile-pipe in
-`kernel_entry`/`fa_fused_aiv` —
-`v36.cons/prod.setEntryOffset(get_sub_block_id(args) * rows * cols * sizeof(T))`.
-`get_subblockid()` then stays at its native 0 (the library auto-split contributes
-nothing) and the explicit offset carries the lane separation. No per-core static,
-no relocation — loads under the strict loader and computes correctly.
-
-The cleaner long-term fix is direct `TPUSH`/`TPOP` with platform-correct
-`get_subblockid()` (see [docs/tpush-tpop.md](../../../docs/tpush-tpop.md)
-and [`spmd_paged_attention`](../../../../tests/st/a2a3/tensormap_and_ringbuffer/spmd_paged_attention/kernels/mix/paged_attention_parallel.cpp)).
+Measured on an idle a2a3 die, one device: **~5 min wall** for the whole case,
+of which ~11 s is fixture generation and ~49 s the torch golden (both host-side,
+single-threaded torch over 40 layers × 16 batch × 8 KV heads); the rest is
+kernel compilation, the 38 GiB host→device upload, and the device run itself.

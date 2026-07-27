@@ -595,11 +595,31 @@ jobs:
           # them on their own dedicated device(s) in the SDMA step below, so an
           # SDMA fault's slow teardown can never mix with ordinary fault recovery.
           SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          # qwen3_14b_decode runs all 40 Qwen3-14B decode layers against a 38 GiB
+          # fixture and takes ~5 min on its own — over half this sweep's 600 s
+          # session budget. It gets its own step below with its own budget, so the
+          # short timeout here keeps its job: catching a genuine hang.
+          HEAVY_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode"
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            python -m pytest examples tests/st $SDMA_IGNORE $HEAVY_IGNORE --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run "python -m pytest examples tests/st $SDMA_IGNORE $HEAVY_IGNORE --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+          fi
+
+      # qwen3_14b_decode is the full 40-layer Qwen3-14B decode — a 38 GiB fixture
+      # (x40-stacked weights + paged KV) and ~5 min wall. It runs here on its own
+      # device with its own session budget rather than eating the general sweep's.
+      - name: Qwen3-14B 40-layer decode (a2a3)
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          QWEN_TEST="examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest $QWEN_TEST --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1800
+          else
+            task-submit --timeout 3600 --max-time 3600 --device auto --device-num 1 \
+              --run "python -m pytest $QWEN_TEST --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1800"
           fi
 
       # SDMA pytest — every SDMA test runs here on its own dedicated device(s),

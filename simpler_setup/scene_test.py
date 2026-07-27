@@ -510,8 +510,50 @@ def _resolve_chip_entry_paths(entry, cls_dir):
             k = dict(k)
             if "source" in k and not os.path.isabs(k["source"]):
                 k["source"] = str(cls_dir / k["source"])
+            if k.get("extra_include_dirs"):
+                k["extra_include_dirs"] = [
+                    d if "$" in str(d) or os.path.isabs(str(d)) else str((cls_dir / str(d)).resolve())
+                    for d in k["extra_include_dirs"]
+                ]
             resolved.append(k)
         entry["incores"] = resolved
+
+
+def _resolve_incore_include_dirs(dirs, incore):
+    """Resolve an incore's ``extra_include_dirs`` down to usable ``-I`` paths.
+
+    Entries may use ``$VAR`` (typically ``$ASCEND_HOME_PATH``, so a CANN-linked
+    kernel does not hardcode a machine-specific path); relative ones were made
+    absolute against the test file's directory when the class was declared.
+
+    This runs when the kernel is compiled, not when its module is imported —
+    a case declaring a CANN dependency is still collected on sim and macOS
+    runners that have no CANN at all, and must not fail there.
+
+    A vendored toolkit ships one over-broad candidate list across SDK versions,
+    so paths that do not exist here are dropped. An unset variable raises, and so
+    does a declared set where nothing survived: that means the SDK is absent, and
+    saying so beats a "file not found" from deep inside vendored code.
+    """
+    name = incore.get("name", incore.get("source", "?"))
+    resolved = []
+    for raw in dirs:
+        expanded = os.path.expandvars(str(raw))
+        if "$" in expanded:
+            raise ValueError(
+                f"incore {name}: extra_include_dirs entry {raw!r} references an environment "
+                f"variable that is not set. Export it (e.g. ASCEND_HOME_PATH for CANN headers) "
+                f"before running."
+            )
+        if Path(expanded).is_dir():
+            resolved.append(expanded)
+    if not resolved:
+        raise ValueError(
+            f"incore {name}: none of its {len(dirs)} extra_include_dirs exist on this machine, "
+            f"so the SDK they come from is not installed where the test expects. Tried:\n  "
+            + "\n  ".join(os.path.expandvars(str(d)) for d in dirs)
+        )
+    return resolved
 
 
 def _extract_name_map(callable_spec: dict) -> dict:
@@ -921,8 +963,12 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
     kernel_binaries = []
     for k in incores:
         signature = k.get("signature", [])
+        extra = _resolve_incore_include_dirs(k["extra_include_dirs"], k) if k.get("extra_include_dirs") else []
         incore = kc.compile_incore(
-            k["source"], core_type=k["core_type"], pto_isa_root=pto_isa_root, extra_include_dirs=inc_dirs
+            k["source"],
+            core_type=k["core_type"],
+            pto_isa_root=pto_isa_root,
+            extra_include_dirs=inc_dirs + extra,
         )
         if not is_sim:
             incore = extract_text_section(incore)

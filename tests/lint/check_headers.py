@@ -69,6 +69,13 @@ FILE_NAME_HEADERS = {
     ".clang-tidy": PY_HEADER,
 }
 
+# Paths carrying third-party or harvested-verbatim sources, which keep their
+# upstream copyright notice. Rewriting those headers would misattribute the code,
+# and the next refresh would copy the originals back over the edit anyway. Drop a
+# harvested tree under a `vendor/` directory and it is covered here and by the
+# matching excludes in .pre-commit-config.yaml, with no config change per tree.
+EXCLUDED_PATH_PARTS = ["reference", "3rdparty", "vendor/"]
+
 
 def get_git_tracked_files(root_dir: Path) -> list[Path]:
     """Get list of files tracked by git."""
@@ -179,7 +186,7 @@ def _collect_files(files: list[str], excluded_patterns: list[str]) -> Optional[l
         return None
 
     all_files = get_git_tracked_files(root_path)
-    filtered = [f for f in all_files if not any(str(f.relative_to(root_path)).startswith(p) for p in excluded_patterns)]
+    filtered = [f for f in all_files if not any(p in str(f.relative_to(root_path)) for p in excluded_patterns)]
     return [f for f in filtered if _is_checkable(f)]
 
 
@@ -195,7 +202,7 @@ def main():
 
     args = parser.parse_args()
 
-    files_to_check = _collect_files(args.files, ["reference"])
+    files_to_check = _collect_files(args.files, EXCLUDED_PATH_PARTS)
     if files_to_check is None:
         return 1
 

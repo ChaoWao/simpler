@@ -633,6 +633,17 @@ Key fields:
 - `CASES[].platforms`: which platforms each case supports (sim names end in "sim")
 - `runtime`: which runtime to use
 - `CALLABLE.orchestration.source` / `CALLABLE.incores[].source`: paths relative to the test file
+- `CALLABLE.incores[].extra_include_dirs`: extra `-I` paths for that one kernel,
+  on top of the runtime/platform includes every kernel already gets. Entries may
+  be relative to the test file, or use `$VAR` — `$ASCEND_HOME_PATH/aarch64-linux/asc/include`
+  keeps a CANN-linked kernel off machine-specific paths. They are resolved when
+  the kernel is **compiled**, not when its module is imported, so a case that
+  declares an SDK dependency is still collectable on sim/macOS runners that do
+  not have that SDK. Paths that do not exist are dropped, letting one candidate
+  list span SDK layouts; an unset variable raises, and so does a declared set
+  where nothing survived (that means the SDK is missing). Used by
+  [`qwen3_14b_decode`](../examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/)
+  for its CANN attention extern.
 
 ### Output Validation
 

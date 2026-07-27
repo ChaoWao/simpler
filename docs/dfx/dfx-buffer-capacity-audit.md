@@ -113,7 +113,12 @@ overwrite count.
 | paged_attention_unroll_manual_scope | 3/1 drop0 | 0/49 | 3/21 | 7/2 | 3/1 ovf0 |
 | benchmark_bgemm | 3/1 drop0 | 0/33 | 3/17 | 7/1 | 3/0 ovf0 |
 | paged_attention_ringbuffer | 3/1 drop0 | 0/25 | 3/12 | 7/1 | 3/1 ovf0 |
-| qwen3_14b_decode | 3/1 drop0 | 0/23 | 3/11 | 7/1 | 3/1 ovf0 |
+
+`qwen3_14b_decode` was measured here too, but only as a 2-layer chunk; it now
+runs all 40 layers, so its peaks need re-measuring before they mean anything and
+the stale row was dropped. Expect dep_gen and l2_swimlane to overflow on the
+full graph. It was not the worst case in any column, so the margins below are
+unaffected.
 
 Converted to worst-case margins (`free = lowest/cap`, `ready = 1 − peak/cap`,
 verdict reads the weaker dimension):

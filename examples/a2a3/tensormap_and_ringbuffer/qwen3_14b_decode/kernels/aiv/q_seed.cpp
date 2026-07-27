@@ -79,39 +79,39 @@ static __aicore__ void q_seed(__gm__ float *v1) {
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
         TEXPANDS(v12, v2);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        Tile<
-            TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
-            CompactMode::Null>
-            v14 = Tile<
-                TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
-                CompactMode::Null>(v8, v3);
-        uint64_t v15 = (uint64_t)v9;
-        TASSIGN(v14, v15);
-        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
-        TEXPANDS(v14, v2);
-        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
-        int64_t v16 = (int64_t)((uint64_t)((int64_t)v11) * (uint64_t)v3);
-        pto::Shape<1, 1, 1, 16, 512> v17 = pto::Shape<1, 1, 1, 16, 512>();
-        pto::Stride<81920, 81920, 81920, 5120, 1> v18 = pto::Stride<81920, 81920, 81920, 5120, 1>();
+        int64_t v14 = (int64_t)((uint64_t)((int64_t)v11) * (uint64_t)v3);
+        pto::Shape<1, 1, 1, 16, 512> v15 = pto::Shape<1, 1, 1, 16, 512>();
+        pto::Stride<81920, 81920, 81920, 5120, 1> v16 = pto::Stride<81920, 81920, 81920, 5120, 1>();
         GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
-            v19 = GlobalTensor<
+            v17 = GlobalTensor<
                 float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
-                v1 + (v10 + v10 * v7 + v16 * v6), v17, v18
+                v1 + (v10 + v10 * v7 + v14 * v6), v15, v16
             );
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         pipe_barrier(PIPE_MTE3);
-        TSTORE(v19, v12);
+        TSTORE(v17, v12);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        Tile<
+            TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+            CompactMode::Null>
+            v18 = Tile<
+                TileType::Vec, float, 16, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+                CompactMode::Null>(v8, v3);
+        uint64_t v19 = (uint64_t)v9;
+        TASSIGN(v18, v19);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
+        TEXPANDS(v18, v2);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
         pto::Shape<1, 1, 1, 16, 512> v20 = pto::Shape<1, 1, 1, 16, 512>();
         pto::Stride<81920, 81920, 81920, 5120, 1> v21 = pto::Stride<81920, 81920, 81920, 5120, 1>();
         GlobalTensor<float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
             v22 = GlobalTensor<
                 float, pto::Shape<1, 1, 1, 16, 512>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
-                v1 + (v10 + v10 * v7 + (int64_t)((uint64_t)v16 + (uint64_t)v3) * v6), v20, v21
+                v1 + (v10 + v10 * v7 + (int64_t)((uint64_t)v14 + (uint64_t)v3) * v6), v20, v21
             );
-        pipe_barrier(PIPE_MTE3);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
-        TSTORE(v22, v14);
+        pipe_barrier(PIPE_MTE3);
+        TSTORE(v22, v18);
         set_flag(PIPE_MTE3, PIPE_V, EVENT_ID1);
     }
     wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
@@ -123,12 +123,12 @@ static __aicore__ void q_seed(__gm__ float *v1) {
 }
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    // Unpack tensor: q_proj_inline129__ssa_v0
-    __gm__ Tensor *q_proj_inline129__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ float *q_proj_inline129__ssa_v0 =
-        reinterpret_cast<__gm__ float *>(q_proj_inline129__ssa_v0_tensor->buffer.addr) +
-        q_proj_inline129__ssa_v0_tensor->start_offset;
+    // Unpack tensor: q_proj_inline139__ssa_v0
+    __gm__ Tensor *q_proj_inline139__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ float *q_proj_inline139__ssa_v0 =
+        reinterpret_cast<__gm__ float *>(q_proj_inline139__ssa_v0_tensor->buffer.addr) +
+        q_proj_inline139__ssa_v0_tensor->start_offset;
 
     // Forward to ptoas-generated function
-    q_seed(q_proj_inline129__ssa_v0);
+    q_seed(q_proj_inline139__ssa_v0);
 }
