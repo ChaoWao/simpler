@@ -785,7 +785,8 @@ jobs:
   # ---------- Unit tests (a5 hardware, Python + C++) ----------
   ut-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    # The a5 self-hosted runner is under repair; drop the `false &&` to re-enable.
+    if: false && needs.detect-changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 30
     env:
