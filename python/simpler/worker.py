@@ -83,7 +83,7 @@ import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAX_REGISTERED_CALLABLE_IDS,
     RUNTIME_ENV_RING_COUNT,
-    TENSOR_CHILD_MEMORY_OFFSET,
+    TENSOR_ADDRESS_SPACE_OFFSET,
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
@@ -95,6 +95,11 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 )
 
 from . import _log as _simpler_log
+from .buffer_handle import (
+    BufferHandle,
+    create_host_shared_buffer,
+    mint_owner_instance_id,
+)
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
     CallableHandle,
@@ -539,10 +544,11 @@ def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[
     ``buffer.addr`` (a parent VA) lands in a registered range, rewrite it in
     place to ``child_base + (addr - parent_lo)`` so the runtime dereferences the
     child's own mapping. Tensors outside every range (fork-inherited or
-    child-allocated) are left untouched. A ``child_memory`` tensor carries a
-    child-owned device pointer, never a host VA, so it is skipped even when its
-    address numerically falls inside a registered host range — rewriting it would
-    corrupt the device pointer. See _BLOB_TENSOR_STRIDE for the wire layout.
+    child-allocated) are left untouched. A device-memory tensor
+    (``address_space == DEVICE``) carries a child-owned device pointer, never a
+    host VA, so it is skipped even when its address numerically falls inside a
+    registered host range — rewriting it would corrupt the device pointer. See
+    _BLOB_TENSOR_STRIDE for the wire layout.
     """
     tensor_count = struct.unpack_from("<i", buf, blob_off)[0]
     if tensor_count <= 0:
@@ -550,7 +556,7 @@ def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[
     base = blob_off + _BLOB_HEADER_BYTES
     for i in range(tensor_count):
         addr_off = base + i * _BLOB_TENSOR_STRIDE
-        if buf[addr_off + TENSOR_CHILD_MEMORY_OFFSET]:
+        if buf[addr_off + TENSOR_ADDRESS_SPACE_OFFSET]:
             continue
         addr = struct.unpack_from("<Q", buf, addr_off)[0]
         for parent_lo, parent_hi, child_base in ranges:
@@ -2440,6 +2446,13 @@ class Worker:
         # address is the entry with the greatest base <= addr.
         self._host_buf_snapshot: tuple[tuple[int, ...], dict[int, _HostBufEntry]] = ((), {})
         self._host_buf_token_counter: int = 0
+        # Owner-side BufferHandle state (P1-B): a per-incarnation opaque nonce, a monotonic buffer_id
+        # (0 reserved), and the live handles this Worker owns. create_buffer allocates a handle whose
+        # self-describing descriptor rides embedded in every BufferRef built over it (no export
+        # handshake); consumers materialize it lazily on receipt.
+        self._owner_instance_id: bytes = mint_owner_instance_id()
+        self._buffer_id_counter: int = 1
+        self._buffer_handles: dict[int, BufferHandle] = {}
 
     @property
     def _initialized(self) -> bool:
@@ -5833,6 +5846,40 @@ class Worker:
     # Post-fork zero-copy host buffers
     # ------------------------------------------------------------------
 
+    def create_buffer(self, nbytes: int) -> BufferHandle:
+        """Allocate a shared ``BufferHandle`` owned by this Worker (P1-B).
+
+        Like ``create_host_buffer``, the backing is a born-shared POSIX shm attached into every
+        forked child; unlike it, the handle carries a typed canonical identity and a self-describing
+        descriptor. No eager export handshake: the descriptor travels **embedded in every
+        ``BufferRef``** built over this handle, and a consumer materializes it lazily on first
+        receipt (map-once, keyed by canonical identity). Build a tensor over ``handle.shm.buf`` with
+        the buffer protocol. Not thread-safe against a concurrent run/create/free on the same Worker.
+        """
+        if self.level < 3:
+            raise TypeError("create_buffer requires a level >= 3 Worker")
+        with self._operation_lease("create_buffer"):
+            return self._create_buffer_locked(int(nbytes))
+
+    def _create_buffer_locked(self, nbytes: int) -> BufferHandle:
+        if not self._chip_shms and not self._sub_shms:
+            raise RuntimeError("create_buffer requires at least one forked chip or sub child (this Worker has none)")
+        if nbytes <= 0:
+            raise ValueError("create_buffer: nbytes must be positive")
+        with self._registry_lock:
+            buffer_id = self._buffer_id_counter
+            self._buffer_id_counter += 1
+        handle = create_host_shared_buffer(
+            nbytes,
+            owner_instance_id=self._owner_instance_id,
+            buffer_id=buffer_id,
+            owner_worker_path=f"L{self.level}",
+            generation=1,
+        )
+        with self._registry_lock:
+            self._buffer_handles[buffer_id] = handle
+        return handle
+
     def create_host_buffer(self, nbytes: int) -> HostBuffer:
         """Allocate a born-shared host buffer, attached into every local L3 child,
         that a later ``run()`` reads/writes with **no per-run copy**.
@@ -6028,6 +6075,25 @@ class Worker:
                     # Tolerates a still-live view over a zero-copy buffer at close():
                     # unlinks the name regardless so the OS reclaims it once dropped.
                     self._close_host_shm(entry)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
+    def _release_all_buffer_handles(self) -> None:
+        """Close + unlink every owner BufferHandle (called from close()).
+
+        Children drop their own lazily-mapped imports when their loops exit; the owner unlinks the
+        backing shm here. Best-effort per handle; the first error is raised after all are attempted so
+        close() reports a leak rather than swallowing it.
+        """
+        with self._registry_lock:
+            handles = list(self._buffer_handles.values())
+            self._buffer_handles.clear()
+        errors: list[BaseException] = []
+        for handle in handles:
+            try:
+                handle.close()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
         if errors:
@@ -6716,6 +6782,7 @@ class Worker:
         # Host buffers must be released while the local L3 child mailboxes are
         # still usable (before _worker.close()).
         _step(self._release_all_host_buffers)
+        _step(self._release_all_buffer_handles)
 
         if self.level == 2:
 

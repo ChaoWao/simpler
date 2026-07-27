@@ -615,7 +615,20 @@ NB_MODULE(_task_interface, m) {
     // blob walker locates tensor i's fields at i * TENSOR_STRIDE_BYTES without
     // reimplementing the struct layout.
     m.attr("TENSOR_STRIDE_BYTES") = static_cast<int>(sizeof(Tensor));
-    m.attr("TENSOR_CHILD_MEMORY_OFFSET") = static_cast<int>(offsetof(Tensor, child_memory));
+    m.attr("TENSOR_ADDRESS_SPACE_OFFSET") = static_cast<int>(offsetof(Tensor, address_space));
+
+    // BufferHandle / BufferRef wire ABI (buffer_handle.h). Exported so the Python mirror in
+    // simpler.buffer_handle can pin its struct formats to the C++ layout and reject drift.
+    m.attr("BUFFER_ABI_VERSION") = static_cast<int>(BUFFER_ABI_VERSION);
+    m.attr("BUFFER_DESCRIPTOR_VERSION") = static_cast<int>(BUFFER_DESCRIPTOR_VERSION);
+    m.attr("MAX_TENSOR_DIMS") = static_cast<int>(MAX_TENSOR_DIMS);
+    m.attr("BUFFER_REF_BYTES") = static_cast<int>(sizeof(BufferRef));
+    m.attr("BUFFER_HANDLE_DESCRIPTOR_BYTES") = static_cast<int>(sizeof(BufferHandleDescriptor));
+    m.attr("CANONICAL_IDENTITY_BYTES") = static_cast<int>(sizeof(CanonicalIdentity));
+    m.attr("OWNER_INSTANCE_ID_BYTES") = static_cast<int>(OWNER_INSTANCE_ID_BYTES);
+    m.attr("PATH_MAX_BYTES") = static_cast<int>(PATH_MAX_BYTES);
+    m.attr("DESC_MAX_BYTES") = static_cast<int>(DESC_MAX_BYTES);
+    m.attr("BUFFERREF_BLOB_HEADER_BYTES") = static_cast<int>(BUFFERREF_BLOB_HEADER_SIZE);
 
     // --- Tensor ---
     // The unified strided tensor descriptor. Constructed contiguous via make()
@@ -636,7 +649,7 @@ NB_MODULE(_task_interface, m) {
                 // start_offset == 0, buffer.size == numel * element_size.
                 return make_tensor_external(
                     reinterpret_cast<void *>(static_cast<uintptr_t>(data)), shp, static_cast<uint32_t>(n), dtype,
-                    /*manual_dep=*/false, /*version=*/0, child_memory ? 1 : 0
+                    /*manual_dep=*/false, /*version=*/0, child_memory ? AddressSpace::DEVICE : AddressSpace::HOST
                 );
             },
             nb::arg("data"), nb::arg("shapes"), nb::arg("dtype"), nb::arg("child_memory") = false,
@@ -681,7 +694,7 @@ NB_MODULE(_task_interface, m) {
                 // Re-establish a contiguous layout over the same buffer base.
                 self.init_external(
                     reinterpret_cast<void *>(self.buffer.addr), numel * get_element_size(self.dtype), shp,
-                    static_cast<uint32_t>(n), self.dtype, self.version, self.manual_dep, self.child_memory
+                    static_cast<uint32_t>(n), self.dtype, self.version, self.manual_dep, self.address_space
                 );
             }
         )
@@ -710,10 +723,10 @@ NB_MODULE(_task_interface, m) {
         .def_prop_rw(
             "child_memory",
             [](const Tensor &self) -> bool {
-                return self.is_child_memory();
+                return self.is_device_memory();
             },
             [](Tensor &self, bool v) {
-                self.child_memory = v ? 1 : 0;
+                self.address_space = v ? AddressSpace::DEVICE : AddressSpace::HOST;
             }
         )
 
@@ -756,7 +769,7 @@ NB_MODULE(_task_interface, m) {
                 os << self.shapes[i];
             }
             os << "), dtype=" << get_dtype_name(self.dtype);
-            if (self.is_child_memory()) os << ", child_memory=True";
+            if (self.is_device_memory()) os << ", child_memory=True";
             os << ")";
             return os.str();
         });
@@ -1601,6 +1614,83 @@ NB_MODULE(_task_interface, m) {
         nb::arg("blob_ptr"),
         "Reconstruct a TaskArgs from a length-prefixed blob at blob_ptr. "
         "Tags are not preserved (blob wire format strips them)."
+    );
+
+    m.def(
+        "materialize_bufferref_blob",
+        [](uint64_t blob_ptr, size_t capacity, nb::dict resolved) -> nb::bytes {
+            const uint8_t *src = reinterpret_cast<const uint8_t *>(blob_ptr);
+            BufferRefBlobView view = read_bufferref_blob(src, capacity);
+            TaskArgs args;
+            for (int32_t i = 0; i < view.ref_count; i++) {
+                BufferRef r = view.ref(i);
+                uint64_t elem = get_element_size(r.dtype);
+                if (elem == 0) {
+                    throw std::runtime_error("materialize_bufferref_blob: unknown dtype");
+                }
+                if (r.byte_offset % elem != 0) {
+                    throw std::runtime_error("materialize_bufferref_blob: byte_offset is not a multiple of dtype size");
+                }
+                // Only row-major (contiguous) views are materializable in this ABI version.
+                uint32_t row_major = 1;
+                bool contiguous = true;
+                for (int d = static_cast<int>(r.ndims) - 1; d >= 0; d--) {
+                    if (r.strides[d] != row_major) {
+                        contiguous = false;
+                        break;
+                    }
+                    row_major *= r.shapes[d];
+                }
+                if (!contiguous) {
+                    throw std::runtime_error("materialize_bufferref_blob: non-contiguous BufferRef not supported yet");
+                }
+                nb::bytes key(reinterpret_cast<const char *>(&r.handle.identity), sizeof(CanonicalIdentity));
+                if (!resolved.contains(key)) {
+                    throw std::runtime_error(
+                        "materialize_bufferref_blob: canonical identity not in the import registry"
+                    );
+                }
+                nb::tuple val = nb::cast<nb::tuple>(resolved[key]);
+                auto base = nb::cast<uint64_t>(val[0]);
+                auto addr_space = nb::cast<int>(val[1]);
+                Tensor t = make_tensor_external(
+                    reinterpret_cast<void *>(static_cast<uintptr_t>(base + r.byte_offset)), r.shapes, r.ndims, r.dtype,
+                    /*manual_dep=*/false, /*version=*/0, static_cast<AddressSpace>(addr_space)
+                );
+                args.add_tensor(t, TensorArgType::INPUT);
+            }
+            for (int32_t i = 0; i < view.scalar_count; i++) {
+                args.add_scalar(view.scalars[i]);
+            }
+            size_t sz = task_args_blob_size(args);
+            std::string out(sz, '\0');
+            write_blob(reinterpret_cast<uint8_t *>(out.data()), args);
+            return nb::bytes(out.data(), sz);
+        },
+        nb::arg("blob_ptr"), nb::arg("capacity"), nb::arg("resolved"),
+        "Materialize a BufferRef blob into a Tensor blob (write_blob format). Each ref's embedded "
+        "handle identity is resolved via `resolved` {identity_bytes: (local_base, address_space)}; "
+        "addr = base + byte_offset. The caller pre-populates `resolved` by materializing each embedded "
+        "descriptor (see bufferref_blob_descriptors) on first receipt. Rejects unknown identity, "
+        "non-dtype-aligned byte_offset, non-contiguous view."
+    );
+
+    m.def(
+        "bufferref_blob_descriptors",
+        [](uint64_t blob_ptr, size_t capacity) -> nb::list {
+            const uint8_t *src = reinterpret_cast<const uint8_t *>(blob_ptr);
+            BufferRefBlobView view = read_bufferref_blob(src, capacity);
+            nb::list out;
+            for (int32_t i = 0; i < view.ref_count; i++) {
+                BufferRef r = view.ref(i);
+                out.append(nb::bytes(reinterpret_cast<const char *>(&r.handle), sizeof(BufferHandleDescriptor)));
+            }
+            return out;
+        },
+        nb::arg("blob_ptr"), nb::arg("capacity"),
+        "Extract each BufferRef's embedded BufferHandleDescriptor (packed bytes) from a BufferRef "
+        "blob, in ref order. A consumer materializes these lazily on receipt to build the `resolved` "
+        "map passed to materialize_bufferref_blob."
     );
 
     nb::class_<L2ChildOnboardRegionExport>(m, "_L2ChildOnboardRegionExport")
