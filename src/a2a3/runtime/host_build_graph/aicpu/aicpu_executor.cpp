@@ -217,7 +217,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         return -1;
     }
     int32_t run_rc = 0;
-    LOG_INFO_V0("Thread %d: Start (exec_idx=%d)", thread_idx, affinity_exec_idx);
 
     // Boot: the last AICPU thread (aicpu_thread_num_ - 1) performs the one-time
     // host-orch attach. host_build_graph's orchestrator already ran on the host,
