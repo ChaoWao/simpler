@@ -47,7 +47,7 @@ TEST(ChildMemory, SetChildMemory) {
 // ---------------------------------------------------------------------------
 
 TEST(ChildMemory, BlobRoundtripPreservesChildMemory) {
-    TaskArgs args;
+    ChipStorageTaskArgs args;  // the Tensor-blob round trip is the L2/materialized form, not the BufferRef wire
 
     Tensor host_t{};
     host_t.buffer.addr = 0x1000;
@@ -55,7 +55,7 @@ TEST(ChildMemory, BlobRoundtripPreservesChildMemory) {
     host_t.ndims = 1;
     host_t.dtype = DataType::FLOAT32;
     host_t.address_space = AddressSpace::HOST;
-    args.add_tensor(host_t, TensorArgType::INPUT);
+    args.add_tensor(host_t);
 
     Tensor dev_t{};
     dev_t.buffer.addr = 0x2000;
@@ -63,7 +63,7 @@ TEST(ChildMemory, BlobRoundtripPreservesChildMemory) {
     dev_t.ndims = 1;
     dev_t.dtype = DataType::FLOAT16;
     dev_t.address_space = AddressSpace::DEVICE;
-    args.add_tensor(dev_t, TensorArgType::INPUT);
+    args.add_tensor(dev_t);
 
     args.add_scalar(42);
 

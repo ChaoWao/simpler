@@ -350,12 +350,15 @@ TaskArgs scalar_args() {
 
 TaskArgs bare_pointer_args() {
     TaskArgs args;
-    Tensor tensor{};
-    tensor.buffer.addr = 0x1234;
-    tensor.ndims = 1;
-    tensor.shapes[0] = 1;
-    tensor.dtype = DataType::UINT8;
-    args.add_tensor(tensor, TensorArgType::INPUT);
+    BufferRef ref{};
+    ref.handle.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    ref.handle.nbytes = 1;  // a local backing without a remote sidecar -> rejected by the remote endpoint
+    ref.handle.identity.buffer_id = 0x1234;
+    ref.ndims = 1;
+    ref.shapes[0] = 1;
+    ref.strides[0] = 1;
+    ref.dtype = DataType::UINT8;
+    args.add_tensor(ref, TensorArgType::INPUT);
     return args;
 }
 
@@ -620,7 +623,7 @@ TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsEndpointFailure) {
     WorkerCompletion completion = endpoint.run(&ring, dispatch);
 
     EXPECT_EQ(completion.outcome, EndpointOutcome::ENDPOINT_FAILURE);
-    EXPECT_NE(completion.error_message.find("bare host pointer"), std::string::npos);
+    EXPECT_NE(completion.error_message.find("local backing"), std::string::npos);
     EXPECT_TRUE(transport->last_frame.empty());
     ring.shutdown();
 }

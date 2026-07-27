@@ -101,6 +101,7 @@ nav:
       - Chip-Level Architecture: chip-level-arch.md
       - Hierarchical Level Runtime: hierarchical-level-runtime.md
       - Task Flow: task-flow.md
+      - BufferHandle Memory Model: buffer-handle-abi.md
       - Orchestrator: orchestrator.md
       - Scheduler: scheduler.md
       - Worker Manager: worker-manager.md

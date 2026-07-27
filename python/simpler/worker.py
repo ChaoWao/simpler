@@ -92,17 +92,20 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _mailbox_load_i32,
     _mailbox_store_i32,
     bufferref_blob_refs,
+    get_element_size,
     materialize_bufferref_blob,
 )
 
 from . import _log as _simpler_log
 from .buffer_handle import (
+    BackendKind,
     BufferHandle,
     BufferHandleDescriptor,
     BufferRef,
     ImportRegistry,
     create_host_shared_buffer,
     mint_owner_instance_id,
+    pack_bufferref_blob,
     re_export,
 )
 from .callable_identity import (
@@ -2467,6 +2470,10 @@ class Worker:
         # so each level's orch sees only its own handles. No map here — H' relabels the backing;
         # a compute leaf maps lazily. Lifetime is worker-scoped for now.
         self._reexport_by_source: dict[bytes, BufferHandle] = {}
+        # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own BufferRef
+        # args itself (no forked child, no mailbox), resolving each ref's descriptor to a local base
+        # map-once — the chip-child path minus the mailbox hop. Lazily created on first L2 run.
+        self._l2_import_registry: ImportRegistry | None = None
 
     @property
     def _initialized(self) -> bool:
@@ -5746,11 +5753,16 @@ class Worker:
     def _child_ptrs_in_args(args: Any) -> list[tuple[int, int]]:
         """``(device_ptr, arg_index)`` for every device arg — used for kind4 device-pointer provenance.
 
-        A BufferRef carries no materialized address, so a device pointer is not extractable here under
-        the BufferRef wire; device-pointer provenance is deferred with the device/remote path. Host
-        refs contribute nothing.
+        A DEVICE_MALLOC ref carries the device pointer in its backend body (u64 LE); that pointer is the
+        provenance key the guard validates against ``_child_alloc_prov``. Host-backed refs (POSIX/fork
+        shm) contribute nothing.
         """
-        return []
+        out: list[tuple[int, int]] = []
+        for i in range(args.tensor_count()):
+            desc = BufferRef.unpack(args.ref(i)).handle
+            if desc.backend_kind == BackendKind.DEVICE_MALLOC:
+                out.append((int.from_bytes(desc.body[:8], "little"), i))
+        return out
 
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
         """Validate every child_memory pointer against its exact target worker."""
@@ -5863,17 +5875,30 @@ class Worker:
     def create_buffer(self, nbytes: int) -> BufferHandle:
         """Allocate a shared ``BufferHandle`` owned by this Worker (P1-B).
 
-        Like ``create_host_buffer``, the backing is a born-shared POSIX shm attached into every
-        forked child; unlike it, the handle carries a typed canonical identity and a self-describing
-        descriptor. No eager export handshake: the descriptor travels **embedded in every
-        ``BufferRef``** built over this handle, and a consumer materializes it lazily on first
-        receipt (map-once, keyed by canonical identity). Build a tensor over ``handle.shm.buf`` with
-        the buffer protocol. Not thread-safe against a concurrent run/create/free on the same Worker.
+        The backing is a POSIX shm; the handle carries a typed canonical identity and a self-describing
+        descriptor. No eager export handshake: the descriptor travels **embedded in every ``BufferRef``**
+        built over this handle, and a consumer materializes it lazily on first receipt (map-once, keyed
+        by canonical identity). At L3+ that consumer is a forked child; at L2 (a leaf, no children) the
+        Worker itself materializes the ref in-process on ``run``. Build a tensor over ``handle.shm.buf``
+        with the buffer protocol. Not thread-safe against a concurrent run/create/free on the same Worker.
         """
-        if self.level < 3:
-            raise TypeError("create_buffer requires a level >= 3 Worker")
+        if self.level < 2:
+            raise TypeError("create_buffer requires a level >= 2 Worker")
         with self._operation_lease("create_buffer"):
             return self._create_buffer_locked(int(nbytes))
+
+    def alloc_shared_tensor(self, shapes: tuple[int, ...], dtype) -> BufferHandle:
+        """Allocate a shared buffer sized for ``shapes`` × ``dtype`` (kind3; successor of ``orch.alloc``).
+
+        A shape-sized ``create_buffer``: the returned handle backs a ``shapes``-shaped tensor. Name it
+        for a task with ``handle.ref(shapes, dtype)`` and read/write its data with
+        ``torch.frombuffer(handle.shm.buf, ...)`` at the run boundary. (Managed auto-free lifecycle is a
+        later phase; for now the handle is released at ``close()`` like ``create_buffer``.)
+        """
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        return self.create_buffer(int(nbytes))
 
     def _next_buffer_id(self) -> int:
         with self._registry_lock:
@@ -5897,7 +5922,10 @@ class Worker:
         return handle
 
     def _create_buffer_locked(self, nbytes: int) -> BufferHandle:
-        if not self._chip_shms and not self._sub_shms:
+        # An L3+ buffer is consumed by a forked child that lazily maps it, so a childless L3+ buffer
+        # can reach no consumer. An L2 leaf has no children and materializes the ref in-process itself,
+        # so it needs none.
+        if self.level >= 3 and not self._chip_shms and not self._sub_shms:
             raise RuntimeError("create_buffer requires at least one forked chip or sub child (this Worker has none)")
         if nbytes <= 0:
             raise ValueError("create_buffer: nbytes must be positive")
@@ -6113,6 +6141,12 @@ class Worker:
         if errors:
             raise errors[0]
 
+    def _close_l2_import_registry(self) -> None:
+        """Close the L2 in-process consumer import cache (drops its mapped shm imports)."""
+        if self._l2_import_registry is not None:
+            self._l2_import_registry.close()
+            self._l2_import_registry = None
+
     def _release_all_buffer_handles(self) -> None:
         """Close + unlink every owner BufferHandle (called from close()).
 
@@ -6271,7 +6305,7 @@ class Worker:
         if self.level == 2:
             assert self._chip_worker is not None
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
-            self._chip_worker._run_slot(state.slot_id, args, cfg)
+            self._run_l2_materialized(state.slot_id, args, cfg)
             return RunHandle._completed(self)
 
         with self._submit_mu:
@@ -6390,6 +6424,37 @@ class Worker:
                 self._accepted_run_handles.discard(handle)
                 self._hierarchical_start_cv.notify_all()
         return result
+
+    def _run_l2_materialized(self, callable_id: int, args, cfg) -> None:
+        """Materialize an L2 leaf's BufferRef args to a Tensor blob in-process and run the kernel.
+
+        The user builds args as ``TaskArgs`` (BufferRef) at every level; an L2 leaf is the consumer of
+        its own args, so it does exactly what a chip child does — resolve each ref's embedded descriptor
+        to a local base (map-once, cached in ``_l2_import_registry``) and build the Tensor blob the
+        runtime reads — only without a mailbox, since the args are already in this process.
+
+        A legacy ``ChipStorageTaskArgs`` (a pre-BufferRef L2 caller — it has ``tensor()`` but no
+        ``ref()``) passes straight through to the runtime until that caller migrates to BufferRef.
+        """
+        if args is not None and not hasattr(args, "ref"):
+            self._chip_worker._run_slot(callable_id, args, cfg)  # type: ignore[union-attr]
+            return
+        if self._l2_import_registry is None:
+            self._l2_import_registry = ImportRegistry()
+        if args is None:
+            refs: list[BufferRef] = []
+            scalars: tuple[int, ...] = ()
+        else:
+            refs = [BufferRef.unpack(args.ref(i)) for i in range(args.tensor_count())]
+            scalars = tuple(args.scalar(i) for i in range(args.scalar_count()))
+        blob = pack_bufferref_blob(refs, scalars)
+        in_scratch = ctypes.create_string_buffer(blob, len(blob))
+        in_addr = ctypes.addressof(in_scratch)
+        resolved = self._l2_import_registry.materialize_blob(in_addr, len(blob))
+        tensor_blob = materialize_bufferref_blob(in_addr, len(blob), resolved)
+        out_scratch = ctypes.create_string_buffer(tensor_blob, len(tensor_blob))
+        assert self._chip_worker is not None
+        self._chip_worker._impl.run_from_blob(callable_id, ctypes.addressof(out_scratch), len(tensor_blob), cfg)
 
     @property
     def aicpu_dlopen_count(self) -> int:
@@ -6816,6 +6881,7 @@ class Worker:
         # still usable (before _worker.close()).
         _step(self._release_all_host_buffers)
         _step(self._release_all_buffer_handles)
+        _step(self._close_l2_import_registry)
 
         if self.level == 2:
 

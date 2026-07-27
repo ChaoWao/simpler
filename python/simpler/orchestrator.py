@@ -56,6 +56,7 @@ from .task_interface import (
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
     _validate_remote_sidecar_access,
+    get_element_size,
 )
 
 
@@ -501,6 +502,20 @@ class Orchestrator:
             self._worker._next_buffer_id(),
             f"L{self._worker.level}",
         )
+
+    def alloc_child_tensor(self, worker_id: int, shapes: tuple[int, ...], dtype: DataType) -> BufferHandle:
+        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype`` and wrap
+        it as a DEVICE_MALLOC ``BufferHandle`` (kind4; successor of ``orch.malloc`` + ``child_memory``).
+
+        Combines ``orch.malloc`` + ``orch.device_handle``. The pointer is private to ``worker_id``; name
+        the arg with ``handle.ref(shapes, dtype)`` and dispatch it only to that worker. Load host data
+        into it with ``orch.copy_to``. Not auto-freed at end-of-task.
+        """
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        ptr = self.malloc(worker_id=int(worker_id), size=int(nbytes))
+        return self.device_handle(ptr, int(nbytes))
 
     def free(self, worker_id: int, ptr: int) -> None:
         """Free memory on next-level worker *worker_id*."""

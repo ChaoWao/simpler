@@ -157,15 +157,17 @@ private:
             MailboxState s = read_state();
             if (s == MailboxState::TASK_READY) {
                 uint8_t callable_hash0 = static_cast<uint8_t>(mailbox[MAILBOX_OFF_TASK_CALLABLE_HASH]);
+                // BufferRef blob header: [abi_version u32][ref_count i32][scalar_count i32][reserved].
                 int32_t t_count = 0;
-                std::memcpy(&t_count, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB, sizeof(int32_t));
+                std::memcpy(&t_count, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB + sizeof(int32_t), sizeof(int32_t));
                 uint64_t tensor_key = 0;
                 if (t_count > 0) {
-                    Tensor first{};
+                    BufferRef first{};
                     std::memcpy(
-                        &first, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB + TASK_ARGS_BLOB_HEADER_SIZE, sizeof(Tensor)
+                        &first, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB + BUFFERREF_BLOB_HEADER_SIZE,
+                        sizeof(BufferRef)
                     );
-                    tensor_key = first.buffer.addr;
+                    tensor_key = first.handle.identity.buffer_id;
                 }
                 {
                     std::lock_guard<std::mutex> lk(dispatched_mu);
@@ -251,14 +253,27 @@ private:
 // Helper: build a TaskArgs whose only tensor has the given (data, tag).
 // ---------------------------------------------------------------------------
 
-static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
+static CanonicalIdentity identity_for(uint64_t buffer_id) {
+    CanonicalIdentity id{};
+    id.buffer_id = buffer_id;
+    return id;
+}
+
+static BufferRef make_local_ref(uint64_t buffer_id) {
+    BufferRef r{};
+    r.handle.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    r.handle.nbytes = 1;
+    r.handle.identity = identity_for(buffer_id);
+    r.ndims = 1;
+    r.shapes[0] = 1;
+    r.strides[0] = 1;
+    r.dtype = DataType::UINT8;
+    return r;
+}
+
+static TaskArgs single_ref_args(uint64_t buffer_id, TensorArgType tag) {
     TaskArgs a;
-    Tensor t{};
-    t.buffer.addr = data_ptr;
-    t.ndims = 1;
-    t.shapes[0] = 1;
-    t.dtype = DataType::UINT8;
-    a.add_tensor(t, tag);
+    a.add_tensor(make_local_ref(buffer_id), tag);
     return a;
 }
 
@@ -534,7 +549,7 @@ TEST(WorkerManagerTest, ControlPrepareUsesStableNextLevelWorkerId) {
 }
 
 TEST_F(SchedulerFixture, IndependentTaskDispatchedAndConsumed) {
-    auto args_a = single_tensor_args(0xCAFE, TensorArgType::OUTPUT);
+    auto args_a = single_ref_args(0xCAFE, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level(C(42), args_a, cfg, 0);
     TaskSlot slot = res.task_slot;
 
@@ -548,10 +563,10 @@ TEST_F(SchedulerFixture, IndependentTaskDispatchedAndConsumed) {
 }
 
 TEST_F(SchedulerFixture, DependentTaskDispatchedAfterProducerCompletes) {
-    auto args_a = single_tensor_args(0xBEEF, TensorArgType::OUTPUT);
+    auto args_a = single_ref_args(0xBEEF, TensorArgType::OUTPUT);
     auto a = orch.submit_next_level(C(10), args_a, cfg, 0);
 
-    auto args_b = single_tensor_args(0xBEEF, TensorArgType::INPUT);
+    auto args_b = single_ref_args(0xBEEF, TensorArgType::INPUT);
     auto b = orch.submit_next_level(C(11), args_b, cfg, 0);
     EXPECT_EQ(S(b.task_slot).state.load(), TaskState::PENDING);
 
@@ -576,19 +591,14 @@ TEST_F(SchedulerFixture, DependentTaskDispatchedAfterProducerCompletes) {
 // mailbox must hold any blob the runtime itself accepts, i.e. up to
 // CHIP_MAX_TENSOR_ARGS / CHIP_MAX_SCALAR_ARGS.
 TEST_F(SchedulerFixture, ComposedKernelArgsBlobFitsMailbox) {
-    constexpr size_t max_blob = TASK_ARGS_BLOB_HEADER_SIZE +
-                                static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
+    constexpr size_t max_blob = BUFFERREF_BLOB_HEADER_SIZE +
+                                static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(BufferRef) +
                                 static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t);
     EXPECT_GE(MAILBOX_ARGS_CAPACITY, max_blob);
 
     TaskArgs args;
     for (int i = 0; i < 76; ++i) {
-        Tensor t{};
-        t.buffer.addr = 0x1000u + static_cast<uint64_t>(i) * 0x100u;
-        t.ndims = 1;
-        t.shapes[0] = 1;
-        t.dtype = DataType::UINT8;
-        args.add_tensor(t, TensorArgType::OUTPUT);
+        args.add_tensor(make_local_ref(0x1000u + static_cast<uint64_t>(i) * 0x100u), TensorArgType::OUTPUT);
     }
     args.add_scalar(1);
     args.add_scalar(2);
@@ -605,10 +615,10 @@ TEST_F(SchedulerFixture, ComposedKernelArgsBlobFitsMailbox) {
 }
 
 TEST_F(SchedulerFixture, FailedProducerPoisonsDependentTask) {
-    auto args_a = single_tensor_args(0xD00D, TensorArgType::OUTPUT);
+    auto args_a = single_ref_args(0xD00D, TensorArgType::OUTPUT);
     auto a = orch.submit_next_level(C(21), args_a, cfg, 0);
 
-    auto args_b = single_tensor_args(0xD00D, TensorArgType::INPUT);
+    auto args_b = single_ref_args(0xD00D, TensorArgType::INPUT);
     auto b = orch.submit_next_level(C(22), args_b, cfg, 0);
     EXPECT_EQ(S(b.task_slot).state.load(), TaskState::PENDING);
 
@@ -711,8 +721,8 @@ struct GroupSchedulerFixture : public ::testing::Test {
 };
 
 TEST_F(GroupSchedulerFixture, GroupDispatchesToNWorkers) {
-    TaskArgs a0 = single_tensor_args(0xA0, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xA1, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xA0, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xA1, TensorArgType::OUTPUT);
 
     auto res = orch.submit_next_level_group(C(42), {a0, a1}, cfg, {0, 1});
     TaskSlot slot = res.task_slot;
@@ -736,8 +746,8 @@ TEST_F(GroupSchedulerFixture, GroupMapsEachMemberToItsTargetWorkerIdNotIndex) {
     // Reversed target order: member 0 -> worker id 1 (worker_b), member 1 ->
     // worker id 0 (worker_a). A map-by-registration-index bug would instead
     // send member 0 (a0) to worker_a; the reversed keys catch it.
-    TaskArgs a0 = single_tensor_args(0xA0, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xA1, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xA0, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xA1, TensorArgType::OUTPUT);
 
     auto res = orch.submit_next_level_group(C(42), {a0, a1}, cfg, {1, 0});
     TaskSlot slot = res.task_slot;
@@ -758,8 +768,8 @@ TEST_F(GroupSchedulerFixture, GroupMapsEachMemberToItsTargetWorkerIdNotIndex) {
 }
 
 TEST_F(GroupSchedulerFixture, GroupCompletesOnlyWhenAllDone) {
-    TaskArgs a0 = single_tensor_args(0xB0, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xB1, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xB0, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xB1, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level_group(C(42), {a0, a1}, cfg, {0, 1});
     TaskSlot slot = res.task_slot;
 
@@ -775,12 +785,12 @@ TEST_F(GroupSchedulerFixture, GroupCompletesOnlyWhenAllDone) {
 }
 
 TEST_F(GroupSchedulerFixture, BlockedGroupDoesNotDispatchPartiallyOrReserveIdleWorker) {
-    auto running = orch.submit_next_level(C(70), single_tensor_args(0xF0, TensorArgType::OUTPUT), cfg, 0);
+    auto running = orch.submit_next_level(C(70), single_ref_args(0xF0, TensorArgType::OUTPUT), cfg, 0);
     worker_a.wait_running();
     ASSERT_TRUE(worker_a.is_running.load());
 
-    TaskArgs group_a = single_tensor_args(0xF1, TensorArgType::OUTPUT);
-    TaskArgs group_b = single_tensor_args(0xF2, TensorArgType::OUTPUT);
+    TaskArgs group_a = single_ref_args(0xF1, TensorArgType::OUTPUT);
+    TaskArgs group_b = single_ref_args(0xF2, TensorArgType::OUTPUT);
     auto group = orch.submit_next_level_group(C(71), {group_a, group_b}, cfg, {0, 1});
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -788,7 +798,7 @@ TEST_F(GroupSchedulerFixture, BlockedGroupDoesNotDispatchPartiallyOrReserveIdleW
     EXPECT_FALSE(worker_b.is_running.load());
     EXPECT_EQ(worker_b.dispatched_count(), 0);
 
-    auto independent = orch.submit_next_level(C(72), single_tensor_args(0xF3, TensorArgType::OUTPUT), cfg, 1);
+    auto independent = orch.submit_next_level(C(72), single_ref_args(0xF3, TensorArgType::OUTPUT), cfg, 1);
     worker_b.wait_running();
     ASSERT_TRUE(worker_b.is_running.load());
     EXPECT_EQ(worker_b.dispatched[0].callable_hash0, 72u);
@@ -815,23 +825,23 @@ TEST_F(GroupSchedulerFixture, BlockedGroupDoesNotDispatchPartiallyOrReserveIdleW
 }
 
 TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {
-    auto running_a = orch.submit_next_level(C(73), single_tensor_args(0xF4, TensorArgType::OUTPUT), cfg, 0);
-    auto running_b = orch.submit_next_level(C(74), single_tensor_args(0xF5, TensorArgType::OUTPUT), cfg, 1);
+    auto running_a = orch.submit_next_level(C(73), single_ref_args(0xF4, TensorArgType::OUTPUT), cfg, 0);
+    auto running_b = orch.submit_next_level(C(74), single_ref_args(0xF5, TensorArgType::OUTPUT), cfg, 1);
     worker_a.wait_running();
     worker_b.wait_running();
     ASSERT_TRUE(worker_a.is_running.load());
     ASSERT_TRUE(worker_b.is_running.load());
 
-    TaskArgs group_a = single_tensor_args(0xF6, TensorArgType::OUTPUT);
-    TaskArgs group_b = single_tensor_args(0xF7, TensorArgType::OUTPUT);
+    TaskArgs group_a = single_ref_args(0xF6, TensorArgType::OUTPUT);
+    TaskArgs group_b = single_ref_args(0xF7, TensorArgType::OUTPUT);
     SubmitResult group;
     SubmitResult single_a;
     SubmitResult single_b;
     {
         std::lock_guard<std::mutex> scheduler_pause(sched.loop_mutex());
         group = orch.submit_next_level_group(C(75), {group_a, group_b}, cfg, {0, 1});
-        single_a = orch.submit_next_level(C(76), single_tensor_args(0xF8, TensorArgType::OUTPUT), cfg, 0);
-        single_b = orch.submit_next_level(C(77), single_tensor_args(0xF9, TensorArgType::OUTPUT), cfg, 1);
+        single_a = orch.submit_next_level(C(76), single_ref_args(0xF8, TensorArgType::OUTPUT), cfg, 0);
+        single_b = orch.submit_next_level(C(77), single_ref_args(0xF9, TensorArgType::OUTPUT), cfg, 1);
         worker_a.complete();
         worker_b.complete();
 
@@ -872,8 +882,8 @@ TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {
 }
 
 TEST_F(GroupSchedulerFixture, GroupFailureWaitsForRunningMembersThenConsumes) {
-    TaskArgs a0 = single_tensor_args(0xC0, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xC1, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xC0, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xC1, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level_group(C(42), {a0, a1}, cfg, {0, 1});
     TaskSlot slot = res.task_slot;
 
@@ -894,8 +904,8 @@ TEST_F(GroupSchedulerFixture, GroupFailureWaitsForRunningMembersThenConsumes) {
 }
 
 TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
-    TaskArgs a0 = single_tensor_args(0xD0, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xD1, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xD0, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xD1, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level_group(C(42), {a0, a1}, cfg, {0, 1});
     TaskSlot slot = res.task_slot;
 
@@ -917,7 +927,7 @@ TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
 }
 
 TEST_F(GroupSchedulerFixture, ExplicitTargetWithinEligibilityIsUsed) {
-    TaskArgs args = single_tensor_args(0xE0, TensorArgType::OUTPUT);
+    TaskArgs args = single_ref_args(0xE0, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level(C(55), args, cfg, 1, {1});
     TaskSlot slot = res.task_slot;
 
@@ -932,16 +942,16 @@ TEST_F(GroupSchedulerFixture, ExplicitTargetWithinEligibilityIsUsed) {
 }
 
 TEST_F(GroupSchedulerFixture, BusyTargetDoesNotBlockAnotherWorkerQueue) {
-    auto running_args = single_tensor_args(0xE4, TensorArgType::OUTPUT);
+    auto running_args = single_ref_args(0xE4, TensorArgType::OUTPUT);
     auto running = orch.submit_next_level(C(62), running_args, cfg, 0);
     worker_a.wait_running();
     ASSERT_TRUE(worker_a.is_running.load());
 
-    auto blocked_args = single_tensor_args(0xE5, TensorArgType::OUTPUT);
+    auto blocked_args = single_ref_args(0xE5, TensorArgType::OUTPUT);
     auto blocked = orch.submit_next_level(C(63), blocked_args, cfg, 0);
-    auto blocked_second_args = single_tensor_args(0xE8, TensorArgType::OUTPUT);
+    auto blocked_second_args = single_ref_args(0xE8, TensorArgType::OUTPUT);
     auto blocked_second = orch.submit_next_level(C(67), blocked_second_args, cfg, 0);
-    auto independent_args = single_tensor_args(0xE6, TensorArgType::OUTPUT);
+    auto independent_args = single_ref_args(0xE6, TensorArgType::OUTPUT);
     auto independent = orch.submit_next_level(C(64), independent_args, cfg, 1);
 
     worker_b.wait_running();
@@ -974,9 +984,9 @@ TEST_F(GroupSchedulerFixture, BusyTargetDoesNotBlockAnotherWorkerQueue) {
 }
 
 TEST_F(GroupSchedulerFixture, DependencyReleaseUsesConsumerWorkerQueue) {
-    auto producer_args = single_tensor_args(0xE7, TensorArgType::OUTPUT);
+    auto producer_args = single_ref_args(0xE7, TensorArgType::OUTPUT);
     auto producer = orch.submit_next_level(C(65), producer_args, cfg, 0);
-    auto consumer_args = single_tensor_args(0xE7, TensorArgType::INPUT);
+    auto consumer_args = single_ref_args(0xE7, TensorArgType::INPUT);
     auto consumer = orch.submit_next_level(C(66), consumer_args, cfg, 1);
     EXPECT_EQ(S(consumer.task_slot).state.load(), TaskState::PENDING);
 
@@ -994,12 +1004,12 @@ TEST_F(GroupSchedulerFixture, DependencyReleaseUsesConsumerWorkerQueue) {
 }
 
 TEST_F(GroupSchedulerFixture, TargetMustBeInEligibleEndpointSet) {
-    TaskArgs args = single_tensor_args(0xE1, TensorArgType::OUTPUT);
+    TaskArgs args = single_ref_args(0xE1, TensorArgType::OUTPUT);
     EXPECT_THROW((void)orch.submit_next_level(C(56), args, cfg, 0, {1}), std::invalid_argument);
 }
 
 TEST_F(GroupSchedulerFixture, UnknownEligibleWorkerIdIsRejectedBeforeScheduling) {
-    TaskArgs args = single_tensor_args(0xE3, TensorArgType::OUTPUT);
+    TaskArgs args = single_ref_args(0xE3, TensorArgType::OUTPUT);
     EXPECT_THROW((void)orch.submit_next_level(C(59), args, cfg, 99, {99}), std::invalid_argument);
 }
 
@@ -1070,7 +1080,7 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
         EXPECT_TRUE(consumed);
     };
 
-    TaskArgs args = single_tensor_args(0xE2, TensorArgType::OUTPUT);
+    TaskArgs args = single_ref_args(0xE2, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level(C(58), args, cfg, 9);
 
     worker_b.wait_running();
@@ -1084,8 +1094,8 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
 
     wait_consumed_slot(res.task_slot);
 
-    TaskArgs a0 = single_tensor_args(0xE6, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xE7, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xE6, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xE7, TensorArgType::OUTPUT);
     auto group_res = orch.submit_next_level_group(C(61), {a0, a1}, cfg, {7, 9}, {{7}, {9}});
 
     worker_a.wait_running();
@@ -1106,12 +1116,13 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
 
 TEST_F(GroupSchedulerFixture, RemoteSidecarRejectsLocalEndpointEligibility) {
     TaskArgs args;
-    Tensor tensor{};
-    tensor.buffer.addr = 0;
-    tensor.ndims = 1;
-    tensor.shapes[0] = 1;
-    tensor.dtype = DataType::UINT8;
-    args.add_tensor(tensor, TensorArgType::OUTPUT);
+    BufferRef ref{};
+    ref.handle.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+    ref.ndims = 1;
+    ref.shapes[0] = 1;
+    ref.strides[0] = 1;
+    ref.dtype = DataType::UINT8;
+    args.add_tensor(ref, TensorArgType::OUTPUT);
 
     RemoteTaskArgsSidecar sidecar;
     sidecar.tensors.resize(1);
@@ -1217,7 +1228,7 @@ struct MixedTypeSchedulerFixture : public ::testing::Test {
 TEST_F(MixedTypeSchedulerFixture, SubTaskDispatchesWhileNextLevelPoolSaturated) {
     // Submit a next-level task; the only chip worker begins running it and
     // stays blocked until we call complete() on it.
-    auto chip_args = single_tensor_args(0xAAA, TensorArgType::OUTPUT);
+    auto chip_args = single_ref_args(0xAAA, TensorArgType::OUTPUT);
     auto chip = orch.submit_next_level(C(20), chip_args, cfg, 0);
     next_level_worker.wait_running();
     ASSERT_TRUE(next_level_worker.is_running.load());
@@ -1226,7 +1237,7 @@ TEST_F(MixedTypeSchedulerFixture, SubTaskDispatchesWhileNextLevelPoolSaturated) 
     // shared ready queue this would block behind any next-level task sitting
     // in worker 0's directed FIFO. The independent shared SUB queue must
     // dispatch immediately to the idle SUB worker.
-    auto sub_args = single_tensor_args(0xBBB, TensorArgType::OUTPUT);
+    auto sub_args = single_ref_args(0xBBB, TensorArgType::OUTPUT);
     auto sub = orch.submit_sub(C(7), sub_args);
 
     sub_worker.wait_running();
@@ -1246,11 +1257,11 @@ TEST_F(MixedTypeSchedulerFixture, SubTaskDispatchesWhileNextLevelPoolSaturated) 
 TEST_F(GroupSchedulerFixture, GroupDependencyChain) {
     // Group A (2 workers) produces an OUTPUT at key 0xCAFE.
     // Task B reads INPUT at the same key -- depends on group A.
-    TaskArgs a0 = single_tensor_args(0xCAFE, TensorArgType::OUTPUT);
-    TaskArgs a1 = single_tensor_args(0xCAFE, TensorArgType::OUTPUT);
+    TaskArgs a0 = single_ref_args(0xCAFE, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_ref_args(0xCAFE, TensorArgType::OUTPUT);
     auto a = orch.submit_next_level_group(C(42), {a0, a1}, cfg, {0, 1});
 
-    auto args_b = single_tensor_args(0xCAFE, TensorArgType::INPUT);
+    auto args_b = single_ref_args(0xCAFE, TensorArgType::INPUT);
     auto b = orch.submit_next_level(C(42), args_b, cfg, 0);
     EXPECT_EQ(S(b.task_slot).state.load(), TaskState::PENDING);
 

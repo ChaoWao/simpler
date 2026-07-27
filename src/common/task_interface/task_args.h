@@ -179,14 +179,11 @@ struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
 // carries BufferRefs, materialized to ChipStorageTaskArgs (Tensor) on the L2 child.
 using TaskArgs = TaskArgsTpl<BufferRef, uint64_t, 0, 0, TensorArgType>;
 
-// Tensor-typed args — the materialized form used at the L2 boundary and for the
-// Tensor-blob round trip (write_blob / read_blob / make_view). Distinct from the
-// BufferRef-typed TaskArgs the L3 orchestrator dispatches: a BufferRef blob is
-// materialized into these on the L2 child before run.
-using TensorTaskArgs = TaskArgsTpl<Tensor, uint64_t, 0, 0, TensorArgType>;
-
-// L2 runtime ABI: fixed POD matching runtime.so byte-for-byte.
-// Assembled from a TaskArgsView on the child side just before pto2_run_runtime.
+// L2 runtime ABI: fixed POD matching runtime.so byte-for-byte, and the sole
+// Tensor-typed args container — the materialized form the L3→L2 BufferRef blob
+// is decoded into on the L2 child, and the source/target of the Tensor-blob
+// round trip (write_blob / read_blob / make_view). Assembled from a
+// TaskArgsView on the child side just before pto2_run_runtime.
 using ChipStorageTaskArgs = TaskArgsTpl<Tensor, uint64_t, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS>;
 
 // ============================================================================
@@ -221,8 +218,8 @@ struct TaskArgsView {
     }
 };
 
-// Build a view directly over a TaskArgs's vectors (THREAD-mode dispatch).
-inline TaskArgsView make_view(const TensorTaskArgs &a) {
+// Build a view directly over a ChipStorageTaskArgs's arrays (THREAD-mode dispatch).
+inline TaskArgsView make_view(const ChipStorageTaskArgs &a) {
     return TaskArgsView{
         a.tensor_count(), a.scalar_count(), reinterpret_cast<const uint8_t *>(a.tensor_data()), a.scalar_data()
     };
@@ -246,14 +243,14 @@ inline TaskArgsView make_view(const TensorTaskArgs &a) {
 
 inline constexpr size_t TASK_ARGS_BLOB_HEADER_SIZE = 8;
 
-inline size_t task_args_blob_size(const TensorTaskArgs &a) {
+inline size_t task_args_blob_size(const ChipStorageTaskArgs &a) {
     return TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(a.tensor_count()) * sizeof(Tensor) +
            static_cast<size_t>(a.scalar_count()) * sizeof(uint64_t);
 }
 
 // Serialize a TaskArgs into `dst`. Caller must ensure `dst` has room for
 // task_args_blob_size(a) bytes. Tags are not written.
-inline void write_blob(uint8_t *dst, const TensorTaskArgs &a) {
+inline void write_blob(uint8_t *dst, const ChipStorageTaskArgs &a) {
     int32_t T = a.tensor_count();
     int32_t S = a.scalar_count();
     std::memcpy(dst + 0, &T, sizeof(T));

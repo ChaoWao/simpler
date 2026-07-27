@@ -26,10 +26,14 @@ from unittest.mock import MagicMock
 
 import pytest
 import simpler.orchestrator as orch_mod
-from _task_interface import DataType, Tensor, TensorArgType
+from _task_interface import TensorArgType
+from simpler.buffer_handle import mint_owner_instance_id, wrap_device_malloc, wrap_fork_inherited
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import TaskArgs
 from simpler.worker import Worker, _ChildProvEntry, _Lifecycle
+
+_F32 = 0  # DataType.FLOAT32 value
+_OID = mint_owner_instance_id()
 
 
 def _l3() -> Worker:
@@ -37,8 +41,10 @@ def _l3() -> Worker:
 
 
 def _child_args(ptr: int, *, n: int = 16) -> TaskArgs:
+    # A DEVICE_MALLOC ref carries ``ptr`` in its backend body: the device-pointer provenance key.
     args = TaskArgs()
-    args.add_tensor(Tensor.make(ptr, (n,), DataType.FLOAT32, child_memory=True), TensorArgType.OUTPUT_EXISTING)
+    dev = wrap_device_malloc(ptr, n * 4, _OID, buffer_id=ptr)
+    args.add_ref(dev.ref(shapes=(n,), dtype=_F32), TensorArgType.OUTPUT_EXISTING)
     return args
 
 
@@ -329,12 +335,13 @@ class TestSubmitDispatchGuard:
         fake.submit_next_level.assert_not_called()
 
     def test_host_only_args_are_not_guarded(self, _fake_handle):
-        # A submit with no child_memory tensor never touches provenance.
+        # A submit with no device (DEVICE_MALLOC) ref never touches provenance.
         w = _l3()
         fake = MagicMock()
         o = Orchestrator(fake, w)
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0, (16,), DataType.FLOAT32, child_memory=False), TensorArgType.INPUT)
+        host = wrap_fork_inherited(0x9000, 64, _OID, buffer_id=0x9000)
+        args.add_ref(host.ref(shapes=(16,), dtype=_F32), TensorArgType.INPUT)
         o.submit_next_level(object(), args, None, worker=0)
         fake.submit_next_level.assert_called_once()
 
