@@ -15,7 +15,6 @@
 
 #include "common/unified_log.h"
 #include "aicpu/aicpu_device_config.h"
-#include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/device_time.h"
 #include "aicpu/l2_swimlane_collector_aicpu.h"
@@ -979,7 +978,6 @@ void SchedulerContext::post_handshake_profiling_init() {
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
     }
-    if (is_dep_gen_enabled()) {}
 #endif
 }
 
@@ -1213,12 +1211,6 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
     }
-    // dep_gen is host-driven (SubmitTrace) — runtime-gated by the host flag —
-    // and compiles out with the other profiling subsystems at SIMPLER_DFX=0.
-    // init() only pops the initial buffer from instance 0's free_queue; the
-    // orchestrator thread still records its idx via
-    // dep_gen_aicpu_set_orch_thread_idx() before the first record_submit.
-    if (is_dep_gen_enabled()) {}
 #endif
 
     // total_tasks_ is read in pre_handshake_init (before the orchestrator's early
