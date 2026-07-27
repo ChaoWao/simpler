@@ -90,11 +90,9 @@ public:
     /// `aicpu_dlopen_count` for the trb path; returns 0 on device-orch variants.
     size_t host_dlopen_count() const;
 
-    /// Number of run stream sets the bound runner has created. A set belongs
-    /// to a pipeline slot and is reused for every run on that slot, so a
-    /// runner that has served any number of runs on one slot reports 1;
-    /// platforms whose runs use the persistent bootstrap pair report 0. Used
-    /// by tests to assert that repeated runs do not rebuild the set per run.
+    /// Number of run stream generations the bound runner has created. AICPU
+    /// streams belong to slots; AICore streams are reused only while the loaded
+    /// code image is unchanged. Platforms using the persistent pair report 0.
     size_t run_stream_set_create_count() const;
 
     uint64_t malloc(size_t size);

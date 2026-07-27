@@ -248,9 +248,16 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return rc;
     }
 
-    rc = ensure_run_stream_set(kPipelineSlot);
+    const int32_t callable_id = runtime.get_active_callable_id();
+    auto callable_it = callables_.find(callable_id);
+    if (callable_it == callables_.end()) {
+        LOG_ERROR("run() has no registered state for callable_id=%d", callable_id);
+        return -1;
+    }
+    const uint64_t aicore_image_hash = callable_it->second.aicore_image_hash;
+    rc = ensure_run_stream_set(kPipelineSlot, aicore_image_hash);
     if (rc != 0) {
-        LOG_ERROR("ensure_run_stream_set(%u) failed: %d", kPipelineSlot, rc);
+        LOG_ERROR("ensure_run_stream_set(%u, image=0x%lx) failed: %d", kPipelineSlot, aicore_image_hash, rc);
         return rc;
     }
 
@@ -480,19 +487,12 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     return 0;
 }
 
-int DeviceRunner::ensure_run_stream_set(unsigned slot) {
+int DeviceRunner::ensure_run_stream_set(unsigned slot, uint64_t aicore_image_hash) {
     if (slot >= kRunStreamSetCount) {
         LOG_ERROR("ensure_run_stream_set: invalid slot %u", slot);
         return -1;
     }
     RunStreamSet &streams = run_stream_sets_[slot];
-    if (streams.aicpu != nullptr && streams.aicore != nullptr) {
-        return 0;
-    }
-
-    // Reached only on the first run for this slot, or after a partial create
-    // rolled one stream back; rtStreamCreate costs ~300 us and the set carries
-    // no per-run content, so it must not be rebuilt per run.
     if (streams.aicpu == nullptr) {
         int rc = rtStreamCreate(&streams.aicpu, 0);
         if (rc != 0) {
@@ -501,16 +501,31 @@ int DeviceRunner::ensure_run_stream_set(unsigned slot) {
             return rc;
         }
     }
-    if (streams.aicore == nullptr) {
-        int rc = rtStreamCreate(&streams.aicore, 0);
+    if (streams.aicore != nullptr && streams.has_aicore_image && streams.aicore_image_hash == aicore_image_hash) {
+        return 0;
+    }
+
+    if (streams.aicore != nullptr) {
+        int rc = rtStreamDestroy(streams.aicore);
         if (rc != 0) {
-            LOG_ERROR("rtStreamCreate (run AICore slot %u) failed: %d", slot, rc);
-            ACL_LOG_ERROR_DETAIL(rc);
+            LOG_ERROR("rtStreamDestroy (retired AICore slot %u) failed: %d", slot, rc);
             return rc;
         }
+        streams.aicore = nullptr;
+        streams.has_aicore_image = false;
     }
+
+    int rc = rtStreamCreate(&streams.aicore, 0);
+    if (rc != 0) {
+        LOG_ERROR("rtStreamCreate (run AICore slot %u) failed: %d", slot, rc);
+        ACL_LOG_ERROR_DETAIL(rc);
+        streams.aicore = nullptr;
+        return rc;
+    }
+    streams.aicore_image_hash = aicore_image_hash;
+    streams.has_aicore_image = true;
     ++run_stream_sets_created_;
-    LOG_INFO_V0("DeviceRunner: run stream set %u created", slot);
+    LOG_INFO_V0("DeviceRunner: run stream generation %zu created for slot %u", run_stream_sets_created_, slot);
     return 0;
 }
 
@@ -539,6 +554,7 @@ int DeviceRunner::destroy_run_stream_sets() {
             }
             capture(destroy_rc);
             streams.aicore = nullptr;
+            streams.has_aicore_image = false;
         }
     }
     return rc;

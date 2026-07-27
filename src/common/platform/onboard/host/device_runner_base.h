@@ -303,8 +303,8 @@ public:
      * @return 0 on success, negative on failure.
      */
     int record_device_orch_callable(
-        int32_t callable_id, uint64_t chip_buffer_hash, uint64_t chip_dev, const void *orch_so_data,
-        size_t orch_so_size, const char *func_name, const char *config_name,
+        int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, uint64_t chip_dev,
+        const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
         std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
     );
 
@@ -319,8 +319,9 @@ public:
      * dlclose'd by `unregister_callable`. Increments `host_dlopen_total_`.
      */
     int record_host_orch_callable(
-        int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
+        void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs,
+        std::vector<ArgDirection> signature
     );
 
     /**
@@ -420,10 +421,9 @@ public:
     size_t host_dlopen_count() const { return host_dlopen_total_; }
 
     /**
-     * Number of run stream sets this runner has created. A set belongs to a
-     * pipeline slot and is reused for every run on that slot, so a runner that
-     * has served any number of runs on one slot reports 1. Arches whose runs
-     * use the persistent pair report 0.
+     * Number of run stream generations this runner has created. AICPU streams
+     * belong to pipeline slots, while an AICore stream is reused only for the
+     * same AICore image. Arches whose runs use the persistent pair report 0.
      */
     virtual size_t run_stream_set_create_count() const { return 0; }
 
@@ -806,6 +806,7 @@ protected:
         // chip_buffer_hash, which keys the retained buffer.
         uint64_t hash{0};
         uint64_t chip_buffer_hash{0};
+        uint64_t aicore_image_hash{0};
         uint64_t dev_orch_so_addr{0};
         size_t dev_orch_so_size{0};
         std::string func_name;
