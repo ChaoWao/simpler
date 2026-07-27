@@ -12,6 +12,21 @@ Three axioms govern hardware classification across all test categories:
 
 These principles apply uniformly to ut-py (pytest markers), ut-cpp (ctest labels), and st (`@scene_test(platforms=[...])`).
 
+### Assertion principle: no wall-clock proxies
+
+Off-hardware tests (sim, ut-py/ut-cpp, github-hosted) must not assert wall-clock
+magnitude as a proxy for a non-temporal property. A wall-time bound used to infer
+"the workers ran concurrently," "the path is fast," or any other non-temporal
+claim polices the host scheduler and timer, not the code under test — and it
+flakes on loaded or virtualized CI hosts (the GHA macOS runner, for example,
+over-sleeps `time.sleep` under load). Assert the property directly — the
+functional result or an observable effect — instead.
+
+Exception: when wall-time *is* the subject under test (a timeout firing, a
+startup deadline being respected, a configured budget), asserting it is correct.
+Budget generously for CI variance, and prefer the mechanism's observable effect
+over a tight measured bound. See [#1496](https://github.com/hw-native-sys/simpler/issues/1496).
+
 ## Quick Reference
 
 ```bash
