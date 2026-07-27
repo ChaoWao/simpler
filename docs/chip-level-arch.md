@@ -9,7 +9,7 @@ data (Callable / TaskArgs / CallConfig) flows through all levels, see
 
 ## Three-Program Model
 
-The PTO Runtime consists of **three separate programs** that communicate through well-defined APIs:
+The simpler runtime consists of **three separate programs** that communicate through well-defined APIs:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐

@@ -118,4 +118,42 @@
    include paths, and host↔device struct layouts — unless you also ship a
    compatibility alias or a full migration. The ban on *new* `PTO2`
    identifiers is unconditional; removal of *existing* ones is scoped to
-   what can be renamed safely.
+   what can be renamed safely. Rule 10 sets the *migration policy* for the
+   existing surface — read it before starting any rename.
+
+10. **Retire the legacy `PTO` naming incrementally — never in one sweep.**
+    The project is **`simpler`** ("Simple Runtime"); its two runtimes are
+    `host_build_graph` and `tensormap_and_ringbuffer`. **"PTO Runtime",
+    "PTO Runtime2", and a bare "Runtime2" are not names of anything** — the
+    `2` never denoted a version any reader can identify. The legacy surface
+    is far too large to fix at once (snapshot 2026-07-26: ~6.6k `PTO2`
+    occurrences across 367 files, plus 17 prose "PTO Runtime[2]" mentions),
+    so it is retired in graded steps. Find the current surface with:
+
+    ```bash
+    grep -rIn -E "PTO Runtime2?|PTO2|pto2_|pto_runtime2" --include=* . | grep -v '^\./\.git/'
+    ```
+
+    Each match falls in exactly one tier, and the tier decides what you owe:
+
+    | Tier | What | Policy |
+    | ---- | ---- | ------ |
+    | **A — prose** | Brand mentions in docs, headings, skill descriptions, issue templates, and code comments (`# PTO Runtime2 Profiling Levels`, "the PTO Runtime consists of…") | **Fix on sight, unconditionally.** No compile risk, no contract. Say `simpler`, or name the actual component ("the AICPU orchestrator", "the `tensormap_and_ringbuffer` runtime") when that is what the sentence means. |
+    | **B — internal identifiers** | `PTO2Foo` types, `pto2_*` functions, internal `PTO2_*` macros and enumerators, `pto_*.h` / `pto_runtime2*.cpp` file names | Rename **only when you are already modifying that code**, per rule 9, and finish the identifier you started (below). |
+    | **C — external contracts** | `PTO2_RING_*` and other `runtime_env` knobs (documented in `MULTI_RING.md`, set by pypto-lib / pypto-serving), `extern "C"` symbols in `pto_runtime_c_api.h`, on-wire / serialized names | **Exempt until a migration ships.** Renaming these breaks callers in other repos. Ask the user before touching one; land it only with a compatibility alias or a coordinated cross-repo change. |
+
+    Two constraints make the difference between progress and churn:
+
+    - **One identifier, all its occurrences, one commit.** A rename that
+      leaves both spellings alive is worse than no rename — the reader now
+      has to know both. The `src/{a2a3,a5}/runtime/{host_build_graph,
+      tensormap_and_ringbuffer}/` trees are near-duplicates, so a Tier-B
+      rename in one of them must land in its siblings in the same commit.
+      Verify with the grep above returning zero hits for that identifier.
+    - **The count only goes down.** Introducing a new `PTO2`/`PTO Runtime`
+      spelling anywhere — including by copying an existing `pto_*.h` to a
+      new arch — is a defect, not neutral. Rule 9 makes this unconditional.
+
+    Do **not** open a repo-wide mechanical rename PR: it collides with every
+    in-flight branch, and a 6k-line diff cannot be reviewed for the handful
+    of Tier-C names hiding in it.

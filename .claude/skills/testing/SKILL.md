@@ -1,6 +1,6 @@
 ---
 name: testing
-description: Testing guide and pre-commit testing strategy for PTO Runtime. Use when running tests, adding tests, or deciding what to test before committing.
+description: Testing guide and pre-commit testing strategy for simpler. Use when running tests, adding tests, or deciding what to test before committing.
 ---
 
 # Testing
