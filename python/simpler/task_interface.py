@@ -29,8 +29,10 @@ import weakref
 from dataclasses import dataclass
 from enum import IntEnum
 from math import prod
+from pathlib import Path
 from typing import Any
 
+import _task_interface as _ti_module  # pyright: ignore[reportMissingImports]
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_OFF_ERROR_MSG,
@@ -56,6 +58,71 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_element_size,
     read_args_from_blob,
 )
+
+
+def _assert_bindings_match_source_tree() -> None:
+    """Refuse a `_task_interface` built from a different revision of this tree.
+
+    An editable install pins the compiled extension at install time
+    (``editable.rebuild = false``) while this file is read live, so switching
+    branches or rebasing moves the Python source out from under a fixed binary.
+    Nothing then rebuilds, and a changed struct layout — `CallConfig` losing a
+    field, say — makes attributes read as 0 with no error at all. That surfaces
+    much later as a plausible-looking runtime rejection
+    (``launch_aicpu_num (0) must be in range [1, 4]``) and reads as a product
+    bug, so it is worth one git call at import to stop.
+
+    Only source-tree installs are checked: a wheel has no ``.git`` to compare
+    against, and a build with no git available carries an empty stamp.
+
+    A *missing* stamp is not the same as an empty one. The attribute only
+    disappears on an extension compiled before it existed, which in a checkout
+    new enough to run this function is by definition a different revision — the
+    exact case this guards, and the one every already-installed worktree is in
+    the moment this lands. Treating it like "cannot tell" would let precisely
+    those through.
+    """
+    import subprocess  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if not (repo_root / ".git").exists():
+        return
+    if not hasattr(_ti_module, "__build_commit__"):
+        raise ImportError(
+            "_task_interface predates the build stamp, so it was compiled before the "
+            "revision you are running and its struct layouts may not match the Python "
+            "that drives them — fields can read as 0 with no error.\n"
+            "Rebuild:  pip install --no-build-isolation -e ."
+        )
+    built_from: str = _ti_module.__build_commit__
+    if not built_from:
+        return
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    if result.returncode != 0:
+        return
+    head = result.stdout.strip()
+    if not head or head == built_from:
+        return
+    raise ImportError(
+        f"_task_interface was built from {built_from[:12]}, but this source tree is at "
+        f"{head[:12]}. The compiled extension does not rebuild on import "
+        f"(editable.rebuild = false), so its struct layouts may no longer match the "
+        f"Python that drives them — fields can read as 0 with no error.\n"
+        f"Rebuild:  pip install --no-build-isolation -e ."
+    )
+
+
+_assert_bindings_match_source_tree()
 
 __all__ = [
     "DataType",

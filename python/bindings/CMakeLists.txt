@@ -30,7 +30,24 @@ set(HIERARCHICAL_SOURCES
     ${HIERARCHICAL_SRC}/worker.cpp
 )
 
+# Stamp the source commit into the module so `simpler.task_interface` can refuse
+# to run against a binding built from a different tree. Same notion of "which
+# sources is this built from" as RuntimeBuilder._build_cache_stamp, and git for
+# the same reason: mtimes do not survive a branch switch. Empty when git is
+# unavailable (release tarball, no .git), which disables the check.
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE SIMPLER_BUILD_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
 nanobind_add_module(_task_interface ${BINDING_SOURCES} ${HIERARCHICAL_SOURCES})
+
+target_compile_definitions(_task_interface PRIVATE
+    SIMPLER_BUILD_COMMIT="${SIMPLER_BUILD_COMMIT}"
+)
 
 target_sources(_task_interface PRIVATE
     ${CMAKE_SOURCE_DIR}/src/common/worker/chip_worker.cpp
