@@ -91,7 +91,7 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 
 ## Documentation
 
-**[docs/README.md](docs/README.md) indexes every document**, grouped by task. The entry points:
+Building **on** simpler? Start at **[docs/user/](docs/user/README.md)** — how-to guides plus the Python and CLI reference. **[docs/README.md](docs/README.md) indexes every document**, grouped by task. The entry points:
 
 | Document | Description |
 | -------- | ----------- |

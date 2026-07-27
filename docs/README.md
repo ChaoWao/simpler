@@ -10,8 +10,15 @@ Add the row here in the same commit — an unlisted doc is invisible.
 
 ## Start here
 
+Two audiences use this tree. If you are **building on** simpler — writing
+kernels and orchestration, running and measuring them — start at
+**[user/](user/README.md)**, which routes you through install → first run →
+write a kernel → profile → debug. Everything else here is written for people
+changing simpler's own internals.
+
 | Document | What it covers |
 | -------- | -------------- |
+| [**Using simpler**](user/README.md) | The user-facing entry point: how-to guides and the Python / CLI reference |
 | [Getting Started](getting-started.md) | Prerequisites, PTO-ISA setup, first example run |
 | [Installation and Runtime Environment](install.md) | Install layout and the runtime environment variables |
 | [Developer Guide](developer-guide.md) | Directory structure, role ownership, when to rebuild |
