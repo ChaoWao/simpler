@@ -491,7 +491,7 @@ class Orchestrator:
             return int(self._o.malloc(wid, sz))
         with self._worker._child_prov_lock:
             ptr = int(self._o.malloc(wid, sz))
-            self._worker._child_prov_record_malloc(wid, ptr)
+            self._worker._child_prov_record_malloc(wid, ptr, sz)
             return ptr
 
     def free(self, worker_id: int, ptr: int) -> None:
@@ -514,13 +514,13 @@ class Orchestrator:
 
     def copy_to(self, worker_id: int, dst: int, src: int, size: int) -> None:
         """Copy *size* bytes from host *src* to worker *dst*."""
-        wid, d = int(worker_id), int(dst)
+        wid, d, nbytes = int(worker_id), int(dst), int(size)
         if self._worker is None:
-            self._o.copy_to(wid, d, int(src), int(size))
+            self._o.copy_to(wid, d, int(src), nbytes)
             return
         with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live(wid, d, api="copy_to")
-            self._o.copy_to(wid, d, int(src), int(size))
+            self._worker._child_prov_require_copy_range(wid, d, nbytes, api="copy_to")
+            self._o.copy_to(wid, d, int(src), nbytes)
 
     def copy_from(self, worker_id: int, dst: int, src: int, size: int) -> None:
         """Copy *size* bytes from worker *src* to host *dst*."""
