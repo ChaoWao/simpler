@@ -7,7 +7,7 @@ onboard scripts, and external consumers (e.g. pypto-serving), so they must be
 consistent and self-describing.
 
 See [profiling-framework.md](profiling-framework.md) for the collector
-architecture, and [dfx/host-trace.md](dfx/host-trace.md) for the `[STRACE]`
+architecture, and [dfx/host-trace.md](host-trace.md) for the `[STRACE]`
 host-trace facility.
 
 ## The four rules

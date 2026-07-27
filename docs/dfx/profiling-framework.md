@@ -3,27 +3,27 @@
 Shared profiling infrastructure that the PMU, L2Swimlane, DepGen,
 ArgsDump, and ScopeStats collectors are built on. The host-side framework
 headers live in
-[`src/common/platform/include/host/`](../src/common/platform/include/host/)
+[`src/common/platform/include/host/`](../../src/common/platform/include/host/)
 and are consumed verbatim by both a2a3 and a5 collectors (PR #944
 unified the previously-divergent per-arch copies into one set). The AICPU
 device-side producer algorithms live in
-[`src/common/platform/include/aicpu/profiler_device_engine.h`](../src/common/platform/include/aicpu/profiler_device_engine.h)
+[`src/common/platform/include/aicpu/profiler_device_engine.h`](../../src/common/platform/include/aicpu/profiler_device_engine.h)
 and are shared by the device writers that publish buffers into those host
 collectors. This page describes both halves; §8 covers the a5-specific
 transport deviations that the collectors themselves still carry.
 
 The per-collector pages
-([pmu-profiling.md](dfx/pmu-profiling.md),
-[l2-swimlane-profiling.md](dfx/l2-swimlane-profiling.md),
-[dep_gen.md](dfx/dep_gen.md),
-[args-dump.md](dfx/args-dump.md),
-[scope-stats.md](dfx/scope-stats.md))
+([pmu-profiling.md](pmu-profiling.md),
+[l2-swimlane-profiling.md](l2-swimlane-profiling.md),
+[dep_gen.md](dep_gen.md),
+[args-dump.md](args-dump.md),
+[scope-stats.md](scope-stats.md))
 describe the data each subsystem collects and how it enables it on-device.
 
 For everyday per-run timing (no collector, always on under `SIMPLER_HOST_STRACE`):
-[l2-timing.md](dfx/l2-timing.md) covers host_wall / device_wall (`[STRACE]` markers) +
-device-log Orch/Sched/Total, and [host-trace.md](dfx/host-trace.md) +
-[device-phases.md](dfx/device-phases.md) cover the `[STRACE]` per-stage
+[l2-timing.md](l2-timing.md) covers host_wall / device_wall (`[STRACE]` markers) +
+device-log Orch/Sched/Total, and [host-trace.md](host-trace.md) +
+[device-phases.md](device-phases.md) cover the `[STRACE]` per-stage
 breakdown of `simpler_run` (host stages + AICPU phase subdivision).
 
 ## 1. Why a shared framework
@@ -53,7 +53,7 @@ space, publish a full buffer, wait for a free replacement, and install it as the
 current buffer. Both waits are resident block-on-contention gates — the writer
 parks until the host clears the freeze — not bounded drops; records are only
 lost if the 30-second host-crash backstop trips. See
-[dfx/global-backpressure-design.md](dfx/global-backpressure-design.md).
+[dfx/global-backpressure-design.md](global-backpressure-design.md).
 
 Before unification this was near-identical control flow repeated across
 collectors. The framework collapses the host side to one implementation
@@ -117,7 +117,7 @@ subsystem's shared-memory layout is shaped.
 
 ### 3.1 `BufferPoolManager<Module>` — data layer
 
-Defined in [`buffer_pool_manager.h`](../src/common/platform/include/host/buffer_pool_manager.h).
+Defined in [`buffer_pool_manager.h`](../../src/common/platform/include/host/buffer_pool_manager.h).
 Owns:
 
 - `ready_shards_` — mgmt drain → collector hand-off shards, each backed by a
@@ -148,7 +148,7 @@ Owns no threads. Every entry point is documented as one of:
 
 ### 3.2 `ProfilerBase<Derived, Module>` — control layer
 
-Defined in [`profiler_base.h`](../src/common/platform/include/host/profiler_base.h).
+Defined in [`profiler_base.h`](../../src/common/platform/include/host/profiler_base.h).
 Provides:
 
 - The mgmt thread(s), collector thread(s), and their lifecycle (`start` /
@@ -179,7 +179,7 @@ Provides:
   before stashing, `start(tf)` becomes a no-op.
 
 `ProfilerAlgorithms<Module>` (in the same
-[profiler_base.h](../src/common/platform/include/host/profiler_base.h))
+[profiler_base.h](../../src/common/platform/include/host/profiler_base.h))
 is where the unified algorithms live:
 
 - `try_pop_aicpu_entry` — barrier-correct head/tail advance over the
@@ -210,7 +210,7 @@ A stateless `struct` per subsystem (`PmuModule`, `L2SwimlaneModule`,
 `DepGenModule`, `DumpModule`, `ScopeStatsModule`) that tells the generic
 algorithms what the shared-memory layout looks like. The contract lives in the
 docblock at the top of
-[`profiler_base.h`](../src/common/platform/include/host/profiler_base.h);
+[`profiler_base.h`](../../src/common/platform/include/host/profiler_base.h);
 the required members are:
 
 | Member | Purpose |
@@ -231,12 +231,12 @@ the required members are:
 | `kind_of(info) → int` | **Multi-kind only.** Tells the framework which recycled bin a finished buffer belongs to. Single-kind modules omit this; the framework passes 0 |
 
 The Module structs are defined alongside their collectors in
-[pmu_collector.h](../src/a2a3/platform/include/host/pmu_collector.h),
-[l2_swimlane_collector.h](../src/common/platform/include/host/l2_swimlane_collector.h),
-[dep_gen_collector.h](../src/common/platform/include/host/dep_gen_collector.h),
-[args_dump_collector.h](../src/common/platform/include/host/args_dump_collector.h),
+[pmu_collector.h](../../src/a2a3/platform/include/host/pmu_collector.h),
+[l2_swimlane_collector.h](../../src/common/platform/include/host/l2_swimlane_collector.h),
+[dep_gen_collector.h](../../src/common/platform/include/host/dep_gen_collector.h),
+[args_dump_collector.h](../../src/common/platform/include/host/args_dump_collector.h),
 and
-[scope_stats_collector.h](../src/common/platform/include/host/scope_stats_collector.h)
+[scope_stats_collector.h](../../src/common/platform/include/host/scope_stats_collector.h)
 — each is a few dozen lines of static methods over the subsystem's own
 `DataHeader` / ringbuffer types.
 
@@ -268,7 +268,7 @@ and only has to provide:
 ### 3.5 `DeviceProfilerEngine<Module>` — AICPU producer algorithm layer
 
 Defined in
-[`profiler_device_engine.h`](../src/common/platform/include/aicpu/profiler_device_engine.h).
+[`profiler_device_engine.h`](../../src/common/platform/include/aicpu/profiler_device_engine.h).
 This is the device-side counterpart to `ProfilerAlgorithms<Module>`: it
 owns the AICPU producer control flow, while each subsystem keeps its record
 schema, flush/finalize behavior, and small layout hooks locally.
@@ -422,7 +422,7 @@ Two things follow:
   the only bound is the 30-second host-crash backstop
   (`PLATFORM_DFX_BACKPRESSURE_TIMEOUT_CYCLES`), and a record is dropped only if
   that trips — i.e. the host is gone. Full state machine and its correctness
-  arguments: [dfx/global-backpressure-design.md](dfx/global-backpressure-design.md).
+  arguments: [dfx/global-backpressure-design.md](global-backpressure-design.md).
 - The AICPU writer publishes a full buffer to the ready queue before
   acquiring its replacement buffer. If no replacement is visible yet, the
   current pointer is cleared and later records first try to recover from
@@ -460,23 +460,23 @@ Two things follow:
 
 Existing collectors are the canonical examples:
 
-- [`PmuCollector`](../src/a2a3/platform/include/host/pmu_collector.h)
-  — single kind, per-core instances. See [pmu-profiling.md](dfx/pmu-profiling.md).
-- [`DepGenCollector`](../src/common/platform/include/host/dep_gen_collector.h)
-  — single kind, one instance. See [dep_gen.md](dfx/dep_gen.md).
-- [`ArgsDumpCollector`](../src/common/platform/include/host/args_dump_collector.h)
-  — single kind, per-AICPU-thread instances. See [args-dump.md](dfx/args-dump.md).
-- [`ScopeStatsCollector`](../src/common/platform/include/host/scope_stats_collector.h)
-  — single kind, one instance. See [scope-stats.md](dfx/scope-stats.md).
-- [`L2SwimlaneCollector`](../src/common/platform/include/host/l2_swimlane_collector.h)
+- [`PmuCollector`](../../src/a2a3/platform/include/host/pmu_collector.h)
+  — single kind, per-core instances. See [pmu-profiling.md](pmu-profiling.md).
+- [`DepGenCollector`](../../src/common/platform/include/host/dep_gen_collector.h)
+  — single kind, one instance. See [dep_gen.md](dep_gen.md).
+- [`ArgsDumpCollector`](../../src/common/platform/include/host/args_dump_collector.h)
+  — single kind, per-AICPU-thread instances. See [args-dump.md](args-dump.md).
+- [`ScopeStatsCollector`](../../src/common/platform/include/host/scope_stats_collector.h)
+  — single kind, one instance. See [scope-stats.md](scope-stats.md).
+- [`L2SwimlaneCollector`](../../src/common/platform/include/host/l2_swimlane_collector.h)
   — four kinds (AICPU task, scheduler phase, orchestrator phase, AICore
   task), per-core / per-thread instances; the canonical multi-kind example. See
-  [l2-swimlane-profiling.md](dfx/l2-swimlane-profiling.md).
+  [l2-swimlane-profiling.md](l2-swimlane-profiling.md).
 
 ## 8. a5 specifics — host-shadow transport
 
 a5's framework headers (under
-[`src/common/platform/include/host/`](../src/common/platform/include/host/))
+[`src/common/platform/include/host/`](../../src/common/platform/include/host/))
 mirror a2a3's class shapes — same `ProfilerBase<Derived, Module>` /
 `BufferPoolManager<Module>` / `ProfilerAlgorithms<Module>` decomposition,
 same Module concept contract, same start/stop lifecycle. The only
@@ -541,7 +541,7 @@ per-core ring/reg addresses travel through `KernelArgs`:
 | `regs` (per-physical-core register-base table) | host (already required for AICPU MMIO) | AICore `KERNEL_ENTRY` resolves `regs[get_physical_core_id()]` → `set_aicore_pmu_reg_base`; AICore `aicore_execute` caches the value at Phase-3 |
 
 AICore's per-core profiling slots live in
-[`aicore/aicore_profiling_state.h`](../src/a5/platform/include/aicore/aicore_profiling_state.h)
+[`aicore/aicore_profiling_state.h`](../../src/a5/platform/include/aicore/aicore_profiling_state.h)
 — `[[block_local]]` static on onboard, `pthread_key_t` TLS in sim. The
 runtime `aicore_execute(runtime, block_idx, core_type)` signature is
 unchanged; adding a new profiling field touches `KernelArgs` and this
@@ -551,8 +551,8 @@ state surface, never the runtime protocol.
 
 L2Swimlane and PMU on a5 both use the "AICore writes, AICPU commits" model.
 The AICore-side write target is a per-core
-[`L2SwimlaneAicoreRing`](../src/common/platform/include/common/l2_swimlane_profiling.h) /
-[`PmuAicoreRing`](../src/a5/platform/include/common/pmu_profiling.h) of
+[`L2SwimlaneAicoreRing`](../../src/common/platform/include/common/l2_swimlane_profiling.h) /
+[`PmuAicoreRing`](../../src/a5/platform/include/common/pmu_profiling.h) of
 `PLATFORM_{L2,PMU}_AICORE_RING_SIZE` (= 2, dual-issue) slots, allocated
 once by the host and addressed by
 `BufferState::aicore_ring_ptr` (AICPU-visible) and the per-core
