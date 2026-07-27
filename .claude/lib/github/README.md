@@ -10,8 +10,8 @@ Reusable procedures for GitHub PR workflows.
 | [lookup-pr](lookup-pr.md) | Find PR by number, branch, or list all | All |
 | [detect-permission](detect-permission.md) | Check push access to PR | fix-pr |
 | [commit-and-push](commit-and-push.md) | Squash commits, rebase, and push | github-pr, fix-pr |
-| [fetch-comments](fetch-comments.md) | Get unresolved PR review comments | fix-pr |
-| [reply-and-resolve](reply-and-resolve.md) | Reply to and resolve review threads | fix-pr |
+| [fetch-comments](fetch-comments.md) | Get all PR feedback — inline threads, review bodies, conversation comments | fix-pr |
+| [reply-and-resolve](reply-and-resolve.md) | Reply to each feedback surface; resolve review threads | fix-pr |
 | [branch-naming](branch-naming.md) | Generate branch name from commit | github-pr |
 | [common-issues](common-issues.md) | Troubleshooting reference | All |
 
