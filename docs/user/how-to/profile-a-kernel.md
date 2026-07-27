@@ -13,7 +13,7 @@ Start by asking which question you have:
 | Is the scheduler the bottleneck, or starved? | `--enable-l2-swimlane --enable-dep-gen --enable-swimlane-overhead` | [Scheduler-Overhead Model](../../dfx/sched-overhead-model.md) |
 | Why is *one* task slow inside the core? | `--dump-args`, then the L0 tool | [L0 Swimlane Profiling](../../dfx/l0-swimlane-profiling.md) |
 | What do the AICore hardware counters say? | `--enable-pmu` | [PMU Profiling](../../dfx/pmu-profiling.md) |
-| What does the dependency graph actually look like? | `--enable-dep-gen` | [dep_gen](../../dfx/dep_gen.md) |
+| What does the dependency graph actually look like? | `--enable-dep-gen` | [dep_gen](../../dfx/dep-gen.md) |
 | Am I near a ring / dep-pool capacity limit? | `--enable-scope-stats` | [Scope Stats](../../dfx/scope-stats.md) |
 | What arguments did a task really receive? | `--dump-args` | [Args Dump](../../dfx/args-dump.md) |
 

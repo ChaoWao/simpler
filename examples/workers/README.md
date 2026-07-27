@@ -78,7 +78,7 @@ require an Ascend NPU box with `ASCEND_HOME_PATH` set.
 
 ## Related documentation
 
-- [`docs/hierarchical_level_runtime.md`](../../docs/hierarchical_level_runtime.md) — the L0–L6 level model
+- [`docs/hierarchical-level-runtime.md`](../../docs/hierarchical-level-runtime.md) — the L0–L6 level model
 - [`docs/chip-level-arch.md`](../../docs/chip-level-arch.md) — what L2 sees
 - [`docs/task-flow.md`](../../docs/task-flow.md) — end-to-end data flow
 - [`python/simpler/worker.py`](../../python/simpler/worker.py) — Worker source (all comments are useful)

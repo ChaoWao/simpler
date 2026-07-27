@@ -6,7 +6,7 @@ the host process. This is where you first see the *DAG* model — you submit a
 task per chip — each pinned to its target chip worker id — and each task
 carries a dependency graph via `orchestrator` APIs.
 
-See [`docs/hierarchical_level_runtime.md`](../../../docs/hierarchical_level_runtime.md)
+See [`docs/hierarchical-level-runtime.md`](../../../docs/hierarchical-level-runtime.md)
 for the full L0–L6 diagram and [`docs/task-flow.md`](../../../docs/task-flow.md)
 for data-flow end to end.
 

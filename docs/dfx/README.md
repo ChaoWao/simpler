@@ -39,7 +39,7 @@ Analysis CLIs that consume these outputs are documented in
 | Document | What it covers |
 | -------- | -------------- |
 | [Args Dump](args-dump.md) | Per-task argument capture, and replaying a task from it |
-| [dep_gen](dep_gen.md) | Complete per-submit dependency graph, tensor-annotated |
+| [dep_gen](dep-gen.md) | Complete per-submit dependency graph, tensor-annotated |
 | [Scope Stats](scope-stats.md) | Per-scope resource-usage peaks (ring fill, dep pool) |
 
 ## Related, outside this directory

@@ -1,6 +1,6 @@
 # Ascend Architecture Quick Reference
 
-See [docs/hardware/chip-architecture.md](../../docs/hardware/chip-architecture.md) for the **hardware substrate** (Host CPU / AICPU / AICore tiers, PCIe boundary, cache-coherency entry point) — shared across a2a3 and a5. See [docs/chip-level-arch.md](../../docs/chip-level-arch.md) for the **software three-program model** (host `.so` + AICPU `.so` + AICore `.o`) layered on top: full diagram, API layers, execution flow, handshake protocol. See [docs/hierarchical_level_runtime.md](../../docs/hierarchical_level_runtime.md) for the L0–L6 level model and component composition, and [docs/task-flow.md](../../docs/task-flow.md) for end-to-end task data flow.
+See [docs/hardware/chip-architecture.md](../../docs/hardware/chip-architecture.md) for the **hardware substrate** (Host CPU / AICPU / AICore tiers, PCIe boundary, cache-coherency entry point) — shared across a2a3 and a5. See [docs/chip-level-arch.md](../../docs/chip-level-arch.md) for the **software three-program model** (host `.so` + AICPU `.so` + AICore `.o`) layered on top: full diagram, API layers, execution flow, handshake protocol. See [docs/hierarchical-level-runtime.md](../../docs/hierarchical-level-runtime.md) for the L0–L6 level model and component composition, and [docs/task-flow.md](../../docs/task-flow.md) for end-to-end task data flow.
 
 ## Key Concepts
 

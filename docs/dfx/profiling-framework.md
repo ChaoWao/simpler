@@ -15,7 +15,7 @@ transport deviations that the collectors themselves still carry.
 The per-collector pages
 ([pmu-profiling.md](pmu-profiling.md),
 [l2-swimlane-profiling.md](l2-swimlane-profiling.md),
-[dep_gen.md](dep_gen.md),
+[dep-gen.md](dep-gen.md),
 [args-dump.md](args-dump.md),
 [scope-stats.md](scope-stats.md))
 describe the data each subsystem collects and how it enables it on-device.
@@ -463,7 +463,7 @@ Existing collectors are the canonical examples:
 - [`PmuCollector`](../../src/a2a3/platform/include/host/pmu_collector.h)
   — single kind, per-core instances. See [pmu-profiling.md](pmu-profiling.md).
 - [`DepGenCollector`](../../src/common/platform/include/host/dep_gen_collector.h)
-  — single kind, one instance. See [dep_gen.md](dep_gen.md).
+  — single kind, one instance. See [dep-gen.md](dep-gen.md).
 - [`ArgsDumpCollector`](../../src/common/platform/include/host/args_dump_collector.h)
   — single kind, per-AICPU-thread instances. See [args-dump.md](args-dump.md).
 - [`ScopeStatsCollector`](../../src/common/platform/include/host/scope_stats_collector.h)

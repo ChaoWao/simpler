@@ -50,7 +50,7 @@
  * append_fanin_or_fail in pto_orchestrator.cpp). A runtime that recycles slots
  * mid-build would need this key revisited.
  *
- * Output is `deps.json` in the schema documented in docs/dfx/dep_gen.md — the
+ * Output is `deps.json` in the schema documented in docs/dfx/dep-gen.md — the
  * same schema the tensormap_and_ringbuffer replay emits, so every downstream
  * consumer (deps viewer, swimlane join) reads both runtimes' output the same way.
  */

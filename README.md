@@ -97,7 +97,7 @@ Building **on** simpler? Start at **[docs/user/](docs/user/README.md)** — how-
 | -------- | ----------- |
 | [Capability Survey](docs/capability-survey.md) | Status snapshot: what is shipped, gated, or design-only across topology (L2→L4), CANN launch, and comm engines |
 | [Chip-Level Architecture](docs/chip-level-arch.md) | L2 single-chip: three-program model (host/AICPU/AICore), API layers, handshake protocol |
-| [Hierarchical Level Runtime](docs/hierarchical_level_runtime.md) | L0–L6 level model, component composition (Orchestrator / Scheduler / Worker) |
+| [Hierarchical Level Runtime](docs/hierarchical-level-runtime.md) | L0–L6 level model, component composition (Orchestrator / Scheduler / Worker) |
 | [Task Flow](docs/task-flow.md) | End-to-end data flow: Callable / TaskArgs / CallConfig handles, IWorker interface |
 | [Orchestrator](docs/orchestrator.md) | DAG submission internals: submit flow, TensorMap, Scope, Ring, task state machine |
 | [Scheduler](docs/scheduler.md) | DAG dispatch internals: wiring/ready/completion queues, dispatch loop |

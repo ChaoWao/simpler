@@ -43,7 +43,7 @@ available.
   in the swimlane record itself (the device hot path stays clean —
   see PR #863). Instead, `swimlane_converter` joins
   `l2_swimlane_records.json` with `deps.json` from
-  [`dep_gen`](dep_gen.md) at post-process time; see
+  [`dep_gen`](dep-gen.md) at post-process time; see
   [§3.5](#35-dependency-arrows-from-dep_gen).
 - **AICPU scheduler phases** — per-iteration breakdown into six
   mutually time-exclusive **outer** phases (`complete` / `async_poll`
@@ -427,7 +427,7 @@ Two artifacts, one join:
 
 | File | Producer | What it carries |
 | ---- | -------- | --------------- |
-| `deps.json` | `--enable-dep-gen` (a [`dep_gen`](dep_gen.md) run) | The static task graph for one topology / case |
+| `deps.json` | `--enable-dep-gen` (a [`dep_gen`](dep-gen.md) run) | The static task graph for one topology / case |
 | `l2_swimlane_records.json` | `--enable-l2-swimlane` | Per-task / per-phase timing for one run |
 | `merged_swimlane.json` | `swimlane_converter` | Perfetto trace = timing joined to the graph |
 

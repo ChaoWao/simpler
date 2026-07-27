@@ -45,7 +45,7 @@ Inputs:
   - `docs/scheduler.md`
   - `docs/worker-manager.md`
   - `docs/task-flow.md`
-  - `docs/hierarchical_level_runtime.md`
+  - `docs/hierarchical-level-runtime.md`
 
 Use PR-head documents, not stale local notes. Drop empty CI retrigger commits
 during the split. Fixup formatting and CI stabilization commits into the

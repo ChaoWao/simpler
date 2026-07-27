@@ -19,7 +19,7 @@ full comm lifecycle entirely through ChipWorker's public Python API:
 
 ACL bring-up and aclrtStream lifetime are owned internally by
 `ChipWorker.comm_init` / `comm_destroy` (matching the L2-boundary contract
-in docs/hierarchical_level_runtime.md — device-side state stays in C++).
+in docs/hierarchical-level-runtime.md — device-side state stays in C++).
 ctypes is used only to declare a `CommContext` layout mirror so the test
 can inspect the struct returned by `comm_alloc_windows`; no CANN / libacl
 symbols are loaded from Python.
@@ -90,7 +90,7 @@ def _rank_entry(
         # ChipWorker.comm_init owns ACL bring-up and aclrtStream creation
         # internally — Python never touches aclInit / aclrtSetDevice /
         # aclrtCreateStream.  This matches the L2-boundary contract in
-        # docs/hierarchical_level_runtime.md: device-side lifecycle stays
+        # docs/hierarchical-level-runtime.md: device-side lifecycle stays
         # in C++.
         comm = worker.comm_init(rank, nranks, rootinfo_path)
         result["stage"] = "comm_init"

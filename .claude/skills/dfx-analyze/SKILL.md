@@ -9,7 +9,7 @@ simpler already ships end-user analysis CLIs under `simpler_setup.tools` —
 **use them; do not re-invent timing/instrumentation in the runtime.** Canonical
 reference (tool flags, examples, output paths): `simpler_setup/tools/README.md`.
 Per-DFX docs: `docs/dfx/` (`l2-timing.md`, `sched-overhead-model.md`,
-`l2-swimlane-profiling.md`, `scope-stats.md`, `dep_gen.md`, `args-dump.md`).
+`l2-swimlane-profiling.md`, `scope-stats.md`, `dep-gen.md`, `args-dump.md`).
 
 ## Pick the tool by question
 

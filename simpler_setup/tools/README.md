@@ -340,7 +340,7 @@ this is the structural view.
 ### Overview
 
 `deps_viewer` reads `deps.json` produced by the dep_gen replay (see
-[docs/dfx/dep_gen.md](../../docs/dfx/dep_gen.md)) and supports two modes:
+[docs/dfx/dep-gen.md](../../docs/dfx/dep-gen.md)) and supports two modes:
 
 - **Default text mode** — emits `deps_viewer.txt` with:
   - `SUMMARY` (input path plus task / edge / tensor counts)

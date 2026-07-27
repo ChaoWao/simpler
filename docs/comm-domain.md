@@ -7,7 +7,7 @@ function** via `orch.allocate_domain(...)` — there is no init-time / static
 declaration path.
 
 For where the Orchestrator sits among the engine components see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md); for the DAG
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md); for the DAG
 submission internals see [orchestrator.md](orchestrator.md).
 
 ---

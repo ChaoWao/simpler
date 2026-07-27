@@ -3,7 +3,7 @@
 This document describes the **single-chip (L2) architecture** — how a host
 program, AICPU kernel, and AICore kernel cooperate on one Ascend NPU chip. For
 the multi-chip hierarchy (L3+: Orchestrator / Scheduler / Worker composition)
-see [hierarchical_level_runtime.md](hierarchical_level_runtime.md). For how task
+see [hierarchical-level-runtime.md](hierarchical-level-runtime.md). For how task
 data (Callable / TaskArgs / CallConfig) flows through all levels, see
 [task-flow.md](task-flow.md).
 
@@ -150,7 +150,7 @@ worker.finalize()
 ### Python Type Naming Convention
 
 Layer 3 Python types use a **level-prefixed naming convention** that mirrors the
-level model (see [hierarchical_level_runtime.md](hierarchical_level_runtime.md)):
+level model (see [hierarchical-level-runtime.md](hierarchical-level-runtime.md)):
 
 | Concept | L2 (Chip) type | L3+ (Distributed) type | Unified factory |
 | ------- | -------------- | ---------------------- | --------------- |

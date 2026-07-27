@@ -26,7 +26,7 @@ simulation transport, and the daemon/session runner used by
 profiles are still pending.
 
 For the high-level role of this layer among the three engine components, see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md). For what
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md). For what
 runs on the other side of the local mailbox, see [task-flow.md](task-flow.md).
 For where dispatched tasks come from, see [scheduler.md](scheduler.md).
 
@@ -326,7 +326,7 @@ Alternative: N children share one dispatch queue. Rejected because:
 
 ## 6. Related
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — where this
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — where this
   layer fits in the three-component engine
 - [task-flow.md](task-flow.md) — what `ChipWorker::run` receives
 - [scheduler.md](scheduler.md) — the producer of `WorkerThread::dispatch`
