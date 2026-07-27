@@ -647,19 +647,20 @@ feed the same drain.
 A sync_start cohort of `block_num` cores must occupy all its cores before any of them run.
 When it cannot fit inline, `enter_drain_mode` arms a stop-the-world drain:
 
-1. **Single election** — a CAS on `sync_start_pending` (0 → −1) makes drains mutually
+1. **Single ownership** — a CAS on `sync_start_pending` (0 → −1) makes drains mutually
    exclusive; only one cohort drains at a time, regardless of source.
-2. **All-or-nothing** — the elected thread checks `count_global_available >= block_num`
-   *before* staging; if short it aborts (stages nothing) and retries after completions free
-   cores. A cohort is fully staged or not at all — never partial.
-3. **Parallel stage** — all threads barrier, then each CAS-claims a block range and stages
-   its own cores with a non-zero `src_payload` gate: idle cores → running slots, busy cores →
-   pending slots.
+2. **All-or-nothing** — scheduler thread 0 coordinates the generation-tagged ack tree and
+   checks `count_global_available >= block_num` *before* staging. If short, it advances the
+   attempt and retries after completions free cores. A cohort is fully staged or not at all —
+   never partial.
+3. **Parallel stage** — after thread 0 broadcasts the completed root token, each scheduler
+   thread CAS-claims a block range and stages its own cores with a non-zero `src_payload`
+   gate: idle cores → running slots, busy cores → pending slots.
 4. **Rendezvous launch** — `running_slot_count` counts staged running-slot cores; when it
    reaches `popcount(staged_core_mask)` **and** the producer has released,
    `maybe_rendezvous_ring` rings every gated core's doorbell together — the cohort starts as one.
 
-Single-election + all-or-nothing make the drain deadlock-free across multiple cohorts: at most
+Single ownership + all-or-nothing make the drain deadlock-free across multiple cohorts: at most
 one drains, and it fully stages or waits, so two cohorts can never each half-occupy the cluster
 set (see the completion path's `pending_gated` classification for why a promoted-but-still-gated
 block is not mistaken for a normal task).

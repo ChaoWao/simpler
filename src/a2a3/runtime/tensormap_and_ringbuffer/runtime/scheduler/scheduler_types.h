@@ -12,6 +12,7 @@
 #define SCHEDULER_TYPES_H
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 #include "common/core_type.h"
@@ -545,22 +546,36 @@ struct alignas(64) SchedL2SwimlaneCounters {
 // =============================================================================
 
 // When sync_start_pending != 0, all scheduler threads skip dispatch
-// (only process completions) until the drain worker finishes launching all blocks.
+// (only process completions) until the fixed coordinator finishes launching all blocks.
 struct alignas(64) SyncStartDrainState {
-    std::atomic<int32_t> sync_start_pending{0};    // 0=normal; -1=initializing; >0=active (value=block_num)
-    std::atomic<int32_t> drain_worker_elected{0};  // 0=none; >0: elected thread's (thread_idx+1)
-    std::atomic<uint32_t> drain_ack_mask{0};       // bit per thread; all-set = all threads reached ack barrier
+    std::atomic<int32_t> sync_start_pending{0};              // 0=normal; -1=initializing; >0=active (value=block_num)
     std::atomic<PTO2TaskSlotState *> pending_task{nullptr};  // held task (not re-queued)
-    // Parallel staging: after the elected thread confirms global availability it sets
+    std::atomic<uint64_t> drain_attempt{0};                  // incremented whenever an ack round is reset
+    // Parallel staging: after the coordinator confirms global availability it sets
     // stage_go, releasing every thread to stage its OWN cores concurrently (vs the old
     // single-thread serial fill). Each thread ORs its bit into stage_done_mask when it
-    // finishes and accumulates its running-slot cores into running_staged; the elected
+    // finishes and accumulates its running-slot cores into running_staged; the coordinator
     // thread waits for all bits, seeds the rendezvous, and reopens the gate.
-    std::atomic<int32_t> drain_stage_go{0};          // 0=hold; 1=elected released parallel staging
+    std::atomic<int32_t> drain_stage_go{0};          // 0=hold; 1=coordinator released parallel staging
     std::atomic<uint32_t> drain_stage_done_mask{0};  // bit per thread; all-set = all threads done staging
     std::atomic<int32_t> drain_running_staged{0};    // sum of running-slot cores staged (rendezvous seed)
     int32_t _pad[7];
 };
 static_assert(sizeof(SyncStartDrainState) == 64);
+static_assert(offsetof(SyncStartDrainState, pending_task) == 8);
+static_assert(offsetof(SyncStartDrainState, drain_attempt) == 16);
+static_assert(offsetof(SyncStartDrainState, drain_stage_go) == 24);
+
+constexpr uint64_t SYNC_START_DRAIN_ACK_SUBTREE_READY = uint64_t{1} << 63;
+constexpr uint64_t SYNC_START_DRAIN_ATTEMPT_MASK = ~SYNC_START_DRAIN_ACK_SUBTREE_READY;
+
+inline uint64_t sync_start_drain_next_attempt(uint64_t attempt) {
+    uint64_t next = (attempt + 1) & SYNC_START_DRAIN_ATTEMPT_MASK;
+    return next == 0 ? 1 : next;
+}
+
+inline uint64_t sync_start_drain_ack_subtree_token(uint64_t attempt) {
+    return attempt | SYNC_START_DRAIN_ACK_SUBTREE_READY;
+}
 
 #endif  // SCHEDULER_TYPES_H
