@@ -40,6 +40,10 @@ NUM_SUB_WORKERS = 3
 # enumerating children externally also catches the transient shell that runs
 # pgrep, and inside a container's shallow pid namespace it picks up unrelated
 # low pids — which the test would then wait on and, worse, SIGKILL.
+#
+# The pids go to a dedicated file named on the command line, not to stdout:
+# the parent's stdout and stderr carry log lines and warnings, and scraping
+# integers out of that stream picks up any bare number they happen to contain.
 _PARENT_SRC = textwrap.dedent(
     """
     import os, sys
@@ -48,8 +52,10 @@ _PARENT_SRC = textwrap.dedent(
     worker = Worker(level=3, num_sub_workers=%d)
     worker.register(lambda args: None)
     worker.init()
-    print(" ".join(str(p) for p in sorted(worker._sub_pids)), flush=True)
-    sys.stdout.flush()
+    with open(sys.argv[1], "w") as f:
+        f.write(" ".join(str(p) for p in sorted(worker._sub_pids)))
+        f.flush()
+        os.fsync(f.fileno())
     os.kill(os.getpid(), 9)
     """
 )
@@ -66,11 +72,14 @@ def _alive(pid: int) -> bool:
 
 
 def test_children_exit_when_parent_is_killed(tmp_path):
-    out_path = tmp_path / "children.txt"
+    pid_path = tmp_path / "child_pids.txt"
+    log_path = tmp_path / "parent_output.txt"
     reported: list[int] = []
     try:
-        with out_path.open("w") as out:
-            parent = subprocess.Popen([sys.executable, "-c", _PARENT_SRC % NUM_SUB_WORKERS], stdout=out, stderr=out)
+        with log_path.open("w") as log:
+            parent = subprocess.Popen(
+                [sys.executable, "-c", _PARENT_SRC % NUM_SUB_WORKERS, str(pid_path)], stdout=log, stderr=log
+            )
         returncode = parent.wait(timeout=PARENT_EXIT_TIMEOUT_S)
 
         # The parent is supposed to die from its own SIGKILL. Any other exit
@@ -79,13 +88,13 @@ def test_children_exit_when_parent_is_killed(tmp_path):
         # got []" that reads like a defect in the code under test.
         assert returncode == -signal.SIGKILL, (
             f"parent exited {returncode}, expected -{int(signal.SIGKILL)} (its own SIGKILL): "
-            f"it failed before it could fork\nparent output:\n{out_path.read_text()}"
+            f"it failed before it could fork\nparent output:\n{log_path.read_text()}"
         )
 
-        reported = [int(tok) for tok in out_path.read_text().split() if tok.isdigit()]
+        reported = [int(tok) for tok in pid_path.read_text().split()]
         assert len(reported) == NUM_SUB_WORKERS, (
             f"expected exactly {NUM_SUB_WORKERS} forked sub-worker pids, parent reported {reported}\n"
-            f"parent output:\n{out_path.read_text()}"
+            f"parent output:\n{log_path.read_text()}"
         )
 
         deadline = time.monotonic() + REAP_TIMEOUT_S
