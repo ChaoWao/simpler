@@ -23,6 +23,7 @@ import os
 import struct
 from dataclasses import dataclass, replace
 from multiprocessing.shared_memory import SharedMemory
+from typing import Any
 
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     BUFFER_ABI_VERSION,
@@ -347,6 +348,10 @@ class BufferHandle:
     body: bytes = b""
     shm: SharedMemory | None = None
     base: int = 0
+    # Owner-side only, never serialized into the descriptor: which next-level worker a DEVICE_MALLOC
+    # backing lives on (0 for a host backing or an L2 own-device malloc). The device-pointer provenance
+    # guard and free/copy key on (owner_worker_id, base).
+    owner_worker_id: int = 0
 
     def to_descriptor(self) -> BufferHandleDescriptor:
         return BufferHandleDescriptor(
@@ -515,6 +520,21 @@ def wrap_fork_inherited(
     )
 
 
+def host_ptr_nbytes(obj: Any) -> tuple[int, int]:
+    """Host address + byte length of a copy_to/copy_from buffer, without importing torch.
+
+    A torch tensor is read via its ``data_ptr`` / ``numel`` / ``element_size`` (duck-typed); any other
+    object goes through the buffer protocol and must be writable so its backing address is stable for
+    the duration of the synchronous copy.
+    """
+    if hasattr(obj, "data_ptr") and hasattr(obj, "numel") and hasattr(obj, "element_size"):
+        return int(obj.data_ptr()), int(obj.numel()) * int(obj.element_size())
+    mv = memoryview(obj)
+    if mv.readonly:
+        raise TypeError("copy_to/copy_from host buffer must be a torch tensor or a writable buffer")
+    return ctypes.addressof((ctypes.c_char * mv.nbytes).from_buffer(obj)), mv.nbytes
+
+
 def wrap_device_malloc(
     device_ptr: int,
     nbytes: int,
@@ -523,12 +543,14 @@ def wrap_device_malloc(
     owner_worker_path: str = "",
     generation: int = 0,
     access: AccessMode = AccessMode.READWRITE,
+    owner_worker_id: int = 0,
 ) -> BufferHandle:
-    """Wrap a device pointer (from ``orch.malloc``) as a ``DEVICE_MALLOC`` ``BufferHandle``.
+    """Wrap a device pointer (from a worker device malloc) as a ``DEVICE_MALLOC`` ``BufferHandle``.
 
     The backend body is the device pointer (u64 LE); the consumer materializes to that pointer with no
     mapping. The pointer is valid only on the chip that allocated it, so a ref over this handle must be
     dispatched only to that chip (a topology invariant, as for the former ``child_memory`` tensor).
+    ``owner_worker_id`` records which next-level worker the backing lives on for free/copy provenance.
     """
     identity = CanonicalIdentity(owner_instance_id, buffer_id, owner_worker_path, generation)
     return BufferHandle(
@@ -541,6 +563,7 @@ def wrap_device_malloc(
         body=int(device_ptr).to_bytes(8, "little"),
         shm=None,
         base=int(device_ptr),
+        owner_worker_id=int(owner_worker_id),
     )
 
 

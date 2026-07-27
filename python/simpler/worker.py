@@ -104,9 +104,11 @@ from .buffer_handle import (
     BufferRef,
     ImportRegistry,
     create_host_shared_buffer,
+    host_ptr_nbytes,
     mint_owner_instance_id,
     pack_bufferref_blob,
     re_export,
+    wrap_device_malloc,
 )
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
@@ -5810,63 +5812,107 @@ class Worker:
         if worker_id < 0 or worker_id >= len(self._chip_shms):
             raise IndexError(f"worker_id {worker_id} out of range (have {len(self._chip_shms)} chips)")
 
-    def malloc(self, size: int, worker_id: int = 0) -> int:
-        """Allocate memory on next-level chip worker *worker_id*. Returns a pointer."""
+    def malloc(self, size: int) -> BufferHandle:
+        """Allocate device memory on this L2 worker's own chip; returns a DEVICE_MALLOC ``BufferHandle``.
+
+        Name a task arg with ``handle.ref(shapes, dtype)`` and release with ``worker.free(handle)``. L3+
+        allocates child device memory with ``alloc_child_tensor(worker_id, ...)`` instead — a Worker is
+        the only allocator, the Orchestrator never allocates.
+        """
+        if self.level != 2:
+            raise TypeError("worker.malloc is L2-only; at L3+ use worker.alloc_child_tensor(worker_id, ...)")
         with self._operation_lease("malloc"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                # L2 is a single chip; worker_id is meaningless there, so the
-                # provenance is keyed on the canonical worker 0.
-                with self._child_prov_lock:
-                    ptr = self._chip_worker.malloc(size)
-                    self._child_prov_record_malloc(0, int(ptr), int(size))
-                    return ptr
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            return self._orch.malloc(worker_id, size)
+            assert self._chip_worker is not None
+            # L2 is a single chip; worker_id is meaningless there, so the provenance is keyed
+            # on the canonical worker 0.
+            with self._child_prov_lock:
+                ptr = int(self._chip_worker.malloc(int(size)))
+                self._child_prov_record_malloc(0, ptr, int(size))
+        return wrap_device_malloc(
+            ptr, int(size), self._owner_instance_id, self._next_buffer_id(), f"L{self.level}", owner_worker_id=0
+        )
 
-    def free(self, ptr: int, worker_id: int = 0) -> None:
-        """Free memory allocated by ``malloc()``."""
+    def alloc_child_tensor(self, worker_id: int, shapes: tuple[int, ...], dtype) -> BufferHandle:
+        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype``; returns a
+        DEVICE_MALLOC ``BufferHandle`` (successor of ``orch.malloc`` + ``child_memory``).
+
+        Called from within an orchestration fn (capture the Worker in the closure). The pointer is
+        private to ``worker_id``; name the arg with ``handle.ref(shapes, dtype)``, dispatch it only to
+        that worker, and load host data with ``copy_to``. Not auto-freed at end-of-task.
+        """
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        self._check_chip_worker_id(int(worker_id))
+        assert self._worker is not None
+        # The lease is re-entrant, so calling this inside the orch fn (the run already holds it) nests
+        # safely, and calling it outside a run acquires it fresh.
+        with self._operation_lease("alloc_child_tensor"), self._child_prov_lock:
+            ptr = int(self._worker.malloc(int(worker_id), int(nbytes)))
+            self._child_prov_record_malloc(int(worker_id), ptr, int(nbytes))
+        return wrap_device_malloc(
+            ptr,
+            int(nbytes),
+            self._owner_instance_id,
+            self._next_buffer_id(),
+            f"L{self.level}",
+            owner_worker_id=int(worker_id),
+        )
+
+    def free(self, handle: BufferHandle) -> None:
+        """Free a device ``BufferHandle`` allocated by ``malloc`` / ``alloc_child_tensor``.
+
+        The operation lease is re-entrant, so an in-run ``orch.free`` that delegates here nests safely.
+        """
+        wid, ptr = int(handle.owner_worker_id), int(handle.base)
         with self._operation_lease("free"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                # Safety-first commit barrier (mirrors Orchestrator.free): revoke
-                # provenance BEFORE the native free so an async unwind after a
-                # successful free can never leave a freed address live.
-                with self._child_prov_lock:
-                    self._child_prov_require_malloc_base(0, int(ptr), api="free")
-                    self._child_prov_clear_malloc(0, int(ptr))
+            # Reject a non-chip target (L4+, or a bad id) before touching provenance: a device op is only
+            # meaningful on a next-level chip.
+            if self.level != 2:
+                self._check_chip_worker_id(wid)
+            with self._child_prov_lock:
+                # Safety-first commit barrier: revoke provenance BEFORE the native free so an async unwind
+                # after a successful free can never leave a freed address live.
+                self._child_prov_require_malloc_base(wid, ptr, api="free")
+                self._child_prov_clear_malloc(wid, ptr)
+                if self.level == 2:
+                    assert self._chip_worker is not None
                     self._chip_worker.free(ptr)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.free(worker_id, ptr)
+                else:
+                    assert self._worker is not None
+                    self._worker.free(wid, ptr)
 
-    def copy_to(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
-        """Copy *size* bytes from host *src* to chip worker *dst*."""
+    def copy_to(self, dst: BufferHandle, src) -> None:
+        """H2D: copy host ``src`` (a torch tensor or writable buffer) into device handle ``dst``."""
+        src_addr, nbytes = host_ptr_nbytes(src)
+        wid, dptr = int(dst.owner_worker_id), int(dst.base)
         with self._operation_lease("copy_to"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                with self._child_prov_lock:
-                    self._child_prov_require_live_range(0, int(dst), int(size), api="copy_to")
-                    self._chip_worker.copy_to(dst, src, size)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.copy_to(worker_id, dst, src, size)
+            if self.level != 2:
+                self._check_chip_worker_id(wid)
+            with self._child_prov_lock:
+                self._child_prov_require_live_range(wid, dptr, nbytes, api="copy_to")
+                if self.level == 2:
+                    assert self._chip_worker is not None
+                    self._chip_worker.copy_to(dptr, src_addr, nbytes)
+                else:
+                    assert self._worker is not None
+                    self._worker.copy_to(wid, dptr, src_addr, nbytes)
 
-    def copy_from(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
-        """Copy *size* bytes from chip worker *src* to host *dst*."""
+    def copy_from(self, dst, src: BufferHandle) -> None:
+        """D2H: copy device handle ``src`` into host ``dst`` (a torch tensor or writable buffer)."""
+        dst_addr, nbytes = host_ptr_nbytes(dst)
+        wid, sptr = int(src.owner_worker_id), int(src.base)
         with self._operation_lease("copy_from"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                with self._child_prov_lock:
-                    self._child_prov_require_live_range(0, int(src), int(size), api="copy_from")
-                    self._chip_worker.copy_from(dst, src, size)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.copy_from(worker_id, dst, src, size)
+            if self.level != 2:
+                self._check_chip_worker_id(wid)
+            with self._child_prov_lock:
+                self._child_prov_require_live_range(wid, sptr, nbytes, api="copy_from")
+                if self.level == 2:
+                    assert self._chip_worker is not None
+                    self._chip_worker.copy_from(dst_addr, sptr, nbytes)
+                else:
+                    assert self._worker is not None
+                    self._worker.copy_from(wid, dst_addr, sptr, nbytes)
 
     # ------------------------------------------------------------------
     # Post-fork zero-copy host buffers

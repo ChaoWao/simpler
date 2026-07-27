@@ -41,7 +41,7 @@ from typing import Any
 
 from _task_interface import _Orchestrator as _COrchestrator  # pyright: ignore[reportMissingImports]
 
-from .buffer_handle import BufferHandle, wrap_device_malloc
+from .buffer_handle import BufferHandle
 from .callable_identity import CallableHandle
 from .task_interface import (
     CallConfig,
@@ -56,7 +56,6 @@ from .task_interface import (
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
     _validate_remote_sidecar_access,
-    get_element_size,
 )
 
 
@@ -470,90 +469,34 @@ class Orchestrator:
         finally:
             self._o.scope_end()
 
-    def malloc(self, worker_id: int, size: int) -> int:
-        """Allocate memory on next-level worker *worker_id*. Returns a pointer.
-
-        This is the single L3 choke for kind4 device memory: ``Worker.malloc``
-        also funnels through here, as does a user's direct ``orch.malloc``. The
-        returned pointer's ``(worker_id, ptr)`` provenance is recorded so a later
-        free / copy / kind4 dispatch to the wrong worker is rejected.
-        """
-        wid, sz = int(worker_id), int(size)
-        if self._worker is None:
-            return int(self._o.malloc(wid, sz))
-        with self._worker._child_prov_lock:
-            ptr = int(self._o.malloc(wid, sz))
-            self._worker._child_prov_record_malloc(wid, ptr, sz)
-            return ptr
-
-    def device_handle(self, device_ptr: int, nbytes: int) -> BufferHandle:
-        """Wrap an ``orch.malloc`` device pointer as a DEVICE_MALLOC ``BufferHandle`` owned by this
-        worker, for naming a chip task arg as a BufferRef (``dev_h.ref(shapes, dtype)`` →
-        ``ta.add_ref(...)``). The pointer is chip-local (valid only on the worker that allocated it),
-        so the ref must be dispatched only to that worker — the successor of the ``child_memory=True``
-        Tensor.
-        """
-        if self._worker is None:
-            raise RuntimeError("orch.device_handle requires a Worker context")
-        return wrap_device_malloc(
-            int(device_ptr),
-            int(nbytes),
-            self._worker._owner_instance_id,
-            self._worker._next_buffer_id(),
-            f"L{self._worker.level}",
-        )
+    # A Worker is the only allocator. The Orchestrator exposes thin wrappers that delegate to the
+    # bound Worker's implementation so an orchestration fn can allocate / copy / free without reaching
+    # for the Worker — each forwards to the Worker's no-lease in-run path (the run already holds it).
 
     def alloc_child_tensor(self, worker_id: int, shapes: tuple[int, ...], dtype: DataType) -> BufferHandle:
-        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype`` and wrap
-        it as a DEVICE_MALLOC ``BufferHandle`` (kind4; successor of ``orch.malloc`` + ``child_memory``).
-
-        Combines ``orch.malloc`` + ``orch.device_handle``. The pointer is private to ``worker_id``; name
-        the arg with ``handle.ref(shapes, dtype)`` and dispatch it only to that worker. Load host data
-        into it with ``orch.copy_to``. Not auto-freed at end-of-task.
-        """
-        nbytes = get_element_size(dtype)
-        for s in shapes:
-            nbytes *= int(s)
-        ptr = self.malloc(worker_id=int(worker_id), size=int(nbytes))
-        return self.device_handle(ptr, int(nbytes))
-
-    def free(self, worker_id: int, ptr: int) -> None:
-        """Free memory on next-level worker *worker_id*."""
-        wid, p = int(worker_id), int(ptr)
+        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype``; returns a
+        DEVICE_MALLOC ``BufferHandle``. Delegates to ``Worker.alloc_child_tensor``."""
         if self._worker is None:
-            self._o.free(wid, p)
-            return
-        with self._worker._child_prov_lock:
-            # Safety-first commit barrier: revoke provenance BEFORE the native
-            # free. If the native free succeeds and an async unwind (e.g. a
-            # KeyboardInterrupt delivered after the binding returns) fires before
-            # a post-free clear could run, a freed address would stay live and a
-            # later copy/dispatch would re-authorize it — a UAF. Revoking first
-            # turns a native-free failure into a terminal leak (recoverable) but
-            # never re-authorizes a maybe-freed address.
-            self._worker._child_prov_require_malloc_base(wid, p, api="free")
-            self._worker._child_prov_clear_malloc(wid, p)
-            self._o.free(wid, p)
+            raise RuntimeError("orch.alloc_child_tensor requires a Worker context")
+        return self._worker.alloc_child_tensor(int(worker_id), tuple(shapes), dtype)
 
-    def copy_to(self, worker_id: int, dst: int, src: int, size: int) -> None:
-        """Copy *size* bytes from host *src* to worker *dst*."""
-        wid, d = int(worker_id), int(dst)
+    def free(self, handle: BufferHandle) -> None:
+        """Free a device ``BufferHandle`` (from ``alloc_child_tensor``). Delegates to ``Worker.free``."""
         if self._worker is None:
-            self._o.copy_to(wid, d, int(src), int(size))
-            return
-        with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live_range(wid, d, int(size), api="copy_to")
-            self._o.copy_to(wid, d, int(src), int(size))
+            raise RuntimeError("orch.free requires a Worker context")
+        self._worker.free(handle)
 
-    def copy_from(self, worker_id: int, dst: int, src: int, size: int) -> None:
-        """Copy *size* bytes from worker *src* to host *dst*."""
-        wid, s = int(worker_id), int(src)
+    def copy_to(self, dst: BufferHandle, src) -> None:
+        """H2D: copy host ``src`` into device handle ``dst``. Delegates to ``Worker.copy_to``."""
         if self._worker is None:
-            self._o.copy_from(wid, int(dst), s, int(size))
-            return
-        with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
-            self._o.copy_from(wid, int(dst), s, int(size))
+            raise RuntimeError("orch.copy_to requires a Worker context")
+        self._worker.copy_to(dst, src)
+
+    def copy_from(self, dst, src: BufferHandle) -> None:
+        """D2H: copy device handle ``src`` into host ``dst``. Delegates to ``Worker.copy_from``."""
+        if self._worker is None:
+            raise RuntimeError("orch.copy_from requires a Worker context")
+        self._worker.copy_from(dst, src)
 
     def alloc(self, shape: Sequence[int], dtype: DataType) -> Tensor:
         """Allocate a runtime-managed intermediate buffer.

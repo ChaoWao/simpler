@@ -84,14 +84,6 @@ public:
     // pointer has reached CONSUMED and scope_end has released the scope ref.
     Tensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
 
-    // Memory management on a specific next-level worker. Thread-safe:
-    // can be called from the orch thread while the target worker is
-    // running a task (MemoryAllocator is mutex-protected).
-    uint64_t malloc(int worker_id, size_t size);
-    void free(int worker_id, uint64_t ptr);
-    void copy_to(int worker_id, uint64_t dst, uint64_t src, size_t size);
-    void copy_from(int worker_id, uint64_t dst, uint64_t src, size_t size);
-
     // Submit a NEXT_LEVEL task. `callable` is the stable identity returned
     // by Worker.register(); the child resolves its digest to a private slot.
     // Tags inside `args` drive dependency inference; OUTPUT tensors with

@@ -13,10 +13,10 @@ tracked by its ``(worker_id, base)`` provenance and byte extent. ``free`` and
 kind4 dispatch require the exact base; ``copy_to`` / ``copy_from`` accept any
 range wholly within a live allocation (a ``base + offset`` partial update), but
 still reject a wrong-worker, stale, or out-of-range address. Covers every real
-entry — ``Worker.malloc`` (L2), ``orch.malloc/copy/free`` (L3, the path that
-bypasses ``Worker.malloc``), ``submit_next_level`` /
-``submit_next_level_group`` dispatch, and CommDomain window pointers — plus the
-explicit boundary that strict ABA is NOT covered.
+entry — ``Worker.malloc`` (L2), ``Worker.alloc_child_tensor`` / ``copy_to`` /
+``copy_from`` / ``free`` (L3, which ``orch.*`` delegates to),
+``submit_next_level`` / ``submit_next_level_group`` dispatch, and CommDomain
+window pointers — plus the explicit boundary that strict ABA is NOT covered.
 """
 
 from __future__ import annotations
@@ -26,18 +26,37 @@ from unittest.mock import MagicMock
 
 import pytest
 import simpler.orchestrator as orch_mod
-from _task_interface import TensorArgType
-from simpler.buffer_handle import mint_owner_instance_id, wrap_device_malloc, wrap_fork_inherited
+from _task_interface import DataType, TensorArgType
+from simpler.buffer_handle import BufferHandle, mint_owner_instance_id, wrap_device_malloc, wrap_fork_inherited
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import TaskArgs
 from simpler.worker import Worker, _ChildProvEntry, _Lifecycle
 
 _F32 = 0  # DataType.FLOAT32 value
 _OID = mint_owner_instance_id()
+_HOSTSRC = bytearray(64)  # a writable host buffer for copy_to/copy_from
 
 
 def _l3() -> Worker:
     return Worker(level=3, num_sub_workers=0, platform="a2a3sim", runtime="tensormap_and_ringbuffer")
+
+
+def _l3_ready(malloc_ret: int = 0x1000, *, chips: int = 2) -> tuple[Worker, MagicMock]:
+    """An uninitialized L3 Worker forced READY with a mocked native worker, so the leased device-mem
+    ops run in isolation. Returns ``(worker, native_worker_mock)``; the mock's ``malloc`` returns
+    ``malloc_ret`` (the fabricated device ptr)."""
+    w = _l3()
+    w._lifecycle = _Lifecycle.READY
+    w._chip_shms = [None] * chips  # type: ignore[list-item]
+    nw = MagicMock()
+    nw.malloc.return_value = malloc_ret
+    w._worker = nw
+    return w, nw
+
+
+def _dev_handle(ptr: int, *, wid: int = 0, nbytes: int = 64) -> BufferHandle:
+    """A DEVICE_MALLOC handle keyed at ``(wid, ptr)`` — the free/copy provenance key."""
+    return wrap_device_malloc(ptr, nbytes, _OID, buffer_id=ptr, owner_worker_id=wid)
 
 
 def _child_args(ptr: int, *, n: int = 16) -> TaskArgs:
@@ -203,98 +222,90 @@ class TestDispatchResolution:
 
 
 # ----------------------------------------------------------------------------
-# Orchestrator malloc / free / copy — the L3 choke (also the orch.* bypass)
+# Worker device memory — alloc_child_tensor / free / copy on a next-level worker
+# (the Worker is the sole allocator; orch.* are thin delegates)
 # ----------------------------------------------------------------------------
 
 
-class TestOrchestratorMemoryOps:
-    def test_malloc_records_then_free_clears(self):
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x1000
-        o = Orchestrator(fake, w)
-        ptr = o.malloc(0, 64)
-        assert ptr == 0x1000
+class TestChildDeviceMemoryOps:
+    def test_alloc_child_records_then_free_clears(self):
+        w, nw = _l3_ready(0x1000)
+        h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        assert h.base == 0x1000
         assert (0, 0x1000) in w._child_alloc_prov
-        o.free(0, ptr)
-        fake.free.assert_called_once_with(0, 0x1000)
+        w.free(h)
+        nw.free.assert_called_once_with(0, 0x1000)
         assert (0, 0x1000) not in w._child_alloc_prov
 
     def test_free_wrong_worker_rejected_without_native_free(self):
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x1000
-        o = Orchestrator(fake, w)
-        o.malloc(1, 64)  # allocated on worker 1
+        w, nw = _l3_ready(0x1000)
+        w.alloc_child_tensor(1, (64,), DataType.UINT8)  # allocated on worker 1
         with pytest.raises(ValueError, match="not a live malloc base"):
-            o.free(0, 0x1000)  # freed on worker 0
-        fake.free.assert_not_called()
+            w.free(_dev_handle(0x1000, wid=0))  # freed on worker 0
+        nw.free.assert_not_called()
 
     def test_copy_to_requires_live_device_dst(self):
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x2000
-        o = Orchestrator(fake, w)
+        w, nw = _l3_ready(0x2000)
         with pytest.raises(ValueError, match="not contained in a live allocation"):
-            o.copy_to(0, 0x2000, 0xABCD, 64)
-        fake.copy_to.assert_not_called()
-        o.malloc(0, 64)
-        o.copy_to(0, 0x2000, 0xABCD, 64)
-        fake.copy_to.assert_called_once()
+            w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
+        nw.copy_to.assert_not_called()
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
+        nw.copy_to.assert_called_once()
 
     def test_copy_to_interior_range_within_allocation_passes(self):
         # A partial update wholly inside a live allocation is valid (issue #1537).
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x2000
-        o = Orchestrator(fake, w)
-        o.malloc(0, 64)
-        o.copy_to(0, 0x2020, 0xABCD, 16)  # base + 32, 16 bytes — inside [0x2000, 0x2040)
-        fake.copy_to.assert_called_once_with(0, 0x2020, 0xABCD, 16)
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        src = bytearray(16)
+        w.copy_to(_dev_handle(0x2020, wid=0), src)  # base + 32, 16 bytes — inside [0x2000, 0x2040)
+        nw.copy_to.assert_called_once()
+        assert nw.copy_to.call_args.args[:2] == (0, 0x2020)
+        assert nw.copy_to.call_args.args[3] == 16
 
     def test_copy_to_range_overrunning_allocation_rejected(self):
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x2000
-        o = Orchestrator(fake, w)
-        o.malloc(0, 64)
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
         with pytest.raises(ValueError, match="not contained in a live allocation"):
-            o.copy_to(0, 0x203F, 0xABCD, 2)  # last byte at 0x2040 == base + size
-        fake.copy_to.assert_not_called()
+            w.copy_to(_dev_handle(0x203F, wid=0), bytearray(2))  # last byte at 0x2040 == base + size
+        nw.copy_to.assert_not_called()
 
     def test_copy_to_domain_window_chunk_not_narrowed_by_aliasing_buffer(self):
         # A carved buffer at offset 0 aliases the window base under the same
         # allocation id; recording its smaller extent must not shrink the
         # window's copy range (a large chunk into the window must still pass).
-        w = _l3()
-        fake = MagicMock()
-        o = Orchestrator(fake, w)
+        w, nw = _l3_ready()
         with w._child_prov_lock:
             w._child_prov_record_domain(0, 0x4000, allocation_id=7, extent=2 << 20)
             w._child_prov_record_domain(0, 0x4000, allocation_id=7, extent=4)  # buffer #0 aliases the base
-        o.copy_to(0, 0x4000, 0xABCD, 1 << 20)  # 1 MiB into a 2 MiB window
-        fake.copy_to.assert_called_once_with(0, 0x4000, 0xABCD, 1 << 20)
+        w.copy_to(_dev_handle(0x4000, wid=0), bytearray(1 << 20))  # 1 MiB into a 2 MiB window
+        nw.copy_to.assert_called_once()
+        assert nw.copy_to.call_args.args[3] == 1 << 20
         with pytest.raises(ValueError, match="not contained in a live allocation"):
-            o.copy_to(0, 0x4000, 0xABCD, (2 << 20) + 1)  # one byte past the window
-        assert fake.copy_to.call_count == 1
+            w.copy_to(_dev_handle(0x4000, wid=0), bytearray((2 << 20) + 1))  # one byte past the window
+        assert nw.copy_to.call_count == 1
 
     def test_copy_from_requires_live_device_src(self):
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x3000
-        o = Orchestrator(fake, w)
+        w, nw = _l3_ready(0x3000)
         with pytest.raises(ValueError, match="not contained in a live allocation"):
-            o.copy_from(0, 0xABCD, 0x3000, 64)
-        fake.copy_from.assert_not_called()
+            w.copy_from(_HOSTSRC, _dev_handle(0x3000, wid=0))
+        nw.copy_from.assert_not_called()
 
-    def test_isolated_orchestrator_has_no_guard(self):
-        # An Orchestrator constructed without a Worker back-ref (test isolation)
-        # must not attempt provenance tracking.
-        fake = MagicMock()
-        fake.malloc.return_value = 0x1000
-        o = Orchestrator(fake, None)
-        assert o.malloc(0, 64) == 0x1000
-        o.free(0, 0x1000)  # no raise, no table
+    def test_orch_delegates_to_worker(self):
+        # orch.alloc_child_tensor / free are thin wrappers over the bound Worker.
+        w, nw = _l3_ready(0x1000)
+        o = Orchestrator(MagicMock(), w)
+        h = o.alloc_child_tensor(0, (64,), DataType.UINT8)
+        assert (0, 0x1000) in w._child_alloc_prov
+        o.free(h)
+        nw.free.assert_called_once_with(0, 0x1000)
+        assert (0, 0x1000) not in w._child_alloc_prov
+
+    def test_orch_without_worker_rejects_memory_ops(self):
+        # A worker-less Orchestrator can't allocate/free/copy — the impl lives on the Worker.
+        o = Orchestrator(MagicMock(), None)
+        with pytest.raises(RuntimeError, match="requires a Worker context"):
+            o.free(_dev_handle(0x1000))
 
 
 # ----------------------------------------------------------------------------
@@ -439,51 +450,54 @@ class TestL2WorkerPath:
 
     def test_l2_malloc_records_and_free_clears(self):
         w, chip = self._l2()
-        ptr = w.malloc(64)
-        assert (0, ptr) in w._child_alloc_prov
-        w.free(ptr)
+        h = w.malloc(64)
+        assert h.base == 0x2000
+        assert (0, 0x2000) in w._child_alloc_prov
+        w.free(h)
         chip.free.assert_called_once_with(0x2000)
-        assert (0, ptr) not in w._child_alloc_prov
+        assert (0, 0x2000) not in w._child_alloc_prov
 
     def test_l2_free_stale_rejected_without_native_free(self):
         w, chip = self._l2()
-        w.malloc(64)
-        w.free(0x2000)
+        h = w.malloc(64)
+        w.free(h)
         chip.free.reset_mock()
         with pytest.raises(ValueError, match="already-freed/stale"):
-            w.free(0x2000)
+            w.free(h)
         chip.free.assert_not_called()
 
     def test_l2_free_revokes_before_native_free(self):
         # L2 mirrors the L3 commit barrier: revoke before the native free.
         w, chip = self._l2()
-        w.malloc(64)
+        h = w.malloc(64)
         seen = {}
         chip.free.side_effect = lambda p: seen.__setitem__("live_at_native", (0, 0x2000) in w._child_alloc_prov)
-        w.free(0x2000)
+        w.free(h)
         assert seen["live_at_native"] is False
 
     def test_l2_copy_to_requires_live_dst(self):
         w, chip = self._l2()
         with pytest.raises(ValueError, match="not contained in a live allocation"):
-            w.copy_to(0x2000, 0xABCD, 64)
+            w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
         chip.copy_to.assert_not_called()
         w.malloc(64)
-        w.copy_to(0x2000, 0xABCD, 64)
+        w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
         chip.copy_to.assert_called_once()
 
     def test_l2_copy_to_interior_range_passes(self):
         # base + offset partial update on the single chip (issue #1537).
         w, chip = self._l2()
         w.malloc(64)  # chip.malloc returns 0x2000
-        w.copy_to(0x2020, 0xABCD, 16)
-        chip.copy_to.assert_called_once_with(0x2020, 0xABCD, 16)
+        w.copy_to(_dev_handle(0x2020, wid=0), bytearray(16))
+        chip.copy_to.assert_called_once()
+        assert chip.copy_to.call_args.args[0] == 0x2020
+        assert chip.copy_to.call_args.args[2] == 16
 
     def test_l2_free_of_interior_pointer_rejected(self):
         w, chip = self._l2()
         w.malloc(64)
         with pytest.raises(ValueError, match="not a live malloc base"):
-            w.free(0x2020)
+            w.free(_dev_handle(0x2020, wid=0))
         chip.free.assert_not_called()
 
 
@@ -494,56 +508,45 @@ class TestL2WorkerPath:
 
 
 class TestProvenanceTransactions:
-    def test_orch_malloc_native_error_records_nothing(self):
+    def test_alloc_child_native_error_records_nothing(self):
         # Provenance is recorded only after the backend malloc succeeds.
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.side_effect = RuntimeError("device OOM")
-        o = Orchestrator(fake, w)
+        w, nw = _l3_ready()
+        nw.malloc.side_effect = RuntimeError("device OOM")
         with pytest.raises(RuntimeError, match="device OOM"):
-            o.malloc(0, 64)
+            w.alloc_child_tensor(0, (64,), DataType.UINT8)
         assert w._child_alloc_prov == {}
 
-    def test_orch_free_revokes_before_native_free(self):
+    def test_free_revokes_before_native_free(self):
         # Safety-first commit barrier: provenance is revoked BEFORE the native
         # free, so an async unwind after a successful free cannot leave a freed
         # address live.
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x1000
-        o = Orchestrator(fake, w)
-        o.malloc(0, 64)
+        w, nw = _l3_ready(0x1000)
+        h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
         seen = {}
-        fake.free.side_effect = lambda wid, p: seen.__setitem__("live_at_native", (0, 0x1000) in w._child_alloc_prov)
-        o.free(0, 0x1000)
+        nw.free.side_effect = lambda wid, p: seen.__setitem__("live_at_native", (0, 0x1000) in w._child_alloc_prov)
+        w.free(h)
         assert seen["live_at_native"] is False  # already revoked when native free runs
 
-    def test_orch_free_native_error_revokes_provenance_safe_first(self):
+    def test_free_native_error_revokes_provenance_safe_first(self):
         # A native free that fails becomes a terminal leak — provenance is
         # revoked, never re-authorized. No retry (the address is no longer a
         # live malloc base).
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x1000
-        o = Orchestrator(fake, w)
-        o.malloc(0, 64)
-        fake.free.side_effect = RuntimeError("free failed")
+        w, nw = _l3_ready(0x1000)
+        h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        nw.free.side_effect = RuntimeError("free failed")
         with pytest.raises(RuntimeError, match="free failed"):
-            o.free(0, 0x1000)
+            w.free(h)
         assert (0, 0x1000) not in w._child_alloc_prov  # revoked (terminal leak)
-        fake.free.side_effect = None
+        nw.free.side_effect = None
         with pytest.raises(ValueError, match="not a live malloc base"):
-            o.free(0, 0x1000)
+            w.free(h)
 
     def test_free_holds_lock_across_native_free(self):
         # Deterministic mutual-exclusion check: the native free runs while
         # _child_prov_lock is held, so a concurrent free/copy/dispatch cannot
         # interleave with a half-completed free.
-        w = _l3()
-        fake = MagicMock()
-        fake.malloc.return_value = 0x1000
-        o = Orchestrator(fake, w)
-        o.malloc(0, 64)
+        w, nw = _l3_ready(0x1000)
+        h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
         held = {}
 
         def _sf(wid, p):
@@ -552,8 +555,8 @@ class TestProvenanceTransactions:
             if acquired:
                 w._child_prov_lock.release()
 
-        fake.free.side_effect = _sf
-        o.free(0, 0x1000)
+        nw.free.side_effect = _sf
+        w.free(h)
         assert held["locked_during_native"] is True
 
     def test_capture_refs_after_provenance_analysis(self, _fake_handle, monkeypatch):

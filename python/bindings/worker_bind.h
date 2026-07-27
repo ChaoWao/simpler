@@ -308,34 +308,6 @@ inline void bind_worker(nb::module_ &m) {
             "Submit a group of SUB tasks: N args -> N workers, 1 DAG node."
         )
         .def(
-            "malloc",
-            [](Orchestrator &self, int worker_id, size_t size) {
-                return self.malloc(worker_id, size);
-            },
-            nb::arg("worker_id"), nb::arg("size"), "Allocate memory on next-level worker."
-        )
-        .def(
-            "free",
-            [](Orchestrator &self, int worker_id, uint64_t ptr) {
-                self.free(worker_id, ptr);
-            },
-            nb::arg("worker_id"), nb::arg("ptr"), "Free memory on next-level worker."
-        )
-        .def(
-            "copy_to",
-            [](Orchestrator &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
-                self.copy_to(worker_id, dst, src, size);
-            },
-            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"), "Copy host src to worker dst."
-        )
-        .def(
-            "copy_from",
-            [](Orchestrator &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
-                self.copy_from(worker_id, dst, src, size);
-            },
-            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"), "Copy worker src to host dst."
-        )
-        .def(
             "alloc",
             [](Orchestrator &self, const std::vector<uint32_t> &shape, DataType dtype) {
                 return self.alloc(shape, dtype);
@@ -420,6 +392,34 @@ inline void bind_worker(nb::module_ &m) {
             "MAILBOX_SIZE-byte MAP_SHARED region; the child process loop is "
             "Python-managed (fork + _sub_worker_loop). `child_pid` is that "
             "forked child, used to detect an exit before mailbox completion."
+        )
+        .def(
+            "malloc",
+            [](Worker &self, int worker_id, size_t size) {
+                return self.malloc(worker_id, size);
+            },
+            nb::arg("worker_id"), nb::arg("size"), "Allocate device memory on next-level worker."
+        )
+        .def(
+            "free",
+            [](Worker &self, int worker_id, uint64_t ptr) {
+                self.free(worker_id, ptr);
+            },
+            nb::arg("worker_id"), nb::arg("ptr"), "Free device memory on next-level worker."
+        )
+        .def(
+            "copy_to",
+            [](Worker &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
+                self.copy_to(worker_id, dst, src, size);
+            },
+            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"), "H2D copy: host src to worker dst."
+        )
+        .def(
+            "copy_from",
+            [](Worker &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
+                self.copy_from(worker_id, dst, src, size);
+            },
+            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"), "D2H copy: worker src to host dst."
         )
         .def(
             "add_remote_l3_socket",

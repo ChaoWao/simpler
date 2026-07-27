@@ -19,9 +19,19 @@ import struct
 from multiprocessing.shared_memory import SharedMemory
 
 import pytest
+from _task_interface import DataType
+from simpler.buffer_handle import mint_owner_instance_id, wrap_device_malloc
 from simpler.callable_identity import CallableHandle
 from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import Worker
+
+_OID = mint_owner_instance_id()
+_HOSTBUF = bytearray(64)
+
+
+def _dev_handle(ptr: int, *, wid: int = 0):
+    return wrap_device_malloc(ptr, 64, _OID, buffer_id=ptr, owner_worker_id=wid)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -128,25 +138,26 @@ class TestL4Validation:
         with pytest.raises(RuntimeError, match="cannot be combined with device_ids"):
             w4.add_worker(child)
 
-    def test_malloc_on_l4_raises_index_error(self):
-        # L4 has no chip mailboxes — `Worker.malloc` must surface IndexError
-        # rather than silently dispatch CTRL_MALLOC to a next_level (L3 worker)
-        # child whose `_child_worker_loop` doesn't recognise CTRL_MALLOC and
-        # would return a garbage pointer from an uninitialised mailbox result
-        # slot.
+    def test_device_mem_on_l4_rejected(self):
+        # L4 has no chip mailboxes — device memory ops must be rejected rather than silently dispatch
+        # CTRL_MALLOC/FREE/COPY to a next_level (L3 worker) child whose `_child_worker_loop` doesn't
+        # recognise them and would return a garbage pointer from an uninitialised mailbox result slot.
+        # `malloc` is L2-only (TypeError); the child-device ops guard the worker id (IndexError).
         l3_child = Worker(level=3, num_sub_workers=0)
         w4 = Worker(level=4, num_sub_workers=0)
         w4.add_worker(l3_child)
         w4.init()
         try:
+            with pytest.raises(TypeError, match="L2-only"):
+                w4.malloc(1024)
             with pytest.raises(IndexError, match="out of range"):
-                w4.malloc(1024, worker_id=0)
+                w4.alloc_child_tensor(0, (256,), DataType.FLOAT32)
             with pytest.raises(IndexError, match="out of range"):
-                w4.free(0xDEADBEEF, worker_id=0)
+                w4.free(_dev_handle(0xDEADBEEF, wid=0))
             with pytest.raises(IndexError, match="out of range"):
-                w4.copy_to(0xDEAD, 0xBEEF, 64, worker_id=0)
+                w4.copy_to(_dev_handle(0xDEAD, wid=0), _HOSTBUF)
             with pytest.raises(IndexError, match="out of range"):
-                w4.copy_from(0xDEAD, 0xBEEF, 64, worker_id=0)
+                w4.copy_from(_HOSTBUF, _dev_handle(0xBEEF, wid=0))
         finally:
             w4.close()
 
