@@ -98,9 +98,15 @@ void Worker::init() {
 
     // Start WorkerManager first — creates WorkerThreads.
     // The on_complete callback routes through the Scheduler's worker_done().
-    manager_.start(&allocator_, [this](WorkerCompletion completion) {
-        scheduler_.worker_done(std::move(completion));
-    });
+    manager_.start(
+        &allocator_,
+        [this](WorkerCompletion completion) {
+            scheduler_.worker_done(std::move(completion));
+        },
+        [this](WorkerDispatch dispatch) {
+            orchestrator_.mark_task_accepted(dispatch.task_slot);
+        }
+    );
     ready_next_level_queues_.reset(manager_.next_level_worker_ids());
     orchestrator_.init(
         &tensormap_, &allocator_, &scope_, &ready_sub_queue_, &ready_next_level_queues_, &manager_, [this] {

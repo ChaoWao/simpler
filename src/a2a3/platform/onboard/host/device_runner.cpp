@@ -618,6 +618,10 @@ int DeviceRunner::launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_
         return rc;
     }
 
+    // Both kernels are enqueued. Publish before reap_run synchronizes either
+    // stream; the parent retains mailbox ownership until TASK_DONE.
+    publish_task_accepted();
+
     return 0;
 }
 

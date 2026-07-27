@@ -1595,6 +1595,43 @@ class TestRunHandle:
         with pytest.raises(KeyboardInterrupt):
             handle._wait_for_serialization()
 
+    def test_acceptance_wait_does_not_block_completion_waiter(self):
+        acceptance_entered = threading.Event()
+        acceptance_release = threading.Event()
+        completion_entered = threading.Event()
+        completion_release = threading.Event()
+
+        class FakeWorker:
+            def _wait_run_handle_accepted(self, run_id):
+                assert run_id == 1
+                acceptance_entered.set()
+                assert acceptance_release.wait(5.0)
+
+            def _wait_run_handle(self, run_id, timeout):
+                assert run_id == 1
+                completion_entered.set()
+                assert completion_release.wait(5.0)
+                return True
+
+            def _finalize_run_handle(self, handle, run_id, error):
+                return error
+
+        handle = RunHandle(cast(Worker, FakeWorker.__new__(FakeWorker)), 1, ())
+        completion_thread = threading.Thread(target=handle.wait)
+        acceptance_thread = threading.Thread(target=handle._wait_for_acceptance)
+        completion_thread.start()
+        assert completion_entered.wait(3.0)
+        acceptance_thread.start()
+        try:
+            assert acceptance_entered.wait(3.0)
+        finally:
+            acceptance_release.set()
+            completion_release.set()
+            acceptance_thread.join(5.0)
+            completion_thread.join(5.0)
+        assert not acceptance_thread.is_alive()
+        assert not completion_thread.is_alive()
+
     def test_done_query_cannot_race_native_run_release(self):
         done_entered = threading.Event()
         done_release = threading.Event()

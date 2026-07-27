@@ -1430,3 +1430,15 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run() {
         scope_stats_collector_.write_jsonl(output_prefix_);
     }
 }
+
+int DeviceRunnerBase::set_task_accepted_state(volatile int32_t *state, int32_t accepted_value) {
+    task_accepted_state_ = state;
+    task_accepted_value_ = accepted_value;
+    return 0;
+}
+
+void DeviceRunnerBase::publish_task_accepted() const {
+    if (task_accepted_state_ != nullptr) {
+        __atomic_store_n(task_accepted_state_, task_accepted_value_, __ATOMIC_RELEASE);
+    }
+}

@@ -186,7 +186,13 @@ _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # MAILBOX_ARGS_CAPACITY mirrors the C++ constexpr in worker_manager.h so the
 # Python reader can bounds-check incoming args blobs. Source-of-truth for the
 # constants on the right is the nanobind binding (cannot drift).
-_MAILBOX_ARGS_CAPACITY = MAILBOX_SIZE - _OFF_TASK_ARGS_BLOB - MAILBOX_ERROR_MSG_SIZE
+# Mirrors MAILBOX_OFF_ACCEPTED / MAILBOX_TASK_ACCEPTED: launch acceptance is a
+# sticky word rather than a MailboxState, because a state carrying it is lost
+# whenever the child reaches TASK_DONE between two parent polls. The parent
+# clears it when it publishes the next TASK_READY.
+_OFF_ACCEPTED = MAILBOX_SIZE - MAILBOX_ERROR_MSG_SIZE - 8
+_TASK_ACCEPTED = 1
+_MAILBOX_ARGS_CAPACITY = MAILBOX_SIZE - _OFF_TASK_ARGS_BLOB - MAILBOX_ERROR_MSG_SIZE - 8
 _OFF_CONTROL_CALLABLE_HASH = _OFF_ARGS + 32
 # MAILBOX_OFF_ERROR_MSG / MAILBOX_ERROR_MSG_SIZE come from the C++
 # nanobind module so the two sides cannot drift.
@@ -1534,7 +1540,14 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # it in Python is N×40B of avoidable work and a permanent
             # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
             # is the source of truth.
-            cw._impl.run_from_blob(cid, mailbox_addr + _OFF_TASK_ARGS_BLOB, _MAILBOX_ARGS_CAPACITY, cfg)
+            cw._impl.run_from_blob(
+                cid,
+                mailbox_addr + _OFF_TASK_ARGS_BLOB,
+                _MAILBOX_ARGS_CAPACITY,
+                cfg,
+                mailbox_addr + _OFF_ACCEPTED,
+                _TASK_ACCEPTED,
+            )
         except Exception as e:  # noqa: BLE001
             code = 1
             msg = _format_exc(f"chip_process dev={device_id}", e)
@@ -1967,6 +1980,8 @@ class RunHandle:
         self._resources = resources if resources is not None else _RunResources()
         self._cv = threading.Condition()
         self._wait_in_progress = False
+        self._accept_wait_in_progress = False
+        self._launch_accepted = False
         self._terminal = False
         self._error: BaseException | None = None
 
@@ -1979,6 +1994,8 @@ class RunHandle:
         handle._resources = _RunResources()
         handle._cv = threading.Condition()
         handle._wait_in_progress = False
+        handle._accept_wait_in_progress = False
+        handle._launch_accepted = True
         handle._terminal = True
         handle._error = None
         return handle
@@ -2064,6 +2081,20 @@ class RunHandle:
                 self._cv.notify_all()
             raise TimeoutError("RunHandle.wait() timed out")
 
+        # An acceptance waiter that already captured this run id must leave the
+        # native wait before finalize releases that id. It is terminal now, so
+        # this is only a short ownership hand-off and does not serialize device
+        # execution with acceptance waiting.
+        try:
+            with self._cv:
+                while self._accept_wait_in_progress:
+                    self._cv.wait(timeout=_RUN_HANDLE_WAIT_RECHECK_S)
+        except BaseException:
+            self._wait_in_progress = False
+            with self._cv:
+                self._cv.notify_all()
+            raise
+
         # Cleanup runs exactly once, on this waiter, and its outcome IS the
         # handle's result: an interruption mid-finalize is cached like any other
         # error rather than lost, so the publication below is unconditional.
@@ -2074,8 +2105,10 @@ class RunHandle:
         self._error = error
         self._run_id = None
         self._keepalive = None
+        self._launch_accepted = True
         self._terminal = True
         self._wait_in_progress = False
+        self._accept_wait_in_progress = False
         with self._cv:
             self._cv.notify_all()
         if error is not None:
@@ -2092,6 +2125,30 @@ class RunHandle:
         except Exception:
             # The result remains cached for this handle's public wait/result.
             pass
+
+    def _wait_for_acceptance(self) -> None:
+        """Wait until this run's dispatches cross their acceptance boundary."""
+        with self._cv:
+            while not self._terminal and self._accept_wait_in_progress:
+                self._cv.wait(timeout=_RUN_HANDLE_WAIT_RECHECK_S)
+            if self._terminal or self._launch_accepted:
+                return
+            self._accept_wait_in_progress = True
+            run_id = self._run_id
+
+        assert run_id is not None
+        try:
+            self._worker._wait_run_handle_accepted(run_id)
+        except BaseException:
+            self._accept_wait_in_progress = False
+            with self._cv:
+                self._cv.notify_all()
+            raise
+
+        self._launch_accepted = True
+        self._accept_wait_in_progress = False
+        with self._cv:
+            self._cv.notify_all()
 
 
 def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_leader: bool = False) -> None:
@@ -5989,8 +6046,9 @@ class Worker:
         ``args``  : TaskArgs (optional)
         ``config``: CallConfig (optional, default-constructed if None)
 
-        Only one live device run is admitted: a later submission waits for the
-        previous handle's fence and cleanup before building its DAG.
+        Graph construction remains serialized. A later submission waits until
+        prior dispatches are accepted; completion and cleanup stay attached to
+        each returned handle.
         """
         with self._operation_lease("submit"):
             return self._submit_locked(callable, args, config)
@@ -6017,13 +6075,12 @@ class Worker:
             return RunHandle._completed(self)
 
         with self._submit_mu:
-            # Cleanup is Worker-global while only one live device run is
-            # admitted. Drain prior handles before a new callback can mutate
-            # those resources; errors remain attached only to their origin.
+            # Graph callbacks are serialized, but accepted runs may remain live:
+            # their Python resources are isolated in each RunHandle.
             with self._hierarchical_start_cv:
                 prior_handles = tuple(self._accepted_run_handles)
             for handle in prior_handles:
-                handle._wait_for_serialization()
+                handle._wait_for_acceptance()
             return self._submit_l3_locked(callable, args, cfg)
 
     def _submit_l3_locked(self, callable, args, cfg: CallConfig) -> RunHandle:
@@ -6079,6 +6136,10 @@ class Worker:
             self._orch._wait_run(run_id)
             return True
         return self._orch._wait_run_for(run_id, timeout)
+
+    def _wait_run_handle_accepted(self, run_id: int) -> None:
+        assert self._orch is not None
+        self._orch._wait_run_accepted(run_id)
 
     def _finalize_run_handle(
         self, handle: RunHandle, run_id: int, native_error: BaseException | None

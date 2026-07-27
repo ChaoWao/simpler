@@ -473,6 +473,36 @@ TEST_F(OrchestratorFixture, EmptyRunCompletesWhenSubmissionCloses) {
     orch.release_run(run_id);
 }
 
+TEST_F(OrchestratorFixture, RunAcceptanceWaitsForEveryDispatchedGroupMember) {
+    std::vector<TaskArgs> args{
+        single_tensor_args(0x8010, TensorArgType::OUTPUT),
+        single_tensor_args(0x8020, TensorArgType::OUTPUT),
+    };
+    auto result = orch.submit_next_level_group(C(80), args, cfg, {0, 1});
+
+    orch.close_run_submission(run_id);
+    EXPECT_FALSE(orch.run_accepted(run_id));
+
+    orch.mark_task_accepted(result.task_slot);
+    EXPECT_FALSE(orch.run_accepted(run_id));
+
+    orch.mark_task_accepted(result.task_slot);
+    EXPECT_TRUE(orch.run_accepted(run_id));
+    EXPECT_NO_THROW(orch.wait_run_accepted(run_id));
+}
+
+TEST_F(OrchestratorFixture, TerminalFailureUnblocksRunAcceptance) {
+    auto result = orch.submit_next_level(C(80), single_tensor_args(0x8030, TensorArgType::OUTPUT), cfg, 0);
+    orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("graph build failed")));
+    EXPECT_FALSE(orch.run_accepted(run_id));
+
+    S(result.task_slot).state.store(TaskState::FAILED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(result.task_slot));
+
+    EXPECT_TRUE(orch.run_accepted(run_id));
+    EXPECT_NO_THROW(orch.wait_run_accepted(run_id));
+}
+
 TEST_F(OrchestratorFixture, TimedWaitCanRetryAfterTimeout) {
     EXPECT_FALSE(orch.wait_run_for(run_id, 0.0));
     EXPECT_FALSE(orch.run_done(run_id));
@@ -494,6 +524,42 @@ TEST_F(OrchestratorFixture, OneTaskRunCompletesAfterConsumption) {
     EXPECT_TRUE(orch.run_done(run_id));
     EXPECT_NO_THROW(orch.wait_run(run_id));
     orch.release_run(run_id);
+}
+
+// mark_task_accepted runs on a WorkerThread, where an escaping exception ends
+// the process. Neither an unknown slot nor an over-count may throw out of it; a
+// count mismatch becomes the run's error, the way decrement_run_tasks does it.
+TEST_F(OrchestratorFixture, AcceptanceFenceNeverThrowsOutOfAWorkerThread) {
+    auto result = orch.submit_next_level(C(90), single_tensor_args(0x9000, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+
+    EXPECT_NO_THROW(orch.mark_task_accepted(TaskSlot{-1}));
+    EXPECT_NO_THROW(orch.mark_task_accepted(result.task_slot));
+    EXPECT_TRUE(orch.run_accepted(run_id));
+    EXPECT_FALSE(orch.run_failed(run_id));
+
+    // One accept past the submitted count: reported, not thrown.
+    EXPECT_NO_THROW(orch.mark_task_accepted(result.task_slot));
+    EXPECT_TRUE(orch.run_failed(run_id));
+
+    S(result.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(result.task_slot));
+    orch.release_run(run_id);
+}
+
+// A waiter that races the run's release must return, not throw: a released run
+// is past acceptance by definition.
+TEST_F(OrchestratorFixture, AcceptanceWaitOnAReleasedRunReturns) {
+    auto result = orch.submit_next_level(C(92), single_tensor_args(0x9200, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+    orch.mark_task_accepted(result.task_slot);
+    S(result.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(result.task_slot));
+    RunId released = run_id;
+    orch.release_run(released);
+
+    EXPECT_NO_THROW(orch.wait_run_accepted(released));
+    run_id = orch.begin_run();
 }
 
 TEST_F(OrchestratorFixture, SequentialRunsHaveDistinctIdsAndErrorsDoNotLeak) {

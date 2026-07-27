@@ -272,6 +272,13 @@ int simpler_run(
 );
 
 /**
+ * Bind an optional host state word that the runner publishes after both device
+ * kernels have been enqueued. Onboard runtimes may export this symbol; callers
+ * must fall back to completion when it is absent.
+ */
+int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value);
+
+/**
  * Drop the prepared state for `callable_id` and release the per-id share of
  * the device orch SO buffer. The buffer itself is freed only when its
  * hash-keyed refcount drops to zero (different callable_ids with identical

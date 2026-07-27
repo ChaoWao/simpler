@@ -87,6 +87,9 @@ public:
     DeviceRunnerBase(DeviceRunnerBase &&) = delete;
     DeviceRunnerBase &operator=(DeviceRunnerBase &&) = delete;
 
+    /** Bind this runner's launch-acceptance publication target. */
+    int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
+
     /** Allocate / free / copy on the per-Worker `MemoryAllocator` + CANN runtime. */
     void *allocate_tensor(std::size_t bytes);
     void free_tensor(void *dev_ptr);
@@ -571,6 +574,8 @@ public:
     const std::string &output_prefix() const { return output_prefix_; }
 
 protected:
+    /** Publish launch acceptance for the currently bound target, if any. */
+    void publish_task_accepted() const;
     // Ctor is protected: this class is for inheritance only — direct
     // instantiation (`new DeviceRunnerBase()`) is a compile error. The
     // public virtual dtor above lets the shared c_api delete through a
@@ -840,6 +845,8 @@ protected:
     // Same re-register semantics as `aicpu_dlopen_total_`, but for hbg
     // variants.
     size_t host_dlopen_total_{0};
+    volatile int32_t *task_accepted_state_{nullptr};
+    int32_t task_accepted_value_{0};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
