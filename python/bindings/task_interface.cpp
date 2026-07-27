@@ -562,8 +562,18 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
 // Module definition
 // ============================================================================
 
+#ifndef SIMPLER_BUILD_COMMIT
+#define SIMPLER_BUILD_COMMIT ""
+#endif
+
 NB_MODULE(_task_interface, m) {
     m.doc() = "Nanobind bindings for task_interface (DataType, Tensor, TaskArgs variants)";
+
+    // Source commit this extension was compiled from; "" when git was
+    // unavailable at build time. simpler.task_interface compares it against the
+    // working tree so a binding built from other sources cannot be used
+    // silently — struct layouts differ and fields read as garbage.
+    m.attr("__build_commit__") = SIMPLER_BUILD_COMMIT;
 
     // --- DataType enum ---
     nb::enum_<DataType>(m, "DataType")
