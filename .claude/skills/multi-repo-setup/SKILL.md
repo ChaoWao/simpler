@@ -44,14 +44,14 @@ co-located with the simpler you're testing). `$BUILD` =
 | simpler | host runtime + DFX (this repo) | — | <https://github.com/hw-native-sys/simpler> | `$PWD` (the current worktree) |
 | pto-isa | ISA spec | — | [pto-isa][pto-isa] | `$BUILD/pto-isa` |
 | pypto | compiler + Python frontend; vendors a simpler submodule at `runtime/` | simpler | <https://github.com/hw-native-sys/pypto> | `$BUILD/pypto` |
-| pypto-lib | model kernels (qwen3, deepseek, etc.) | pypto + simpler | <https://github.com/hw-native-sys/pypto-lib> | `$BUILD/pypto-lib` |
+| pypto-lib | models (qwen3, deepseek, etc.) | pypto + simpler | <https://github.com/hw-native-sys/pypto-lib> | `$BUILD/pypto-lib` |
 | pypto-serving | serving stack + standalone model runners (qwen3 `npu_generate.py`) | pypto-lib + pypto + simpler | <https://github.com/hw-native-sys/pypto-serving> | `$BUILD/pypto-serving` |
 
 [pto-isa]: https://github.com/hw-native-sys/pto-isa
 | PTOAS | `ptoas` assembler — **provided globally**, no clone | — | (on dev box / CI) | `/usr/local/bin/ptoas-bin` via `pypto-setup` |
 
 The import chain is a stack: **pto-isa** (build-time spec) → **simpler**
-(runtime) → **pypto** (compiler, vendors simpler) → **pypto-lib** (kernels)
+(runtime) → **pypto** (compiler, vendors simpler) → **pypto-lib** (models)
 → **pypto-serving** (serving + runners). A change low in the stack
 (simpler) can break anything above it; that's why Step 3 lets you pin which
 simpler the whole stack sees.
@@ -207,7 +207,7 @@ pip install --no-build-isolation "$BUILD/pypto"
 # overwrite the simpler you installed in Step 3 with pypto's older pin.
 ```
 
-### pypto-lib (kernels) — import-only
+### pypto-lib (models) — import-only
 
 ```bash
 export PYTHONPATH="$BUILD/pypto-lib"   # no install; run scripts out of its tree
