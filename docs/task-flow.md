@@ -22,7 +22,7 @@ scheduled), see:
 - [orchestrator.md](orchestrator.md) — submit flow, Ring, TensorMap, Scope
 - [scheduler.md](scheduler.md) — dispatch loop, queues, completion handling
 - [worker-manager.md](worker-manager.md) — WorkerThread, mailbox IPC mechanics
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — level model
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — level model
   and how components compose
 
 ---
@@ -612,7 +612,7 @@ lives in the mailbox blob bytes on the child side — view doesn't care.
 
 ## Related
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — L0–L6 level
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — L0–L6 level
   model, three-component composition
 - [orchestrator.md](orchestrator.md) — how `submit_*` actually builds the DAG
 - [scheduler.md](scheduler.md) — how dispatched slots get worker threads

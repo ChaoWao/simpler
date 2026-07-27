@@ -996,5 +996,5 @@ their unset fallback and keep the `#897` distributed-skew trade-off.
   AICore program boundaries this feature spans.
 - [task-flow.md](../task-flow.md) — where AICPU dispatch and
   completion sit in the per-task state machine.
-- [hierarchical_level_runtime.md](../hierarchical_level_runtime.md)
+- [hierarchical-level-runtime.md](../hierarchical-level-runtime.md)
   — how L2 (this feature) relates to L3+ composition.

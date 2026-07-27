@@ -13,7 +13,7 @@
  * @file dep_gen_host_graph.cpp
  * @brief Host-side dep_gen graph capture + deps.json writer for host_build_graph.
  *
- * Edge model (unchanged from the schema in docs/dfx/dep_gen.md):
+ * Edge model (unchanged from the schema in docs/dfx/dep-gen.md):
  *   explicit  — declared via Arg::set_dependencies (STEP 1); no tensor context.
  *   creator   — creator retention on an existing tensor (STEP 3 Step A).
  *   tensormap — a producer whose written slice overlaps what this task reads

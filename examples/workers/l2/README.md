@@ -6,7 +6,7 @@ runtime; everything larger (L3 multi-chip DAG, L4 multi-host) is built on top
 of L2 primitives.
 
 For the full hierarchy model see
-[`docs/hierarchical_level_runtime.md`](../../../docs/hierarchical_level_runtime.md).
+[`docs/hierarchical-level-runtime.md`](../../../docs/hierarchical-level-runtime.md).
 
 ## Minimum Worker lifecycle
 

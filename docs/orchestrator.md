@@ -12,7 +12,7 @@ that turn a sequence of `submit_*` calls into a scheduled DAG: `Ring`,
 `TensorMap`, and `Scope`.
 
 For the high-level role of the Orchestrator among the three engine components,
-see [hierarchical_level_runtime.md](hierarchical_level_runtime.md). For what
+see [hierarchical-level-runtime.md](hierarchical-level-runtime.md). For what
 flows through `submit`, see [task-flow.md](task-flow.md).
 
 ---
@@ -745,7 +745,7 @@ instead of stalling forever. Default timeout: 10 s.
 
 ## 10. Related
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — how
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — how
   Orchestrator fits alongside Scheduler and Worker
 - [scheduler.md](scheduler.md) — READY dispatch and completion-time dependency
   release

@@ -5,7 +5,7 @@ How to write an AICore kernel for the `tensormap_and_ringbuffer` runtime
 the things that break silently when ported from native CANN code.
 
 For the broader picture see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md) (where
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md) (where
 kernels sit in the L0–L6 layering),
 [task-flow.md](task-flow.md) (end-to-end task data flow), and
 [chip-level-arch.md](chip-level-arch.md) (Host / AICPU / AICore tiers).

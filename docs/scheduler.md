@@ -187,7 +187,7 @@ The scheduling invariants are:
 
 ## 8. Related documents
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md)
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md)
 - [orchestrator.md](orchestrator.md)
 - [worker-manager.md](worker-manager.md)
 - [task-flow.md](task-flow.md)
