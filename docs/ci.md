@@ -10,7 +10,8 @@ Design principles:
 2. **Runner matches hardware tier** — no-hardware tests run on `ubuntu-latest`; platform-specific tests run on self-hosted runners with the matching label (`a2a3`, `a5`).
 3. **`--platform` is the only filter** — pytest uses `--platform` + the `requires_hardware` marker; ctest uses label `-LE` exclusion. No `-m st`, no `-m "not requires_hardware"`.
 4. **sim = no hardware** — `a2a3sim`/`a5sim` jobs run on github-hosted runners alongside unit tests.
-5. **Skip irrelevant platforms for scene tests** — `detect-changes` gates `st-sim-*` and `st-onboard-*` so pure-a5 PRs skip a2a3 scene-test runs and vice versa. **UT jobs (`ut`, `ut-a2a3`, `ut-a5`) are unconditional** — unit tests cover shared contracts and the cost of a falsely-skipped regression outweighs the savings.
+5. **Skip irrelevant platforms for scene tests** — `detect-changes` gates `st-sim-*` and `st-onboard-*` so pure-a5 PRs skip a2a3 scene-test runs and vice versa. **UT jobs (`ut`, `ut-a2a3`, `ut-a5`) are not gated by platform** — unit tests cover shared contracts and the cost of a falsely-skipped regression outweighs the savings.
+6. **Markdown-only PRs run pre-commit and nothing else** — `detect-changes` sets `docs_only` when *every* changed file ends in `.md`. That is the one case where skipping the UT jobs carries no risk: there is no code delta to regress, and markdownlint inside pre-commit is the only check that reads the files at all.
 
 ## Full Job Matrix
 
@@ -26,14 +27,14 @@ The complete test-type × hardware-tier matrix. Empty cells have no tests yet; o
 ```text
 PullRequest
   ├── pre-commit             (ubuntu-latest)
-  ├── packaging-matrix       (ubuntu + macOS)
-  ├── ut                     (ubuntu + macOS)        — Python + C++ UT, no hardware [always]
-  ├── detect-changes         (ubuntu-latest)         — outputs a{2a3,5}_changed flags
+  ├── packaging-matrix       (ubuntu + macOS)        — [skipped iff docs_only]
+  ├── ut                     (ubuntu + macOS)        — Python + C++ UT, no hardware [skipped iff docs_only]
+  ├── detect-changes         (ubuntu-latest)         — outputs a{2a3,5}_changed + docs_only
   ├── st-sim-a2a3            (ubuntu + macOS)        — gated by a2a3_changed
   ├── st-sim-a5              (ubuntu + macOS)        — gated by a5_changed
-  ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [always]
+  ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [skipped iff docs_only]
   ├── st-onboard-a2a3        (a2a3 self-hosted)      — gated by a2a3_changed
-  ├── ut-a5                  (a5 self-hosted)        — Python + C++ UT, a5 hardware [always]
+  ├── ut-a5                  (a5 self-hosted)        — Python + C++ UT, a5 hardware [skipped iff docs_only]
   └── st-onboard-a5          (a5 self-hosted)        — gated by a5_changed
 ```
 
@@ -127,9 +128,10 @@ not need `--max-parallel` manually.
 ### Scheduling constraints
 
 - Sim scene tests and no-hardware unit tests run on github-hosted runners (no hardware).
-- `detect-changes` computes two flags (`a2a3_changed`, `a5_changed`) from the PR diff. Each flag is `false` only when *every* changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in the `NON_CODE` set (`docs/`, `.docs/`, `.claude/`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere). Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or workflow files (`.github/`) — flips both flags to `true`.
+- `detect-changes` computes three flags (`a2a3_changed`, `a5_changed`, `docs_only`) from the PR diff. Each flag is `false` only when *every* changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in the `NON_CODE` set (`docs/`, `.docs/`, `.claude/`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere). Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or workflow files (`.github/`) — flips both flags to `true`.
 - **Gated jobs (scene tests only):** `st-sim-{a2a3,a5}`, `st-onboard-{a2a3,a5}` run iff their platform's flag is `true`.
-- **Unconditional jobs (all UT):** `ut`, `ut-a2a3`, `ut-a5` always run regardless of the flags — unit tests exercise shared contracts (nanobind bindings, RuntimeBuilder, ring buffers, etc.) and the risk of silently skipping a regression outweighs the CI minutes saved. The `tests/ut/cpp/{arch}/` entry in the gating regex only *attributes* an arch-specific C++ UT change to that platform (so it does not spuriously flip the other arch's scene-test flag); it does not gate the UT jobs themselves. A consequence: self-hosted runners (`a2a3`, `a5`) are always busy for at least the UT job, even on doc-only PRs that skip all scene tests.
+- **Platform-independent jobs (all UT + packaging):** `ut`, `ut-a2a3`, `ut-a5`, `packaging-matrix` ignore the platform flags — unit tests exercise shared contracts (nanobind bindings, RuntimeBuilder, ring buffers, etc.) and the risk of silently skipping a regression outweighs the CI minutes saved. The `tests/ut/cpp/{arch}/` entry in the gating regex only *attributes* an arch-specific C++ UT change to that platform (so it does not spuriously flip the other arch's scene-test flag); it does not gate the UT jobs themselves.
+- **`docs_only` is the one exception**, and it is narrower than the `NON_CODE` set on purpose. `NON_CODE` is about *platform attribution* and covers whole trees (`docs/`, `.claude/`, `.gitignore`, `.pre-commit-config.yaml`) — a change to `.pre-commit-config.yaml` or a `.claude/` script can still change what CI does, so it must not skip the UT jobs. `docs_only` is true only when every changed path ends in `.md`, which no test can execute. An empty diff leaves it `false`, so an unexpected result runs the full matrix rather than nothing.
 
 ## Hardware Classification
 

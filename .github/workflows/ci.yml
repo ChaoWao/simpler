@@ -61,7 +61,8 @@ jobs:
   # build artifacts cannot mask a regression in the next mode. Slow but reliable.
   # See docs/python-packaging.md and tools/verify_packaging.sh.
   packaging-matrix:
-    needs: pre-commit
+    needs: [detect-changes, pre-commit]
+    if: needs.detect-changes.outputs.docs_only != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -105,7 +106,8 @@ jobs:
 
   # ---------- Unit tests (no hardware, Python + C++) ----------
   ut:
-    needs: pre-commit
+    needs: [detect-changes, pre-commit]
+    if: needs.detect-changes.outputs.docs_only != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -470,7 +472,8 @@ jobs:
 
   # ---------- Unit tests (a2a3 hardware, Python + C++) ----------
   ut-a2a3:
-    needs: pre-commit
+    needs: [detect-changes, pre-commit]
+    if: needs.detect-changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, a2a3]
     timeout-minutes: 30
     env:
@@ -729,6 +732,7 @@ jobs:
     outputs:
       a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
       a5_changed: ${{ steps.check.outputs.a5_changed }}
+      docs_only: ${{ steps.check.outputs.docs_only }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -740,6 +744,17 @@ jobs:
           FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
 
           NON_CODE='^(docs/|\.docs/|\.claude/|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
+
+          # Markdown-only: nothing here can change what the code does, and
+          # markdownlint (in pre-commit) is the only check that inspects it. An
+          # empty FILES leaves this false, so an unexpected diff runs everything.
+          NON_MD=$(echo "$FILES" | grep -v '\.md$' || true)
+          if [ -n "$FILES" ] && [ -z "$NON_MD" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "Only .md changed; pre-commit is the whole gate"
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          fi
 
           # a2a3: skip only when ALL changed files are a5-only or non-code
           A5_ONLY='^(src/a5/|examples/a5/|tests/(st|ut/cpp)/a5/)'
@@ -769,7 +784,8 @@ jobs:
 
   # ---------- Unit tests (a5 hardware, Python + C++) ----------
   ut-a5:
-    needs: pre-commit
+    needs: [detect-changes, pre-commit]
+    if: needs.detect-changes.outputs.docs_only != 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 30
     env:
