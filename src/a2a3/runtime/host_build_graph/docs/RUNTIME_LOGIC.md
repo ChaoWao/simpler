@@ -225,6 +225,11 @@ The heap ring manages output buffer allocation from a circular GM heap.
 
 **Reclamation**: When `last_task_alive` advances past a task, its `packed_buffer_end` is used to advance `heap_tail`, freeing the memory region.
 
+When an empty ring is parked at a non-zero offset and neither free arc can hold a request that fits the full
+capacity, allocation restarts at offset zero: `heap_tail` resets to zero and `heap_top` advances past the new
+allocation. Reclaim markers from tasks in the preceding coordinate space are ignored until the first post-rebase
+allocation retires.
+
 ### 4.3 Dependency Representation (polling completion)
 
 There is no dependency-list pool or fanout adjacency. A task's dependencies are

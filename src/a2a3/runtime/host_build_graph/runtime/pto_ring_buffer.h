@@ -111,6 +111,7 @@ public:
         heap_top_ = 0;
         heap_tail_ = 0;
         last_alive_seen_ = 0;
+        heap_rebase_anchor_task_id_ = -1;
     }
 
     /**
@@ -232,6 +233,9 @@ public:
 
     uint64_t heap_available() const {
         uint64_t tail = heap_tail_;
+        if (heap_top_ == tail) {
+            return heap_size_;
+        }
         if (heap_top_ >= tail) {
             uint64_t at_end = heap_size_ - heap_top_;
             uint64_t at_begin = tail;
@@ -270,6 +274,9 @@ private:
     uint64_t heap_top_ = 0;        // Current heap allocation pointer
     uint64_t heap_tail_ = 0;       // Heap reclamation pointer (derived from consumed tasks)
     int32_t last_alive_seen_ = 0;  // last_task_alive at last heap_tail derivation
+    // While last_alive has not advanced past this task ID, the latest
+    // reclaimed descriptor still predates the empty-ring rebase.
+    int32_t heap_rebase_anchor_task_id_ = -1;
 
     // --- Shared ---
     std::atomic<int32_t> *error_code_ptr_ = nullptr;
@@ -298,6 +305,11 @@ private:
     void update_heap_tail(int32_t last_alive) {
         if (last_alive <= last_alive_seen_) return;
         last_alive_seen_ = last_alive;
+
+        if (heap_rebase_anchor_task_id_ >= 0 && last_alive <= heap_rebase_anchor_task_id_) {
+            return;
+        }
+        heap_rebase_anchor_task_id_ = -1;
 
         PTO2TaskDescriptor &desc = descriptors_[(last_alive - 1) & window_mask_];
         uint64_t old_tail = heap_tail_;
@@ -345,6 +357,17 @@ private:
                 // scope_stats can unroll the wrapping offset into a monotonic value.
                 // The collector attributes the wrap to the current scope's ring.
                 if (is_scope_stats_enabled()) scope_stats_note_heap_wrap(SCOPE_STATS_HEAP_SIDE_ALLOC);
+#endif
+            } else if (top == tail && alloc_size <= heap_size_) {
+                result = heap_base_;
+                heap_top_ = alloc_size;
+                heap_tail_ = 0;
+                heap_rebase_anchor_task_id_ = local_task_id_;
+#if SIMPLER_DFX
+                if (is_scope_stats_enabled()) {
+                    scope_stats_note_heap_wrap(SCOPE_STATS_HEAP_SIDE_ALLOC);
+                    scope_stats_note_heap_wrap(SCOPE_STATS_HEAP_SIDE_RECLAIM);
+                }
 #endif
             } else {
                 LOG_DEBUG(
