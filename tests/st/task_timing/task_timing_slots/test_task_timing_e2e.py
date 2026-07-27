@@ -314,7 +314,6 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
         platform=st_platform,
         runtime="tensormap_and_ringbuffer",
         device_id=int(st_device_ids[0]),
-        aicpu_thread_num=4,
     )
     chip_handle = worker.register(_build_mix_chip_callable(st_platform))
     worker.init()

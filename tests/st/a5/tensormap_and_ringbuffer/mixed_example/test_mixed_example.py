@@ -95,14 +95,12 @@ class TestMixedExample(SceneTestCase):
         {
             "name": "case1",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {"num_iters": 4},
         },
         {
             "name": "case2",
             "manual": True,
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {"num_iters": 1},
         },
     ]

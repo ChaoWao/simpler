@@ -139,12 +139,12 @@ report what user code can address.
 
 | You are doing… | Use |
 | -------------- | --- |
-| Configuring runtime `aicpu_thread_num` | **user-visible** (6) |
+| Configuring runtime `aicpu_thread_num` | **0 = auto** → architecture default 5; explicit values pass configuration validation in `[2, 7]`, while the observed onboard device-visible pool limits the effective maximum to 6 |
 | Setting kernel `block_dim` for AICore | **user-visible** (per CANN ini for your specific SKU) |
 | Counting cores in a multi-die a5 device | **per-device** HAL CORE_NUM (= 2 × per-die) |
 | Reasoning about hyperthreading on AICPU | **DSMI CPU_TOPO** (only it shows the hyperthread pair on cpu_id 1+2) |
 | Writing code expected to also work on a3 | **ACL or CANN ini only** — HAL semantics differ |
-| Debugging "I requested N AICPU, only 6 ran" | gap is **1 AICPU OS scheduler (cpu_id 0) + 2 SMT-pair (cpu_id 1, 2) withheld by AICPU OS**; cap is 6 |
+| Debugging "I requested N AICPU, only 6 ran" | active cap is **7** (`PLATFORM_MAX_AICPU_THREADS`); 6 are device-usable (gap = 1 OS cpu_id 0 + 2 SMT-pair withheld by AICPU OS). Host-side OCCUPY reports 8, so the default 5 stays <= 6 |
 
 For cross-generation portable code: **always go through ACL or CANN
 ini, never HAL**. HAL's CORE_NUM semantics shift between a3 and a5 in

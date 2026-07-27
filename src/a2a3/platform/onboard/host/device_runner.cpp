@@ -241,7 +241,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // prepare_launch_shape() resolved block_dim before the graph was built, so
     // the geometry this run launches with is already on the runner.
     const int block_dim = block_dim_;
-    const int launch_aicpu_num = config.aicpu_thread_num;
+    int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
     // in-place drain could not clear it. Refuse to run rather than cascade into
     // rtMalloc 507899 / halResMap rc=62 (init_aicore_register_addresses). A soft
@@ -358,13 +358,18 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
             LOG_ERROR("A2A3 AICPU topology probe failed; cannot configure affinity gate");
             return -1;
         }
-        if (!pto::a2a3::compute_allowed_cpus(user_cpus, runtime.get_aicpu_thread_num(), allowed)) {
+        int resolved_aicpu = resolve_aicpu_thread_num(
+            runtime.get_aicpu_thread_num(), static_cast<int>(user_cpus.size()), PLATFORM_DEFAULT_AICPU_THREAD_NUM
+        );
+        if (resolved_aicpu < 0) return -1;
+        if (!pto::a2a3::compute_allowed_cpus(user_cpus, resolved_aicpu, allowed)) {
             LOG_ERROR(
-                "A2A3 AICPU topology has %zu user cpus, cannot fit %d active threads", user_cpus.size(),
-                runtime.get_aicpu_thread_num()
+                "A2A3 AICPU topology has %zu user cpus, cannot fit %d active threads", user_cpus.size(), resolved_aicpu
             );
             return -1;
         }
+        runtime.set_aicpu_thread_num(resolved_aicpu);
+        launch_aicpu_num = resolved_aicpu;
         const size_t cap = runtime.aicpu_allowed_cpus_capacity();
         if (allowed.size() > cap) {
             LOG_ERROR("A2A3 compute_allowed_cpus returned %zu > cap %zu", allowed.size(), cap);

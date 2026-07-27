@@ -145,11 +145,11 @@ correctness, prefer ACL or CANN ini.
 
 | You are doing… | Use |
 | -------------- | --- |
-| Configuring runtime `aicpu_thread_num` (per-case config) | **user-accessible** (6 — never request more) |
+| Configuring runtime `aicpu_thread_num` (per-case config) | **0 = auto** → architecture default 4; explicit values must be in `[2, 4]`; the effective count is capped by the usable AICPU pool |
 | Setting kernel `block_dim` for AICore launch | **user-accessible** (24 — runtime rejects > 24) |
 | Reading the spec sheet / product datasheet | **spec / user-accessible** (24 AIC, 6 AICPU) |
 | Asking "what is in silicon" | **HAL physical** (25 AIC, 8 AICPU slots) — 1 PG-disabled + 1 OS-reserved on AICPU; 1 PG-disabled on AICore |
-| Debugging "I set `aicpu_thread_num=8`, got error" | gap is **cpu_id 0 (AICPU OS) + cpu_id 1 (PG)** — both unreachable from runtime; cap is 6 |
+| Debugging "I set `aicpu_thread_num=8`, got error" | active cap is **4** (`PLATFORM_MAX_AICPU_THREADS`); 6 is the launch pool (popcount OCCUPY). Gap to 8 AICPU slots = **cpu_id 0 (OS) + cpu_id 1 (PG)**, both unreachable from runtime |
 | Debugging "I set `block_dim=25`, got error" | runtime cap is **24**; the +1 slot is PG fab-disabled |
 | Building a chip-management dashboard | use HAL OCCUPY + OS_SCHED to expose the split; cite `tools/cann-examples/aicpu-device-query/` for the OS_SCHED query |
 

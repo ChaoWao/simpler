@@ -52,6 +52,13 @@ constexpr int PLATFORM_AIV_CORES_PER_BLOCKDIM = 2;
 constexpr int PLATFORM_MAX_AICPU_THREADS = 7;
 
 /**
+ * Default active AICPU thread count when aicpu_thread_num is left at 0 (auto):
+ * 1 orchestrator + 4 schedulers. Onboard topology probing assigns those
+ * threads to device-visible CPUs; simulation uses the value directly.
+ */
+constexpr int PLATFORM_DEFAULT_AICPU_THREAD_NUM = 5;  // 1 orch + 4 sched
+
+/**
  * Compile-time upper bound on the number of AICPU threads CANN may
  * start per launch. The actual launch count is runtime-derived:
  * the host topology probe sets runtime.aicpu_launch_count =

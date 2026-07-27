@@ -210,7 +210,7 @@ View does **not** own memory. Valid for the duration of a single
 
 ```cpp
 struct CallConfig {
-    int32_t aicpu_thread_num = 3;
+    int32_t aicpu_thread_num = 0;  // auto
     int32_t enable_l2_swimlane = 0;  // perf_level 0–4 (0=off, 4=full)
     int32_t enable_dump_args = 0;
     int32_t enable_pmu = 0;           // 0 = disabled; >0 selects PMU event type
@@ -683,7 +683,7 @@ w3 = Worker(level=3, child_mode=PROCESS)
 w3.add_worker(NEXT_LEVEL, chip_worker_0)
 w3.init()    # fork chip_0 here
 
-w3.run(my_orch, args, CallConfig(aicpu_thread_num=3))
+w3.run(my_orch, args, CallConfig(aicpu_thread_num=0))
 ```
 
 Step-by-step (one chip worker):

@@ -148,7 +148,7 @@ worker.init(device_id=0, bins=bins)   # bins = RuntimeBuilder(platform).get_bina
 
 config = CallConfig()
 # A run always takes the whole device; there is no per-call width knob.
-config.aicpu_thread_num = 3
+config.aicpu_thread_num = 0  # auto
 config.enable_pmu = 0
 worker.run(callable, args, config)
 worker.finalize()

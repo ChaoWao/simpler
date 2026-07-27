@@ -61,7 +61,6 @@ class TestMergePipelineBarrier(SceneTestCase):
             # per-task via launch_spec.set_block_num in merge_orch.cpp).
             "name": "merge",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]

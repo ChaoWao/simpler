@@ -69,7 +69,6 @@ class TestMultiRoundPagedAttention(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
                 "num_heads": 16,
@@ -85,7 +84,6 @@ class TestMultiRoundPagedAttention(SceneTestCase):
             "name": "Case2",
             "platforms": ["a2a3sim", "a2a3"],
             "manual": True,
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
                 "num_heads": 16,
@@ -101,7 +99,6 @@ class TestMultiRoundPagedAttention(SceneTestCase):
             "name": "CaseVarSeq2",
             "platforms": ["a2a3sim", "a2a3"],
             "manual": True,
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 2,
                 "num_heads": 16,
@@ -118,7 +115,6 @@ class TestMultiRoundPagedAttention(SceneTestCase):
             "name": "CaseVarSeq4",
             "platforms": ["a2a3sim", "a2a3"],
             "manual": True,
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 4,
                 "num_heads": 16,

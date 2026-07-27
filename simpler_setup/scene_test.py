@@ -1182,7 +1182,8 @@ class SceneTestCase:
         from simpler.task_interface import CallConfig  # noqa: PLC0415
 
         config = CallConfig()
-        config.aicpu_thread_num = config_dict.get("aicpu_thread_num", 3)
+        # 0 = auto: DeviceRunner uses the architecture default.
+        config.aicpu_thread_num = config_dict.get("aicpu_thread_num", 0)
         # Per-task ring sizing (tensormap_and_ringbuffer only; 0 = unset),
         # nested under the "runtime_env" key. Takes precedence over the
         # PTO2_RING_* env vars / RUNTIME_ENV. Each value is either a scalar

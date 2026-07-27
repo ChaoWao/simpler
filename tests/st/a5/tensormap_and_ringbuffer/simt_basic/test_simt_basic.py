@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """SIMT basic element-scatter: minimal AIV scatter kernel that exercises the SIMT launch path.
 
-Config: aicpu_thread_num=4, sequential identity indices.
+Config: default aicpu_thread_num (auto), sequential identity indices.
 Identity indices keep the golden trivially src-equals-out so a failure
 here points at the SIMT launch path itself (TLV injection, localMemorySize
 budget, sync) rather than at the scatter index semantics.
@@ -52,7 +52,6 @@ class TestSimtBasic(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a5", "a5sim"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         }
     ]

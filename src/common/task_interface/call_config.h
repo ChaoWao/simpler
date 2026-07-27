@@ -109,7 +109,9 @@ struct RuntimeEnv {
 };
 
 struct CallConfig {
-    int32_t aicpu_thread_num = 3;
+    // 0 = auto: use the architecture default (a2a3: 4; a5: 5).
+    // Explicit normal-run values must be at least 2.
+    int32_t aicpu_thread_num = 0;
     int32_t enable_l2_swimlane = 0;
     int32_t enable_dump_args = 0;
     int32_t enable_pmu = 0;  // 0 = disabled; >0 = enabled, value selects event type

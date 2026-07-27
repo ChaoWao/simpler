@@ -71,14 +71,12 @@ class TestPreparedCallable(SceneTestCase):
         ],
     }
 
-    _COMMON_CONFIG = {"aicpu_thread_num": 4}
     _PLATFORMS = ["a2a3sim", "a2a3"]
 
     CASES = [
         {
             "name": "prepare_run_twice",
             "platforms": _PLATFORMS,
-            "config": _COMMON_CONFIG,
             "params": {"a": 2.0, "b": 3.0},
         },
     ]
@@ -163,7 +161,7 @@ class TestPreparedCallable(SceneTestCase):
         """Common fixture: build callable + config, return (callable, config, case)."""
         case = self.CASES[0]
         callable_obj = self.build_callable(st_platform)
-        config = self._build_config(case["config"])
+        config = self._build_config(case.get("config", {}))
         return callable_obj, config, case
 
     def _run_one(self, worker, slot, config, case):
@@ -279,7 +277,7 @@ class TestPreparedCallable(SceneTestCase):
 
         MissingEntryCallable.CALLABLE["orchestration"]["function_name"] = "missing_aicpu_orchestration_entry"
         bad_callable = MissingEntryCallable().build_callable(st_platform)
-        config = self._build_config(self.CASES[0]["config"])
+        config = self._build_config(self.CASES[0].get("config", {}))
         case = self.CASES[0]
         baseline = st_worker.aicpu_dlopen_count
         chip_worker = self._chip_worker(st_worker)

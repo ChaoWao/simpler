@@ -21,9 +21,9 @@ graph is a consequence of the data, not of the code.
 
 ## Cases
 
-Seven, all `platforms=["a2a3"]` with `aicpu_thread_num: 4`: `Case1`–`Case3` at
-production scale (up to batch 256, 16 heads, 8192 context), `CaseSmall1` /
-`CaseSmall2`, and `CaseVarSeq2` / `CaseVarSeq4` for ragged sequence lengths.
+Seven, all for `platforms=["a2a3"]` with automatic AICPU thread selection:
+`Case1`–`Case3` at production scale (up to batch 256, 16 heads, 8192 context),
+`CaseSmall1` / `CaseSmall2`, and `CaseVarSeq2` / `CaseVarSeq4` for ragged sequence lengths.
 The four kernels are registered as sub-callables named `QK`, `SF`, `PV`, `UP`.
 
 ## Run

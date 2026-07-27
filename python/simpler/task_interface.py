@@ -76,7 +76,7 @@ def _assert_bindings_match_source_tree() -> None:
     Nothing then rebuilds, and a changed struct layout — `CallConfig` losing a
     field, say — makes attributes read as 0 with no error at all. That surfaces
     much later as a plausible-looking runtime rejection
-    (``launch_aicpu_num (0) must be in range [1, 4]``) and reads as a product
+    (``launch_aicpu_num (1) must be 0 (auto) or in range [2, 4]``) and reads as a product
     bug, so it is worth one git call at import to stop.
 
     Only source-tree installs are checked: a wheel has no ``.git`` to compare
@@ -1322,7 +1322,7 @@ class ChipWorker:
             args: ChipStorageTaskArgs for this invocation.
             config: Optional CallConfig. If None, a default is created.
             **kwargs: Overrides applied to config (e.g.
-                ``aicpu_thread_num=4``). A run always takes the whole device;
+                ``aicpu_thread_num=2``). A run always takes the whole device;
                 orchestration reads the resulting width back through
                 ``rt_available_cluster_count()``.
 

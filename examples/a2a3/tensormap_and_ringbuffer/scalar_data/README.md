@@ -49,7 +49,8 @@ landing a value in `check[0..8]`:
 
 ## Cases
 
-One, `default`, `platforms=["a2a3"]`, `aicpu_thread_num: 4`.
+One, `default`, for `platforms=["a2a3"]`. The default AICPU configuration uses
+auto selection.
 
 Note the comment on the `check` tensor in `generate_args`: it is **exactly 9
 slots**, matching `check[0..8]`. Output-tensor slots are not seeded from the

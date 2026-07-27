@@ -64,7 +64,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 256,
                 "num_heads": 16,
@@ -79,7 +78,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "Case2",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 64,
@@ -95,7 +93,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "Case3",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 64,
@@ -111,7 +108,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "CaseSmall1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
                 "num_heads": 16,
@@ -126,7 +122,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "CaseSmall2",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 1,
@@ -142,7 +137,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "CaseSmall3",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 1,
@@ -158,7 +152,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "CaseVarSeq2",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 2,
@@ -175,7 +168,6 @@ class TestBatchPagedAttention(SceneTestCase):
         {
             "name": "CaseVarSeq4",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 4,

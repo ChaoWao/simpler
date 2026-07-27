@@ -214,7 +214,7 @@ Runtime behavior is configured via `kernel_config.py` in each example:
 ```python
 RUNTIME_CONFIG = {
     "runtime": "host_build_graph",    # Runtime to use
-    "aicpu_thread_num": 3,            # Number of AICPU scheduler threads
+    "aicpu_thread_num": 0,            # Auto-select AICPU threads
 }
 ```
 

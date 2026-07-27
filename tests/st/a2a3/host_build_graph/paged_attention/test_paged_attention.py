@@ -76,7 +76,6 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
             # a large PTO2_RING_TASK_WINDOW / PTO2_RING_HEAP if needed.
             "name": "Case1",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 256,
@@ -92,7 +91,6 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "Case2",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 64,
@@ -108,7 +106,6 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "small1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
                 "num_heads": 16,
@@ -123,7 +120,6 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "small2",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 1,

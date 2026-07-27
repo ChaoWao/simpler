@@ -120,7 +120,7 @@ takes a device pointer; `DataType` carries the element types.
 
 | Field | Default | Meaning |
 | ----- | ------- | ------- |
-| `aicpu_thread_num` | `3` | AICPU threads for this run |
+| `aicpu_thread_num` | `0` | AICPU threads for this run; `0` selects the architecture default |
 | `enable_l2_swimlane` | `0` | `0` off; `1`–`4` select detail. L2 only |
 | `enable_dump_args` | `0` | Capture per-task arguments |
 | `enable_pmu` | `0` | `0` off; `>0` selects the event type |
