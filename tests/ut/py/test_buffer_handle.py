@@ -32,6 +32,8 @@ from simpler.buffer_handle import (
     create_host_shared_buffer,
     mint_owner_instance_id,
     pack_bufferref_blob,
+    re_export,
+    wrap_device_malloc,
     wrap_fork_inherited,
 )
 
@@ -196,6 +198,51 @@ def test_bufferref_view_algebra():
         h.close()
 
 
+def test_bufferref_unpack_roundtrip():
+    oid = mint_owner_instance_id()
+    h = create_host_shared_buffer(64, oid, buffer_id=1, owner_worker_path="L3")
+    try:
+        ref = h.ref(shapes=(2, 4), dtype=DataType.FLOAT16.value, byte_offset=8)
+        assert BufferRef.unpack(ref.pack()) == ref
+    finally:
+        h.close()
+
+
+def test_re_export_preserves_identity_same_backing_no_map():
+    # Frozen model §5/§8: canonical identity is invariant across every edge. Re-exporting an L4-owned
+    # backing for forwarding keeps the SOURCE identity (owner_instance_id / path / buffer_id /
+    # generation) and the same backing, only stripping the mapping.
+    l4 = mint_owner_instance_id()
+    src = create_host_shared_buffer(64, l4, buffer_id=7, owner_worker_path="L4")
+    try:
+        sdesc = src.to_descriptor()
+        hp = re_export(sdesc)
+        assert hp.identity.pack() == src.identity.pack()  # identity invariant across the edge
+        assert hp.backend_kind == BackendKind.POSIX_SHM
+        assert hp.body == sdesc.body and hp.nbytes == 64  # same backing
+        assert hp.shm is None and hp.base == 0  # no map (lazy — a compute leaf maps)
+        # a ref built from H' carries the source identity + the same shm body, so L2 can materialize it
+        r = hp.ref(shapes=(16,), dtype=DataType.FLOAT32.value)
+        assert BufferRef.unpack(r.pack()).handle.identity.pack() == src.identity.pack()
+    finally:
+        src.close()
+
+
+def test_device_malloc_wrap_materialize():
+    # A device pointer (from orch.malloc) wrapped as DEVICE_MALLOC: materializes to the pointer with
+    # no map, address_space DEVICE (-> a child_memory Tensor).
+    oid = mint_owner_instance_id()
+    h = wrap_device_malloc(0xDEAD0000, 4096, oid, buffer_id=3, owner_worker_path="L3")
+    assert h.backend_kind == BackendKind.DEVICE_MALLOC
+    assert h.address_space == AddressSpace.DEVICE
+    assert h.shm is None and h.base == 0xDEAD0000
+    reg = ImportRegistry()
+    imp = reg.materialize(h.to_descriptor())
+    assert imp.base == 0xDEAD0000
+    assert imp.address_space == AddressSpace.DEVICE
+    assert imp.shm is None
+
+
 def test_fork_inherited_zero_copy_materialize():
     # A pre-fork COW-inherited allocation: the FORK_SHM body is the base VA, materialized in place
     # (no shm, no copy). In-process the VA is trivially valid.
@@ -273,6 +320,34 @@ def test_materialize_bufferref_blob_to_tensors():
         reg.close()
         h0.close()
         h1.close()
+
+
+def test_materialize_strided_views():
+    # transpose / inner-slice produce non-contiguous refs that materialize to strided Tensors
+    # (matching the mainline strided Tensor wire), not rejected.
+    oid = mint_owner_instance_id()
+    h = create_host_shared_buffer(1024, oid, buffer_id=1)
+    reg = ImportRegistry()
+    try:
+        t = h.ref(shapes=(4, 8), dtype=DataType.FLOAT32.value).transpose(0, 1)  # (8,4) strides (1,8)
+        s = h.ref(shapes=(4, 8), dtype=DataType.FLOAT32.value).slice(1, 2, 6)  # (4,4) strides (8,1), off 8
+        blob = pack_bufferref_blob([t, s])
+        src = ctypes.create_string_buffer(blob, len(blob))
+        resolved = reg.materialize_blob(ctypes.addressof(src), len(blob))
+        tb = materialize_bufferref_blob(ctypes.addressof(src), len(blob), resolved)
+        dst = ctypes.create_string_buffer(tb, len(tb))
+        args = read_args_from_blob(ctypes.addressof(dst))
+        base = reg.resolve(h.identity).base
+
+        tt = args.tensor(0)
+        assert tt.shapes == (8, 4) and tt.strides == (1, 8) and not tt.is_contiguous
+        assert tt.data == base
+        ss = args.tensor(1)
+        assert ss.shapes == (4, 4) and ss.strides == (8, 1) and not ss.is_contiguous
+        assert ss.data == base + 2 * 1 * 4  # slice(1,2,..) shifts byte_offset by start*stride*elem
+    finally:
+        reg.close()
+        h.close()
 
 
 def test_materialize_rejects_unresolved_identity():

@@ -91,14 +91,19 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _l3_host_mapped_region_import_sim,
     _mailbox_load_i32,
     _mailbox_store_i32,
-    read_args_from_blob,
+    bufferref_blob_refs,
+    materialize_bufferref_blob,
 )
 
 from . import _log as _simpler_log
 from .buffer_handle import (
     BufferHandle,
+    BufferHandleDescriptor,
+    BufferRef,
+    ImportRegistry,
     create_host_shared_buffer,
     mint_owner_instance_id,
+    re_export,
 )
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
@@ -144,7 +149,6 @@ from .task_interface import (
     RemoteAddressSpace,
     RemoteBufferExport,
     RemoteBufferHandle,
-    TaskArgs,
     Tensor,
     _Worker,
 )
@@ -1029,24 +1033,21 @@ def _format_exc(prefix: str, exc: BaseException) -> str:
     return f"{prefix}: {type(exc).__name__}: {exc}"
 
 
-def _read_args_from_mailbox(buf) -> TaskArgs:
-    """Decode the TaskArgs blob written by C++ write_blob from the mailbox.
+def _reexport_args_from_mailbox(buf, worker: Worker) -> list[BufferRef]:
+    """Re-export the mailbox BufferRef args for an orchestrator (nested L4→L3) child.
 
-    Used by the Python-targeted child loops (sub_worker, nested L4+ child)
-    where the destination of `args` is a Python callable that needs a
-    typed TaskArgs object.  The chip-child loops that immediately forward
-    to C++ run use the zero-copy `run_from_blob` path
-    instead — see those loops for the matching comment.
-
-    Delegates to the nanobind helper so the Tensor layout is
-    parsed by C++ `read_blob` (single source of truth) instead of being
-    reimplemented in Python.  The Python re-implementation that lived
-    here previously dropped the `child_memory` byte (offset 33), which
-    silently broke any tensor carrying a chip-owned device pointer
-    (HCCL window slots etc.) — now structurally impossible.
+    Each received ref's backing is re-exported (per-backing, no map, canonical identity preserved), and
+    a new ref carrying the original view (byte_offset / shapes / strides / dtype) is built over it. The
+    inner orch fn forwards these to L2 with no map cost (no BufferRef pass-through); dependency
+    inference keys on the invariant identity. The compute leaf downstream maps lazily.
     """
-    mailbox_addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
-    return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
+    args_ptr = _buffer_field_addr(buf, _OFF_TASK_ARGS_BLOB)
+    out: list[BufferRef] = []
+    for ref_bytes in bufferref_blob_refs(args_ptr, _MAILBOX_ARGS_CAPACITY):
+        ref = BufferRef.unpack(ref_bytes)
+        h_prime = worker._reexport(ref.handle)
+        out.append(h_prime.ref(shapes=ref.shapes, dtype=ref.dtype, strides=ref.strides, byte_offset=ref.byte_offset))
+    return out
 
 
 # Idle mailbox polls between `getppid()` samples in a forked child. One poll
@@ -1134,6 +1135,7 @@ def _sub_worker_loop(
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
     host_buf_ranges: list[tuple[int, int, int]] = []
+    import_registry = ImportRegistry()  # lazy per-endpoint import cache: canonical identity -> local base
 
     def handle_task() -> tuple[int, str]:
         digest = _read_task_digest(buf)
@@ -1142,9 +1144,10 @@ def _sub_worker_loop(
         if fn is None:
             return 1, f"sub_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            if host_buf_ranges:
-                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-            args = _read_args_from_mailbox(buf)
+            # Compute leaf: materialize each arg (map-once) into a MappedArg the Python
+            # callable computes on via torch.frombuffer(arg.buffer, ...).
+            args_ptr = _buffer_field_addr(buf, _OFF_TASK_ARGS_BLOB)
+            args = import_registry.mapped_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
             fn(args)
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker", e)
@@ -1172,6 +1175,7 @@ def _sub_worker_loop(
     try:
         _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
+        import_registry.close()
         for host_shm, _lo, _hi, _base in host_buf_table.values():
             try:
                 host_shm.close()
@@ -1538,6 +1542,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     # rebuilt from the table on every map/unmap.
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}  # token -> (shm, lo, hi, child_base)
     host_buf_ranges: list[tuple[int, int, int]] = []  # (parent_lo, parent_hi, child_base)
+    import_registry = ImportRegistry()  # lazy per-endpoint import cache: canonical identity -> local base
 
     def handle_task() -> tuple[int, str]:
         digest = _read_task_digest(buf)
@@ -1559,20 +1564,20 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
                     f"(register via _CTRL_PREPARE first)"
                 )
-            # Redirect any registered host pointer (a parent VA) in the
-            # blob to this child's own mapping before the runtime reads it.
-            # No-op when nothing is registered.
-            if host_buf_ranges:
-                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-            # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
-            # the blob layout is what `write_blob` already wrote, so re-parsing
-            # it in Python is N×40B of avoidable work and a permanent
-            # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
-            # is the source of truth.
+            # Materialize the BufferRef args into a Tensor blob the runtime reads: resolve
+            # each ref's embedded handle to a local base (map-once, cached by canonical
+            # identity), then build the Tensor blob at those bases. Replaces the former
+            # parent-VA range rewrite — identities resolve exactly, not by numeric range.
+            args_ptr = mailbox_addr + _OFF_TASK_ARGS_BLOB
+            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            tensor_blob = materialize_bufferref_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            scratch = ctypes.create_string_buffer(tensor_blob, len(tensor_blob))
+            # The acceptance flag lives in the mailbox, not in the materialized blob, so
+            # the fence still publishes through the address the parent polls.
             cw._impl.run_from_blob(
                 cid,
-                mailbox_addr + _OFF_TASK_ARGS_BLOB,
-                _MAILBOX_ARGS_CAPACITY,
+                ctypes.addressof(scratch),
+                len(tensor_blob),
                 cfg,
                 mailbox_addr + _OFF_ACCEPTED,
                 _TASK_ACCEPTED,
@@ -1699,6 +1704,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     try:
         _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
+        import_registry.close()
         _sweep_l2_host_l3_l2_regions(l3_l2_region_store)
         for host_shm, _lo, _hi, _base in host_buf_table.values():
             try:
@@ -1850,7 +1856,10 @@ def _child_worker_loop(
         if orch_fn is None:
             return 1, f"child_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            args = _read_args_from_mailbox(buf)
+            # Orchestrator (not a compute leaf): re-export each received backing to a local
+            # handle H' (per-backing, no map) so the inner orch sees only its own handles;
+            # pure forwarding to L2 carries no map cost.
+            args = _reexport_args_from_mailbox(buf, inner_worker)
             cfg = _read_config_from_mailbox(buf)
             inner_worker.run(orch_fn, args, cfg)
         except Exception as e:  # noqa: BLE001
@@ -2453,6 +2462,11 @@ class Worker:
         self._owner_instance_id: bytes = mint_owner_instance_id()
         self._buffer_id_counter: int = 1
         self._buffer_handles: dict[int, BufferHandle] = {}
+        # Re-export table (points 1-4): an upper-level ref received by this worker's orch is re-exported
+        # to a local handle H' under this worker's identity, per-backing (keyed by source identity),
+        # so each level's orch sees only its own handles. No map here — H' relabels the backing;
+        # a compute leaf maps lazily. Lifetime is worker-scoped for now.
+        self._reexport_by_source: dict[bytes, BufferHandle] = {}
 
     @property
     def _initialized(self) -> bool:
@@ -5730,13 +5744,13 @@ class Worker:
 
     @staticmethod
     def _child_ptrs_in_args(args: Any) -> list[tuple[int, int]]:
-        """Extract ``(device_ptr, arg_index)`` for every child_memory tensor in ``args``."""
-        out: list[tuple[int, int]] = []
-        for i in range(args.tensor_count()):
-            tensor = args.tensor(i)
-            if tensor.child_memory:
-                out.append((int(tensor.data), i))
-        return out
+        """``(device_ptr, arg_index)`` for every device arg — used for kind4 device-pointer provenance.
+
+        A BufferRef carries no materialized address, so a device pointer is not extractable here under
+        the BufferRef wire; device-pointer provenance is deferred with the device/remote path. Host
+        refs contribute nothing.
+        """
+        return []
 
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
         """Validate every child_memory pointer against its exact target worker."""
@@ -5861,14 +5875,33 @@ class Worker:
         with self._operation_lease("create_buffer"):
             return self._create_buffer_locked(int(nbytes))
 
+    def _next_buffer_id(self) -> int:
+        with self._registry_lock:
+            bid = self._buffer_id_counter
+            self._buffer_id_counter += 1
+        return bid
+
+    def _reexport(self, source: BufferHandleDescriptor) -> BufferHandle:
+        """Re-export a received backing for forwarding (per-backing, memoized, no map).
+
+        An upper-level ref reaching this worker's orch is forwarded as a handle H' that keeps the
+        source's canonical identity unchanged (invariant across every edge, frozen model §5/§8) — H'
+        is never mapped here (a downstream compute leaf maps it lazily), and is built once per source
+        backing (keyed by identity). Worker-scoped lifetime for now.
+        """
+        key = source.identity.pack()
+        handle = self._reexport_by_source.get(key)
+        if handle is None:
+            handle = re_export(source)
+            self._reexport_by_source[key] = handle
+        return handle
+
     def _create_buffer_locked(self, nbytes: int) -> BufferHandle:
         if not self._chip_shms and not self._sub_shms:
             raise RuntimeError("create_buffer requires at least one forked chip or sub child (this Worker has none)")
         if nbytes <= 0:
             raise ValueError("create_buffer: nbytes must be positive")
-        with self._registry_lock:
-            buffer_id = self._buffer_id_counter
-            self._buffer_id_counter += 1
+        buffer_id = self._next_buffer_id()
         handle = create_host_shared_buffer(
             nbytes,
             owner_instance_id=self._owner_instance_id,
