@@ -13,8 +13,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # TEMPORARY: only the a5 self-hosted jobs (ut-a5, st-onboard-a5) run, so the
+  # new [self-hosted, a5, test] runner can be validated in isolation. Every
+  # other job is gated off with `if: false` and the a5 jobs have their
+  # `needs:`/`detect-changes` gating dropped. Revert this whole block to
+  # restore the normal pipeline.
+
   # ---------- Pre-commit hooks (format, lint, clang-tidy) ----------
   pre-commit:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -62,7 +69,7 @@ jobs:
   # See docs/python-packaging.md and tools/verify_packaging.sh.
   packaging-matrix:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -107,7 +114,7 @@ jobs:
   # ---------- Unit tests (no hardware, Python + C++) ----------
   ut:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -163,7 +170,7 @@ jobs:
   # ---------- Simulation scene tests ----------
   st-sim-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a2a3_changed == 'true'
+    if: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -257,7 +264,7 @@ jobs:
 
   st-sim-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a5_changed == 'true'
+    if: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -375,7 +382,7 @@ jobs:
   # corresponding profiling block — no cross-contamination from cmake cache.
   profiling-flags-smoke:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true'
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -473,7 +480,7 @@ jobs:
   # ---------- Unit tests (a2a3 hardware, Python + C++) ----------
   ut-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: false
     runs-on: [self-hosted, a2a3]
     timeout-minutes: 30
     env:
@@ -559,7 +566,7 @@ jobs:
   # ---------- Scene tests (a2a3 hardware) ----------
   st-onboard-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a2a3_changed == 'true'
+    if: false
     runs-on: [self-hosted, a2a3]
     timeout-minutes: 60
     env:
@@ -728,6 +735,7 @@ jobs:
 
   # ---------- Detect platform-specific changes (runs on GitHub server) ----------
   detect-changes:
+    if: false
     runs-on: ubuntu-latest
     outputs:
       a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
@@ -784,9 +792,7 @@ jobs:
 
   # ---------- Unit tests (a5 hardware, Python + C++) ----------
   ut-a5:
-    needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
-    runs-on: [self-hosted, a5]
+    runs-on: [self-hosted, test]
     timeout-minutes: 30
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
@@ -854,9 +860,7 @@ jobs:
           cmake --build build
 
   st-onboard-a5:
-    needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a5_changed == 'true'
-    runs-on: [self-hosted, a5]
+    runs-on: [self-hosted, test]
     timeout-minutes: 60
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
