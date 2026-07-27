@@ -54,14 +54,16 @@ struct HostApi {
     // device_free's the old one, device_malloc's a bigger one, and writes the
     // new {addr, size} back. The grow/pack/slice logic lives in trb bind
     // (runtime_maker); the platform only remembers the slot so it can be reused
-    // next run and freed at finalize. hbg leaves these null and stages tensors
-    // through per-tensor device_malloc. `get` returns {nullptr, 0} when nothing
-    // is retained yet.
+    // by later runs and freed at finalize. The slot is per pipeline slot, so
+    // the pair reads and writes whichever one the current run's lease selected
+    // — two runs in different slots never share a staging buffer. hbg leaves
+    // these null and stages tensors through per-tensor device_malloc. `get`
+    // returns {nullptr, 0} when nothing is retained yet.
     void (*get_retained_temp_buffer)(void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *addr, size_t size);
-    // Commit the three per-Worker pooled regions (PTO2 GM heap, PTO2 shared
-    // memory, trb prebuilt runtime arena) as three independent device
-    // allocations. `runtime_arena_size == 0` skips the third region (hbg
+    // Commit the three pooled regions (PTO2 GM heap, PTO2 shared memory, trb
+    // prebuilt runtime arena) of the arena bank the current run's lease
+    // selected, as three independent device allocations. `runtime_arena_size == 0` skips the third region (hbg
     // path: hbg has no prebuilt runtime arena). Idempotent on identical
     // sizes; returns 0 on success, -1 on allocation failure.
     int (*setup_static_arena)(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);

@@ -28,14 +28,18 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "pto_runtime_c_api.h"
 
 #include "callable.h"
 #include "prepare_callable_common.h"
@@ -66,10 +70,24 @@ constexpr int SIM_AUTO_BLOCKDIM = 8;
 
 class SimDeviceRunnerBase {
 public:
-    SimDeviceRunnerBase() :
-        gm_heap_arena_(&arena_alloc_trampoline, &arena_free_trampoline, &mem_alloc_),
-        gm_sm_arena_(&arena_alloc_trampoline, &arena_free_trampoline, &mem_alloc_),
-        runtime_arena_pool_(&arena_alloc_trampoline, &arena_free_trampoline, &mem_alloc_) {}
+    SimDeviceRunnerBase() {
+        for (auto &bank : arena_banks_) {
+            bank = std::make_unique<ArenaBank>(&arena_alloc_trampoline, &arena_free_trampoline, &mem_alloc_);
+        }
+    }
+
+    /** Carry an already-validated run lease into resource selection. */
+    int select_pipeline_slot(uint32_t slot_id);
+    int select_arena_bank(uint32_t bank_id);
+    uint32_t pipeline_slot() const { return pipeline_slot_; }
+    uint64_t arena_bank_gm_heap_base(uint32_t bank_id) const;
+
+    /**
+     * Retained temporary-buffer address held for one pipeline slot, or 0 while
+     * that slot holds none. Two slots that have both staged arguments hold
+     * distinct buffers; tests read this to prove the split is real.
+     */
+    uint64_t retained_temp_addr(uint32_t slot_id) const;
 
     // Public virtual dtor so c_api_shared can `delete` a SimDeviceRunnerBase *
     // (destroy_device_context entrypoint).
@@ -234,29 +252,45 @@ protected:
     std::vector<uint8_t> aicore_kernel_binary_;
 
     MemoryAllocator mem_alloc_;
-    void *retained_temp_addr_ = nullptr;
-    size_t retained_temp_size_ = 0;
+    std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
+    std::array<size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
 
-    // Three independent per-Worker arenas, each backing a single pooled
-    // region (PTO2 GM heap / PTO2 shared memory / trb prebuilt runtime
-    // arena). Split out from a single backing allocation because the
-    // combined size can exceed the device allocator's largest contiguous
-    // block. Released explicitly in finalize() before mem_alloc_.finalize().
+    // Each arena bank backs the three pooled regions (PTO2 GM heap / PTO2
+    // shared memory / trb prebuilt runtime arena) for one pipeline slot. They
+    // are separate allocations because the combined size can exceed the device
+    // allocator's largest contiguous block. Released explicitly in finalize()
+    // before mem_alloc_.finalize().
     //
-    // runtime_arena_pool_ stays unreserved when setup_static_arena was
+    // A bank's runtime pool stays unreserved when setup_static_arena was
     // invoked with runtime_arena_size == 0 (hbg path).
     static void *arena_alloc_trampoline(void *ctx, size_t size) {
         return static_cast<MemoryAllocator *>(ctx)->alloc(size);
     }
     static void arena_free_trampoline(void *ctx, void *p) { static_cast<MemoryAllocator *>(ctx)->free(p); }
-    DeviceArena gm_heap_arena_;
-    DeviceArena gm_sm_arena_;
-    DeviceArena runtime_arena_pool_;
-    // Cached sizes for setup_static_arena's "fits" check — avoids re-allocating
-    // a buffer when a later worker init asks for an equal-or-smaller layout.
-    size_t cached_gm_heap_size_{0};
-    size_t cached_gm_sm_size_{0};
-    size_t cached_runtime_arena_size_{0};
+    // One independently committed set of the three pooled regions per pipeline
+    // slot, so preparing one bank never mutates a region the active run is
+    // executing out of. `cached_*` back setup_static_arena's "fits" check —
+    // avoids re-allocating when a later worker init asks for an equal-or-
+    // smaller layout. Held by pointer because DeviceArena is neither copyable
+    // nor movable, so the array cannot be brace-initialised without naming
+    // every bank.
+    struct ArenaBank {
+        ArenaBank(DeviceArena::AllocFn alloc, DeviceArena::FreeFn free_fn, void *ctx) :
+            gm_heap(alloc, free_fn, ctx),
+            gm_sm(alloc, free_fn, ctx),
+            runtime_pool(alloc, free_fn, ctx) {}
+
+        DeviceArena gm_heap;
+        DeviceArena gm_sm;
+        DeviceArena runtime_pool;
+        size_t cached_gm_heap_size{0};
+        size_t cached_gm_sm_size{0};
+        size_t cached_runtime_arena_size{0};
+    };
+    std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
+    ArenaBank &arena_bank() { return *arena_banks_[arena_bank_]; }
+    uint32_t pipeline_slot_{0};
+    uint32_t arena_bank_{0};
     bool prebuilt_runtime_arena_cache_valid_{false};
     uint64_t prebuilt_runtime_arena_cache_hash_{0};
     std::vector<uint8_t> prebuilt_runtime_arena_cache_key_;

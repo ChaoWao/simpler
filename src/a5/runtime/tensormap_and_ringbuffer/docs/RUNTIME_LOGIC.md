@@ -98,7 +98,7 @@ TRB bind normally allocates one device buffer per ordinary non-child tensor
 during host-side argument staging, copies input bytes as needed, records
 copy-back metadata, and frees those temporary buffers during runtime
 validation. TRB replaces those per-run malloc/free pairs with a single
-runner-scoped retained buffer that is reused across runs. This is always on for
+retained buffer, owned per pipeline slot, that its runs reuse. This is always on for
 TRB — an internal allocation optimization, not user-facing configuration.
 
 The platform side is deliberately thin: `DeviceRunnerBase` only remembers a

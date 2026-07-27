@@ -694,13 +694,19 @@ int DeviceRunner::finalize() {
 
     // Release the three per-Worker pooled arenas. Must precede mem_alloc_.finalize()
     // so the arenas free through the still-live allocator, not after it.
-    gm_heap_arena_.release();
-    gm_sm_arena_.release();
-    runtime_arena_pool_.release();
+    for (auto &bank : arena_banks_) {
+        bank->gm_heap.release();
+        bank->gm_sm.release();
+        bank->runtime_pool.release();
+    }
     clear_temporary_buffer();
-    cached_gm_heap_size_ = 0;
-    cached_gm_sm_size_ = 0;
-    cached_runtime_arena_size_ = 0;
+    for (auto &bank : arena_banks_) {
+        bank->cached_gm_heap_size = 0;
+        bank->cached_gm_sm_size = 0;
+        bank->cached_runtime_arena_size = 0;
+    }
+    pipeline_slot_ = 0;
+    arena_bank_ = 0;
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_key_.clear();
     prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;

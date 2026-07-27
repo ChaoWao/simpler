@@ -38,9 +38,11 @@
 
 #include <runtime/rt.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -63,6 +65,7 @@
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
 #include "prepare_callable_common.h"
+#include "pto_runtime_c_api.h"
 
 struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
 struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
@@ -89,6 +92,28 @@ public:
 
     /** Bind this runner's launch-acceptance publication target. */
     int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
+
+    /** Carry an already-validated run lease into resource selection. */
+    int select_pipeline_slot(uint32_t slot_id);
+    int select_arena_bank(uint32_t bank_id);
+
+    /** Slot selected by the current run lease. */
+    uint32_t pipeline_slot() const;
+
+    /**
+     * Committed GM heap base of one arena bank, or 0 while that bank has never
+     * been committed. Two banks that have both served a run hold distinct
+     * device allocations; tests read this to prove the depth-two split is real
+     * rather than two names for one region.
+     */
+    uint64_t arena_bank_gm_heap_base(uint32_t bank_id) const;
+
+    /**
+     * Retained temporary-buffer address held for one pipeline slot, or 0 while
+     * that slot holds none. Two slots that have both staged arguments hold
+     * distinct buffers; tests read this to prove the split is real.
+     */
+    uint64_t retained_temp_addr(uint32_t slot_id) const;
 
     /** Allocate / free / copy on the per-Worker `MemoryAllocator` + CANN runtime. */
     void *allocate_tensor(std::size_t bytes);
@@ -138,11 +163,12 @@ public:
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
     /**
-     * Return the pooled GM heap / PTO2 SM / runtime arena base pointer.
-     * `setup_static_arena` (arch subclass) must have already committed
-     * the relevant region; otherwise returns nullptr. The runtime arena
-     * accessor is trb-only — hbg's `setup_static_arena(...,0)` leaves
-     * `runtime_arena_pool_` uncommitted and this returns nullptr.
+     * Return the pooled GM heap / PTO2 SM / runtime arena base pointer of the
+     * selected arena bank. `setup_static_arena` (arch subclass) must have
+     * already committed the relevant region on that bank; otherwise returns
+     * nullptr. The runtime arena accessor is trb-only — hbg's
+     * `setup_static_arena(...,0)` leaves the runtime pool uncommitted and this
+     * returns nullptr.
      */
     void *acquire_pooled_gm_heap();
     void *acquire_pooled_gm_sm();
@@ -903,22 +929,43 @@ protected:
     host::LoadAicpuOp load_aicpu_op_;
 
     MemoryAllocator mem_alloc_;
-    // Retained temporary buffer slot for TRB device-arg staging (see HostApi
-    // get/set_retained_temp_buffer). Just a remembered {addr, size} reused
-    // across runs and freed in finalize; the grow/pack logic lives in trb bind.
-    void *retained_temp_addr_ = nullptr;
-    std::size_t retained_temp_size_ = 0;
-    DeviceArena gm_heap_arena_;
-    DeviceArena gm_sm_arena_;
-    DeviceArena runtime_arena_pool_;
+    // Retained temporary buffer for TRB device-arg staging, one per pipeline
+    // slot (see HostApi get/set_retained_temp_buffer). Just a remembered
+    // {addr, size} that the slot reuses across its runs and finalize frees;
+    // the grow/pack logic lives in trb bind.
+    std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
+    std::array<std::size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
 
-    // Cached arena sizes for `setup_static_arena`'s "fits" check — avoids
-    // re-allocating the same buffer when a later worker init asks for an
-    // equal-or-smaller layout on an already-committed arena. Reset by
-    // the subclass's `finalize()` alongside the other identity state.
-    size_t cached_gm_heap_size_{0};
-    size_t cached_gm_sm_size_{0};
-    size_t cached_runtime_arena_size_{0};
+    // One independently committed set of the three pooled device regions. A
+    // run reaches its set through the arena bank its lease selects, so
+    // preparing one bank never mutates a region the active run is executing
+    // out of. `cached_*` back `setup_static_arena`'s "fits" check: a later
+    // init asking for an equal-or-smaller layout on an already-committed
+    // arena reuses it instead of re-allocating.
+    struct ArenaBank {
+        ArenaBank(DeviceArena::AllocFn alloc, DeviceArena::FreeFn free_fn, void *ctx) :
+            gm_heap(alloc, free_fn, ctx),
+            gm_sm(alloc, free_fn, ctx),
+            runtime_pool(alloc, free_fn, ctx) {}
+
+        DeviceArena gm_heap;
+        DeviceArena gm_sm;
+        DeviceArena runtime_pool;
+        size_t cached_gm_heap_size{0};
+        size_t cached_gm_sm_size{0};
+        size_t cached_runtime_arena_size{0};
+    };
+    // Held by pointer because DeviceArena is non-copyable and non-movable, so
+    // the array cannot be brace-initialised without naming every bank.
+    std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
+    ArenaBank &arena_bank() { return *arena_banks_[arena_bank_]; }
+
+    // Selection carried by the lease of the run currently being served. Both
+    // default to zero, which is what an unleased run and every depth-one
+    // runtime use.
+    uint32_t pipeline_slot_{0};
+    uint32_t arena_bank_{0};
+
     bool prebuilt_runtime_arena_cache_valid_{false};
     uint64_t prebuilt_runtime_arena_cache_hash_{0};
     std::vector<uint8_t> prebuilt_runtime_arena_cache_key_;

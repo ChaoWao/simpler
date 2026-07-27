@@ -19,6 +19,7 @@
 
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
+#include "pipeline_slot_pool.h"
 #include "pto_runtime_c_api.h"
 #include "types.h"
 
@@ -79,6 +80,14 @@ public:
     void
     run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config,
         volatile int32_t *accepted_state, int32_t accepted_value);
+    void run_with_lease(
+        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+        volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
+    );
+    void run_with_lease(
+        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
+        volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
+    );
 
     // Per-callable_id preparation. Requires init() first and a callable_id
     // in [0, MAX_REGISTERED_CALLABLE_IDS) (cap 64).
@@ -96,9 +105,10 @@ public:
     /// `aicpu_dlopen_count` for the trb path; returns 0 on device-orch variants.
     size_t host_dlopen_count() const;
 
-    /// Number of run stream generations the bound runner has created. AICPU
-    /// streams belong to slots; AICore streams are reused only while the loaded
-    /// code image is unchanged. Platforms using the persistent pair report 0.
+    /// Number of AICore run streams the bound runner has created. AICPU streams
+    /// belong to slots for the worker's lifetime; each run gets a freshly
+    /// created AICore stream, so this advances once per run. Platforms using
+    /// the persistent bootstrap pair report 0.
     size_t run_stream_set_create_count() const;
 
     uint64_t malloc(size_t size);
@@ -152,6 +162,20 @@ public:
     int device_id() const { return device_id_; }
     bool initialized() const { return initialized_; }
     unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
+    size_t runtime_slot_count() const { return runtime_bufs_.size(); }
+
+    /// Host Runtime staging buffer address of every copy the contract asked
+    /// for, in slot order. Two copies hold distinct storage; tests read this to
+    /// prove per-run buffers are not one buffer under two slot ids.
+    std::vector<uint64_t> runtime_buffer_addrs() const;
+
+    /// Committed GM heap base of one arena bank on the bound runner, or 0 when
+    /// that bank has never been committed or the platform shares one arena set.
+    uint64_t arena_bank_gm_heap_base(uint32_t bank_id) const;
+
+    /// Retained temporary-buffer address the bound runner holds for one
+    /// pipeline slot, or 0 while that slot holds none.
+    uint64_t retained_temp_addr(uint32_t slot_id) const;
 
 private:
     using CreateDeviceContextFn = void *(*)();
@@ -170,6 +194,10 @@ private:
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
     using SetTaskAcceptedStateFn = int (*)(void *, volatile int32_t *, int32_t);
+    using SelectPipelineSlotFn = int (*)(void *, uint32_t);
+    using SelectArenaBankFn = int (*)(void *, uint32_t);
+    using GetArenaBankGmHeapBaseFn = uint64_t (*)(void *, uint32_t);
+    using GetRetainedTempAddrFn = uint64_t (*)(void *, uint32_t);
     using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
@@ -218,6 +246,10 @@ private:
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;
     SetTaskAcceptedStateFn set_task_accepted_state_fn_ = nullptr;
+    SelectPipelineSlotFn select_pipeline_slot_fn_ = nullptr;
+    SelectArenaBankFn select_arena_bank_fn_ = nullptr;
+    GetArenaBankGmHeapBaseFn get_arena_bank_gm_heap_base_fn_ = nullptr;
+    GetRetainedTempAddrFn get_retained_temp_addr_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;
     GetAicpuDlopenCountFn get_aicpu_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_host_dlopen_count_fn_ = nullptr;
@@ -241,7 +273,18 @@ private:
     std::unordered_map<uint64_t, size_t> comm_session_index_;
     uint64_t base_comm_handle_ = 0;
 
-    std::vector<uint8_t> runtime_buf_;
+    // Slot 0 with no generation bookkeeping: an unleased run is a caller that
+    // is not using the pipeline, and minting a generation for it here would
+    // advance the filter past the leases a real pool later presents.
+    static constexpr uint32_t UNLEASED_SLOT = 0;
+    void run_on_slot(
+        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
+        volatile int32_t *accepted_state, int32_t accepted_value
+    );
+    uint32_t select_slot_resources(uint32_t slot_id);
+
+    std::vector<std::vector<uint8_t>> runtime_bufs_;
+    PipelineSlotGenerationFilter pipeline_generations_;
     PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     // device_id_ is set once in init() and never modified afterward. All
     // ChipWorker callers run on the thread that called init() (the same

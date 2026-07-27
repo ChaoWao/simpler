@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "pipeline_contract.h"
+#include "pipeline_slot_pool.h"
 
 namespace {
 
@@ -31,52 +32,62 @@ PipelineContract accepted_contract() {
 
 TEST(PipelineContract, AcceptsADeclarationThisBuildCanHonor) {
     const PipelineContract c = accepted_contract();
-    EXPECT_TRUE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_TRUE(is_valid_pipeline_contract(&c));
 }
 
 // A runtime that exports no contract is handled by the caller, not here.
-TEST(PipelineContract, RejectsNull) { EXPECT_FALSE(is_valid_depth1_pipeline_contract(nullptr)); }
+TEST(PipelineContract, RejectsNull) { EXPECT_FALSE(is_valid_pipeline_contract(nullptr)); }
 
 TEST(PipelineContract, AcceptsAnEmptyResourceList) {
     PipelineContract c = accepted_contract();
     c.resource_count = 0;
-    EXPECT_TRUE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_TRUE(is_valid_pipeline_contract(&c));
 }
 
 TEST(PipelineContract, RejectsAnotherAbiVersion) {
     PipelineContract c = accepted_contract();
     c.abi_version = PTO_PIPELINE_CONTRACT_ABI_VERSION + 1;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
     c.abi_version = 0;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 }
 
 TEST(PipelineContract, RejectsMoreResourcesThanFit) {
     PipelineContract c = accepted_contract();
     c.resource_count = PTO_PIPELINE_MAX_RESOURCES + 1;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 }
 
-// The depth-1 gate is what keeps this build from honoring a contract whose
-// resources it would have to replicate.
-TEST(PipelineContract, RejectsADepthOtherThanOne) {
+TEST(PipelineContract, AcceptsDepthTwoAndDerivesResourceCopies) {
+    PipelineContract c = accepted_contract();
+    c.pipeline_depth = 2;
+    ASSERT_TRUE(is_valid_pipeline_contract(&c));
+    EXPECT_EQ(pipeline_resource_copy_count(c, c.resources[0]), 2u);
+    EXPECT_EQ(pipeline_resource_copy_count(c, c.resources[1]), 1u);
+    EXPECT_EQ(pipeline_resource_copy_count(c, c.resources[2]), 2u);
+
+    const PipelineSlotLease second_slot{1, 0, 7};
+    EXPECT_EQ(pipeline_resource_slot(c, c.resources[0], second_slot), 1u);
+    EXPECT_EQ(pipeline_resource_slot(c, c.resources[1], second_slot), 0u);
+    EXPECT_EQ(pipeline_resource_slot(c, c.resources[2], second_slot), 1u);
+}
+
+TEST(PipelineContract, RejectsDepthOutsideSupportedRange) {
     PipelineContract c = accepted_contract();
     c.pipeline_depth = 0;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
-    c.pipeline_depth = 2;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
-    c.pipeline_depth = PTO_PIPELINE_MAX_DEPTH;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
+    c.pipeline_depth = PTO_PIPELINE_MAX_DEPTH + 1;
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 }
 
 TEST(PipelineContract, RejectsAnOutOfRangeKindOrClass) {
     PipelineContract c = accepted_contract();
     c.resources[0].kind = PTO_PIPELINE_AICORE_STREAM + 1;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 
     c = accepted_contract();
     c.resources[0].resource_class = PTO_PIPELINE_EXEC_HANDLE + 1;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 }
 
 // bytes_per_copy is reserved: nothing sizes anything from it yet, so a runtime
@@ -84,13 +95,13 @@ TEST(PipelineContract, RejectsAnOutOfRangeKindOrClass) {
 TEST(PipelineContract, RejectsANonZeroReservedSize) {
     PipelineContract c = accepted_contract();
     c.resources[1].bytes_per_copy = 4096;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 }
 
 TEST(PipelineContract, RejectsAnUnspecifiedKind) {
     PipelineContract c = accepted_contract();
     c.resources[1].kind = PTO_PIPELINE_KIND_UNSPECIFIED;
-    EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_FALSE(is_valid_pipeline_contract(&c));
 }
 
 // A resource_count larger than the entries a runtime filled in leaves trailing
@@ -106,9 +117,9 @@ TEST(PipelineContract, RejectsAResourceCountPastTheFilledEntries) {
         c.resources[0] = {filled, PTO_PIPELINE_HOST_PER_RUN, 0};
 
         c.resource_count = 2;  // overstates by exactly one
-        EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c)) << "filled kind " << filled;
+        EXPECT_FALSE(is_valid_pipeline_contract(&c)) << "filled kind " << filled;
         c.resource_count = 3;
-        EXPECT_FALSE(is_valid_depth1_pipeline_contract(&c)) << "filled kind " << filled;
+        EXPECT_FALSE(is_valid_pipeline_contract(&c)) << "filled kind " << filled;
     }
 }
 
@@ -117,7 +128,7 @@ TEST(PipelineContract, RejectsAResourceCountPastTheFilledEntries) {
 TEST(PipelineContract, AcceptsARepeatedKind) {
     PipelineContract c = accepted_contract();
     c.resources[3].kind = PTO_PIPELINE_AICPU_STREAM;
-    EXPECT_TRUE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_TRUE(is_valid_pipeline_contract(&c));
 }
 
 TEST(PipelineContract, AcceptsEveryKindOnce) {
@@ -128,7 +139,97 @@ TEST(PipelineContract, AcceptsEveryKindOnce) {
     for (uint32_t kind = PTO_PIPELINE_GM_HEAP; kind <= PTO_PIPELINE_AICORE_STREAM; ++kind) {
         c.resources[kind - 1] = {kind, PTO_PIPELINE_HOST_PER_RUN, 0};
     }
-    EXPECT_TRUE(is_valid_depth1_pipeline_contract(&c));
+    EXPECT_TRUE(is_valid_pipeline_contract(&c));
+}
+
+// GM heap, GM shared memory, and the runtime image are committed by one
+// setup_static_arena call into one bank, so a contract that gives them
+// different copy counts describes a layout no runner can build.
+TEST(PipelineContract, RejectsArenaKindsThatDisagreeOnCopyCount) {
+    PipelineContract c{PTO_PIPELINE_CONTRACT_ABI_VERSION, 2, 2, {}};
+    c.resources[0] = {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_HOST_PER_RUN, 0};
+    c.resources[1] = {PTO_PIPELINE_GM_SM, PTO_PIPELINE_DEVICE_SCRATCH, 0};
+    ASSERT_TRUE(is_valid_pipeline_contract(&c));
+    EXPECT_FALSE(has_serviceable_arena_topology(c));
+
+    c.resources[1].resource_class = PTO_PIPELINE_HOST_PER_RUN;
+    EXPECT_TRUE(has_serviceable_arena_topology(c));
+
+    // At depth one every class collapses to one copy, so the same declaration
+    // is serviceable there.
+    c.resources[1].resource_class = PTO_PIPELINE_DEVICE_SCRATCH;
+    c.pipeline_depth = 1;
+    EXPECT_TRUE(has_serviceable_arena_topology(c));
+}
+
+// Only the first entry of a kind is ever read, so a second one is a silent
+// misdeclaration for the kinds that select a bank.
+TEST(PipelineContract, RejectsARepeatedArenaKind) {
+    PipelineContract c{PTO_PIPELINE_CONTRACT_ABI_VERSION, 2, 2, {}};
+    c.resources[0] = {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_HOST_PER_RUN, 0};
+    c.resources[1] = {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_HOST_PER_RUN, 0};
+    ASSERT_TRUE(is_valid_pipeline_contract(&c));
+    EXPECT_FALSE(has_serviceable_arena_topology(c));
+}
+
+// A repeated stream kind still selects nothing, so it stays legal.
+TEST(PipelineContract, AcceptsARepeatedNonArenaKind) {
+    PipelineContract c{PTO_PIPELINE_CONTRACT_ABI_VERSION, 2, 2, {}};
+    c.resources[0] = {PTO_PIPELINE_AICPU_STREAM, PTO_PIPELINE_EXEC_HANDLE, 0};
+    c.resources[1] = {PTO_PIPELINE_AICPU_STREAM, PTO_PIPELINE_EXEC_HANDLE, 0};
+    ASSERT_TRUE(is_valid_pipeline_contract(&c));
+    EXPECT_TRUE(has_serviceable_arena_topology(c));
+}
+
+// Both shipped A2/A3 contracts must be serviceable as declared.
+TEST(PipelineContract, ShippedArenaTopologiesAreServiceable) {
+    PipelineContract hbg{PTO_PIPELINE_CONTRACT_ABI_VERSION, 3, 2, {}};
+    hbg.resources[0] = {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_HOST_PER_RUN, 0};
+    hbg.resources[1] = {PTO_PIPELINE_GM_SM, PTO_PIPELINE_HOST_PER_RUN, 0};
+    hbg.resources[2] = {PTO_PIPELINE_RUNTIME_IMAGE, PTO_PIPELINE_HOST_PER_RUN, 0};
+    EXPECT_TRUE(has_serviceable_arena_topology(hbg));
+
+    PipelineContract tmr{PTO_PIPELINE_CONTRACT_ABI_VERSION, 3, 2, {}};
+    tmr.resources[0] = {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_DEVICE_SCRATCH, 0};
+    tmr.resources[1] = {PTO_PIPELINE_GM_SM, PTO_PIPELINE_DEVICE_SCRATCH, 0};
+    tmr.resources[2] = {PTO_PIPELINE_RUNTIME_IMAGE, PTO_PIPELINE_DEVICE_SCRATCH, 0};
+    EXPECT_TRUE(has_serviceable_arena_topology(tmr));
+}
+
+TEST(PipelineSlotPool, DepthOneKeepsLegacySingleSlotBehavior) {
+    PipelineSlotPool pool(1);
+    auto first = pool.try_acquire();
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->slot_id, 0u);
+    EXPECT_FALSE(pool.try_acquire().has_value());
+    EXPECT_TRUE(pool.release(*first));
+}
+
+TEST(PipelineSlotPool, DepthTwoProvidesExactlyTwoIndependentLeases) {
+    PipelineSlotPool pool(2);
+    auto first = pool.try_acquire();
+    auto second = pool.try_acquire();
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_NE(first->slot_id, second->slot_id);
+    EXPECT_FALSE(pool.try_acquire().has_value());
+    EXPECT_TRUE(pool.owns(*first));
+    EXPECT_TRUE(pool.owns(*second));
+}
+
+TEST(PipelineSlotPool, StaleGenerationCannotAccessOrReleaseAReusedSlot) {
+    PipelineSlotPool pool(1);
+    const PipelineSlotLease first = *pool.try_acquire();
+    ASSERT_TRUE(pool.release(first));
+    EXPECT_TRUE(pool.release(first));  // idempotent before reuse
+
+    const PipelineSlotLease replacement = *pool.try_acquire();
+    ASSERT_EQ(replacement.slot_id, first.slot_id);
+    ASSERT_GT(replacement.generation, first.generation);
+    EXPECT_FALSE(pool.owns(first));
+    EXPECT_FALSE(pool.release(first));
+    EXPECT_TRUE(pool.owns(replacement));
+    EXPECT_TRUE(pool.release(replacement));
 }
 
 }  // namespace

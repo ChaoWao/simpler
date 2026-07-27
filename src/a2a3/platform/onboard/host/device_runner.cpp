@@ -215,7 +215,7 @@ void DeviceRunner::set_dep_gen_enabled(bool enable) {
 }
 
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
-    constexpr unsigned kPipelineSlot = 0;
+    const unsigned selected_pipeline_slot = pipeline_slot();
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
@@ -248,18 +248,23 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return rc;
     }
 
-    const int32_t callable_id = runtime.get_active_callable_id();
-    auto callable_it = callables_.find(callable_id);
-    if (callable_it == callables_.end()) {
-        LOG_ERROR("run() has no registered state for callable_id=%d", callable_id);
-        return -1;
-    }
-    const uint64_t aicore_image_hash = callable_it->second.aicore_image_hash;
-    rc = ensure_run_stream_set(kPipelineSlot, aicore_image_hash);
+    rc = ensure_run_stream_set(selected_pipeline_slot);
     if (rc != 0) {
-        LOG_ERROR("ensure_run_stream_set(%u, image=0x%lx) failed: %d", kPipelineSlot, aicore_image_hash, rc);
+        LOG_ERROR("ensure_run_stream_set(%u) failed: %d", selected_pipeline_slot, rc);
         return rc;
     }
+    // The AICore stream is this run's alone: creation is the only operation
+    // this platform offers that is known to leave a core free of a previous
+    // image's cached instructions, and there is no evidence that selecting an
+    // already-existing stream does anything to the instruction cache. Retiring
+    // it on every exit path is what keeps that guarantee from depending on
+    // which image the next run happens to publish.
+    // On an early return the guard retires it; the success path below retires
+    // it explicitly so a failed destroy is reported instead of discarded.
+    bool aicore_stream_retired = false;
+    auto aicore_stream_retire = RAIIScopeGuard([this, selected_pipeline_slot, &aicore_stream_retired]() {
+        if (!aicore_stream_retired) (void)retire_run_aicore_stream(selected_pipeline_slot);
+    });
 
     ensure_device_wall_buffer();
 
@@ -475,10 +480,17 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         l2_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
     }
 
-    rc = launch_run(runtime, num_aicore, launch_aicpu_num, kPipelineSlot);
+    rc = launch_run(runtime, num_aicore, launch_aicpu_num, selected_pipeline_slot);
     if (rc != 0) return rc;
 
-    rc = reap_run(kPipelineSlot);
+    rc = reap_run(selected_pipeline_slot);
+    if (rc != 0) return rc;
+
+    // The run owns its AICore stream, so a destroy this run cannot complete is
+    // this run's failure: reporting success would leave the caller believing a
+    // slot is reusable that ensure_run_stream_set will now refuse.
+    aicore_stream_retired = true;
+    rc = retire_run_aicore_stream(selected_pipeline_slot);
     if (rc != 0) return rc;
 
     // Print handshake results (reads from device memory, must be before free)
@@ -487,75 +499,30 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     return 0;
 }
 
-int DeviceRunner::ensure_run_stream_set(unsigned slot, uint64_t aicore_image_hash) {
-    if (slot >= kRunStreamSetCount) {
-        LOG_ERROR("ensure_run_stream_set: invalid slot %u", slot);
-        return -1;
-    }
-    RunStreamSet &streams = run_stream_sets_[slot];
-    if (streams.aicpu == nullptr) {
-        int rc = rtStreamCreate(&streams.aicpu, 0);
-        if (rc != 0) {
-            LOG_ERROR("rtStreamCreate (run AICPU slot %u) failed: %d", slot, rc);
-            ACL_LOG_ERROR_DETAIL(rc);
-            return rc;
-        }
-    }
-    if (streams.aicore != nullptr && streams.has_aicore_image && streams.aicore_image_hash == aicore_image_hash) {
-        return 0;
-    }
-
-    if (streams.aicore != nullptr) {
-        int rc = rtStreamDestroy(streams.aicore);
-        if (rc != 0) {
-            LOG_ERROR("rtStreamDestroy (retired AICore slot %u) failed: %d", slot, rc);
-            return rc;
-        }
-        streams.aicore = nullptr;
-        streams.has_aicore_image = false;
-    }
-
-    int rc = rtStreamCreate(&streams.aicore, 0);
+int DeviceRunner::ensure_run_stream_set(unsigned slot) {
+    int rc = run_stream_slots_.acquire(slot);
     if (rc != 0) {
-        LOG_ERROR("rtStreamCreate (run AICore slot %u) failed: %d", slot, rc);
+        LOG_ERROR("ensure_run_stream_set(%u) failed: %d", slot, rc);
         ACL_LOG_ERROR_DETAIL(rc);
-        streams.aicore = nullptr;
-        return rc;
     }
-    streams.aicore_image_hash = aicore_image_hash;
-    streams.has_aicore_image = true;
-    ++run_stream_sets_created_;
-    LOG_INFO_V0("DeviceRunner: run stream generation %zu created for slot %u", run_stream_sets_created_, slot);
-    return 0;
+    return rc;
+}
+
+int DeviceRunner::retire_run_aicore_stream(unsigned slot) {
+    int rc = run_stream_slots_.retire_aicore(slot);
+    if (rc != 0) {
+        LOG_ERROR("rtStreamDestroy (run AICore slot %u) failed: %d, slot is now unusable", slot, rc);
+    }
+    return rc;
 }
 
 int DeviceRunner::destroy_run_stream_sets() {
-    int rc = 0;
-    auto capture = [&rc](int err) {
-        if (err != 0 && rc == 0) rc = err;
-    };
     // No pre-destroy sync, for the reason finalize_common() documents for the
     // bootstrap pair: rtStreamDestroy is the supported teardown for a stream
     // left in the error state by an op-timeout.
-    for (unsigned slot = 0; slot < kRunStreamSetCount; ++slot) {
-        RunStreamSet &streams = run_stream_sets_[slot];
-        if (streams.aicpu != nullptr) {
-            int destroy_rc = rtStreamDestroy(streams.aicpu);
-            if (destroy_rc != 0) {
-                LOG_ERROR("rtStreamDestroy (run AICPU slot %u) failed: %d", slot, destroy_rc);
-            }
-            capture(destroy_rc);
-            streams.aicpu = nullptr;
-        }
-        if (streams.aicore != nullptr) {
-            int destroy_rc = rtStreamDestroy(streams.aicore);
-            if (destroy_rc != 0) {
-                LOG_ERROR("rtStreamDestroy (run AICore slot %u) failed: %d", slot, destroy_rc);
-            }
-            capture(destroy_rc);
-            streams.aicore = nullptr;
-            streams.has_aicore_image = false;
-        }
+    int rc = run_stream_slots_.destroy_all();
+    if (rc != 0) {
+        LOG_ERROR("destroy_run_stream_sets: a stream survived teardown: %d", rc);
     }
     return rc;
 }
@@ -564,12 +531,11 @@ int DeviceRunner::launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_
     // KernelLaunch is the pipeline boundary: this method clears the handshake
     // consumed by the launch and submits exactly the AICore and AICPU kernels.
     // It intentionally performs no stream synchronization or per-run cleanup.
-    if (slot >= kRunStreamSetCount || run_stream_sets_[slot].aicpu == nullptr ||
-        run_stream_sets_[slot].aicore == nullptr) {
+    if (!run_stream_slots_.ready(slot)) {
         LOG_ERROR("launch_run: stream set %u is not ready", slot);
         return -1;
     }
-    RunStreamSet &streams = run_stream_sets_[slot];
+    RunStreamSet streams{run_stream_slots_.aicpu(slot), run_stream_slots_.aicore(slot)};
     int rc = 0;
 
     // Launch the AICore worker BEFORE the AICPU Run task — mirrors the a5 path
@@ -626,12 +592,11 @@ int DeviceRunner::launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_
 }
 
 int DeviceRunner::reap_run(unsigned slot) {
-    if (slot >= kRunStreamSetCount) {
+    if (!run_stream_slots_.ready(slot)) {
         LOG_ERROR("reap_run: invalid stream set %u", slot);
         return -1;
     }
-    RunStreamSet &streams = run_stream_sets_[slot];
-    int rc = sync_stream_pair(streams.aicpu, streams.aicore);
+    int rc = sync_stream_pair(run_stream_slots_.aicpu(slot), run_stream_slots_.aicore(slot));
     if (rc != 0) {
         // The pair wait surfaces the AICore op-timeout (STARS-reaped op ->
         // 507000/507018/507046 at AICPU/AICore stream sync). The op-timeout

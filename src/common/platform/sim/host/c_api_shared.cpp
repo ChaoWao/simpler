@@ -597,6 +597,30 @@ int simpler_run(
     }
 }
 
+int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
+    if (ctx == NULL) return -1;
+    return static_cast<SimDeviceRunnerBase *>(ctx)->select_pipeline_slot(slot_id);
+}
+
+int select_arena_bank_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
+    if (ctx == NULL) return -1;
+    return static_cast<SimDeviceRunnerBase *>(ctx)->select_arena_bank(bank_id);
+}
+
+uint64_t get_arena_bank_gm_heap_base_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
+    if (ctx == NULL) return 0;
+    return static_cast<SimDeviceRunnerBase *>(ctx)->arena_bank_gm_heap_base(bank_id);
+}
+
+uint64_t get_retained_temp_addr_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(ctx)->retained_temp_addr(slot_id);
+    } catch (...) {
+        return 0;
+    }
+}
+
 int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
     if (ctx == NULL) return -1;
     try {

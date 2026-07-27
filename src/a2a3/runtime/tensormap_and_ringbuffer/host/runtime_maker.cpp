@@ -67,7 +67,7 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
     static const PipelineContract contract = {
         PTO_PIPELINE_CONTRACT_ABI_VERSION,
         6,
-        1,
+        2,
         {
             {PTO_PIPELINE_TASK_ARGS, PTO_PIPELINE_HOST_PER_RUN, 0},
             {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_DEVICE_SCRATCH, 0},

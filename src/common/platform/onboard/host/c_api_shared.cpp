@@ -659,6 +659,42 @@ int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state
     }
 }
 
+int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
+    if (ctx == NULL) return -1;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->select_pipeline_slot(slot_id);
+    } catch (...) {
+        return -1;
+    }
+}
+
+int select_arena_bank_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
+    if (ctx == NULL) return -1;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->select_arena_bank(bank_id);
+    } catch (...) {
+        return -1;
+    }
+}
+
+uint64_t get_arena_bank_gm_heap_base_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->arena_bank_gm_heap_base(bank_id);
+    } catch (...) {
+        return 0;
+    }
+}
+
+uint64_t get_retained_temp_addr_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->retained_temp_addr(slot_id);
+    } catch (...) {
+        return 0;
+    }
+}
+
 int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
     if (ctx == NULL) return -1;
     try {
