@@ -18,6 +18,7 @@
 #include "common/l2_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
+#include "device_time_fast.h"
 #include "pto_runtime2.h"
 #include "runtime.h"
 #include "spin_hint.h"
@@ -601,7 +602,7 @@ SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block
 #if SIMPLER_DFX
             uint64_t pub_t0 = 0;
             if (sub_prof) {
-                pub_t0 = get_sys_cnt_aicpu();
+                pub_t0 = fast_sys_cnt_aicpu();
                 // DrainPrepare bar: cluster scan happened before this lambda, so this covers the
                 // build_payload work for `claim` blocks (handle_count subtasks).
                 l2_swimlane_aicpu_record_sched_phase(
@@ -610,7 +611,7 @@ SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block
                 );
             }
             if (l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING) {
-                dispatch_ts = pub_t0 != 0 ? pub_t0 : get_sys_cnt_aicpu();
+                dispatch_ts = pub_t0 != 0 ? pub_t0 : fast_sys_cnt_aicpu();
             }
 #endif
             // Accumulate this batch's gated cores into a LOCAL mask and OR it into the shared

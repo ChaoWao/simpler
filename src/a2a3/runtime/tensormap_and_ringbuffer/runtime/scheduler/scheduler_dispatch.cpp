@@ -24,6 +24,7 @@
 #include "common/l2_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
+#include "device_time_fast.h"
 #include "pto_runtime2.h"
 #include "runtime.h"
 #include "spin_hint.h"
@@ -380,7 +381,7 @@ void SchedulerContext::dispatch_shape(
             uint64_t dispatch_ts = 0;
 #if SIMPLER_DFX
             if (l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING) {
-                dispatch_ts = get_sys_cnt_aicpu();
+                dispatch_ts = fast_sys_cnt_aicpu();
             }
 #endif
             for (int i = 0; i < handle_count; i++) {
@@ -624,7 +625,7 @@ int32_t SchedulerContext::stage_consumer_blocks(
     CoreTracker &tracker = core_trackers_[thread_idx];
     // Stamp the real pre-stage time (NOT 0) so the swimlane shows these blocks
     // dispatched during the producer's run, not at trace start.
-    uint64_t early_dispatch_ts = get_sys_cnt_aicpu();
+    uint64_t early_dispatch_ts = fast_sys_cnt_aicpu();
     uint64_t my_cores[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};  // cores gated by this staging pass
     int32_t staged = 0;
     int32_t block = start;
