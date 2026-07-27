@@ -81,11 +81,14 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 
 ### Level 1: Basic Profiling (SIMPLER_DFX=1)
 
+host_build_graph boots **scheduler-only** — the orchestrator runs on the host,
+so the device log carries no `orch_start`/`orch_end`/`orch_cost` lines and no
+`PTO2 total submitted tasks` line (see the note at the top of this file). Every
+AICPU thread schedules its own core slice, so `N_sched == aicpu_thread_num`.
+
 **What's compiled:**
 
 - Base timing counters for scheduler loop (`sched_complete/dispatch/idle/scan`)
-- Per-thread orchestration timing (`orch_start`, `orch_end`, `orch_cost`)
-- PTO2 total submitted tasks count (printed by last orch thread, after orch timing line)
 - Scheduler summary output (`total_time`, `loops`, `tasks_scheduled`)
 - Scheduler lifetime timestamps and cost (`sched_start`, `sched_end`, `sched_cost` — captured inside `resolve_and_dispatch_pto2()`, printed before Scheduler summary)
 
@@ -96,28 +99,27 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 
 **Log output (additional lines vs Level 0, per normal run):**
 
-- `Thread %d: orch_start=%llu orch_end=%llu orch_cost=%.3fus` — each orch thread, after orchestration fully complete
-- `PTO2 total submitted tasks = %d, already executed %d tasks` — last orch thread only (×1), after orch timing line
-- `Thread %d: sched_start=%llu sched_end=%llu sched_cost=%.3fus` — each sched thread, printed before Scheduler summary
-- `Thread %d: Scheduler summary: total_time=%.3fus, loops=%llu, tasks_scheduled=%d` — each sched thread
+- `Thread %d: sched_start=%llu sched_end=%llu sched_cost=%.3fus` — each scheduler thread, printed before Scheduler summary
+- `Thread %d: Scheduler summary: total_time=%.3fus, loops=%llu, tasks_scheduled=%d` — each scheduler thread
 - `Thread %d: sched_start=%llu sched_end(timeout)=%llu sched_cost=%.3fus` — timeout path only (replaces normal `sched_end`)
 
 **LOG_INFO_V9 count (normal run):**
 
-- `N_sched*2 + N_orch*1 + 1` (orch_timing + PTO2_total + sched_timing + Scheduler_summary)
+- `N_sched*2` (sched_timing + Scheduler_summary per scheduler thread)
 
 > See the table at the end for concrete counts based on the `paged_attention` example.
 
-**Example log output** (from `paged_attention`, device 10):
+**Example log output** (`paged_attention`, `aicpu_thread_num=4`, scheduler-only):
 
 ```text
-Thread 2: orch_start=48214752948321 orch_end=48214752959379 orch_cost=230.000us
-Thread 3: orch_start=48214752948316 orch_end=48214752961505 orch_cost=275.000us
-PTO2 total submitted tasks = 13, already executed 13 tasks
-Thread 1: sched_start=48214752948235 sched_end=48214752962379 sched_cost=295.000us
-Thread 1: Scheduler summary: total_time=159.560us, loops=3782, tasks_scheduled=6
 Thread 0: sched_start=48214752948200 sched_end=48214752963571 sched_cost=320.000us
-Thread 0: Scheduler summary: total_time=183.180us, loops=4611, tasks_scheduled=7
+Thread 0: Scheduler summary: total_time=183.180us, loops=4611, tasks_scheduled=4
+Thread 1: sched_start=48214752948235 sched_end=48214752962379 sched_cost=295.000us
+Thread 1: Scheduler summary: total_time=159.560us, loops=3782, tasks_scheduled=3
+Thread 2: sched_start=48214752948260 sched_end=48214752961840 sched_cost=280.000us
+Thread 2: Scheduler summary: total_time=151.220us, loops=3510, tasks_scheduled=3
+Thread 3: sched_start=48214752948290 sched_end=48214752961505 sched_cost=275.000us
+Thread 3: Scheduler summary: total_time=147.940us, loops=3402, tasks_scheduled=3
 ```
 
 **Note:**
@@ -411,12 +413,14 @@ definitions to runtime headers.
 
 ## Log Output Summary
 
-> Example: `paged_attention` on Ascend hardware, normal run (no stall/timeout).
+> Example: `paged_attention` on Ascend hardware, `aicpu_thread_num=4`, normal
+> run (no stall/timeout). host_build_graph boots scheduler-only, so the Level-1
+> count is `N_sched*2` with no orchestrator lines (`N_sched == aicpu_thread_num`).
 
 | Level | Macro Settings | LOG_INFO_V9 Count | Description |
 | ----- | -------------- | ----------------- | ----------- |
 | 0 | `SIMPLER_DFX=0` | 0 | No timing output |
-| 1 | `SIMPLER_DFX=1` | 7 | Timing timestamps + scheduler summary |
+| 1 | `SIMPLER_DFX=1` | 8 | Scheduler timing + summary (4 threads × 2) |
 | 2 | `+SIMPLER_SCHED_PROFILING=1` | — | Scheduler detailed phase breakdown |
 | 3 | `+SIMPLER_ORCH_PROFILING=1` | — | Orchestrator detailed phase breakdown |
 | 4 | `+SIMPLER_TENSORMAP_PROFILING=1` | — | TensorMap lookup stats |
