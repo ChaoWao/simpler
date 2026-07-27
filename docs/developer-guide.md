@@ -183,9 +183,28 @@ This builds the nanobind `_task_interface` extension **and** pre-builds all runt
 | First time / clean checkout | `pip install --no-build-isolation -e .` |
 | Runtime C++ source (`src/{arch}/runtime/`, `src/{arch}/platform/`) | Re-run `pip install --no-build-isolation -e .` (or `.` for a non-editable install). Incremental via the cmake caches under `build/cache/` (~1-2s). |
 | Nanobind bindings (`python/bindings/`) | Re-run `pip install --no-build-isolation -e .` (no rebuild-on-import; `editable.rebuild = false`) |
-| Python-only code (`python/*.py`, `simpler_setup/*.py`) | No rebuild needed (editable install) |
-| Examples / kernels (`examples/{arch}/`, `tests/st/`) | No rebuild needed, just re-run |
+| Nothing — but `HEAD` moved (branch switch, rebase, pull, **or your own commit**) | Re-run `pip install ...`. You may have changed no compiled file, yet the tree moved out from under a binary frozen at install time. `simpler.task_interface` refuses to import on this skew (see below) rather than let struct fields read as 0. |
+| Python-only code (`python/*.py`, `simpler_setup/*.py`) | Nothing to recompile (editable install) — but see the row above: once you *commit* it, the import guard keys on `HEAD`, so reinstall before the next import. |
+| Examples / kernels (`examples/{arch}/`, `tests/st/`) | Nothing to recompile, just re-run — same commit caveat as the row above |
 | `pto_isa.pin` changed | Re-run `pip install`. The cmake cache stamp and the `host_runtime` ccache key include the pinned PTO-ISA commit for a2a3 onboard (and a5 onboard when the SDMA overlay is enabled), so a pin bump invalidates stale runtime objects automatically. |
+
+`_task_interface` records the commit it was compiled from, and
+`simpler.task_interface` compares it against the working tree at import,
+raising when they differ. It is git-based for the same reason
+`RuntimeBuilder._build_cache_stamp` is — mtimes do not survive a branch switch —
+and deliberately keyed on the whole HEAD rather than on the binding sources
+alone: a root `CMakeLists.txt`, `pyproject.toml` or nanobind change alters the
+extension without touching `python/bindings/`, and under-detecting here means
+silently wrong values. The cost of over-detecting is one ~20 s reinstall, and
+120 of the last 200 commits touched the ABI surface anyway — so most of those
+reinstalls are ones you owed regardless, merely made visible.
+
+Verifying that `import simpler` resolves into your worktree does **not** cover
+this: under an editable install that only proves the *Python* is live, while the
+compiled extension stays at whatever `pip install` produced.
+
+The check is inert outside a source tree — a wheel has no `.git` to compare
+against, and a build made without git carries an empty stamp.
 
 A `pto_isa.pin` bump changes the SDMA headers embedded by
 `host_runtime.so`. Install-time runtime builds and run-time kernel compilation

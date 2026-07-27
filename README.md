@@ -1,6 +1,32 @@
-# PTO Runtime - Task Runtime Execution Framework
+# simpler — Simple Runtime
+
+**Make writing runtime simpler.**
 
 Modular runtime for building and executing task dependency graphs on Ascend devices with coordinated AICPU and AICore execution. Three independently compiled programs (Host `.so`, AICPU `.so`, AICore `.o`) work together through clearly defined APIs.
+
+## Where simpler sits in the stack
+
+simpler is one layer of the [hw-native-sys](https://github.com/hw-native-sys) stack. Each repo below imports the ones to its left:
+
+```text
+pto-isa ──▶ simpler ──▶ pypto ──▶ pypto-lib ──▶ pypto-serving
+(tile ISA)  (runtime)  (compiler)  (kernels)    (serving)
+                ▲
+             PTOAS (assembler, installed globally)
+```
+
+**simpler owns** task orchestration and dispatch at runtime: DAG submission, the AICPU/host scheduler, worker and device lifecycle, the host↔device handshake, and the DFX/profiling tooling that reads it back. **simpler does not own** kernel bodies, the tile ISA, graph compilation, or model/serving logic — those belong to the repos below.
+
+| Repository | Owns | Relation to simpler |
+| ---------- | ---- | ------------------- |
+| [pto-isa](https://github.com/hw-native-sys/pto-isa) | PTO tile virtual ISA and its C++ tile-instruction library | Build-time dependency: AICore kernels in `examples/` include its headers; revision pinned by [`pto_isa.pin`](pto_isa.pin) |
+| [PTOAS](https://github.com/hw-native-sys/PTOAS) | `ptoas` — MLIR-based assembler/optimizer lowering PTO bytecode to device code | Provided as a global binary on dev boxes and CI; simpler neither builds nor vendors it |
+| [pypto](https://github.com/hw-native-sys/pypto) | Tensor/Tile programming framework and compiler (Python frontend → PTO IR → device code) | Vendors simpler as a submodule at `runtime/` and drives it through simpler's Python API |
+| [pypto-lib](https://github.com/hw-native-sys/pypto-lib) | Tensor-level kernels and end-to-end model implementations (Qwen3, DeepSeek) | Consumer of pypto + simpler; source of the cross-repo performance and regression workloads |
+| [pypto-serving](https://github.com/hw-native-sys/pypto-serving) | LLM inference service and standalone model runners | Top of the stack — exercises simpler through the full serving path |
+| [pypto_top_level_documents](https://github.com/hw-native-sys/pypto_top_level_documents) | Cross-repo design documents and proposals | Where runtime designs spanning more than one repo are written down |
+
+To run a workload from any of these repos against this checkout of simpler, see [`.claude/skills/multi-repo-setup/SKILL.md`](.claude/skills/multi-repo-setup/SKILL.md).
 
 ## Quick Start
 
@@ -65,8 +91,11 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 
 ## Documentation
 
+Building **on** simpler? Start at **[docs/user/](docs/user/README.md)** — how-to guides plus the Python and CLI reference. **[docs/README.md](docs/README.md) indexes every document**, grouped by task. The entry points:
+
 | Document | Description |
 | -------- | ----------- |
+| [Capability Survey](docs/capability-survey.md) | Status snapshot: what is shipped, gated, or design-only across topology (L2→L4), CANN launch, and comm engines |
 | [Chip-Level Architecture](docs/chip-level-arch.md) | L2 single-chip: three-program model (host/AICPU/AICore), API layers, handshake protocol |
 | [Hierarchical Level Runtime](docs/hierarchical_level_runtime.md) | L0–L6 level model, component composition (Orchestrator / Scheduler / Worker) |
 | [Task Flow](docs/task-flow.md) | End-to-end data flow: Callable / TaskArgs / CallConfig handles, IWorker interface |

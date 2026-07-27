@@ -169,13 +169,13 @@ _OFF_ERROR = 4
 _OFF_CALLABLE = 8
 _OFF_CONFIG = 16
 # Packed CallConfig wire layout — must match call_config.h byte for byte:
-# 7 int32 (block_dim, aicpu_thread_num, enable_l2_swimlane, enable_dump_args,
+# 6 int32 (aicpu_thread_num, enable_l2_swimlane, enable_dump_args,
 # enable_pmu, enable_dep_gen, enable_scope_stats) + uint64 ring sizing
 # overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT: ring_task_window,
 # ring_heap, ring_dep_pool) + 1024-byte NUL-terminated output_prefix. Log config
 # travels separately via ChipWorker.init(log_level, log_info_v) — not on per-task wire.
 _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
-_CFG_FMT = struct.Struct("=iiiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
+_CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # Args region starts after CONFIG, rounded up to 8 bytes so the first
 # Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
 # SIGBUS on strict-alignment platforms (aarch64 atomics, some ARM cores).
@@ -229,6 +229,12 @@ _ROLLBACK_GRACEFUL_TIMEOUT_S = 10.0
 # joiner still re-observes `done` within this interval instead of blocking
 # forever.
 _CLOSE_JOIN_RECHECK_S = 1.0
+# Bounded re-check interval for a RunHandle waiter parked behind the elected
+# waiter. Same backstop role as _CLOSE_JOIN_RECHECK_S: if the elected waiter's
+# notify_all() is skipped (an async BaseException landing between publishing the
+# terminal state and notifying), a parked waiter re-observes that state within
+# this interval instead of blocking forever.
+_RUN_HANDLE_WAIT_RECHECK_S = 1.0
 
 # Control sub-commands (written at _OFF_CALLABLE as uint64)
 _CTRL_MALLOC = 0
@@ -272,6 +278,17 @@ _CTRL_PY_IMPORT_REGISTER = 12
 # for the buffer's registered lifetime — see docs/comm-domain.md.
 _CTRL_MAP_HOST = 14
 _CTRL_UNMAP_HOST = 15
+
+# Operation names a child puts in its error message when a control command
+# fails, so the parent's re-raised text names the operation and not just a
+# numeric sub-command. Absent entries fall back to the raw number.
+_CTRL_OP_NAMES = {
+    _CTRL_REGISTER: "register",
+    _CTRL_UNREGISTER: "unregister",
+    _CTRL_PY_REGISTER: "py_register",
+    _CTRL_PY_IMPORT_REGISTER: "py_register",
+    _CTRL_PY_UNREGISTER: "py_unregister",
+}
 
 # MAP_HOST payload: token (u64), parent_va (u64), nbytes (u64), then the
 # NUL-free host-buffer shm name as the trailing bytes. UNMAP_HOST payload is the
@@ -925,6 +942,17 @@ def _mailbox_addr(shm: SharedMemory) -> int:
     return ctypes.addressof(ctypes.c_char.from_buffer(buf))
 
 
+def _require_matching_pids(shms: list[SharedMemory], pids: list[int], kind: str) -> None:
+    """Guard the shm/pid pairing the C++ liveness check depends on.
+
+    Registering a mailbox against the wrong child pid would make the endpoint
+    watch an unrelated process, so a length mismatch is rejected instead of
+    being silently truncated by ``zip``.
+    """
+    if len(shms) != len(pids):
+        raise RuntimeError(f"{kind} worker shm/pid count mismatch: {len(shms)} mailboxes, {len(pids)} pids")
+
+
 def _buffer_field_addr(buf, offset: int) -> int:
     """Absolute address of a field inside a shared-memory buffer.
 
@@ -986,6 +1014,75 @@ def _read_args_from_mailbox(buf) -> TaskArgs:
     return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
 
 
+# Idle mailbox polls between `getppid()` samples in a forked child. One poll
+# costs ~0.1 us, so this samples roughly every 100 us — fast enough that an
+# orphan is reaped before it is noticeable, cheap enough to be lost in the
+# noise of the poll itself.
+_PARENT_LIVENESS_POLL_INTERVAL = 1000
+
+
+def _run_mailbox_loop(
+    buf,
+    state_addr: int,
+    *,
+    handle_task,
+    handle_control,
+    on_shutdown=None,
+) -> None:
+    """The mailbox state machine every forked child runs.
+
+    Sole waiter on a child mailbox: sub workers, nested next-level workers and
+    chip processes all reach the parent through this one loop, differing only
+    in what they do with a task and which control sub-commands they accept.
+
+    `handle_task()` and `handle_control(sub_cmd)` each return an
+    ``(error_code, message)`` pair and are responsible for catching their own
+    exceptions, because the message wording is what the parent re-raises and
+    only the caller knows its own context. The pair is published to the
+    mailbox error region *before* the DONE state, so the parent never observes
+    completion without the matching error report.
+
+    `on_shutdown()` runs on SHUTDOWN before the loop exits, for children that
+    own a nested Worker; per-child resource teardown that must survive an
+    exception belongs in the caller's own ``finally``.
+
+    A parent that dies without sending SHUTDOWN (SIGKILL from a timeout, an OOM
+    kill, a cancelled CI job) would otherwise leave this loop polling a mailbox
+    nobody writes to, for the lifetime of the machine. The loop therefore
+    samples its own parent and leaves by the SHUTDOWN path once it changes.
+    """
+    parent_pid = os.getppid()
+    liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+    while True:
+        state = _mailbox_load_i32(state_addr)
+        if state == _TASK_READY:
+            code, msg = handle_task()
+            _write_error(buf, code, msg)
+            _mailbox_store_i32(state_addr, _TASK_DONE)
+        elif state == _CONTROL_REQUEST:
+            sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
+            code, msg = handle_control(int(sub_cmd))
+            _write_error(buf, code, msg)
+            _mailbox_store_i32(state_addr, _CONTROL_DONE)
+        elif state == _SHUTDOWN:
+            if on_shutdown is not None:
+                on_shutdown()
+            break
+        else:
+            liveness_countdown -= 1
+            if liveness_countdown <= 0:
+                liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+                # Comparing against the pid captured at entry rather than
+                # testing for pid 1: a subreaper (container init, systemd
+                # user session) adopts orphans instead of init, so the pid
+                # changes but never becomes 1. A live parent's pid cannot
+                # change, so this cannot fire spuriously.
+                if os.getppid() != parent_pid:
+                    if on_shutdown is not None:
+                        on_shutdown()
+                    break
+
+
 def _sub_worker_loop(
     buf,
     registry: dict[int, Any],
@@ -1002,54 +1099,43 @@ def _sub_worker_loop(
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
     host_buf_ranges: list[tuple[int, int, int]] = []
+
+    def handle_task() -> tuple[int, str]:
+        digest = _read_task_digest(buf)
+        cid = identity_table.get(digest)
+        fn = registry.get(int(cid)) if cid is not None else None
+        if fn is None:
+            return 1, f"sub_worker: callable hash {_format_digest(digest)} not registered"
+        try:
+            if host_buf_ranges:
+                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+            args = _read_args_from_mailbox(buf)
+            fn(args)
+        except Exception as e:  # noqa: BLE001
+            return 1, _format_exc("sub_worker", e)
+        return 0, ""
+
+    def handle_control(sub_cmd: int) -> tuple[int, str]:
+        try:
+            if sub_cmd == _CTRL_MAP_HOST:
+                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
+            elif sub_cmd == _CTRL_UNMAP_HOST:
+                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
+            else:
+                _handle_py_callable_control(
+                    buf,
+                    registry,
+                    identity_table,
+                    identity_refs,
+                    sub_cmd,
+                    context="sub_worker",
+                )
+        except Exception as e:  # noqa: BLE001
+            return 1, _format_exc("sub_worker control", e)
+        return 0, ""
+
     try:
-        while True:
-            state = _mailbox_load_i32(state_addr)
-            if state == _TASK_READY:
-                digest = _read_task_digest(buf)
-                cid = identity_table.get(digest)
-                fn = registry.get(int(cid)) if cid is not None else None
-                code = 0
-                msg = ""
-                if fn is None:
-                    code = 1
-                    msg = f"sub_worker: callable hash {_format_digest(digest)} not registered"
-                else:
-                    try:
-                        if host_buf_ranges:
-                            _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-                        args = _read_args_from_mailbox(buf)
-                        fn(args)
-                    except Exception as e:  # noqa: BLE001
-                        code = 1
-                        msg = _format_exc("sub_worker", e)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _TASK_DONE)
-            elif state == _CONTROL_REQUEST:
-                sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-                code = 0
-                msg = ""
-                try:
-                    if sub_cmd == _CTRL_MAP_HOST:
-                        _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-                    elif sub_cmd == _CTRL_UNMAP_HOST:
-                        _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-                    else:
-                        _handle_py_callable_control(
-                            buf,
-                            registry,
-                            identity_table,
-                            identity_refs,
-                            int(sub_cmd),
-                            context="sub_worker",
-                        )
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    msg = _format_exc("sub_worker control", e)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _CONTROL_DONE)
-            elif state == _SHUTDOWN:
-                break
+        _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
         for host_shm, _lo, _hi, _base in host_buf_table.values():
             try:
@@ -1379,7 +1465,7 @@ def _ensure_prepared(cw, registry, prepared, cid: int, *, device_id: int) -> Non
     prepared.add(cid)
 
 
-def _run_chip_main_loop(  # noqa: PLR0912, PLR0913, PLR0915 -- unified TASK_READY / CONTROL_REQUEST state machine
+def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every dependency the handlers close over crosses the fork as an explicit arg, and the control handler carries one branch per sub-command
     cw: ChipWorker,
     buf: memoryview,
     mailbox_addr: int,
@@ -1394,7 +1480,7 @@ def _run_chip_main_loop(  # noqa: PLR0912, PLR0913, PLR0915 -- unified TASK_READ
     on_task_done_success=None,
     prepared: set[int] | None = None,
 ) -> None:
-    """Unified TASK_READY / CONTROL_REQUEST / SHUTDOWN state machine.
+    """Chip-process handlers for `_run_mailbox_loop`.
 
     `on_task_done_success`, if provided, is invoked after a successful
     ``run_from_blob`` and before publishing TASK_DONE. It must
@@ -1417,165 +1503,159 @@ def _run_chip_main_loop(  # noqa: PLR0912, PLR0913, PLR0915 -- unified TASK_READ
     # rebuilt from the table on every map/unmap.
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}  # token -> (shm, lo, hi, child_base)
     host_buf_ranges: list[tuple[int, int, int]] = []  # (parent_lo, parent_hi, child_base)
-    try:
-        while True:
-            state = _mailbox_load_i32(state_addr)
-            if state == _TASK_READY:
-                digest = _read_task_digest(buf)
+
+    def handle_task() -> tuple[int, str]:
+        digest = _read_task_digest(buf)
+        cid = identity_table.get(digest)
+        cfg = _read_config_from_mailbox(buf)
+
+        code = 0
+        msg = ""
+        try:
+            if cid is None:
+                raise RuntimeError(f"callable hash {_format_digest(digest)} not registered")
+            # Run only consumes a prepared slot — it never lazily
+            # prepares. The callable must have been staged via
+            # _CTRL_PREPARE first; reaching TASK_READY without it is a
+            # control-flow bug, so fail loudly instead of masking the
+            # missing-prepare with a first-task latency spike.
+            if cid not in prepared:
+                raise RuntimeError(
+                    f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
+                    f"(register via _CTRL_PREPARE first)"
+                )
+            # Redirect any registered host pointer (a parent VA) in the
+            # blob to this child's own mapping before the runtime reads it.
+            # No-op when nothing is registered.
+            if host_buf_ranges:
+                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+            # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
+            # the blob layout is what `write_blob` already wrote, so re-parsing
+            # it in Python is N×40B of avoidable work and a permanent
+            # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
+            # is the source of truth.
+            cw._impl.run_from_blob(cid, mailbox_addr + _OFF_TASK_ARGS_BLOB, _MAILBOX_ARGS_CAPACITY, cfg)
+        except Exception as e:  # noqa: BLE001
+            code = 1
+            msg = _format_exc(f"chip_process dev={device_id}", e)
+
+        # On a successful kernel run, give the caller a chance to do
+        # post-run work (e.g. store_to_host D2H staging) before the
+        # parent sees TASK_DONE. The kernel's failure path skips the
+        # hook because the device output region is undefined and
+        # staging garbage would mask the real error in post-mortems.
+        if code == 0 and on_task_done_success is not None:
+            code, msg = on_task_done_success()
+        return code, msg
+
+    def handle_control(sub_cmd: int) -> tuple[int, str]:  # noqa: PLR0912 -- one branch per control sub-command
+        code = 0
+        msg = ""
+        try:
+            if sub_cmd == _CTRL_MALLOC:
+                size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                ptr = cw.malloc(size)
+                struct.pack_into("Q", buf, _CTRL_OFF_RESULT, ptr)
+            elif sub_cmd == _CTRL_FREE:
+                ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                cw.free(ptr)
+            elif sub_cmd == _CTRL_COPY_TO:
+                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
+                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
+                cw.copy_to(dst, src, n)
+            elif sub_cmd == _CTRL_COPY_FROM:
+                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
+                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
+                cw.copy_from(dst, src, n)
+            elif sub_cmd == _CTRL_PREPARE:
+                digest = _read_control_digest(buf)
                 cid = identity_table.get(digest)
-                cfg = _read_config_from_mailbox(buf)
-
-                code = 0
-                msg = ""
+                if cid is None:
+                    raise RuntimeError(
+                        f"prepare chip={device_id}: callable hash {_format_digest(digest)} not registered"
+                    )
+                _ensure_prepared(cw, registry, prepared, int(cid), device_id=device_id)
+            elif sub_cmd == _CTRL_REGISTER:
+                digest = _read_control_digest(buf)
+                payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                shm_name = _read_ctrl_staged_shm_name(buf)
+                shm = SharedMemory(name=shm_name)
+                shm_buf = shm.buf
+                assert shm_buf is not None
                 try:
-                    if cid is None:
-                        raise RuntimeError(f"callable hash {_format_digest(digest)} not registered")
-                    # Run only consumes a prepared slot — it never lazily
-                    # prepares. The callable must have been staged via
-                    # _CTRL_PREPARE first; reaching TASK_READY without it is a
-                    # control-flow bug, so fail loudly instead of masking the
-                    # missing-prepare with a first-task latency spike.
-                    if cid not in prepared:
+                    if payload_size <= 0 or payload_size > shm.size:
                         raise RuntimeError(
-                            f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
-                            f"(register via _CTRL_PREPARE first)"
+                            f"CTRL_REGISTER payload size mismatch: payload={payload_size}, shm={shm.size}"
                         )
-                    # Redirect any registered host pointer (a parent VA) in the
-                    # blob to this child's own mapping before the runtime reads it.
-                    # No-op when nothing is registered.
-                    if host_buf_ranges:
-                        _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-                    # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
-                    # the blob layout is what `write_blob` already wrote, so re-parsing
-                    # it in Python is N×40B of avoidable work and a permanent
-                    # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
-                    # is the source of truth.
-                    cw._impl.run_from_blob(cid, mailbox_addr + _OFF_TASK_ARGS_BLOB, _MAILBOX_ARGS_CAPACITY, cfg)
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    msg = _format_exc(f"chip_process dev={device_id}", e)
-
-                # On a successful kernel run, give the caller a chance to do
-                # post-run work (e.g. store_to_host D2H staging) before the
-                # parent sees TASK_DONE. The kernel's failure path skips the
-                # hook because the device output region is undefined and
-                # staging garbage would mask the real error in post-mortems.
-                if code == 0 and on_task_done_success is not None:
-                    code, msg = on_task_done_success()
-
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _TASK_DONE)
-            elif state == _CONTROL_REQUEST:
-                sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-                code = 0
-                msg = ""
-                try:
-                    if sub_cmd == _CTRL_MALLOC:
-                        size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        ptr = cw.malloc(size)
-                        struct.pack_into("Q", buf, _CTRL_OFF_RESULT, ptr)
-                    elif sub_cmd == _CTRL_FREE:
-                        ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        cw.free(ptr)
-                    elif sub_cmd == _CTRL_COPY_TO:
-                        dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                        n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                        cw.copy_to(dst, src, n)
-                    elif sub_cmd == _CTRL_COPY_FROM:
-                        dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                        n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                        cw.copy_from(dst, src, n)
-                    elif sub_cmd == _CTRL_PREPARE:
-                        digest = _read_control_digest(buf)
-                        cid = identity_table.get(digest)
-                        if cid is None:
-                            raise RuntimeError(
-                                f"prepare chip={device_id}: callable hash {_format_digest(digest)} not registered"
-                            )
-                        _ensure_prepared(cw, registry, prepared, int(cid), device_id=device_id)
-                    elif sub_cmd == _CTRL_REGISTER:
-                        digest = _read_control_digest(buf)
-                        payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                        shm_name = _read_ctrl_staged_shm_name(buf)
-                        shm = SharedMemory(name=shm_name)
-                        shm_buf = shm.buf
-                        assert shm_buf is not None
-                        try:
-                            if payload_size <= 0 or payload_size > shm.size:
-                                raise RuntimeError(
-                                    f"CTRL_REGISTER payload size mismatch: payload={payload_size}, shm={shm.size}"
-                                )
-                            callable_obj = ChipCallable.from_bytes(bytes(shm_buf[:payload_size]))
-                            _validate_chip_payload_digest(
-                                callable_obj,
-                                digest,
-                                platform=chip_platform,
-                                runtime=chip_runtime,
-                                context=f"chip_process dev={device_id}",
-                            )
-                            if digest in identity_table:
-                                identity_refs[digest] = identity_refs.get(digest, 1) + 1
-                            else:
-                                cid = _install_local_identity(
-                                    registry, identity_table, identity_refs, digest, callable_obj
-                                )
-                                # Self-heal when a prior unregister popped the local
-                                # identity table but failed before clearing device
-                                # prepared state for the reusable private slot.
-                                if int(cid) in prepared:
-                                    try:
-                                        cw._unregister_slot(int(cid))
-                                    except Exception:  # noqa: BLE001
-                                        pass
-                                    prepared.discard(int(cid))
-                                exported = ctypes.c_char.from_buffer(shm_buf)
-                                try:
-                                    addr = ctypes.addressof(exported)
-                                    cw._impl.register_callable_from_blob(int(cid), addr)
-                                finally:
-                                    del exported
-                                prepared.add(int(cid))
-                        finally:
-                            shm_buf.release()
-                            # Release the local mmap as soon as prepare returns;
-                            # register_callable has already H2D-copied the bytes to
-                            # device GM, so the child no longer needs the shm.
-                            shm.close()
-                    elif sub_cmd == _CTRL_UNREGISTER:
-                        digest = _read_control_digest(buf)
-                        cid, removed = _remove_local_identity(registry, identity_table, identity_refs, digest)
-                        if removed and cid is not None:
-                            cw._unregister_slot(int(cid))
+                    callable_obj = ChipCallable.from_bytes(bytes(shm_buf[:payload_size]))
+                    _validate_chip_payload_digest(
+                        callable_obj,
+                        digest,
+                        platform=chip_platform,
+                        runtime=chip_runtime,
+                        context=f"chip_process dev={device_id}",
+                    )
+                    if digest in identity_table:
+                        identity_refs[digest] = identity_refs.get(digest, 1) + 1
+                    else:
+                        cid = _install_local_identity(registry, identity_table, identity_refs, digest, callable_obj)
+                        # Self-heal when a prior unregister popped the local
+                        # identity table but failed before clearing device
+                        # prepared state for the reusable private slot.
+                        if int(cid) in prepared:
+                            try:
+                                cw._unregister_slot(int(cid))
+                            except Exception:  # noqa: BLE001
+                                pass
                             prepared.discard(int(cid))
-                    elif sub_cmd == _CTRL_ALLOC_DOMAIN:
-                        _handle_ctrl_alloc_domain(cw, buf)
-                    elif sub_cmd == _CTRL_RELEASE_DOMAIN:
-                        _handle_ctrl_release_domain(cw, buf)
-                    elif sub_cmd == _CTRL_COMM_INIT:
-                        _handle_ctrl_comm_init(cw, buf)
-                    elif sub_cmd == _CTRL_MAP_HOST:
-                        _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-                    elif sub_cmd == _CTRL_UNMAP_HOST:
-                        _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-                    elif sub_cmd == _CTRL_L3_L2_REGION_CREATE:
-                        _handle_ctrl_l3_l2_region_create(cw, buf, chip_platform, l3_l2_region_store)
-                    elif sub_cmd == _CTRL_L3_L2_REGION_RELEASE:
-                        _handle_ctrl_l3_l2_region_release(buf, l3_l2_region_store)
-                    else:
-                        raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    if sub_cmd in (_CTRL_REGISTER, _CTRL_UNREGISTER):
-                        op = "register" if sub_cmd == _CTRL_REGISTER else "unregister"
-                        msg = _format_exc(f"{op} hash={_format_digest(_read_control_digest(buf))} chip={device_id}", e)
-                    else:
-                        msg = _format_exc(f"chip_process dev={device_id} ctrl={int(sub_cmd)}", e)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _CONTROL_DONE)
-            elif state == _SHUTDOWN:
-                break
+                        exported = ctypes.c_char.from_buffer(shm_buf)
+                        try:
+                            addr = ctypes.addressof(exported)
+                            cw._impl.register_callable_from_blob(int(cid), addr)
+                        finally:
+                            del exported
+                        prepared.add(int(cid))
+                finally:
+                    shm_buf.release()
+                    # Release the local mmap as soon as prepare returns;
+                    # register_callable has already H2D-copied the bytes to
+                    # device GM, so the child no longer needs the shm.
+                    shm.close()
+            elif sub_cmd == _CTRL_UNREGISTER:
+                digest = _read_control_digest(buf)
+                cid, removed = _remove_local_identity(registry, identity_table, identity_refs, digest)
+                if removed and cid is not None:
+                    cw._unregister_slot(int(cid))
+                    prepared.discard(int(cid))
+            elif sub_cmd == _CTRL_ALLOC_DOMAIN:
+                _handle_ctrl_alloc_domain(cw, buf)
+            elif sub_cmd == _CTRL_RELEASE_DOMAIN:
+                _handle_ctrl_release_domain(cw, buf)
+            elif sub_cmd == _CTRL_COMM_INIT:
+                _handle_ctrl_comm_init(cw, buf)
+            elif sub_cmd == _CTRL_MAP_HOST:
+                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
+            elif sub_cmd == _CTRL_UNMAP_HOST:
+                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
+            elif sub_cmd == _CTRL_L3_L2_REGION_CREATE:
+                _handle_ctrl_l3_l2_region_create(cw, buf, chip_platform, l3_l2_region_store)
+            elif sub_cmd == _CTRL_L3_L2_REGION_RELEASE:
+                _handle_ctrl_l3_l2_region_release(buf, l3_l2_region_store)
+            else:
+                raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
+        except Exception as e:  # noqa: BLE001
+            code = 1
+            if sub_cmd in (_CTRL_REGISTER, _CTRL_UNREGISTER):
+                op = "register" if sub_cmd == _CTRL_REGISTER else "unregister"
+                msg = _format_exc(f"{op} hash={_format_digest(_read_control_digest(buf))} chip={device_id}", e)
+            else:
+                msg = _format_exc(f"chip_process dev={device_id} ctrl={int(sub_cmd)}", e)
+        return code, msg
+
+    try:
+        _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
         _sweep_l2_host_l3_l2_regions(l3_l2_region_store)
         for host_shm, _lo, _hi, _base in host_buf_table.values():
@@ -1678,7 +1758,6 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
 def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     """Reconstruct a CallConfig from the unified mailbox layout."""
     (
-        block_dim,
         aicpu_tn,
         swl,
         dt,
@@ -1692,7 +1771,6 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     ring_heap = list(ring_values[RUNTIME_ENV_RING_COUNT : 2 * RUNTIME_ENV_RING_COUNT])
     ring_dep_pool = list(ring_values[2 * RUNTIME_ENV_RING_COUNT : 3 * RUNTIME_ENV_RING_COUNT])
     cfg = CallConfig()
-    cfg.block_dim = block_dim
     cfg.aicpu_thread_num = aicpu_tn
     cfg.enable_l2_swimlane = swl
     cfg.enable_dump_args = int(dt)
@@ -1724,88 +1802,70 @@ def _child_worker_loop(
     into the inner Worker (see docs section 7).
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
-    while True:
-        state = _mailbox_load_i32(state_addr)
-        if state == _TASK_READY:
-            digest = _read_task_digest(buf)
-            cid = identity_table.get(digest)
-            orch_fn = registry.get(int(cid)) if cid is not None else None
-            code = 0
-            msg = ""
-            if orch_fn is None:
-                code = 1
-                msg = f"child_worker: callable hash {_format_digest(digest)} not registered"
-            else:
+
+    def handle_task() -> tuple[int, str]:
+        digest = _read_task_digest(buf)
+        cid = identity_table.get(digest)
+        orch_fn = registry.get(int(cid)) if cid is not None else None
+        if orch_fn is None:
+            return 1, f"child_worker: callable hash {_format_digest(digest)} not registered"
+        try:
+            args = _read_args_from_mailbox(buf)
+            cfg = _read_config_from_mailbox(buf)
+            inner_worker.run(orch_fn, args, cfg)
+        except Exception as e:  # noqa: BLE001
+            return 1, _format_exc(f"child_worker level={inner_worker.level}", e)
+        return 0, ""
+
+    def handle_control(sub_cmd: int) -> tuple[int, str]:
+        try:
+            if sub_cmd == _CTRL_REGISTER:
+                digest = _read_control_digest(buf)
+                payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+                shm_name = _read_ctrl_staged_shm_name(buf)
+                callable_obj = _read_chip_callable_from_shm(shm_name, int(payload_size))
+                inner_registered = False
                 try:
-                    args = _read_args_from_mailbox(buf)
-                    cfg = _read_config_from_mailbox(buf)
-                    inner_worker.run(orch_fn, args, cfg)
-                except Exception as e:  # noqa: BLE001
-                    code = 1
-                    msg = _format_exc(f"child_worker level={inner_worker.level}", e)
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _TASK_DONE)
-        elif state == _CONTROL_REQUEST:
-            sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-            code = 0
-            msg = ""
-            try:
-                if sub_cmd == _CTRL_REGISTER:
-                    digest = _read_control_digest(buf)
-                    payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                    shm_name = _read_ctrl_staged_shm_name(buf)
-                    callable_obj = _read_chip_callable_from_shm(shm_name, int(payload_size))
-                    inner_registered = False
-                    try:
-                        inner_worker._register_child_chip(callable_obj, digest=digest)
-                        inner_registered = True
-                        _install_local_identity(
-                            registry,
-                            identity_table,
-                            identity_refs,
-                            digest,
-                            callable_obj,
-                        )
-                    except Exception:
-                        if inner_registered:
-                            inner_worker._unregister_child_digest(digest=digest)
-                        raise
-                elif sub_cmd == _CTRL_UNREGISTER:
-                    digest = _read_control_digest(buf)
-                    inner_worker._unregister_child_digest(digest=digest)
-                    _remove_local_identity(registry, identity_table, identity_refs, digest)
-                elif sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER, _CTRL_PY_UNREGISTER):
-                    _handle_py_callable_control(
-                        buf,
+                    inner_worker._register_child_chip(callable_obj, digest=digest)
+                    inner_registered = True
+                    _install_local_identity(
                         registry,
                         identity_table,
                         identity_refs,
-                        int(sub_cmd),
-                        context=f"child_worker level={inner_worker.level}",
+                        digest,
+                        callable_obj,
                     )
-                else:
-                    raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
-            except Exception as e:  # noqa: BLE001
-                code = 1
-                op = (
-                    "register"
-                    if sub_cmd == _CTRL_REGISTER
-                    else (
-                        "unregister"
-                        if sub_cmd == _CTRL_UNREGISTER
-                        else (
-                            "py_register"
-                            if sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER)
-                            else ("py_unregister" if sub_cmd == _CTRL_PY_UNREGISTER else f"ctrl={int(sub_cmd)}")
-                        )
-                    )
+                except Exception:
+                    if inner_registered:
+                        inner_worker._unregister_child_digest(digest=digest)
+                    raise
+            elif sub_cmd == _CTRL_UNREGISTER:
+                digest = _read_control_digest(buf)
+                inner_worker._unregister_child_digest(digest=digest)
+                _remove_local_identity(registry, identity_table, identity_refs, digest)
+            elif sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER, _CTRL_PY_UNREGISTER):
+                _handle_py_callable_control(
+                    buf,
+                    registry,
+                    identity_table,
+                    identity_refs,
+                    sub_cmd,
+                    context=f"child_worker level={inner_worker.level}",
                 )
-                msg = _format_exc(f"child_worker level={inner_worker.level} {op}", e)
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _CONTROL_DONE)
-        elif state == _SHUTDOWN:
-            inner_worker.close()
-            break
+            else:
+                raise RuntimeError(f"unknown control sub-command {sub_cmd}")
+        except Exception as e:  # noqa: BLE001
+            op = _CTRL_OP_NAMES.get(sub_cmd, f"ctrl={sub_cmd}")
+            return 1, _format_exc(f"child_worker level={inner_worker.level} {op}", e)
+        return 0, ""
+
+    _run_mailbox_loop(
+        buf,
+        state_addr,
+        handle_task=handle_task,
+        handle_control=handle_control,
+        on_shutdown=inner_worker.close,
+    )
 
 
 class _Lifecycle(enum.Enum):
@@ -1863,6 +1923,175 @@ class _StartupCancelled(BaseException):
 
     Only the forked-child SIGTERM path raises this: the startup *root* is not
     cancellable (``close()`` fails fast while INITIALIZING)."""
+
+
+@dataclass
+class _RunResources:
+    """Python resources whose lifetime ends at one native run fence."""
+
+    remote_slot_refs: list[RemoteBufferHandle] = field(default_factory=list)
+    live_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
+    pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
+    l3_l2_regions: list[Any] = field(default_factory=list)
+    l3_l2_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
+    # True once the owning run's fence has claimed the domains above. A release
+    # that arrives after this has no fence left to run behind and frees inline.
+    # Read and written only under `domain_lock`.
+    retired: bool = False
+    # Serializes one domain's release transition against the fence that retires
+    # this run. Without it a release can read `retired` as False, be preempted,
+    # and append to a queue the fence has already drained for the last time —
+    # unreachable from the fence and from close(), which the release itself
+    # made blind by dropping the handle from `_live_domains`.
+    domain_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class RunHandle:
+    """Completion handle returned by :meth:`Worker.submit`.
+
+    A handle owns the run's Python keepalives and keeps its Worker alive until
+    the native completion fence has fired and run-owned resources are cleaned
+    up. Waiting is idempotent; every waiter observes the same terminal result.
+    """
+
+    def __init__(
+        self,
+        worker: Worker,
+        run_id: int,
+        keepalive: tuple[Any, ...],
+        resources: _RunResources | None = None,
+    ) -> None:
+        self._worker = worker
+        self._run_id: int | None = run_id
+        self._keepalive: tuple[Any, ...] | None = keepalive
+        self._resources = resources if resources is not None else _RunResources()
+        self._cv = threading.Condition()
+        self._wait_in_progress = False
+        self._terminal = False
+        self._error: BaseException | None = None
+
+    @classmethod
+    def _completed(cls, worker: Worker) -> RunHandle:
+        handle = cls.__new__(cls)
+        handle._worker = worker
+        handle._run_id = None
+        handle._keepalive = None
+        handle._resources = _RunResources()
+        handle._cv = threading.Condition()
+        handle._wait_in_progress = False
+        handle._terminal = True
+        handle._error = None
+        return handle
+
+    @staticmethod
+    def _deadline(timeout: float | None) -> float | None:
+        if timeout is None:
+            return None
+        value = float(timeout)
+        if value < 0 or not math.isfinite(value):
+            raise ValueError("RunHandle timeout must be a non-negative finite number of seconds")
+        return time.monotonic() + value
+
+    @property
+    def done(self) -> bool:
+        """True once this run is terminal and its cleanup has been published.
+
+        Reads False while another waiter is still publishing cleanup, so a run
+        whose native fence has already fired can report False until that waiter
+        finishes.
+        """
+        with self._cv:
+            if self._terminal:
+                return True
+            # A waiter may have crossed the native fence and released the run
+            # identity while it is still publishing cleanup. Avoid querying a
+            # native id that can disappear in that interval.
+            if self._wait_in_progress:
+                return False
+            run_id = self._run_id
+            assert run_id is not None
+            return self._worker._run_handle_done(run_id)
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Wait for completion, raising ``TimeoutError`` or the run's error."""
+        # Exactly one waiter is elected to cross the native fence; the rest park
+        # on the CV until it publishes. That election is unrecoverable if it is
+        # abandoned silently — no other path clears `_wait_in_progress`, and
+        # Worker.close() drains the handle with an untimed wait() — so every
+        # publication below (both abandonment paths and the terminal one) is a
+        # resilient publish in the shape close() uses for its _CloseAttempt:
+        # plain attribute assigns land BEFORE the CV acquire, whose only
+        # remaining work is notify_all(). An async BaseException in that
+        # interruptible acquire therefore cannot strand the handle, and a parked
+        # waiter's bounded re-check recovers the skipped notify. The only
+        # irreducible window is an async exception landing between the `_error`
+        # and `_terminal` assigns.
+        deadline = self._deadline(timeout)
+        with self._cv:
+            while not self._terminal and self._wait_in_progress:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("RunHandle.wait() timed out")
+                recheck = (
+                    _RUN_HANDLE_WAIT_RECHECK_S if remaining is None else min(remaining, _RUN_HANDLE_WAIT_RECHECK_S)
+                )
+                self._cv.wait(timeout=recheck)
+            if self._terminal:
+                error = self._error
+                if error is not None:
+                    raise error
+                return
+            self._wait_in_progress = True
+            run_id = self._run_id
+
+        assert run_id is not None
+        native_error: BaseException | None = None
+        try:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            completed = self._worker._wait_run_handle(run_id, remaining)
+        except Exception as exc:  # native run failures are terminal
+            completed = True
+            native_error = exc
+        except BaseException:
+            self._wait_in_progress = False
+            with self._cv:
+                self._cv.notify_all()
+            raise
+
+        if not completed:
+            self._wait_in_progress = False
+            with self._cv:
+                self._cv.notify_all()
+            raise TimeoutError("RunHandle.wait() timed out")
+
+        # Cleanup runs exactly once, on this waiter, and its outcome IS the
+        # handle's result: an interruption mid-finalize is cached like any other
+        # error rather than lost, so the publication below is unconditional.
+        try:
+            error = self._worker._finalize_run_handle(self, run_id, native_error)
+        except BaseException as exc:  # noqa: BLE001
+            error = exc
+        self._error = error
+        self._run_id = None
+        self._keepalive = None
+        self._terminal = True
+        self._wait_in_progress = False
+        with self._cv:
+            self._cv.notify_all()
+        if error is not None:
+            raise error
+
+    def result(self, timeout: float | None = None) -> None:
+        """Alias for :meth:`wait`; successful runs have no return value."""
+        self.wait(timeout)
+
+    def _wait_for_serialization(self) -> None:
+        """Drain this run before another submission, without poisoning it."""
+        try:
+            self.wait()
+        except Exception:
+            # The result remains cached for this handle's public wait/result.
+            pass
 
 
 def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_leader: bool = False) -> None:
@@ -2025,6 +2254,17 @@ class Worker:
         self._last_rollback: dict[str, list[int]] | None = None
         self._hierarchical_start_mu = threading.Lock()
         self._hierarchical_start_cv = threading.Condition(self._hierarchical_start_mu)
+        # Asynchronous completion currently admits only one live device run. A
+        # new submit drains the prior accepted handle under this gate.
+        self._submit_mu = threading.Lock()
+        # Guarded by _hierarchical_start_cv. Handles are installed before their
+        # orchestration callback can enqueue work and retired after fence-owned
+        # cleanup, so close() can drain the exact accepted set.
+        self._accepted_run_handles: set[RunHandle] = set()
+        # submit graph construction is serialized by _submit_mu. Resource
+        # creation helpers use this pointer to bind new objects to the handle
+        # being built; the pointer is cleared before submit() returns.
+        self._building_run_resources: _RunResources | None = None
         # Absolute time.monotonic() deadline for the current startup epoch, set
         # once at init() and shared by every child group and recursive descendant
         # so the whole tree comes up within a single startup_timeout_s budget.
@@ -2060,6 +2300,8 @@ class Worker:
         self._remote_worker_ids: list[int] = []
         self._remote_sessions: list[_RemoteSession] = []
         self._next_level_worker_id_count: int = 0
+        # Fallback ownership for private helpers used outside Worker.submit.
+        # Normal orchestration-owned refs live in RunHandle._resources.
         self._active_remote_slot_refs: list[RemoteBufferHandle] = []
         self._pending_remote_buffer_frees: list[RemoteBufferHandle] = []
         self._pending_remote_import_releases: list[RemoteBufferHandle] = []
@@ -2068,15 +2310,19 @@ class Worker:
         # among live handles).  ``orch.allocate_domain`` adds entries here;
         # ``release()`` removes them and queues a deferred backend free.
         self._live_domains: dict[str, CommDomainHandle] = {}
-        # Handles whose `release()` has been called inside an orch function.
-        # The backend free is deferred until after Worker.run.drain() so that
-        # tasks already submitted with this domain's device_ctx / buffer_ptrs
-        # see live memory through execution.
-        self._pending_release_domains: list[CommDomainHandle] = []
         # Monotonic per-Worker counter; mixed into IPC barrier filenames so
         # two concurrent allocations don't share a marker file.  Wraps after
         # 2^64 allocations — far beyond any realistic Worker lifetime.
         self._next_alloc_id: int = 0
+        # Exactly one caller drives CTRL_RELEASE_DOMAIN for a given allocation,
+        # and every other caller waits for its outcome. Several paths can reach
+        # one handle at once — an end-of-run or close() sweep working from its
+        # snapshot, and a release on an already retired run — where a second
+        # release of a live allocation is a backend double free, and returning
+        # before the first one finishes would let close() tear the mailboxes
+        # down under an in-flight release.
+        self._domain_free_mu = threading.Lock()
+        self._domain_free_results: dict[int, BaseException | None] = {}
         self._alloc_id_lock = threading.Lock()
         # Base HCCL/sim communicator is built lazily on the first
         # ``orch.allocate_domain`` call (see ``_ensure_comm_base``).  We
@@ -2753,15 +2999,23 @@ class Worker:
         return captured
 
     def _adopt_remote_slot_refs(self, handles: list[RemoteBufferHandle]) -> None:
-        self._active_remote_slot_refs.extend(handles)
+        resources = self._building_run_resources
+        if resources is None:
+            self._active_remote_slot_refs.extend(handles)
+        else:
+            resources.remote_slot_refs.extend(handles)
 
     def _release_remote_slot_refs(self, handles: list[RemoteBufferHandle]) -> None:
         for handle in handles:
             handle._release_slot_ref()
 
-    def _release_active_remote_slot_refs(self) -> None:
-        refs = self._active_remote_slot_refs
-        self._active_remote_slot_refs = []
+    def _release_active_remote_slot_refs(self, resources: _RunResources | None = None) -> None:
+        if resources is None:
+            refs = self._active_remote_slot_refs
+            self._active_remote_slot_refs = []
+        else:
+            refs = resources.remote_slot_refs
+            resources.remote_slot_refs = []
         self._release_remote_slot_refs(refs)
 
     def _flush_pending_remote_frees(self) -> None:
@@ -4276,20 +4530,25 @@ class Worker:
         dw = self._worker
         assert dw is not None
 
-        # Register chip workers as NEXT_LEVEL (L3)
+        # Register chip workers as NEXT_LEVEL (L3). The child pid lets the C++
+        # endpoint fail a dispatch whose child died instead of spinning on a
+        # mailbox that can no longer be completed.
         if device_ids:
-            for shm in self._chip_shms:
-                dw.add_next_level_worker(_mailbox_addr(shm))
+            _require_matching_pids(self._chip_shms, self._chip_pids, "chip")
+            for shm, pid in zip(self._chip_shms, self._chip_pids):
+                dw.add_next_level_worker(_mailbox_addr(shm), pid)
 
         # Register Worker children as NEXT_LEVEL (L4+)
         if self._next_level_shms and not hasattr(dw, "add_next_level_worker_at"):
             raise RuntimeError("explicit NEXT_LEVEL worker ids require a rebuilt _task_interface module")
+        _require_matching_pids(self._next_level_shms, self._next_level_pids, "next_level")
         for idx, shm in enumerate(self._next_level_shms):
             worker_id = self._next_level_worker_ids[idx]
-            dw.add_next_level_worker_at(worker_id, _mailbox_addr(shm))
+            dw.add_next_level_worker_at(worker_id, _mailbox_addr(shm), self._next_level_pids[idx])
 
-        for shm in self._sub_shms:
-            dw.add_sub_worker(_mailbox_addr(shm))
+        _require_matching_pids(self._sub_shms, self._sub_pids, "sub")
+        for shm, pid in zip(self._sub_shms, self._sub_pids):
+            dw.add_sub_worker(_mailbox_addr(shm), pid)
 
         # Start Scheduler + WorkerThreads (C++ threads start here, after fork)
         dw.init()
@@ -4573,7 +4832,9 @@ class Worker:
         if worker_id < 0 or worker_id >= len(device_ids):
             raise ValueError(f"create_l3_l2_region: worker_id {worker_id} outside [0, {len(device_ids)})")
 
-    def _poison_l3_l2_region_from_endpoint_error(self, exc: BaseException) -> bool:
+    def _poison_l3_l2_region_from_endpoint_error(
+        self, exc: BaseException, resources: _RunResources | None = None
+    ) -> bool:
         match = _L3_L2_ENDPOINT_ERROR_REGION_RE.search(str(exc))
         if match is None:
             return False
@@ -4581,7 +4842,8 @@ class Worker:
         if region_id == 0:
             return False
         poisoned = False
-        for region in self._live_l3_l2_regions:
+        regions = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
+        for region in regions:
             if int(region.region_id) == region_id:
                 region._poison()
                 poisoned = True
@@ -4598,8 +4860,10 @@ class Worker:
         nbytes = int(tensor.nbytes())
         if base <= 0 or nbytes <= 0:
             return
-        self._l3_l2_orch_comm_host_buffers[base] = max(
-            int(self._l3_l2_orch_comm_host_buffers.get(base, 0)),
+        resources = self._building_run_resources
+        buffers = self._l3_l2_orch_comm_host_buffers if resources is None else resources.l3_l2_orch_comm_host_buffers
+        buffers[base] = max(
+            int(buffers.get(base, 0)),
             nbytes,
         )
 
@@ -4614,7 +4878,9 @@ class Worker:
         nbytes = int(tensor.nbytes())
         if base <= 0 or nbytes <= 0:
             raise ValueError("L3-L2 payload buffer must have a nonzero address and size")
-        registered_nbytes = self._l3_l2_orch_comm_host_buffers.get(base)
+        resources = self._building_run_resources
+        buffers = self._l3_l2_orch_comm_host_buffers if resources is None else resources.l3_l2_orch_comm_host_buffers
+        registered_nbytes = buffers.get(base)
         if registered_nbytes is None:
             raise ValueError("L3-L2 payload Tensor is not registered; use a tensor returned by orch.alloc(...)")
         if nbytes > int(registered_nbytes):
@@ -4628,6 +4894,7 @@ class Worker:
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
             raise ValueError("create_l3_l2_region: counter_bytes must be positive and a multiple of 4")
         self._validate_l3_l2_worker_id(int(worker_id))
+        resources = self._building_run_resources
         req_shm = SharedMemory(create=True, size=_REGION_CREATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=_REGION_CREATE_REPLY_BYTES)
         req_buf = cast(memoryview, req_shm.buf)
@@ -4677,6 +4944,8 @@ class Worker:
             )
             region = L3L2OrchRegion(self, int(worker_id), reply.desc, l3_host_mapping)
             self._live_l3_l2_regions.append(region)
+            if resources is not None:
+                resources.l3_l2_regions.append(region)
             return region
         except Exception:
             if l3_host_mapping is not None:
@@ -4701,13 +4970,15 @@ class Worker:
                 except (BufferError, FileNotFoundError, OSError):
                     pass
 
-    def _cleanup_l3_l2_regions(self) -> None:
+    def _cleanup_l3_l2_regions(self, resources: _RunResources | None = None) -> None:
         # Per-region best-effort: every region is attempted (and _expire()d) even
         # if one raises, so a failing region never strands the rest; the first
         # error is raised after all are attempted so close() reports the leak.
-        if not self._live_l3_l2_regions:
+        tracked = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
+        if not tracked:
             return
-        regions, self._live_l3_l2_regions = self._live_l3_l2_regions, []
+        regions = list(tracked)
+        tracked.clear()
         errors: list[BaseException] = []
         for region in regions:
             try:
@@ -4719,6 +4990,9 @@ class Worker:
                     region._expire()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
+            finally:
+                if resources is not None:
+                    self._live_l3_l2_regions[:] = [live for live in self._live_l3_l2_regions if live is not region]
         if errors:
             raise errors[0]
 
@@ -4812,6 +5086,11 @@ class Worker:
             raise RuntimeError("allocate_domain requires level >= 3")
         if self._worker is None:
             raise RuntimeError("allocate_domain requires a hierarchical Worker (_start_hierarchical ran)")
+        # A domain's lifetime ends at the fence of the run that allocated it,
+        # so there is no owner to charge it to outside graph construction.
+        resources = self._building_run_resources
+        if resources is None:
+            raise RuntimeError("allocate_domain is only valid while a run's graph is being built")
         if not workers:
             raise ValueError("allocate_domain: workers must be non-empty")
         if len(set(workers)) != len(workers):
@@ -4933,9 +5212,11 @@ class Worker:
             workers=workers,
             contexts=contexts,
             allocation_id=allocation_id,
-            _release_fn=self._release_domain_handle,
+            _release_fn=lambda released, owner=resources: self._release_domain_handle(released, owner),
         )
         self._live_domains[name] = handle
+        if resources is not None:
+            resources.live_domains[name] = handle
         # The backend windows are now live: record each chip's window base and
         # every carved buffer pointer so a later kind4 (child_memory) dispatch of
         # one of them is validated against its owning chip. Revoked by
@@ -4948,32 +5229,81 @@ class Worker:
                     self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id)
         return handle
 
-    def _release_domain_handle(self, handle: CommDomainHandle) -> None:
+    def _release_domain_handle(self, handle: CommDomainHandle, resources: _RunResources) -> None:
         """Mark a handle for release.  Actual backend free is deferred.
 
         Called by ``CommDomainHandle.release()``.  We do NOT drive
         ``CTRL_RELEASE_DOMAIN`` here because the orch function is allowed
         to have already submitted DAG tasks that capture the handle's
         ``device_ctx`` / ``buffer_ptrs``.  Those tasks must see live
-        memory through execution; ``Worker.run`` calls
-        ``_execute_pending_domain_releases`` only after ``drain()``.
+        memory through execution; the queue is drained by
+        ``_execute_pending_domain_releases`` once the owning run's fence fires.
+
+        ``resources`` is the run that allocated the handle, bound at
+        allocation; a handle released after that run's fence has no drain left
+        and is reported rather than silently queued.
         """
         if self._worker is None:
             return
-        # Pop from live_domains so a subsequent allocate_domain(name=...)
-        # call within the same run can reuse the name.  The actual memory
-        # is still live until _execute_pending_domain_releases runs.
-        self._live_domains.pop(handle.name, None)
-        self._pending_release_domains.append(handle)
+        with resources.domain_lock:
+            resources.live_domains.pop(handle.name, None)
+            # Pop from live_domains so a subsequent allocate_domain(name=...)
+            # call within the same run can reuse the name.  The actual memory
+            # is still live until _execute_pending_domain_releases runs.
+            if self._live_domains.get(handle.name) is handle:
+                self._live_domains.pop(handle.name)
+            if not resources.retired:
+                resources.pending_release_domains.append(handle)
+                return
+        # Deferral exists so tasks that captured this domain still see live
+        # memory; the owning run's fence has passed, so there is nothing left
+        # to defer behind. Freed outside the lock — it is a backend call.
+        self._free_domain_after_fence(handle)
 
-    def _execute_pending_domain_releases(self) -> None:
+    def _retire_run_domains(self, resources: _RunResources) -> None:
+        """Close this run's deferred-release path and free anything left on it.
+
+        A release that read `retired` as False contends for `domain_lock`, so
+        it has either already appended (and is drained here) or observes
+        retirement and frees itself.
+        """
+        with resources.domain_lock:
+            resources.retired = True
+            stragglers = list(resources.pending_release_domains)
+            resources.pending_release_domains.clear()
+        for handle in stragglers:
+            self._free_domain_after_fence(handle)
+
+    def _free_domain_after_fence(self, handle: CommDomainHandle) -> None:
+        """Back-end free for a handle whose owning run has retired.
+
+        Tolerates a handle the end-of-run sweep already freed: the sweep works
+        from a snapshot, so a release taken after that snapshot reaches here
+        for a domain that is already gone.
+        """
+        if handle.freed:
+            return
+        try:
+            self._release_domain_now(handle)
+            handle._freed = True  # noqa: SLF001 -- runtime owns this transition
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(
+                f"Worker._free_domain_after_fence: {handle.name!r} "
+                f"(allocation_id={handle.allocation_id}) released after its run's fence, "
+                f"immediate free failed: {type(e).__name__}: {e}\n"
+            )
+            sys.stderr.flush()
+
+    def _execute_pending_domain_releases(self, resources: _RunResources) -> None:
         """Drive CTRL_RELEASE_DOMAIN for every queued handle.  Must run
-        after ``self._orch._drain()`` so chip-side tasks have completed
+        after ``self._orch._wait_run()`` so chip-side tasks have completed
         their use of the domain memory.
         """
-        if not self._pending_release_domains:
+        pending_releases = resources.pending_release_domains
+        if not pending_releases:
             return
-        pending, self._pending_release_domains = self._pending_release_domains, []
+        pending = list(pending_releases)
+        pending_releases.clear()
         for handle in pending:
             try:
                 self._release_domain_now(handle)
@@ -4991,10 +5321,36 @@ class Worker:
                 sys.stderr.flush()
 
     def _release_domain_now(self, handle: CommDomainHandle) -> None:
-        """Synchronous backend release for one handle.  Used by the
-        deferred-release path and by the abort/close cleanup helpers."""
+        """Synchronous backend release for one handle, exactly once.
+
+        Used by the deferred-release path and by the abort/close cleanup
+        helpers. The first caller drives the release; a second caller for the
+        same allocation blocks until that release finishes and then sees its
+        outcome, so it never issues a duplicate CTRL_RELEASE_DOMAIN and never
+        reports success early. Returning before the owner finished would let a
+        caller mark the handle freed, drop it from ``_live_domains`` and — on
+        the close() path — tear down the mailboxes the release is still using.
+
+        A failure is replayed to every later caller rather than retried, so the
+        sweeps keep the handle in ``_live_domains`` as a detectable residual.
+        """
         if self._worker is None:
             return
+        with self._domain_free_mu:
+            if handle.allocation_id in self._domain_free_results:
+                failure = self._domain_free_results[handle.allocation_id]
+                if failure is not None:
+                    raise failure
+                return
+            try:
+                self._release_domain_claimed(handle)
+            except BaseException as exc:
+                self._domain_free_results[handle.allocation_id] = exc
+                raise
+            self._domain_free_results[handle.allocation_id] = None
+
+    def _release_domain_claimed(self, handle: CommDomainHandle) -> None:
+        """Drive CTRL_RELEASE_DOMAIN. Caller holds this allocation's claim."""
         # Revoke provenance BEFORE the physical free: once release begins the
         # domain's pointers are no longer dispatchable. Revoking after the
         # backend free would leave a use-after-free window (a concurrent
@@ -5042,7 +5398,8 @@ class Worker:
                     shm.unlink()
                 except Exception:  # noqa: BLE001
                     pass
-        self._live_domains.pop(handle.name, None)
+        if self._live_domains.get(handle.name) is handle:
+            self._live_domains.pop(handle.name)
 
     def _dispatch_control_domain(
         self,
@@ -5087,25 +5444,28 @@ class Worker:
                 f"{len(errors)}/{len(workers)} chips; first error chip={first[0]}: {first[1]}"
             )
 
-    def _release_all_live_domains(self) -> None:
+    def _release_all_live_domains(self, resources: _RunResources | None = None) -> None:
         """Best-effort release of every still-live domain handle (LIFO).
 
-        Called from ``Worker.run`` end-of-run sweep (after pending releases)
-        and ``Worker.close``.  Skips the deferred-release machinery
-        (``_pending_release_domains``) because by the time this runs, drain
-        has already happened — synchronous release of leftover handles is
-        safe.  Falls back to immediate backend free + drop from
-        ``_live_domains`` on each handle; logs and moves on if one fails.
+        Called from the end-of-run sweep (after the owning run's pending
+        releases) and from ``Worker.close``.  Skips the deferred-release
+        queue because by the time this runs, drain has already happened —
+        synchronous release of leftover handles is safe.  Falls back to
+        immediate backend free + drop from ``_live_domains`` on each handle;
+        logs and moves on if one fails.
         """
-        for handle in list(self._live_domains.values())[::-1]:
+        live_domains = self._live_domains if resources is None else resources.live_domains
+        for handle in list(live_domains.values())[::-1]:
             try:
                 # Mark released first (flips handle._released so further
                 # indexing raises), then synchronously free.  The handle is
-                # not in _pending_release_domains, so we use the direct path.
+                # not in the deferred-release queue, so we use the direct path.
                 if not handle.released:
                     handle._released = True  # noqa: SLF001 -- runtime owns the transition
                 self._release_domain_now(handle)
                 handle._freed = True  # noqa: SLF001
+                if live_domains.get(handle.name) is handle:
+                    live_domains.pop(handle.name)
             except Exception as e:  # noqa: BLE001
                 sys.stderr.write(
                     f"Worker._release_all_live_domains: {handle.name!r} release failed: {type(e).__name__}: {e}\n"
@@ -5614,85 +5974,161 @@ class Worker:
     # run — uniform entry point
     # ------------------------------------------------------------------
 
-    def run(self, callable, args=None, config=None) -> None:
-        """Execute one task (L2) or one DAG (L3+) synchronously.
+    def submit(self, callable, args=None, config=None) -> RunHandle:
+        """Submit one task (L2) or one DAG (L3+) and return its completion handle.
 
         Dispatch:
           - L2: ``callable`` is a ``CallableHandle`` returned by
             ``Worker.register(chip_callable)``. Routes to the private slot
-            carried by the handle.
+            carried by the handle. The current L2 backend remains blocking, so
+            the returned handle is already complete.
           - L3+: ``callable`` is a Python orch fn invoked with the
-            ``Orchestrator`` handle.
+            ``Orchestrator`` handle. Graph construction completes synchronously;
+            device completion is reported by the returned handle.
 
         ``args``  : TaskArgs (optional)
         ``config``: CallConfig (optional, default-constructed if None)
 
-        Returns ``None``. Per-stage run timing (host wall, on-NPU device wall +
+        Only one live device run is admitted: a later submission waits for the
+        previous handle's fence and cleanup before building its DAG.
+        """
+        with self._operation_lease("submit"):
+            return self._submit_locked(callable, args, config)
+
+    def run(self, callable, args=None, config=None) -> None:
+        """Execute one task or DAG synchronously as ``submit(...).wait()``.
+
+        Per-stage run timing (host wall, on-NPU device wall +
         AICPU phase breakdown) is no longer returned — the platform emits it as
         ``[STRACE]`` log markers from each L2 ``simpler_run``, so the L3
         dispatcher and its L2 children are observed uniformly. Parse the markers
         with ``simpler_setup.tools.strace_timing`` (see
         ``docs/dfx/host-trace.md``).
         """
-        with self._operation_lease("run"):
-            self._run_locked(callable, args, config)
+        self.submit(callable, args=args, config=config).wait()
 
-    def _run_locked(self, callable, args, config) -> None:
+    def _submit_locked(self, callable, args, config) -> RunHandle:
         cfg = config if config is not None else CallConfig()
 
         if self.level == 2:
             assert self._chip_worker is not None
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
             self._chip_worker._run_slot(state.slot_id, args, cfg)
-            return None
+            return RunHandle._completed(self)
 
+        with self._submit_mu:
+            # Cleanup is Worker-global while only one live device run is
+            # admitted. Drain prior handles before a new callback can mutate
+            # those resources; errors remain attached only to their origin.
+            with self._hierarchical_start_cv:
+                prior_handles = tuple(self._accepted_run_handles)
+            for handle in prior_handles:
+                handle._wait_for_serialization()
+            return self._submit_l3_locked(callable, args, cfg)
+
+    def _submit_l3_locked(self, callable, args, cfg: CallConfig) -> RunHandle:
         assert self._orch is not None
         assert self._worker is not None
-        # Drop any error stashed by a previous run() so this call starts
-        # clean. drain() rethrows on the way out; every successful run()
-        # leaves the error slot empty, but an unrelated caller may have
-        # poked it.
-        self._orch._clear_error()
-        self._orch._scope_begin()
+        run_id = self._orch._begin_run()
+        resources = _RunResources()
+        handle = RunHandle(self, run_id, (callable, args, cfg), resources)
+        with self._hierarchical_start_cv:
+            self._accepted_run_handles.add(handle)
+            self._hierarchical_start_cv.notify_all()
+
+        scope_open = False
+        self._building_run_resources = resources
         try:
+            self._orch._scope_begin()
+            scope_open = True
             callable(self._orch, args, cfg)
-        finally:
-            # Always release scope refs and drain so ring slots aren't
-            # stranded when the orch fn raises mid-DAG. drain() also
-            # rethrows the first dispatch failure for this run — that
-            # is how child-task exceptions surface to the caller of
-            # Worker.run(). scope_end deliberately does NOT throw: if
-            # it did, released refs would be incomplete and drain
-            # would hang on in-flight tasks.
+            scope_open = False
             self._orch._scope_end()
-            # ORDER MATTERS: drain() must complete first so any in-flight
-            # task that captured a now-pending handle's device_ctx /
-            # buffer_ptrs sees live memory.  THEN execute the pending
-            # backend releases.  Last, sweep any handles that the orch
-            # function neither released nor passed out (covers exception
-            # unwind and "forgot to release" — auto-release in LIFO).
-            # drain() rethrows the first chip-task/dispatch failure, so the
-            # cleanup lives in a finally: a failed task must not strand
-            # backend domain allocations into the next run.
+            self._orch._close_run_submission(run_id)
+        except BaseException as e:
             try:
-                try:
-                    self._orch._drain()
-                except Exception as e:
-                    self._poison_l3_l2_region_from_endpoint_error(e)
-                    raise
+                if scope_open:
+                    scope_open = False
+                    self._orch._scope_end()
             finally:
-                self._release_active_remote_slot_refs()
-                self._flush_pending_remote_frees()
                 try:
-                    self._cleanup_l3_l2_regions()
+                    self._orch._fail_run_submission(run_id, _format_exc("orchestration", e))
+                except Exception:
+                    # The orchestration cause is the useful one, so a failure
+                    # while closing the run must not replace it; the handle's
+                    # own wait still reports the run's terminal state.
+                    pass
                 finally:
-                    self._l3_l2_orch_comm_host_buffers.clear()
-                self._execute_pending_domain_releases()
-                if self._live_domains:
-                    self._release_all_live_domains()
-        # L3+ returns None like every other worker level; per-L2-child timing
-        # is emitted as `[STRACE]` markers from each simpler_run.
-        return None
+                    # Graph-construction failures remain synchronous, but any
+                    # tasks already submitted still own their resources until
+                    # the run fence fires.
+                    self._building_run_resources = None
+                    handle._wait_for_serialization()
+            raise
+        finally:
+            self._building_run_resources = None
+        return handle
+
+    def _run_handle_done(self, run_id: int) -> bool:
+        assert self._orch is not None
+        return self._orch._run_done(run_id)
+
+    def _wait_run_handle(self, run_id: int, timeout: float | None) -> bool:
+        assert self._orch is not None
+        if timeout is None:
+            self._orch._wait_run(run_id)
+            return True
+        return self._orch._wait_run_for(run_id, timeout)
+
+    def _finalize_run_handle(
+        self, handle: RunHandle, run_id: int, native_error: BaseException | None
+    ) -> BaseException | None:
+        """Run fence-owned cleanup exactly once and return the cached result."""
+        result = native_error
+
+        def _step(fn) -> None:
+            nonlocal result
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001
+                if result is None:
+                    result = exc
+
+        resources = handle._resources
+        if native_error is not None:
+            _step(lambda: self._poison_l3_l2_region_from_endpoint_error(native_error, resources))
+        _step(lambda: self._release_active_remote_slot_refs(resources))
+        _step(self._flush_pending_remote_frees)
+        try:
+            _step(lambda: self._cleanup_l3_l2_regions(resources))
+        finally:
+            resources.l3_l2_orch_comm_host_buffers.clear()
+        _step(lambda: self._execute_pending_domain_releases(resources))
+        if resources.live_domains:
+            _step(lambda: self._release_all_live_domains(resources))
+        _step(lambda: self._retire_run_domains(resources))
+        orch = self._orch
+        if orch is None:
+            if result is None:
+                result = RuntimeError("RunHandle cleanup lost its native Orchestrator")
+        else:
+            _step(lambda: orch._release_run(run_id))
+        # Retirement is not optional: a handle left in the accepted set keeps
+        # every later close() from completing its drain, and the lock is
+        # mandatory (the drain and the submit serializer both snapshot the set
+        # under it). An async BaseException in the interruptible acquire is
+        # delivered to this frame once, so one retry always retires the handle.
+        try:
+            with self._hierarchical_start_cv:
+                self._accepted_run_handles.discard(handle)
+                self._hierarchical_start_cv.notify_all()
+        except BaseException as exc:  # noqa: BLE001
+            if result is None:
+                result = exc
+            with self._hierarchical_start_cv:
+                self._accepted_run_handles.discard(handle)
+                self._hierarchical_start_cv.notify_all()
+        return result
 
     @property
     def aicpu_dlopen_count(self) -> int:
@@ -5716,6 +6152,19 @@ class Worker:
         if self.level != 2 or self._chip_worker is None:
             return 0
         return self._chip_worker.host_dlopen_count
+
+    @property
+    def run_stream_set_create_count(self) -> int:
+        """L2 only: number of run stream sets the bound runner has created.
+
+        A set belongs to a pipeline slot and is reused for every run on that
+        slot, so a worker that has served any number of runs reports 1.
+        Returns 0 on non-L2 workers and on platforms whose runs use the
+        persistent bootstrap stream pair (simulation, a5).
+        """
+        if self.level != 2 or self._chip_worker is None:
+            return 0
+        return self._chip_worker.run_stream_set_create_count
 
     # ------------------------------------------------------------------
     # close
@@ -5794,11 +6243,13 @@ class Worker:
         attempt: _CloseAttempt | None = None
         result: BaseException | None = None
         teardown_tree = False
+        drain_complete = False
+        handles_to_drain: tuple[RunHandle, ...] = ()
         try:
             with self._hierarchical_start_cv:
                 if threading.get_ident() in self._lease_depth:
                     raise RuntimeError(
-                        "Worker.close(): cannot be called from within a run() / create_host_buffer() "
+                        "Worker.close(): cannot be called from within a run() / submit() / create_host_buffer() "
                         "operation on this thread"
                     )
                 if self._lifecycle is _Lifecycle.INITIALIZING:
@@ -5863,11 +6314,29 @@ class Worker:
                             f"({_ROLLBACK_GRACEFUL_TIMEOUT_S}s); teardown deferred (worker stays CLOSED)"
                         )
                 if result is None:
-                    teardown_tree = self._has_live_resources()
-                    # Latch terminal: once we commit to teardown no later close()
-                    # re-drives it, whatever the outcome.
-                    if teardown_tree:
-                        self._teardown_attempted = True
+                    handles_to_drain = tuple(self._accepted_run_handles)
+                    drain_complete = True
+            if drain_complete:
+                # CLOSED prevents new admissions and active operations have
+                # drained, so this is the complete accepted set. Wait outside
+                # the lifecycle CV: handle retirement acquires the same lock.
+                for handle in handles_to_drain:
+                    try:
+                        handle.wait()
+                    except BaseException as exc:  # noqa: BLE001
+                        if result is None:
+                            result = exc
+                with self._hierarchical_start_cv:
+                    if self._accepted_run_handles:
+                        # An asynchronous interruption left at least one fence
+                        # undrained. Keep teardown retryable and the tree intact.
+                        drain_complete = False
+                    else:
+                        teardown_tree = self._has_live_resources()
+                        # Fence drain makes this close terminal even when the
+                        # run error is the only remaining outcome and no native
+                        # resource needs teardown.
+                        self._teardown_attempted = teardown_tree or result is not None
             if teardown_tree:
                 self._teardown_ready_tree()
         except BaseException as exc:  # noqa: BLE001

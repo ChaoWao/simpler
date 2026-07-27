@@ -153,7 +153,6 @@ def _l2_config(base: CallConfig, spec: dict) -> CallConfig:
     child L2. So copy those over and override only the ring sizing.
     """
     cfg = CallConfig()
-    cfg.block_dim = base.block_dim
     cfg.aicpu_thread_num = base.aicpu_thread_num
     cfg.enable_l2_swimlane = base.enable_l2_swimlane
     cfg.enable_dump_args = base.enable_dump_args

@@ -339,6 +339,7 @@ add_hierarchical_test(test_orchestrator hierarchical/test_orchestrator.cpp)
 add_hierarchical_test(test_scheduler  hierarchical/test_scheduler.cpp)
 add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
+add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)
 
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
@@ -506,6 +507,29 @@ target_link_libraries(test_scope_stats_collector PRIVATE
 )
 add_test(NAME test_scope_stats_collector COMMAND test_scope_stats_collector)
 set_tests_properties(test_scope_stats_collector PROPERTIES LABELS "no_hardware")
+
+# AICPU-side dep_gen writer. The shared-memory layout is byte-identical across
+# platforms, so compiling against a2a3's platform_config covers a5 too.
+add_executable(test_dep_gen_collector_aicpu
+    common/test_dep_gen_collector_aicpu.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/dep_gen_collector_aicpu.cpp
+    ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
+)
+target_include_directories(test_dep_gen_collector_aicpu PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+)
+target_link_libraries(test_dep_gen_collector_aicpu PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_dep_gen_collector_aicpu COMMAND test_dep_gen_collector_aicpu)
+set_tests_properties(test_dep_gen_collector_aicpu PROPERTIES LABELS "no_hardware")
 
 function(add_pmu_collector_test name platform)
     add_executable(${name}

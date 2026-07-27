@@ -350,14 +350,29 @@ inline void bind_worker(nb::module_ &m) {
         .def("scope_end", &Orchestrator::scope_end, "Close the innermost scope. Non-blocking.")
         .def("_scope_begin", &Orchestrator::scope_begin)
         .def("_scope_end", &Orchestrator::scope_end)
+        .def("_begin_run", &Orchestrator::begin_run)
+        .def("_close_run_submission", &Orchestrator::close_run_submission, nb::arg("run_id"))
         .def(
-            "_drain", &Orchestrator::drain, nb::call_guard<nb::gil_scoped_release>(),
-            "Block until all submitted tasks are CONSUMED (releases GIL). "
-            "Rethrows the first dispatch failure seen in this run, if any."
+            "_fail_run_submission",
+            [](Orchestrator &self, RunId run_id, const std::string &message) {
+                self.fail_run_submission(
+                    run_id,
+                    message.empty() ? std::exception_ptr{} : std::make_exception_ptr(std::runtime_error(message))
+                );
+            },
+            nb::arg("run_id"), nb::arg("message") = std::string(),
+            "Close a run whose submission failed. A non-empty message becomes the run's first error."
         )
         .def(
-            "_clear_error", &Orchestrator::clear_error, "Clear any stored dispatch error so the next run can proceed."
-        );
+            "_wait_run", &Orchestrator::wait_run, nb::arg("run_id"), nb::call_guard<nb::gil_scoped_release>(),
+            "Block until one run is terminal and raise only that run's error."
+        )
+        .def(
+            "_wait_run_for", &Orchestrator::wait_run_for, nb::arg("run_id"), nb::arg("timeout_seconds"),
+            nb::call_guard<nb::gil_scoped_release>(), "Wait up to timeout_seconds for one run to become terminal."
+        )
+        .def("_run_done", &Orchestrator::run_done, nb::arg("run_id"))
+        .def("_release_run", &Orchestrator::release_run, nb::arg("run_id"));
 
     // --- Worker ---
     // Bound as `_Worker` because the Python user-facing `Worker` factory
@@ -372,30 +387,33 @@ inline void bind_worker(nb::module_ &m) {
 
         .def(
             "add_next_level_worker",
-            [](Worker &self, uint64_t mailbox_ptr) {
-                self.add_worker(WorkerType::NEXT_LEVEL, reinterpret_cast<void *>(mailbox_ptr));
+            [](Worker &self, uint64_t mailbox_ptr, int child_pid) {
+                self.add_worker(WorkerType::NEXT_LEVEL, reinterpret_cast<void *>(mailbox_ptr), child_pid);
             },
-            nb::arg("mailbox_ptr"),
+            nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1,
             "Add a NEXT_LEVEL sub-worker. `mailbox_ptr` is the address of a "
             "MAILBOX_SIZE-byte MAP_SHARED region; the child process loop is "
-            "Python-managed (fork + _chip_process_loop)."
+            "Python-managed (fork + _chip_process_loop). `child_pid` is that "
+            "forked child, used to detect an exit before mailbox completion."
         )
         .def(
             "add_next_level_worker_at",
-            [](Worker &self, int32_t worker_id, uint64_t mailbox_ptr) {
-                self.add_next_level_worker(worker_id, reinterpret_cast<void *>(mailbox_ptr));
+            [](Worker &self, int32_t worker_id, uint64_t mailbox_ptr, int child_pid) {
+                self.add_next_level_worker(worker_id, reinterpret_cast<void *>(mailbox_ptr), child_pid);
             },
-            nb::arg("worker_id"), nb::arg("mailbox_ptr"), "Add a NEXT_LEVEL sub-worker with an explicit worker id."
+            nb::arg("worker_id"), nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1,
+            "Add a NEXT_LEVEL sub-worker with an explicit worker id."
         )
         .def(
             "add_sub_worker",
-            [](Worker &self, uint64_t mailbox_ptr) {
-                self.add_worker(WorkerType::SUB, reinterpret_cast<void *>(mailbox_ptr));
+            [](Worker &self, uint64_t mailbox_ptr, int child_pid) {
+                self.add_worker(WorkerType::SUB, reinterpret_cast<void *>(mailbox_ptr), child_pid);
             },
-            nb::arg("mailbox_ptr"),
+            nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1,
             "Add a SUB sub-worker. `mailbox_ptr` is the address of a "
             "MAILBOX_SIZE-byte MAP_SHARED region; the child process loop is "
-            "Python-managed (fork + _sub_worker_loop)."
+            "Python-managed (fork + _sub_worker_loop). `child_pid` is that "
+            "forked child, used to detect an exit before mailbox completion."
         )
         .def(
             "add_remote_l3_socket",

@@ -58,26 +58,26 @@ The handle is a context manager. Its lifecycle has **two distinct states**:
   exits). Further indexing (`handle[i]`) raises. This is the *user-visible*
   state: "do not hand this domain to any new `submit_*`."
 - **`freed`** — the backend `comm_release_domain_windows` has actually run and
-  the device memory is gone. This happens **after** `Worker.run` drains the
-  DAG, never inside the `with` block.
+  the device memory is gone. This happens **after** the owning run's completion
+  fence, never inside the `with` block.
 
 This split exists because `submit_next_level()` only *enqueues* DAG work;
-`Worker.run()` does not drain until the orch function returns. If `release()`
-freed memory immediately on `with`-exit, a still-queued task that captured the
-domain's `device_ctx` / `buffer_ptrs` would read freed memory. So **release is
-deferred**: `release()` flips `released` and queues the backend free; the real
-free runs after drain, when every task that could reference the window has
-completed.
+`Worker.run()` does not wait for completion until the orch function returns.
+If `release()` freed memory immediately on `with`-exit, a still-queued task that
+captured the domain's `device_ctx` / `buffer_ptrs` would read freed memory. So
+**release is deferred**: `release()` flips `released` and queues the backend
+free; the real free runs after the run fence, when every task that could
+reference the window has completed.
 
 Mental model: like `with open(f) as fh: ...` — the user-visible close is
 lexical (end of block), the physical teardown is managed for you. Use
 `handle.released` to guard against accidental reuse; use `handle.freed` only if
 you must assert physical teardown.
 
-Cleanup is **drain-safe**: even if a chip task fails and `drain()` re-raises,
-`Worker.run` still executes the pending releases and sweeps any live domains the
-orch fn forgot to release (LIFO), so a failed run cannot strand backend
-allocations into the next run.
+Cleanup is **failure-safe**: even if a chip task fails and the run wait
+re-raises, `Worker.run` still executes pending releases and sweeps any live
+domains the orch fn forgot to release (LIFO), so a failed run cannot strand
+backend allocations into the next run.
 
 ---
 
@@ -94,7 +94,7 @@ called many times:
 
 - the **base communicator is created once** and reused — it is *not* rebuilt
   per `run` or per domain;
-- only the **per-domain windows** are allocated (and freed after drain) on each
+- only the **per-domain windows** are allocated (and freed after the run fence) on each
   `allocate_domain` / `run`. Each allocation gets a fresh `allocation_id` so
   concurrent or sequential domains never collide on IPC handshake / barrier
   names.
@@ -110,11 +110,19 @@ symmetric window is realized:
 | ------ | --- | -------------- |
 | Window memory | POSIX shm + `ftruncate`, mmap'd per rank | VMM physical allocation + shareable-handle import; peer access via `aclrtDeviceEnablePeerAccess` |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
-| Window init | window zeroed after handshake (`memset`) | window zeroed after handshake (`aclrtMemset`) |
+| Window init | window zeroed before the subset barrier (`memset`) | window zeroed before the handle is announced (`aclrtMemset`) |
 | Async-DMA workspace | n/a | a2a3: opt-in per Worker (`enable_sdma`); a5: optional communication overlay, gated off by default |
 
 The window is zero-initialized on both backends so scratch/signal protocols see
 a known starting state (matching the historical static-path contract).
+
+The wipe happens before the window becomes reachable by any peer — before the
+shareable handle is announced on HCCL, before the `ready_count` barrier on sim.
+A peer that clears the subset barrier can return, launch its kernel and store a
+barrier signal into this rank's window immediately; a wipe issued after that
+point can erase a signal the owner has not yet waited on, and the owner then
+waits on it forever. The rank skew that opens that window grows with host load,
+so the resulting hang shows up only under a loaded box.
 
 On a2a3, async-DMA resources are a Worker-level opt-in, not a
 communication-domain property. Construct the Worker with `enable_sdma=True` and

@@ -12,6 +12,21 @@ Three axioms govern hardware classification across all test categories:
 
 These principles apply uniformly to ut-py (pytest markers), ut-cpp (ctest labels), and st (`@scene_test(platforms=[...])`).
 
+### Assertion principle: no wall-clock proxies
+
+Off-hardware tests (sim, ut-py/ut-cpp, github-hosted) must not assert wall-clock
+magnitude as a proxy for a non-temporal property. A wall-time bound used to infer
+"the workers ran concurrently," "the path is fast," or any other non-temporal
+claim polices the host scheduler and timer, not the code under test — and it
+flakes on loaded or virtualized CI hosts (the GHA macOS runner, for example,
+over-sleeps `time.sleep` under load). Assert the property directly — the
+functional result or an observable effect — instead.
+
+Exception: when wall-time *is* the subject under test (a timeout firing, a
+startup deadline being respected, a configured budget), asserting it is correct.
+Budget generously for CI variance, and prefer the mechanism's observable effect
+over a tight measured bound. See [#1496](https://github.com/hw-native-sys/simpler/issues/1496).
+
 ## Quick Reference
 
 ```bash
@@ -596,7 +611,7 @@ class TestMyKernel(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]
@@ -633,6 +648,39 @@ Key fields:
 - `CASES[].platforms`: which platforms each case supports (sim names end in "sim")
 - `runtime`: which runtime to use
 - `CALLABLE.orchestration.source` / `CALLABLE.incores[].source`: paths relative to the test file
+- `CALLABLE.incores[].extra_include_dirs`: extra `-I` paths for that one kernel,
+  on top of the runtime/platform includes every kernel already gets. Entries may
+  be relative to the test file, or use `$VAR` — `$ASCEND_HOME_PATH/aarch64-linux/asc/include`
+  keeps a CANN-linked kernel off machine-specific paths. They are resolved when
+  the kernel is **compiled**, not when its module is imported, so a case that
+  declares an SDK dependency is still collectable on sim/macOS runners that do
+  not have that SDK. Paths that do not exist are dropped, letting one candidate
+  list span SDK layouts; an unset variable raises, and so does a declared set
+  where nothing survived (that means the SDK is missing). Used by
+  [`qwen3_14b_decode`](../examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/)
+  for its CANN attention extern.
+
+### Output Validation
+
+By default every output tensor is compared against `compute_golden` with
+`torch.allclose` at the class `RTOL` / `ATOL`. Two hooks cover the cases that
+don't fit:
+
+- **`CASES[].skip_golden`** (defaults to the class attribute `SKIP_GOLDEN`,
+  itself `False`) — the case has no host-computable expected output and passes
+  by running clean; `compute_golden` is never called for it. Use it when the
+  output depends on a shape only the device knows, such as the SPMD grid width
+  the runtime resolved. `--skip-golden` on the command line forces this on for
+  every case (benchmark mode).
+- **`compare_outputs(self, test_args, golden_args, output_names, params)`** —
+  override to compare a subset of the outputs, apply a per-tensor tolerance, or
+  derive the valid extent from the output itself (a task that writes one slot
+  per SPMD block reports the grid width it actually ran with, and only that
+  prefix is defined). Call `super().compare_outputs(...)` with the names you
+  still want checked the default way.
+
+Prefer a `compare_outputs` override to `skip_golden`: a self-describing output
+still gets checked, whereas a skipped case only proves the run didn't crash.
 
 ### Case Selection and Manual Cases
 

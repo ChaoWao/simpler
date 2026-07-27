@@ -66,7 +66,7 @@ class TestPagedAttentionManualScope(SceneTestCase):
         {
             "name": "SmallCase1",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {
                 "batch": 1,
                 "num_heads": 16,
@@ -81,7 +81,7 @@ class TestPagedAttentionManualScope(SceneTestCase):
         {
             "name": "SmallCase2",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 1,
@@ -97,7 +97,7 @@ class TestPagedAttentionManualScope(SceneTestCase):
         {
             "name": "SmallCaseVarSeq2",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 2,
@@ -114,7 +114,7 @@ class TestPagedAttentionManualScope(SceneTestCase):
         {
             "name": "SmallCaseVarSeq4",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "manual": True,
             "params": {
                 "batch": 4,

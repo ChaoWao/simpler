@@ -50,53 +50,70 @@ static __aicore__ inline void ptoas_auto_sync_tail(PTOAutoSyncTailMode mode = PT
     }
 }
 
-static __aicore__ void copy_hidden(__gm__ bfloat16_t *v1, __gm__ bfloat16_t *v2, int64_t v3) {
-    const int64_t v4 = 256;
-    const int64_t v5 = 20;
-    const int64_t v6 = 1;
-    const int64_t v7 = 5120;
-    const int64_t v8 = 16;
-    const int64_t v9 = 0;
+static __aicore__ void copy_hidden(__gm__ float *v1, __gm__ bfloat16_t *v2, int64_t v3) {
+    SaturationMode v4 = SaturationMode::OFF;
+    RoundMode v5 = RoundMode::CAST_ROUND;
+    const int64_t v6 = 256;
+    const int64_t v7 = 20;
+    const int64_t v8 = 1;
+    const int64_t v9 = 5120;
+    const int64_t v10 = 16;
+    const int64_t v11 = 8192;
+    const int64_t v12 = 0;
     using T = float;
 
 #if defined(__DAV_VEC__)
     set_mask_norm();
     set_vector_mask(-1, -1);
-    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-    for (size_t v10 = (size_t)v9; v10 < ((size_t)v5); v10 += (size_t)v6) {
-        int64_t v11 = (int64_t)((uint64_t)((int64_t)v10) * (uint64_t)v4);
+    set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+    set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+    for (size_t v13 = (size_t)v12; v13 < ((size_t)v7); v13 += (size_t)v8) {
+        int64_t v14 = (int64_t)((uint64_t)((int64_t)v13) * (uint64_t)v6);
         Tile<
             TileType::Vec, bfloat16_t, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
             CompactMode::Null>
-            v12 = Tile<
+            v15 = Tile<
                 TileType::Vec, bfloat16_t, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
-                CompactMode::Null>(v8, v4);
-        uint64_t v13 = (uint64_t)v9;
-        TASSIGN(v12, v13);
-        pto::Shape<1, 1, 1, 16, 256> v14 = pto::Shape<1, 1, 1, 16, 256>();
-        pto::Stride<81920, 81920, 81920, 5120, 1> v15 = pto::Stride<81920, 81920, 81920, 5120, 1>();
-        GlobalTensor<
-            bfloat16_t, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
-            v16 = GlobalTensor<
-                bfloat16_t, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
-                v2 + (v9 + v3 * v7 + v11 * v6), v14, v15
-            );
-        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-        TLOAD(v12, v16);
-        set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+                CompactMode::Null>(v10, v6);
+        uint64_t v16 = (uint64_t)v12;
+        TASSIGN(v15, v16);
         pto::Shape<1, 1, 1, 16, 256> v17 = pto::Shape<1, 1, 1, 16, 256>();
         pto::Stride<81920, 81920, 81920, 5120, 1> v18 = pto::Stride<81920, 81920, 81920, 5120, 1>();
         GlobalTensor<
             bfloat16_t, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
             v19 = GlobalTensor<
                 bfloat16_t, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
-                v1 + (v9 + v3 * v7 + v11 * v6), v17, v18
+                v2 + (v12 + v3 * v9 + v14 * v8), v17, v18
             );
-        wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-        TSTORE(v19, v12);
-        set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        TLOAD(v15, v19);
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        Tile<
+            TileType::Vec, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+            CompactMode::Null>
+            v20 = Tile<
+                TileType::Vec, float, 16, 256, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+                CompactMode::Null>(v10, v6);
+        uint64_t v21 = (uint64_t)v11;
+        TASSIGN(v20, v21);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
+        TCVT(v20, v15, v5, v4);
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        pto::Shape<1, 1, 1, 16, 256> v22 = pto::Shape<1, 1, 1, 16, 256>();
+        pto::Stride<81920, 81920, 81920, 5120, 1> v23 = pto::Stride<81920, 81920, 81920, 5120, 1>();
+        GlobalTensor<float, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>
+            v24 = GlobalTensor<
+                float, pto::Shape<1, 1, 1, 16, 256>, pto::Stride<81920, 81920, 81920, 5120, 1>, pto::Layout::ND>(
+                v1 + (v12 + v3 * v9 + v14 * v8), v22, v23
+            );
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+        TSTORE(v24, v20);
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
     }
-    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0);
 #endif  // __DAV_VEC__
 
     ptoas_auto_sync_tail(PTOAutoSyncTailMode::kBarrierAll);
@@ -106,8 +123,8 @@ static __aicore__ void copy_hidden(__gm__ bfloat16_t *v1, __gm__ bfloat16_t *v2,
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: cur__iter_v1
     __gm__ Tensor *cur__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ bfloat16_t *cur__iter_v1 =
-        reinterpret_cast<__gm__ bfloat16_t *>(cur__iter_v1_tensor->buffer.addr) + cur__iter_v1_tensor->start_offset;
+    __gm__ float *cur__iter_v1 =
+        reinterpret_cast<__gm__ float *>(cur__iter_v1_tensor->buffer.addr) + cur__iter_v1_tensor->start_offset;
 
     // Unpack tensor: hidden_states__ssa_v0
     __gm__ Tensor *hidden_states__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);

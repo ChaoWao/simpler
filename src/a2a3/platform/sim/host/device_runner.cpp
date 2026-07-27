@@ -41,19 +41,33 @@
 #include "host/runtime_timeout_config.h"
 #include "runtime.h"
 
-// dep_gen_replay_emit_deps_json: strong symbol provided by
-// runtime/tensormap_and_ringbuffer/host/dep_gen_replay.cpp when that runtime is
-// linked into host_runtime.so. host_build_graph has no replay implementation
-// today, so its host_runtime.so falls through to this weak stub. Hidden
-// visibility keeps the stub off the global symbol table so RTLD_GLOBAL can't
-// let it shadow the strong symbol in cross-.so loads.
-// LOG_DEBUG (not WARN): runtimes that don't link dep_gen never enable it in
-// practice, so this path is unreachable for end users — the symbol exists
-// purely to keep the .so loadable.
+// dep_gen has two shapes, one per orchestration site, and each runtime provides
+// the strong symbols for the one it uses:
+//   - device orchestration (tensormap_and_ringbuffer): the AICPU writes a ring
+//     of captured submits, the host collector drains it, and
+//     `dep_gen_replay_emit_deps_json` (runtime/.../host/dep_gen_replay.cpp)
+//     replays them into deps.json.
+//   - host orchestration (host_build_graph): the graph is captured from the
+//     orchestrator's own dependency path as it runs on the host, and
+//     `dep_gen_host_graph_*` (runtime/.../host/dep_gen_host_graph.cpp) writes it
+//     out directly — no ring, no collector, nothing to reconcile.
+// A runtime links only its own half, so each half needs a weak fallback here.
+// Hidden visibility keeps the stubs off the global symbol table so RTLD_GLOBAL
+// can't let them shadow a strong symbol in cross-.so loads.
+// LOG_DEBUG (not WARN): the runner picks the shape via
+// `dep_gen_host_graph_active()`, so neither stub is reachable when dep_gen is on
+// — they exist purely to keep the .so loadable.
 extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_deps_json(
     const struct DepGenRecord * /*records*/, size_t /*num_records*/, const char * /*deps_json_path*/
 ) {
     LOG_DEBUG("dep_gen replay not implemented for this runtime — deps.json skipped");
+    return -1;
+}
+
+extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_set_enabled(bool /*enable*/) {}
+extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_emit(const char * /*deps_json_path*/) {
+    LOG_DEBUG("dep_gen host graph not implemented for this runtime — deps.json skipped");
     return -1;
 }
 
@@ -89,9 +103,6 @@ int DeviceRunner::ensure_binaries_loaded() {
         auto load_optional_sym = [this](const char *name, void **out) {
             dlerror();
             void *sym = dlsym(aicpu_so_handle_, name);
-            if (sym == nullptr) {
-                LOG_DEBUG("Optional dlsym skipped for %s: %s", name, dlerror());
-            }
             *out = sym;
         };
 
@@ -206,25 +217,24 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
     return aicpu_register_callable_func_(const_cast<RegisterCallableArgs *>(&reg_args));
 }
 
+void DeviceRunner::set_dep_gen_enabled(bool enable) {
+    enable_dep_gen_ = enable;
+    // Arms host-side capture for a host-orch runtime (no-op weak stub for the
+    // device-orch one). Enabling clears the previous run's graph, so this must
+    // stay ahead of the orchestration it captures — the c_api latches the
+    // CallConfig before the bind for exactly that reason.
+    dep_gen_host_graph_set_enabled(enable);
+}
+
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     apply_call_config(config);
-    int block_dim = config.block_dim;
+    // prepare_launch_shape() resolved block_dim before the graph was built, so
+    // the geometry this run launches with is already on the runner.
+    const int block_dim = block_dim_;
     const int launch_aicpu_num = config.aicpu_thread_num;
     clear_cpu_sim_shared_storage();
-    if (launch_aicpu_num < 1 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
-        LOG_ERROR("launch_aicpu_num (%d) must be in range [1, %d]", launch_aicpu_num, PLATFORM_MAX_AICPU_THREADS);
-        return -1;
-    }
-
-    // Validate block_dim. Sim has no stream resource query, so the static
-    // platform capacity is the bound. block_dim == 0 is the CallConfig "auto"
-    // sentinel.
-    if (block_dim == 0) {
-        block_dim = PLATFORM_MAX_BLOCKDIM;
-        LOG_INFO_V0("block_dim auto-resolved to %d", block_dim);
-    }
-    if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
-        LOG_ERROR("block_dim (%d) must be in range [1, %d]", block_dim, PLATFORM_MAX_BLOCKDIM);
+    if (block_dim < 1) {
+        LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
         return -1;
     }
 
@@ -245,19 +255,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    block_dim_ = block_dim;
     int num_aicore = block_dim * cores_per_blockdim_;
-
-    if (num_aicore > RUNTIME_MAX_WORKER) {
-        LOG_ERROR("num_aicore (%d) exceeds RUNTIME_MAX_WORKER (%d)", num_aicore, RUNTIME_MAX_WORKER);
-        return -1;
-    }
-
-    runtime.set_worker_count(num_aicore);
-    worker_count_ = num_aicore;
-    runtime.set_aicpu_thread_num(launch_aicpu_num);
-
-    int num_aic = block_dim;
     uint32_t enable_profiling_flag = SIMPLER_DFX_FLAG_NONE;
     if (enable_dump_args_) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
@@ -268,7 +266,9 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (enable_pmu_) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
     }
-    if (enable_dep_gen_) {
+    // The device flag drives the AICPU writer only; a host-orch runtime has no
+    // device-side dep_gen to switch on.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
     }
     if (enable_scope_stats_) {
@@ -276,15 +276,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     }
     kernel_args_.enable_profiling_flag = enable_profiling_flag;
 
-    Handshake *workers = runtime.get_workers();
-    for (int i = 0; i < num_aicore; i++) {
-        workers[i].aicpu_ready = 0;
-        workers[i].aicore_done = 0;
-        workers[i].task = 0;
-        workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
-    }
-
-    LOG_DEBUG("Setting function_bin_addr for Tasks (Simulation)");
     for (int i = 0; i < runtime.get_task_count(); i++) {
         Task *task = runtime.get_task(i);
         if (task != nullptr) {
@@ -310,8 +301,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
             return rc;
         }
         // Publish per-core core_type to the collector so the level=1 host
-        // emit path can label lanes without an AICPU record. Sim already set
-        // workers[i].core_type via the (i < num_aic) rule at line ~240.
+        // emit path can label lanes without an AICPU record. prepare_launch_shape
+        // already typed workers[i].core_type (first block_dim cores are AIC).
         std::vector<CoreType> core_types(num_aicore);
         for (int i = 0; i < num_aicore; i++) {
             core_types[i] = runtime.get_workers()[i].core_type;
@@ -335,7 +326,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    if (enable_dep_gen_) {
+    // A host-orch runtime already holds the graph in host memory; standing up
+    // the device ring and its collector would allocate shared memory and a
+    // drain thread for a stream that never produces a record.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         rc = init_dep_gen(launch_aicpu_num, device_id_);
         if (rc != 0) {
             LOG_ERROR("init_dep_gen failed: %d", rc);
@@ -387,8 +381,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     });
 
-    LOG_INFO_V0("Allocated simulated registers: %d cores x 0x%x bytes", num_aicore, SIM_REG_BLOCK_SIZE);
-
     // Allocate simulated PMU register blocks. PMU MMIO is a separate address
     // region from the general AICore regs on hardware, so sim mirrors that with
     // its own backing memory; otherwise the AICPU PMU collector would early-out
@@ -423,8 +415,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     });
 
-    LOG_INFO_V0("Allocated simulated PMU registers: %d cores x 0x%x bytes", num_aicore, SIM_REG_BLOCK_SIZE);
-
     if (aicpu_execute_func_ == nullptr || aicore_execute_func_ == nullptr || set_platform_regs_func_ == nullptr ||
         set_platform_dump_base_func_ == nullptr || set_platform_phase_base_func_ == nullptr ||
         set_dump_args_enabled_func_ == nullptr || set_platform_pmu_base_func_ == nullptr ||
@@ -450,7 +440,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     set_platform_pmu_reg_addrs_func_(kernel_args_.pmu_reg_addrs);
     set_pmu_enabled_func_(enable_pmu_);
     set_platform_dep_gen_base_func_(kernel_args_.dep_gen_data_base);
-    set_dep_gen_enabled_func_(enable_dep_gen_);
+    set_dep_gen_enabled_func_(enable_dep_gen_ && !dep_gen_host_graph_active());
     set_scope_stats_enabled_func_(enable_scope_stats_);
     set_platform_scope_stats_base_func_(kernel_args_.scope_stats_data_base);
 
@@ -467,7 +457,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (enable_pmu_) {
         pmu_collector_.start(thread_factory);
     }
-    if (enable_dep_gen_) {
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         dep_gen_collector_.start(thread_factory);
     }
     if (enable_scope_stats_) {
@@ -535,7 +525,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }));
     }
 
-    LOG_INFO_V0("Waiting for threads to complete");
     for (auto &t : aicpu_threads) {
         t.join();
     }
@@ -607,14 +596,23 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         pmu_collector_.reconcile_counters();
     }
 
+    // Host-orch emits the graph it captured during this run's orchestration;
+    // device-orch stops the collector, reconciles the ring, and replays.
     if (enable_dep_gen_) {
-        dep_gen_collector_.stop();
-        if (dep_gen_collector_.reconcile_counters()) {
-            const auto &records = dep_gen_collector_.records();
-            const std::string deps = make_deps_json_path(output_prefix_);
-            int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+        const std::string deps = make_deps_json_path(output_prefix_);
+        if (dep_gen_host_graph_active()) {
+            int rc = dep_gen_host_graph_emit(deps.c_str());
             if (rc != 0) {
-                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
+                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", rc);
+            }
+        } else {
+            dep_gen_collector_.stop();
+            if (dep_gen_collector_.reconcile_counters()) {
+                const auto &records = dep_gen_collector_.records();
+                int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+                if (rc != 0) {
+                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
+                }
             }
         }
     }
@@ -724,7 +722,6 @@ int DeviceRunner::finalize() {
     worker_count_ = 0;
     last_runtime_ = nullptr;
 
-    LOG_INFO_V0("DeviceRunner(sim) finalized");
     return 0;
 }
 

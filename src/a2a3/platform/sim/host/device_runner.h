@@ -35,7 +35,10 @@ public:
 
     int run(Runtime &runtime, const CallConfig &config) override;
     int finalize() override;
-    void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
+    // Also arms the loaded runtime's host-side graph capture, which a host-orch
+    // runtime uses instead of the device collector. Defined in the .cpp so this
+    // header stays free of the runtime-provided capture symbols.
+    void set_dep_gen_enabled(bool enable) override;
 
 private:
     int ensure_binaries_loaded() override;

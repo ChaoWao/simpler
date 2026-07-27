@@ -1,6 +1,6 @@
 ---
 name: fix-pr
-description: Fix GitHub PR issues — address review comments and resolve CI failures in a loop until the PR is fully clean. Fetches CI errors online and triages review feedback. Use when fixing PR problems, addressing review comments, or resolving CI failures.
+description: Fix GitHub PR issues — address all PR feedback (inline review threads, review summary bodies, and conversation comments) and resolve CI failures in a loop until the PR is fully clean. Fetches CI errors online and triages review feedback. Use when fixing PR problems, addressing review comments, or resolving CI failures.
 ---
 
 # Fix PR Workflow
@@ -15,7 +15,7 @@ Create tasks to track progress through this workflow:
 2. Detect & classify issues
 3. Get user confirmation
 4. Fix issues & push (fold into one commit — amend/squash, never append)
-5. Resolve comment threads
+5. Reply to all feedback; resolve the threads that support it
 6. Re-check (loop until clean)
 
 ## Input
@@ -52,39 +52,41 @@ Validate PR state: OPEN (continue), CLOSED (warn), MERGED (exit).
 
 ### Step 2: Detect Issues (run in parallel)
 
-**A) Review comments:**
+**A) All PR feedback — three surfaces, not just inline threads:**
 
-Run [fetch-comments](../../lib/github/fetch-comments.md).
+Run [fetch-comments](../../lib/github/fetch-comments.md) and fetch **all three**
+surfaces in one query:
+
+| Surface | What it is | Why it is easy to miss |
+| ------- | ---------- | ---------------------- |
+| **A** inline review threads | `reviewThreads.nodes` — anchored to file/line | — (the only one with `isResolved`) |
+| **B** review summary bodies | `reviews.nodes[].body` — text submitted with CHANGES_REQUESTED / COMMENTED / APPROVED | Not a thread; never appears in a `reviewThreads` query |
+| **C** PR conversation comments | `comments.nodes` — issue comments, `@`-mentions, most bot posts | Not a thread; holds "please rebase", scope objections, maintainer instructions |
+
+**Fetching only surface A is the classic failure of this workflow** — a
+maintainer's "this approach is wrong, see my comment above" lives on B or C and
+gets silently skipped while the PR is declared clean.
 
 ```bash
 OWNER=$(gh repo view --json owner -q '.owner.login')
 NAME=$(gh repo view --json name -q '.name')
+P='.data.repository.pullRequest'
 
-# Fetch review threads — save to file, then grep (see pitfalls below)
-gh api graphql \
-  -F owner="$OWNER" -F name="$NAME" -F number=<NUMBER> \
-  -f query='
-query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100) {
-        nodes {
-          id isResolved
-          comments(last: 1) {
-            nodes { id databaseId body author { login } path line }
-          }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}' > /tmp/threads.json
+# Save the combined query from fetch-comments.md to a file, then jq the file
+# (see pitfalls below)
+gh api graphql -f query='...' > /tmp/pr-feedback.json
 
-# Count unresolved threads (use whitespace-tolerant pattern)
-grep -Ec '"isResolved":[[:space:]]*false' /tmp/threads.json
+# Count each surface
+jq "[${P}.reviewThreads.nodes[] | select(.isResolved == false)] | length" /tmp/pr-feedback.json
+jq "[${P}.reviews.nodes[]      | select(.body != \"\")]          | length" /tmp/pr-feedback.json
+jq "${P}.comments.nodes | length" /tmp/pr-feedback.json
 
-# Paginate: if hasNextPage is true, re-run with -F cursor="<endCursor>" until done
+# Paginate: if any connection's hasNextPage is true, re-query with after: "<endCursor>"
 ```
+
+Surfaces B and C carry no `isResolved` bit — filter them against the
+handled-ID ledger (`/tmp/pr-<NUMBER>-handled.txt`, see fetch-comments) so
+already-answered feedback is not re-presented every iteration.
 
 **B) CI status:**
 
@@ -99,9 +101,11 @@ gh pr checks <NUMBER>
 - Also see [common-issues](../../lib/github/common-issues.md) for `gh api` quoting pitfalls (use single quotes for `--jq` and `-f body=`)
 - Use `grep -c` for simple counts; save to a temp file first if complex parsing is needed
 
-Present: "**Iteration N** — Found X unresolved comments and Y failed/pending checks."
+Present: "**Iteration N** — Found X unresolved review threads, Y unhandled review bodies / conversation comments, and Z failed/pending checks."
 
-**Exit condition:** All checks green AND no unresolved comments → done. Pending checks do NOT count as clean.
+**Exit condition:** All checks green AND no unresolved threads AND no unhandled
+review bodies or conversation comments → done. Pending checks do NOT count as
+clean, and an unanswered conversation comment does NOT count as clean.
 
 ### Step 3: Detect Permission
 
@@ -109,17 +113,25 @@ Run [detect-permission](../../lib/github/detect-permission.md) to determine push
 
 ### Step 4: Classify Issues
 
-**Review comments** — filter `isResolved: false`, classify:
+**Feedback** — take unresolved surface-A threads plus unhandled surface-B/C
+items, and classify **every** item by content, regardless of which surface it
+arrived on:
 
 | Category | Description | Examples |
 | -------- | ----------- | -------- |
-| **A: Actionable** | Code changes required | Bugs, missing validation, race conditions, incorrect logic |
+| **A: Actionable** | Code changes required | Bugs, missing validation, race conditions, incorrect logic, "rebase onto main", "split this PR" |
 | **B: Discussable** | May skip if follows `.claude/rules/` | Style preferences, premature optimizations |
-| **C: Informational** | Resolve without changes | Acknowledgments, "optional" suggestions |
+| **C: Informational** | Answer without changes | Acknowledgments, "optional" suggestions, bot walkthroughs |
 
 Treat bot reviewers (CodeRabbit, Copilot, Gemini) same as human — classify by content.
 
 For Category B, explain why code may already comply with `.claude/rules/`.
+
+Surface-specific handling before classifying:
+
+- **B (review bodies):** a `CHANGES_REQUESTED` body is actionable by default — it blocks merge even when every inline thread is resolved. A body that only enumerates its own inline threads is informational; address the threads instead.
+- **C (conversation comments):** drop bot status/walkthrough noise per the filter list in [fetch-comments](../../lib/github/fetch-comments.md); classify everything else. Short human one-liners here are frequently the most consequential feedback on the PR.
+- **Dedup across surfaces** — the same point raised inline and repeated in a summary is one item, addressed once.
 
 **CI failures:**
 
@@ -151,12 +163,19 @@ For large logs: `gh run view --job <JOB_ID> --log-failed 2>&1 | grep -E "error:|
 
 Present ALL issues in a numbered list:
 
+Label each item with its surface so the user can see nothing was dropped:
+
 ```text
-Review Comments:
+Inline review threads:
   1. [A] src/foo.cpp:42 — Missing null check (reviewer: alice)
   2. [B] src/bar.py:15 — Style suggestion (reviewer: coderabbitai)
+Review bodies:
+  3. [A] CHANGES_REQUESTED — "split the ring resize out of this PR" (reviewer: bob)
+Conversation comments:
+  4. [A] "please rebase onto main, base moved" (reviewer: alice)
+  5. [C] CodeRabbit walkthrough — no action
 CI Failures:
-  3. [CI] build — error: 'Foo' is not a member of 'pto2'
+  6. [CI] build — error: 'Foo' is not a member of 'pto2'
 ```
 
 Ask which to address/skip:
@@ -186,6 +205,15 @@ git pull "$PUSH_REMOTE" "$HEAD_BRANCH"
 
 Run [checkout-fork-branch](../../lib/github/checkout-fork-branch.md) to create/switch to the local working branch and set the push refspec.
 
+**Land on the current base before editing anything.** `$BASE_REF` moves while a
+PR is open and everything below measures against it. Doing it here also keeps the
+rebase off a dirty worktree, which git refuses to rebase:
+
+```bash
+git fetch upstream                        # $BASE_REF is a remote-tracking ref — refresh it
+git rebase "$BASE_REF"                    # see [commit-and-push](../../lib/github/commit-and-push.md) §1
+```
+
 **Fix:**
 
 1. Read affected files, make changes with Edit tool
@@ -196,13 +224,18 @@ The PR must stay as **one commit** (its original commit + your fixes squashed
 in), so reviewers see a single clean diff, not a running log of review
 churn. This is the default on **every** iteration.
 
-Stage all changes, then squash based on how many commits the PR has ahead of
-`$BASE_REF`:
+Stage the fix and count what is ahead of the base you rebased onto above:
 
 ```bash
 git add -A
 COMMITS_AHEAD=$(git rev-list HEAD --not "$BASE_REF" --count)
 ```
+
+That rebase is why this is safe. `git reset --soft "$BASE_REF"` moves HEAD to the
+base but keeps *your* index, so on a stale base every file the base gained since
+you branched is recorded as **your deletion**. Rebasing afterwards does not undo
+it — the revert is already part of your diff and replays cleanly. It surfaces as
+unrelated files being reverted in the PR, easy to miss in a large diff.
 
 | `COMMITS_AHEAD` | How to fold the fix in |
 | --------------- | ---------------------- |
@@ -214,10 +247,19 @@ Do NOT run `/git-commit` to create a *new* commit here — that is what causes
 the appended-commit problem. `/git-commit` is only for regenerating the
 squashed message when `COMMITS_AHEAD > 1`.
 
-Then push and verify exactly one commit landed:
+Then verify and push:
 
-1. Rebase onto `$BASE_REF` (see [commit-and-push](../../lib/github/commit-and-push.md) §1)
-2. **Verify single commit:** `git rev-list HEAD --not "$BASE_REF" --count` must print `1`. If not, squash again before pushing — never push a multi-commit PR.
+1. **Verify single commit:** `git rev-list HEAD --not "$BASE_REF" --count` must print `1` — never push a multi-commit PR. `> 1` means squash again; `0` means the fold produced nothing and is the same stop-and-investigate as in the table above, not something to re-squash.
+2. **Verify you reverted nothing.** Review the file list with a **three-dot** diff:
+
+   ```bash
+   git diff "$BASE_REF"...HEAD --stat     # three dots: your changes only
+   ```
+
+   Two dots (`$BASE_REF..HEAD`) also reports files the base has and you do not,
+   rendering them as deletions you made — so it hides a real revert among noise
+   and invents fake ones. Any file here you did not intend to touch is a bug:
+   restore it with `git checkout "$BASE_REF" -- <path>` and amend.
 3. Push (update push with `--force-with-lease` to `$PUSH_REMOTE`)
 
 **Commit message — evolve it, don't replace or freeze it.** The message must
@@ -244,9 +286,12 @@ missing null check on the predicate. Update the body to note the guard, keep
 the `feat(runtime): add predicated dispatch` subject — not `fix(pr): address
 comments`, not the untouched original.
 
-### Step 7: Reply and Resolve Comment Threads
+### Step 7: Reply and Resolve
 
-For each comment, **both steps are mandatory** (see [reply-and-resolve](../../lib/github/reply-and-resolve.md)):
+Every item presented in Step 5 gets an answer. How depends on its surface (see
+[reply-and-resolve](../../lib/github/reply-and-resolve.md)).
+
+**Surface A — inline review threads.** Both steps are mandatory:
 
 1. **Reply** using the comment's `databaseId`:
 
@@ -265,6 +310,22 @@ For each comment, **both steps are mandatory** (see [reply-and-resolve](../../li
    ```
 
 **Important:** The thread `id` comes from `reviewThreads.nodes[].id` in the fetch-comments GraphQL response. Each thread contains comments — use the thread's `id` to resolve, and the comment's `databaseId` to reply.
+
+**Surfaces B and C — review bodies and conversation comments.** There is no
+resolve mutation for these (`resolveReviewThread` takes only a review-thread
+node ID). Reply with a single batched PR conversation comment, then record each
+handled ID in the ledger:
+
+```bash
+gh pr comment "$PR_NUMBER" --body "@alice Addressed:
+- Rebased onto main.
+- Null check added on the predicate path."
+
+echo "$NODE_ID" >> "/tmp/pr-${PR_NUMBER}-handled.txt"   # one line per item, incl. skipped/informational
+```
+
+Recording the ID is what makes the answer stick — skip it and Step 2 re-presents
+the same feedback next iteration and the loop never converges.
 
 Reply templates:
 
@@ -304,15 +365,21 @@ Then loop back to Step 2.
 ## Checklist
 
 - [ ] PR matched and validated
-- [ ] Review comments and CI status fetched
-- [ ] ALL issues presented to user for selection
+- [ ] **All three feedback surfaces fetched** — inline threads, review bodies, conversation comments — plus CI status
+- [ ] ALL issues presented to user for selection, labelled by surface
 - [ ] Fixes folded into the PR (amended/squashed — **no appended `fix(pr)` commit**)
 - [ ] Verified `git rev-list HEAD --not "$BASE_REF" --count` == 1 before pushing
 - [ ] Changes force-pushed with `--force-with-lease` (single commit)
-- [ ] Review comment threads replied to and resolved
+- [ ] Inline threads replied to **and** resolved
+- [ ] Review bodies / conversation comments replied to and recorded in the handled-ID ledger
 - [ ] Waited for CI/reviews and re-checked
 - [ ] Loop exited: all clean OR max iterations reached
 
 ## Remember
 
 **Not all comments require code changes.** Evaluate against `.claude/rules/` first. When in doubt, consult user.
+
+**Feedback is not only inline review threads.** A review summary body or a plain
+conversation comment carries no `isResolved` flag and no file anchor, but it can
+be the most consequential thing on the PR. Fetch all three surfaces every
+iteration, or the loop will report "clean" over unread feedback.

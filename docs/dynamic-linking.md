@@ -299,7 +299,7 @@ ChipWorker.run(handle, args, config)                   # public wrapper path
   simpler_run(ctx, buf, internal callable entry, args, config)
     new (buf) Runtime()
     DeviceRunner::bind_callable_to_runtime(r, cid, api, args, rings)  # replay + per-run bind
-    DeviceRunner::run(r, config)                        # applies config, resolves block_dim
+    DeviceRunner::run(r, config)                        # applies config; width already resolved pre-bind
       clear_cpu_sim_shared_storage()
       ensure_binaries_loaded()               dlopen aicpu/aicore SOs once
       launch AICPU + AICore threads

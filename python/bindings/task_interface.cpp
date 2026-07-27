@@ -562,8 +562,18 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
 // Module definition
 // ============================================================================
 
+#ifndef SIMPLER_BUILD_COMMIT
+#define SIMPLER_BUILD_COMMIT ""
+#endif
+
 NB_MODULE(_task_interface, m) {
     m.doc() = "Nanobind bindings for task_interface (DataType, Tensor, TaskArgs variants)";
+
+    // Source commit this extension was compiled from; "" when git was
+    // unavailable at build time. simpler.task_interface compares it against the
+    // working tree so a binding built from other sources cannot be used
+    // silently — struct layouts differ and fields read as garbage.
+    m.attr("__build_commit__") = SIMPLER_BUILD_COMMIT;
 
     // --- DataType enum ---
     nb::enum_<DataType>(m, "DataType")
@@ -1235,7 +1245,6 @@ NB_MODULE(_task_interface, m) {
     // --- CallConfig ---
     nb::class_<CallConfig>(m, "CallConfig")
         .def(nb::init<>())
-        .def_rw("block_dim", &CallConfig::block_dim)
         .def_rw("aicpu_thread_num", &CallConfig::aicpu_thread_num)
         // runtime_env returns an internal reference so `cfg.runtime_env.ring_heap = X`
         // writes through to the owning CallConfig (rv_policy::reference_internal).
@@ -1322,7 +1331,7 @@ NB_MODULE(_task_interface, m) {
         )
         .def("__repr__", [append_ring_values](const CallConfig &self) -> std::string {
             std::ostringstream os;
-            os << "CallConfig(block_dim=" << self.block_dim << ", aicpu_thread_num=" << self.aicpu_thread_num
+            os << "CallConfig(aicpu_thread_num=" << self.aicpu_thread_num
                << ", enable_l2_swimlane=" << self.enable_l2_swimlane << ", enable_dump_args=" << self.enable_dump_args
                << ", enable_pmu=" << self.enable_pmu << ", enable_dep_gen=" << (self.enable_dep_gen ? "True" : "False")
                << ", enable_scope_stats=" << (self.enable_scope_stats ? "True" : "False");
@@ -1464,6 +1473,14 @@ NB_MODULE(_task_interface, m) {
             "Number of host-side dlopens triggered by register_callable on "
             "host_build_graph variants. Mirrors aicpu_dlopen_count for the "
             "host-orchestration path; 0 on device-orch variants."
+        )
+        .def_prop_ro(
+            "run_stream_set_create_count", &ChipWorker::run_stream_set_create_count,
+            "Number of run stream sets the bound runner has created. A set "
+            "belongs to a pipeline slot and is reused for every run on that "
+            "slot, so a worker that has served any number of runs reports 1; "
+            "platforms whose runs use the persistent bootstrap pair report 0. "
+            "Tests assert this to verify repeated runs do not rebuild the set."
         )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))

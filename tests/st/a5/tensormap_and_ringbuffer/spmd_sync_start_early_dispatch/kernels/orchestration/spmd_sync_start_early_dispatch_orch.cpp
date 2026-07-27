@@ -38,13 +38,15 @@ extern "C" {
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 1,
+        .expected_arg_count = 3,
     };
 }
 
 // Match a2a3 ST (1e7): board is fast enough that 2e6 often finishes before the
 // scheduler can stage the sync_start consumer on the early path.
 static constexpr int64_t PRODUCER_SPIN_ITERS = 10000000;
+
+static constexpr int32_t PRODUCER_BLOCKS = 50;
 
 static PTO2TaskId submit_producer(const Tensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
     L0TaskArgs args;
@@ -72,16 +74,26 @@ static void submit_sync_consumer(const Tensor &out, int16_t core_num, int64_t ba
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const Tensor &layout = orch_args.tensor(1).ref();
     const bool early_on = orch_args.scalar(0) != 0;
 
+    // The consumer must occupy every AIC slot for the strand this case looks
+    // for, and require_sync_start needs every block of it co-resident — so its
+    // width is exactly this run's cluster count. The producer stays wider than
+    // the device on purpose; it carries no sync_start, so no cap applies.
+    const int32_t sync_blocks = rt_available_cluster_count();
+
     rt_scope_begin(PTO2ScopeMode::MANUAL);
-    PTO2TaskId prod = submit_producer(ext_output, 50, 0, early_on);
-    submit_sync_consumer(ext_output, 24, 50, prod);
+    PTO2TaskId prod = submit_producer(ext_output, PRODUCER_BLOCKS, 0, early_on);
+    submit_sync_consumer(ext_output, static_cast<int16_t>(sync_blocks), PRODUCER_BLOCKS, prod);
     rt_scope_end();
 
+    uint32_t idx[1] = {0};
+    set_tensor_data<int32_t>(layout, 1, idx, sync_blocks);
+
     LOG_INFO_V9(
-        "[spmd_sync_start_early_dispatch] early_on=%d wide AIC producer + MIX sync_start consumer submitted",
-        early_on ? 1 : 0
+        "[spmd_sync_start_early_dispatch] early_on=%d producer (%d) + MIX sync_start consumer (%d)", early_on ? 1 : 0,
+        PRODUCER_BLOCKS, sync_blocks
     );
 }
 

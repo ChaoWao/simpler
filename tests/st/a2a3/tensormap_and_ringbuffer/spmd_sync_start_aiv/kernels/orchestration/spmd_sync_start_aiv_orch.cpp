@@ -40,8 +40,17 @@ extern "C" {
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 1,
+        .expected_arg_count = 2,
     };
+}
+
+// The cohort widths are fractions of this run's core count rather than
+// literals: the run always takes the whole device, and that width differs
+// between sim and silicon. What the case exercises is the SHAPE of the widths
+// relative to capacity, so each is derived and clamped to at least one block.
+static int16_t cohort(int32_t total, int32_t divisor, int32_t delta) {
+    int32_t n = total / divisor + delta;
+    return static_cast<int16_t>(n < 1 ? 1 : n);
 }
 
 static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
@@ -55,17 +64,28 @@ static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bo
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const Tensor &layout = orch_args.tensor(1).ref();
 
-    // T0: 4 blocks, sync_start=true (fast path: 4 <= idle AIV cores on one thread)
-    submit_aiv(ext_output, 4, 0, true);
-    // T1: 16 blocks, sync_start=true (saturate: 8 clusters × 2 AIV = 16 cores)
-    submit_aiv(ext_output, 16, 4, true);
-    // T2: 4 blocks, sync_start=false (baseline)
-    submit_aiv(ext_output, 4, 20, false);
-    // T3: 24 blocks, sync_start=true (cross-thread drain)
-    submit_aiv(ext_output, 24, 24, true);
+    const int32_t aiv_cores = rt_available_aiv_count();
+    const int16_t block_nums[4] = {
+        cohort(aiv_cores, 12, 0), cohort(aiv_cores, 3, 0), cohort(aiv_cores, 12, 0), cohort(aiv_cores, 2, 0)
+    };
+    const bool sync_start[4] = {true, true, false, true};
 
-    LOG_INFO_V9("[spmd_sync_start_aiv] Submitted 4 AIV tasks (3 sync_start + 1 baseline)");
+    // layout[2i] = block_num, layout[2i+1] = base cache line. The host cannot
+    // predict either, so the run reports the geometry it used and the golden is
+    // rebuilt from it.
+    int32_t base_cl = 0;
+    for (int32_t i = 0; i < 4; i++) {
+        submit_aiv(ext_output, block_nums[i], base_cl, sync_start[i]);
+        uint32_t idx[1] = {static_cast<uint32_t>(2 * i)};
+        set_tensor_data<int32_t>(layout, 1, idx, block_nums[i]);
+        idx[0] = static_cast<uint32_t>(2 * i + 1);
+        set_tensor_data<int32_t>(layout, 1, idx, base_cl);
+        base_cl += block_nums[i] * 1;
+    }
+
+    LOG_INFO_V9("[spmd_sync_start_aiv] Submitted 4 tasks over %d units", aiv_cores);
 }
 
 }  // extern "C"

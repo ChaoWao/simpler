@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from multiprocessing.shared_memory import SharedMemory
 from typing import cast
@@ -175,6 +176,71 @@ def _free_tcp_port() -> int:
         return int(sock.getsockname()[1])
     finally:
         sock.close()
+
+
+class _RemoteL3Daemon:
+    """A `simpler.remote_l3_worker` subprocess that is waited for, not slept on.
+
+    `await_ready()` polls the port until it accepts a connection. The interval
+    between spawning the daemon and its `listen()` is interpreter start, import
+    and bind — a duration that holds on an idle machine and is refused on a
+    loaded one, so it cannot be guessed at (#1508). A worker-side timeout does
+    not cover this: a closed port refuses immediately rather than timing out.
+
+    The daemon's output goes to a temporary file, not `DEVNULL`, so a daemon
+    that dies during startup reports why instead of surfacing as a bare
+    `ConnectionRefusedError`. A file rather than a pipe because the daemon
+    outlives startup and nothing drains a pipe, which would eventually block it.
+
+    A probe connection is safe: `_serve_loop` accepts serially, and the
+    immediate close makes `_read_json` raise `EOFError`, which
+    `_serve_connection` absorbs before accepting the next caller.
+    """
+
+    READY_TIMEOUT_S = 30.0
+    STOP_TIMEOUT_S = 5.0
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self._log = tempfile.NamedTemporaryFile("w+", suffix=".log")  # noqa: SIM115
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
+            stdout=self._log,
+            stderr=subprocess.STDOUT,
+        )
+
+    def _output(self) -> str:
+        self._log.seek(0)
+        return self._log.read().strip() or "(daemon produced no output)"
+
+    def await_ready(self, timeout_s: float = READY_TIMEOUT_S) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._proc.poll() is not None:
+                raise AssertionError(
+                    f"remote-L3 daemon exited with {self._proc.returncode} before listening on "
+                    f"port {self.port}\ndaemon output:\n{self._output()}"
+                )
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
+                    return
+            except OSError:
+                time.sleep(0.01)
+        raise AssertionError(
+            f"remote-L3 daemon did not accept a connection on port {self.port} within "
+            f"{timeout_s:.0f}s\ndaemon output:\n{self._output()}"
+        )
+
+    def stop(self) -> None:
+        try:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=self.STOP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait(timeout=self.STOP_TIMEOUT_S)
+        finally:
+            self._log.close()
 
 
 def test_python_descriptor_hash_is_stable_for_same_serialized_payload():
@@ -1016,14 +1082,10 @@ def test_remote_worker_requires_reachable_daemon_before_registration():
 
 def test_remote_sim_noop_task_roundtrip():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1039,24 +1101,15 @@ def test_remote_sim_noop_task_roundtrip():
         worker.run(parent_orch)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_prepare_callable_control_roundtrip():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1074,24 +1127,15 @@ def test_remote_sim_prepare_callable_control_roundtrip():
         worker.run(parent_orch)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_error_completion_raises_root_error():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1108,24 +1152,15 @@ def test_remote_sim_error_completion_raises_root_error():
             worker.run(parent_orch)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_post_init_register_roundtrip():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1141,24 +1176,15 @@ def test_remote_sim_post_init_register_roundtrip():
         worker.run(parent_orch)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_unregister_then_reregister_roundtrip():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1184,24 +1210,15 @@ def test_remote_sim_unregister_then_reregister_roundtrip():
         run_handle(second)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_health_lane_stays_live_during_long_task():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=5)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1217,26 +1234,17 @@ def test_remote_sim_health_lane_stays_live_during_long_task():
         worker.run(parent_orch)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_inner_python_import_register_runs_sub_task():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     inner_committed = False
     worker_id = -1
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(
                 endpoint=f"127.0.0.1:{port}",
@@ -1295,24 +1303,15 @@ def test_remote_sim_inner_python_import_register_runs_sub_task():
             except Exception:
                 pass
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_buffer_copy_roundtrip():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1342,30 +1341,18 @@ def test_remote_sim_buffer_copy_roundtrip():
         worker.remote_free(remote_buf)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_imported_buffer_runs_on_peer_worker():
     owner_port = _free_tcp_port()
     peer_port = _free_tcp_port()
-    owner_daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(owner_port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    peer_daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(peer_port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    owner_daemon = _RemoteL3Daemon(owner_port)
+    peer_daemon = _RemoteL3Daemon(peer_port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        owner_daemon.await_ready()
+        peer_daemon.await_ready()
         owner_worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{owner_port}", platform="a2a3sim", transport="sim")
         )
@@ -1402,12 +1389,7 @@ def test_remote_sim_imported_buffer_runs_on_peer_worker():
     finally:
         worker.close()
         for daemon in (owner_daemon, peer_daemon):
-            daemon.terminate()
-            try:
-                daemon.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                daemon.kill()
-                daemon.wait(timeout=5)
+            daemon.stop()
 
 
 def test_remote_owner_free_waits_for_import_release():
@@ -1776,14 +1758,10 @@ def test_remote_dispatcher_manifest_rejects_duplicate_hashid():
 
 def test_remote_sim_failed_dependency_skips_consumer():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1824,24 +1802,15 @@ def test_remote_sim_failed_dependency_skips_consumer():
         worker.remote_free(remote_buf)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_session_exit_becomes_endpoint_failure():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=3)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1858,24 +1827,15 @@ def test_remote_sim_session_exit_becomes_endpoint_failure():
             worker.run(parent_orch)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_input_free_is_deferred_until_slot_refs_drop():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1912,24 +1872,15 @@ def test_remote_sim_input_free_is_deferred_until_slot_refs_drop():
         worker.remote_free(remote_out)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_remote_sim_host_inline_descriptor_roundtrip():
     port = _free_tcp_port()
-    daemon = subprocess.Popen(
-        [sys.executable, "-m", "simpler.remote_l3_worker", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    daemon = _RemoteL3Daemon(port)
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
     try:
-        time.sleep(0.3)
+        daemon.await_ready()
         worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
         )
@@ -1961,12 +1912,7 @@ def test_remote_sim_host_inline_descriptor_roundtrip():
         worker.remote_free(remote_out)
     finally:
         worker.close()
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5)
+        daemon.stop()
 
 
 def test_worker_remote_memory_api_returns_opaque_handle_and_routes_controls():

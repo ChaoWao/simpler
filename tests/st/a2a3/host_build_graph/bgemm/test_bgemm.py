@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """BGEMM — host_build_graph runtime with tiled matrix multiplication.
 
-Computation: C = A @ B (4x4x4 grid, 64x64 tiles).
+Computation: C = C_init + A @ B (4x4x4 grid, 64x64 tiles).
 Tests AIC (Cube) + AIV (Vector) cooperation with tile-first memory layout.
 """
 
@@ -25,11 +25,12 @@ GRID_M = 4
 GRID_K = 4
 GRID_N = 4
 BATCH = 1
+C_BASE = 0.25
 
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestBgemmHostBuildGraph(SceneTestCase):
-    """BGEMM: tiled C = A @ B with AIC gemm + AIV tile add."""
+    """BGEMM: tiled C = C_init + A @ B with AIC gemm + AIV tile add."""
 
     RTOL = 1e-3
     ATOL = 1e-3
@@ -38,7 +39,7 @@ class TestBgemmHostBuildGraph(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/bgemm_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.IN, D.IN, D.OUT],
+            "signature": [D.IN, D.IN, D.INOUT],
         },
         "incores": [
             {
@@ -60,7 +61,7 @@ class TestBgemmHostBuildGraph(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]
@@ -68,7 +69,10 @@ class TestBgemmHostBuildGraph(SceneTestCase):
     def generate_args(self, params):
         A = torch.randn(BATCH, GRID_M, GRID_K, TILE_M, TILE_K, dtype=torch.float32) * 0.01
         B = torch.randn(BATCH, GRID_K, GRID_N, TILE_K, TILE_N, dtype=torch.float32) * 0.01
-        C = torch.zeros(BATCH, GRID_M, GRID_N, TILE_M, TILE_N, dtype=torch.float32)
+        # C is an INOUT accumulator: the k=0 tile_add reads it before anything
+        # writes it. A non-zero base makes the host->device staging of C
+        # observable — a zeroed or unstaged device buffer fails the compare.
+        C = torch.full((BATCH, GRID_M, GRID_N, TILE_M, TILE_N), C_BASE, dtype=torch.float32)
 
         return TaskArgsBuilder(
             Tensor("A", A.flatten()),
@@ -81,7 +85,6 @@ class TestBgemmHostBuildGraph(SceneTestCase):
         B = args.B.reshape(BATCH, GRID_K, GRID_N, TILE_K, TILE_N)
         C = args.C.reshape(BATCH, GRID_M, GRID_N, TILE_M, TILE_N)
 
-        C[:] = 0.0
         for batch in range(BATCH):
             for m_idx in range(GRID_M):
                 for n_idx in range(GRID_N):

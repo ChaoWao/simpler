@@ -29,8 +29,10 @@ import weakref
 from dataclasses import dataclass
 from enum import IntEnum
 from math import prod
+from pathlib import Path
 from typing import Any
 
+import _task_interface as _ti_module  # pyright: ignore[reportMissingImports]
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_OFF_ERROR_MSG,
@@ -56,6 +58,71 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_element_size,
     read_args_from_blob,
 )
+
+
+def _assert_bindings_match_source_tree() -> None:
+    """Refuse a `_task_interface` built from a different revision of this tree.
+
+    An editable install pins the compiled extension at install time
+    (``editable.rebuild = false``) while this file is read live, so switching
+    branches or rebasing moves the Python source out from under a fixed binary.
+    Nothing then rebuilds, and a changed struct layout — `CallConfig` losing a
+    field, say — makes attributes read as 0 with no error at all. That surfaces
+    much later as a plausible-looking runtime rejection
+    (``launch_aicpu_num (0) must be in range [1, 4]``) and reads as a product
+    bug, so it is worth one git call at import to stop.
+
+    Only source-tree installs are checked: a wheel has no ``.git`` to compare
+    against, and a build with no git available carries an empty stamp.
+
+    A *missing* stamp is not the same as an empty one. The attribute only
+    disappears on an extension compiled before it existed, which in a checkout
+    new enough to run this function is by definition a different revision — the
+    exact case this guards, and the one every already-installed worktree is in
+    the moment this lands. Treating it like "cannot tell" would let precisely
+    those through.
+    """
+    import subprocess  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if not (repo_root / ".git").exists():
+        return
+    if not hasattr(_ti_module, "__build_commit__"):
+        raise ImportError(
+            "_task_interface predates the build stamp, so it was compiled before the "
+            "revision you are running and its struct layouts may not match the Python "
+            "that drives them — fields can read as 0 with no error.\n"
+            "Rebuild:  pip install --no-build-isolation -e ."
+        )
+    built_from: str = _ti_module.__build_commit__
+    if not built_from:
+        return
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    if result.returncode != 0:
+        return
+    head = result.stdout.strip()
+    if not head or head == built_from:
+        return
+    raise ImportError(
+        f"_task_interface was built from {built_from[:12]}, but this source tree is at "
+        f"{head[:12]}. The compiled extension does not rebuild on import "
+        f"(editable.rebuild = false), so its struct layouts may no longer match the "
+        f"Python that drives them — fields can read as 0 with no error.\n"
+        f"Rebuild:  pip install --no-build-isolation -e ."
+    )
+
+
+_assert_bindings_match_source_tree()
 
 __all__ = [
     "DataType",
@@ -854,7 +921,7 @@ class CommDomainHandle:
     def freed(self) -> bool:
         """True once the backend ``comm_release_domain_windows`` has executed.
 
-        Only flips after the owning ``Worker.run`` drains and processes the
+        Only flips after the owning ``Worker.run`` completes and processes the
         pending-release queue.  An ``orch_fn`` will never observe ``True``
         for a handle it released within the same ``run`` call.
         """
@@ -865,7 +932,7 @@ class CommDomainHandle:
 
         Inside an orch function, this is a non-blocking mark — the actual
         backend ``comm_release_domain_windows`` runs after
-        ``Worker.run.drain()`` so that any tasks already submitted with
+        the owning run's completion wait so that tasks already submitted with
         this domain's ``device_ctx`` see live memory through execution.
 
         After this returns, the handle is treated as released for the
@@ -877,7 +944,7 @@ class CommDomainHandle:
             return
         self._released = True
         # _release_fn is owned by Worker; it queues the actual backend
-        # release and runs it after drain.  Worker also flips _freed.
+        # release and runs it after the owning run completes. Worker also flips _freed.
         self._release_fn(self)
 
     def __enter__(self) -> CommDomainHandle:
@@ -930,7 +997,7 @@ class ChipWorker:
         worker = ChipWorker()
         worker.init(device_id=0, bins=bins)
         handle = worker.register_callable(chip_callable)
-        worker.run(handle, args=orch_args, config=CallConfig())  # block_dim defaults to 0 = auto
+        worker.run(handle, args=orch_args, config=CallConfig())
         worker.unregister_callable(handle)
         worker.finalize()
     """
@@ -1145,11 +1212,10 @@ class ChipWorker:
             handle: ``CallableHandle`` returned by ``register_callable``.
             args: ChipStorageTaskArgs for this invocation.
             config: Optional CallConfig. If None, a default is created.
-            **kwargs: Overrides applied to config (e.g. ``block_dim=8`` to
-                pin a smaller value than the default). Omit ``block_dim`` (or
-                set it to 0) to have DeviceRunner auto-resolve it to the max
-                the AICore stream allows (``aclrtGetStreamResLimit`` on
-                onboard, ``PLATFORM_MAX_BLOCKDIM`` on sim).
+            **kwargs: Overrides applied to config (e.g.
+                ``aicpu_thread_num=4``). A run always takes the whole device;
+                orchestration reads the resulting width back through
+                ``rt_available_cluster_count()``.
 
         Returns ``None``. Per-stage run timing is emitted as ``[STRACE]`` log
         markers by the platform — see ``docs/dfx/host-trace.md``.
@@ -1195,6 +1261,11 @@ class ChipWorker:
     def host_dlopen_count(self):
         """Number of host-side orch SO dlopens (host_build_graph variants)."""
         return self._impl.host_dlopen_count
+
+    @property
+    def run_stream_set_create_count(self):
+        """Number of run stream sets the bound runner has created."""
+        return self._impl.run_stream_set_create_count
 
     def malloc(self, size):
         """Allocate memory. Returns a pointer (uint64)."""

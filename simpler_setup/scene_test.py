@@ -510,8 +510,50 @@ def _resolve_chip_entry_paths(entry, cls_dir):
             k = dict(k)
             if "source" in k and not os.path.isabs(k["source"]):
                 k["source"] = str(cls_dir / k["source"])
+            if k.get("extra_include_dirs"):
+                k["extra_include_dirs"] = [
+                    d if "$" in str(d) or os.path.isabs(str(d)) else str((cls_dir / str(d)).resolve())
+                    for d in k["extra_include_dirs"]
+                ]
             resolved.append(k)
         entry["incores"] = resolved
+
+
+def _resolve_incore_include_dirs(dirs, incore):
+    """Resolve an incore's ``extra_include_dirs`` down to usable ``-I`` paths.
+
+    Entries may use ``$VAR`` (typically ``$ASCEND_HOME_PATH``, so a CANN-linked
+    kernel does not hardcode a machine-specific path); relative ones were made
+    absolute against the test file's directory when the class was declared.
+
+    This runs when the kernel is compiled, not when its module is imported —
+    a case declaring a CANN dependency is still collected on sim and macOS
+    runners that have no CANN at all, and must not fail there.
+
+    A vendored toolkit ships one over-broad candidate list across SDK versions,
+    so paths that do not exist here are dropped. An unset variable raises, and so
+    does a declared set where nothing survived: that means the SDK is absent, and
+    saying so beats a "file not found" from deep inside vendored code.
+    """
+    name = incore.get("name", incore.get("source", "?"))
+    resolved = []
+    for raw in dirs:
+        expanded = os.path.expandvars(str(raw))
+        if "$" in expanded:
+            raise ValueError(
+                f"incore {name}: extra_include_dirs entry {raw!r} references an environment "
+                f"variable that is not set. Export it (e.g. ASCEND_HOME_PATH for CANN headers) "
+                f"before running."
+            )
+        if Path(expanded).is_dir():
+            resolved.append(expanded)
+    if not resolved:
+        raise ValueError(
+            f"incore {name}: none of its {len(dirs)} extra_include_dirs exist on this machine, "
+            f"so the SDK they come from is not installed where the test expects. Tried:\n  "
+            + "\n  ".join(os.path.expandvars(str(d)) for d in dirs)
+        )
+    return resolved
 
 
 def _extract_name_map(callable_spec: dict) -> dict:
@@ -921,8 +963,12 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
     kernel_binaries = []
     for k in incores:
         signature = k.get("signature", [])
+        extra = _resolve_incore_include_dirs(k["extra_include_dirs"], k) if k.get("extra_include_dirs") else []
         incore = kc.compile_incore(
-            k["source"], core_type=k["core_type"], pto_isa_root=pto_isa_root, extra_include_dirs=inc_dirs
+            k["source"],
+            core_type=k["core_type"],
+            pto_isa_root=pto_isa_root,
+            extra_include_dirs=inc_dirs + extra,
         )
         if not is_sim:
             incore = extract_text_section(incore)
@@ -981,6 +1027,13 @@ class SceneTestCase:
     CASES: list[dict] = []
     RTOL: float = 1e-5
     ATOL: float = 1e-5
+    # Class-wide default for `CASES[*]["skip_golden"]`. True means the case has
+    # no host-computable expected output — it passes by running clean, and
+    # `compute_golden` is never called. Use it for cases whose output depends on
+    # a shape only the device knows (e.g. the SPMD grid width the runtime
+    # resolved). Prefer a `compare_outputs` override when the output is
+    # self-describing enough to still be checked.
+    SKIP_GOLDEN: bool = False
     RUNTIME_ENV: dict = {}
 
     def generate_args(self, params) -> TaskArgsBuilder:
@@ -990,6 +1043,17 @@ class SceneTestCase:
     def compute_golden(self, args: TaskArgsBuilder, params) -> None:
         """Compute expected outputs in-place on a cloned TaskArgsBuilder."""
         raise NotImplementedError
+
+    def compare_outputs(self, test_args, golden_args, output_names, params) -> None:
+        """Assert the run's outputs match golden. Raises AssertionError on mismatch.
+
+        The default is `torch.allclose` on every output at the class RTOL/ATOL.
+        Override to compare a subset, to apply a per-tensor tolerance, or when
+        the valid extent of an output is carried in the output itself (a task
+        that writes one slot per SPMD block reports the grid width it actually
+        ran with, and only that prefix is defined).
+        """
+        _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
     # ------------------------------------------------------------------
     # Callable compilation
@@ -1063,11 +1127,6 @@ class SceneTestCase:
         from simpler.task_interface import CallConfig  # noqa: PLC0415
 
         config = CallConfig()
-        # Default to 0 (CallConfig "auto" sentinel) when a case omits
-        # block_dim — DeviceRunner resolves it to the stream's max capacity
-        # at run() time. Cases that need a specific value still set it
-        # explicitly in their config dict.
-        config.block_dim = config_dict.get("block_dim", 0)
         config.aicpu_thread_num = config_dict.get("aicpu_thread_num", 3)
         # Per-task ring sizing (tensormap_and_ringbuffer only; 0 = unset),
         # nested under the "runtime_env" key. Takes precedence over the
@@ -1168,6 +1227,7 @@ class SceneTestCase:
     ):
         params = case.get("params", {})
         config_dict = case.get("config", {})
+        skip_golden = skip_golden or bool(case.get("skip_golden", self.SKIP_GOLDEN))
         orch_sig = self.CALLABLE.get("orchestration", {}).get("signature", [])
 
         # The L2 entry point is `Worker.run(handle, args, cfg)`. Reuse the
@@ -1223,7 +1283,7 @@ class SceneTestCase:
                 worker.run(handle, chip_args, config=config)
 
             if not skip_golden:
-                _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
+                self.compare_outputs(test_args, golden_args, output_names, params)
 
     def _run_and_validate_l3(  # noqa: PLR0913 -- threads CLI diagnostic flags + L3 ns context
         self,
@@ -1254,6 +1314,7 @@ class SceneTestCase:
 
         params = case.get("params", {})
         config_dict = case.get("config", {})
+        skip_golden = skip_golden or bool(case.get("skip_golden", self.SKIP_GOLDEN))
 
         # Build args
         test_args = self.generate_args(params)
@@ -1314,7 +1375,7 @@ class SceneTestCase:
                     worker.run(task_orch)
 
                 if not skip_golden:
-                    _compare_outputs(test_args, golden_args, all_tensor_names, self.RTOL, self.ATOL)
+                    self.compare_outputs(test_args, golden_args, all_tensor_names, params)
         finally:
             rehosted.release()
 

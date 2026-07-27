@@ -1,6 +1,6 @@
 # Worker API Examples
 
-This directory demonstrates how to drive PTO runtime **directly through the
+This directory demonstrates how to drive the simpler runtime **directly through the
 `Worker` class**, without going through the `@scene_test` framework.
 
 If you want to **write and test kernels** with golden comparison, automatic

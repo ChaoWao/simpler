@@ -68,15 +68,15 @@ Worker::~Worker() {
     if (initialized_) close();
 }
 
-void Worker::add_worker(WorkerType type, void *mailbox) {
+void Worker::add_worker(WorkerType type, void *mailbox, int child_pid) {
     if (initialized_) throw std::runtime_error("Worker: add_worker after init");
-    if (type == WorkerType::NEXT_LEVEL) manager_.add_next_level(mailbox);
-    else manager_.add_sub(mailbox);
+    if (type == WorkerType::NEXT_LEVEL) manager_.add_next_level(mailbox, child_pid);
+    else manager_.add_sub(mailbox, child_pid);
 }
 
-void Worker::add_next_level_worker(int32_t worker_id, void *mailbox) {
+void Worker::add_next_level_worker(int32_t worker_id, void *mailbox, int child_pid) {
     if (initialized_) throw std::runtime_error("Worker: add_next_level_worker after init");
-    manager_.add_next_level_at(worker_id, mailbox);
+    manager_.add_next_level_at(worker_id, mailbox, child_pid);
 }
 
 void Worker::add_remote_l3_socket(
@@ -119,10 +119,12 @@ void Worker::init() {
     cfg.on_consumed_cb = [this](TaskSlot slot) {
         orchestrator_.on_consumed(slot);
     };
+    cfg.on_task_failed_cb = [this](TaskSlot slot, const std::string &message) {
+        orchestrator_.report_task_error(slot, message);
+    };
 
     scheduler_.start(cfg);
-    // Let drain() hold the scheduler's loop mutex across ring teardown so slots
-    // aren't freed while the scheduler thread is mid-on_task_complete.
+    // Allocator compaction and scheduler slot access share this mutex.
     orchestrator_.set_scheduler_loop_mutex(&scheduler_.loop_mutex());
     initialized_ = true;
 }

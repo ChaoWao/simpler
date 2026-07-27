@@ -1,10 +1,10 @@
-# PTO Runtime2 Profiling Levels
+# Profiling Levels
 
-This document describes the profiling macro hierarchy and logging control in the PTO Runtime2 system.
+This document describes the profiling macro hierarchy and logging control in the simpler runtime.
 
 ## Overview
 
-PTO Runtime2 uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_l2_swimlane` runtime flag (integer perf_level 0–4) controls data collection granularity (performance buffers, shared memory writes) but does NOT control log output.
+The runtime uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_l2_swimlane` runtime flag (integer perf_level 0–4) controls data collection granularity (performance buffers, shared memory writes) but does NOT control log output.
 
 ## Profiling Macro Hierarchy
 

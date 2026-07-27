@@ -33,6 +33,7 @@ struct OrchestratorFixture : public ::testing::Test {
     ReadyQueue rq_sub;
     Orchestrator orch;
     CallConfig cfg;
+    RunId run_id{INVALID_RUN_ID};
 
     // Tests in this file only submit NEXT_LEVEL tasks, so `rq` is a
     // convenience alias for the next-level queue. Kept public so existing
@@ -47,6 +48,7 @@ struct OrchestratorFixture : public ::testing::Test {
         allocator.init(/*heap_bytes=*/1ULL << 20);
         rq_next_level.reset({0, 1, 3});
         orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level);
+        run_id = orch.begin_run();
     }
 
     void TearDown() override { allocator.shutdown(); }
@@ -166,7 +168,7 @@ TEST_F(OrchestratorFixture, TensorMapTracksProducer) {
     TaskSlot drain_slot;
     rq.try_pop(drain_slot);
 
-    EXPECT_EQ(tm.lookup(TensorKey{0x1234, -1}), a.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x1234, -1}), a.task_slot);
 }
 
 TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
@@ -175,13 +177,43 @@ TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
     TaskSlot slot;
     rq.try_pop(slot);
 
-    EXPECT_EQ(tm.lookup(TensorKey{0x42, -1}), slot);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x42, -1}), slot);
 
     S(slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
     orch.on_consumed(slot);
 
-    EXPECT_EQ(tm.lookup(TensorKey{0x42, -1}), INVALID_SLOT);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x42, -1}), INVALID_SLOT);
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
+}
+
+TEST_F(OrchestratorFixture, ConsumingASupersededProducerKeepsTheNewerMapping) {
+    // Two OUTPUT writers of one key carry no edge between them (insert-only,
+    // see OutputAndOutputExistingAreInsertOnly), so the first can reach
+    // CONSUMED while the second is still running. Its cleanup must leave the
+    // second's mapping intact -- otherwise a later INPUT reader looks up an
+    // empty slot, infers no dependency, and can be dispatched before the
+    // second writer has written the buffer.
+    auto args_a = single_tensor_args(0x5150, TensorArgType::OUTPUT);
+    auto a = orch.submit_next_level(C(42), args_a, cfg, 0);
+    TaskSlot drain;
+    ASSERT_TRUE(rq.try_pop(drain));
+
+    auto args_b = single_tensor_args(0x5150, TensorArgType::OUTPUT);
+    auto b = orch.submit_next_level(C(43), args_b, cfg, 0);
+    ASSERT_TRUE(rq.try_pop(drain));
+    ASSERT_EQ(tm.lookup(run_id, TensorKey{0x5150, -1}), b.task_slot);
+
+    S(a.task_slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
+    ASSERT_TRUE(orch.on_consumed(a.task_slot));
+
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x5150, -1}), b.task_slot);
+
+    auto args_c = single_tensor_args(0x5150, TensorArgType::INPUT);
+    auto c = orch.submit_next_level(C(44), args_c, cfg, 0);
+    EXPECT_EQ(S(c.task_slot).state.load(), TaskState::PENDING);
+    EXPECT_EQ(S(c.task_slot).fanin_count, 1);
+    ASSERT_EQ(S(c.task_slot).fanin_producers.size(), 1u);
+    EXPECT_EQ(S(c.task_slot).fanin_producers[0], b.task_slot);
 }
 
 TEST_F(OrchestratorFixture, ScopeRegistersAndReleasesRef) {
@@ -237,8 +269,8 @@ TEST_F(OrchestratorFixture, GroupTaskStoresArgsListPerMember) {
     EXPECT_EQ(S(res.task_slot).args_view(1).tensors(0).buffer.addr, 0xA1u);
 
     // Both keys registered as producers for the group slot.
-    EXPECT_EQ(tm.lookup(TensorKey{0xA0, -1}), res.task_slot);
-    EXPECT_EQ(tm.lookup(TensorKey{0xA1, -1}), res.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0xA0, -1}), res.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0xA1, -1}), res.task_slot);
 }
 
 TEST_F(OrchestratorFixture, SingleTaskStoresTaskArgsDirectly) {
@@ -274,7 +306,7 @@ TEST_F(OrchestratorFixture, OutputAutoAllocsFromHeapRing) {
     EXPECT_LT(data, base + allocator.heap_size(0));
     EXPECT_EQ(data % HEAP_ALIGN, 0u);
 
-    EXPECT_EQ(tm.lookup(TensorKey{data, -1}), res.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{data, -1}), res.task_slot);
 }
 
 TEST_F(OrchestratorFixture, RemoteOutputSidecarSkipsLocalAutoAllocAndRegistersRemoteKey) {
@@ -301,7 +333,7 @@ TEST_F(OrchestratorFixture, RemoteOutputSidecarSkipsLocalAutoAllocAndRegistersRe
     EXPECT_EQ(S(res.task_slot).task_args.tensor(0).buffer.addr, 0u);
 
     TensorKey key = TensorKey::remote_buffer(TensorAddressKind::REMOTE_BUFFER, 3, 9, 2, 64);
-    EXPECT_EQ(tm.lookup(key), res.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, key), res.task_slot);
 }
 
 TEST_F(OrchestratorFixture, RemoteBarePayloadFailsBeforeSlotCommit) {
@@ -388,7 +420,7 @@ TEST_F(OrchestratorFixture, InoutWiresCreatorAsFanin) {
     rq.try_pop(writer_slot);
 
     // TensorMap now points at the new writer.
-    EXPECT_EQ(tm.lookup(TensorKey{0xFEED, -1}), writer.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, TensorKey{0xFEED, -1}), writer.task_slot);
     // Writer has the creator recorded as a fanin producer (via INOUT
     // lookup) but no *live* fanin since the creator is already COMPLETED.
     EXPECT_EQ(S(writer.task_slot).fanin_count, 0);
@@ -422,7 +454,7 @@ TEST_F(OrchestratorFixture, OutputAndOutputExistingAreInsertOnly) {
         auto writer_args = single_tensor_args(c.key, c.tag);
         auto writer = orch.submit_next_level(C(42), writer_args, cfg, 0);
 
-        EXPECT_EQ(tm.lookup(TensorKey{c.key, -1}), writer.task_slot);
+        EXPECT_EQ(tm.lookup(run_id, TensorKey{c.key, -1}), writer.task_slot);
         EXPECT_EQ(S(writer.task_slot).fanin_count, 0);
         EXPECT_TRUE(S(writer.task_slot).fanin_producers.empty()) << "tag=" << static_cast<int>(c.tag);
         {
@@ -430,4 +462,150 @@ TEST_F(OrchestratorFixture, OutputAndOutputExistingAreInsertOnly) {
             EXPECT_EQ(S(prior.task_slot).fanout_total, 0) << "tag=" << static_cast<int>(c.tag);
         }
     }
+}
+
+TEST_F(OrchestratorFixture, EmptyRunCompletesWhenSubmissionCloses) {
+    EXPECT_FALSE(orch.run_done(run_id));
+    orch.close_run_submission(run_id);
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_FALSE(orch.run_failed(run_id));
+    EXPECT_NO_THROW(orch.wait_run(run_id));
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, TimedWaitCanRetryAfterTimeout) {
+    EXPECT_FALSE(orch.wait_run_for(run_id, 0.0));
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    orch.close_run_submission(run_id);
+    EXPECT_TRUE(orch.wait_run_for(run_id, 0.0));
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, OneTaskRunCompletesAfterConsumption) {
+    auto result = orch.submit_next_level(C(80), single_tensor_args(0x8000, TensorArgType::OUTPUT), cfg, 0);
+    EXPECT_EQ(S(result.task_slot).run_id, run_id);
+
+    orch.close_run_submission(run_id);
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    S(result.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(result.task_slot));
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_NO_THROW(orch.wait_run(run_id));
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, SequentialRunsHaveDistinctIdsAndErrorsDoNotLeak) {
+    auto failed_task = orch.submit_next_level(C(81), single_tensor_args(0x8100, TensorArgType::OUTPUT), cfg, 0);
+    orch.report_task_error(failed_task.task_slot, "run one failed");
+    S(failed_task.task_slot).failure_message = "run one failed";
+    S(failed_task.task_slot).state.store(TaskState::FAILED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(failed_task.task_slot));
+    orch.close_run_submission(run_id);
+    EXPECT_TRUE(orch.run_failed(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+
+    RunId second = orch.begin_run();
+    EXPECT_NE(second, run_id);
+    orch.close_run_submission(second);
+    EXPECT_FALSE(orch.run_failed(second));
+    EXPECT_NO_THROW(orch.wait_run(second));
+    orch.release_run(second);
+}
+
+TEST_F(OrchestratorFixture, FailedSubmissionCompletesWithoutEnteringDeviceWork) {
+    orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("graph build failed")));
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_TRUE(orch.run_failed(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, ReleasingRunDoesNotResetSlotsOwnedByAnotherRegisteredRun) {
+    auto first_task = orch.submit_next_level(C(82), single_tensor_args(0x8200, TensorArgType::OUTPUT), cfg, 0);
+    S(first_task.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(first_task.task_slot));
+    orch.close_run_submission(run_id);
+    orch.wait_run(run_id);
+
+    RunId second = orch.begin_run();
+    EXPECT_EQ(allocator.next_task_id(), 1);
+    orch.release_run(run_id);
+    EXPECT_EQ(allocator.next_task_id(), 1);
+
+    orch.close_run_submission(second);
+    orch.wait_run(second);
+    orch.release_run(second);
+    EXPECT_EQ(allocator.next_task_id(), 0);
+}
+
+// report_task_error runs on a worker thread, where an escaping exception would
+// terminate the process, so a slot whose run is already gone is a no-op.
+TEST_F(OrchestratorFixture, ReportingErrorForAReleasedRunIsIgnored) {
+    orch.close_run_submission(run_id);
+    orch.wait_run(run_id);
+    RunId released = run_id;
+    orch.release_run(released);
+
+    run_id = orch.begin_run();
+    auto live = orch.submit_next_level(C(83), single_tensor_args(0x8300, TensorArgType::OUTPUT), cfg, 0);
+    S(live.task_slot).run_id = released;
+
+    EXPECT_NO_THROW(orch.report_task_error(live.task_slot, "late endpoint failure"));
+    EXPECT_FALSE(orch.run_failed(run_id));
+}
+
+// on_consumed runs on the scheduler thread and reaches the same accounting.
+TEST_F(OrchestratorFixture, ConsumingASlotOwnedByAReleasedRunIsIgnored) {
+    auto task = orch.submit_next_level(C(84), single_tensor_args(0x8400, TensorArgType::OUTPUT), cfg, 0);
+    S(task.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(task.task_slot));
+    orch.close_run_submission(run_id);
+    orch.wait_run(run_id);
+    RunId released = run_id;
+    orch.release_run(released);
+
+    run_id = orch.begin_run();
+    auto live = orch.submit_next_level(C(85), single_tensor_args(0x8500, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+
+    S(live.task_slot).run_id = released;
+    S(live.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_NO_THROW((void)orch.on_consumed(live.task_slot));
+
+    // The decrement landed on no run at all, so the live run still owes a task.
+    EXPECT_FALSE(orch.run_done(run_id));
+}
+
+// Failing a run is the recovery path: refusing a run whose submission already
+// closed would leave the caller's fence wait blocked forever.
+TEST_F(OrchestratorFixture, FailingAnAlreadyClosedRunStillResolvesTheFence) {
+    auto task = orch.submit_next_level(C(86), single_tensor_args(0x8600, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("late submission failure")))
+    );
+
+    S(task.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(task.task_slot));
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_TRUE(orch.run_failed(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, FailedSubmissionCarriesItsMessageToTheFence) {
+    orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("orchestration: ValueError: bad arg")));
+    EXPECT_TRUE(orch.run_failed(run_id));
+    try {
+        orch.wait_run(run_id);
+        FAIL() << "wait_run must rethrow the submission error";
+    } catch (const std::runtime_error &e) {
+        EXPECT_STREQ(e.what(), "orchestration: ValueError: bad arg");
+    }
+    orch.release_run(run_id);
 }

@@ -590,6 +590,23 @@ int simpler_run(
         // runtime state — the shared g_host_api table (built once at load time)
         // is passed explicitly into the runtime impls rather than stored on
         // `Runtime` or reassembled per run.
+        // Core geometry first: a host-side orchestrator runs to completion
+        // inside the bind below, and reads worker_count to size its cluster
+        // spreading. Resolving after the bind would hand it the zeros a fresh
+        // Runtime carries.
+        rc = runner->prepare_launch_shape(*r, *config);
+        if (rc != 0) {
+            r->set_gm_sm_ptr(nullptr);
+            int validation_rc = validate_runtime_impl(r, &g_host_api, rc);
+            return validation_rc != 0 ? validation_rc : rc;
+        }
+
+        // Latch the diagnostic enables before the bind: a host-orch runtime
+        // builds its whole task graph inside it, so a diagnostic that hooks the
+        // orchestrator (dep_gen) has to be armed by now. run() latches again at
+        // its entry — the call is idempotent.
+        runner->apply_call_config(*config);
+
         {
             STRACE("simpler_run.bind");
             // One-step bind: restore kernel addrs + active_callable_id and run
@@ -655,6 +672,15 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx) {
     if (ctx == NULL) return 0;
     try {
         return static_cast<DeviceRunnerBase *>(ctx)->host_dlopen_count();
+    } catch (...) {
+        return 0;
+    }
+}
+
+size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->run_stream_set_create_count();
     } catch (...) {
         return 0;
     }

@@ -398,7 +398,7 @@ int32_t AicpuExecutor::load_orch_so(
             continue;
         }
         file_created = true;
-        LOG_INFO_V0("Thread %d: Created SO file at %s (%zu bytes)", thread_idx, so_path, so_size);
+        LOG_DEBUG("Thread %d: Created SO file at %s (%zu bytes)", thread_idx, so_path, so_size);
     }
 
     if (!file_created) {
@@ -414,7 +414,7 @@ int32_t AicpuExecutor::load_orch_so(
         unlink(so_path);
         return -1;
     }
-    LOG_INFO_V0("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
+    LOG_DEBUG("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
 
     // The image is mmap'd after dlopen; keeping only the handle avoids stale
     // libdevice_orch_<pid>_<cid>.so files when worker children exit via os._exit.
@@ -494,7 +494,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // stamps below would have no valid slot and silently drop. Idempotent
     // onboard, where the filter gate already set this same value.
     platform_aicpu_affinity_set_thread_idx(thread_idx);
-    LOG_INFO_V0("Thread %d: Start (exec_idx=%d)", thread_idx, affinity_exec_idx);
 
     // Orchestrator check
     if (thread_idx >= sched_thread_num_) {
@@ -552,7 +551,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 // Validate arg count on every run against the registered SO.
                 if (*p_config_func != nullptr) {
                     PTO2OrchestrationConfig cfg = (*p_config_func)(orch_args_cached_);
-                    LOG_INFO_V0("Thread %d: Config: expected_args=%d", thread_idx, cfg.expected_arg_count);
+                    LOG_DEBUG("Thread %d: Config: expected_args=%d", thread_idx, cfg.expected_arg_count);
                     if (cfg.expected_arg_count > 0) {
                         const ChipStorageTaskArgs &args_validate = runtime->get_orch_args();
                         int32_t actual_arg_count = args_validate.tensor_count() + args_validate.scalar_count();
@@ -570,29 +569,11 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                             return -1;
                         }
                     }
-                } else {
-                    LOG_INFO_V0("Thread %d: No config function, using defaults", thread_idx);
                 }
 
                 // sm_handle / rt are bound to *this* run's memory and must be
                 // (re)created every run, regardless of whether the SO itself was
                 // reused above.
-                const ChipStorageTaskArgs &args = runtime->get_orch_args();
-                int32_t arg_count = args.tensor_count() + args.scalar_count();
-                LOG_INFO_V0("Thread %d: sm_ptr=%p, arg_count=%d", thread_idx, runtime->get_gm_sm_ptr(), arg_count);
-                for (int32_t i = 0; i < args.tensor_count() && i < 20; i++) {
-                    const Tensor &t = args.tensor(i);
-                    LOG_INFO_V0(
-                        "Thread %d: orch_args[%d] = TENSOR(data=0x%lx, ndims=%u, dtype=%u)", thread_idx, i,
-                        static_cast<uint64_t>(t.buffer.addr), t.ndims, static_cast<unsigned>(t.dtype)
-                    );
-                }
-                for (int32_t i = 0; i < args.scalar_count() && (args.tensor_count() + i) < 20; i++) {
-                    LOG_INFO_V0(
-                        "Thread %d: orch_args[%d] = SCALAR(0x%lx)", thread_idx, args.tensor_count() + i,
-                        static_cast<uint64_t>(args.scalar(i))
-                    );
-                }
                 sm_ptr = runtime->get_gm_sm_ptr();
             }
 
@@ -615,13 +596,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 // addresses; we overwrite them with device addresses).
                 runtime_wire_arena_pointers(runtime_arena_, rt->prebuilt_layout, rt);
                 sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.sizing.task_window_sizes);
-                for (int r = 0; r < PTO2_MAX_RING_DEPTH; ++r) {
-                    LOG_INFO_V0(
-                        "Thread %d: Ring %d sizes: task_window=%" PRIu64 " heap=%" PRIu64 " dep_pool=%d", thread_idx, r,
-                        rt->prebuilt_layout.sizing.task_window_sizes[r], rt->prebuilt_layout.sizing.heap_sizes[r],
-                        rt->prebuilt_layout.sizing.dep_pool_capacities[r]
-                    );
-                }
             }
 
             // Reset SM state. setup_pointers + init_header_per_ring restore
@@ -660,11 +634,11 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
                 // Fill ops / core counts (host can't resolve s_runtime_ops's
                 // device address nor know the SchedulerContext's core fan-out).
-                // Core counts come from cores_total_num_ (fixed 1 AIC : 2 AIV
-                // cluster ratio). On the decoupled path aic_count()/aiv_count() are
-                // not populated until after this SM reset, so they cannot be read here.
-                int32_t spike_total = sched_ctx_.cores_total_num();
-                runtime_finalize_after_wire(rt, spike_total / 3, (spike_total * 2) / 3);
+                // aic_count()/aiv_count() carry the handshake-derived cluster
+                // count: cores_total_num_/3 on the fixed 1:2 blocked layout, or
+                // the core-type-classified count post_handshake_init produces on
+                // the serial path.
+                runtime_finalize_after_wire(rt, sched_ctx_.aic_count(), sched_ctx_.aiv_count());
 #if SIMPLER_DFX
                 rt->orchestrator.l2_swimlane_level = get_l2_swimlane_level();
                 {
@@ -695,9 +669,20 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
 #if SIMPLER_DFX
             // dep_gen plugs into the orchestrator thread (single-instance subsystem):
-            // record the per-thread ready_queue index before any submit_task fires
-            // inside orch_func_.
+            // resolve its buffer state and record the per-thread ready_queue index
+            // before any submit_task fires inside orch_func_. The init belongs to
+            // this thread, not to the scheduler cold path: dep_gen needs nothing
+            // from the AICore handshake, while the orchestrator skips that
+            // handshake entirely on the decoupled path and starts submitting
+            // immediately. Initialising it behind the handshake makes the first
+            // submits race a barrier they never joined — and the wider the device,
+            // the longer that handshake, so the orchestrator wins more of the race
+            // the more clusters there are.
+            //
+            // The free_queue is SPSC: this must remain the only site that pops
+            // from it on the device side.
             if (is_dep_gen_enabled()) {
+                dep_gen_aicpu_init();
                 dep_gen_aicpu_set_orch_thread_idx(thread_idx);
             }
 

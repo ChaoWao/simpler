@@ -7,20 +7,26 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Qwen3-14B 2-layer decode (load-balanced fused attention) — SceneTestCase.
+"""Qwen3-14B 40-layer decode (CANN fused-attention) — SceneTestCase.
 
-Self-contained port of pypto-lib ``models/qwen3/14b/decode_layer.py`` entry
-``decode_fwd_layers`` with ``_CHUNK_NLAYERS == 2``: a fused chunk of two
-consecutive Qwen3-14B decode layers (hidden -> hidden, no LM head), with FP32
-inter-layer residual carry. The 36 C++ sources under ``kernels/`` (orchestration
-+ 35 incores: 8 AIC + 27 AIV) and ``simpler_setup/goldens/qwen3_14b_decode.py``
-are the pypto codegen for that entry, harvested verbatim so simpler developers
-run it directly — no descent through pypto-lib / the JIT.
+Self-contained port of pypto-lib ``models/qwen3/14b/decode_fwd.py`` entry
+``decode_fwd_layers`` with ``_CHUNK_NLAYERS == 40``: the whole Qwen3-14B decode
+stack as ONE fused dispatch (hidden -> hidden, no LM head), carrying the
+inter-layer residual in FP32. The layer loop is a real loop in the generated
+orchestration, so a 40-layer chunk costs one extra literal over a 2-layer one,
+not 20x the kernels.
+
+The C++ under ``kernels/`` is harvested pypto codegen (orchestration + 18 AIC +
+16 AIV) plus the hand-written CANN attention extern under
+``kernels/paged_attention_cce/``; ``simpler_setup/goldens/qwen3_14b_decode.py``
+is the matching torch reference. See README.md for provenance and how to
+regenerate.
 
 Parameter regime matches ``stress_profile.py`` (vLLM serving stress): BATCH=16,
-MAX_SEQ=5500 (= max_model_len), fixed decode seq_len=3500 (the ~3500-token
-prompt). Weights + paged KV pool are stacked x2 (one slice per layer; the two
-layers reuse layer-0 weights, per the lib const-layer-0 stacked-fwd reference).
+MAX_SEQ=5500 (= max_model_len), fixed decode seq_len=3500. Weights and the paged
+KV pool are stacked x40 (one slice per layer); every layer reuses layer-0
+weights, per the lib const-layer-0 stacked-fwd reference, while each layer reads
+and writes its own KV pool.
 """
 
 from simpler.task_interface import ArgDirection as D
@@ -33,11 +39,48 @@ from simpler_setup.goldens.qwen3_14b_decode import (
     generate_inputs as _decode_generate_inputs,
 )
 
+# CANN devkit headers for the attention extern, which builds on AscendC and the
+# vendored FusedInferAttentionScore under kernels/paged_attention_cce/vendor/.
+# `vendor/.../attn_infra/base_defs.hpp` selects its AscendC entry header under
+# `#if ASC_DEVKIT_MAJOR >= 9`, which ccec predefines from the installed devkit,
+# so a CANN 9 box must be able to resolve `basic_api/kernel_basic_intf.h` from
+# one of these.
+#
+# `$ASCEND_HOME_PATH` keeps the paths machine-independent and is expanded at
+# compile time, not import time — this file is collected on sim and macOS runners
+# that have no CANN at all. The devkit's arch subdirectory is named differently
+# across installs, so both layouts are listed; missing ones are dropped, and the
+# scene-test resolver raises if *every* entry is missing.
+_CANN_SUBDIRS = (
+    "include",
+    "asc",
+    "asc/impl/adv_api",
+    "asc/impl/basic_api",
+    "asc/impl/basic_api/reg_compute",
+    "asc/impl/c_api",
+    "asc/impl/simt_api",
+    "asc/impl/utils",
+    "asc/include",
+    "asc/include/adv_api",
+    "asc/include/aicpu_api",
+    "asc/include/basic_api",
+    "asc/include/basic_api/reg_compute",
+    "asc/include/c_api",
+    "asc/include/interface",
+    "asc/include/simt_api",
+    "asc/include/utils",
+    "tikcpp/tikcfw",
+    "tikcpp/tikcfw/impl",
+    "tikcpp/tikcfw/interface",
+)
 
-# Validates the fused 2-layer decode against a torch reference.
+_CANN_INCLUDE_DIRS = [f"$ASCEND_HOME_PATH/{prefix}{sub}" for prefix in ("aarch64-linux/", "") for sub in _CANN_SUBDIRS]
+
+
+# Validates the full 40-layer fused decode against a torch reference.
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
 class TestQwen314BDecode(SceneTestCase):
-    """Two-layer Qwen3-14B decode (decode_fwd_layers N=2) against a torch reference."""
+    """Qwen3-14B decode, all 40 layers in one dispatch, against a torch reference."""
 
     RTOL = 5e-2
     ATOL = 1e-1
@@ -46,6 +89,10 @@ class TestQwen314BDecode(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/decode_fwd_layers.cpp",
             "function_name": "aicpu_orchestration_entry",
+            # decode_fwd_layers takes k_cache / v_cache as plain inputs, but the
+            # attention extern writes the current token's KV into them. Declaring
+            # them INOUT here has simpler copy the pools back, so the golden can
+            # check all 40 layers' KV writes and not just the hidden output.
             "signature": [
                 D.IN,  # 0  hidden_states
                 D.IN,  # 1  input_rms_weight
@@ -69,250 +116,304 @@ class TestQwen314BDecode(SceneTestCase):
                 D.OUT,  # 19 out
             ],
         },
-        # 35 incores (func_id 0..34), transcribed from the pypto codegen
-        # kernel_config.py for decode_fwd_layers (N=2). fa_fused is the
-        # codegen-split mixed kernel (fa_fused_aic + fa_fused_aiv).
+        # 37 incores (func_id 0..36), transcribed from the pypto codegen
+        # kernel_config.py for decode_fwd_layers (N=40). func_id 0/11/12 are the
+        # CANN attention externs; 11 and 12 are the same source dispatched as the
+        # AIC and AIV halves of one mixed task.
         "incores": [
             {
                 "func_id": 0,
+                "name": "paged_attention_tiling_cce",
+                "source": "kernels/vendor/paged_attention_cce/tiling/entry.cpp",
+                "core_type": "aiv",
+                "extra_include_dirs": _CANN_INCLUDE_DIRS,
+                "signature": [D.IN, D.OUT],
+            },
+            {
+                "func_id": 1,
                 "name": "copy_hidden",
                 "source": "kernels/aiv/copy_hidden.cpp",
                 "core_type": "aiv",
                 "signature": [D.OUT, D.IN],
             },
             {
-                "func_id": 1,
-                "name": "x_gamma",
-                "source": "kernels/aiv/x_gamma.cpp",
+                "func_id": 2,
+                "name": "x_gamma0",
+                "source": "kernels/aiv/x_gamma0.cpp",
                 "core_type": "aiv",
-                "signature": [D.INOUT, D.IN, D.IN],
+                "signature": [D.OUT, D.IN, D.IN],
             },
             {
-                "func_id": 2,
+                "func_id": 3,
+                "name": "attn_out_seed",
+                "source": "kernels/aiv/attn_out_seed.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN],
+            },
+            {
+                "func_id": 4,
                 "name": "rms_recip",
                 "source": "kernels/aiv/rms_recip.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.INOUT],
             },
             {
-                "func_id": 3,
+                "func_id": 5,
                 "name": "q_seed",
                 "source": "kernels/aiv/q_seed.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT],
             },
             {
-                "func_id": 4,
+                "func_id": 6,
                 "name": "q_proj",
                 "source": "kernels/aic/q_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.INOUT, D.IN, D.IN],
             },
             {
-                "func_id": 5,
-                "name": "k_seed",
-                "source": "kernels/aiv/k_seed.cpp",
+                "func_id": 7,
+                "name": "kv_seed",
+                "source": "kernels/aiv/kv_seed.cpp",
                 "core_type": "aiv",
-                "signature": [D.INOUT],
+                "signature": [D.INOUT, D.INOUT],
             },
             {
-                "func_id": 6,
+                "func_id": 8,
+                "name": "mlp_out_seed",
+                "source": "kernels/aiv/mlp_out_seed.cpp",
+                "core_type": "aiv",
+                "signature": [D.INOUT, D.INOUT, D.INOUT, D.INOUT],
+            },
+            {
+                "func_id": 9,
                 "name": "k_proj",
                 "source": "kernels/aic/k_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.INOUT, D.IN, D.IN],
             },
             {
-                "func_id": 7,
-                "name": "v_seed",
-                "source": "kernels/aiv/v_seed.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT],
-            },
-            {
-                "func_id": 8,
+                "func_id": 10,
                 "name": "v_proj",
                 "source": "kernels/aic/v_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.INOUT, D.IN, D.IN],
             },
             {
-                "func_id": 9,
-                "name": "fa_work_build",
-                "source": "kernels/aiv/fa_work_build.cpp",
-                "core_type": "aiv",
-                "signature": [D.IN, D.INOUT, D.INOUT],
-            },
-            {
-                "func_id": 10,
-                "name": "qk_gamma",
-                "source": "kernels/aiv/qk_gamma.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN, D.IN, D.IN],
-            },
-            {
                 "func_id": 11,
-                "name": "qk_recip",
-                "source": "kernels/aiv/qk_recip.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN],
+                "name": "paged_attention_rope_cce_aic",
+                "source": "kernels/vendor/paged_attention_cce/attention_rope/entry.cpp",
+                "core_type": "aic",
+                "extra_include_dirs": _CANN_INCLUDE_DIRS,
+                "signature": [
+                    D.INOUT,
+                    D.INOUT,
+                    D.INOUT,
+                    D.INOUT,
+                    D.IN,
+                    D.INOUT,
+                    D.INOUT,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                ],
             },
             {
                 "func_id": 12,
-                "name": "rope_qkv",
-                "source": "kernels/aiv/rope_qkv.cpp",
+                "name": "paged_attention_rope_cce_aiv",
+                "source": "kernels/vendor/paged_attention_cce/attention_rope/entry.cpp",
                 "core_type": "aiv",
-                "signature": [D.IN, D.IN, D.IN, D.IN, D.IN, D.INOUT, D.INOUT, D.INOUT, D.IN, D.IN, D.IN, D.IN, D.IN],
+                "extra_include_dirs": _CANN_INCLUDE_DIRS,
+                "signature": [
+                    D.INOUT,
+                    D.INOUT,
+                    D.INOUT,
+                    D.INOUT,
+                    D.IN,
+                    D.INOUT,
+                    D.INOUT,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                    D.IN,
+                ],
             },
             {
                 "func_id": 13,
-                "name": "down_seed",
-                "source": "kernels/aiv/down_seed.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT],
-            },
-            {
-                "func_id": 14,
-                "name": "gate_seed",
-                "source": "kernels/aiv/gate_seed.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT],
-            },
-            {
-                "func_id": 15,
-                "name": "up_seed",
-                "source": "kernels/aiv/up_seed.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT],
-            },
-            {
-                "func_id": 16,
-                "name": "fa_fused_aic",
-                "source": "kernels/aic/fa_fused_aic.cpp",
-                "core_type": "aic",
-                "signature": [D.IN, D.INOUT, D.INOUT, D.INOUT, D.IN, D.IN, D.IN, D.IN, D.IN, D.IN, D.INOUT],
-            },
-            {
-                "func_id": 17,
-                "name": "fa_fused_aiv",
-                "source": "kernels/aiv/fa_fused_aiv.cpp",
-                "core_type": "aiv",
-                "signature": [D.IN, D.INOUT, D.INOUT, D.INOUT, D.IN, D.IN, D.IN, D.IN, D.IN, D.IN, D.INOUT],
-            },
-            {
-                "func_id": 18,
-                "name": "online_softmax",
-                "source": "kernels/aiv/online_softmax.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT, D.IN, D.IN, D.IN, D.IN],
-            },
-            {
-                "func_id": 19,
-                "name": "out_seed",
-                "source": "kernels/aiv/out_seed.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT],
-            },
-            {
-                "func_id": 20,
-                "name": "attn_fence",
-                "source": "kernels/aiv/attn_fence.cpp",
-                "core_type": "aiv",
-                "signature": [D.IN, D.INOUT],
-            },
-            {
-                "func_id": 21,
                 "name": "out_proj",
                 "source": "kernels/aic/out_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.INOUT],
             },
             {
-                "func_id": 22,
+                "func_id": 14,
+                "name": "out_proj_0",
+                "source": "kernels/aic/out_proj_0.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 15,
                 "name": "residual_rms_cast",
                 "source": "kernels/aiv/residual_rms_cast.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN],
             },
             {
-                "func_id": 23,
+                "func_id": 16,
                 "name": "residual_rms_cast_0",
                 "source": "kernels/aiv/residual_rms_cast_0.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN],
             },
             {
-                "func_id": 24,
+                "func_id": 17,
                 "name": "residual_rms_cast_1",
                 "source": "kernels/aiv/residual_rms_cast_1.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN],
             },
             {
-                "func_id": 25,
+                "func_id": 18,
                 "name": "residual_rms_cast_2",
                 "source": "kernels/aiv/residual_rms_cast_2.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN],
             },
             {
-                "func_id": 26,
+                "func_id": 19,
                 "name": "residual_rms_cast_3",
                 "source": "kernels/aiv/residual_rms_cast_3.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.INOUT, D.IN, D.IN, D.IN],
             },
             {
-                "func_id": 27,
+                "func_id": 20,
                 "name": "post_rms_reduce",
                 "source": "kernels/aiv/post_rms_reduce.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.INOUT],
             },
             {
-                "func_id": 28,
+                "func_id": 21,
                 "name": "gate_proj",
                 "source": "kernels/aic/gate_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.INOUT],
             },
             {
-                "func_id": 29,
+                "func_id": 22,
                 "name": "up_proj",
                 "source": "kernels/aic/up_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.INOUT],
             },
             {
+                "func_id": 23,
+                "name": "gate_proj_0",
+                "source": "kernels/aic/gate_proj_0.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 24,
+                "name": "up_proj_0",
+                "source": "kernels/aic/up_proj_0.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 25,
+                "name": "gate_proj_1",
+                "source": "kernels/aic/gate_proj_1.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 26,
+                "name": "up_proj_1",
+                "source": "kernels/aic/up_proj_1.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 27,
+                "name": "gate_proj_2",
+                "source": "kernels/aic/gate_proj_2.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 28,
+                "name": "up_proj_2",
+                "source": "kernels/aic/up_proj_2.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 29,
+                "name": "gate_proj_3",
+                "source": "kernels/aic/gate_proj_3.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
                 "func_id": 30,
+                "name": "up_proj_3",
+                "source": "kernels/aic/up_proj_3.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 31,
+                "name": "gate_proj_4",
+                "source": "kernels/aic/gate_proj_4.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 32,
+                "name": "up_proj_4",
+                "source": "kernels/aic/up_proj_4.cpp",
+                "core_type": "aic",
+                "signature": [D.IN, D.IN, D.INOUT],
+            },
+            {
+                "func_id": 33,
                 "name": "silu",
                 "source": "kernels/aiv/silu.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.INOUT, D.IN, D.IN],
             },
             {
-                "func_id": 31,
+                "func_id": 34,
                 "name": "down_proj",
                 "source": "kernels/aic/down_proj.cpp",
                 "core_type": "aic",
                 "signature": [D.IN, D.IN, D.INOUT],
             },
             {
-                "func_id": 32,
-                "name": "down_cast_residual",
-                "source": "kernels/aiv/down_cast_residual.cpp",
+                "func_id": 35,
+                "name": "dcr_xgamma",
+                "source": "kernels/aiv/dcr_xgamma.cpp",
                 "core_type": "aiv",
-                "signature": [D.IN, D.IN, D.INOUT],
+                "signature": [D.IN, D.IN, D.INOUT, D.IN, D.INOUT],
             },
             {
-                "func_id": 33,
-                "name": "out_consolidate",
-                "source": "kernels/aiv/out_consolidate.cpp",
-                "core_type": "aiv",
-                "signature": [D.INOUT, D.IN],
-            },
-            {
-                "func_id": 34,
+                "func_id": 36,
                 "name": "copy_out",
                 "source": "kernels/aiv/copy_out.cpp",
                 "core_type": "aiv",
@@ -325,8 +426,8 @@ class TestQwen314BDecode(SceneTestCase):
         {
             "name": "StressBatch16Seq3500",
             "platforms": ["a2a3"],
-            # block_dim=0 -> auto (stream max capacity), matching the lib default.
-            "config": {"aicpu_thread_num": 4, "block_dim": 0},
+            # A run takes the whole device, matching the lib default.
+            "config": {"aicpu_thread_num": 4},
             "params": {"seed": 1234, "seq_len": 3500},
         },
     ]

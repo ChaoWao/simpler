@@ -135,7 +135,7 @@ reading the kernel source — names are not in the dump (only kind / shape
 / value), so cross-reference the kernel's `args:` header for those:
 
 ```text
-[l0_swimlane] func_id=0 task=0x... mix=[0, 1, 2] mode=mix block_dim=3
+[l0_swimlane] func_id=0 task=0x... mix=[0, 1, 2] mode=mix block_num=3
               members=[MATMUL(aic,func 0), ADD(aiv,func 1), MUL(aiv,func 2)]
 [l0_swimlane] arg slots (override with --set-arg SLOT=VALUE):
     slot 0  tensor  FLOAT32  [16384]
@@ -231,7 +231,7 @@ Omitting `--case` auto-pins the **first** `CASES[*]` that lists your
 no "run every case, reconstruct from the newest dump dir" ambiguity). Pass
 `--case` explicitly when that first case is not the smallest — a full-size
 production case's shapes overflow the camodel replay (§3.4). The synthesized
-slot-48 `block_num` is taken from the **selected** case's `block_dim`.
+slot-48 `block_num` comes from `--spmd-block-num` (default 1); an SPMD cohort sizes itself on device, so it is not readable from the test file.
 
 ### 3.6 Reusing a dump across kernels
 
@@ -257,7 +257,7 @@ categories — one representative each, with its verified `--func-id`. The
 runnable commands follow the table, wrapped in `task-submit` (the step-5
 `msprof` collect takes a device on the shared box). Most use
 `--platform a2a3sim` (the dump runs off-NPU); `alternating_matmul_add`,
-`paged_attention_unroll`, and `qwen3_14b_decode`, whose `CASES` declare
+and `paged_attention_unroll`, whose `CASES` declare
 **no `a2a3sim`**, are grouped separately and use `--platform a2a3` after an
 arch-precheck (the case must declare the `--platform` you pass — §3.1).
 
@@ -267,11 +267,10 @@ arch-precheck (the case must declare the `--platform` you pass — §3.1).
 | Single AIV | `vector_example` | `--func-id 0` | `kernel_add`, dispatched `rt_submit_aiv_task(0)` (vec only) |
 | Mix 2 AIV (per-lane) | `mixed_example` | `--func-id 3,4` | ADD_STD@AIV0 + MUL_STD@AIV1 (`get_subblockid` routing) |
 | Mix 3-way 1C2V | `mixed_example` | `--func-id 0,1,2` | MATMUL@AIC + ADD@AIV0 + MUL@AIV1 |
-| SPMD single-source | `spmd_multiblock_aiv` | `--func-id 0` | single AIV reading `get_block_idx` (`block_dim=24`; replay traces block 0) |
+| SPMD single-source | `spmd_multiblock_aiv` | `--func-id 0` | single AIV reading `get_block_idx` (pass `--spmd-block-num`; replay traces block 0) |
 | SPMD mix, 2 AIV share a source | `spmd_multiblock_mix` | `--func-id 0,1,2` | func 1 & 2 are distinct ids but **both `kernel_spmd_mix.cpp`** → the 2 AIV collapse to one (both lanes run it). Routes by `get_sub_block_id` (slot 49) → in replay both lanes read `sub_block_id=0`; AIV0/AIV1 differ only by write offset, so the pipeline stays representative. (The same-source collapse also covers the duplicate-func_id `[0,1,1]` shape an SPMD mix produces when `aiv0 = aiv1`.) |
 | Paged-attn, loop = scalar | `paged_attention_unroll` | `--func-id 0 --set-arg 4=4` | QK stage; `n_blocks` scalar (slot 4) → shrink to 4 ([§7.2](#72---set-arg-floor-for-a-loop-count-without-distortion)) |
 | Paged-attn, loop = control tensor | `batch_paged_attention` | `--func-id 1 --set-arg 1=512 --case CaseSmall1` | SF reads `context_lens` (**slot 1**) content (`aiv_softmax_prepare.cpp`); `--set-arg 1=512` fills it uniformly → shrinks the derived per-batch block count |
-| Real SPMD workload | `qwen3_14b_decode` | `--func-id 16,17 --set-arg 0=96` | the `fa_fused` mix `{16,17,17}` (AIC + 2 same-source AIV → collapses). a2a3-only. `--set-arg 0=96` sets slot 0 `fa_total` (the outer work-item count) → `ceil(96/24)=4` fa blocks → real QK/PV `MMAD` + online-softmax (`VMAX`/`VEXP`/`VSUB`/`VCADD`) lanes. Slot 0 defaults to 0 in replay → empty trace, so this `--set-arg` is required. camodel simulates ~19k instrs cycle-by-cycle — expect minutes, not a hang (§7.1) |
 
 Runnable commands (one per category):
 
@@ -302,11 +301,29 @@ L0a="python -m simpler_setup.tools.l0_swimlane --platform a2a3 -g"
 task-submit --device auto --max-time 1800 --run "$L0a --func-id 0 --test $T/alternating_matmul_add/test_alternating_matmul_add.py"
 # Paged-attn, loop = scalar (shrink n_blocks to 4)
 task-submit --device auto --max-time 1800 --run "$L0a --func-id 0 --set-arg 4=4 --test $T/paged_attention_unroll/test_paged_attention_unroll.py"
-# Real SPMD workload — qwen3 fa_fused mix {16,17,17}. --set-arg 0=96 sets slot 0
-# (fa_total = outer work-item count) → ceil(96/24)=4 fa blocks → real MMAD + online
-# softmax. Slot 0 is 0 in replay otherwise → empty trace. camodel takes minutes (§7.1).
-task-submit --device auto --max-time 1800 --run "$L0a --func-id 16,17 --set-arg 0=96 --test $E/qwen3_14b_decode/test_qwen3_14b_decode.py"
 ```
+
+`qwen3_14b_decode` used to serve as the "real SPMD workload" row here, driving
+its generated `fa_fused` mix with `--set-arg 0=96` on the `fa_total` work-item
+count. That kernel is gone: its attention is now a CANN
+`FusedInferAttentionScore` extern, so the row was dropped.
+
+Being an extern is not what blocks it — the replay feeds `kernel_entry` and does
+not care whether the source was generated or hand-written. The blocker is that
+this one takes its work distribution from a `FAInferTilingData` **struct**, in a
+`UINT8 metadata` buffer that `paged_attention_tiling_cce` fills at runtime.
+`--set-arg` writes one integer into *every* element, so it cannot synthesize a
+coherent struct (it is not even refused — `UINT8` passes the integer-dtype
+check), and this tool dumps at level 3, which captures metadata but no payload
+([args-dump](args-dump.md) §levels). With a zeroed `metadata`,
+`fai_body.hpp` reads `tiling->needCoreNum == 0` and takes the degenerate branch,
+so the trace would be unrepresentative rather than absent.
+
+That gap is in the tooling, not the kernel: `--dump-args 2` does capture the
+buffer's real bytes. Restoring payloads for control tensors — rather than only
+uniform-filling them — would make this and any other metadata-driven extern
+replayable. Until then the "real SPMD workload" category has no representative
+here.
 
 **Not l0 targets (excluded).** Runtime-mechanics tests (`orch_so_cache`,
 `prepared_callable`, `dynamic_register`, `l3_group`, `l3_dependency`,
@@ -441,15 +458,16 @@ SPMD kernels read an execution context the orchestration builds per
 dispatch — `LocalContext{block_idx, block_num}` at args slot 48 and
 `GlobalContext{sub_block_id}` at slot 49. The isolated replay has no
 orchestration, so `replay_host.cpp` **synthesizes** it: one
-`LocalContext{block_idx=0, block_num=block_dim}` + `GlobalContext`
+`LocalContext{block_idx=0, block_num=--spmd-block-num}` + `GlobalContext`
 pointed at slots 48/49. This is harmless for positional kernels (they
 ignore 48/49) and required for SPMD kernels that read `get_block_idx` /
 `get_block_num` (which would otherwise dereference null). `block_idx=0`
-traces a representative block; `block_num = block_dim` (the **selected**
-case's grid width — the `--case` case, else the auto-pinned first-platform
-case) keeps steady-state branches (`block_idx+1 < block_num`) on their
-normal path — see [§8](#8-fidelity-rules). `--spmd-block-num` overrides
-`block_num`.
+traces a representative block; `block_num` (from `--spmd-block-num`, default
+
+1) keeps steady-state branches (`block_idx+1 < block_num`) on their normal
+path — see [§8](#8-fidelity-rules). An SPMD cohort sizes itself from
+`rt_available_cluster_count()` on device, so the width is not readable from
+the test file and must be passed.
 Note the per-AIV-lane routing for a mix uses the hardware
 `get_subblockid()` (§5.4), not the synthesized slot-49 value.
 

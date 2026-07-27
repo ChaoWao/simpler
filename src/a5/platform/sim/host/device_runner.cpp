@@ -100,9 +100,6 @@ int DeviceRunner::ensure_binaries_loaded() {
         auto load_optional_sym = [this](const char *name, void **out) {
             dlerror();
             void *sym = dlsym(aicpu_so_handle_, name);
-            if (sym == nullptr) {
-                LOG_DEBUG("Optional dlsym skipped for %s: %s", name, dlerror());
-            }
             *out = sym;
         };
 
@@ -214,20 +211,13 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
 
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     apply_call_config(config);
-    int block_dim = config.block_dim;
+    // prepare_launch_shape() resolved block_dim before the graph was built, so
+    // the geometry this run launches with is already on the runner.
+    const int block_dim = block_dim_;
     const int launch_aicpu_num = config.aicpu_thread_num;
     clear_cpu_sim_shared_storage();
-    if (launch_aicpu_num < 1 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
-        LOG_ERROR("launch_aicpu_num (%d) must be in range [1, %d]", launch_aicpu_num, PLATFORM_MAX_AICPU_THREADS);
-        return -1;
-    }
-
-    if (block_dim == 0) {
-        block_dim = PLATFORM_MAX_BLOCKDIM;
-        LOG_INFO_V0("block_dim auto-resolved to %d", block_dim);
-    }
-    if (block_dim < 1 || block_dim > PLATFORM_MAX_BLOCKDIM) {
-        LOG_ERROR("block_dim (%d) must be in range [1, %d]", block_dim, PLATFORM_MAX_BLOCKDIM);
+    if (block_dim < 1) {
+        LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
         return -1;
     }
 
@@ -245,19 +235,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    block_dim_ = block_dim;
     int num_aicore = block_dim * cores_per_blockdim_;
-
-    if (num_aicore > RUNTIME_MAX_WORKER) {
-        LOG_ERROR("num_aicore (%d) exceeds RUNTIME_MAX_WORKER (%d)", num_aicore, RUNTIME_MAX_WORKER);
-        return -1;
-    }
-
-    runtime.set_worker_count(num_aicore);
-    worker_count_ = num_aicore;
-    runtime.set_aicpu_thread_num(launch_aicpu_num);
-
-    int num_aic = block_dim;
     uint32_t enable_profiling_flag = SIMPLER_DFX_FLAG_NONE;
     if (enable_dump_args_) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
@@ -275,16 +253,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS);
     }
 
-    Handshake *workers = runtime.get_workers();
-    for (int i = 0; i < num_aicore; i++) {
-        workers[i].aicpu_ready = 0;
-        workers[i].aicore_done = 0;
-        workers[i].task = 0;
-        workers[i].core_type = (i < num_aic) ? CoreType::AIC : CoreType::AIV;
-    }
     kernel_args_.enable_profiling_flag = enable_profiling_flag;
 
-    LOG_DEBUG("Setting function_bin_addr for Tasks (Simulation)");
     for (int i = 0; i < runtime.get_task_count(); i++) {
         Task *task = runtime.get_task(i);
         if (task != nullptr) {
@@ -390,10 +360,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
             kernel_args_.regs = 0;
         }
     });
-
-    LOG_INFO_V0(
-        "Allocated simulated registers: %d cores x 0x%x bytes (sparse: 3 pages)", num_aicore, SIM_REG_TOTAL_SIZE
-    );
 
     if (aicpu_execute_func_ == nullptr || aicore_execute_func_ == nullptr || set_platform_regs_func_ == nullptr ||
         set_platform_dump_base_func_ == nullptr || set_platform_phase_base_func_ == nullptr ||
@@ -503,7 +469,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }));
     }
 
-    LOG_INFO_V0("Waiting for threads to complete");
     for (auto &t : aicpu_threads) {
         t.join();
     }
@@ -683,7 +648,6 @@ int DeviceRunner::finalize() {
     worker_count_ = 0;
     last_runtime_ = nullptr;
 
-    LOG_INFO_V0("DeviceRunner(sim) finalized");
     return 0;
 }
 

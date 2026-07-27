@@ -37,6 +37,7 @@
 
 #include "callable.h"
 #include "prepare_callable_common.h"
+#include "pto_runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"
 #include "common/l2_swimlane_profiling.h"
@@ -97,8 +98,8 @@ public:
      * 1. Initializes device if not already done (lazy initialization)
      * 2. Initializes worker handshake buffers in the runtime based on block_dim
      * 3. Transfers runtime to device memory
-     * 4. Launches AICPU main kernel
-     * 5. Launches AICore kernel
+     * 4. Launches AICore kernel
+     * 5. Launches AICPU main kernel
      * 6. Synchronizes streams
      * 7. Cleans up runtime memory
      *
@@ -122,12 +123,15 @@ public:
     void unregister_device_memory_from_host(void *dev_ptr) override;
 
     /**
-     * a2a3-only `dep_gen` enablement setter. The shared
-     * `set_l2_swimlane_enabled`, `set_dump_args_enabled`,
-     * `set_pmu_enabled`, `set_scope_stats_enabled`, `set_output_prefix`,
-     * `output_prefix`, and `launch_aicpu_kernel` live on `DeviceRunnerBase`.
+     * a2a3-only `dep_gen` enablement setter. Also arms the loaded runtime's
+     * host-side graph capture, which a host-orch runtime uses instead of the
+     * device collector. Defined in the .cpp so this header stays free of the
+     * runtime-provided capture symbols. The shared `set_l2_swimlane_enabled`,
+     * `set_dump_args_enabled`, `set_pmu_enabled`, `set_scope_stats_enabled`,
+     * `set_output_prefix`, `output_prefix`, and `launch_aicpu_kernel` live on
+     * `DeviceRunnerBase`.
      */
-    void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
+    void set_dep_gen_enabled(bool enable) override;
 
     /**
      * Cleanup all resources
@@ -187,6 +191,8 @@ public:
     // `aicpu_dlopen_count`, and `host_dlopen_count` are inherited from
     // `DeviceRunnerBase`.
 
+    size_t run_stream_set_create_count() const override { return run_stream_sets_created_; }
+
 private:
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
     // worker_count_, executor + dispatcher bytes, aicore_bin_handle_,
@@ -218,6 +224,27 @@ private:
     // force_reset_device()). This flag fails run() fast and drives that
     // recovery. See run() and recover_device_or_mark_unusable().
     bool device_unusable_{false};
+
+    struct RunStreamSet {
+        rtStream_t aicpu{nullptr};
+        rtStream_t aicore{nullptr};
+    };
+    // One slot per in-flight run the pipeline contract can declare.
+    static constexpr unsigned kRunStreamSetCount = PTO_PIPELINE_MAX_DEPTH;
+
+    // A stream set carries no per-run content, so it is created on first use
+    // and reused for every later run on this slot; `destroy_run_stream_sets()`
+    // in finalize() is the sole release point, as for the persistent bootstrap
+    // pair. Only slot 0 is selected while the contract is K=1.
+    RunStreamSet run_stream_sets_[kRunStreamSetCount]{};
+    size_t run_stream_sets_created_{0};
+    int ensure_run_stream_set(unsigned slot);
+    int destroy_run_stream_sets();
+
+    // The kernel submission boundary is separate from the stream wait and the
+    // post-run teardown; run() invokes the two back-to-back.
+    int launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_num, unsigned slot);
+    int reap_run(unsigned slot);
 
     // On an AICore launch/sync error, best-effort drain the device so a later
     // run() on the same DeviceRunner can recover in place; if the drain itself

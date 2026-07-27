@@ -101,7 +101,6 @@ def test_a5hbg_task_timing_slots_emit_markers(st_platform, st_device_ids, capfd)
 
         config = CallConfig()
         config.enable_l2_swimlane = False  # slots must work with swimlane OFF
-        config.block_dim = 3
 
         assert worker.run(chip_handle, args, config) is None
         assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (

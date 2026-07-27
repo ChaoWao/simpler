@@ -43,7 +43,7 @@ extern "C" {
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 1,
+        .expected_arg_count = 2,
     };
 }
 
@@ -51,6 +51,8 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 // process the consumer as an early-dispatch candidate WHILE the producer is running
 // (a fast producer would finish first and route the consumer through the ready path).
 static constexpr int64_t PRODUCER_SPIN_ITERS = 10000000;
+
+static constexpr int32_t PRODUCER_BLOCKS = 50;
 
 static PTO2TaskId submit_producer(const Tensor &out, int16_t block_num, int64_t base_cl) {
     L0TaskArgs args;
@@ -78,13 +80,25 @@ static void submit_sync_consumer(const Tensor &out, int16_t block_num, int64_t b
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const Tensor &layout = orch_args.tensor(1).ref();
+
+    // The consumer must occupy every AIC slot for the strand this case looks
+    // for, and require_sync_start needs every block of it co-resident — so its
+    // width is exactly this run's cluster count. The producer stays wider than
+    // the device on purpose; it carries no sync_start, so no cap applies.
+    const int32_t sync_blocks = rt_available_cluster_count();
 
     rt_scope_begin(PTO2ScopeMode::MANUAL);
-    PTO2TaskId prod = submit_producer(ext_output, 50, 0);
-    submit_sync_consumer(ext_output, 24, 50, prod);
+    PTO2TaskId prod = submit_producer(ext_output, PRODUCER_BLOCKS, 0);
+    submit_sync_consumer(ext_output, static_cast<int16_t>(sync_blocks), PRODUCER_BLOCKS, prod);
     rt_scope_end();
 
-    LOG_INFO_V9("[spmd_sync_start_early_dispatch] wide producer + MIX sync_start consumer submitted");
+    uint32_t idx[1] = {0};
+    set_tensor_data<int32_t>(layout, 1, idx, sync_blocks);
+
+    LOG_INFO_V9(
+        "[spmd_sync_start_early_dispatch] producer (%d) + MIX sync_start consumer (%d)", PRODUCER_BLOCKS, sync_blocks
+    );
 }
 
 }  // extern "C"

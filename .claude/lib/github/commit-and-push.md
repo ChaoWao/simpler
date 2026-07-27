@@ -5,8 +5,12 @@ Prepares changes for PR: rebases, squashes commits, and pushes.
 ## 1. Rebase
 
 First, rebase onto the latest base branch to incorporate upstream changes.
+**This must happen before the squash in §2, not after** — see the warning there.
 
 ```bash
+# $BASE_REF is a remote-tracking ref and goes stale during a long session
+git fetch upstream
+
 # Save commit SHA before rebase
 BEFORE_REBASE=$(git rev-parse HEAD)
 
@@ -66,17 +70,32 @@ COMMITS_AHEAD=$(git rev-list HEAD --not "$BASE_REF" --count 2>/dev/null || echo 
    git reset --soft "$BASE_REF"
    ```
 
+   **Only safe because §1 already rebased onto `$BASE_REF`.** The reset moves
+   HEAD to the base but keeps *your* index, so if the branch still sits on an
+   older base, every file the base gained meanwhile is recorded as **your
+   deletion** — and a later rebase will not undo it, because the revert is by
+   then part of your own diff. Step 5 verifies this; do not check it here, where
+   `HEAD` is `$BASE_REF` and a `$BASE_REF`-to-`HEAD` diff is empty by
+   construction.
+
 4. All changes are now staged. Delegate to `/git-commit`, passing the captured
    `/tmp/orig_pr_msg.txt` as the starting point so the single squashed commit
    **evolves** the original subject/body to cover the combined diff (see the
    message rule below) rather than inventing a generic one. If `OTHER_AUTHORS`
    is non-empty, append `Co-authored-by:` trailers for each human author.
-5. **Re-verify** the count:
+5. **Re-verify** the count, and that the squash reverted nothing:
 
    ```bash
    COMMITS_AHEAD=$(git rev-list HEAD --not "$BASE_REF" --count)
    # Must be exactly 1. If not, something went wrong — do NOT push.
+
+   # Three dots, and only now that a commit exists — see step 3.
+   git diff "$BASE_REF"...HEAD --stat
    ```
+
+   Every file listed must be one you meant to touch. Anything else is the
+   stale-base deletion described in step 3: restore it with
+   `git checkout "$BASE_REF" -- <path>` and amend.
 
 **Important:** When squashing, the commit message must describe the final combined diff. Start from the original PR commit's message (keep its type/scope/subject and intent) and evolve it to absorb the folded-in fixes — do not replace it with a generic `fix(pr): …` message, and do not leave it frozen when the fix changed the commit's behavior or scope.
 

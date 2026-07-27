@@ -9,7 +9,10 @@
 # -----------------------------------------------------------------------------------------------------------
 """SPMD sync_start stress: 54 tasks over 6 rounds with mixed shapes (MIX + AIV).
 
-Grand total: 840 CL = 13440 float32.
+The four cohort widths scale with the run's cluster count and are reported back
+in `layout` — a run always takes the whole device, and that width differs
+between sim and silicon. The host replays the same round structure from the
+reported widths; `output` is sized for the widest device the platform allows.
 """
 
 import torch
@@ -21,28 +24,33 @@ FLOATS_PER_CACHE_LINE = 16
 ROUNDS = 6
 SHAPE_MIX, SHAPE_AIV = "MIX", "AIV"
 MIX_SLOTS, AIV_SLOTS = 3, 1
-NORMAL_MIX_BN, SYNC_MIX_BN, SYNC_AIV_BN, NORMAL_AIV_BN = 4, 12, 8, 4
+# Widest the platform allows: cohort divisors 6/2/3/6 at 24 clusters.
+MAX_CLUSTERS = 24
 
 
-def _build_tasks():
+def _build_tasks(normal_mix_bn, sync_mix_bn, sync_aiv_bn, normal_aiv_bn):
+    """Replay the orchestration's round structure from its reported widths."""
     tasks, cl = [], 0
     for _ in range(ROUNDS):
         for _ in range(4):
-            tasks.append((NORMAL_MIX_BN, cl, SHAPE_MIX))
-            cl += NORMAL_MIX_BN * MIX_SLOTS
+            tasks.append((normal_mix_bn, cl, SHAPE_MIX))
+            cl += normal_mix_bn * MIX_SLOTS
         for _ in range(2):
-            tasks.append((SYNC_MIX_BN, cl, SHAPE_MIX))
-            cl += SYNC_MIX_BN * MIX_SLOTS
+            tasks.append((sync_mix_bn, cl, SHAPE_MIX))
+            cl += sync_mix_bn * MIX_SLOTS
         for _ in range(2):
-            tasks.append((SYNC_AIV_BN, cl, SHAPE_AIV))
-            cl += SYNC_AIV_BN * AIV_SLOTS
-        tasks.append((NORMAL_AIV_BN, cl, SHAPE_AIV))
-        cl += NORMAL_AIV_BN * AIV_SLOTS
+            tasks.append((sync_aiv_bn, cl, SHAPE_AIV))
+            cl += sync_aiv_bn * AIV_SLOTS
+        tasks.append((normal_aiv_bn, cl, SHAPE_AIV))
+        cl += normal_aiv_bn * AIV_SLOTS
     return tasks
 
 
-TASKS = _build_tasks()
-TOTAL_CL = sum(bn * (MIX_SLOTS if s == SHAPE_MIX else AIV_SLOTS) for bn, _, s in TASKS)
+def _total_cl(tasks):
+    return sum(bn * (MIX_SLOTS if s == SHAPE_MIX else AIV_SLOTS) for bn, _, s in tasks)
+
+
+MAX_TOTAL_CL = _total_cl(_build_tasks(MAX_CLUSTERS // 6, MAX_CLUSTERS // 2, MAX_CLUSTERS // 3, MAX_CLUSTERS // 6))
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -54,7 +62,7 @@ class TestSpmdSyncStartStress(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/spmd_sync_start_stress_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT],
+            "signature": [D.INOUT, D.INOUT],
         },
         "incores": [
             {
@@ -92,23 +100,36 @@ class TestSpmdSyncStartStress(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        return TaskArgsBuilder(
+            Tensor("output", torch.zeros(MAX_TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            Tensor("layout", torch.zeros(4, dtype=torch.int32)),
+        )
 
     def compute_golden(self, args, params):
-        out = args.output
-        for block_num, base_cl, shape in TASKS:
+        # Both outputs are checked against the reported widths in compare_outputs.
+        pass
+
+    def compare_outputs(self, test_args, golden_args, output_names, params):
+        widths = [int(v) for v in test_args.layout]
+        assert all(w >= 1 for w in widths), f"reported cohort widths {widths}"
+        tasks = _build_tasks(*widths)
+        assert _total_cl(tasks) <= MAX_TOTAL_CL, f"widths {widths} overflow {MAX_TOTAL_CL} cache lines"
+        expected = torch.zeros(MAX_TOTAL_CL, dtype=torch.float32)
+        for block_num, base_cl, shape in tasks:
             for block_idx in range(block_num):
                 if shape == SHAPE_MIX:
                     for slot in range(MIX_SLOTS):
-                        out[(base_cl + block_idx * MIX_SLOTS + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
+                        expected[base_cl + block_idx * MIX_SLOTS + slot] = float(block_idx)
                 else:
-                    out[(base_cl + block_idx) * FLOATS_PER_CACHE_LINE] = float(block_idx)
+                    expected[base_cl + block_idx] = float(block_idx)
+        actual = test_args.output.reshape(MAX_TOTAL_CL, FLOATS_PER_CACHE_LINE)[:, 0]
+        assert torch.equal(actual, expected), f"slots disagree with the reported cohort widths {widths}"
 
 
 if __name__ == "__main__":

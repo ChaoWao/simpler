@@ -18,48 +18,20 @@ blocks still arrive), so each barrier waits for block_num.
 The barrier has two compile-time variants (MERGE_BARRIER_COUNTER in
 merge_pipeline.cpp): a per-slot st_dev poll (O(n) non-cacheable reads) and a
 single-counter st_atomic+dcci arrival + one-ld_dev poll (O(1) read). The kernel
-records each block's per-barrier gap with get_sys_cnt; the hook below prints
-them (ticks at 50 MHz -> us) and skips golden-checking the diagnostic output.
+records each block's per-barrier gap with get_sys_cnt; the `compare_outputs`
+override prints them (ticks at 50 MHz -> us) and leaves the diagnostic 'timing'
+output out of the golden comparison.
 """
-
-import sys
 
 import torch
 from simpler.task_interface import ArgDirection as D
 
-import simpler_setup.scene_test  # noqa: F401
 from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 TILES = 8
 M = 128
 SIZE = TILES * M  # 1024
 NBLK = 8
-
-# Print the kernel's per-block timing (get_sys_cnt deltas, ticks->us at 50 MHz)
-# and skip golden-checking the diagnostic 'timing' output. Each block's slots are
-# strided by 32 int32 (one cacheline) because scalar st_dev only commits the
-# first 8 int32 of a 128B line.
-_st = sys.modules["simpler_setup.scene_test"]
-_orig_cmp = _st._compare_outputs
-
-
-def _cmp_with_gaps(test_args, golden_args, output_names, rtol, atol):
-    if "timing" in output_names:
-        tm = test_args.timing.reshape(NBLK, 32)[:, :6].to(torch.float64) / 50.0
-        labels = ["segA", "bar1", "segB", "bar2", "segC", "total"]
-        print("[GAP] per-block us (50 MHz counter):")
-        print("  blk " + " ".join(f"{lbl:>7}" for lbl in labels))
-        for b in range(NBLK):
-            print(f"  {b:>3} " + " ".join(f"{tm[b, k]:7.2f}" for k in range(6)))
-        print(
-            f"[GAP] barrier1: max={tm[:, 1].max():.2f} min={tm[:, 1].min():.2f} us | "
-            f"barrier2: max={tm[:, 3].max():.2f} min={tm[:, 3].min():.2f} us"
-        )
-        output_names = [n for n in output_names if n != "timing"]
-    return _orig_cmp(test_args, golden_args, output_names, rtol, atol)
-
-
-_st._compare_outputs = _cmp_with_gaps
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -89,7 +61,7 @@ class TestMergePipelineBarrier(SceneTestCase):
             # per-task via launch_spec.set_block_num in merge_orch.cpp).
             "name": "merge",
             "platforms": ["a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
     ]
@@ -104,6 +76,23 @@ class TestMergePipelineBarrier(SceneTestCase):
 
     def compute_golden(self, args, params):
         args.out[:] = 2.0 * args.x + 3.0
+
+    def compare_outputs(self, test_args, golden_args, output_names, params):
+        # 'timing' is a diagnostic output with no golden: print the per-block
+        # gaps, then compare everything else. Each block's slots are strided by
+        # 32 int32 (one cacheline) because scalar st_dev only commits the first
+        # 8 int32 of a 128B line.
+        tm = test_args.timing.reshape(NBLK, 32)[:, :6].to(torch.float64) / 50.0
+        labels = ["segA", "bar1", "segB", "bar2", "segC", "total"]
+        print("[GAP] per-block us (50 MHz counter):")
+        print("  blk " + " ".join(f"{lbl:>7}" for lbl in labels))
+        for b in range(NBLK):
+            print(f"  {b:>3} " + " ".join(f"{tm[b, k]:7.2f}" for k in range(6)))
+        print(
+            f"[GAP] barrier1: max={tm[:, 1].max():.2f} min={tm[:, 1].min():.2f} us | "
+            f"barrier2: max={tm[:, 3].max():.2f} min={tm[:, 3].min():.2f} us"
+        )
+        super().compare_outputs(test_args, golden_args, [n for n in output_names if n != "timing"], params)
 
 
 if __name__ == "__main__":

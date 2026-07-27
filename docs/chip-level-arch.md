@@ -9,7 +9,7 @@ data (Callable / TaskArgs / CallConfig) flows through all levels, see
 
 ## Three-Program Model
 
-The PTO Runtime consists of **three separate programs** that communicate through well-defined APIs:
+The simpler runtime consists of **three separate programs** that communicate through well-defined APIs:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -106,7 +106,7 @@ DeviceRunner runner;
 void *ptr = runner.allocate_tensor(bytes);
 runner.copy_to_device(dev_ptr, host_ptr, bytes);
 runner.set_executors(aicpu_binary, aicore_binary);   // once, at init time
-runner.run(runtime, config);                         // config carries block_dim, aicpu_thread_num, diagnostics
+runner.run(runtime, config);                         // config carries aicpu_thread_num, diagnostics
 runner.finalize();
 ```
 
@@ -124,7 +124,7 @@ simpler_init(ctx, device_id,                          // attach + binary takeove
 size_t size = get_runtime_size();
 register_callable(ctx, cid, callable);                 // one-time per callable
 simpler_run(ctx, runtime, cid, args, config);        // per-launch — no binaries; config
-                                                       // carries block_dim, aicpu_thread_num,
+                                                       // carries aicpu_thread_num,
                                                        // diagnostics + ring overrides
 unregister_callable(ctx, cid);
 finalize_device(ctx);
@@ -140,8 +140,7 @@ worker = ChipWorker()
 worker.init(device_id=0, bins=bins)   # bins = RuntimeBuilder(platform).get_binaries(...)
 
 config = CallConfig()
-# config.block_dim defaults to 0 = auto (DeviceRunner resolves to the max
-# the AICore stream allows). Set explicitly to pin a smaller value.
+# A run always takes the whole device; there is no per-call width knob.
 config.aicpu_thread_num = 3
 config.enable_pmu = 0
 worker.run(callable, args, config)
@@ -204,7 +203,7 @@ binding — they must be called from the same thread that called `init()`.
 ### 3. Execution Phase
 
 ```text
-worker.run(callable, args, CallConfig(block_dim, aicpu_thread_num))
+worker.run(callable, args, CallConfig(aicpu_thread_num))
   │
   └─→ run_runtime(ctx, runtime, callable, args, ...)
        │

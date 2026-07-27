@@ -152,7 +152,10 @@ ARCH_CONFIG = {
 #                   one source. Detected by load_kernel_meta; everything else
 #                   (incl. independent kernels packed into a mix dispatch, like
 #                   mixed_example) goes through the AIC/AIV-only path.
-#   * hw_block_dim / block_num — the case's `block_dim` (the SPMD grid width).
+#   * hw_block_dim / block_num — the SPMD grid width, from `--spmd-block-num`
+#                   (defaults to 1). Cohorts size themselves from
+#                   rt_available_cluster_count() at run time, so the width is
+#                   not statically known from the test file.
 #   * aiv_lanes_per_block      — the arch's hardware subblockdim (ARCH_CONFIG).
 # The mix path additionally needs ONE incore to declare the full tensor
 # `signature` (so the dump captures the shared args) — a standard CALLABLE
@@ -168,8 +171,7 @@ def _first_platform_case(cls, platform):
     always dumps with `--manual include`). None if no case lists the platform.
     Auto-pinning one case makes the dump deterministic (no "run all cases,
     reconstruct from the newest dump dir" ambiguity), and ties the synthesized
-    slot-48 block_num to the SAME case the dump ran (block_dim resolved via the
-    caller's per-case map)."""
+    slot-48 replay to the SAME case the dump ran."""
     for c in getattr(cls, "CASES", []):
         if platform in c.get("platforms", []):
             return c.get("name")
@@ -224,12 +226,6 @@ def load_kernel_meta(test_path: Path, func_id: int, platform: str):
     tgt = by_func[func_id]
     cls = owner_cls[func_id]
     auto_case = _first_platform_case(cls, platform)
-    # name -> block_dim for every case, so main can resolve block_dim from the
-    # case actually selected (--case X, or the auto-pinned first-platform case),
-    # not an arbitrary CASES entry. A case declaring no block_dim maps to 1.
-    block_dim_by_case = {
-        c.get("name"): int(c.get("config", {}).get("block_dim") or 1) for c in getattr(cls, "CASES", [])
-    }
     return {
         "by_func": by_func,
         "target_func_id": func_id,
@@ -238,7 +234,6 @@ def load_kernel_meta(test_path: Path, func_id: int, platform: str):
         "name": tgt["name"],
         "class_name": cls.__name__,
         "auto_case": auto_case,
-        "block_dim_by_case": block_dim_by_case,
     }
 
 
@@ -763,7 +758,7 @@ int main() {{
     // positional kernels (they ignore 48/49); required for SPMD kernels that
     // read get_block_idx / get_block_num / get_sub_block_id, which would
     // otherwise dereference a null context. block_idx=0 traces a representative
-    // block; block_num={block_num} (the case's block_dim) keeps steady-state
+    // block; block_num={block_num} (from --spmd-block-num) keeps steady-state
     // branches (e.g. `block_idx+1 < block_num`) on their normal path.
     uint8_t h_local[64] = {{0}};   // LocalContext: block_idx@0, block_num@4
     *reinterpret_cast<int32_t *>(h_local + 0) = 0;
@@ -1316,7 +1311,8 @@ def main():
         default=None,
         metavar="N",
         help="block_num written into the synthesized SPMD LocalContext "
-        "(slot 48). Default: the case's block_dim. Only matters for "
+        "(slot 48). Default: 1. Required to replay an SPMD cohort, whose "
+        "width is resolved on device. Only matters for "
         "kernels that branch/stride on block_num; set the real grid "
         "width for those.",
     )
@@ -1352,14 +1348,11 @@ def main():
     selected_case = args.case or meta["auto_case"]
     if not args.case and meta["auto_case"]:
         print(f"[l0_swimlane] no --case; auto-pinned first {args.platform} case: {meta['auto_case']}")
-    # block_num for the synthesized slot-48 LocalContext: the grid width of the
-    # SELECTED case (--case bare name, ignoring any ClassName:: prefix), not an
-    # arbitrary CASES entry. Defaults to 1 (a non-SPMD single block) when the
-    # selected case declares no block_dim, or when no case is selected (a
-    # single-case / no-CASES test) — never guessed from a different case.
-    case_key = selected_case.split("::")[-1] if selected_case else None
-    block_dim = meta["block_dim_by_case"].get(case_key, 1)
-    block_num = args.spmd_block_num if args.spmd_block_num is not None else block_dim
+    # block_num for the synthesized slot-48 LocalContext. An SPMD cohort sizes
+    # itself from rt_available_cluster_count() on device, so its width is not
+    # readable from the test file; pass --spmd-block-num to replay one. Default
+    # 1 is a non-SPMD single block.
+    block_num = args.spmd_block_num if args.spmd_block_num is not None else 1
 
     # task-submit hands the locked device by appending --device <id> to argv
     # (and may also set $TASK_DEVICE). One resolved value threads through both
@@ -1385,7 +1378,7 @@ def main():
     member_desc = ", ".join(f"{m['name']}({m['core_type']},func {m['func_id']})" for m in members)
     print(
         f"[l0_swimlane] func_id={func_id_list} task={chosen} mix={mix_func_ids} mode={mode} "
-        f"block_dim={block_dim}\n              members=[{member_desc}]"
+        f"block_num={block_num}\n              members=[{member_desc}]"
     )
 
     scalars = [a for a in kargs if a["kind"] == "scalar"]

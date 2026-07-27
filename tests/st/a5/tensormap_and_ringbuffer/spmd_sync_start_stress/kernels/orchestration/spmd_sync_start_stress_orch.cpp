@@ -40,10 +40,13 @@
 #define FUNC_SPMD_WRITE_AIV 3
 
 static constexpr int32_t MIX_SLOTS = 3;
-static constexpr int32_t NORMAL_MIX_BN = 4;
-static constexpr int32_t SYNC_MIX_BN = 12;
-static constexpr int32_t SYNC_AIV_BN = 8;
-static constexpr int32_t NORMAL_AIV_BN = 4;
+// Cohort widths scale with this run's cluster count, keeping the shape the
+// case exercises (a mix of narrow and near-capacity cohorts contending on the
+// drain path) on any device. At 24 clusters these are the original 4/12/8/4.
+static int16_t cohort(int32_t total, int32_t divisor) {
+    int32_t n = total / divisor;
+    return static_cast<int16_t>(n < 1 ? 1 : n);
+}
 static constexpr int32_t ROUNDS = 6;
 
 extern "C" {
@@ -77,25 +80,43 @@ static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bo
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
+    const Tensor &layout = orch_args.tensor(1).ref();
+
+    const int32_t total = rt_available_cluster_count();
+    const int16_t normal_mix_bn = cohort(total, 6);
+    const int16_t sync_mix_bn = cohort(total, 2);
+    const int16_t sync_aiv_bn = cohort(total, 3);
+    const int16_t normal_aiv_bn = cohort(total, 6);
+
+    // The host replays this same round structure from the four widths; it cannot
+    // predict them, so the run reports what it used.
+    uint32_t idx[1] = {0};
+    set_tensor_data<int32_t>(layout, 1, idx, normal_mix_bn);
+    idx[0] = 1;
+    set_tensor_data<int32_t>(layout, 1, idx, sync_mix_bn);
+    idx[0] = 2;
+    set_tensor_data<int32_t>(layout, 1, idx, sync_aiv_bn);
+    idx[0] = 3;
+    set_tensor_data<int32_t>(layout, 1, idx, normal_aiv_bn);
 
     int64_t cl = 0;
 
     for (int32_t r = 0; r < ROUNDS; r++) {
-        // 4 x normal MIX
-        for (int i = 0; i < 4; i++, cl += NORMAL_MIX_BN * MIX_SLOTS)
-            submit_mix(ext_output, NORMAL_MIX_BN, cl, false);
+        // 4 × normal MIX
+        for (int i = 0; i < 4; i++, cl += normal_mix_bn * MIX_SLOTS)
+            submit_mix(ext_output, normal_mix_bn, cl, false);
 
-        // 2 x sync MIX — CAS contention: second sync task may arrive while first is draining
-        for (int i = 0; i < 2; i++, cl += SYNC_MIX_BN * MIX_SLOTS)
-            submit_mix(ext_output, SYNC_MIX_BN, cl, true);
+        // 2 × sync MIX — CAS contention: second sync task may arrive while first is draining
+        for (int i = 0; i < 2; i++, cl += sync_mix_bn * MIX_SLOTS)
+            submit_mix(ext_output, sync_mix_bn, cl, true);
 
-        // 2 x sync AIV — cross-shape drain contention with the MIX drain above
-        for (int i = 0; i < 2; i++, cl += SYNC_AIV_BN)
-            submit_aiv(ext_output, SYNC_AIV_BN, cl, true);
+        // 2 × sync AIV — cross-shape drain contention with the MIX drain above
+        for (int i = 0; i < 2; i++, cl += sync_aiv_bn)
+            submit_aiv(ext_output, sync_aiv_bn, cl, true);
 
-        // 1 x normal AIV
-        submit_aiv(ext_output, NORMAL_AIV_BN, cl, false);
-        cl += NORMAL_AIV_BN;
+        // 1 × normal AIV
+        submit_aiv(ext_output, normal_aiv_bn, cl, false);
+        cl += normal_aiv_bn;
     }
 
     LOG_INFO_V9("[spmd_sync_start_stress] Submitted %d tasks over %d rounds", 9 * ROUNDS, ROUNDS);

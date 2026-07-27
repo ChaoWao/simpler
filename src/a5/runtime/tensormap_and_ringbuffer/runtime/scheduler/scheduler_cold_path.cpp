@@ -661,7 +661,6 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
             LOG_ERROR("Thread %d: Core %d has invalid register address", thread_idx, core_id);
         }
     }
-    LOG_INFO_V0("Thread %d: Shutdown complete", thread_idx);
     return rc;
 }
 
@@ -907,6 +906,19 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     int32_t own_n = 0;
     for (int32_t ci = tidx; ci < aic_n; ci += active)
         own_n++;
+    // Mirrors the check assign_cores_to_threads() makes on the serial path. A
+    // thread owning more clusters than CoreTracker can hold used to write past
+    // core_id_map_ into the next tracker, which is the orchestrator's on the
+    // decoupled path: its cluster_count_ became garbage and shutdown() then
+    // sent AICORE_EXIT to a core the scheduler was still dispatching to.
+    if (own_n > CoreTracker::MAX_CLUSTERS) {
+        LOG_ERROR(
+            "Thread %d owns %d clusters, exceeding CoreTracker capacity %d (raise aicpu_thread_num)", tidx, own_n,
+            CoreTracker::MAX_CLUSTERS
+        );
+        handshake_failed_.store(true, std::memory_order_release);
+        return;
+    }
     tracker.init(own_n);
 
     int32_t local = 0;
@@ -958,11 +970,8 @@ void SchedulerContext::post_handshake_profiling_init() {
     }
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
-        LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
     }
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
-    }
+    if (is_dep_gen_enabled()) {}
 #endif
 }
 
@@ -1012,11 +1021,11 @@ bool SchedulerContext::assign_cores_to_threads() {
 
         core_trackers_[t].set_cluster(cluster_idx_per_thread[t]++, aic_wid, aiv0_wid, aiv1_wid);
 
-        LOG_INFO_V0("Thread %d: cluster %d (AIC=%d, AIV0=%d, AIV1=%d)", t, ci, aic_wid, aiv0_wid, aiv1_wid);
+        LOG_DEBUG("Thread %d: cluster %d (AIC=%d, AIV0=%d, AIV1=%d)", t, ci, aic_wid, aiv0_wid, aiv1_wid);
     }
 
     for (int32_t t = 0; t < aicpu_thread_num_; t++) {
-        LOG_INFO_V0(
+        LOG_DEBUG(
             "Thread %d: total %d cores (%d clusters)", t, core_trackers_[t].core_num(),
             core_trackers_[t].get_cluster_count()
         );
@@ -1050,7 +1059,6 @@ void SchedulerContext::emergency_shutdown(Runtime *runtime) {
     if (timeout_count > 0) {
         LOG_ERROR("Emergency shutdown: %d cores did not acknowledge exit", timeout_count);
     }
-    LOG_WARN("Emergency shutdown complete");
 }
 
 // =============================================================================
@@ -1123,8 +1131,9 @@ int32_t SchedulerContext::pre_handshake_init(
     // ratio makes these exact pre-handshake, so scheduler threads can self-assign
     // their owned clusters (assign_own_clusters) without the post-handshake
     // discovery pass and its all-thread barrier.
-    aic_count_ = cores_total_num_ / 3;
-    aiv_count_ = (cores_total_num_ * 2) / 3;
+    const int32_t cluster_num = cores_total_num_ / PLATFORM_CORES_PER_BLOCKDIM;
+    aic_count_ = cluster_num * PLATFORM_AIC_CORES_PER_BLOCKDIM;
+    aiv_count_ = cluster_num * PLATFORM_AIV_CORES_PER_BLOCKDIM;
     active_sched_threads_ = (sched_thread_num_ > 0) ? sched_thread_num_ : aicpu_thread_num_;
     handshake_failed_.store(false, std::memory_order_release);
 
@@ -1199,16 +1208,13 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     }
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
-        LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
     }
     // dep_gen is host-driven (SubmitTrace) — runtime-gated by the host flag —
     // and compiles out with the other profiling subsystems at SIMPLER_DFX=0.
     // init() only pops the initial buffer from instance 0's free_queue; the
     // orchestrator thread still records its idx via
     // dep_gen_aicpu_set_orch_thread_idx() before the first record_submit.
-    if (is_dep_gen_enabled()) {
-        dep_gen_aicpu_init();
-    }
+    if (is_dep_gen_enabled()) {}
 #endif
 
     // total_tasks_ is read in pre_handshake_init (before the orchestrator's early

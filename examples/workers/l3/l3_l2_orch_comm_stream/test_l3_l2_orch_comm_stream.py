@@ -119,7 +119,6 @@ def run_closed_loop_stream(platform: str, device_id: int) -> None:
     worker.init()
     try:
         config = CallConfig()
-        config.block_dim = 1
         config.aicpu_thread_num = 2
 
         def orch(orch_handle, _args, cfg):

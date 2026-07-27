@@ -35,7 +35,7 @@ Every task flowing through any level carries exactly three pieces of data:
 | ------ | ---- | ---------- |
 | `CallableHandle` / `CallableIdentity` | hash digest + kind + namespace | What the target worker should execute; targets resolve the digest to a local slot |
 | `TaskArgs` | user builder class | Tensors + scalars + per-tensor tags (IN/OUT/INOUT/etc.) |
-| `CallConfig` | small POD | Execution knobs (block_dim, aicpu_thread_num, profiling/dump/PMU flags, …) |
+| `CallConfig` | small POD | Execution knobs (aicpu_thread_num, profiling/dump/PMU flags, …) |
 
 Everything else in the engine is either plumbing (slots, ring, tensormap,
 scheduler) or target-local executable state resolved from the callable digest.
@@ -204,7 +204,6 @@ View does **not** own memory. Valid for the duration of a single
 
 ```cpp
 struct CallConfig {
-    int32_t block_dim = 0;  // 0 = auto (DeviceRunner resolves to stream max at run() time)
     int32_t aicpu_thread_num = 3;
     int32_t enable_l2_swimlane = 0;  // perf_level 0–4 (0=off, 4=full)
     int32_t enable_dump_args = 0;
@@ -369,7 +368,7 @@ The mailbox layout, fork ordering, and child loop are in
 
 | Region | Lives in | Used by | Lifetime |
 | ------ | -------- | ------- | -------- |
-| `Ring` slot-state pool (`std::deque<unique_ptr<TaskSlotState>>`) | parent heap | Orchestrator, Scheduler, WorkerThread parent side | monotonic task-id; reset at `Worker.run` drain |
+| `Ring` slot-state pool (`std::deque<unique_ptr<TaskSlotState>>`) | parent heap | Orchestrator, Scheduler, WorkerThread parent side | monotonic task-id; compacted only when globally quiescent |
 | `slot.task_args` (single) or `task_args_list[N]` (group, vector-backed) | parent heap | same | until slot reaches CONSUMED |
 | per-WT mailbox | shm MAP_SHARED | parent WorkerThread writes, child reads | lifetime of WorkerThread |
 | **HeapRing[0..3]** (user OUTPUT auto-alloc + `orch.alloc`) | **4 separate shm MAP_SHARED mmaps**, one per scope-layer ring | output to user code; inherited by forked children | per-ring FIFO via `rings_[r].last_alive`; scope depth picks the ring |
@@ -378,9 +377,9 @@ The mailbox layout, fork ordering, and child loop are in
 
 Slot state lives inside `Ring` as `std::deque<std::unique_ptr<…>>` so
 `push_back` never invalidates pointers to live slots.
-`ring.slot_state(id)` hands out a stable pointer for every live slot;
-`drain()` calls `ring.reset_to_empty()` to drop all slot state at the
-end of each `Worker.run`, bounding per-run memory.
+`ring.slot_state(id)` hands out a stable pointer for every live slot. Each slot
+is reclaimed individually when it reaches CONSUMED. The deque is reset only
+when the worker has no registered runs or live slots.
 
 The HeapRing is **partitioned into `MAX_RING_DEPTH = 4` independent
 rings** (Strict-1; matches L2's `PTO2_MAX_RING_DEPTH`). Each ring is its
@@ -502,10 +501,10 @@ L4 parent process
 | 6 | L3 child | `inner_worker.run(my_l3_orch, args, cfg)` → `scope_begin` → `my_l3_orch(orch3, ...)` |
 | 7 | L3 `Orchestrator.submit_sub` | `l3_sub_handle` digest dispatched to L3's own sub worker child |
 | 8 | L3 sub child | child resolves digest to its local Python callable and executes `verify_result()` |
-| 9 | L3 drain | all L3 tasks complete; `scope_end` + `drain` return |
+| 9 | L3 run fence | all L3 tasks complete; `scope_end` + `wait_run` return |
 | 10 | L3 child | `inner_worker.run()` returns; `_child_worker_loop` writes `TASK_DONE` |
 | 11 | L4 LocalMailboxEndpoint | sees `TASK_DONE`; returns success completion |
-| 12 | L4 drain | L4 scope_end + drain; `w4.run()` returns |
+| 12 | L4 run fence | L4 `scope_end` + `wait_run`; `w4.run()` returns |
 
 Each level's orch fn receives **its own** `Orchestrator` — the recursion is
 symmetric. `Worker` code does not branch on `level`; the level is only a
@@ -537,7 +536,7 @@ w3 = Worker(level=3, child_mode=PROCESS)
 w3.add_worker(NEXT_LEVEL, chip_worker_0)
 w3.init()    # fork chip_0 here
 
-w3.run(my_orch, args, CallConfig(block_dim=3))
+w3.run(my_orch, args, CallConfig(aicpu_thread_num=3))
 ```
 
 Step-by-step (one chip worker):

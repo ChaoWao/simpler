@@ -81,13 +81,12 @@ Verified examples (slots read from source):
 | Test | Loop bound | Flag |
 | ---- | ---------- | ---- |
 | `paged_attention_unroll` | `aic_qk_matmul.cpp` `args[4] = n_blocks` (scalar) | `--set-arg 4=4` |
-| `qwen3_14b_decode` (fa_fused) | `fa_fused_aic/aiv.cpp` outer loop `for(i=block_idx; i<v1[0]; i+=24)`; `v1[0]` = slot 0 `fa_total` (a 1-elem **INT32 tensor** read as the work-item count) | `--set-arg 0=96` → `ceil(96/24)=4` blocks. Slot 0 is 0 in replay → empty trace without this |
 | `batch_paged_attention` | `context_lens` **tensor** (slot 1; 2nd `params_sf` `add_input`); the SF kernel (func 1) derives per-batch blocks from its content | `--set-arg 1=512` |
 
 ### `--spmd-block-num N` — SPMD grid width
 
 `block_num` is written into the synthesised slot-48 `LocalContext`. Default
-is the case's `block_dim`; override only for a kernel that branches or
+is 1; pass it to replay an SPMD cohort, or for a kernel that branches or
 grid-strides on `block_num` (e.g. set the real hw width `24`). `block_idx`
 is always synthesised to `0` (a representative block) and is **not** a flag —
 it has no instruction-stream branches (doc §8).

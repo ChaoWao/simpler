@@ -44,19 +44,33 @@
 #include "host/host_regs.h"  // Register address retrieval
 #include "host/raii_scope_guard.h"
 
-// dep_gen_replay_emit_deps_json: strong symbol provided by
-// runtime/tensormap_and_ringbuffer/host/dep_gen_replay.cpp when that runtime is
-// linked into host_runtime.so. host_build_graph has no replay implementation
-// today, so its host_runtime.so falls through to this weak stub. visibility=
-// hidden keeps the stub off the global dynamic symbol table so it can't
-// accidentally shadow the strong symbol via RTLD_GLOBAL.
-// LOG_DEBUG (not WARN): runtimes that don't link dep_gen never enable it in
-// practice, so this path is unreachable for end users — the symbol exists
-// purely to keep the .so loadable.
+// dep_gen has two shapes, one per orchestration site, and each runtime provides
+// the strong symbols for the one it uses:
+//   - device orchestration (tensormap_and_ringbuffer): the AICPU writes a ring
+//     of captured submits, the host collector drains it, and
+//     `dep_gen_replay_emit_deps_json` (runtime/.../host/dep_gen_replay.cpp)
+//     replays them into deps.json.
+//   - host orchestration (host_build_graph): the graph is captured from the
+//     orchestrator's own dependency path as it runs on the host, and
+//     `dep_gen_host_graph_*` (runtime/.../host/dep_gen_host_graph.cpp) writes it
+//     out directly — no ring, no collector, nothing to reconcile.
+// A runtime links only its own half, so each half needs a weak fallback here.
+// visibility=hidden keeps the stubs off the global dynamic symbol table so they
+// can't accidentally shadow a strong symbol via RTLD_GLOBAL.
+// LOG_DEBUG (not WARN): the runner picks the shape via
+// `dep_gen_host_graph_active()`, so neither stub is reachable when dep_gen is on
+// — they exist purely to keep the .so loadable.
 extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_deps_json(
     const struct DepGenRecord * /*records*/, size_t /*num_records*/, const char * /*deps_json_path*/
 ) {
     LOG_DEBUG("dep_gen replay not implemented for this runtime — deps.json skipped");
+    return -1;
+}
+
+extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_set_enabled(bool /*enable*/) {}
+extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_emit(const char * /*deps_json_path*/) {
+    LOG_DEBUG("dep_gen host graph not implemented for this runtime — deps.json skipped");
     return -1;
 }
 
@@ -191,11 +205,23 @@ int DeviceRunner::destroy_comm_stream(void *stream) {
 // live on `DeviceRunnerBase` — see
 // `src/common/platform/onboard/host/device_runner_base.cpp`.
 
+void DeviceRunner::set_dep_gen_enabled(bool enable) {
+    enable_dep_gen_ = enable;
+    // Arms host-side capture for a host-orch runtime (no-op weak stub for the
+    // device-orch one). Enabling clears the previous run's graph, so this must
+    // stay ahead of the orchestration it captures — the c_api latches the
+    // CallConfig before the bind for exactly that reason.
+    dep_gen_host_graph_set_enabled(enable);
+}
+
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
+    constexpr unsigned kPipelineSlot = 0;
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
-    int block_dim = config.block_dim;
+    // prepare_launch_shape() resolved block_dim before the graph was built, so
+    // the geometry this run launches with is already on the runner.
+    const int block_dim = block_dim_;
     const int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
     // in-place drain could not clear it. Refuse to run rather than cascade into
@@ -222,10 +248,18 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return rc;
     }
 
+    rc = ensure_run_stream_set(kPipelineSlot);
+    if (rc != 0) {
+        LOG_ERROR("ensure_run_stream_set(%u) failed: %d", kPipelineSlot, rc);
+        return rc;
+    }
+
     ensure_device_wall_buffer();
 
-    block_dim = resolve_block_dim(block_dim);
-    if (block_dim < 0) return -1;
+    if (block_dim < 1) {
+        LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
+        return -1;
+    }
     int num_aicore = block_dim * cores_per_blockdim_;
 
     // Scope guards for register-address cleanup on all exit paths. Declared
@@ -270,11 +304,15 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (enable_dump_args_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     if (enable_l2_swimlane_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_L2_SWIMLANE);
     if (enable_pmu_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
-    if (enable_dep_gen_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
+    // The device flag drives the AICPU writer only; a host-orch runtime has no
+    // device-side dep_gen to switch on.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
+        SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
+    }
     if (enable_scope_stats_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS);
     kernel_args_.args.enable_profiling_flag = enable_profiling_flag;
 
-    if (prepare_runtime_for_launch(runtime, block_dim, launch_aicpu_num) != 0) return -1;
+    resolve_task_binary_addrs(runtime);
 
     // a2a3 onboard now uses the same host-computed, device-filtered affinity
     // shape as a5. Host probes the AICPU user pool once, chooses the active
@@ -354,7 +392,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    if (enable_dep_gen_) {
+    // A host-orch runtime already holds the graph in host memory; standing up
+    // the device ring and its collector would allocate shared memory and a
+    // drain thread for a stream that never produces a record.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         rc = init_dep_gen(launch_aicpu_num, device_id_);
         if (rc != 0) {
             LOG_ERROR("init_dep_gen failed: %d", rc);
@@ -378,7 +419,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         finalize_collectors();
     });
 
-    LOG_INFO_V0("=== Initialize runtime args ===");
     // Resolve the orchestration SO into a device-resident buffer and refresh
     // runtime metadata before the Runtime struct is uploaded to device.
     rc = prepare_orch_so(runtime);
@@ -405,7 +445,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     start_shared_collectors_for_run();
     // a2a3-only dep_gen collector — share the same thread_factory shape as base.
-    if (enable_dep_gen_) {
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         auto thread_factory = [this](std::function<void()> fn) {
             return create_thread(std::move(fn));
         };
@@ -427,6 +467,94 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
         l2_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
     }
+
+    rc = launch_run(runtime, num_aicore, launch_aicpu_num, kPipelineSlot);
+    if (rc != 0) return rc;
+
+    rc = reap_run(kPipelineSlot);
+    if (rc != 0) return rc;
+
+    // Print handshake results (reads from device memory, must be before free)
+    print_handshake_results();
+
+    return 0;
+}
+
+int DeviceRunner::ensure_run_stream_set(unsigned slot) {
+    if (slot >= kRunStreamSetCount) {
+        LOG_ERROR("ensure_run_stream_set: invalid slot %u", slot);
+        return -1;
+    }
+    RunStreamSet &streams = run_stream_sets_[slot];
+    if (streams.aicpu != nullptr && streams.aicore != nullptr) {
+        return 0;
+    }
+
+    // Reached only on the first run for this slot, or after a partial create
+    // rolled one stream back; rtStreamCreate costs ~300 us and the set carries
+    // no per-run content, so it must not be rebuilt per run.
+    if (streams.aicpu == nullptr) {
+        int rc = rtStreamCreate(&streams.aicpu, 0);
+        if (rc != 0) {
+            LOG_ERROR("rtStreamCreate (run AICPU slot %u) failed: %d", slot, rc);
+            ACL_LOG_ERROR_DETAIL(rc);
+            return rc;
+        }
+    }
+    if (streams.aicore == nullptr) {
+        int rc = rtStreamCreate(&streams.aicore, 0);
+        if (rc != 0) {
+            LOG_ERROR("rtStreamCreate (run AICore slot %u) failed: %d", slot, rc);
+            ACL_LOG_ERROR_DETAIL(rc);
+            return rc;
+        }
+    }
+    ++run_stream_sets_created_;
+    LOG_INFO_V0("DeviceRunner: run stream set %u created", slot);
+    return 0;
+}
+
+int DeviceRunner::destroy_run_stream_sets() {
+    int rc = 0;
+    auto capture = [&rc](int err) {
+        if (err != 0 && rc == 0) rc = err;
+    };
+    // No pre-destroy sync, for the reason finalize_common() documents for the
+    // bootstrap pair: rtStreamDestroy is the supported teardown for a stream
+    // left in the error state by an op-timeout.
+    for (unsigned slot = 0; slot < kRunStreamSetCount; ++slot) {
+        RunStreamSet &streams = run_stream_sets_[slot];
+        if (streams.aicpu != nullptr) {
+            int destroy_rc = rtStreamDestroy(streams.aicpu);
+            if (destroy_rc != 0) {
+                LOG_ERROR("rtStreamDestroy (run AICPU slot %u) failed: %d", slot, destroy_rc);
+            }
+            capture(destroy_rc);
+            streams.aicpu = nullptr;
+        }
+        if (streams.aicore != nullptr) {
+            int destroy_rc = rtStreamDestroy(streams.aicore);
+            if (destroy_rc != 0) {
+                LOG_ERROR("rtStreamDestroy (run AICore slot %u) failed: %d", slot, destroy_rc);
+            }
+            capture(destroy_rc);
+            streams.aicore = nullptr;
+        }
+    }
+    return rc;
+}
+
+int DeviceRunner::launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_num, unsigned slot) {
+    // KernelLaunch is the pipeline boundary: this method clears the handshake
+    // consumed by the launch and submits exactly the AICore and AICPU kernels.
+    // It intentionally performs no stream synchronization or per-run cleanup.
+    if (slot >= kRunStreamSetCount || run_stream_sets_[slot].aicpu == nullptr ||
+        run_stream_sets_[slot].aicore == nullptr) {
+        LOG_ERROR("launch_run: stream set %u is not ready", slot);
+        return -1;
+    }
+    RunStreamSet &streams = run_stream_sets_[slot];
+    int rc = 0;
 
     // Launch the AICore worker BEFORE the AICPU Run task — mirrors the a5 path
     // so the two arches stay symmetric. First-launch latency optimization +
@@ -453,7 +581,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     LOG_INFO_V0("=== launch_aicore_kernel ===");
     // Launch AICore kernel (pass device copy of KernelArgs)
-    rc = launch_aicore_kernel(stream_aicore_, kernel_args_.device_k_args_);
+    rc = launch_aicore_kernel(streams.aicore, kernel_args_.device_k_args_);
     if (rc != 0) {
         LOG_ERROR("launch_aicore_kernel failed: %d", rc);
         recover_device_or_mark_unusable(rc);
@@ -462,7 +590,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     LOG_INFO_V0("=== launch_aicpu_kernel %s ===", host::KernelNames::RunName);
     int aicpu_launch_n = (runtime.get_aicpu_launch_count() > 0) ? runtime.get_aicpu_launch_count() : launch_aicpu_num;
-    rc = launch_aicpu_kernel(stream_aicpu_, &kernel_args_.args, host::KernelNames::RunName, aicpu_launch_n);
+    rc = launch_aicpu_kernel(streams.aicpu, &kernel_args_.args, host::KernelNames::RunName, aicpu_launch_n);
     if (rc != 0) {
         LOG_ERROR("launch_aicpu_kernel (main) failed: %d", rc);
         // The AICore worker was already launched above and is now spinning in
@@ -474,9 +602,18 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return rc;
     }
 
-    rc = sync_run_streams();
+    return 0;
+}
+
+int DeviceRunner::reap_run(unsigned slot) {
+    if (slot >= kRunStreamSetCount) {
+        LOG_ERROR("reap_run: invalid stream set %u", slot);
+        return -1;
+    }
+    RunStreamSet &streams = run_stream_sets_[slot];
+    int rc = sync_stream_pair(streams.aicpu, streams.aicore);
     if (rc != 0) {
-        // sync_run_streams surfaces the AICore op-timeout (STARS-reaped op ->
+        // The pair wait surfaces the AICore op-timeout (STARS-reaped op ->
         // 507000/507018/507046 at AICPU/AICore stream sync). The op-timeout
         // leaves the device context poisoned for the SAME DeviceRunner's next
         // run, so attempt recovery / mark-unusable here too, not only on the
@@ -500,21 +637,27 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     teardown_shared_collectors_after_run();
 
-    // a2a3-only dep_gen teardown: stop + reconcile + replay emit.
+    // a2a3-only dep_gen teardown: host-orch emits the graph it captured during
+    // this run's orchestration; device-orch stops the collector, reconciles the
+    // ring, and replays the records.
     if (enable_dep_gen_) {
-        dep_gen_collector_.stop();
-        if (dep_gen_collector_.reconcile_counters()) {
-            const auto &records = dep_gen_collector_.records();
-            const std::string deps = make_deps_json_path(output_prefix_);
-            int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+        const std::string deps = make_deps_json_path(output_prefix_);
+        if (dep_gen_host_graph_active()) {
+            int rc = dep_gen_host_graph_emit(deps.c_str());
             if (rc != 0) {
-                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
+                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", rc);
+            }
+        } else {
+            dep_gen_collector_.stop();
+            if (dep_gen_collector_.reconcile_counters()) {
+                const auto &records = dep_gen_collector_.records();
+                int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+                if (rc != 0) {
+                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
+                }
             }
         }
     }
-
-    // Print handshake results (reads from device memory, must be before free)
-    print_handshake_results();
 
     return 0;
 }
@@ -780,10 +923,16 @@ int DeviceRunner::finalize() {
     // for the no-run-since-init case.
     finalize_collectors();
 
+    // The per-run stream sets are this subclass's own RTS-owning member, so
+    // they are released here, while RTS is live and before the device reset
+    // below — the same window finalize_common() uses for the bootstrap pair.
+    int stream_rc = destroy_run_stream_sets();
+
     // Shared cleanup body — streams, kernel_args, callable/orch maps,
     // chip-callable buffer pool, the three arenas, device_wall,
     // mem_alloc_.finalize(), and cached arena sizes.
     rc = finalize_common();
+    if (rc == 0) rc = stream_rc;
 
     // Reset device AFTER all device memory is freed. Two paths:
     //
@@ -872,7 +1021,6 @@ int DeviceRunner::finalize() {
     if (reset_rc == 0) {
         device_unusable_ = false;
     }
-    LOG_INFO_V0("DeviceRunner finalized");
     return rc != 0 ? rc : reset_rc;
 }
 

@@ -17,7 +17,7 @@ The 4 files `kernel_compiler.py`, `runtime_compiler.py`, `toolchain.py`, `elf_pa
 | What | Where |
 | ---- | ----- |
 | Runtime selection | `@scene_test(runtime="...")` on the SceneTestCase class |
-| Per-case knobs (aicpu_thread_num, block_dim) | `CASES[*]["config"]` on the SceneTestCase class |
+| Per-case knobs (aicpu_thread_num, runtime_env) | `CASES[*]["config"]` on the SceneTestCase class |
 | Per-runtime build config | `src/{arch}/runtime/{runtime}/build_config.py` |
 | Runtime build orchestration | `simpler_setup/runtime_builder.py` → `simpler_setup/runtime_compiler.py` → cmake |
 | Pre-build all runtimes | `simpler_setup/build_runtimes.py` (invoked by `pip install .`) |

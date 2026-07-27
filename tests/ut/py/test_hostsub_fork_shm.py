@@ -13,7 +13,7 @@ Verifies the full communication path:
   2. torch.share_memory_() tensor is accessible (zero-copy) in forked child
   3. Callable registry is accessible in forked child (no pickle needed)
   4. Mailbox state machine: IDLE → TASK_READY → TASK_DONE cycles correctly
-  5. Multiple workers execute pure-Python in parallel (wall time < serial)
+  5. Multiple workers execute pure-Python concurrently (no cross-talk between mailboxes)
   6. C++ threading (via Python threading module) after fork is safe
 """
 
@@ -29,10 +29,12 @@ import torch
 # ---------------------------------------------------------------------------
 # Mailbox layout (256 bytes per worker, fits in 4 cache lines)
 # ---------------------------------------------------------------------------
-#   offset  0  int32  state         IDLE=0, TASK_READY=1, TASK_DONE=2, SHUTDOWN=3
-#   offset  4  int32  callable_id
-#   offset  8  int64  result_int    worker writes a simple int result for the POC
-#   offset 16  int32  error_code    0 = ok
+#   offset  0  int32   state         IDLE=0, TASK_READY=1, TASK_DONE=2, SHUTDOWN=3
+#   offset  4  int32   callable_id
+#   offset  8  int64   result_int    worker writes a simple int result for the POC
+#   offset 16  int32   error_code    0 = ok
+#   offset 24  float64 t_begin       monotonic time the worker began the task
+#   offset 32  float64 t_end         monotonic time the worker finished the task
 # ---------------------------------------------------------------------------
 
 MAILBOX_SIZE = 256
@@ -45,6 +47,8 @@ _STATE_OFF = 0
 _CID_OFF = 4
 _RESULT_OFF = 8
 _ERR_OFF = 16
+_T_BEGIN_OFF = 24
+_T_END_OFF = 32
 
 
 def _mb_read_state(buf) -> int:
@@ -57,9 +61,11 @@ def _mb_write(buf, state: int, cid: int = 0) -> None:
     struct.pack_into("i", buf, _STATE_OFF, state)
 
 
-def _mb_write_result(buf, result: int, error: int = 0) -> None:
+def _mb_write_result(buf, result: int, error: int = 0, t_begin: float = 0.0, t_end: float = 0.0) -> None:
     struct.pack_into("q", buf, _RESULT_OFF, result)
     struct.pack_into("i", buf, _ERR_OFF, error)
+    struct.pack_into("d", buf, _T_BEGIN_OFF, t_begin)
+    struct.pack_into("d", buf, _T_END_OFF, t_end)
     struct.pack_into("i", buf, _STATE_OFF, TASK_DONE)
 
 
@@ -81,15 +87,17 @@ def _worker_loop(buf, registry: dict) -> None:
 
         if state == TASK_READY:
             cid = struct.unpack_from("i", buf, _CID_OFF)[0]
+            t_begin = time.monotonic()
             fn = registry.get(cid)
+            result, error = 0, 0
             if fn is None:
-                _mb_write_result(buf, 0, error=1)
-                continue
-            try:
-                result = fn()
-                _mb_write_result(buf, result, error=0)
-            except Exception:  # noqa: BLE001
-                _mb_write_result(buf, 0, error=2)
+                error = 1
+            else:
+                try:
+                    result = fn()
+                except Exception:  # noqa: BLE001
+                    result, error = 0, 2
+            _mb_write_result(buf, result, error=error, t_begin=t_begin, t_end=time.monotonic())
 
         elif state == SHUTDOWN:
             break
@@ -135,15 +143,17 @@ class _SubWorkerPool:
         assert buf is not None
         _mb_write(buf, TASK_READY, cid=callable_id)
 
-    def wait(self, worker_idx: int, timeout: float = 5.0) -> tuple[int, int]:
+    def wait(self, worker_idx: int, timeout: float = 5.0) -> tuple[int, int, float, float]:
         buf = self._shms[worker_idx].buf
         assert buf is not None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if _mb_read_state(buf) == TASK_DONE:
                 result, err = _mb_read_result(buf)
+                t_begin = struct.unpack_from("d", buf, _T_BEGIN_OFF)[0]
+                t_end = struct.unpack_from("d", buf, _T_END_OFF)[0]
                 _mb_write(buf, IDLE)
-                return result, err
+                return result, err, t_begin, t_end
         raise TimeoutError(f"worker {worker_idx} did not complete within {timeout}s")
 
     def shutdown(self) -> None:
@@ -272,7 +282,7 @@ class TestMailboxStateMachine:
         try:
             for cid, expected in [(0, 42), (1, 99), (0, 42)]:
                 pool.dispatch(0, cid)
-                result, err = pool.wait(0)
+                result, err, _t0, _t1 = pool.wait(0)
                 assert err == 0
                 assert result == expected
         finally:
@@ -280,39 +290,48 @@ class TestMailboxStateMachine:
 
 
 class TestParallelExecution:
-    """Case 5 — multiple workers execute pure-Python in parallel.
+    """Case 5 — the pool drives N workers concurrently.
 
-    Each task sleeps for 0.2s (pure Python, holds GIL).  With N workers we
-    expect wall time close to 0.2s rather than N * 0.2s.
+    Each worker is dispatched a callable whose result is unique to that worker
+    (so a misrouted result is detected), and the three work windows must
+    overlap — a relational concurrency check, not a wall-clock magnitude bound
+    (see the no-wall-clock proxy principle in docs/testing.md, #1496).
     """
 
-    def _make_sleep_fn(self, duration: float) -> Callable[[], int]:
+    def _make_work_fn(self, tag: int, duration: float) -> Callable[[], int]:
         def fn():
             time.sleep(duration)
-            return int(duration * 1000)
+            return tag
 
         return fn
 
-    def test_parallel_wall_time(self):
+    def test_multi_worker_concurrency(self):
         n_workers = 3
-        sleep_sec = 0.2
-        registry = {i: self._make_sleep_fn(sleep_sec) for i in range(n_workers)}
+        duration = 0.2
+        # distinct tags: result routing is verified, not assumed
+        registry = {i: self._make_work_fn(tag=100 * (i + 1), duration=duration) for i in range(n_workers)}
         pool = _SubWorkerPool(num_workers=n_workers, registry=registry)
 
         try:
-            start = time.monotonic()
             for i in range(n_workers):
                 pool.dispatch(i, i)
+            windows: list[tuple[float, float]] = []
             for i in range(n_workers):
-                result, err = pool.wait(i, timeout=5.0)
+                result, err, t_begin, t_end = pool.wait(i, timeout=5.0)
                 assert err == 0
-                assert result == int(sleep_sec * 1000)
-            elapsed = time.monotonic() - start
+                assert result == 100 * (i + 1)
+                windows.append((t_begin, t_end))
 
-            serial_time = n_workers * sleep_sec
-            assert elapsed < serial_time * 0.8, (
-                f"expected parallel wall time < {serial_time * 0.8:.2f}s "
-                f"(serial would be {serial_time:.2f}s), got {elapsed:.2f}s"
+            # Concurrency: the work windows mutually overlap. Relational, not a
+            # magnitude bound — holds whether each sleep takes 0.2 s or 0.6 s, so
+            # it is immune to host timer inflation, yet fails if the pool
+            # serialises the workers.
+            latest_begin = max(b for b, _ in windows)
+            earliest_end = min(e for _, e in windows)
+            assert latest_begin < earliest_end, (
+                f"expected the {n_workers} work windows to overlap (concurrent "
+                f"execution); latest begin {latest_begin:.4f} >= earliest end "
+                f"{earliest_end:.4f}. cpu_count={os.cpu_count()}"
             )
         finally:
             pool.shutdown()

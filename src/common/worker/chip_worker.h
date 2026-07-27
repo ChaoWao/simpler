@@ -90,6 +90,13 @@ public:
     /// `aicpu_dlopen_count` for the trb path; returns 0 on device-orch variants.
     size_t host_dlopen_count() const;
 
+    /// Number of run stream sets the bound runner has created. A set belongs
+    /// to a pipeline slot and is reused for every run on that slot, so a
+    /// runner that has served any number of runs on one slot reports 1;
+    /// platforms whose runs use the persistent bootstrap pair report 0. Used
+    /// by tests to assert that repeated runs do not rebuild the set per run.
+    size_t run_stream_set_create_count() const;
+
     uint64_t malloc(size_t size);
     void free(uint64_t ptr);
     void copy_to(uint64_t dst, uint64_t src, size_t size);
@@ -140,6 +147,7 @@ public:
 
     int device_id() const { return device_id_; }
     bool initialized() const { return initialized_; }
+    unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
 
 private:
     using CreateDeviceContextFn = void *(*)();
@@ -157,6 +165,7 @@ private:
     );
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
+    using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
     using SimplerProvisionDmaWorkspaceFn = int (*)(void *, uint32_t);
@@ -206,6 +215,7 @@ private:
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;
     GetAicpuDlopenCountFn get_aicpu_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_host_dlopen_count_fn_ = nullptr;
+    GetAicpuDlopenCountFn get_run_stream_set_create_count_fn_ = nullptr;
     SimplerProvisionDmaWorkspaceFn simpler_provision_dma_workspace_fn_ = nullptr;
     FinalizeDeviceFn finalize_device_fn_ = nullptr;
     EnsureAclReadyFn ensure_acl_ready_fn_ = nullptr;
@@ -226,6 +236,7 @@ private:
     uint64_t base_comm_handle_ = 0;
 
     std::vector<uint8_t> runtime_buf_;
+    PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     // device_id_ is set once in init() and never modified afterward. All
     // ChipWorker callers run on the thread that called init() (the same
     // thread is the only one that subsequently calls malloc / copy_to /

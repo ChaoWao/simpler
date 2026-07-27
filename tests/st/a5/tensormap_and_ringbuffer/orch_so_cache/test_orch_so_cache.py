@@ -72,7 +72,7 @@ class TestOrchSoCache(SceneTestCase):
     # Three cases sharing one callable. The framework iterates them on a
     # single Worker; cases after the first land on cache-hit. Sizes vary so
     # a stale handle would manifest as wrong output, not "happens to pass".
-    _COMMON_CONFIG = {"aicpu_thread_num": 4, "block_dim": 3}
+    _COMMON_CONFIG = {"aicpu_thread_num": 4}
     _PLATFORMS = ["a5sim", "a5"]
 
     # All cases use the same size (128*128) because the AIV kernels have

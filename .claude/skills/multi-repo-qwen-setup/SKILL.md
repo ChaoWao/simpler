@@ -25,17 +25,21 @@ styles**. They measure different things; don't confuse them:
 | repo | simpler (this) | pypto-serving | pypto-lib |
 | entry | qwen3_14b_decode | npu_generate.py | decode_fwd.py |
 | cross-repo? | no | yes | yes |
-| measures | 2-layer decode correctness/timing | end-to-end TPOT | device decode TPOT + sched DFX |
+| measures | full 40-layer decode correctness/timing | end-to-end TPOT | device decode TPOT + sched DFX |
 | see | this section | sections 2-5 | section 6 |
 
 - **Path 0 — in-repo example (simpler itself, NO cross-repo).** Start here
   if you just want qwen3 decode running on simpler. simpler ships a
   self-contained SceneTestCase at
-  `examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/` — a fused chunk
-  of **two** Qwen3-14B decode layers (harvested pypto codegen: 8 AIC + 27
-  AIV + orchestration, golden in `simpler_setup/goldens/qwen3_14b_decode.py`).
-  No pypto / pypto-lib / JIT descent — it builds and runs like any simpler
-  example. Onboard rules still apply (per-die lock + `onboard-arch-precheck`):
+  `examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/` — **all 40**
+  Qwen3-14B decode layers as one fused dispatch (harvested pypto codegen: 18
+  AIC + 16 AIV + orchestration, plus the vendored CANN FusedInferAttentionScore
+  extern under `kernels/paged_attention_cce/`; golden in
+  `simpler_setup/goldens/qwen3_14b_decode.py`). No pypto / pypto-lib / JIT
+  descent — it builds and runs like any simpler example. Budget ~5 min wall and
+  a 38 GiB fixture (weights + paged KV, bf16), and note it needs CANN devkit
+  headers to build the attention extern. Onboard rules still apply (per-die
+  lock + `onboard-arch-precheck`):
 
   ```bash
   .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1

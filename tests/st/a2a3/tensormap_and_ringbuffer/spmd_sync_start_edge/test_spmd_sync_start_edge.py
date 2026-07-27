@@ -7,7 +7,13 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""SPMD sync_start edge: boundary block_num values. Output: 126 CL = 2016 float32."""
+"""SPMD sync_start edge: boundary block_num values. Output: 126 CL = 2016 float32.
+
+The cohort widths are fractions of the run's core count, derived on device and
+reported back in `layout` — a run always takes the whole device, and that width
+differs between sim and silicon. The golden is rebuilt from the reported
+geometry; `output` is sized for the widest device the platform allows.
+"""
 
 import torch
 from simpler.task_interface import ArgDirection as D
@@ -16,8 +22,10 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
-TASKS = [(1, 0), (8, 3), (9, 27), (23, 54), (1, 123)]
-TOTAL_CL = sum(bn * SLOTS_PER_BLOCK for bn, _ in TASKS)
+NUM_TASKS = 5
+# Widest the platform allows: 1 + c/3 + c/3+1 + c-1 + 1 at 24 clusters.
+MAX_CLUSTERS = 24
+MAX_TOTAL_CL = (1 + MAX_CLUSTERS // 3 + MAX_CLUSTERS // 3 + 1 + MAX_CLUSTERS - 1 + 1) * SLOTS_PER_BLOCK
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -29,7 +37,7 @@ class TestSpmdSyncStartEdge(SceneTestCase):
         "orchestration": {
             "source": "kernels/orchestration/spmd_sync_start_edge_orch.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT],
+            "signature": [D.INOUT, D.INOUT],
         },
         "incores": [
             {
@@ -60,20 +68,38 @@ class TestSpmdSyncStartEdge(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 24},
+            "config": {"aicpu_thread_num": 4},
             "params": {},
         }
     ]
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("output", torch.zeros(TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)))
+        return TaskArgsBuilder(
+            Tensor("output", torch.zeros(MAX_TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            Tensor("layout", torch.zeros(2 * NUM_TASKS, dtype=torch.int32)),
+        )
 
     def compute_golden(self, args, params):
-        out = args.output
-        for block_num, base_cl in TASKS:
+        # Both outputs are checked against the reported layout in compare_outputs.
+        pass
+
+    def compare_outputs(self, test_args, golden_args, output_names, params):
+        layout = [int(v) for v in test_args.layout]
+        expected = torch.zeros(MAX_TOTAL_CL, dtype=torch.float32)
+        for i in range(NUM_TASKS):
+            block_num, base_cl = layout[2 * i], layout[2 * i + 1]
+            assert block_num >= 1, f"task {i} reported block_num {block_num}"
+            assert base_cl + block_num * 3 <= MAX_TOTAL_CL, (
+                f"task {i} layout ({block_num}, {base_cl}) overflows {MAX_TOTAL_CL} cache lines"
+            )
             for block_idx in range(block_num):
-                for slot in range(SLOTS_PER_BLOCK):
-                    out[(base_cl + block_idx * SLOTS_PER_BLOCK + slot) * FLOATS_PER_CACHE_LINE] = float(block_idx)
+                for slot in range(3):
+                    expected[base_cl + block_idx * 3 + slot] = float(block_idx)
+        actual = test_args.output.reshape(MAX_TOTAL_CL, FLOATS_PER_CACHE_LINE)[:, 0]
+        assert torch.equal(actual, expected), (
+            f"block slots disagree with the reported layout {layout}: "
+            f"got {actual.tolist()}, expected {expected.tolist()}"
+        )
 
 
 if __name__ == "__main__":

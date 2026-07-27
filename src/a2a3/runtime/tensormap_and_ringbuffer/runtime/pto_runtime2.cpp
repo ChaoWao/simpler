@@ -258,6 +258,9 @@ void set_tensor_data(PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, cons
 static void scope_set_site_impl(const char *file, int line) { scope_stats_set_pending_site(file, line); }
 #endif
 
+static int32_t available_cluster_count_impl(PTO2Runtime *rt) { return rt->orchestrator.total_cluster_count; }
+static int32_t available_aiv_count_impl(PTO2Runtime *rt) { return rt->orchestrator.total_aiv_count; }
+
 static const PTO2RuntimeOps s_runtime_ops = {
     .submit_task = submit_task_impl,
     .scope_begin = rt_scope_begin,
@@ -273,6 +276,8 @@ static const PTO2RuntimeOps s_runtime_ops = {
     .set_tensor_data = set_tensor_data,
     .alloc_tensors = alloc_tensors_impl,
     .submit_dummy_task = submit_dummy_task_impl,
+    .available_cluster_count = available_cluster_count_impl,
+    .available_aiv_count = available_aiv_count_impl,
 #if SIMPLER_DFX
     .scope_set_site = scope_set_site_impl,
 #else
