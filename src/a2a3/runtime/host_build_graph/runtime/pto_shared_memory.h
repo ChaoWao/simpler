@@ -113,6 +113,24 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
         completion_flags[local_id & task_window_mask].store(1, order);
     }
 
+    // set completion flag first before updating the watermark (logic requirement)
+    void update_completed_watermark() {
+        int32_t curr_watermark = completed_watermark.load(std::memory_order_acquire);
+        const int32_t submitted = fc.current_task_index.load(std::memory_order_acquire);
+
+        int32_t next = curr_watermark;
+        while (true) {
+            while (next + 1 < submitted && is_completion_flag_set(next + 1)) {
+                ++next;
+            }
+            if (next == curr_watermark) { return; }
+
+            if (completed_watermark.compare_exchange_strong(curr_watermark, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                curr_watermark = next;
+            }
+        }
+    }
+
     int32_t get_slot_by_task_id(int32_t local_task_id) { return local_task_id & task_window_mask; }
 
     PTO2TaskDescriptor &get_task_by_slot(int32_t slot) { return task_descriptors[slot]; }
@@ -134,7 +152,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
 static_assert(sizeof(PTO2SharedMemoryRingHeader) == 256, "PTO2SharedMemoryRingHeader layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 160,
+    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 216,
     "PTO2SharedMemoryRingHeader task_descriptors_offset layout drift"
 );
 
