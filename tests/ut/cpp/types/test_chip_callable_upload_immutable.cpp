@@ -36,6 +36,7 @@
 #include <gtest/gtest.h>
 
 #include "callable.h"
+#include "chip_callable_layout.h"
 #include "utils/fnv1a_64.h"
 
 namespace {
@@ -134,4 +135,35 @@ TEST(ChipCallableUploadImmutable, ChildOffsetsAreCallableAligned) {
             << "child_offset(" << i << ") = " << callable->child_offset(i)
             << " is not a multiple of CALLABLE_ALIGN=" << CALLABLE_ALIGN;
     }
+}
+
+TEST(ChipCallableImageHash, IgnoresOrchestrationBytes) {
+    auto first = build_test_chip_callable();
+    auto second = first;
+    auto *second_callable = reinterpret_cast<ChipCallable *>(second.data());
+    ASSERT_GT(second_callable->binary_size(), 0u);
+    second_callable->storage_[0] ^= 0xff;
+
+    const auto first_layout = compute_chip_callable_layout(reinterpret_cast<const ChipCallable *>(first.data()));
+    const auto second_layout = compute_chip_callable_layout(second_callable);
+    EXPECT_NE(first_layout.content_hash, second_layout.content_hash);
+    EXPECT_EQ(first_layout.aicore_image_hash, second_layout.aicore_image_hash);
+}
+
+TEST(ChipCallableImageHash, ChangesWithKernelBytesOrFunctionMapping) {
+    auto original = build_test_chip_callable();
+    auto changed_binary = original;
+    auto *binary_callable = reinterpret_cast<ChipCallable *>(changed_binary.data());
+    auto *binary_child = reinterpret_cast<uint8_t *>(binary_callable) + offsetof(ChipCallable, storage_) +
+                         binary_callable->child_offset(0) + CoreCallable::binary_data_offset();
+    *binary_child ^= 0xff;
+
+    auto changed_mapping = original;
+    auto *mapping_callable = reinterpret_cast<ChipCallable *>(changed_mapping.data());
+    mapping_callable->child_func_ids_[0] += 1;
+
+    const auto original_hash =
+        compute_chip_callable_layout(reinterpret_cast<const ChipCallable *>(original.data())).aicore_image_hash;
+    EXPECT_NE(original_hash, compute_chip_callable_layout(binary_callable).aicore_image_hash);
+    EXPECT_NE(original_hash, compute_chip_callable_layout(mapping_callable).aicore_image_hash);
 }

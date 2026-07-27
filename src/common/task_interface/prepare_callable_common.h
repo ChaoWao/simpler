@@ -65,6 +65,7 @@ struct CallableArtifacts {
     void *host_dlopen_handle{nullptr};  // hbg only
     void *host_orch_func_ptr{nullptr};  // hbg only
     uint64_t chip_buffer_hash{0};       // FNV-1a hash for the whole ChipCallable buffer
+    uint64_t aicore_image_hash{0};      // FNV-1a hash for func ids and AICore child binaries
     uint64_t chip_buffer_dev{0};        // device address of the ChipCallable header
     const void *orch_so_data{nullptr};  // trb only; host view used for validation/hash only
     size_t orch_so_size{0};             // trb only
@@ -90,7 +91,7 @@ struct CallableArtifacts {
  */
 inline int upload_and_collect_child_addrs(
     const ChipCallable *callable, uint64_t (*upload_fn)(const void *), std::vector<ChildKernelAddr> *out,
-    uint64_t *out_chip_dev = nullptr, uint64_t *out_chip_hash = nullptr
+    uint64_t *out_chip_dev = nullptr, uint64_t *out_chip_hash = nullptr, uint64_t *out_aicore_image_hash = nullptr
 ) {
     if (callable == nullptr || upload_fn == nullptr || out == nullptr) return -1;
     out->clear();
@@ -100,6 +101,7 @@ inline int upload_and_collect_child_addrs(
     if (chip_dev == 0) return -1;
     if (out_chip_dev != nullptr) *out_chip_dev = chip_dev;
     if (out_chip_hash != nullptr) *out_chip_hash = layout.content_hash;
+    if (out_aicore_image_hash != nullptr) *out_aicore_image_hash = layout.aicore_image_hash;
 
     out->reserve(static_cast<size_t>(callable->child_count()));
     for (int32_t i = 0; i < callable->child_count(); ++i) {

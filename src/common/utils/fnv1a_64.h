@@ -20,15 +20,19 @@ namespace simpler::common::utils {
 // FNV-1a 64-bit content hash. Deterministic, allocation-free, ~µs / MB.
 // Used as a generic content-keyed dedup key (ChipCallable buffer hashing in
 // DeviceRunner, ELF Build-ID fallback in elf_build_id.h, etc.).
-inline uint64_t fnv1a_64(const void *data, std::size_t len) {
+inline uint64_t fnv1a_64_append(uint64_t hash, const void *data, std::size_t len) {
     constexpr uint64_t kPrime = 0x00000100000001b3ULL;
-    uint64_t h = 0xcbf29ce484222325ULL;
     const auto *p = static_cast<const uint8_t *>(data);
     for (std::size_t i = 0; i < len; ++i) {
-        h ^= p[i];
-        h *= kPrime;
+        hash ^= p[i];
+        hash *= kPrime;
     }
-    return h;
+    return hash;
+}
+
+inline uint64_t fnv1a_64(const void *data, std::size_t len) {
+    constexpr uint64_t kOffsetBasis = 0xcbf29ce484222325ULL;
+    return fnv1a_64_append(kOffsetBasis, data, len);
 }
 
 }  // namespace simpler::common::utils

@@ -228,17 +228,18 @@ private:
     struct RunStreamSet {
         rtStream_t aicpu{nullptr};
         rtStream_t aicore{nullptr};
+        uint64_t aicore_image_hash{0};
+        bool has_aicore_image{false};
     };
     // One slot per in-flight run the pipeline contract can declare.
     static constexpr unsigned kRunStreamSetCount = PTO_PIPELINE_MAX_DEPTH;
 
-    // A stream set carries no per-run content, so it is created on first use
-    // and reused for every later run on this slot; `destroy_run_stream_sets()`
-    // in finalize() is the sole release point, as for the persistent bootstrap
-    // pair. Only slot 0 is selected while the contract is K=1.
+    // AICPU streams belong to slots. AICore streams additionally belong to the
+    // loaded code image because the platform has no explicit instruction-cache
+    // invalidation operation for code replaced in GM.
     RunStreamSet run_stream_sets_[kRunStreamSetCount]{};
     size_t run_stream_sets_created_{0};
-    int ensure_run_stream_set(unsigned slot);
+    int ensure_run_stream_set(unsigned slot, uint64_t aicore_image_hash);
     int destroy_run_stream_sets();
 
     // The kernel submission boundary is separate from the stream wait and the
