@@ -76,19 +76,23 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, cast
 
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAX_REGISTERED_CALLABLE_IDS,
+    PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
     TENSOR_CHILD_MEMORY_OFFSET,
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
+    _l3_host_mapped_region_close,
     _l3_host_mapped_region_import_onboard,
     _l3_host_mapped_region_import_sim,
+    _l3_host_mapped_region_take_cleanup_error,
     _mailbox_load_i32,
     _mailbox_store_i32,
     read_args_from_blob,
@@ -125,7 +129,7 @@ from .l3_l2_orch_comm import (
     peek_region_create_reply_region_id,
     validate_region_create_reply,
 )
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, _callback_run, direct_control
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_OFF_ERROR_MSG,
@@ -176,10 +180,13 @@ _OFF_CONFIG = 16
 # travels separately via ChipWorker.init(log_level) — not on per-task wire.
 _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
 _CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
-# Args region starts after CONFIG, rounded up to 8 bytes so the first
+# The generation-safe pipeline lease follows CONFIG. Args start after the
+# lease, rounded up to 8 bytes so the first
 # Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
 # SIGBUS on strict-alignment platforms (aarch64 atomics, some ARM cores).
-_OFF_ARGS = (_OFF_CONFIG + _CFG_FMT.size + 7) & ~7
+_PIPELINE_LEASE_FMT = struct.Struct("=IIQ")
+_OFF_PIPELINE_LEASE = (_OFF_CONFIG + _CFG_FMT.size + 7) & ~7
+_OFF_ARGS = (_OFF_PIPELINE_LEASE + _PIPELINE_LEASE_FMT.size + 7) & ~7
 assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for Tensor.data"
 _OFF_TASK_CALLABLE_HASH = _OFF_ARGS
 _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
@@ -241,6 +248,10 @@ _CLOSE_JOIN_RECHECK_S = 1.0
 # terminal state and notifying), a parked waiter re-observes that state within
 # this interval instead of blocking forever.
 _RUN_HANDLE_WAIT_RECHECK_S = 1.0
+# Native cancellation may finish fallible fan-in preparation only on a retry.
+# Never turn that contract into an unbounded Python loop: one retry is enough
+# to either settle the fence or declare the worker unusable.
+_RUN_CANCELLATION_ATTEMPTS = 2
 
 # Control sub-commands (written at _OFF_CALLABLE as uint64)
 _CTRL_MALLOC = 0
@@ -341,11 +352,17 @@ _DOMAIN_REQ_HEADER = struct.Struct("<QIIQI4x")
 #         window_size (u64), buffer_count (u32), padding (4 bytes)
 assert _DOMAIN_REQ_HEADER.size == 32
 
-# Domain-allocation reply shm layout: 24-byte header + buffer_ptrs (u64).
-_DOMAIN_REPLY_HEADER = struct.Struct("<QQI4x")
-# fields: device_ctx (u64), local_window_base (u64),
+# Domain-allocation reply shm layout: 32-byte header + buffer_ptrs (u64).
+_DOMAIN_REPLY_HEADER = struct.Struct("<QQQI4x")
+# fields: committed (u64), device_ctx (u64), local_window_base (u64),
 #         buffer_count (u32), padding (4 bytes)
-assert _DOMAIN_REPLY_HEADER.size == 24
+assert _DOMAIN_REPLY_HEADER.size == 32
+# `committed` leads the header and is written on the chip the instant its window
+# exists, before anything else that can fail. It is the only honest answer to
+# "does this chip hold an allocation": the RPC's outcome is not, because the
+# window is committed well before the reply is written. The parent's shm is
+# zero-filled, so an unwritten slot reads as not committed.
+_OFF_DOMAIN_REPLY_COMMITTED = 0
 
 # Control args layout (reuses task mailbox fields when state == _CONTROL_*):
 #   offset  8 (_OFF_CALLABLE):  uint64  sub-command
@@ -530,6 +547,626 @@ class HostBuffer:
     data_ptr: int
     nbytes: int
     buffer: memoryview
+
+
+# Which Workers this thread already holds a control reservation on. One control
+# call can be built out of others (a queue out of a region) and the serializer
+# it takes is not re-entrant — but the re-entrance is per Worker: a call that
+# reaches a *different* Worker owes that Worker its own reservation.
+_CONTROL_RESERVATION = threading.local()
+
+
+def _held_control_reservations() -> set[int]:
+    held = getattr(_CONTROL_RESERVATION, "workers", None)
+    if held is None:
+        held = set()
+        _CONTROL_RESERVATION.workers = held
+    return held
+
+
+def _domain_reply_committed(reply_shm: SharedMemory | None) -> bool:
+    """Whether the chip owning *reply_shm* published a committed window.
+
+    The parent creates the shm zero-filled, so a chip that never ran, never
+    allocated, or died before its window existed reads as not committed.
+    """
+    if reply_shm is None:
+        return False
+    buf = reply_shm.buf
+    if buf is None:
+        return False
+    return struct.unpack_from("<Q", buf, _OFF_DOMAIN_REPLY_COMMITTED)[0] != 0
+
+
+def _raise_first(step, items) -> None:
+    """Apply ``step`` to every item, then raise the first error it produced.
+
+    Teardown of a resource set is terminal: one handle that cannot be reclaimed
+    must not strand the rest, and it must not be reported as success either —
+    an unreclaimed device resource is what poisons the worker for its successor.
+    """
+    first_error: BaseException | None = None
+    for item in items:
+        try:
+            step(item)
+        except BaseException as exc:  # noqa: BLE001
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+@dataclass
+class _ThreadFanoutState:
+    item: Any
+    claim_lock: Any = field(default_factory=threading.Lock)
+    claimed: bool = False
+    target_completed: threading.Event = field(default_factory=threading.Event)
+    launch_confirmed: bool = False
+    attempted_once: bool = False
+    terminal_start_failure: bool = False
+
+
+@dataclass
+class _ThreadFanoutCandidate:
+    completed: threading.Event = field(default_factory=threading.Event)
+    decided: threading.Event = field(default_factory=threading.Event)
+    admitted: bool | None = None
+    thread: threading.Thread | None = None
+
+
+@dataclass
+class _ThreadFanoutDrainCursor:
+    phases: tuple[Any, ...]
+    after_phase: Any | None
+    next_phase: int = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self.next_phase == len(self.phases)
+
+    def advance(self) -> None:
+        phase = self.next_phase
+        self.phases[phase]()
+        self.next_phase = phase + 1
+        if self.after_phase is not None:
+            self.after_phase(phase)
+
+
+class _ThreadFanout:
+    """Own every possible launch until no target can retain caller state."""
+
+    def __init__(self, items, target, name_prefix: str, after_start, after_phase) -> None:
+        self._states = [_ThreadFanoutState(item) for item in items]
+        self._target = target
+        self._name_prefix = name_prefix
+        self._after_start = after_start
+        self._after_phase = after_phase
+        self._candidates: list[_ThreadFanoutCandidate] = []
+        self._first_error: BaseException | None = None
+
+    def _record_error(self, exc: BaseException) -> None:
+        if self._first_error is None:
+            self._first_error = exc
+
+    def _set_event(self, event: threading.Event) -> None:
+        while not event.is_set():
+            try:
+                event.set()
+            except BaseException as exc:  # noqa: BLE001, PERF203
+                self._record_error(exc)
+
+    def _wait_event(self, event: threading.Event) -> None:
+        while not event.is_set():
+            try:
+                event.wait()
+            except BaseException as exc:  # noqa: BLE001, PERF203
+                self._record_error(exc)
+
+    def _publish_decision(self, candidate: _ThreadFanoutCandidate, value: bool) -> None:
+        # Admission is one-way.  An interrupt can land after the candidate was
+        # admitted but before its rank is recorded as confirmed; cleanup must
+        # never retract that publication under a target leaving the gate.
+        if candidate.admitted is None:
+            candidate.admitted = value
+        self._set_event(candidate.decided)
+
+    def _invoke(self, state: _ThreadFanoutState, candidate: _ThreadFanoutCandidate) -> None:
+        try:
+            self._wait_event(candidate.decided)
+            if candidate.admitted is not True:
+                return
+            with state.claim_lock:
+                if state.claimed:
+                    return
+                state.claimed = True
+            try:
+                self._target(state.item)
+            finally:
+                self._set_event(state.target_completed)
+        finally:
+            self._set_event(candidate.completed)
+
+    def _attempt_start(self, state: _ThreadFanoutState) -> bool | None:
+        candidate = _ThreadFanoutCandidate()
+        try:
+            thread = threading.Thread(
+                target=self._invoke,
+                args=(state, candidate),
+                name=f"{self._name_prefix}{state.item}",
+            )
+        except Exception as exc:
+            self._record_error(exc)
+            state.terminal_start_failure = True
+            return None
+        except BaseException as exc:  # noqa: BLE001
+            self._record_error(exc)
+            return False
+        try:
+            candidate.thread = thread
+            self._candidates.append(candidate)
+            thread.start()
+            self._publish_decision(candidate, True)
+            state.launch_confirmed = True
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._record_error(exc)
+            self._publish_decision(candidate, False)
+            state.terminal_start_failure = True
+            return None
+        except BaseException as exc:  # noqa: BLE001
+            self._record_error(exc)
+            self._publish_decision(candidate, False)
+            return False
+
+    def _finish_launches(self) -> None:
+        # Give every participant one opportunity before retrying an ambiguous
+        # BaseException boundary on any one participant.
+        for state in self._states:
+            if state.attempted_once:
+                continue
+            if state.launch_confirmed or state.terminal_start_failure:
+                state.attempted_once = True
+                continue
+            result = self._attempt_start(state)
+            if result is True and self._after_start is not None:
+                self._after_start(state.item)
+            state.attempted_once = True
+
+        for state in self._states:
+            while not state.launch_confirmed and not state.terminal_start_failure:
+                result = self._attempt_start(state)
+                if result is True and self._after_start is not None:
+                    self._after_start(state.item)
+
+    def _cancel_undecided_candidates(self) -> None:
+        for candidate in self._candidates:
+            if not candidate.decided.is_set():
+                self._publish_decision(candidate, False)
+
+    def _wait_for_targets(self) -> None:
+        for state in self._states:
+            if state.launch_confirmed:
+                self._wait_event(state.target_completed)
+
+    def _join_candidates(self) -> None:
+        for candidate in self._candidates:
+            thread = candidate.thread
+            assert thread is not None
+            if not thread._started.is_set():  # noqa: SLF001 -- a cancelled ambiguous start cannot access target state
+                continue
+            self._wait_event(candidate.completed)
+            while True:
+                try:
+                    thread.join()
+                    break
+                except BaseException as exc:  # noqa: BLE001, PERF203
+                    self._record_error(exc)
+
+    def _drain(self, cursor: _ThreadFanoutDrainCursor) -> None:
+        try:
+            while not cursor.exhausted:
+                cursor.advance()
+        except BaseException as exc:  # noqa: BLE001
+            self._record_error(exc)
+            self._drain(cursor)
+
+    def run(self) -> None:
+        cursor = _ThreadFanoutDrainCursor(
+            phases=(
+                self._finish_launches,
+                self._cancel_undecided_candidates,
+                self._wait_for_targets,
+                self._join_candidates,
+            ),
+            after_phase=self._after_phase,
+        )
+        self._drain(cursor)
+        if self._first_error is not None:
+            raise self._first_error
+
+
+def _start_and_join_threads(
+    items,
+    target,
+    *,
+    name_prefix: str,
+    _after_start: Any | None = None,
+    _after_phase: Any | None = None,
+) -> None:
+    """Start all targets and defer interruptions until every launch is drained.
+
+    ``Thread.start`` may be interrupted after the OS thread exists but before
+    it returns. Candidates are owned before start and gated until the launch is
+    accepted, so an ambiguous candidate is harmless and can be retried.
+    """
+    _ThreadFanout(items, target, name_prefix, _after_start, _after_phase).run()
+
+
+@dataclass
+class _IsolatedCallResult:
+    value: Any | None = None
+    error: BaseException | None = None
+    completed: bool = False
+
+
+def _run_isolated_call(
+    result: _IsolatedCallResult,
+    operation,
+    *,
+    name_prefix: str,
+    after_success: Any | None = None,
+) -> None:
+    """Run a control call outside the caller's async-exception boundary."""
+
+    def invoke(_item) -> None:
+        try:
+            result.value = operation()
+            if after_success is not None:
+                after_success()
+            result.completed = True
+        except BaseException as exc:  # noqa: BLE001
+            result.error = exc
+
+    _start_and_join_threads((0,), invoke, name_prefix=name_prefix)
+
+
+@dataclass
+class _OwnedSharedMemorySlot:
+    shm: SharedMemory | None = None
+    owns_name: bool = False
+    close_buffer: Any | None = None
+    close_mmap: Any | None = None
+
+
+@dataclass
+class _SharedMemoryCreateResult:
+    shm: SharedMemory | None = None
+    error: BaseException | None = None
+
+
+class _SharedMemoryOwner:
+    """Own fixed named shm slots before any create operation can publish one."""
+
+    def __init__(self, capacity: int) -> None:
+        self._slots = [_OwnedSharedMemorySlot() for _ in range(capacity)]
+        self._create_cursor = 0
+        self._attempted = 0
+        self._cleanup_step = 0
+        self._cleanup_error: BaseException | None = None
+
+    @staticmethod
+    def _create_in_helper(slot: _OwnedSharedMemorySlot, size: int, result: _SharedMemoryCreateResult) -> None:
+        while True:
+            # Several mailbox control payloads reserve 32 bytes including the
+            # trailing NUL for this token. Keep the explicit collision-safe
+            # name below that ABI limit while retaining 96 bits of entropy.
+            name = f"smp_{uuid.uuid4().hex[:24]}"
+            shm = SharedMemory.__new__(SharedMemory)
+            shm._name = f"/{name}" if SharedMemory._prepend_leading_slash else name  # noqa: SLF001
+            shm._fd = -1  # noqa: SLF001
+            shm._mmap = None  # noqa: SLF001
+            shm._buf = None  # noqa: SLF001
+            slot.shm = shm
+            slot.owns_name = False
+            try:
+                SharedMemory.__init__(shm, name=name, create=True, size=size)
+            except FileExistsError as exc:
+                if _shm_slot_has_created_resource(slot):
+                    slot.owns_name = True
+                    result.error = exc
+                    return
+                slot.shm = None
+                continue
+            except BaseException as exc:  # noqa: BLE001
+                slot.owns_name = _shm_slot_has_created_resource(slot)
+                result.error = exc
+                return
+            slot.owns_name = True
+            result.shm = shm
+            return
+
+    def create(self, size: int) -> SharedMemory:
+        if self._create_cursor >= len(self._slots):
+            raise RuntimeError("shared-memory owner capacity exhausted")
+        slot = self._slots[self._create_cursor]
+        result = _SharedMemoryCreateResult()
+        self._attempted = self._create_cursor + 1
+
+        def create_in_helper(_item) -> None:
+            try:
+                self._create_in_helper(slot, size, result)
+            except BaseException as exc:  # noqa: BLE001
+                result.error = exc
+
+        _start_and_join_threads((0,), create_in_helper, name_prefix="shm-create-")
+        if result.error is not None:
+            raise result.error
+        shm = result.shm
+        if shm is None:
+            raise RuntimeError("shared-memory helper completed without a result")
+        self._create_cursor += 1
+        return shm
+
+
+def _remember_cleanup_error(first_error: BaseException | None, exc: BaseException) -> BaseException:
+    return exc if first_error is None else first_error
+
+
+def _shm_slot_has_created_resource(slot: _OwnedSharedMemorySlot) -> bool:
+    shm = slot.shm
+    if shm is None:
+        return False
+    if os.name == "posix" and getattr(shm, "_fd", -1) >= 0:
+        return True
+    return getattr(shm, "_mmap", None) is not None or getattr(shm, "_buf", None) is not None
+
+
+def _release_owned_shm_buffer(slot: _OwnedSharedMemorySlot) -> None:
+    shm = slot.shm
+    if shm is None:
+        return
+    if slot.close_buffer is None:
+        slot.close_buffer = shm._buf  # noqa: SLF001
+    buffer = slot.close_buffer
+    if shm._buf is buffer:  # noqa: SLF001
+        shm._buf = None  # noqa: SLF001
+    if buffer is not None:
+        buffer.release()
+    slot.close_buffer = None
+
+
+def _close_owned_shm_mmap(slot: _OwnedSharedMemorySlot) -> None:
+    shm = slot.shm
+    if shm is None:
+        return
+    if slot.close_mmap is None:
+        slot.close_mmap = shm._mmap  # noqa: SLF001
+    mapped = slot.close_mmap
+    if shm._mmap is mapped:  # noqa: SLF001
+        shm._mmap = None  # noqa: SLF001
+    if mapped is not None and not getattr(mapped, "closed", False):
+        mapped.close()
+    slot.close_mmap = None
+
+
+def _close_owned_shm_fd(slot: _OwnedSharedMemorySlot) -> None:
+    if os.name != "posix" or slot.shm is None:
+        return
+    shm = slot.shm
+    fd = shm._fd  # noqa: SLF001
+    if fd < 0:
+        return
+    shm._fd = -1  # noqa: SLF001
+    os.close(fd)
+
+
+_SHM_CLEANUP_PHASES = 7
+
+
+class _SharedMemoryCleanupCursor:
+    def __init__(self, owner: _SharedMemoryOwner, after_error: Any | None, after_step: Any | None) -> None:
+        self._owner = owner
+        self._after_error = after_error
+        self._after_step = after_step
+        self._pending_error: BaseException | None = None
+        self._pending_advance = False
+
+    @property
+    def exhausted(self) -> bool:
+        return self._owner._cleanup_step >= self._owner._attempted * _SHM_CLEANUP_PHASES
+
+    def _finish_step(self) -> None:
+        self._owner._cleanup_step += 1
+        if self._after_step is not None:
+            self._after_step()
+
+    def _queue_error(self, exc: BaseException, *, advance: bool) -> None:
+        if self._pending_error is None:
+            self._pending_error = exc
+            self._pending_advance = advance
+        elif self._owner._cleanup_error is None:
+            self._owner._cleanup_error = self._pending_error
+
+    def _capture_interruption(self, exc: BaseException) -> None:
+        seen: set[int] = set()
+        first = exc
+        while first.__context__ is not None and id(first) not in seen:
+            seen.add(id(first))
+            first = first.__context__
+        if self._pending_error is None:
+            self._pending_error = first
+            self._pending_advance = False
+        elif self._owner._cleanup_error is None:
+            self._owner._cleanup_error = self._pending_error
+
+    def _record_pending_error(self) -> None:
+        pending = self._pending_error
+        assert pending is not None
+        self._owner._cleanup_error = _remember_cleanup_error(self._owner._cleanup_error, pending)
+        if self._after_error is not None:
+            self._after_error()
+        advance = self._pending_advance
+        self._pending_error = None
+        self._pending_advance = False
+        if advance:
+            self._finish_step()
+
+    def _run_step(self) -> None:
+        slot_index, phase = divmod(self._owner._cleanup_step, _SHM_CLEANUP_PHASES)
+        slot = self._owner._slots[slot_index]
+        shm = slot.shm
+        try:
+            if phase == 0:
+                slot.owns_name = slot.owns_name or _shm_slot_has_created_resource(slot)
+            elif phase == 1:
+                if slot.owns_name and os.name == "posix" and shm is not None and shm._name is not None:  # noqa: SLF001
+                    resource_tracker.register(shm._name, "shared_memory")  # noqa: SLF001
+            elif phase == 2:
+                if slot.owns_name and shm is not None:
+                    shm.unlink()
+            elif phase == 3:
+                if slot.owns_name and os.name == "posix" and shm is not None and shm._name is not None:  # noqa: SLF001
+                    resource_tracker.register(shm._name, "shared_memory")  # noqa: SLF001
+                    resource_tracker.unregister(shm._name, "shared_memory")  # noqa: SLF001
+            elif phase == 4:
+                _release_owned_shm_buffer(slot)
+            elif phase == 5:
+                _close_owned_shm_mmap(slot)
+            else:
+                _close_owned_shm_fd(slot)
+        except FileNotFoundError:
+            self._finish_step()
+        except Exception as exc:  # noqa: BLE001
+            self._queue_error(exc, advance=True)
+        else:
+            self._finish_step()
+
+    def drain(self, pending_interruption: BaseException | None = None) -> None:
+        if pending_interruption is not None:
+            self._capture_interruption(pending_interruption)
+        while not self.exhausted or self._pending_error is not None:
+            try:
+                if self._pending_error is not None:
+                    self._record_pending_error()
+                else:
+                    self._run_step()
+            except BaseException as exc:  # noqa: BLE001
+                self._capture_interruption(exc)
+
+
+def _close_unlink_shms(
+    owner: _SharedMemoryOwner,
+    *,
+    _after_error: Any | None = None,
+    _after_step: Any | None = None,
+) -> BaseException | None:
+    """Drain every owned shm and return the first non-benign cleanup error."""
+    pending_interruption: BaseException | None = None
+    while True:
+        try:
+            cursor = _SharedMemoryCleanupCursor(owner, _after_error, _after_step)
+            if pending_interruption is None:
+                _start_and_join_threads((0,), lambda _item: cursor.drain(), name_prefix="shm-cleanup-")
+            else:
+                # A setup/fanout interruption is itself a cleanup error, but
+                # cannot be allowed to bypass the owner whose names are still
+                # live. The cursor records it and drains from the durable step.
+                cursor.drain(pending_interruption)
+            if not cursor.exhausted:
+                cursor.drain()
+            return owner._cleanup_error
+        except BaseException as exc:  # noqa: BLE001, PERF203
+            if pending_interruption is None:
+                pending_interruption = exc
+
+
+def _run_with_owned_shared_memory(
+    capacity: int,
+    operation,
+    *,
+    name_prefix: str,
+    after_success: Any | None = None,
+) -> Any:
+    """Run one complete shm lifecycle outside the caller's signal boundary.
+
+    Python delivers ``KeyboardInterrupt`` to the main thread.  Constructing the
+    owner inside the isolated helper means an interrupt can either prevent the
+    lifecycle from starting, or be deferred until every acquired name has been
+    unlinked and closed; it can never abort the caller immediately before its
+    cleanup call.
+    """
+    result = _IsolatedCallResult()
+
+    def run_lifecycle() -> Any:
+        owner = _SharedMemoryOwner(capacity)
+        value: Any | None = None
+        operation_error: BaseException | None = None
+        cleanup_error: BaseException | None = None
+        cleanup_done = False
+        try:
+            value = operation(owner)
+        except BaseException as exc:  # noqa: BLE001
+            operation_error = exc
+        while not cleanup_done:
+            try:
+                cleanup_error = _close_unlink_shms(owner)
+                cleanup_done = True
+            except BaseException as exc:  # noqa: BLE001
+                # This handles a synchronous failure at the cleanup call entry.
+                # Caller-directed asynchronous exceptions cannot reach this
+                # lifecycle thread.
+                operation_error = _remember_cleanup_error(operation_error, exc)
+        if operation_error is not None:
+            raise operation_error
+        if cleanup_error is not None:
+            raise cleanup_error
+        return value
+
+    _run_isolated_call(result, run_lifecycle, name_prefix=name_prefix, after_success=after_success)
+    if result.error is not None:
+        raise result.error
+    if not result.completed:
+        raise RuntimeError("shared-memory lifecycle did not publish an outcome")
+    return result.value
+
+
+def _validate_domain_allocation(
+    worker: Worker,
+    name: str,
+    workers: tuple[int, ...],
+    window_size: int,
+    buffers: list[CommBufferSpec],
+) -> _RunResources:
+    """Validate a domain request before any communicator or shm side effect."""
+    if worker.level < 3:
+        raise RuntimeError("allocate_domain requires level >= 3")
+    if worker._worker is None:
+        raise RuntimeError("allocate_domain requires a hierarchical Worker (_start_hierarchical ran)")
+    resources = worker._building_run_resources
+    if resources is None:
+        raise RuntimeError("allocate_domain is only valid while a run's graph is being built")
+    if not workers:
+        raise ValueError("allocate_domain: workers must be non-empty")
+    if len(set(workers)) != len(workers):
+        raise ValueError(f"allocate_domain: workers contains duplicates: {workers}")
+    device_ids = worker._config.get("device_ids", [])
+    for worker_id in workers:
+        if worker_id < 0 or worker_id >= len(device_ids):
+            raise ValueError(f"allocate_domain: worker_id {worker_id} outside [0, {len(device_ids)})")
+    if window_size <= 0:
+        raise ValueError("allocate_domain: window_size must be positive")
+    buffer_names = [buffer.name for buffer in buffers]
+    if len(set(buffer_names)) != len(buffer_names):
+        raise ValueError(f"allocate_domain: duplicate buffer names: {buffer_names}")
+    total_buffer_nbytes = sum(int(buffer.nbytes) for buffer in buffers)
+    if total_buffer_nbytes > window_size:
+        raise ValueError(
+            f"allocate_domain: buffers sum to {total_buffer_nbytes} bytes, exceeds window_size={window_size}"
+        )
+    if name in worker._live_domains:
+        raise ValueError(f"allocate_domain: domain {name!r} already live")
+    return resources
 
 
 def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[int, int, int]]) -> None:
@@ -1215,32 +1852,37 @@ def _handle_ctrl_alloc_domain(cw: ChipWorker, buf: memoryview) -> None:
         req_buf.release()
         req_shm.close()
 
-    handle = _comm_base_handle(cw)  # base communicator handle (cached on the ChipWorker)
-    device_ctx, local_window_base = cw._impl.comm_alloc_domain_windows(
-        int(handle),
-        int(allocation_id),
-        rank_ids,
-        int(domain_rank),
-        int(window_size),
-    )
-
-    # Carve buffer pointers sequentially inside the local window.
-    buffer_ptrs: list[int] = []
-    offset = 0
-    for nbytes in buffer_nbytes:
-        if offset + nbytes > window_size:
-            raise ValueError(
-                f"alloc_domain: buffer #{len(buffer_ptrs)} (nbytes={nbytes}) at offset={offset} "
-                f"overflows window_size {window_size}"
-            )
-        buffer_ptrs.append(int(local_window_base) + offset)
-        offset += int(nbytes)
-
+    # Opened before the collective so the commit can be published the instant
+    # the window exists. Everything after that point — the carving bounds check,
+    # the pack — can fail with the allocation already made, and a parent that
+    # inferred "not allocated" from the failure would leak it.
     reply_shm = SharedMemory(name=reply_shm_name)
     reply_buf = reply_shm.buf
     assert reply_buf is not None
     try:
-        _DOMAIN_REPLY_HEADER.pack_into(reply_buf, 0, int(device_ctx), int(local_window_base), int(buffer_count))
+        handle = _comm_base_handle(cw)  # base communicator handle (cached on the ChipWorker)
+        device_ctx, local_window_base = cw._impl.comm_alloc_domain_windows(
+            int(handle),
+            int(allocation_id),
+            rank_ids,
+            int(domain_rank),
+            int(window_size),
+            _buffer_field_addr(reply_buf, _OFF_DOMAIN_REPLY_COMMITTED),
+        )
+
+        # Carve buffer pointers sequentially inside the local window.
+        buffer_ptrs: list[int] = []
+        offset = 0
+        for nbytes in buffer_nbytes:
+            if offset + nbytes > window_size:
+                raise ValueError(
+                    f"alloc_domain: buffer #{len(buffer_ptrs)} (nbytes={nbytes}) at offset={offset} "
+                    f"overflows window_size {window_size}"
+                )
+            buffer_ptrs.append(int(local_window_base) + offset)
+            offset += int(nbytes)
+
+        _DOMAIN_REPLY_HEADER.pack_into(reply_buf, 0, 1, int(device_ctx), int(local_window_base), int(buffer_count))
         if buffer_ptrs:
             struct.pack_into(f"<{len(buffer_ptrs)}Q", reply_buf, _DOMAIN_REPLY_HEADER.size, *buffer_ptrs)
     finally:
@@ -1559,9 +2201,14 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # No-op when nothing is registered.
             if host_buf_ranges:
                 _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+            pipeline_slot, pipeline_reserved, pipeline_generation = _PIPELINE_LEASE_FMT.unpack_from(
+                buf, _OFF_PIPELINE_LEASE
+            )
+            if pipeline_reserved != 0:
+                raise RuntimeError(f"chip_process dev={device_id}: invalid pipeline lease reserved field")
             # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
             # the blob layout is what `write_blob` already wrote, so re-parsing
-            # it in Python is N×40B of avoidable work and a permanent
+            # it in Python is N x 40B of avoidable work and a permanent
             # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
             # is the source of truth.
             cw._impl.run_from_blob(
@@ -1571,6 +2218,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 cfg,
                 mailbox_addr + _OFF_ACCEPTED,
                 _TASK_ACCEPTED,
+                pipeline_slot,
+                pipeline_generation,
             )
         except Exception as e:  # noqa: BLE001
             code = 1
@@ -1770,6 +2419,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
     # child to reach _INIT_READY before dispatching the first task, so the
     # per-rank host-side stream sync budget only covers actual op execution
     # rather than absorbing peer-rank init skew.
+    _PIPELINE_LEASE_FMT.pack_into(buf, _OFF_PIPELINE_LEASE, int(cw.pipeline_depth), 0, 0)
     _mailbox_store_i32(state_addr, _INIT_READY)
     sys.stderr.write(f"[chip_process pid={os.getpid()} dev={device_id}] ready\n")
     sys.stderr.flush()
@@ -1930,6 +2580,14 @@ class _Lifecycle(enum.Enum):
     CLOSED = enum.auto()
 
 
+@dataclass(frozen=True)
+class _CloseOutcome:
+    """One immutable result published by a close attempt."""
+
+    error: BaseException | None
+    incomplete: bool
+
+
 class _CloseAttempt:
     """Private completion record for one close() teardown attempt.
 
@@ -1942,16 +2600,57 @@ class _CloseAttempt:
     latches True), an un-reclaimed resource LEAKS — a later close() never re-drives
     a half-torn tree. Teardown stays UN-attempted, with the tree intact and a
     later close() free to drive drain+teardown, only where the drain itself did
-    not complete: in-flight leases outlived the cleanup budget, or an async
-    interruption left an accepted run fence undrained.
+    not complete: in-flight leases or accepted run fences outlived the shared
+    cleanup budget, or an async interruption left a run fence undrained.
     """
 
-    __slots__ = ("done", "error", "incomplete")
+    __slots__ = ("_outcome",)
 
     def __init__(self) -> None:
-        self.done: bool = False
-        self.error: BaseException | None = None
-        self.incomplete: bool = False
+        self._outcome: _CloseOutcome | None = None
+
+    @property
+    def done(self) -> bool:
+        return self._outcome is not None
+
+    @property
+    def error(self) -> BaseException | None:
+        outcome = self._outcome
+        return None if outcome is None else outcome.error
+
+    @property
+    def incomplete(self) -> bool:
+        outcome = self._outcome
+        return False if outcome is None else outcome.incomplete
+
+    def publish(self, error: BaseException | None, incomplete: bool) -> _CloseOutcome:
+        """Install the attempt's only outcome despite pre-commit interruptions."""
+        effective_error = error
+        effective_incomplete = incomplete
+        try:
+            while True:
+                try:
+                    committed = self._outcome
+                    if committed is not None:
+                        return committed
+                    candidate = _CloseOutcome(effective_error, effective_incomplete)
+                    self._outcome = candidate
+                    return candidate
+                except BaseException as exc:  # noqa: BLE001, PERF203
+                    # An interruption after STORE_ATTR observes the immutable
+                    # committed result and remains local to this publisher. An
+                    # interruption before STORE_ATTR becomes the shared result.
+                    if self._outcome is not None:
+                        raise
+                    if effective_error is None:
+                        effective_error = exc
+                    effective_incomplete = True
+        except BaseException as exc:  # noqa: BLE001
+            if self._outcome is not None:
+                raise
+            if effective_error is None:
+                effective_error = exc
+            return self.publish(effective_error, True)
 
 
 class _StartupCancelled(BaseException):
@@ -1963,11 +2662,19 @@ class _StartupCancelled(BaseException):
     cancellable (``close()`` fails fast while INITIALIZING)."""
 
 
+@dataclass(eq=False)
+class _RemoteSlotRefClaim:
+    """One replayable remote-buffer reference owned by a run cleanup journal."""
+
+    handle: RemoteBufferHandle
+    token: object = field(default_factory=object)
+
+
 @dataclass
 class _RunResources:
     """Python resources whose lifetime ends at one native run fence."""
 
-    remote_slot_refs: list[RemoteBufferHandle] = field(default_factory=list)
+    remote_slot_refs: list[_RemoteSlotRefClaim | RemoteBufferHandle] = field(default_factory=list)
     live_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
     pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
     l3_l2_regions: list[Any] = field(default_factory=list)
@@ -1982,6 +2689,94 @@ class _RunResources:
     # unreachable from the fence and from close(), which the release itself
     # made blind by dropping the handle from `_live_domains`.
     domain_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Sticky: this run's cleanup itself touches the device, so a successor may
+    # not be admitted until that cleanup has finished.
+    #
+    # The whole-run FIFO orders *tasks*. It cannot order cleanup, which runs
+    # after the native fence and reaches a child through mailbox control rather
+    # than a TaskSlot: N+1 allocating a domain while N is still releasing one
+    # can leave two collectives each holding a different chip's mailbox and
+    # waiting for the other. Runs that only dispatch tasks keep the full
+    # admission depth; a run that acquires any of these degrades itself to
+    # depth one. Set, never cleared.
+    requires_ordered_cleanup: bool = False
+
+
+@dataclass
+class _PendingRemoteImportReleaseState:
+    """Durable local phases after a deferred import-release RPC starts."""
+
+    owner_ref: RemoteBufferHandle | None
+    owner_ref_token: object | None = None
+    rpc_complete: bool = False
+    owner_release_complete: bool = False
+    error: BaseException | None = None
+
+
+@dataclass
+class _RunFinalizationCursor:
+    """Own the boundary between each one-shot run cleanup operation."""
+
+    steps: tuple[tuple[str, Any], ...]
+    next_step: int = 0
+    cleanup_error: BaseException | None = None
+    boundary_error: BaseException | None = None
+    incomplete: bool = False
+
+    @property
+    def exhausted(self) -> bool:
+        return self.next_step == len(self.steps)
+
+    def _remember_cleanup_error(self, exc: BaseException) -> None:
+        if self.cleanup_error is None:
+            self.cleanup_error = exc
+
+    def remember_boundary_error(self, exc: BaseException) -> None:
+        if self.boundary_error is None:
+            self.boundary_error = exc
+
+    def _advance(self, after_step) -> None:
+        index = self.next_step
+        name, operation = self.steps[index]
+        try:
+            operation()
+        except Exception as exc:  # noqa: BLE001
+            self._remember_cleanup_error(exc)
+        self.next_step = index + 1
+        if after_step is not None:
+            after_step(name)
+
+    def drain(self, after_step) -> None:
+        while not self.exhausted:
+            starting_step = self.next_step
+            try:
+                self._advance(after_step)
+            except BaseException as exc:  # noqa: BLE001
+                self.remember_boundary_error(exc)
+                if self.next_step == starting_step:
+                    # An uncommitted operation has ambiguous ownership and is
+                    # not replayable: its native side effect may have landed.
+                    self.incomplete = True
+                    return
+
+
+class _AbandonedRunKeepaliveCursor:
+    """Drain retained references only after the native tree is gone."""
+
+    def __init__(self, handles: list[RunHandle]) -> None:
+        self._handles = handles
+        self.first_error: BaseException | None = None
+
+    def drain(self, pending_error: BaseException | None = None) -> None:
+        try:
+            if pending_error is not None and self.first_error is None:
+                self.first_error = pending_error
+            while self._handles:
+                handle = self._handles[-1]
+                handle._keepalive = None
+                self._handles.pop()
+        except BaseException as exc:  # noqa: BLE001
+            self.drain(exc)
 
 
 class RunHandle:
@@ -2009,6 +2804,14 @@ class RunHandle:
         self._launch_accepted = False
         self._terminal = False
         self._error: BaseException | None = None
+        self._finalization_error: BaseException | None = None
+        self._finalization_abandoned = False
+        # Set only after this run's fence-owned cleanup has actually run. The
+        # native fence firing is not the same event: it says the device is
+        # drained, not that the CommDomain / L3-L2 / remote-slot teardown that
+        # follows it has happened. A successor keyed on the native answer would
+        # be admitted while that teardown is still outstanding.
+        self._cleanup_published = False
 
     @classmethod
     def _completed(cls, worker: Worker) -> RunHandle:
@@ -2023,6 +2826,10 @@ class RunHandle:
         handle._launch_accepted = True
         handle._terminal = True
         handle._error = None
+        handle._finalization_error = None
+        handle._finalization_abandoned = False
+        # Nothing was ever admitted, so there is no cleanup owing.
+        handle._cleanup_published = True
         return handle
 
     @staticmethod
@@ -2036,11 +2843,17 @@ class RunHandle:
 
     @property
     def done(self) -> bool:
-        """True once this run is terminal and its cleanup has been published.
+        """True once waiting on this run would not block.
 
-        Reads False while another waiter is still publishing cleanup, so a run
-        whose native fence has already fired can report False until that waiter
-        finishes.
+        This answers the native fence — the device is drained and every task
+        has reached its terminal state — plus this handle's own terminal flag.
+        It does **not** say the run's fence-owned cleanup has happened: the
+        CommDomain, L3-L2 and remote-slot teardown runs after the fence, in
+        whichever thread waits. Anything that has to be ordered behind that
+        teardown keys on ``_cleanup_published`` instead.
+
+        Reads False while another waiter is crossing the fence, because the
+        native run identity can disappear in that interval.
         """
         with self._cv:
             if self._terminal:
@@ -2054,90 +2867,204 @@ class RunHandle:
             assert run_id is not None
             return self._worker._run_handle_done(run_id)
 
-    def wait(self, timeout: float | None = None) -> None:
-        """Wait for completion, raising ``TimeoutError`` or the run's error."""
-        # Exactly one waiter is elected to cross the native fence; the rest park
-        # on the CV until it publishes. That election is unrecoverable if it is
-        # abandoned silently — no other path clears `_wait_in_progress`, and
-        # Worker.close() drains the handle with an untimed wait() — so every
-        # publication below (both abandonment paths and the terminal one) is a
-        # resilient publish in the shape close() uses for its _CloseAttempt:
-        # plain attribute assigns land BEFORE the CV acquire, whose only
-        # remaining work is notify_all(). An async BaseException in that
-        # interruptible acquire therefore cannot strand the handle, and a parked
-        # waiter's bounded re-check recovers the skipped notify. The only
-        # irreducible window is an async exception landing between the `_error`
-        # and `_terminal` assigns.
-        deadline = self._deadline(timeout)
-        with self._cv:
-            while not self._terminal and self._wait_in_progress:
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    raise TimeoutError("RunHandle.wait() timed out")
-                recheck = (
-                    _RUN_HANDLE_WAIT_RECHECK_S if remaining is None else min(remaining, _RUN_HANDLE_WAIT_RECHECK_S)
-                )
-                self._cv.wait(timeout=recheck)
-            if self._terminal:
-                error = self._error
-                if error is not None:
-                    raise error
-                return
-            self._wait_in_progress = True
-            run_id = self._run_id
+    def _clear_wait_owner(self) -> None:
+        """Make an interrupted pre-finalization fence wait re-electable."""
+        try:
+            while self._wait_in_progress:
+                try:
+                    self._wait_in_progress = False
+                except BaseException:  # noqa: BLE001, PERF203
+                    pass
+            try:
+                with self._cv:
+                    self._cv.notify_all()
+            except BaseException:  # noqa: BLE001
+                # Parked waiters use bounded re-checks and observe the plain flag.
+                pass
+        except BaseException:  # noqa: BLE001
+            self._clear_wait_owner()
 
-        assert run_id is not None
+    def _clear_acceptance_owner(self) -> None:
+        """Make an interrupted acceptance wait re-electable."""
+        try:
+            while self._accept_wait_in_progress:
+                try:
+                    self._accept_wait_in_progress = False
+                except BaseException:  # noqa: BLE001, PERF203
+                    pass
+            try:
+                with self._cv:
+                    self._cv.notify_all()
+            except BaseException:  # noqa: BLE001
+                # Parked waiters use bounded re-checks and observe the plain flag.
+                pass
+        except BaseException:  # noqa: BLE001
+            self._clear_acceptance_owner()
+
+    def _publish_acceptance(self) -> None:
+        """Publish launch acceptance before releasing its elected owner."""
+        try:
+            while not self._launch_accepted or self._accept_wait_in_progress:
+                try:
+                    self._launch_accepted = True
+                    self._accept_wait_in_progress = False
+                except BaseException:  # noqa: BLE001, PERF203
+                    pass
+            try:
+                with self._cv:
+                    self._cv.notify_all()
+            except BaseException:  # noqa: BLE001
+                # Launch acceptance is visible before notification.
+                pass
+        except BaseException:  # noqa: BLE001
+            self._publish_acceptance()
+
+    def _publish_terminal(self, error: BaseException | None) -> BaseException | None:
+        """Publish one terminal result despite interruptions between assigns."""
+        effective_error = error
+        try:
+            while not self._terminal or self._wait_in_progress or self._accept_wait_in_progress:
+                try:
+                    if not self._terminal:
+                        self._error = effective_error
+                        self._run_id = None
+                        if not self._finalization_abandoned:
+                            self._keepalive = None
+                        self._launch_accepted = True
+                        self._terminal = True
+                    self._wait_in_progress = False
+                    self._accept_wait_in_progress = False
+                except BaseException as exc:  # noqa: BLE001, PERF203
+                    if not self._terminal and effective_error is None:
+                        effective_error = exc
+            try:
+                with self._cv:
+                    self._cv.notify_all()
+            except BaseException:  # noqa: BLE001
+                # Terminal is visible before notification; bounded re-checks
+                # cover a skipped wakeup.
+                pass
+            return self._error
+        except BaseException as exc:  # noqa: BLE001
+            if not self._terminal and effective_error is None:
+                effective_error = exc
+            return self._publish_terminal(effective_error)
+
+    def _cache_finalization_error(self, error: BaseException | None) -> None:
+        """Store the finalizer outcome before control returns to its caller."""
+        try:
+            while True:
+                try:
+                    self._finalization_error = error
+                    return
+                except BaseException:  # noqa: BLE001, PERF203
+                    pass
+        except BaseException:  # noqa: BLE001
+            self._cache_finalization_error(error)
+
+    def _recover_and_publish_terminal(self, error: BaseException) -> BaseException | None:
+        """Finish interrupted finalization without reopening its cleanup."""
+        try:
+            while True:
+                try:
+                    if self._terminal:
+                        return self._error
+                    recover = getattr(self._worker, "_recover_interrupted_run_finalization", None)
+                    if recover is not None:
+                        recover(self, error)
+                    return self._publish_terminal(error)
+                except BaseException:  # noqa: BLE001, PERF203
+                    # Recovery and terminal publication form one monotonic
+                    # transition. Re-entering recovery only repeats ownership
+                    # publication; it never replays a cleanup step.
+                    pass
+        except BaseException:  # noqa: BLE001
+            return self._recover_and_publish_terminal(error)
+
+    def wait(self, timeout: float | None = None) -> None:  # noqa: PLR0912 -- one owner spans fence through publication
+        """Wait for completion, raising ``TimeoutError`` or the run's error."""
+        # One owner spans the native fence through finalization. An interruption
+        # before finalization clears that election; one after finalization starts
+        # never re-enters cleanup and conservatively abandons any unpublished
+        # ownership. Terminal fields are monotonic, and parked waiters use
+        # bounded re-checks when notification itself is interrupted.
+        deadline = self._deadline(timeout)
+        elected = False
+        finalization_started = False
+        final_error: BaseException | None = None
         native_error: BaseException | None = None
         try:
+            with self._cv:
+                while not self._terminal and self._wait_in_progress:
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("RunHandle.wait() timed out")
+                    recheck = (
+                        _RUN_HANDLE_WAIT_RECHECK_S if remaining is None else min(remaining, _RUN_HANDLE_WAIT_RECHECK_S)
+                    )
+                    self._cv.wait(timeout=recheck)
+                if self._terminal:
+                    error = self._error
+                    if error is not None:
+                        raise error
+                    return
+                run_id = self._run_id
+                elected = True
+                self._wait_in_progress = True
+
+            boundary_hook = getattr(self, "_wait_boundary_hook", None)
+            if boundary_hook is not None:
+                boundary_hook("after_election")
+
+            assert run_id is not None
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            completed = self._worker._wait_run_handle(run_id, remaining)
-        except Exception as exc:  # native run failures are terminal
-            completed = True
-            native_error = exc
-        except BaseException:
-            self._wait_in_progress = False
-            with self._cv:
-                self._cv.notify_all()
-            raise
+            try:
+                completed = self._worker._wait_run_handle(run_id, remaining)
+            except Exception as exc:  # native run failures are terminal
+                completed = True
+                native_error = exc
 
-        if not completed:
-            self._wait_in_progress = False
-            with self._cv:
-                self._cv.notify_all()
-            raise TimeoutError("RunHandle.wait() timed out")
+            if not completed:
+                raise TimeoutError("RunHandle.wait() timed out")
 
-        # An acceptance waiter that already captured this run id must leave the
-        # native wait before finalize releases that id. It is terminal now, so
-        # this is only a short ownership hand-off and does not serialize device
-        # execution with acceptance waiting.
-        try:
+            # An acceptance waiter that already captured this run id must leave
+            # the native wait before finalize releases that id. It is terminal
+            # now, so this ownership hand-off does not serialize device
+            # execution with acceptance waiting.
             with self._cv:
                 while self._accept_wait_in_progress:
-                    self._cv.wait(timeout=_RUN_HANDLE_WAIT_RECHECK_S)
-        except BaseException:
-            self._wait_in_progress = False
-            with self._cv:
-                self._cv.notify_all()
-            raise
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        raise TimeoutError("RunHandle.wait() timed out")
+                    recheck = (
+                        _RUN_HANDLE_WAIT_RECHECK_S if remaining is None else min(remaining, _RUN_HANDLE_WAIT_RECHECK_S)
+                    )
+                    self._cv.wait(timeout=recheck)
 
-        # Cleanup runs exactly once, on this waiter, and its outcome IS the
-        # handle's result: an interruption mid-finalize is cached like any other
-        # error rather than lost, so the publication below is unconditional.
-        try:
-            error = self._worker._finalize_run_handle(self, run_id, native_error)
+            # Finalization owns the accepted-set retirement from this point.
+            # An escape after this flag takes conservative abandonment rather
+            # than re-entering cleanup or native run release.
+            finalization_started = True
+            final_error = self._worker._finalize_run_handle(self, run_id, native_error)
+            if boundary_hook is not None:
+                boundary_hook("after_finalize")
+            published_error = self._publish_terminal(final_error)
         except BaseException as exc:  # noqa: BLE001
-            error = exc
-        self._error = error
-        self._run_id = None
-        self._keepalive = None
-        self._launch_accepted = True
-        self._terminal = True
-        self._wait_in_progress = False
-        self._accept_wait_in_progress = False
-        with self._cv:
-            self._cv.notify_all()
-        if error is not None:
-            raise error
+            if not elected:
+                raise
+            if not finalization_started:
+                self._clear_wait_owner()
+                raise
+
+            preferred_error = native_error
+            if preferred_error is None:
+                preferred_error = self._finalization_error
+            if preferred_error is None:
+                preferred_error = final_error if final_error is not None else exc
+            published_error = self._recover_and_publish_terminal(preferred_error)
+
+        if published_error is not None:
+            raise published_error
 
     def result(self, timeout: float | None = None) -> None:
         """Alias for :meth:`wait`; successful runs have no return value."""
@@ -2151,29 +3078,56 @@ class RunHandle:
             # The result remains cached for this handle's public wait/result.
             pass
 
+    def _wait_for_handoff(self) -> None:
+        """Drain this run *and* its device-touching cleanup before a successor.
+
+        The run's own failure is not this caller's problem — a failed kernel
+        says nothing about whether cleanup succeeded — so a task error is
+        swallowed here exactly as pre-submission draining does. What must not be
+        swallowed is a *cleanup* failure, and that is published by the cleanup
+        itself rather than inferred from this exception: whoever ran the cleanup
+        recorded it on the worker before dropping the handle, and any waiter
+        could have been the one to run it. So this waits, then lets the
+        admission check see the poison.
+        """
+        try:
+            self.wait()
+        except Exception:
+            # Cached on the handle for its public wait()/result().
+            pass
+
     def _wait_for_acceptance(self) -> None:
         """Wait until this run's dispatches cross their acceptance boundary."""
-        with self._cv:
-            while not self._terminal and self._accept_wait_in_progress:
-                self._cv.wait(timeout=_RUN_HANDLE_WAIT_RECHECK_S)
-            if self._terminal or self._launch_accepted:
-                return
-            self._accept_wait_in_progress = True
-            run_id = self._run_id
-
-        assert run_id is not None
+        elected = False
+        acceptance_completed = False
         try:
-            self._worker._wait_run_handle_accepted(run_id)
-        except BaseException:
-            self._accept_wait_in_progress = False
             with self._cv:
-                self._cv.notify_all()
-            raise
+                while not self._terminal and self._accept_wait_in_progress:
+                    self._cv.wait(timeout=_RUN_HANDLE_WAIT_RECHECK_S)
+                if self._terminal or self._launch_accepted:
+                    return
+                run_id = self._run_id
+                elected = True
+                self._accept_wait_in_progress = True
 
-        self._launch_accepted = True
-        self._accept_wait_in_progress = False
-        with self._cv:
-            self._cv.notify_all()
+            boundary_hook = getattr(self, "_wait_boundary_hook", None)
+            if boundary_hook is not None:
+                boundary_hook("after_acceptance_election")
+
+            assert run_id is not None
+            self._worker._wait_run_handle_accepted(run_id)
+            acceptance_completed = True
+            if boundary_hook is not None:
+                boundary_hook("after_acceptance_wait")
+            self._publish_acceptance()
+        except BaseException:
+            if not elected:
+                raise
+            if acceptance_completed:
+                self._publish_acceptance()
+            else:
+                self._clear_acceptance_owner()
+            raise
 
 
 def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_leader: bool = False) -> None:
@@ -2336,13 +3290,27 @@ class Worker:
         self._last_rollback: dict[str, list[int]] | None = None
         self._hierarchical_start_mu = threading.Lock()
         self._hierarchical_start_cv = threading.Condition(self._hierarchical_start_mu)
-        # Asynchronous completion currently admits only one live device run. A
-        # new submit drains the prior accepted handle under this gate.
+        # Device *execution* is one run at a time — the whole-run FIFO admits a
+        # prepared successor but dispatches only the head — while how many runs
+        # may be admitted at once is the depth the child backends negotiated.
+        # This gate serialises graph construction itself, which stays
+        # synchronous on the submitting caller at any depth.
         self._submit_mu = threading.Lock()
         # Guarded by _hierarchical_start_cv. Handles are installed before their
         # orchestration callback can enqueue work and retired after fence-owned
         # cleanup, so close() can drain the exact accepted set.
         self._accepted_run_handles: set[RunHandle] = set()
+        # A nonterminal cancellation or ambiguous finalization boundary has no
+        # fence-owned cleanup Python can safely replay. Keep that run's callback
+        # and resource references alive outside close()'s drain set; whole-tree
+        # teardown is the only remaining safe reclamation boundary.
+        self._abandoned_run_handles: list[RunHandle] = []
+        # Set once a cleanup-bearing run's ordered cleanup failed. That cleanup
+        # is collective control on the children, so a failure leaves device
+        # state this process can neither describe nor reclaim; admitting more
+        # work would build on it. Sticky — there is no recovery short of close.
+        # Guarded by _hierarchical_start_cv.
+        self._ordered_cleanup_error: BaseException | None = None
         # submit graph construction is serialized by _submit_mu. Resource
         # creation helpers use this pointer to bind new objects to the handle
         # being built; the pointer is cleared before submit() returns.
@@ -2384,9 +3352,14 @@ class Worker:
         self._next_level_worker_id_count: int = 0
         # Fallback ownership for private helpers used outside Worker.submit.
         # Normal orchestration-owned refs live in RunHandle._resources.
-        self._active_remote_slot_refs: list[RemoteBufferHandle] = []
+        self._active_remote_slot_refs: list[_RemoteSlotRefClaim | RemoteBufferHandle] = []
         self._pending_remote_buffer_frees: list[RemoteBufferHandle] = []
+        # One publication/drain boundary for every remote release debt.  In
+        # particular, an owner free must not append after a run fence has taken
+        # the queue's only snapshot, and two callers must not both send it.
+        self._remote_import_release_mu = threading.RLock()
         self._pending_remote_import_releases: list[RemoteBufferHandle] = []
+        self._pending_remote_import_release_states: dict[RemoteBufferHandle, _PendingRemoteImportReleaseState] = {}
 
         # Dynamic CommDomain allocations.  Keyed by user-facing name (unique
         # among live handles).  ``orch.allocate_domain`` adds entries here;
@@ -2838,7 +3811,7 @@ class Worker:
         size = int(nbytes)
         if size <= 0:
             raise ValueError("Worker.remote_malloc nbytes must be positive")
-        with self._operation_lease("remote_malloc"):
+        with self._operation_lease("remote_malloc"), self._control_admission("remote_malloc"):
             self._require_remote_worker_started(worker_id)
             assert self._worker is not None
             fields = self._worker.remote_malloc(worker_id, size)
@@ -2869,18 +3842,48 @@ class Worker:
         if handle.is_imported:
             raise ValueError("remote_free is invalid for imported handles; use remote_release_import")
         if handle.released:
-            return
+            with self._remote_import_release_mu:
+                if handle not in self._pending_remote_buffer_frees:
+                    return
         # Public admission: READY-only + drained. (The private _send_* transport
         # helper accepts CLOSED so teardown can flush pending frees, so remote_free
         # must fence admission itself rather than lean on the transport gate.)
         with self._operation_lease("remote_free"):
-            if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
-                handle._mark_released()
-                if handle not in self._pending_remote_buffer_frees:
-                    self._pending_remote_buffer_frees.append(handle)
-                return
-            self._send_remote_free(handle)
-            handle._mark_released()
+            with self._remote_import_release_mu:
+                if handle.released:
+                    if handle not in self._pending_remote_buffer_frees:
+                        return
+                    if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
+                        return
+                if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
+                    # Deferred: nothing reaches the owner here, so there is no
+                    # command to order against a run. The fence flushes it, and
+                    # the ordering that matters is the fence's own.
+                    self._publish_pending_remote_buffer_free(handle)
+                    return
+            with self._control_admission("remote_free"):
+                # Admission can block behind a graph callback that acquires a
+                # slot/import ref, and another free can have completed while we
+                # waited. Re-read both facts at the linearization boundary.
+                with self._remote_import_release_mu:
+                    if handle.released:
+                        if handle not in self._pending_remote_buffer_frees:
+                            return
+                        if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
+                            return
+                        self._flush_pending_remote_frees()
+                        return
+                    if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
+                        self._publish_pending_remote_buffer_free(handle)
+                        return
+                    # Publish logical release before the RPC. A Python async
+                    # exception can otherwise land after the remote allocation
+                    # is gone but before the handle is marked. FREE_REMOTE_BUFFER
+                    # is idempotent by (buffer_id, generation), so a retained
+                    # debt may safely be retried if queue retirement is
+                    # interrupted after the reply.
+                    self._publish_pending_remote_buffer_free(handle)
+                    self._flush_pending_remote_frees()
 
     def remote_copy_to(self, handle: RemoteBufferHandle, host_ptr: Any, nbytes: int, *, offset: int = 0) -> None:
         """Copy ``nbytes`` from host memory into an owner remote buffer.
@@ -2888,7 +3891,7 @@ class Worker:
         Requires an owner handle, not an imported one. ``offset + nbytes`` must
         fall within ``handle.nbytes``.
         """
-        with self._operation_lease("remote_copy_to"):
+        with self._operation_lease("remote_copy_to"), self._control_admission("remote_copy_to"):
             self._require_live_remote_buffer(handle)
             if handle.is_imported:
                 raise ValueError("Worker.remote_copy_to expects an owner remote buffer handle")
@@ -2915,7 +3918,7 @@ class Worker:
         Requires an owner handle, not an imported one. ``offset + nbytes`` must
         fall within ``handle.nbytes``.
         """
-        with self._operation_lease("remote_copy_from"):
+        with self._operation_lease("remote_copy_from"), self._control_admission("remote_copy_from"):
             self._require_live_remote_buffer(handle)
             if handle.is_imported:
                 raise ValueError("Worker.remote_copy_from expects an owner remote buffer handle")
@@ -2951,7 +3954,7 @@ class Worker:
         requested ``access`` must be a subset of the handle's own access flags —
         an export can narrow permissions but never widen them.
         """
-        with self._operation_lease("remote_export"):
+        with self._operation_lease("remote_export"), self._control_admission("remote_export"):
             return self._remote_export_locked(
                 handle, offset=offset, nbytes=nbytes, access=access, transport_profile=transport_profile
             )
@@ -3023,10 +4026,10 @@ class Worker:
             raise ValueError("Worker.remote_import rejects forged or different Worker RemoteBufferExport values")
         if exported._owner_handle is not None and exported._owner_handle.released:
             raise ValueError("Worker.remote_import rejects stale RemoteBufferExport values for released buffers")
-        with self._operation_lease("remote_import"):
+        with self._operation_lease("remote_import"), self._control_admission("remote_import"):
             return self._remote_import_locked(exported, worker=worker, access=access)
 
-    def _remote_import_locked(
+    def _remote_import_locked(  # noqa: PLR0912 -- import and rollback phases share one ownership journal
         self, exported: RemoteBufferExport, *, worker: int, access: str | int | None = None
     ) -> RemoteBufferHandle:
         importer_worker_id = int(worker)
@@ -3035,28 +4038,78 @@ class Worker:
         if flags & ~exported._access_flags:
             raise ValueError("Worker.remote_import requested access is not a subset of export access")
         assert self._worker is not None
+        native_worker = self._worker
         owner_handle = exported._owner_handle
-        if owner_handle is not None:
-            owner_handle._acquire_import_ref()
-        fields: Any | None = None
+        owner_ref_token = object() if owner_handle is not None else None
+        owner_acquire = _IsolatedCallResult()
+        call_result = _IsolatedCallResult()
+
+        def retire_owner_reference(message: str) -> None:
+            if owner_handle is None or owner_ref_token is None:
+                return
+            owner_release = _IsolatedCallResult()
+
+            def release_owner_reference() -> None:
+                with self._remote_import_release_mu:
+                    owner_handle._release_import_ref(owner_ref_token)
+
+            try:
+                _run_isolated_call(
+                    owner_release,
+                    release_owner_reference,
+                    name_prefix="simpler-remote-import-owner-release-",
+                )
+            except BaseException as exc:  # noqa: BLE001
+                if owner_release.error is None:
+                    owner_release.error = exc
+            if not owner_release.completed:
+                cleanup_error = owner_release.error or RuntimeError(
+                    "Worker.remote_import: owner reference rollback did not settle"
+                )
+                self._record_unreclaimable(message, cleanup_error)
+
         try:
-            fields = self._worker.remote_import(
-                importer_worker_id,
-                exported._owner_worker_id,
-                exported._buffer_id,
-                exported._generation,
-                int(exported._address_space),
-                exported._offset,
-                exported._nbytes,
-                exported._export_id,
-                exported._remote_addr,
-                exported._rkey_or_token,
-                exported._ub_ldst_va,
-                exported._access_flags,
-                exported._transport_profile,
-                exported._transport_descriptor,
-                flags,
+            if owner_handle is not None:
+
+                def acquire_owner_reference() -> object:
+                    with self._remote_import_release_mu:
+                        return owner_handle._acquire_import_ref(owner_ref_token)
+
+                _run_isolated_call(
+                    owner_acquire,
+                    acquire_owner_reference,
+                    name_prefix="simpler-remote-import-owner-acquire-",
+                )
+                if owner_acquire.error is not None:
+                    raise owner_acquire.error
+                if not owner_acquire.completed:
+                    raise RuntimeError("Worker.remote_import: owner reference acquisition did not settle")
+            _run_isolated_call(
+                call_result,
+                lambda: native_worker.remote_import(
+                    importer_worker_id,
+                    exported._owner_worker_id,
+                    exported._buffer_id,
+                    exported._generation,
+                    int(exported._address_space),
+                    exported._offset,
+                    exported._nbytes,
+                    exported._export_id,
+                    exported._remote_addr,
+                    exported._rkey_or_token,
+                    exported._ub_ldst_va,
+                    exported._access_flags,
+                    exported._transport_profile,
+                    exported._transport_descriptor,
+                    flags,
+                ),
+                name_prefix="simpler-remote-import-",
             )
+            if call_result.error is not None:
+                raise call_result.error
+            fields = call_result.value
+            if fields is None:
+                raise RuntimeError("Worker.remote_import: remote transport returned no import descriptor")
             return RemoteBufferHandle._from_imported_mapping(
                 worker_id=int(fields[0]),
                 owner_worker_id=int(fields[1]),
@@ -3071,16 +4124,89 @@ class Worker:
                 ub_ldst_va=int(fields[10]),
                 access_flags=int(fields[11]),
                 owner_handle_ref=owner_handle,
+                owner_import_ref_token=owner_ref_token,
             )
-        except BaseException:
+        except BaseException as original_error:
+            fields = call_result.value
             if fields is not None:
+                release_result = _IsolatedCallResult()
                 try:
-                    self._send_remote_release_import_fields(fields)
-                except Exception:  # noqa: BLE001
-                    pass
-            if owner_handle is not None:
-                owner_handle._release_import_ref()
-            raise
+                    _run_isolated_call(
+                        release_result,
+                        lambda: self._send_remote_release_import_fields(fields),
+                        name_prefix="simpler-remote-import-rollback-",
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    if release_result.error is None:
+                        release_result.error = exc
+                if not release_result.completed:
+                    cleanup_error = release_result.error or RuntimeError(
+                        "Worker.remote_import: rollback did not settle"
+                    )
+                    self._record_unreclaimable(
+                        "Worker.remote_import: a committed remote import could not be rolled back; "
+                        "the mapping is retained until whole-tree teardown",
+                        cleanup_error,
+                    )
+                else:
+                    retire_owner_reference(
+                        "Worker.remote_import: the remote mapping was rolled back but its owner reference "
+                        "could not be retired"
+                    )
+            elif call_result.completed:
+                self._record_unreclaimable(
+                    "Worker.remote_import: the transport completed without publishing an import descriptor; "
+                    "remote ownership is retained until whole-tree teardown",
+                    original_error,
+                )
+            elif call_result.error is None:
+                retire_owner_reference(
+                    "Worker.remote_import: the transport failed before publishing an import descriptor, but "
+                    "its owner reference could not be retired"
+                )
+            else:
+                self._record_unreclaimable(
+                    "Worker.remote_import: import ownership is ambiguous after a failed transport call; "
+                    "the owner reference is retained until whole-tree teardown",
+                    call_result.error,
+                )
+            raise original_error
+
+    def _publish_pending_remote_import_release(
+        self,
+        handle: RemoteBufferHandle,
+        state: _PendingRemoteImportReleaseState,
+        pending_error: BaseException | None = None,
+    ) -> None:
+        """Publish release ownership before any import-release RPC can start."""
+        with self._remote_import_release_mu:
+            try:
+                existing = self._pending_remote_import_release_states.get(handle)
+                if existing is None:
+                    self._pending_remote_import_release_states[handle] = state
+                if handle not in self._pending_remote_import_releases:
+                    self._pending_remote_import_releases.append(handle)
+                handle._mark_released()
+            except BaseException as exc:  # noqa: BLE001
+                self._publish_pending_remote_import_release(handle, state, pending_error or exc)
+                return
+            if pending_error is not None:
+                raise pending_error
+
+    def _publish_pending_remote_buffer_free(
+        self, handle: RemoteBufferHandle, pending_error: BaseException | None = None
+    ) -> None:
+        """Atomically publish an owner-free debt and logical release."""
+        with self._remote_import_release_mu:
+            try:
+                if handle not in self._pending_remote_buffer_frees:
+                    self._pending_remote_buffer_frees.append(handle)
+                handle._mark_released()
+            except BaseException as exc:  # noqa: BLE001
+                self._publish_pending_remote_buffer_free(handle, pending_error or exc)
+                return
+            if pending_error is not None:
+                raise pending_error
 
     def remote_release_import(self, handle: RemoteBufferHandle) -> None:
         """Release an imported remote handle.
@@ -3098,23 +4224,47 @@ class Worker:
         # Public admission: READY-only + drained (the private _send_* transport
         # accepts CLOSED for teardown, so fence admission here).
         with self._operation_lease("remote_release_import"):
-            if handle._live_slot_refs > 0:
-                handle._mark_released()
-                if handle not in self._pending_remote_import_releases:
-                    self._pending_remote_import_releases.append(handle)
-                return
-            self._send_remote_release_import(handle)
-            if handle._owner_handle_ref is not None:
-                handle._owner_handle_ref._release_import_ref()
-                handle._owner_handle_ref = None
-            handle._mark_released()
-            self._flush_pending_remote_frees()
+            with self._remote_import_release_mu:
+                if handle.released:
+                    return
+                if handle._live_slot_refs > 0:
+                    # Deferred: see remote_free — nothing is sent from here.
+                    self._publish_pending_remote_import_release(
+                        handle,
+                        _PendingRemoteImportReleaseState(
+                            owner_ref=handle._owner_handle_ref,
+                            owner_ref_token=handle._owner_import_ref_token,
+                        ),
+                    )
+                    return
+            with self._control_admission("remote_release_import"):
+                with self._remote_import_release_mu:
+                    if handle.released:
+                        return
+                    if handle._live_slot_refs > 0:
+                        self._publish_pending_remote_import_release(
+                            handle,
+                            _PendingRemoteImportReleaseState(
+                                owner_ref=handle._owner_handle_ref,
+                                owner_ref_token=handle._owner_import_ref_token,
+                            ),
+                        )
+                        return
+                    self._publish_pending_remote_import_release(
+                        handle,
+                        _PendingRemoteImportReleaseState(
+                            owner_ref=handle._owner_handle_ref,
+                            owner_ref_token=handle._owner_import_ref_token,
+                        ),
+                    )
+                    self._flush_pending_remote_frees()
 
-    def _capture_remote_sidecar_refs(self, remote_sidecar: Any) -> list[RemoteBufferHandle]:
-        captured: list[RemoteBufferHandle] = []
-        if remote_sidecar is None:
-            return captured
-        try:
+    @staticmethod
+    def _remote_sidecar_handles(remote_sidecars: Any) -> list[RemoteBufferHandle]:
+        handles: list[RemoteBufferHandle] = []
+        for remote_sidecar in remote_sidecars:
+            if remote_sidecar is None:
+                continue
             for tensor_sidecar in getattr(remote_sidecar, "tensors", ()):
                 if tensor_sidecar is None or not getattr(tensor_sidecar, "present", False):
                     continue
@@ -3123,73 +4273,209 @@ class Worker:
                     continue
                 if not isinstance(handle, RemoteBufferHandle):
                     raise TypeError("remote sidecar handle must be a RemoteBufferHandle")
-                handle._acquire_slot_ref()
-                captured.append(handle)
+                handles.append(handle)
+        return handles
+
+    def _capture_remote_sidecar_refs(self, remote_sidecar: Any) -> list[_RemoteSlotRefClaim]:
+        captured: list[_RemoteSlotRefClaim] = []
+        try:
+            for handle in self._remote_sidecar_handles((remote_sidecar,)):
+                claim = _RemoteSlotRefClaim(handle)
+                captured.append(claim)
+                with self._remote_import_release_mu:
+                    handle._acquire_slot_ref(claim.token)
         except BaseException:
             self._release_remote_slot_refs(captured)
             raise
         return captured
 
-    def _adopt_remote_slot_refs(self, handles: list[RemoteBufferHandle]) -> None:
+    def _adopt_remote_slot_refs(self, handles: list[Any]) -> None:
         resources = self._building_run_resources
         if resources is None:
             self._active_remote_slot_refs.extend(handles)
         else:
             resources.remote_slot_refs.extend(handles)
+            # Releasing a remote slot ref is an RPC to its owner, so it is
+            # cleanup that reaches off this process.
+            if handles:
+                resources.requires_ordered_cleanup = True
 
-    def _release_remote_slot_refs(self, handles: list[RemoteBufferHandle]) -> None:
+    def _adopt_remote_sidecar_refs(self, remote_sidecars: Any) -> None:
+        handles = self._remote_sidecar_handles(remote_sidecars)
+        if not handles:
+            return
+        resources = self._building_run_resources
+        refs = self._active_remote_slot_refs if resources is None else resources.remote_slot_refs
+        if resources is not None:
+            resources.requires_ordered_cleanup = True
         for handle in handles:
-            handle._release_slot_ref()
+            claim = _RemoteSlotRefClaim(handle)
+            refs.append(claim)
+            with self._remote_import_release_mu:
+                handle._acquire_slot_ref(claim.token)
+
+    def _release_remote_slot_refs(self, refs: list[Any]) -> None:
+        while refs:
+            # Preserve acquisition order. If a release is interrupted, later
+            # claims must remain owned rather than being retired ahead of the
+            # ambiguous claim. Token releases are idempotent across the
+            # release/delete boundary.
+            ref = refs[0]
+            with self._remote_import_release_mu:
+                if isinstance(ref, _RemoteSlotRefClaim):
+                    ref.handle._release_slot_ref(ref.token)
+                else:
+                    ref._release_slot_ref()
+            del refs[0]
 
     def _release_active_remote_slot_refs(self, resources: _RunResources | None = None) -> None:
         if resources is None:
             refs = self._active_remote_slot_refs
-            self._active_remote_slot_refs = []
         else:
             refs = resources.remote_slot_refs
-            resources.remote_slot_refs = []
         self._release_remote_slot_refs(refs)
 
-    def _flush_pending_remote_frees(self) -> None:
+    def _flush_pending_remote_frees(self) -> None:  # noqa: PLR0912
         errors: list[str] = []
-        pending_imports = self._pending_remote_import_releases
-        self._pending_remote_import_releases = []
-        remaining_imports: list[RemoteBufferHandle] = []
-        for handle in pending_imports:
-            if handle._live_slot_refs > 0:
-                remaining_imports.append(handle)
-                continue
-            try:
-                self._send_remote_release_import(handle)
-            except Exception as exc:  # noqa: BLE001
-                remaining_imports.append(handle)
-                errors.append(f"release_import worker_id={handle.worker_id} import_id={handle.import_id}: {exc}")
-                continue
-            if handle._owner_handle_ref is not None:
-                handle._owner_handle_ref._release_import_ref()
-                handle._owner_handle_ref = None
-        self._pending_remote_import_releases.extend(remaining_imports)
+        first_async_error: BaseException | None = None
 
-        pending = self._pending_remote_buffer_frees
-        self._pending_remote_buffer_frees = []
-        remaining: list[RemoteBufferHandle] = []
-        for handle in pending:
-            if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
-                remaining.append(handle)
-                continue
-            try:
-                self._send_remote_free(handle)
-            except Exception as exc:  # noqa: BLE001
-                remaining.append(handle)
-                errors.append(f"free worker_id={handle.worker_id} buffer_id={handle._buffer_id}: {exc}")
-                continue
-        self._pending_remote_buffer_frees.extend(remaining)
+        def remember_error(exc: BaseException, context: str) -> None:
+            nonlocal first_async_error
+            if isinstance(exc, Exception):
+                errors.append(f"{context}: {exc}")
+            elif first_async_error is None:
+                first_async_error = exc
+
+        with self._remote_import_release_mu:
+            release_states = self._pending_remote_import_release_states
+            pending_imports = self._pending_remote_import_releases
+            self._pending_remote_import_releases = []
+            for handle in release_states:
+                if handle not in pending_imports:
+                    pending_imports.append(handle)
+            remaining_imports: list[RemoteBufferHandle] = []
+            for handle in pending_imports:
+                context = f"release_import worker_id={handle.worker_id} import_id={handle.import_id}"
+                state = release_states.get(handle)
+                if state is None:
+                    state = _PendingRemoteImportReleaseState(
+                        owner_ref=handle._owner_handle_ref,
+                        owner_ref_token=handle._owner_import_ref_token,
+                    )
+                    release_states[handle] = state
+                if handle._live_slot_refs > 0:
+                    remaining_imports.append(handle)
+                    continue
+                if state.error is not None:
+                    remaining_imports.append(handle)
+                    remember_error(state.error, context)
+                    continue
+
+                rpc_boundary_error: BaseException | None = None
+                if not state.rpc_complete:
+                    rpc_result = _IsolatedCallResult()
+                    try:
+                        _run_isolated_call(
+                            rpc_result,
+                            lambda: self._send_remote_release_import(handle),
+                            name_prefix="simpler-remote-import-release-",
+                            after_success=lambda: setattr(state, "rpc_complete", True),
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        rpc_boundary_error = exc
+                    if rpc_result.error is not None:
+                        rpc_boundary_error = rpc_result.error
+                    if rpc_boundary_error is not None:
+                        remember_error(rpc_boundary_error, context)
+                        if not state.rpc_complete:
+                            state.error = rpc_boundary_error
+                            self._record_unreclaimable(
+                                "Worker.remote_release_import: the release RPC did not publish completion; "
+                                "the import is retained until whole-tree teardown",
+                                rpc_boundary_error,
+                            )
+                            remaining_imports.append(handle)
+                            continue
+
+                if state.owner_ref is None:
+                    state.owner_release_complete = True
+                elif not state.owner_release_complete:
+                    owner_boundary_error: BaseException | None = None
+                    owner_result = _IsolatedCallResult()
+                    owner_ref = state.owner_ref
+                    owner_ref_token = state.owner_ref_token
+                    owner_release = (
+                        owner_ref._release_import_ref
+                        if owner_ref_token is None
+                        else lambda: owner_ref._release_import_ref(owner_ref_token)
+                    )
+                    try:
+                        _run_isolated_call(
+                            owner_result,
+                            owner_release,
+                            name_prefix="simpler-remote-import-owner-release-",
+                            after_success=lambda: setattr(state, "owner_release_complete", True),
+                        )
+                    except BaseException as exc:  # noqa: BLE001
+                        owner_boundary_error = exc
+                    if owner_result.error is not None:
+                        owner_boundary_error = owner_result.error
+                    if owner_boundary_error is not None:
+                        remember_error(owner_boundary_error, context)
+                        if not state.owner_release_complete:
+                            state.error = owner_boundary_error
+                            self._record_unreclaimable(
+                                "Worker.remote_release_import: the release RPC completed but its owner "
+                                "reference could not be retired",
+                                owner_boundary_error,
+                            )
+                            remaining_imports.append(handle)
+                            continue
+
+                while handle._owner_import_ref_token is not None:
+                    try:
+                        handle._owner_import_ref_token = None
+                    except BaseException as exc:  # noqa: BLE001, PERF203
+                        remember_error(exc, context)
+                while handle._owner_handle_ref is not None:
+                    try:
+                        handle._owner_handle_ref = None
+                    except BaseException as exc:  # noqa: BLE001, PERF203
+                        remember_error(exc, context)
+                release_states.pop(handle, None)
+            self._pending_remote_import_releases.extend(remaining_imports)
+
+        with self._remote_import_release_mu:
+            # Keep the durable queue intact while RPCs are in flight. If an
+            # async exception escapes between a successful idempotent free and
+            # retirement below, the old debt is replayed rather than lost.
+            pending = list(self._pending_remote_buffer_frees)
+            remaining: list[RemoteBufferHandle] = []
+            for handle in pending:
+                if handle._live_slot_refs > 0 or handle._live_import_refs > 0:
+                    remaining.append(handle)
+                    continue
+                try:
+                    self._send_remote_free(handle)
+                except BaseException as exc:  # noqa: BLE001
+                    remaining.append(handle)
+                    if isinstance(exc, Exception):
+                        errors.append(f"free worker_id={handle.worker_id} buffer_id={handle._buffer_id}: {exc}")
+                    elif first_async_error is None:
+                        first_async_error = exc
+                    continue
+            self._pending_remote_buffer_frees[:] = remaining
+        if first_async_error is not None:
+            raise first_async_error
         if errors:
-            sys.stderr.write(
-                "Worker._flush_pending_remote_frees(): deferred remote buffer cleanup after control error. "
-                f"First error: {errors[0]}\n"
+            # Every handle is attempted and the ones that failed stay pending,
+            # but the failure is the caller's answer: this runs inside the run
+            # fence's cleanup, and swallowing it would publish a run as cleanly
+            # finished while a remote allocation it owns is still held.
+            raise RuntimeError(
+                f"Worker._flush_pending_remote_frees: {len(errors)} deferred remote buffer cleanup(s) "
+                f"failed and remain owed. First error: {errors[0]}"
             )
-            sys.stderr.flush()
 
     # ------------------------------------------------------------------
     # Callable registration (before init)
@@ -3325,6 +4611,11 @@ class Worker:
         with self._hierarchical_start_cv:
             if self._lifecycle is not _Lifecycle.READY:
                 raise RuntimeError(f"Worker.{api}: requires an initialized (READY) worker") from self._startup_error
+            if self._ordered_cleanup_error is not None:
+                raise RuntimeError(
+                    f"Worker.{api}: a prior run's ordered cleanup failed, so this worker's device state is "
+                    "unreclaimed and no further work is admitted; close() it"
+                ) from self._ordered_cleanup_error
             self._active_ops += 1
             self._lease_depth[tid] = self._lease_depth.get(tid, 0) + 1
         try:
@@ -4492,6 +5783,7 @@ class Worker:
         device_ids = self._config.get("device_ids", [])
         n_sub = self._config.get("num_sub_workers", 0)
         deadline = self._startup_deadline
+        direct_chip_pipeline_depth = PTO_PIPELINE_MAX_DEPTH
 
         # Freeze the startup registry snapshot. init() already holds the epoch in
         # the INITIALIZING state, so a concurrent register/unregister is blocked
@@ -4597,6 +5889,14 @@ class Worker:
             # documented in issue #897.  A chip that fails or dies during init
             # raises here rather than spinning forever.
             self._await_children_ready(self._chip_shms, self._chip_pids, "chip", deadline)
+            chip_depths = []
+            for shm in self._chip_shms:
+                buf = shm.buf
+                assert buf is not None
+                chip_depths.append(_PIPELINE_LEASE_FMT.unpack_from(buf, _OFF_PIPELINE_LEASE)[0])
+            if any(depth <= 0 or depth > PTO_PIPELINE_MAX_DEPTH for depth in chip_depths):
+                raise RuntimeError(f"chip worker published invalid pipeline depths: {chip_depths}")
+            direct_chip_pipeline_depth = min(chip_depths)
 
         # Fork next-level Worker children (L4+ with Worker children).
         # Each child process eagerly inits the inner Worker, which forks its own
@@ -4660,6 +5960,7 @@ class Worker:
         # the unified mailbox.
         dw = self._worker
         assert dw is not None
+        dw.configure_pipeline_depth(direct_chip_pipeline_depth)
 
         # Register chip workers as NEXT_LEVEL (L3). The child pid lets the C++
         # endpoint fail a dispatch whose child died instead of spinning on a
@@ -5025,13 +6326,25 @@ class Worker:
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
             raise ValueError("create_l3_l2_region: counter_bytes must be positive and a multiple of 4")
         self._validate_l3_l2_worker_id(int(worker_id))
+        prior_native_cleanup_error = _l3_host_mapped_region_take_cleanup_error()
+        if prior_native_cleanup_error:
+            raise self._record_unreclaimable(
+                "create_l3_l2_region: a native L3 Host mapping finalized without explicit close on this "
+                "thread and could not be reclaimed; its owning Worker is no longer identifiable, so this "
+                "Worker is conservatively stopped and no further work is admitted",
+                RuntimeError(prior_native_cleanup_error),
+            )
         resources = self._building_run_resources
         req_shm = SharedMemory(create=True, size=_REGION_CREATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=_REGION_CREATE_REPLY_BYTES)
         req_buf = cast(memoryview, req_shm.buf)
         reply_buf = cast(memoryview, reply_shm.buf)
         region_id = 0
+        native_mapping_handle = None
         l3_host_mapping = None
+        region = None
+        dispatched = False
+        required_ordered_cleanup_before = resources.requires_ordered_cleanup if resources is not None else False
         try:
             L3L2RegionCreateRequest(
                 magic_version=_REGION_MAGIC_VERSION,
@@ -5041,6 +6354,11 @@ class Worker:
             ).encode_into(req_buf)
             worker = self._worker
             assert worker is not None
+            # From here the chip may have created a region. The create releases
+            # the GIL, so an interrupt can land after the child committed and
+            # before the id is read back — the rollback below cannot assume
+            # "no id" means "nothing exists".
+            dispatched = True
             worker.control_l3_l2_region_create(int(worker_id), req_shm.name, reply_shm.name)
             # Peek before decode: decode rejects malformed replies, but the
             # child has already created the region and the rollback below
@@ -5055,9 +6373,9 @@ class Worker:
             )
             counter_offset, total_bytes = validate_region_create_reply(reply, expected_access_profile)
             if platform.endswith("sim"):
-                handle = _l3_host_mapped_region_import_sim(reply.backing_shm, int(reply.mapping_bytes))
+                native_mapping_handle = _l3_host_mapped_region_import_sim(reply.backing_shm, int(reply.mapping_bytes))
             else:
-                handle = _l3_host_mapped_region_import_onboard(
+                native_mapping_handle = _l3_host_mapped_region_import_onboard(
                     int(reply.device_id),
                     int(reply.shareable_handle),
                     int(reply.mapping_bytes),
@@ -5071,26 +6389,94 @@ class Worker:
                 payload_bytes=int(reply.desc.payload_bytes),
                 counter_offset=counter_offset,
                 counter_bytes=int(reply.desc.counter_bytes),
-                handle=int(handle),
+                handle=native_mapping_handle,
             )
+            native_mapping_handle = None
             region = L3L2OrchRegion(self, int(worker_id), reply.desc, l3_host_mapping)
             self._live_l3_l2_regions.append(region)
             if resources is not None:
                 resources.l3_l2_regions.append(region)
+                # Region teardown is mailbox control on its owning chip.
+                resources.requires_ordered_cleanup = True
             return region
-        except Exception:
+        except BaseException as exc:
+            mapping_cleanup_error: BaseException | None = None
+            if region is not None:
+                try:
+                    self._live_l3_l2_regions.remove(region)
+                except ValueError:
+                    pass
+                if resources is not None:
+                    try:
+                        resources.l3_l2_regions.remove(region)
+                    except ValueError:
+                        pass
+                    resources.requires_ordered_cleanup = required_ordered_cleanup_before
+                region._expire()
             if l3_host_mapping is not None:
                 try:
                     l3_host_mapping.close()
-                except RuntimeError:
-                    pass
+                except BaseException as mapping_exc:  # noqa: BLE001
+                    mapping_cleanup_error = mapping_exc
+            elif native_mapping_handle is not None:
+                try:
+                    _l3_host_mapped_region_close(int(native_mapping_handle))
+                except BaseException as mapping_exc:  # noqa: BLE001
+                    mapping_cleanup_error = mapping_exc
+            deferred_native_cleanup_error = _l3_host_mapped_region_take_cleanup_error()
+            if deferred_native_cleanup_error:
+                deferred_exc = RuntimeError(deferred_native_cleanup_error)
+                if mapping_cleanup_error is not None:
+                    combined_exc = RuntimeError(
+                        f"{mapping_cleanup_error}; deferred native cleanup also failed: {deferred_native_cleanup_error}"
+                    )
+                    combined_exc.__cause__ = mapping_cleanup_error
+                    mapping_cleanup_error = combined_exc
+                else:
+                    mapping_cleanup_error = deferred_exc
+            if not region_id:
+                # The failure may have landed after the child created its
+                # region. The reply shm is parent-owned and zero-filled and the
+                # child writes the id as part of committing, so a nonzero id
+                # here is the child saying the region exists.
+                with contextlib.suppress(BaseException):
+                    region_id = peek_region_create_reply_region_id(reply_buf)
+            if not region_id and dispatched and not isinstance(exc, Exception):
+                # An asynchronous unwind through the create. The child may still
+                # be finishing a region, and the id it would write lands in a
+                # reply this frame is about to unlink — leaving something on the
+                # chip that nothing here can name. An ordinary failure is not
+                # this case: the child releases its own region before reporting
+                # one, so a zero id there really does mean nothing exists.
+                self._record_unreclaimable(
+                    f"create_l3_l2_region: interrupted on worker {int(worker_id)} before the region id was "
+                    "read back; a region may be live on the chip and no further work is admitted",
+                    exc,
+                )
             if region_id:
                 try:
                     assert self._worker is not None
                     self._worker.control_l3_l2_region_release(int(worker_id), int(region_id))
-                except RuntimeError:
-                    pass
-            raise
+                except BaseException as release_exc:  # noqa: BLE001
+                    # The chip created the region and this call could not give
+                    # it back. Nothing else knows the id — it was never tracked
+                    # — so no later cleanup can reclaim it, and a rollback that
+                    # swallows this reports an ordinary failure over a region
+                    # that stays allocated for the worker's life. That is the
+                    # unreclaimed-device-state condition, recorded here directly
+                    # because there is no handle for a fence to fail on.
+                    raise self._record_unreclaimable(
+                        f"create_l3_l2_region: rollback could not release region {region_id} on worker "
+                        f"{int(worker_id)}; it is leaked and no further work is admitted",
+                        release_exc,
+                    )
+            if mapping_cleanup_error is not None:
+                raise self._record_unreclaimable(
+                    f"create_l3_l2_region: rollback could not close the L3 Host mapping for region "
+                    f"{region_id} on worker {int(worker_id)}; it is leaked and no further work is admitted",
+                    mapping_cleanup_error,
+                )
+            raise exc
         finally:
             del req_buf
             del reply_buf
@@ -5102,28 +6488,47 @@ class Worker:
                     pass
 
     def _cleanup_l3_l2_regions(self, resources: _RunResources | None = None) -> None:
-        # Per-region best-effort: every region is attempted (and _expire()d) even
-        # if one raises, so a failing region never strands the rest; the first
-        # error is raised after all are attempted so close() reports the leak.
+        # Per-region best-effort: mapping close and child release are independent
+        # ownership debts, so both are attempted before the region is expired.
         tracked = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
         if not tracked:
             return
         regions = list(tracked)
-        tracked.clear()
         errors: list[BaseException] = []
         for region in regions:
             try:
-                try:
-                    region._close_l3_host_mapping()
-                    if self._worker is not None:
-                        self._worker.control_l3_l2_region_release(region._worker_id, region.region_id)
-                finally:
-                    region._expire()
+                region._close_l3_host_mapping()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
-            finally:
-                if resources is not None:
-                    self._live_l3_l2_regions[:] = [live for live in self._live_l3_l2_regions if live is not region]
+            try:
+                if self._worker is not None:
+                    self._worker.control_l3_l2_region_release(region._worker_id, region.region_id)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            try:
+                region._expire()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+            tracking_lists = (tracked,) if tracked is self._live_l3_l2_regions else (tracked, self._live_l3_l2_regions)
+            next_tracking_list = 0
+
+            def retire_tracking() -> None:
+                nonlocal next_tracking_list
+                try:
+                    while next_tracking_list < len(tracking_lists):
+                        owned_regions = tracking_lists[next_tracking_list]
+                        owned_regions[:] = [owned for owned in owned_regions if owned is not region]
+                        next_tracking_list += 1
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    next_tracking_list += 1
+                    retire_tracking()
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    retire_tracking()
+
+            retire_tracking()
         if errors:
             raise errors[0]
 
@@ -5157,20 +6562,22 @@ class Worker:
         device_ids = self._config.get("device_ids", [])
         rootinfo_path = self._comm_plan_rootinfo_path()
 
-        request_shms: dict[int, SharedMemory] = {}
         # Layout: header (rank, nranks) + NUL-terminated rootinfo_path bytes.
         path_bytes = rootinfo_path.encode("utf-8") + b"\x00"
         req_size = _COMM_INIT_HEADER.size + len(path_bytes)
-        try:
+
+        def initialize(request_owner: _SharedMemoryOwner) -> None:
+            request_shms: dict[int, SharedMemory] = {}
             for chip_idx, _device_id in enumerate(device_ids):
-                req = SharedMemory(create=True, size=req_size)
+                req = request_owner.create(req_size)
+                request_shms[chip_idx] = req
                 req_buf = req.buf
                 assert req_buf is not None
                 _COMM_INIT_HEADER.pack_into(req_buf, 0, int(chip_idx), int(len(device_ids)))
                 req_buf[_COMM_INIT_HEADER.size : _COMM_INIT_HEADER.size + len(path_bytes)] = path_bytes
-                request_shms[chip_idx] = req
 
             dw = self._worker
+            assert dw is not None
             errors: dict[int, BaseException] = {}
 
             def dispatch(chip_idx: int) -> None:
@@ -5179,27 +6586,20 @@ class Worker:
                 except BaseException as e:  # noqa: BLE001
                     errors[chip_idx] = e
 
-            threads = [
-                threading.Thread(target=dispatch, args=(i,), name=f"comm_init_chip_{i}") for i in range(len(device_ids))
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            _start_and_join_threads(range(len(device_ids)), dispatch, name_prefix="comm_init_chip_")
             if errors:
                 first = next(iter(errors.items()))
                 raise RuntimeError(
                     f"_ensure_comm_base failed on {len(errors)}/{len(device_ids)} chips; "
                     f"first error chip={first[0]}: {first[1]}"
                 )
-        finally:
-            for shm in request_shms.values():
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception:  # noqa: BLE001
-                    pass
-        self._comm_base_ready = True
+
+        _run_with_owned_shared_memory(
+            len(device_ids),
+            initialize,
+            name_prefix="shm-comm-init-lifecycle-",
+            after_success=lambda: setattr(self, "_comm_base_ready", True),
+        )
 
     def _allocate_domain(  # noqa: PLR0912 -- linear input-validation + per-chip shm staging + dispatch + reply unpack; splitting obscures the fail-fast ordering
         self,
@@ -5210,42 +6610,10 @@ class Worker:
         buffers: list[CommBufferSpec],
     ) -> CommDomainHandle:
         # Admission is the run() lease that the driving orchestrator holds;
-        # this checks resource presence (not the public lifecycle) so a domain
-        # allocation admitted before a concurrent close() published CLOSED still
-        # completes during the drain. The _worker check below is that gate.
-        if self.level < 3:
-            raise RuntimeError("allocate_domain requires level >= 3")
-        if self._worker is None:
-            raise RuntimeError("allocate_domain requires a hierarchical Worker (_start_hierarchical ran)")
-        # A domain's lifetime ends at the fence of the run that allocated it,
-        # so there is no owner to charge it to outside graph construction.
-        resources = self._building_run_resources
-        if resources is None:
-            raise RuntimeError("allocate_domain is only valid while a run's graph is being built")
-        if not workers:
-            raise ValueError("allocate_domain: workers must be non-empty")
-        if len(set(workers)) != len(workers):
-            raise ValueError(f"allocate_domain: workers contains duplicates: {workers}")
-        device_ids = self._config.get("device_ids", [])
-        for w in workers:
-            if w < 0 or w >= len(device_ids):
-                raise ValueError(f"allocate_domain: worker_id {w} outside [0, {len(device_ids)})")
-        if window_size <= 0:
-            raise ValueError("allocate_domain: window_size must be positive")
-        buffer_names = [b.name for b in buffers]
-        if len(set(buffer_names)) != len(buffer_names):
-            raise ValueError(f"allocate_domain: duplicate buffer names: {buffer_names}")
-        # Check buffer carving fits in window BEFORE dispatching: a chip-side
-        # overflow would still register the backend allocation (aclrtMalloc
-        # already succeeded) but never produce a Handle on the parent, so it
-        # would silently leak.  Fail fast here instead.
-        total_buffer_nbytes = sum(int(b.nbytes) for b in buffers)
-        if total_buffer_nbytes > window_size:
-            raise ValueError(
-                f"allocate_domain: buffers sum to {total_buffer_nbytes} bytes, exceeds window_size={window_size}"
-            )
-        if name in self._live_domains:
-            raise ValueError(f"allocate_domain: domain {name!r} already live")
+        # validation checks resource presence rather than the public lifecycle,
+        # so an allocation admitted before concurrent close still drains.
+        # Buffer carving is checked before communicator/device side effects.
+        resources = _validate_domain_allocation(self, name, workers, window_size, buffers)
 
         # Lazy base communicator: first orch.allocate_domain on this Worker
         # triggers HCCL RootInfo handshake + EnablePeerAccess on every chip.
@@ -5267,100 +6635,139 @@ class Worker:
         # this, `workers.index(chip_idx)` makes the hot path quadratic.
         worker_to_rank = {w: r for r, w in enumerate(workers)}
 
-        request_shms: dict[int, SharedMemory] = {}
-        reply_shms: dict[int, SharedMemory] = {}
-        try:
-            for chip_idx in workers:
-                req = SharedMemory(create=True, size=req_size)
-                req_buf = req.buf
-                assert req_buf is not None
-                _DOMAIN_REQ_HEADER.pack_into(
-                    req_buf,
-                    0,
-                    int(allocation_id),
-                    int(len(workers)),
-                    int(worker_to_rank[chip_idx]),  # domain_rank
-                    int(window_size),
-                    int(buffer_count),
-                )
-                nbytes_off = _DOMAIN_REQ_HEADER.size
-                if buffer_count:
-                    struct.pack_into(f"<{buffer_count}Q", req_buf, nbytes_off, *[int(b.nbytes) for b in buffers])
-                rank_ids_off = nbytes_off + buffer_count * 8
-                struct.pack_into(f"<{len(workers)}I", req_buf, rank_ids_off, *[int(w) for w in workers])
-                request_shms[chip_idx] = req
+        handle: CommDomainHandle | None = None
+        contexts: dict[int, ChipDomainContext] = {}
+        previous_ordered_cleanup = resources.requires_ordered_cleanup
 
-                reply_shms[chip_idx] = SharedMemory(create=True, size=reply_size)
-
-            self._dispatch_control_domain(
-                workers=workers,
-                request_shms=request_shms,
-                reply_shms=reply_shms,
-                op="alloc",
-                allocation_id=allocation_id,
-            )
-
-            contexts: dict[int, ChipDomainContext] = {}
-            for chip_idx in workers:
-                reply_buf = reply_shms[chip_idx].buf
-                assert reply_buf is not None
-                (device_ctx, local_window_base, reply_buffer_count) = _DOMAIN_REPLY_HEADER.unpack_from(reply_buf, 0)
-                if reply_buffer_count != buffer_count:
-                    raise RuntimeError(
-                        f"allocate_domain: chip {chip_idx} reply buffer_count={reply_buffer_count} "
-                        f"!= requested {buffer_count}"
+        def allocate(staged_shms: _SharedMemoryOwner) -> CommDomainHandle:
+            nonlocal handle
+            request_shms: dict[int, SharedMemory] = {}
+            reply_shms: dict[int, SharedMemory] = {}
+            dispatch_started = False
+            try:
+                for chip_idx in workers:
+                    req = staged_shms.create(req_size)
+                    request_shms[chip_idx] = req
+                    req_buf = req.buf
+                    assert req_buf is not None
+                    _DOMAIN_REQ_HEADER.pack_into(
+                        req_buf,
+                        0,
+                        int(allocation_id),
+                        int(len(workers)),
+                        int(worker_to_rank[chip_idx]),  # domain_rank
+                        int(window_size),
+                        int(buffer_count),
                     )
-                ptrs: list[int] = []
-                if buffer_count:
-                    ptrs = list(struct.unpack_from(f"<{buffer_count}Q", reply_buf, _DOMAIN_REPLY_HEADER.size))
-                contexts[chip_idx] = ChipDomainContext(
-                    name=name,
-                    domain_rank=worker_to_rank[chip_idx],
-                    domain_size=len(workers),
-                    device_ctx=int(device_ctx),
-                    local_window_base=int(local_window_base),
-                    actual_window_size=int(window_size),
-                    buffer_ptrs={b.name: ptrs[i] for i, b in enumerate(buffers)},
-                )
-        finally:
-            # Close + unlink local copies regardless of outcome.  Children
-            # have already finished reading by the time CONTROL_DONE fires.
-            for shm in request_shms.values():
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception:  # noqa: BLE001
-                    pass
-            for shm in reply_shms.values():
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception:  # noqa: BLE001
-                    pass
+                    nbytes_off = _DOMAIN_REQ_HEADER.size
+                    if buffer_count:
+                        struct.pack_into(f"<{buffer_count}Q", req_buf, nbytes_off, *[int(b.nbytes) for b in buffers])
+                    rank_ids_off = nbytes_off + buffer_count * 8
+                    struct.pack_into(f"<{len(workers)}I", req_buf, rank_ids_off, *[int(w) for w in workers])
+                    reply = staged_shms.create(reply_size)
+                    reply_shms[chip_idx] = reply
 
-        handle = CommDomainHandle(
-            name=name,
-            workers=workers,
-            contexts=contexts,
-            allocation_id=allocation_id,
-            _release_fn=lambda released, owner=resources: self._release_domain_handle(released, owner),
-        )
-        self._live_domains[name] = handle
-        if resources is not None:
-            resources.live_domains[name] = handle
-        # The backend windows are now live: record each chip's window base and
-        # every carved buffer pointer so a later kind4 (child_memory) dispatch of
-        # one of them is validated against its owning chip. Revoked by
-        # _release_domain_now just before the backend free (a commit barrier),
-        # not by the deferred marker — so the deferred window stays dispatchable.
-        buf_nbytes = {b.name: int(b.nbytes) for b in buffers}
-        with self._child_prov_lock:
-            for chip_idx, ctx in contexts.items():
-                self._child_prov_record_domain(
-                    chip_idx, int(ctx.local_window_base), allocation_id, int(ctx.actual_window_size)
+                # Ownership is complete before a chip can commit an allocation.
+                # Until the replies are sampled, every requested rank is retained
+                # conservatively; an interrupted sampler may cost a failed release,
+                # but cannot make an allocated window unreachable.
+                handle = CommDomainHandle(
+                    name=name,
+                    workers=workers,
+                    contexts={},
+                    allocation_id=allocation_id,
+                    _release_fn=lambda released, owner=resources: self._release_domain_handle(released, owner),
+                    _domain_size=len(workers),
+                    _domain_ranks=worker_to_rank,
                 )
-                for buf_name, buf_ptr in ctx.buffer_ptrs.items():
-                    self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id, buf_nbytes[buf_name])
+                self._live_domains[name] = handle
+                resources.live_domains[name] = handle
+                resources.requires_ordered_cleanup = True
+
+                # A chip that committed its window holds it whether or not this call
+                # returns a handle, and whether or not its RPC reported success —
+                # the window exists before the reply is written. Each chip says so
+                # itself, and the chips that did are registered under a handle the
+                # run owns, so the fence sweep releases exactly those and poisons
+                # the worker if that release fails too. Inferring it from the RPC
+                # outcome leaks an allocation whose reply could not be delivered.
+                dispatch_started = True
+                try:
+                    self._dispatch_control_domain(
+                        workers=workers,
+                        request_shms=request_shms,
+                        reply_shms=reply_shms,
+                        op="alloc",
+                        allocation_id=allocation_id,
+                    )
+
+                    for chip_idx in workers:
+                        reply_buf = reply_shms[chip_idx].buf
+                        assert reply_buf is not None
+                        (committed, device_ctx, local_window_base, reply_buffer_count) = (
+                            _DOMAIN_REPLY_HEADER.unpack_from(reply_buf, 0)
+                        )
+                        if not committed:
+                            raise RuntimeError(f"allocate_domain: chip {chip_idx} reported success without committing")
+                        if reply_buffer_count != buffer_count:
+                            raise RuntimeError(
+                                f"allocate_domain: chip {chip_idx} reply buffer_count={reply_buffer_count} "
+                                f"!= requested {buffer_count}"
+                            )
+                        ptrs: list[int] = []
+                        if buffer_count:
+                            ptrs = list(struct.unpack_from(f"<{buffer_count}Q", reply_buf, _DOMAIN_REPLY_HEADER.size))
+                        contexts[chip_idx] = ChipDomainContext(
+                            name=name,
+                            domain_rank=worker_to_rank[chip_idx],
+                            domain_size=len(workers),
+                            device_ctx=int(device_ctx),
+                            local_window_base=int(local_window_base),
+                            actual_window_size=int(window_size),
+                            buffer_ptrs={b.name: ptrs[i] for i, b in enumerate(buffers)},
+                        )
+                    handle.contexts = contexts
+                finally:
+                    committed = tuple(w for w in workers if _domain_reply_committed(reply_shms.get(w)))
+                    handle.workers = committed
+                    if not committed:
+                        if self._live_domains.get(name) is handle:
+                            self._live_domains.pop(name)
+                        if resources.live_domains.get(name) is handle:
+                            resources.live_domains.pop(name)
+                        resources.requires_ordered_cleanup = previous_ordered_cleanup
+            except BaseException:  # noqa: BLE001
+                if handle is not None and not dispatch_started:
+                    if self._live_domains.get(name) is handle:
+                        self._live_domains.pop(name)
+                    if resources.live_domains.get(name) is handle:
+                        resources.live_domains.pop(name)
+                    resources.requires_ordered_cleanup = previous_ordered_cleanup
+                raise
+            assert handle is not None
+            return handle
+
+        def publish_provenance() -> None:
+            assert handle is not None
+            # The backend windows are now live: record each chip's window base
+            # and every carved buffer pointer before the lifecycle publishes
+            # success back to the interruptible caller.
+            buf_nbytes = {b.name: int(b.nbytes) for b in buffers}
+            with self._child_prov_lock:
+                for chip_idx, ctx in contexts.items():
+                    self._child_prov_record_domain(
+                        chip_idx, int(ctx.local_window_base), allocation_id, int(ctx.actual_window_size)
+                    )
+                    for buf_name, buf_ptr in ctx.buffer_ptrs.items():
+                        self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id, buf_nbytes[buf_name])
+
+        published_handle = _run_with_owned_shared_memory(
+            len(workers) * 2,
+            allocate,
+            name_prefix="shm-domain-alloc-lifecycle-",
+            after_success=publish_provenance,
+        )
+        assert handle is not None and published_handle is handle
         return handle
 
     def _release_domain_handle(self, handle: CommDomainHandle, resources: _RunResources) -> None:
@@ -5380,19 +6787,29 @@ class Worker:
         if self._worker is None:
             return
         with resources.domain_lock:
-            resources.live_domains.pop(handle.name, None)
-            # Pop from live_domains so a subsequent allocate_domain(name=...)
-            # call within the same run can reuse the name.  The actual memory
-            # is still live until _execute_pending_domain_releases runs.
-            if self._live_domains.get(handle.name) is handle:
-                self._live_domains.pop(handle.name)
             if not resources.retired:
+                # Publish the fence-owned claim before retiring either live
+                # registry. If append is interrupted, those registries still
+                # make the allocation reachable by the end-of-run/close sweep.
                 resources.pending_release_domains.append(handle)
+                resources.live_domains.pop(handle.name, None)
+                # Pop from _live_domains so a subsequent allocation in this
+                # run can reuse the name. The pending claim keeps the old
+                # allocation alive until the fence drains it.
+                if self._live_domains.get(handle.name) is handle:
+                    self._live_domains.pop(handle.name)
                 return
         # Deferral exists so tasks that captured this domain still see live
         # memory; the owning run's fence has passed, so there is nothing left
-        # to defer behind. Freed outside the lock — it is a backend call.
+        # to defer behind. Keep both live registries as the durable owner while
+        # the backend call runs; exact-once free removes the global entry only
+        # after it commits, and the run entry is retired below.
         self._free_domain_after_fence(handle)
+        with resources.domain_lock:
+            if resources.live_domains.get(handle.name) is handle:
+                resources.live_domains.pop(handle.name)
+            if self._live_domains.get(handle.name) is handle:
+                self._live_domains.pop(handle.name)
 
     def _retire_run_domains(self, resources: _RunResources) -> None:
         """Close this run's deferred-release path and free anything left on it.
@@ -5404,9 +6821,23 @@ class Worker:
         with resources.domain_lock:
             resources.retired = True
             stragglers = list(resources.pending_release_domains)
-            resources.pending_release_domains.clear()
-        for handle in stragglers:
+        self._drain_pending_domain_snapshot(resources, stragglers)
+
+    def _drain_pending_domain_snapshot(self, resources: _RunResources, pending: list[CommDomainHandle]) -> None:
+        """Free a snapshot while each source-queue claim stays durable."""
+
+        def _release(handle: CommDomainHandle) -> None:
             self._free_domain_after_fence(handle)
+            # Retire only after exact-once backend success. An interruption
+            # before this deletion leaves a replayable claim; an interruption
+            # after it is safe because the allocation is already gone.
+            with resources.domain_lock:
+                for index, candidate in enumerate(resources.pending_release_domains):
+                    if candidate is handle:
+                        del resources.pending_release_domains[index]
+                        break
+
+        _raise_first(_release, pending)
 
     def _free_domain_after_fence(self, handle: CommDomainHandle) -> None:
         """Back-end free for a handle whose owning run has retired.
@@ -5414,45 +6845,32 @@ class Worker:
         Tolerates a handle the end-of-run sweep already freed: the sweep works
         from a snapshot, so a release taken after that snapshot reaches here
         for a domain that is already gone.
+
+        A failed release propagates. Its run carries
+        ``requires_ordered_cleanup`` — that is set when the domain is created —
+        so the error is what stops a successor from starting on top of device
+        state nobody can describe.
         """
         if handle.freed:
             return
-        try:
-            self._release_domain_now(handle)
-            handle._freed = True  # noqa: SLF001 -- runtime owns this transition
-        except Exception as e:  # noqa: BLE001
-            sys.stderr.write(
-                f"Worker._free_domain_after_fence: {handle.name!r} "
-                f"(allocation_id={handle.allocation_id}) released after its run's fence, "
-                f"immediate free failed: {type(e).__name__}: {e}\n"
-            )
-            sys.stderr.flush()
+        self._release_domain_now(handle)
+        handle._freed = True  # noqa: SLF001 -- runtime owns this transition
 
     def _execute_pending_domain_releases(self, resources: _RunResources) -> None:
         """Drive CTRL_RELEASE_DOMAIN for every queued handle.  Must run
         after ``self._orch._wait_run()`` so chip-side tasks have completed
         their use of the domain memory.
+
+        Per-handle best-effort: one failing release never strands the rest, and
+        the first error is raised once all are attempted.
         """
-        pending_releases = resources.pending_release_domains
-        if not pending_releases:
-            return
-        pending = list(pending_releases)
-        pending_releases.clear()
-        for handle in pending:
-            try:
-                self._release_domain_now(handle)
-                handle._freed = True  # noqa: SLF001 -- runtime owns this transition
-            except Exception as e:  # noqa: BLE001
-                # A failed release should not block other handles' frees or
-                # the rest of Worker.run() shutdown.  Drop from any residual
-                # tracking and log; the kernel-side memory may have already
-                # been reclaimed by the device_ctx-owning chip's finalize.
-                sys.stderr.write(
-                    f"Worker._execute_pending_domain_releases: {handle.name!r} "
-                    f"(allocation_id={handle.allocation_id}) failed: "
-                    f"{type(e).__name__}: {e}\n"
-                )
-                sys.stderr.flush()
+        # Snapshot under the same lock release() uses to append. Keep every
+        # claim in the source queue while the backend call is in flight: a
+        # release appended after this snapshot then remains for retirement's
+        # final drain instead of being erased by an unlocked clear().
+        with resources.domain_lock:
+            pending = list(resources.pending_release_domains)
+        self._drain_pending_domain_snapshot(resources, pending)
 
     def _release_domain_now(self, handle: CommDomainHandle) -> None:
         """Synchronous backend release for one handle, exactly once.
@@ -5476,48 +6894,71 @@ class Worker:
                 if failure is not None:
                     raise failure
                 return
-            try:
-                self._release_domain_claimed(handle)
-            except BaseException as exc:
-                self._domain_free_results[handle.allocation_id] = exc
-                raise
-            self._domain_free_results[handle.allocation_id] = None
+            # Absence means no backend attempt has been claimed. Once the
+            # isolated target is admitted it publishes a conservative outcome
+            # before the backend call, so even failure to store the real
+            # post-RPC result cannot turn a committed free back into an
+            # apparently unclaimed allocation that a waiter replays. Publishing
+            # inside the target matters: an interruption before admission must
+            # leave the allocation retryable because no backend work began.
+            unpublished_outcome = RuntimeError(
+                "CommDomain backend release outcome publication was interrupted; refusing to replay the free"
+            )
+            result = _IsolatedCallResult()
+
+            def release_claim() -> None:
+                self._domain_free_results[handle.allocation_id] = unpublished_outcome
+                try:
+                    self._release_domain_claimed(handle)
+                except BaseException as exc:
+                    self._domain_free_results[handle.allocation_id] = exc
+                    raise
+
+            # The operation and its success publication run outside the
+            # caller's async-exception boundary while contenders remain behind
+            # _domain_free_mu. A KeyboardInterrupt after helper completion can
+            # propagate, but a retry already observes the committed outcome.
+            _run_isolated_call(
+                result,
+                release_claim,
+                name_prefix="simpler-domain-free-",
+                after_success=lambda: self._domain_free_results.__setitem__(handle.allocation_id, None),
+            )
+            if result.error is not None:
+                raise result.error
+            if not result.completed:
+                raise RuntimeError("CommDomain backend release did not publish an outcome")
 
     def _release_domain_claimed(self, handle: CommDomainHandle) -> None:
         """Drive CTRL_RELEASE_DOMAIN. Caller holds this allocation's claim."""
-        # Revoke provenance BEFORE the physical free: once release begins the
-        # domain's pointers are no longer dispatchable. Revoking after the
-        # backend free would leave a use-after-free window (a concurrent
-        # copy/dispatch could still validate the being-freed pointer as live),
-        # and a partial/failed release would strand a freed pointer as "live"
-        # forever. Dropping first is the safe direction — a leak (if the backend
-        # free later fails) is recoverable; a use-after-free is not.
-        with self._child_prov_lock:
-            self._child_prov_drop_domain(handle.allocation_id)
         workers = handle.workers
         # Release payload is just the fixed header — no rank_ids tail; the
         # backend looked them up from its own per-allocation record at
         # alloc time and doesn't need them again.
         req_size = _DOMAIN_REQ_HEADER.size
-        worker_to_rank = {w: r for r, w in enumerate(workers)}
 
-        request_shms: dict[int, SharedMemory] = {}
-        try:
+        def release(request_owner: _SharedMemoryOwner) -> None:
+            # Revoke provenance BEFORE the physical free: once release begins
+            # the domain's pointers are no longer dispatchable. Dropping first
+            # makes an interrupted/failed release a recoverable leak instead of
+            # leaving a use-after-free validation window.
+            with self._child_prov_lock:
+                self._child_prov_drop_domain(handle.allocation_id)
+            request_shms: dict[int, SharedMemory] = {}
             for chip_idx in workers:
-                req = SharedMemory(create=True, size=req_size)
+                req = request_owner.create(req_size)
+                request_shms[chip_idx] = req
                 req_buf = req.buf
                 assert req_buf is not None
                 _DOMAIN_REQ_HEADER.pack_into(
                     req_buf,
                     0,
                     int(handle.allocation_id),
-                    int(len(workers)),
-                    int(worker_to_rank[chip_idx]),
+                    int(handle._domain_size),  # noqa: SLF001 -- backend release identity belongs to the handle
+                    int(handle._domain_ranks[chip_idx]),  # noqa: SLF001 -- preserve the allocation-time rank
                     0,  # window_size — ignored on release
                     0,  # buffer_count — ignored on release
                 )
-                request_shms[chip_idx] = req
-
             self._dispatch_control_domain(
                 workers=workers,
                 request_shms=request_shms,
@@ -5525,15 +6966,17 @@ class Worker:
                 op="release",
                 allocation_id=handle.allocation_id,
             )
-        finally:
-            for shm in request_shms.values():
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception:  # noqa: BLE001
-                    pass
-        if self._live_domains.get(handle.name) is handle:
-            self._live_domains.pop(handle.name)
+
+        def retire_live_handle() -> None:
+            if self._live_domains.get(handle.name) is handle:
+                self._live_domains.pop(handle.name)
+
+        _run_with_owned_shared_memory(
+            len(workers),
+            release,
+            name_prefix="shm-domain-release-lifecycle-",
+            after_success=retire_live_handle,
+        )
 
     def _dispatch_control_domain(
         self,
@@ -5565,11 +7008,7 @@ class Worker:
             except BaseException as e:  # noqa: BLE001
                 errors[chip_idx] = e
 
-        threads = [threading.Thread(target=dispatch, args=(w,), name=f"{op}_domain_chip_{w}") for w in workers]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        _start_and_join_threads(workers, dispatch, name_prefix=f"{op}_domain_chip_")
 
         if errors:
             first = next(iter(errors.items()))
@@ -5585,29 +7024,27 @@ class Worker:
         releases) and from ``Worker.close``.  Skips the deferred-release
         queue because by the time this runs, drain has already happened —
         synchronous release of leftover handles is safe.  Falls back to
-        immediate backend free + drop from ``_live_domains`` on each handle;
-        logs and moves on if one fails.
+        immediate backend free + drop from ``_live_domains`` on each handle.
+
+        Every handle is attempted and the first error is raised once they all
+        have been. A failed handle stays in ``_live_domains`` so the leak stays
+        detectable: close() reports it as a terminal residual instead of
+        returning success (terminal — it is not retried).
         """
         live_domains = self._live_domains if resources is None else resources.live_domains
-        for handle in list(live_domains.values())[::-1]:
-            try:
-                # Mark released first (flips handle._released so further
-                # indexing raises), then synchronously free.  The handle is
-                # not in the deferred-release queue, so we use the direct path.
-                if not handle.released:
-                    handle._released = True  # noqa: SLF001 -- runtime owns the transition
-                self._release_domain_now(handle)
-                handle._freed = True  # noqa: SLF001
-                if live_domains.get(handle.name) is handle:
-                    live_domains.pop(handle.name)
-            except Exception as e:  # noqa: BLE001
-                sys.stderr.write(
-                    f"Worker._release_all_live_domains: {handle.name!r} release failed: {type(e).__name__}: {e}\n"
-                )
-                sys.stderr.flush()
-                # Keep the un-freed handle in _live_domains so the leak stays
-                # detectable: close() reports it as a terminal residual instead
-                # of returning success (terminal — it is not retried).
+
+        def _release(handle: CommDomainHandle) -> None:
+            # Mark released first (flips handle._released so further indexing
+            # raises), then synchronously free.  The handle is not in the
+            # deferred-release queue, so we use the direct path.
+            if not handle.released:
+                handle._released = True  # noqa: SLF001 -- runtime owns the transition
+            self._release_domain_now(handle)
+            handle._freed = True  # noqa: SLF001
+            if live_domains.get(handle.name) is handle:
+                live_domains.pop(handle.name)
+
+        _raise_first(_release, list(live_domains.values())[::-1])
 
     # ------------------------------------------------------------------
     # memory management — forward to C++ Orchestrator, which holds
@@ -6170,9 +7607,14 @@ class Worker:
         ``args``  : TaskArgs (optional)
         ``config``: CallConfig (optional, default-constructed if None)
 
-        Graph construction remains serialized. A later submission waits until
-        prior dispatches are accepted; completion and cleanup stay attached to
-        each returned handle.
+        Graph construction remains serialized. How many runs may be admitted is
+        the depth this worker's backends negotiated, not a constant: at the
+        negotiated depth two, one active plus one prepared run are permitted and
+        a third submission blocks before invoking its graph callback; where a
+        backend publishes depth one — A5, or any runtime without a depth-two
+        contract — the *second* submission already blocks there. A caller whose
+        first run only completes because a later callback runs would deadlock on
+        such a backend. Completion and cleanup stay attached to each handle.
         """
         with self._operation_lease("submit"):
             return self._submit_locked(callable, args, config)
@@ -6199,13 +7641,186 @@ class Worker:
             return RunHandle._completed(self)
 
         with self._submit_mu:
-            # Graph callbacks are serialized, but accepted runs may remain live:
-            # their Python resources are isolated in each RunHandle.
-            with self._hierarchical_start_cv:
-                prior_handles = tuple(self._accepted_run_handles)
-            for handle in prior_handles:
-                handle._wait_for_acceptance()
+            # Graph callbacks stay serialized, so a predecessor's callback has
+            # always returned by the time we get here — which is what makes the
+            # decision below a fact about that run rather than a guess about
+            # this one.
+            #
+            # Native begin_run owns depth-two backpressure and slot generations
+            # for runs that only dispatch tasks. A predecessor whose cleanup
+            # itself touches the device gets stricter treatment: its teardown is
+            # mailbox control that the whole-run FIFO cannot order against this
+            # run's control, so we wait for that teardown and this worker
+            # degrades to depth one for exactly those runs.
+            predecessor = self._cleanup_bearing_predecessor()
+            if predecessor is not None:
+                predecessor._wait_for_handoff()
+            # Re-check under _submit_mu, after the wait. Two submissions can
+            # both pass the lease's admission check before either reaches here,
+            # and the poison may have been published by the cleanup this call
+            # just waited on — the check at lease time cannot have seen it.
+            self._require_no_ordered_cleanup_failure("submit")
             return self._submit_l3_locked(callable, args, cfg)
+
+    def _record_unreclaimable(self, message: str, cause: BaseException | None = None) -> RuntimeError:
+        """Refuse all further work on this worker, and return the reason.
+
+        For device state that no cleanup can reach: nothing tracks it, so there
+        is no handle for a run's fence to fail on and no sweep that could
+        retry it. First-wins, like every other terminal error here.
+        """
+        leaked = RuntimeError(message)
+        if cause is not None:
+            leaked.__cause__ = cause
+        with self._hierarchical_start_cv:
+            if self._ordered_cleanup_error is None:
+                self._ordered_cleanup_error = leaked
+        return leaked
+
+    def _recover_interrupted_run_finalization(self, handle: RunHandle, error: BaseException) -> BaseException:
+        """Retire an accepted handle after its finalizer escaped unexpectedly."""
+        poison = RuntimeError(
+            "RunHandle finalization escaped before retirement; the run is retained until whole-tree teardown "
+            "and no further work is admitted"
+        )
+        poison.__cause__ = error
+        self._publish_abandoned_run(handle, poison)
+        return error
+
+    def _publish_abandoned_run(self, handle: RunHandle, poison: BaseException) -> None:
+        """Publish poison and abandonment before accepted-set removal."""
+        try:
+            while True:
+                try:
+                    with self._hierarchical_start_cv:
+                        if handle in self._accepted_run_handles:
+                            if self._ordered_cleanup_error is None:
+                                self._ordered_cleanup_error = poison
+                            handle._finalization_abandoned = True
+                            if handle not in self._abandoned_run_handles:
+                                self._abandoned_run_handles.append(handle)
+                            handle._cleanup_published = True
+                            self._accepted_run_handles.discard(handle)
+                            self._hierarchical_start_cv.notify_all()
+                    return
+                except BaseException:  # noqa: BLE001, PERF203
+                    # Publication fields are monotonic; repetition never
+                    # replays cleanup or a native release.
+                    pass
+        except BaseException:  # noqa: BLE001
+            self._publish_abandoned_run(handle, poison)
+
+    def _drain_abandoned_run_keepalives(self) -> BaseException | None:
+        """Drop retained run references after native teardown has succeeded."""
+        cursor = _AbandonedRunKeepaliveCursor(self._abandoned_run_handles)
+        cursor.drain()
+        return cursor.first_error
+
+    def _abandon_unsettled_run(
+        self, handle: RunHandle, message: str, cause: BaseException | None = None
+    ) -> RuntimeError:
+        """Retire a run whose native cancellation fence could not be settled.
+
+        Waiting would be an unbounded operation because native never promised a
+        terminal fence. Retain every run-owned Python reference until whole-tree
+        teardown, publish the sticky poison before removing the handle from the
+        accepted drain set, and make the otherwise-private handle terminal.
+        """
+        poison = handle._finalization_error
+        try:
+            while not handle._terminal:
+                try:
+                    if poison is None:
+                        poison = RuntimeError(message)
+                        if cause is not None:
+                            poison.__cause__ = cause
+                        handle._cache_finalization_error(poison)
+                    self._publish_abandoned_run(handle, poison)
+                    handle._publish_terminal(poison)
+                except BaseException:  # noqa: BLE001, PERF203
+                    # Every field above is monotonic. Retrying cannot restore
+                    # acceptance or release retained ownership early.
+                    pass
+            assert isinstance(handle._error, RuntimeError)
+            return handle._error
+        except BaseException:  # noqa: BLE001
+            return self._abandon_unsettled_run(handle, message, cause)
+
+    def _require_no_ordered_cleanup_failure(self, api: str) -> None:
+        """Refuse if a prior run's ordered cleanup failed."""
+        with self._hierarchical_start_cv:
+            if self._ordered_cleanup_error is not None:
+                raise RuntimeError(
+                    f"Worker.{api}: a prior run's ordered cleanup failed, so this worker's device state is "
+                    "unreclaimed and no further work is admitted; close() it"
+                ) from self._ordered_cleanup_error
+
+    def _control_admission(self, api: str):
+        """The direct-control ordering policy for a Worker-level command.
+
+        Same policy the Orchestrator facade applies: a call inside a graph
+        callback belongs to that run and waits for the FIFO head; one that
+        belongs to no run reserves the worker for its duration.
+        """
+        native = self._orch._o if self._orch is not None else None
+        return direct_control(self, native, f"Worker.{api}")
+
+    @contextlib.contextmanager
+    def _control_reservation(self, api: str):
+        """Reserve this worker for one command that belongs to no run.
+
+        A public `Worker.malloc/free/copy_*/remote_*` outside a graph callback
+        never becomes a task, so the whole-run FIFO cannot order it against one:
+        against a live run it can copy into a buffer that run is reading, or
+        free one it still holds. It is ordered only by being alone.
+
+        "Alone" has to cover the command, not just the moment before it. A
+        sampled check leaves the caller free to send its mailbox command after a
+        submit admitted a run behind its back, so this takes the serializer
+        submission itself holds — no run can be admitted between the check and
+        the command. Re-entrant per thread: one control call may be built out of
+        others (a queue out of a region), and the second must join the
+        reservation rather than deadlock on it.
+        """
+        held = _held_control_reservations()
+        if id(self) in held:
+            yield
+            return
+        with self._submit_mu:
+            with self._hierarchical_start_cv:
+                if self._ordered_cleanup_error is not None:
+                    raise RuntimeError(
+                        f"{api}: a prior run's ordered cleanup failed, so this worker's device state is "
+                        "unreclaimed and no further work is admitted; close() it"
+                    ) from self._ordered_cleanup_error
+                live = [h for h in self._accepted_run_handles if not h._cleanup_published]
+                if live:
+                    raise RuntimeError(
+                        f"{api}: {len(live)} run(s) still in flight. Device control that belongs to no "
+                        "run is only ordered when nothing else is: wait on the outstanding handles first, "
+                        "or issue it from inside a run's orchestration callback"
+                    )
+            held.add(id(self))
+            try:
+                yield
+            finally:
+                held.discard(id(self))
+
+    def _cleanup_bearing_predecessor(self) -> RunHandle | None:
+        """A live handle whose ordered cleanup must finish before admission.
+
+        At most one can be outstanding: graph callbacks are serialized, so a
+        run only acquires cleanup-bearing resources while it holds
+        ``_submit_mu``, and the next submission waits for it here.
+        """
+        with self._hierarchical_start_cv:
+            for handle in self._accepted_run_handles:
+                # `done` answers the native fence, which fires before this
+                # run's device-touching cleanup runs — keying on it would admit
+                # a successor while that cleanup is still outstanding.
+                if handle._resources.requires_ordered_cleanup and not handle._cleanup_published:
+                    return handle
+        return None
 
     def _submit_l3_locked(self, callable, args, cfg: CallConfig) -> RunHandle:
         assert self._orch is not None
@@ -6222,7 +7837,8 @@ class Worker:
         try:
             self._orch._scope_begin()
             scope_open = True
-            callable(self._orch, args, cfg)
+            with _callback_run(run_id, self):
+                callable(self._orch, args, cfg)
             scope_open = False
             self._orch._scope_end()
             self._orch._close_run_submission(run_id)
@@ -6232,19 +7848,31 @@ class Worker:
                     scope_open = False
                     self._orch._scope_end()
             finally:
-                try:
-                    self._orch._fail_run_submission(run_id, _format_exc("orchestration", e))
-                except Exception:
-                    # The orchestration cause is the useful one, so a failure
-                    # while closing the run must not replace it; the handle's
-                    # own wait still reports the run's terminal state.
-                    pass
-                finally:
-                    # Graph-construction failures remain synchronous, but any
-                    # tasks already submitted still own their resources until
-                    # the run fence fires.
-                    self._building_run_resources = None
+                cancellation_error: BaseException | None = None
+                failure_text = _format_exc("orchestration", e)
+                for _ in range(_RUN_CANCELLATION_ATTEMPTS):
+                    try:
+                        self._orch._fail_run_submission(run_id, failure_text)
+                    except BaseException as exc:  # noqa: BLE001
+                        cancellation_error = exc
+                    else:
+                        cancellation_error = None
+                        break
+
+                # Graph-construction failures remain synchronous, but any
+                # tasks already submitted still own their resources until
+                # either the run fence fires or whole-tree teardown reclaims an
+                # unsettled cancellation.
+                self._building_run_resources = None
+                if cancellation_error is None:
                     handle._wait_for_serialization()
+                else:
+                    self._abandon_unsettled_run(
+                        handle,
+                        "Worker.submit(): native cancellation did not settle after its bounded retry; "
+                        "the run fence is nonterminal and no further work is admitted",
+                        cancellation_error,
+                    )
             raise
         finally:
             self._building_run_resources = None
@@ -6266,54 +7894,103 @@ class Worker:
         self._orch._wait_run_accepted(run_id)
 
     def _finalize_run_handle(
-        self, handle: RunHandle, run_id: int, native_error: BaseException | None
+        self,
+        handle: RunHandle,
+        run_id: int,
+        native_error: BaseException | None,
+        *,
+        _after_step: Any | None = None,
     ) -> BaseException | None:
         """Run fence-owned cleanup exactly once and return the cached result."""
-        result = native_error
-
-        def _step(fn) -> None:
-            nonlocal result
-            try:
-                fn()
-            except BaseException as exc:  # noqa: BLE001
-                if result is None:
-                    result = exc
-
-        resources = handle._resources
-        if native_error is not None:
-            _step(lambda: self._poison_l3_l2_region_from_endpoint_error(native_error, resources))
-        _step(lambda: self._release_active_remote_slot_refs(resources))
-        _step(self._flush_pending_remote_frees)
+        # Two different failures, deliberately not merged. A task that failed is
+        # this run's business and says nothing about the worker; a cleanup that
+        # failed leaves collective device state nobody can describe, and poisons
+        # the worker. Reporting a task failure as a cleanup failure would
+        # permanently poison a worker whose cleanup was fine.
+        cursor: _RunFinalizationCursor | None = None
+        outer_error: BaseException | None = None
         try:
-            _step(lambda: self._cleanup_l3_l2_regions(resources))
-        finally:
-            resources.l3_l2_orch_comm_host_buffers.clear()
-        _step(lambda: self._execute_pending_domain_releases(resources))
-        if resources.live_domains:
-            _step(lambda: self._release_all_live_domains(resources))
-        _step(lambda: self._retire_run_domains(resources))
-        orch = self._orch
-        if orch is None:
-            if result is None:
-                result = RuntimeError("RunHandle cleanup lost its native Orchestrator")
-        else:
-            _step(lambda: orch._release_run(run_id))
-        # Retirement is not optional: a handle left in the accepted set keeps
-        # every later close() from completing its drain, and the lock is
-        # mandatory (the drain and the submit serializer both snapshot the set
-        # under it). An async BaseException in the interruptible acquire is
-        # delivered to this frame once, so one retry always retires the handle.
-        try:
-            with self._hierarchical_start_cv:
-                self._accepted_run_handles.discard(handle)
-                self._hierarchical_start_cv.notify_all()
+            resources = handle._resources
+            orch = self._orch
+
+            def _poison_endpoint() -> None:
+                if native_error is not None:
+                    self._poison_l3_l2_region_from_endpoint_error(native_error, resources)
+
+            def _release_native_run() -> None:
+                if orch is None:
+                    raise RuntimeError("RunHandle cleanup lost its native Orchestrator")
+                orch._release_run(run_id)
+
+            cursor = _RunFinalizationCursor(
+                steps=(
+                    ("endpoint_poison", _poison_endpoint),
+                    ("remote_slot_refs", lambda: self._release_active_remote_slot_refs(resources)),
+                    ("remote_frees", self._flush_pending_remote_frees),
+                    ("l3_l2_regions", lambda: self._cleanup_l3_l2_regions(resources)),
+                    ("l3_l2_host_buffers", resources.l3_l2_orch_comm_host_buffers.clear),
+                    ("pending_domains", lambda: self._execute_pending_domain_releases(resources)),
+                    ("live_domains", lambda: self._release_all_live_domains(resources)),
+                    ("retire_domains", lambda: self._retire_run_domains(resources)),
+                    ("native_run", _release_native_run),
+                )
+            )
+            cursor.drain(_after_step)
         except BaseException as exc:  # noqa: BLE001
-            if result is None:
-                result = exc
-            with self._hierarchical_start_cv:
-                self._accepted_run_handles.discard(handle)
-                self._hierarchical_start_cv.notify_all()
-        return result
+            # Any escape outside a committed cursor edge has ambiguous cleanup
+            # ownership. Native teardown is its only safe reclamation boundary.
+            outer_error = exc
+            if cursor is not None:
+                cursor.remember_boundary_error(exc)
+                cursor.incomplete = True
+
+        cleanup_error = None if cursor is None else cursor.cleanup_error
+        boundary_error = outer_error if cursor is None else cursor.boundary_error
+        incomplete = cursor is None or cursor.incomplete or not cursor.exhausted
+        abandonment_error: RuntimeError | None = None
+        if incomplete:
+            abandonment_error = RuntimeError(
+                "RunHandle finalization stopped at an ambiguous cleanup boundary; the run is retained until "
+                "whole-tree teardown and no further work is admitted"
+            )
+            abandonment_error.__cause__ = boundary_error if boundary_error is not None else cleanup_error
+
+        # Poison/cleanup publication precedes accepted-set removal under the
+        # same lifecycle lock. A successor therefore sees either the accepted
+        # predecessor or the sticky poison, including the conservative path
+        # whose keepalives stay owned until native teardown succeeds.
+        while True:
+            try:
+                if native_error is not None:
+                    result = native_error
+                elif cleanup_error is not None:
+                    result = cleanup_error
+                elif boundary_error is not None:
+                    result = boundary_error
+                else:
+                    result = abandonment_error
+                handle._cache_finalization_error(result)
+                with self._hierarchical_start_cv:
+                    if incomplete:
+                        assert abandonment_error is not None
+                        if self._ordered_cleanup_error is None:
+                            self._ordered_cleanup_error = abandonment_error
+                        handle._finalization_abandoned = True
+                        if handle not in self._abandoned_run_handles:
+                            self._abandoned_run_handles.append(handle)
+                    elif cleanup_error is not None and self._ordered_cleanup_error is None:
+                        self._ordered_cleanup_error = cleanup_error
+                    handle._cleanup_published = True
+                    self._accepted_run_handles.discard(handle)
+                    self._hierarchical_start_cv.notify_all()
+                break
+            except BaseException as exc:  # noqa: BLE001, PERF203
+                if boundary_error is None:
+                    boundary_error = exc
+        # Precedence: the run's own failure is what its waiters came for. A
+        # cleanup failure is reported when the run itself succeeded, since it is
+        # the reason the worker is now shut.
+        return handle._finalization_error
 
     @property
     def aicpu_dlopen_count(self) -> int:
@@ -6414,9 +8091,9 @@ class Worker:
         - Teardown is single-shot. Once it runs, a later ``close()`` re-raises
           the same result rather than re-driving a half-torn tree. A retry is
           permitted only where the drain did not complete and so left teardown
-          un-attempted and the tree intact: either in-flight leases outlived
-          the cleanup budget, or an asynchronous interruption left an accepted
-          run fence undrained.
+          un-attempted and the tree intact: either in-flight leases or accepted
+          run fences outlived the shared cleanup budget, or an asynchronous
+          interruption left a run fence undrained.
         - Native teardown runs on the ``init()``-owner thread, being device-bound.
         """
         # close() is a permanent commitment against a resource, not a reversible
@@ -6432,25 +8109,28 @@ class Worker:
         #     resource leaks and a later close() re-raises the same result — it
         #     never re-drives a half-torn tree. A later close() may retry only
         #     where the drain left teardown un-attempted and the tree intact —
-        #     leases outliving the budget, or an async interruption leaving an
-        #     accepted run fence undrained; a tree with a live op is never torn
-        #     down;
+        #     leases or accepted run fences outliving the shared budget, or an
+        #     async interruption leaving a run fence undrained; a tree with a
+        #     live op is never torn down;
         #   - native teardown runs only on the init-owner thread (device-bound).
         # `attempt` is None until the claim installs it. The pre-claim checks
         # raise/return before that, so the finally skips completion for them. From
         # the claim on, the attempt is completed in an innermost resilient finally
-        # whose only work is three plain attribute assigns (`error`, `incomplete`,
-        # then `done`) followed by a locked `notify_all()`. Every fallible step —
+        # by one immutable outcome-reference publication followed by a locked
+        # `notify_all()`. Every fallible step —
         # drain, teardown, residual synthesis, registry detach — runs before it
         # and folds its error into `result`. `done` is set BEFORE the CV acquire,
         # so an async BaseException in the (interruptible) acquire or the notify
         # cannot strand a joiner — the joiner's bounded re-check recovers a
-        # skipped notify. The only irreducible window is an async exception landing
-        # between the `error`/`incomplete` and `done` plain assigns.
+        # skipped notify. A pre-publication interruption becomes that immutable
+        # outcome's error; an interruption after publication cannot retract it.
         attempt: _CloseAttempt | None = None
         result: BaseException | None = None
         teardown_tree = False
+        teardown_completed = False
         drain_complete = False
+        drain_deadline: float | None = None
+        drain_deadline_expired = False
         handles_to_drain: tuple[RunHandle, ...] = ()
         try:
             with self._hierarchical_start_cv:
@@ -6503,6 +8183,10 @@ class Worker:
                 attempt = _CloseAttempt()
                 self._close_completion = attempt
                 self._hierarchical_start_cv.notify_all()
+                # One absolute budget covers both kinds of admitted work. A
+                # lease that consumes most of it must not be followed by a
+                # fresh full-budget wait on an accepted run fence.
+                drain_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
                 # Drain in-flight leases before touching the tree. CLOSED already
                 # rejects new leases; a tree with a live op is never torn down.
                 # If an op outlives the budget, teardown stays UN-attempted and
@@ -6510,7 +8194,6 @@ class Worker:
                 # one of the two paths that keep close() retryable (the other is
                 # an async interruption leaving an accepted run fence undrained).
                 if self._active_ops > 0:
-                    drain_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
                     while self._active_ops > 0:
                         remaining = drain_deadline - time.monotonic()
                         if remaining <= 0:
@@ -6528,17 +8211,31 @@ class Worker:
                 # CLOSED prevents new admissions and active operations have
                 # drained, so this is the complete accepted set. Wait outside
                 # the lifecycle CV: handle retirement acquires the same lock.
+                assert drain_deadline is not None
                 for handle in handles_to_drain:
+                    remaining = drain_deadline - time.monotonic()
+                    if remaining <= 0:
+                        drain_deadline_expired = True
+                        break
                     try:
-                        handle.wait()
+                        handle.wait(remaining)
                     except BaseException as exc:  # noqa: BLE001
                         if result is None:
                             result = exc
+                        if isinstance(exc, TimeoutError) and time.monotonic() >= drain_deadline:
+                            drain_deadline_expired = True
+                            break
                 with self._hierarchical_start_cv:
                     if self._accepted_run_handles:
-                        # An asynchronous interruption left at least one fence
-                        # undrained. Keep teardown retryable and the tree intact.
+                        # A timeout or asynchronous interruption left at least
+                        # one fence undrained. Keep teardown retryable and the
+                        # tree intact.
                         drain_complete = False
+                        if drain_deadline_expired and (result is None or isinstance(result, TimeoutError)):
+                            result = TimeoutError(
+                                "Worker.close(): run fence(s) still in flight after the cleanup budget "
+                                f"({_ROLLBACK_GRACEFUL_TIMEOUT_S}s); teardown deferred (worker stays CLOSED)"
+                            )
                     else:
                         teardown_tree = self._has_live_resources()
                         # Fence drain makes this close terminal even when the
@@ -6547,6 +8244,7 @@ class Worker:
                         self._teardown_attempted = teardown_tree or result is not None
             if teardown_tree:
                 self._teardown_ready_tree()
+                teardown_completed = True
         except BaseException as exc:  # noqa: BLE001
             if result is None:
                 result = exc
@@ -6555,6 +8253,14 @@ class Worker:
                 had_live = True  # conservative default if a read below is interrupted
                 detached_registry: tuple[dict, dict, dict] | None = None
                 try:
+                    # A successful tree teardown is the reclamation boundary
+                    # for abandoned run ownership. Drain it before the residual
+                    # inventory: that diagnostic probe is interruptible and an
+                    # interruption must not retain already-safe references.
+                    if teardown_completed:
+                        retained_error = self._drain_abandoned_run_keepalives()
+                        if result is None and retained_error is not None:
+                            result = retained_error
                     had_live = self._has_live_resources()
                     # Terminal teardown is single-shot and best-effort: a resource
                     # it could not reclaim LEAKS. Never return success with a
@@ -6586,17 +8292,22 @@ class Worker:
                     if result is None:
                         result = exc
                 finally:
-                    # Innermost, resilient publish: all plain attribute assigns
-                    # (error/incomplete first, then `done`), so a joiner that
-                    # observes `done` always observes the result. `done` is set
-                    # BEFORE acquiring the CV — the only remaining work under the
-                    # lock is notify_all(). A BaseException during the
-                    # (interruptible, possibly-blocking) CV acquire therefore
-                    # cannot strand the attempt at done=False; a joiner's bounded
-                    # re-check then recovers the skipped notify on its own.
-                    attempt.error = result
-                    attempt.incomplete = result is not None or had_live
-                    attempt.done = True
+                    # The immutable outcome reference is the completion flag and
+                    # result. A reader can therefore never observe completion
+                    # without its error/incomplete payload. Publication precedes
+                    # notification; bounded re-checks cover a skipped wakeup.
+                    published: _CloseOutcome | None = None
+                    incomplete = result is not None or had_live
+                    while published is None:
+                        try:
+                            published = attempt.publish(result, incomplete)
+                        except BaseException as exc:  # noqa: BLE001, PERF203
+                            if attempt.done:
+                                raise
+                            if result is None:
+                                result = exc
+                            incomplete = True
+                    result = published.error
                     with self._hierarchical_start_cv:
                         self._hierarchical_start_cv.notify_all()
                 # Post-completion, lock-free: dropping the last refs may run a

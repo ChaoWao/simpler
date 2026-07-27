@@ -272,6 +272,164 @@ static CallableIdentity C(uint8_t seed) {
 // Fixture
 // ---------------------------------------------------------------------------
 
+// The claim is what makes "pop a READY slot" and "dispatch it" one decision.
+// A cancelling run moves its unstarted slots out of READY and consumes them;
+// anything the scheduler had already popped must lose the race rather than
+// overwrite that state with RUNNING.
+TEST(ClaimForDispatch, OnlyAReadySlotCanBeClaimed) {
+    TaskSlotState s;
+
+    s.state.store(TaskState::READY, std::memory_order_release);
+    EXPECT_TRUE(claim_for_dispatch(s));
+    EXPECT_EQ(s.state.load(std::memory_order_acquire), TaskState::RUNNING);
+
+    // Already claimed by this scheduler: a second claim must not re-dispatch.
+    EXPECT_FALSE(claim_for_dispatch(s));
+    EXPECT_EQ(s.state.load(std::memory_order_acquire), TaskState::RUNNING);
+
+    // Cancelled between the pop and here — the cancelling path owns it now.
+    // BUILDING is in the list for a different reason: a slot whose submit has
+    // not published it has no final args or fanin count to dispatch on.
+    for (TaskState taken :
+         {TaskState::FAILED, TaskState::COMPLETED, TaskState::CONSUMED, TaskState::PENDING, TaskState::BUILDING}) {
+        s.state.store(taken, std::memory_order_release);
+        EXPECT_FALSE(claim_for_dispatch(s)) << "claimed a slot in state " << static_cast<int>(taken);
+        EXPECT_EQ(s.state.load(std::memory_order_acquire), taken) << "claim overwrote a state it did not own";
+    }
+}
+
+// Every failing path — a device completion poisoning its consumers, a run
+// cancellation, and a submit that wired onto a producer that had already
+// failed — moves a task to FAILED through this one exchange, so exactly one of
+// them writes the message and runs the propagation.
+TEST(ClaimTaskFailure, ReportsThePriorStateAndIsWonOnce) {
+    TaskSlotState s;
+
+    for (TaskState claimable : {TaskState::PENDING, TaskState::READY, TaskState::BUILDING}) {
+        s.state.store(claimable, std::memory_order_release);
+        s.failure_message.clear();
+
+        std::optional<TaskState> won = claim_task_failure(s, "first");
+        ASSERT_TRUE(won.has_value()) << "refused a claimable slot in state " << static_cast<int>(claimable);
+        EXPECT_EQ(*won, claimable) << "claim did not report the state it took the slot from";
+        EXPECT_EQ(s.state.load(std::memory_order_acquire), TaskState::FAILED);
+        EXPECT_EQ(s.failure_message, "first");
+        EXPECT_EQ(s.failure_propagation_pending.load(std::memory_order_acquire), claimable == TaskState::BUILDING)
+            << "only a mid-wiring claim may advertise propagation takeover debt";
+
+        // A second path reaching the same slot must not overwrite the reason
+        // the first one recorded.
+        EXPECT_FALSE(claim_task_failure(s, "second").has_value());
+        EXPECT_EQ(s.failure_message, "first");
+
+        s.failure_propagation_pending.store(false, std::memory_order_release);
+    }
+}
+
+TEST(MarkGroupMembersSkipped, RepairsBothBookkeepingVectorsAsOneTransaction) {
+    TaskSlotState s;
+    s.is_group_ = true;
+    s.task_args_list.resize(2);
+    s.group_member_states.assign(2, GroupMemberState::NOT_DISPATCHED);
+    s.group_member_outcomes.clear();
+
+    mark_group_members_skipped(s, "cancelled");
+
+    ASSERT_EQ(s.group_member_states.size(), 2u);
+    ASSERT_EQ(s.group_member_outcomes.size(), 2u);
+    EXPECT_EQ(s.group_member_states[0], GroupMemberState::SKIPPED);
+    EXPECT_EQ(s.group_member_states[1], GroupMemberState::SKIPPED);
+    EXPECT_EQ(s.group_member_outcomes[0], EndpointOutcome::SKIPPED);
+    EXPECT_EQ(s.group_member_outcomes[1], EndpointOutcome::SKIPPED);
+    EXPECT_EQ(s.group_terminal_count.load(std::memory_order_acquire), 2);
+}
+
+// Readiness is one decision over two fields that different threads own.
+// Judging the count outside the transition lets a producer pass a comparison
+// against a count submit has not published, then act on it after submit has —
+// dispatching a task whose remaining producers are still running.
+TEST(TryMarkReady, JudgesThePublishedCountNotTheOneItArrivedWith) {
+    TaskSlotState s;
+    s.state.store(TaskState::BUILDING, std::memory_order_release);
+
+    // A producer completes while the slot is still building. The count it can
+    // see is zero, which any release count passes — but nothing is readiable
+    // yet, and the release is not lost either.
+    s.fanin_released.store(1, std::memory_order_release);
+    EXPECT_FALSE(try_mark_ready(s));
+
+    // Submit publishes two live producers alongside the transition.
+    {
+        std::lock_guard<std::mutex> lk(s.fanout_mu);
+        s.fanin_count.store(2, std::memory_order_release);
+        s.state.store(TaskState::PENDING, std::memory_order_release);
+    }
+    EXPECT_FALSE(try_mark_ready(s)) << "one of two producers released and the task was marked ready";
+
+    s.fanin_released.store(2, std::memory_order_release);
+    EXPECT_TRUE(try_mark_ready(s));
+    EXPECT_EQ(s.state.load(std::memory_order_acquire), TaskState::READY);
+
+    // Exactly one caller owns the enqueue.
+    EXPECT_FALSE(try_mark_ready(s));
+}
+
+// The publication is not a moment another thread can slip through. A producer
+// that has already completed is held outside it for its whole duration, so
+// there is no instant at which the slot is PENDING with a count only half the
+// deciders have seen — which is the state that dispatches a task whose
+// remaining producers are still running.
+TEST(TryMarkReady, NoProducerTransitionsTheSlotWhileThePublicationHoldsIt) {
+    TaskSlotState s;
+    s.state.store(TaskState::BUILDING, std::memory_order_release);
+    s.fanin_count.store(0, std::memory_order_release);
+
+    std::atomic<bool> producer_marked_ready{false};
+    std::unique_lock<std::mutex> publishing(s.fanout_mu);
+
+    std::thread producer([&] {
+        s.fanin_released.fetch_add(1, std::memory_order_acq_rel);
+        producer_marked_ready.store(try_mark_ready(s), std::memory_order_release);
+    });
+
+    // The producer's release has landed and its decision is now in flight.
+    while (s.fanin_released.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
+
+    // Publish two live producers alongside the transition, then stay in the
+    // critical section: a decider that judged the count before entering it
+    // would take PENDING to READY right here.
+    s.fanin_count.store(2, std::memory_order_release);
+    s.state.store(TaskState::PENDING, std::memory_order_release);
+    for (int i = 0; i < 1000; ++i)
+        std::this_thread::yield();
+    EXPECT_EQ(s.state.load(std::memory_order_acquire), TaskState::PENDING)
+        << "a producer transitioned the slot from inside the publication";
+
+    publishing.unlock();
+    producer.join();
+    EXPECT_FALSE(producer_marked_ready.load(std::memory_order_acquire));
+    EXPECT_EQ(s.state.load(std::memory_order_acquire), TaskState::PENDING)
+        << "a task was made ready with a live producer still running";
+}
+
+TEST(ClaimTaskFailure, RefusesASlotItDoesNotOwn) {
+    TaskSlotState s;
+
+    // RUNNING is the device's until its completion arrives; the rest are
+    // already terminal, and resurrecting one would release its dependency
+    // references a second time.
+    for (TaskState owned :
+         {TaskState::RUNNING, TaskState::COMPLETED, TaskState::FAILED, TaskState::CONSUMED, TaskState::FREE}) {
+        s.state.store(owned, std::memory_order_release);
+        s.failure_message.clear();
+        EXPECT_FALSE(claim_task_failure(s, "cancelled").has_value())
+            << "claimed a slot in state " << static_cast<int>(owned);
+        EXPECT_EQ(s.state.load(std::memory_order_acquire), owned);
+        EXPECT_TRUE(s.failure_message.empty());
+    }
+}
+
 struct SchedulerFixture : public ::testing::Test {
     TensorMap tm;
     Ring allocator;
@@ -287,6 +445,10 @@ struct SchedulerFixture : public ::testing::Test {
 
     std::vector<TaskSlot> consumed_slots;
     std::mutex consumed_mu;
+
+    // Set by a test before the Scheduler reaches a claim; see
+    // Scheduler::Config::before_claim_cb.
+    std::function<void(TaskSlot)> before_claim_hook;
 
     TaskSlotState &S(TaskSlot id) { return *allocator.slot_state(id); }
 
@@ -318,6 +480,13 @@ struct SchedulerFixture : public ::testing::Test {
         c.enqueue_ready_cb = [this](TaskSlot slot) {
             orch.enqueue_ready(slot);
         };
+        // Same gate Worker::start installs: an active run that is also the
+        // EXECUTING FIFO head and still owns its pipeline lease. Testing
+        // against the weaker active_run_id() would let a slot dispatch here
+        // that production refuses.
+        c.active_run_cb = [this] {
+            return orch.dispatchable_run_id();
+        };
         c.on_consumed_cb = [this](TaskSlot s) {
             orch.on_consumed(s);
             std::lock_guard<std::mutex> lk(consumed_mu);
@@ -325,6 +494,9 @@ struct SchedulerFixture : public ::testing::Test {
         };
         c.on_task_failed_cb = [this](TaskSlot s, const std::string &message) {
             orch.report_task_error(s, message);
+        };
+        c.before_claim_cb = [this](TaskSlot slot) {
+            if (before_claim_hook) before_claim_hook(slot);
         };
         sched.start(c);
     }
@@ -387,6 +559,7 @@ TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
     ASSERT_NE(slot, nullptr);
     slot->reset();
     slot->callable.digest[0] = 0x42;
+    slot->pipeline_lease = PipelineSlotLease{1, 0, 7};
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
     std::promise<WorkerCompletion> result;
@@ -400,6 +573,12 @@ TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
 
     child.wait_running();
     EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
+    PipelineSlotLease wire_lease{};
+    std::memcpy(
+        &wire_lease, static_cast<char *>(child.mailbox_ptr()) + MAILBOX_OFF_PIPELINE_LEASE, sizeof(PipelineSlotLease)
+    );
+    EXPECT_EQ(wire_lease.slot_id, 1u);
+    EXPECT_EQ(wire_lease.generation, 7u);
     child.write_task_accepted();
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!accepted.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {}
@@ -533,6 +712,37 @@ TEST(WorkerManagerTest, ControlPrepareUsesStableNextLevelWorkerId) {
     EXPECT_EQ(worker3_prepares.load(std::memory_order_relaxed), 1);
 }
 
+// The losing side of the dispatch claim, driven by the real cancellation path
+// rather than a simulated state write. `before_claim_cb` is the only point that
+// can observe the window: everything else is either before the queue pop or
+// after the launch.
+TEST_F(SchedulerFixture, ACancellationThatWinsTheClaimStopsTheDispatch) {
+    std::atomic<int> hook_calls{0};
+    before_claim_hook = [this, &hook_calls](TaskSlot) {
+        if (hook_calls.fetch_add(1) != 0) return;
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("cancelled mid-dispatch")));
+    };
+
+    auto task = orch.submit_next_level(C(60), single_tensor_args(0x6000, TensorArgType::OUTPUT), cfg, 0);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (hook_calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(hook_calls.load(), 0) << "the Scheduler never reached a dispatch claim";
+
+    // Give the Scheduler its whole loop iteration; a lost claim must leave the
+    // slot alone rather than continue into the launch.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    EXPECT_NE(S(task.task_slot).state.load(std::memory_order_acquire), TaskState::RUNNING)
+        << "the dispatch overwrote a slot the cancellation already owned";
+    {
+        std::lock_guard<std::mutex> lk(mock_worker.dispatched_mu);
+        EXPECT_TRUE(mock_worker.dispatched.empty()) << "a cancelled task was still handed to a worker";
+    }
+}
+
 TEST_F(SchedulerFixture, IndependentTaskDispatchedAndConsumed) {
     auto args_a = single_tensor_args(0xCAFE, TensorArgType::OUTPUT);
     auto res = orch.submit_next_level(C(42), args_a, cfg, 0);
@@ -640,6 +850,8 @@ struct GroupSchedulerFixture : public ::testing::Test {
     MockMailboxWorker worker_a;
     MockMailboxWorker worker_b;
     MockMailboxWorker worker_c;
+    MockMailboxWorker sub_worker_a;
+    MockMailboxWorker sub_worker_b;
     WorkerManager manager;
     Scheduler sched;
     CallConfig cfg;
@@ -656,9 +868,13 @@ struct GroupSchedulerFixture : public ::testing::Test {
         worker_a.start();
         worker_b.start();
         worker_c.start();
+        sub_worker_a.start();
+        sub_worker_b.start();
         manager.add_next_level(worker_a.mailbox_ptr());
         manager.add_next_level(worker_b.mailbox_ptr());
         manager.add_next_level(worker_c.mailbox_ptr());
+        manager.add_sub(sub_worker_a.mailbox_ptr());
+        manager.add_sub(sub_worker_b.mailbox_ptr());
         manager.start(
             &allocator,
             [this](WorkerCompletion completion) {
@@ -681,6 +897,12 @@ struct GroupSchedulerFixture : public ::testing::Test {
         c.manager = &manager;
         c.enqueue_ready_cb = [this](TaskSlot slot) {
             orch.enqueue_ready(slot);
+        };
+        // Same gate Worker::start installs. Without it the scheduler takes the
+        // unpartitioned branch, which is not the one #1565's group reservation
+        // and placement run through.
+        c.active_run_cb = [this] {
+            return orch.dispatchable_run_id();
         };
         c.on_consumed_cb = [this](TaskSlot s) {
             orch.on_consumed(s);
@@ -733,6 +955,22 @@ TEST_F(GroupSchedulerFixture, GroupDispatchesToNWorkers) {
     worker_a.complete();
     worker_b.complete();
     wait_consumed(slot);
+}
+
+TEST_F(GroupSchedulerFixture, SubGroupUsesTheAllocationFreeGroupCommitPath) {
+    TaskArgs a0 = single_tensor_args(0xA2, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_tensor_args(0xA3, TensorArgType::OUTPUT);
+    auto res = orch.submit_sub_group(C(44), {a0, a1});
+
+    sub_worker_a.wait_running();
+    sub_worker_b.wait_running();
+    EXPECT_EQ(sub_worker_a.dispatched_count(), 1);
+    EXPECT_EQ(sub_worker_b.dispatched_count(), 1);
+    EXPECT_EQ(S(res.task_slot).state.load(std::memory_order_acquire), TaskState::RUNNING);
+
+    sub_worker_a.complete();
+    sub_worker_b.complete();
+    wait_consumed(res.task_slot);
 }
 
 TEST_F(GroupSchedulerFixture, GroupMapsEachMemberToItsTargetWorkerIdNotIndex) {
@@ -840,6 +1078,120 @@ TEST_F(GroupSchedulerFixture, BlockedGroupReservesTargetsThatBecomeIdleOneAtATim
     wait_consumed(single_a.task_slot);
     wait_consumed(single_b.task_slot);
     wait_consumed(unrelated.task_slot);
+}
+
+TEST(SchedulerDispatchPassTest, ActiveRunSwitchCannotBypassSuccessorGroupReservation) {
+    constexpr RunId run_a = 41;
+    constexpr RunId run_b = 42;
+
+    Ring allocator;
+    ReadyQueue rq_sub;
+    NextLevelReadyQueues rq_next_level;
+    MockMailboxWorker worker_a;
+    MockMailboxWorker worker_b;
+    WorkerManager manager;
+    Scheduler sched;
+
+    allocator.init(/*heap_bytes=*/0);
+    worker_a.start();
+    worker_b.start();
+    manager.add_next_level(worker_a.mailbox_ptr());
+    manager.add_next_level(worker_b.mailbox_ptr());
+    manager.start(
+        &allocator,
+        [&sched](WorkerCompletion completion) {
+            sched.worker_done(std::move(completion));
+        },
+        [](WorkerDispatch) {}
+    );
+    rq_next_level.reset(manager.next_level_worker_ids());
+
+    auto allocate_slot = [&](RunId run_id, uint8_t callable_seed, int32_t worker_id, bool group) {
+        AllocResult allocation = allocator.alloc(/*heap_bytes=*/0, /*scope_depth=*/0);
+        TaskSlotState &state = *allocator.slot_state(allocation.slot);
+        state.reset();
+        state.run_id = run_id;
+        state.worker_type = WorkerType::NEXT_LEVEL;
+        state.callable = C(callable_seed);
+        state.target_worker_ids.push_back(worker_id);
+        if (group) {
+            state.is_group_ = true;
+            state.task_args_list.push_back(single_tensor_args(callable_seed, TensorArgType::OUTPUT));
+            rq_next_level.push_group(run_id, allocation.slot);
+        } else {
+            state.task_args = single_tensor_args(callable_seed, TensorArgType::OUTPUT);
+            rq_next_level.push_single(worker_id, run_id, allocation.slot);
+        }
+        state.state.store(TaskState::READY, std::memory_order_release);
+        return allocation.slot;
+    };
+
+    // Run A's group occupies worker 1. Run B's group and following single
+    // both target worker 0, so the group head owns that worker reservation.
+    allocate_slot(run_a, /*callable_seed=*/70, /*worker_id=*/1, /*group=*/true);
+    allocate_slot(run_b, /*callable_seed=*/71, /*worker_id=*/0, /*group=*/true);
+    allocate_slot(run_b, /*callable_seed=*/72, /*worker_id=*/0, /*group=*/false);
+
+    std::atomic<RunId> active_run{run_a};
+    Scheduler::Config config;
+    config.ring = &allocator;
+    config.ready_sub_queue = &rq_sub;
+    config.ready_next_level_queues = &rq_next_level;
+    config.manager = &manager;
+    config.enqueue_ready_cb = [&](TaskSlot slot) {
+        TaskSlotState &state = *allocator.slot_state(slot);
+        if (state.is_group()) {
+            rq_next_level.push_group(state.run_id, slot);
+        } else {
+            rq_next_level.push_single(state.target_worker_id(0), state.run_id, slot);
+        }
+    };
+    config.active_run_cb = [&] {
+        return active_run.load(std::memory_order_acquire);
+    };
+    // The run switch lands after the group phase selected A and before the
+    // singles phase can select a queue partition.
+    config.before_claim_cb = [&](TaskSlot slot) {
+        if (allocator.slot_state(slot)->run_id == run_a) active_run.store(run_b, std::memory_order_release);
+    };
+    config.on_consumed_cb = [&](TaskSlot slot) {
+        allocator.slot_state(slot)->state.store(TaskState::CONSUMED, std::memory_order_release);
+        allocator.release(slot);
+    };
+    config.on_task_failed_cb = [](TaskSlot, const std::string &) {};
+    sched.start(config);
+
+    worker_a.wait_running();
+    worker_b.wait_running();
+    EXPECT_EQ(worker_a.dispatched_count(), 1);
+    EXPECT_EQ(worker_b.dispatched_count(), 1);
+    if (worker_a.dispatched_count() == 1) {
+        std::lock_guard<std::mutex> lock(worker_a.dispatched_mu);
+        EXPECT_EQ(worker_a.dispatched[0].callable_hash0, 71u)
+            << "run B's group must dispatch before its single on the same target";
+    }
+    if (worker_b.dispatched_count() == 1) {
+        std::lock_guard<std::mutex> lock(worker_b.dispatched_mu);
+        EXPECT_EQ(worker_b.dispatched[0].callable_hash0, 70u);
+    }
+
+    if (worker_a.is_running.load(std::memory_order_acquire)) worker_a.complete();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_a.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(worker_a.dispatched_count(), 2);
+    worker_a.wait_running();
+    if (worker_a.dispatched_count() == 2) {
+        std::lock_guard<std::mutex> lock(worker_a.dispatched_mu);
+        EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 72u);
+    }
+
+    if (worker_a.is_running.load(std::memory_order_acquire)) worker_a.complete();
+    if (worker_b.is_running.load(std::memory_order_acquire)) worker_b.complete();
+    sched.stop();
+    manager.stop();
+    allocator.shutdown();
 }
 
 TEST_F(GroupSchedulerFixture, ConsecutiveGroupsReserveOnlyBlockedHeadTargets) {
@@ -986,6 +1338,42 @@ TEST_F(GroupSchedulerFixture, GroupFailureWaitsForRunningMembersThenConsumes) {
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
 }
 
+TEST_F(GroupSchedulerFixture, CompletionRepairPreservesRunningPeersWhenOutcomesAreMissing) {
+    TaskArgs a0 = single_tensor_args(0xC2, TensorArgType::OUTPUT);
+    TaskArgs a1 = single_tensor_args(0xC3, TensorArgType::OUTPUT);
+    auto res = orch.submit_next_level_group(C(43), {a0, a1}, cfg, {0, 1});
+    TaskSlot slot = res.task_slot;
+
+    worker_a.wait_running();
+    worker_b.wait_running();
+    {
+        std::lock_guard<std::mutex> lk(S(slot).group_mu);
+        ASSERT_EQ(S(slot).group_member_states.size(), 2u);
+        ASSERT_EQ(S(slot).group_member_outcomes.size(), 2u);
+        S(slot).group_member_outcomes.clear();
+    }
+
+    worker_a.complete_with_error("first member failed");
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    bool repaired = false;
+    while (!repaired && std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> lk(S(slot).group_mu);
+            repaired = S(slot).group_member_states.size() == 2u && S(slot).group_member_outcomes.size() == 2u &&
+                       S(slot).group_member_states[0] == GroupMemberState::FAILED &&
+                       S(slot).group_member_states[1] == GroupMemberState::RUNNING;
+        }
+        if (!repaired) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(repaired) << "worker_done indexed mismatched group bookkeeping instead of repairing both vectors";
+    EXPECT_EQ(S(slot).state.load(std::memory_order_acquire), TaskState::RUNNING)
+        << "repair discarded a live peer and let group failure consume its slot early";
+
+    worker_b.complete();
+    wait_consumed(slot);
+    EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
+}
+
 TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
     TaskArgs a0 = single_tensor_args(0xD0, TensorArgType::OUTPUT);
     TaskArgs a1 = single_tensor_args(0xD1, TensorArgType::OUTPUT);
@@ -1084,6 +1472,69 @@ TEST_F(GroupSchedulerFixture, DependencyReleaseUsesConsumerWorkerQueue) {
     worker_b.complete();
     wait_consumed(producer.task_slot);
     wait_consumed(consumer.task_slot);
+}
+
+// A producer that fails while its consumer is still being submitted. Wiring
+// happens under each producer's fanout_mu, so the consumer is reachable from
+// the failing producer's fanout list well before its own fanin/fanout counters
+// are final — which is exactly what BUILDING marks. The poison must stop at the
+// claim and leave the propagation to the submitting thread; running it from
+// both sides releases every producer reference the consumer holds twice.
+//
+// The window is opened by holding the *second* producer's fanout_mu: submit
+// wires the first producer, then parks on the second, and the failure is
+// injected in between.
+TEST_F(GroupSchedulerFixture, APoisonThatLandsMidSubmitLeavesThePropagationToSubmit) {
+    auto failing = orch.submit_next_level(C(70), single_tensor_args(0xF100, TensorArgType::OUTPUT), cfg, 0);
+    auto blocking = orch.submit_next_level(C(71), single_tensor_args(0xB200, TensorArgType::OUTPUT), cfg, 1);
+    worker_a.wait_running();
+    worker_b.wait_running();
+
+    TaskArgs consumer_args;
+    for (uint64_t key : {0xF100ULL, 0xB200ULL}) {
+        Tensor t{};
+        t.buffer.addr = key;
+        t.ndims = 1;
+        t.shapes[0] = 1;
+        t.dtype = DataType::UINT8;
+        consumer_args.add_tensor(t, TensorArgType::INPUT);
+    }
+
+    std::unique_lock<std::mutex> parked(S(blocking.task_slot).fanout_mu);
+    std::thread submitter([&] {
+        (void)orch.submit_next_level(C(72), consumer_args, cfg, 2);
+    });
+
+    // Wired into `failing` and now parked on `blocking`: the exact window.
+    TaskSlot consumer = INVALID_SLOT;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (consumer == INVALID_SLOT && std::chrono::steady_clock::now() < deadline) {
+        std::lock_guard<std::mutex> lk(S(failing.task_slot).fanout_mu);
+        if (!S(failing.task_slot).fanout_consumers.empty()) consumer = S(failing.task_slot).fanout_consumers[0];
+    }
+    ASSERT_NE(consumer, INVALID_SLOT) << "submit never reached the failing producer's fanout list";
+    ASSERT_EQ(S(consumer).state.load(std::memory_order_acquire), TaskState::BUILDING);
+
+    worker_a.complete_with_error("producer boom");
+    while (S(consumer).state.load(std::memory_order_acquire) == TaskState::BUILDING &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(S(consumer).state.load(std::memory_order_acquire), TaskState::FAILED)
+        << "the poison did not claim the consumer while it was building";
+
+    parked.unlock();
+    submitter.join();
+
+    // One release per producer reference the consumer holds, from the one
+    // thread that knows the wiring is final. `failing` reaches its threshold
+    // (fanout_total 1 + the terminal self release) and no further.
+    EXPECT_EQ(S(consumer).state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(S(failing.task_slot).fanout_released.load(std::memory_order_acquire), 2);
+    EXPECT_EQ(S(blocking.task_slot).fanout_released.load(std::memory_order_acquire), 1);
+
+    worker_b.complete();
+    wait_consumed(blocking.task_slot);
 }
 
 TEST_F(GroupSchedulerFixture, TargetMustBeInEligibleEndpointSet) {
@@ -1273,6 +1724,13 @@ struct MixedTypeSchedulerFixture : public ::testing::Test {
         c.enqueue_ready_cb = [this](TaskSlot slot) {
             orch.enqueue_ready(slot);
         };
+        // Same gate Worker::start installs: an active run that is also the
+        // EXECUTING FIFO head and still owns its pipeline lease. Testing
+        // against the weaker active_run_id() would let a slot dispatch here
+        // that production refuses.
+        c.active_run_cb = [this] {
+            return orch.dispatchable_run_id();
+        };
         c.on_consumed_cb = [this](TaskSlot s) {
             orch.on_consumed(s);
             std::lock_guard<std::mutex> lk(consumed_mu);
@@ -1334,6 +1792,28 @@ TEST_F(MixedTypeSchedulerFixture, SubTaskDispatchesWhileNextLevelPoolSaturated) 
 
     next_level_worker.complete();
     wait_consumed(chip.task_slot);
+}
+
+TEST_F(MixedTypeSchedulerFixture, BusySubWorkerRequeuesWithinTheActiveRun) {
+    auto first = orch.submit_sub(C(8), single_tensor_args(0xC01, TensorArgType::OUTPUT));
+    sub_worker.wait_running();
+    ASSERT_TRUE(sub_worker.is_running.load());
+
+    auto second = orch.submit_sub(C(9), single_tensor_args(0xC02, TensorArgType::OUTPUT));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_EQ(sub_worker.dispatched_count(), 1);
+
+    sub_worker.complete();
+    wait_consumed(first.task_slot);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (sub_worker.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(sub_worker.dispatched_count(), 2);
+    EXPECT_TRUE(sub_worker.is_running.load());
+
+    sub_worker.complete();
+    wait_consumed(second.task_slot);
 }
 
 TEST_F(GroupSchedulerFixture, GroupDependencyChain) {

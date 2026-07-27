@@ -86,8 +86,10 @@ device or endpoint errors are attached to the handle and raised by `wait()` or
 bounded waits without cancelling or corrupting the run, and repeated waits
 replay the same terminal result. The handle keeps its `Worker`, callback
 arguments, configuration, and run-owned cleanup state alive until completion.
-`Worker.close()` rejects new submissions and drains every accepted handle
-before tearing down the worker tree.
+`Worker.close()` rejects new submissions and drains operation leases plus
+accepted handles within one cleanup budget before tearing down the worker
+tree. If that budget expires, teardown remains unattempted and the closed
+worker retains the handles/tree for a later `close()` retry.
 
 `Worker.run` remains source-compatible and blocking:
 
@@ -99,10 +101,13 @@ worker.submit(orchestration, args, config).wait()
 
 The current L2 backend is synchronous, so L2 `submit()` executes the existing
 blocking path and returns an already-completed handle. At L3 and above, graph
-callbacks remain serialized, but a later submit waits only for every dispatch
-in the prior run to cross its endpoint acceptance boundary. On A2A3 onboard,
-that boundary is after both device kernels are enqueued and before stream
-synchronization. Endpoints without an earlier signal fall back to completion.
+callbacks remain serialized, and what admits a later submit is a free pipeline
+slot rather than the prior run's acceptance: `begin_run` reserves a
+generation-safe lease before the callback is invoked and blocks there when the
+negotiated depth is already spent. Endpoint acceptance remains the launch fence
+a run's own dispatches advance — on A2A3 onboard, after both device kernels are
+enqueued and before stream synchronization, with endpoints lacking an earlier
+signal falling back to completion — but it no longer gates the next callback.
 Each run still owns its completion error, keepalives, and cleanup independently.
 
 Remote L3 submit adds two hidden pieces of metadata: final eligible worker-id
@@ -160,23 +165,32 @@ SubmitResult Orchestrator::submit_next_level(const CallableIdentity &callable,
         // NO_DEP: skip both
     }
 
-    // 4. Record fanin on self
-    s.fanin_count    = static_cast<int32_t>(producers.size());
-    s.fanin_released = 0;
-
-    // 5. Register with scope (holds slot open until scope_end releases ref)
-    scope_.register_task(sid);          // increments s.fanout_total by 1
-
-    // 6. Attach fanout edges under each producer's mutex. Producers already
-    //    completed do not count as live fanins; failed producers poison this
-    //    slot. Route an immediately READY slot through enqueue_ready().
-    attach_fanout_and_count_live_producers(sid, producers);
-    if (s.fanin_count == 0) {
-        s.state = TaskState::READY;
-        enqueue_ready(sid);
-    } else {
-        s.state = TaskState::PENDING;
+    // 4. Register with scope (holds slot open until scope_end releases ref)
+    scope_.register_task(sid);
+    {
+        std::lock_guard<std::mutex> lk(s.fanout_mu);
+        s.fanout_total += 1;
     }
+
+    // 5. Attach fanout edges under each producer's mutex. Producers already
+    //    completed do not count as live fanins; failed producers poison this
+    //    slot.
+    int32_t live = attach_fanout_and_count_live_producers(sid, producers);
+
+    // 6. Publication: the one point where the slot leaves BUILDING. The count
+    //    and the transition are published together under fanout_mu — see
+    //    §8 "The BUILDING publication rule".
+    bool ready;
+    {
+        std::lock_guard<std::mutex> lk(s.fanout_mu);
+        s.fanin_count.store(live);
+        ready = s.fanin_released >= live;   // releases that landed while BUILDING
+        if (!s.state.compare_exchange_strong(BUILDING, ready ? READY : PENDING)) {
+            propagate_failure(sid);         // a producer claimed us mid-wiring
+            return {sid};
+        }
+    }
+    if (ready) enqueue_ready(sid);          // outside the lock: takes runs_mu_
 
     // 7. Return handle
     return {sid};
@@ -213,22 +227,30 @@ register this task as the new producer of the tensor's dependency key. For
 local tensors this key contains `tensor.data`; for remote sidecars it contains
 remote buffer identity and logical offset.
 
-**Step 4 — fanin count**: The number of live producers. Decremented by
-`fanin_released++` each time a producer completes; when `fanin_released ==
-fanin_count`, the slot is ready. A ready NEXT_LEVEL single task is routed to
-the FIFO for its required stable worker id. The same routing function is used
-for immediately-ready submissions and tasks released by Scheduler dependency
-processing. A ready NEXT_LEVEL group is routed to the dedicated group FIFO;
-SUB tasks remain on their shared queue.
+Before each output mapping becomes visible, its key is appended to the slot's
+cleanup journal. A failed journal append therefore publishes no mapping, while
+a later failure leaves a key `on_consumed` can erase. Erasure remains
+owner-checked: if publication failed before replacing an older producer, cleanup
+of the failed slot does not remove that older producer's mapping.
 
-**Step 5 — scope ref**: Each slot starts with one "scope reference" in its
-fanout_total. Without this, a task with no downstream consumer would never be
-reclaimable. See [§6 Scope](#6-scope).
+**Step 4 — scope ref**: A slot submitted inside an open scope registers one
+scope reference in `fanout_total`. Registration precedes the charge, so a
+failed registration cannot leave a reference that no `scope_end` can release.
+See [§6 Scope](#6-scope).
 
-**Step 6 — fanout attachment and READY routing**: Submission synchronously
+**Step 5 — fanout attachment and live-fanin count**: Submission synchronously
 locks each producer's `fanout_mu`, attaches the consumer, and counts only live
-producers. An immediately READY task is routed to its exact NEXT_LEVEL worker
-FIFO, the NEXT_LEVEL group FIFO, or the shared SUB FIFO. See
+producers. The producer's forward edge and the consumer's reverse edge are one
+transaction: failure to publish the reverse edge rolls the forward edge and
+its reference charge back. A completing live producer advances
+`fanin_released`; completed producers retain the reference edge but do not
+contribute to `fanin_count`.
+
+**Step 6 — publication and READY routing**: `fanin_count` and the transition
+from BUILDING to PENDING or READY are published together under `fanout_mu`. An
+immediately READY task is routed to its exact NEXT_LEVEL worker FIFO, the
+NEXT_LEVEL group FIFO, or the shared SUB FIFO. The same routing function is
+used when Scheduler releases the final dependency. See
 [scheduler.md](scheduler.md) §1.
 
 ---
@@ -259,7 +281,11 @@ SubmitResult Orchestrator::submit_next_level_group(
 
 `submit_impl` validates that `worker_ids` contains one unique, eligible target
 per group member before it performs shared dependency inference and READY
-routing.
+routing. It also prepares the member-state and member-outcome vectors as one
+transaction while the slot is still BUILDING. Dispatch therefore never has to
+allocate after claiming READY → RUNNING. A defensive size repair is likewise
+prepared in local vectors before the claim and published only if the Scheduler
+wins; a losing claim cannot overwrite cancellation's terminal bookkeeping.
 
 At dispatch time the Scheduler checks the group FIFO head and resolves every
 entry in `workers` to that exact stable worker ID. It dispatches only if the
@@ -267,7 +293,8 @@ entire target set is idle. A blocked group reserves all of its targets against
 new singles but does not cause a scan past the FIFO head. Each WorkerThread
 runs `worker->run` with its own `task_args_list[i]`. Completion remains
 aggregated at the group slot, so downstream consumers are released once after
-every member is terminal.
+every member is terminal. Completion validates both bookkeeping-vector sizes;
+repair preserves already-terminal and still-running members before indexing.
 
 ---
 
@@ -556,13 +583,18 @@ insert, erase, and size operations across those threads.
 Each `TaskSlotState.state` progresses through:
 
 ```text
-FREE ──► PENDING ──► READY ──► RUNNING ──► COMPLETED ──► CONSUMED ──► FREE
-                             │               │
-                             └──────────────► FAILED ─────► CONSUMED ──► FREE
+FREE ─► BUILDING ─► PENDING ──► READY ──► RUNNING ──► COMPLETED ──► CONSUMED ──► FREE
+             │                │             │
+             └────────────────┴─────────────┴──► FAILED ─────► CONSUMED ──► FREE
 ```
 
 - **FREE**: slot in the ring pool, not allocated
-- **PENDING**: allocated; waiting on live fanin producers
+- **BUILDING**: allocated; submit owns it. Step 3 registers its outputs in the
+  TensorMap and step 5 appends it to its producers' fanout lists, so it is
+  observable from other threads well before its fanin and fanout counters are
+  final. No other thread may advance it — see
+  [the publication rule](#the-building-publication-rule) below
+- **PENDING**: published; waiting on live fanin producers
 - **READY**: all fanins satisfied; queued for Scheduler dispatch
 - **RUNNING**: dispatched to one or more endpoints
 - **COMPLETED**: worker(s) done; may still be referenced by fanout / scope
@@ -573,11 +605,103 @@ FREE ──► PENDING ──► READY ──► RUNNING ──► COMPLETED ─
 
 State transitions are driven by atomic operations:
 
-- Orch: FREE → PENDING at submit time
+- Orch: FREE → BUILDING at slot claim, BUILDING → PENDING/READY at publication
 - Scheduler: PENDING → READY → RUNNING during dispatch
-- Scheduler: RUNNING → COMPLETED or RUNNING/PENDING/READY → FAILED during
+- Scheduler: RUNNING → COMPLETED, or BUILDING/PENDING/READY → FAILED during
   completion / dependency poisoning
 - Scheduler/Orch cleanup: COMPLETED/FAILED → CONSUMED
+
+### The BUILDING publication rule
+
+Wiring a task to a producer has to happen under that producer's `fanout_mu` —
+otherwise a producer completing concurrently either misses the new consumer or
+releases one that has not counted it. That makes a half-built task reachable
+from another thread, and BUILDING is what tells that thread the counters are
+not final:
+
+- A **producer that fails** claims the slot through `claim_task_failure` and
+  **stops there**. It does not mark group members, poison consumers, or release
+  references — the submitting thread does, once its wiring is done. Running the
+  propagation from both sides releases every producer reference twice, which
+  reclaims a producer's output while the device is still reading it.
+- A **producer that completes** advances `fanin_released` against a
+  `fanin_count` submit has not published, and zero is a count any release
+  passes. Readiness is therefore one decision, not two readable facts:
+  `try_mark_ready` compares the pair and changes the state under `fanout_mu`,
+  and publication writes `fanin_count` together with the transition out of
+  BUILDING under the same lock. A producer that arrives first is re-evaluated
+  by the publication; one that arrives after reads a published count. Neither
+  can act on half of the pair, and exactly one enqueues the task.
+- **Dispatch** never claims a BUILDING slot: there are no final args or fanin
+  count to dispatch on.
+
+`cancel_unstarted_run` is the one caller that *does* propagate for a BUILDING
+slot, because submission is closed before it runs — a slot still BUILDING there
+is one whose submit threw part-way through wiring, and no submitting thread is
+left to publish it. The same applies one step later: a claim won from BUILDING
+sets `failure_propagation_pending`, and cancellation takes over any slot still
+carrying it. Without that, a submit that threw *after* being claimed would
+leave a FAILED slot cancellation skips, holding references the run's fence
+waits on forever.
+
+Cancellation also records debt immediately after it wins a PENDING or READY
+claim. Scheduler-owned PENDING/READY claims expose no takeover debt: their
+claimant propagates exclusively, so cancellation cannot race it over stale slot
+IDs.
+
+Debt settlement is not the start of cancellation propagation. Cancellation
+first marks groups and snapshots the producer lists for **every** slot it owns;
+all of that work is idempotent and may allocate. An exception therefore leaves
+each claimed slot's debt set and any unvisited slot claimable by the next
+attempt. Only after every snapshot succeeds does cancellation clear the debts,
+then perform the non-repeatable self and producer reference releases without
+any further allocation.
+
+### What a submit that throws leaves behind
+
+A submit publishes BUILDING before its slot is charged to the run, so a throw
+part-way has to leave either an unowned Ring slot it releases directly or a
+registered slot the run's cancellation can fully reclaim. These ownership
+rules carry that:
+
+- **Run-slot registration is the ownership boundary.** If registration throws,
+  the slot is absent from the run and cancellation cannot discover it, so
+  submit marks it CONSUMED and directly releases the combined slot/HeapRing
+  reservation before rethrowing. Once registration succeeds, all remaining
+  fallible construction stays BUILDING and cancellation owns rollback.
+
+- **The scope reference is registered before it is charged.** `fanout_total`
+  counts a release that `scope_end` will make; charging it before
+  `scope_->register_task` succeeded would leave a slot owing a release nothing
+  can make. Cancellation contributes only the terminal release, the threshold
+  is never reached, and the slot — and with it the run's task count and its
+  fence — never resolves.
+- **The charge immediately follows successful registration** and precedes Step
+  2 publishing the slot's outputs. A failure between registration and charge
+  leaves an extra scope release, which is safe; the opposite order would leave
+  an unreleasable charge. Once an output is published, downstream consumers
+  increment the same `fanout_total` field.
+- **The output cleanup journal precedes TensorMap publication.** A failure can
+  never leave a mapping cancellation does not know to erase, and the map's
+  owner check preserves a previous producer when the replacement insert never
+  completed.
+
+### The failure claim
+
+Every path that fails a task — a completion poisoning its consumers, a run
+cancelling its unstarted slots, and a submit that wires onto an already-failed
+producer — moves it to FAILED through `claim_task_failure`, and the winner is
+the only one that writes `failure_message`. A plain store could put a CONSUMED
+slot back to FAILED and then consume it, releasing its dependency references a
+second time.
+
+The claim, the message and the fanout snapshot are all taken under `fanout_mu`,
+so a task wiring itself onto a producer either registers before the claim and is
+poisoned by it, or observes FAILED — with its reason — and poisons itself. The
+same lock covers the ordinary terminal transition in `on_task_complete`: split
+from the snapshot, a consumer can wire itself in afterwards and never be
+released, or read COMPLETED, decline to count the fanin, and still be released,
+reaching READY one producer early.
 
 ### Fanout-release threshold
 
@@ -614,28 +738,39 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     AllocResult ar = allocator_.alloc(aligned);
     TaskSlotState &s   = slots_[ar.slot];
     s.reset();
-    // 2. Register as this slot's output so downstream tensors with the same
-    //    data pointer look up this slot as producer.
+    // 2. Publish cancellation ownership before registering active_tasks. If
+    //    run-slot registration itself throws, release the unowned Ring slot.
     uint64_t key = reinterpret_cast<uint64_t>(ar.heap_ptr);
     s.run_id = current_run_id;
-    tensormap_.insert(current_run_id, key, ar.slot);
-    s.output_keys.push_back(key);
+    s.state = TaskState::BUILDING;
+    current_run.register_slot(ar.slot);
     // 3. No fanin — alloc has no work to wait on.
     s.fanin_count = 0;
-    // 4. Initial fanout = scope_ref. Consumers that wire on this slot in
-    //    infer_deps bump fanout_total; this slot's CONSUMED transition waits
-    //    for all of them + scope_end.
-    s.fanout_total = (scope_.depth() > 0) ? 1 : 0;
-    if (s.fanout_total > 0) scope_.register_task(ar.slot);
-    // 5. Sim self-consume so the fanout-release threshold math aligns with
+    // 4. Register the scope reference before charging it. Consumers that wire
+    //    on this slot in infer_deps later increment fanout_total.
+    int32_t scope_ref = (scope_.depth() > 0) ? 1 : 0;
+    if (scope_ref > 0) scope_.register_task(ar.slot);
+    s.fanout_total = scope_ref;
+    // 5. Journal the key before TensorMap publication so cancellation can
+    //    erase every entry that became visible before a later failure.
+    s.output_keys.push_back(key);
+    tensormap_.insert(current_run_id, key, ar.slot);
+    // 6. Sim self-consume so the fanout-release threshold math aligns with
     //    normal slots (see §8 Fanout-release threshold).
     s.fanout_released = 1;
-    // 6. Straight to COMPLETED — no dispatch needed.
+    // 7. Straight to COMPLETED — no dispatch needed.
     s.state = TaskState::COMPLETED;
-    current_run.active_tasks++;
     return Tensor{key, shape, dtype};
 }
 ```
+
+All fallible setup after run registration happens while the synthetic slot is
+BUILDING. If `alloc()` throws, graph-failure cancellation can therefore claim
+and consume it just like an interrupted task submit. The synthetic self-release
+is published only after those fallible steps; a failed BUILDING slot gets that
+terminal release from cancellation instead. Run-slot registration is the one
+earlier boundary cancellation cannot cover, so failure there directly releases
+the Ring claim before rethrowing.
 
 `on_consumed` runs the usual `tensormap.erase_task_outputs` and then calls
 `allocator_.release(sid)`. FIFO reclamation inside the allocator returns the

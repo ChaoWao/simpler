@@ -33,16 +33,19 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../task_interface/call_config.h"
 #include "../task_interface/data_type.h"
 #include "../task_interface/task_args.h"
 #include "../task_interface/tensor.h"
+#include "../worker/pipeline_slot_pool.h"
 #include "ring.h"
 #include "scope.h"
 #include "tensormap.h"
@@ -61,6 +64,21 @@ class WorkerManager;
 
 struct SubmitResult {
     TaskSlot task_slot{INVALID_SLOT};
+};
+
+// Deterministic seams for exception-safety unit tests. Production workers
+// leave the callback unset.
+enum class OrchestratorTestPoint : int32_t {
+    SCOPE_REGISTERED = 0,
+    PRODUCER_FORWARD_EDGE_PUBLISHED = 1,
+    FAILURE_FANIN_SNAPSHOT = 2,
+    GROUP_MEMBER_STATES_PREPARED = 3,
+    ALLOC_RUN_SLOT_REGISTERING = 4,
+    ALLOC_OUTPUT_KEY_PREPARED = 5,
+    SUBMIT_RUN_SLOT_REGISTERING = 6,
+    SUBMIT_OUTPUT_KEY_PREPARED = 7,
+    BEGIN_RUN_MAP_PUBLISHED = 8,
+    BEGIN_RUN_FIFO_PUBLISHED = 9,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +137,7 @@ public:
 
     // Only the calling orchestration thread builds a run at a time.
     RunId begin_run();
+    void configure_pipeline_depth(uint32_t depth);
     void close_run_submission(RunId run_id);
     void fail_run_submission(RunId run_id, std::exception_ptr error = nullptr);
     void wait_run_accepted(RunId run_id);
@@ -127,6 +146,27 @@ public:
     bool wait_run_for(RunId run_id, double timeout_seconds);
     bool run_done(RunId run_id) const;
     bool run_failed(RunId run_id) const;
+    bool can_dispatch_run(RunId run_id) const;
+
+    /**
+     * The run the scheduler may dispatch from, or INVALID_RUN_ID when none is.
+     *
+     * Stricter than `active_run_id()`: the FIFO head must also be EXECUTING and
+     * still own its pipeline lease, so a head whose lease was released cannot
+     * have further work handed down under it.
+     */
+    RunId dispatchable_run_id() const;
+
+    /**
+     * Block until `run_id` holds the whole-run FIFO head, or is terminal.
+     *
+     * Direct device control bypasses the ready-queue FIFO, so a caller acting
+     * on behalf of a run must wait here before touching a child. The run is
+     * explicit: only the thread actually inside that run's graph callback may
+     * be ordered against it. INVALID_RUN_ID returns immediately.
+     */
+    void await_run_admission(RunId run_id);
+    RunId active_run_id() const;
     void release_run(RunId run_id);
 
     // Open a nested scope. Every task submitted between this call and the
@@ -167,19 +207,27 @@ public:
     // Scheduler uses the same path after releasing the final dependency.
     void enqueue_ready(TaskSlot slot);
 
+    void set_test_hook(std::function<void(OrchestratorTestPoint)> hook) { test_hook_ = std::move(hook); }
+
 private:
     TensorMap *tensormap_ = nullptr;
     Ring *allocator_ = nullptr;
     Scope *scope_ = nullptr;
     WorkerManager *manager_ = nullptr;
     std::function<void()> ready_notify_cb_;
+    std::function<void(OrchestratorTestPoint)> test_hook_;
     ReadyQueue *ready_sub_queue_ = nullptr;
     NextLevelReadyQueues *ready_next_level_queues_ = nullptr;
 
     mutable std::mutex runs_mu_;
+    std::condition_variable runs_cv_;
     std::unordered_map<RunId, std::shared_ptr<RunState>> runs_;
+    std::deque<RunId> run_fifo_;
+    PipelineSlotPool pipeline_slots_{PTO_PIPELINE_MAX_DEPTH};
+    uint32_t admission_depth_{PTO_PIPELINE_MAX_DEPTH};
     RunId next_run_id_{1};
     RunId building_run_id_{INVALID_RUN_ID};
+    RunId active_run_id_{INVALID_RUN_ID};
 
     // Scheduler's loop mutex (not owned). Held across optional quiescent
     // compaction so the scheduler cannot retain a slot pointer being removed.
@@ -191,13 +239,18 @@ private:
     std::shared_ptr<RunState> find_run(RunId run_id) const;
     std::shared_ptr<RunState> get_run(RunId run_id) const;
     std::shared_ptr<RunState> current_building_run() const;
-    static void finish_run_if_ready(const std::shared_ptr<RunState> &run);
+    void finish_run_if_ready(const std::shared_ptr<RunState> &run);
     static bool is_terminal(RunPhase phase);
     static bool acceptance_ready(const std::shared_ptr<RunState> &run);
     // Callers hold runs_mu_.
     bool quiescent_locked() const;
+    bool dispatchable_locked(RunId run_id) const;
+    void activate_fifo_head();
+    void retire_terminal_run(const std::shared_ptr<RunState> &run);
+    void cancel_unstarted_run(const std::shared_ptr<RunState> &run, const std::string &message);
+    void register_run_slot(const std::shared_ptr<RunState> &run, TaskSlot slot);
+    void clear_run_ready_queues(RunId run_id);
     void compact_if_quiescent();
-    void increment_run_tasks(RunId run_id);
     void decrement_run_tasks(RunId run_id);
     void increment_run_accepts(RunId run_id, int32_t count);
     void decrement_run_accepts(RunId run_id);

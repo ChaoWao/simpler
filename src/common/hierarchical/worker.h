@@ -92,6 +92,11 @@ public:
     // otherwise be accidentally inherited across fork.
     void init();
 
+    void configure_pipeline_depth(uint32_t depth) {
+        if (initialized_) throw std::logic_error("Worker: configure_pipeline_depth after init");
+        orchestrator_.configure_pipeline_depth(depth);
+    }
+
     // Shut down the Scheduler thread and release resources.
     void close();
 

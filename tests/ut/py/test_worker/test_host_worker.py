@@ -12,16 +12,24 @@ Tests use SubWorker (fork/shm) as the only worker type — no NPU device require
 Each test verifies a distinct aspect of the L3 scheduling pipeline.
 """
 
+import _thread
 import ctypes
+import dis
 import gc
+import inspect
+import multiprocessing.shared_memory as shared_memory_mod
 import struct
+import sys
 import threading
 import time
 import weakref
 from multiprocessing.shared_memory import SharedMemory
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
+import simpler.orchestrator as orch_mod
 import simpler.worker as worker_mod
 from _task_interface import MAX_REGISTERED_CALLABLE_IDS  # pyright: ignore[reportMissingImports]
 from simpler.callable_identity import (
@@ -130,8 +138,11 @@ def _chip_payload_shm(callable_obj: ChipCallable) -> SharedMemory:
 
 def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
     events: list[tuple] = []
+    published_depths: list[int] = []
 
     class FakeChipWorker:
+        pipeline_depth = 2
+
         def init(self, device_id, bins, *, log_level, prewarm_config=None, enable_sdma=False):
             events.append(("init", device_id, bins, log_level, prewarm_config, enable_sdma))
 
@@ -139,6 +150,7 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
             events.append(("finalize",))
 
     def fake_run_chip_main_loop(cw, *_args, chip_platform, chip_runtime, prepared=None):
+        published_depths.append(worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)[0])
         events.append(("main_loop", cw, chip_platform, chip_runtime))
 
     monkeypatch.setattr(worker_mod, "ChipWorker", FakeChipWorker)
@@ -165,6 +177,7 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
     assert events[1][0] == "main_loop"
     assert events[1][2:] == ("a2a3", "tensormap_and_ringbuffer")
     assert events[2] == ("finalize",)
+    assert published_depths == [2]
 
 
 def _chip_digest(callable_obj: ChipCallable, *, platform: str = "", runtime: str = "") -> bytes:
@@ -1393,6 +1406,162 @@ class TestSingleSubTask:
 
 
 class TestRunHandle:
+    @staticmethod
+    def _submission_failure_worker(failures: int):
+        events: list[str] = []
+
+        class NativeWorker:
+            def close(self):
+                events.append("close")
+
+        class NativeOrchestrator:
+            def __init__(self):
+                self.failures_left = failures
+
+            def _begin_run(self):
+                events.append("begin")
+                return 1
+
+            def _scope_begin(self):
+                events.append("scope_begin")
+
+            def _scope_end(self):
+                events.append("scope_end")
+
+            def _fail_run_submission(self, run_id, _error):
+                assert run_id == 1
+                events.append("fail")
+                if self.failures_left:
+                    self.failures_left -= 1
+                    raise RuntimeError("injected cancellation failure")
+
+            def _wait_run(self, run_id):
+                assert run_id == 1
+                events.append("wait")
+                raise RuntimeError("native graph failure")
+
+            def _release_run(self, run_id):
+                assert run_id == 1
+                events.append("release")
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, NativeWorker())
+        worker._orch = cast(Any, NativeOrchestrator())
+        return worker, events
+
+    def test_graph_failure_retries_native_cancellation_before_waiting(self):
+        worker, events = self._submission_failure_worker(failures=1)
+        graph_error = ValueError("bad graph")
+
+        def bad_graph(*_args):
+            raise graph_error
+
+        with pytest.raises(ValueError) as excinfo:
+            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
+
+        assert excinfo.value is graph_error
+        assert events == ["begin", "scope_begin", "scope_end", "fail", "fail", "wait", "release"]
+        assert not worker._accepted_run_handles
+        assert worker._ordered_cleanup_error is None
+
+    def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
+        worker, events = self._submission_failure_worker(failures=2)
+        graph_error = ValueError("bad graph")
+
+        def bad_graph(*_args):
+            raise graph_error
+
+        with pytest.raises(ValueError) as excinfo:
+            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
+
+        assert excinfo.value is graph_error
+        assert events == ["begin", "scope_begin", "scope_end", "fail", "fail"]
+        assert not worker._accepted_run_handles
+        assert len(worker._abandoned_run_handles) == 1
+        assert worker._abandoned_run_handles[0]._keepalive is not None
+        assert worker._ordered_cleanup_error is not None
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+
+        worker.close()
+        assert events[-1] == "close"
+        assert not worker._abandoned_run_handles
+
+    def test_unsettled_graph_cancellation_publishes_through_a_cv_enter_interrupt(self):
+        publication_interrupt = KeyboardInterrupt("cancellation publication")
+        cancellation_error = RuntimeError("injected cancellation failure")
+        graph_error = ValueError("bad graph")
+
+        class ArmableCV:
+            def __init__(self, cv):
+                self.cv = cv
+                self.armed = False
+                self.interrupts = 0
+
+            def __enter__(self):
+                if self.armed:
+                    self.armed = False
+                    self.interrupts += 1
+                    raise publication_interrupt
+                return self.cv.__enter__()
+
+            def __exit__(self, *exc_info):
+                return self.cv.__exit__(*exc_info)
+
+            def notify_all(self):
+                self.cv.notify_all()
+
+        class NativeWorker:
+            def close(self):
+                return None
+
+        class NativeOrchestrator:
+            def __init__(self, lifecycle_cv):
+                self.lifecycle_cv = lifecycle_cv
+                self.cancellations = 0
+
+            def _begin_run(self):
+                return 1
+
+            def _scope_begin(self):
+                return None
+
+            def _scope_end(self):
+                return None
+
+            def _fail_run_submission(self, run_id, _error):
+                assert run_id == 1
+                self.cancellations += 1
+                if self.cancellations == worker_mod._RUN_CANCELLATION_ATTEMPTS:
+                    self.lifecycle_cv.armed = True
+                raise cancellation_error
+
+        worker = Worker(level=3, num_sub_workers=0)
+        lifecycle_cv = ArmableCV(worker._hierarchical_start_cv)
+        worker._hierarchical_start_cv = cast(Any, lifecycle_cv)
+        worker._worker = cast(Any, NativeWorker())
+        worker._orch = cast(Any, NativeOrchestrator(lifecycle_cv))
+
+        def bad_graph(*_args):
+            raise graph_error
+
+        with pytest.raises(ValueError) as caught:
+            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
+
+        assert caught.value is graph_error
+        assert lifecycle_cv.interrupts == 1
+        assert not worker._accepted_run_handles
+        assert len(worker._abandoned_run_handles) == 1
+        abandoned = worker._abandoned_run_handles[0]
+        assert abandoned._terminal
+        assert isinstance(abandoned._error, RuntimeError)
+        assert abandoned._error is worker._ordered_cleanup_error
+        assert abandoned._error.__cause__ is cancellation_error
+        assert abandoned._keepalive is not None
+
+        worker.close()
+        assert abandoned._keepalive is None
+
     def test_submit_returns_before_completion_and_timeout_is_retryable(self):
         state_shm = SharedMemory(create=True, size=8)
         state_buf = state_shm.buf
@@ -1432,6 +1601,77 @@ class TestRunHandle:
             assert handle.result() is None
             hw.close()
         finally:
+            state_shm.close()
+            state_shm.unlink()
+
+    def test_depth_two_prepares_next_run_and_blocks_third_callback(self):
+        state_shm = SharedMemory(create=True, size=16)
+        state_buf = state_shm.buf
+        assert state_buf is not None
+        for offset in range(0, 16, 4):
+            _set_flag(state_buf, offset, 0)
+
+        third_callback = threading.Event()
+        third_result: dict[str, RunHandle] = {}
+        hw = Worker(level=3, num_sub_workers=2)
+        try:
+
+            def first_task(_args):
+                _set_flag(state_buf, 0, 1)
+                while _get_flag(state_buf, 4) == 0:
+                    time.sleep(0.001)
+
+            def second_task(_args):
+                _set_flag(state_buf, 8, 1)
+                while _get_flag(state_buf, 12) == 0:
+                    time.sleep(0.001)
+
+            first_target = hw.register(first_task)
+            second_target = hw.register(second_task)
+            hw.init()
+
+            first = hw.submit(lambda o, _args, _cfg: o.submit_sub(first_target))
+            deadline = time.monotonic() + 3.0
+            while _get_flag(state_buf, 0) == 0 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert _get_flag(state_buf, 0) == 1
+
+            second_callback_done = False
+
+            def second_graph(o, _args, _cfg):
+                nonlocal second_callback_done
+                o.submit_sub(second_target)
+                second_callback_done = True
+
+            second = hw.submit(second_graph)
+            assert second_callback_done
+            time.sleep(0.05)
+            assert _get_flag(state_buf, 8) == 0, "prepared run dispatched before the active run became terminal"
+
+            def third_graph(_o, _args, _cfg):
+                third_callback.set()
+
+            submitter = threading.Thread(target=lambda: third_result.setdefault("handle", hw.submit(third_graph)))
+            submitter.start()
+            assert not third_callback.wait(0.05), "third callback ran before depth-two admission freed a slot"
+
+            _set_flag(state_buf, 4, 1)
+            assert third_callback.wait(3.0)
+            deadline = time.monotonic() + 3.0
+            while _get_flag(state_buf, 8) == 0 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert _get_flag(state_buf, 8) == 1
+
+            _set_flag(state_buf, 12, 1)
+            submitter.join(5.0)
+            assert not submitter.is_alive()
+            first.wait(5.0)
+            second.wait(5.0)
+            third_result["handle"].wait(5.0)
+        finally:
+            _set_flag(state_buf, 4, 1)
+            _set_flag(state_buf, 12, 1)
+            hw.close()
             state_shm.close()
             state_shm.unlink()
 
@@ -1500,6 +1740,87 @@ class TestRunHandle:
         finally:
             state_shm.close()
             state_shm.unlink()
+
+    def test_close_uses_one_deadline_for_operations_and_run_fences_then_retries(self, monkeypatch):
+        class Clock:
+            now = 0.0
+
+        clock = Clock()
+        monkeypatch.setattr(worker_mod.time, "monotonic", lambda: clock.now)
+        monkeypatch.setattr(worker_mod, "_ROLLBACK_GRACEFUL_TIMEOUT_S", 10.0)
+
+        wait_budgets: list[float] = []
+        released_runs: list[int] = []
+        native_closes: list[str] = []
+
+        class NativeWorker:
+            def close(self):
+                native_closes.append("close")
+
+        class NativeOrchestrator:
+            complete = False
+
+            def _wait_run_for(self, run_id, timeout):
+                assert run_id == 1
+                wait_budgets.append(timeout)
+                if not self.complete:
+                    clock.now += timeout
+                    return False
+                return True
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        native_worker = NativeWorker()
+        native_orch = NativeOrchestrator()
+        worker._worker = cast(Any, native_worker)
+        worker._orch = cast(Any, native_orch)
+        handle = RunHandle(worker, 1, ())
+        worker._accepted_run_handles.add(handle)
+        worker._active_ops = 1
+
+        real_cv = worker._hierarchical_start_cv
+
+        class AdvancingCondition:
+            def __enter__(self):
+                return real_cv.__enter__()
+
+            def __exit__(self, *exc_info):
+                return real_cv.__exit__(*exc_info)
+
+            def wait(self, timeout=None):
+                assert timeout == pytest.approx(10.0)
+                clock.now += 7.0
+                worker._active_ops = 0
+                return True
+
+            def notify_all(self):
+                real_cv.notify_all()
+
+        worker._hierarchical_start_cv = cast(Any, AdvancingCondition())
+
+        with pytest.raises(TimeoutError, match="run fence.*cleanup budget"):
+            worker.close()
+
+        assert wait_budgets == [pytest.approx(3.0)]
+        assert handle in worker._accepted_run_handles
+        assert not handle._terminal
+        assert worker._worker is native_worker
+        assert not worker._teardown_attempted
+        assert worker._close_completion is not None and worker._close_completion.incomplete
+        assert native_closes == []
+
+        native_orch.complete = True
+        worker.close()
+
+        assert wait_budgets == [pytest.approx(3.0), pytest.approx(10.0)]
+        assert released_runs == [1]
+        assert handle._terminal
+        assert not worker._accepted_run_handles
+        assert worker._teardown_attempted
+        assert worker._close_completion is not None and not worker._close_completion.incomplete
+        assert native_closes == ["close"]
 
     def test_submit_close_race_accepts_and_drains_admitted_run(self):
         callback_entered = threading.Event()
@@ -1756,6 +2077,612 @@ class TestRunHandle:
         assert hw._finalize_run_handle(handle, 1, None) is interrupt
         assert not hw._accepted_run_handles
 
+    def test_finalize_drains_after_a_post_step_interrupt_and_close_completes(self):
+        interrupt = KeyboardInterrupt("post-step")
+        released_refs: list[str] = []
+        released_runs: list[int] = []
+
+        class SlotRef:
+            def _release_slot_ref(self):
+                released_refs.append("released")
+
+        class NativeOrchestrator:
+            def _wait_run(self, run_id):
+                assert run_id == 1
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._orch = cast(Any, NativeOrchestrator())
+        resources = worker_mod._RunResources()
+        resources.remote_slot_refs.append(cast(Any, SlotRef()))
+        handle = RunHandle(worker, 1, (object(),), resources)
+        worker._accepted_run_handles.add(handle)
+        original_finalize = worker._finalize_run_handle
+        interrupted = False
+
+        def interrupt_after_remote_refs(step: str) -> None:
+            nonlocal interrupted
+            if step == "remote_slot_refs" and not interrupted:
+                interrupted = True
+                raise interrupt
+
+        worker._finalize_run_handle = cast(
+            Any,
+            lambda finalized, run_id, error: original_finalize(
+                finalized,
+                run_id,
+                error,
+                _after_step=interrupt_after_remote_refs,
+            ),
+        )
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.wait()
+
+        assert caught.value is interrupt
+        assert released_refs == ["released"]
+        assert released_runs == [1]
+        assert handle._cleanup_published
+        assert handle not in worker._accepted_run_handles
+        assert handle._keepalive is None
+        worker.close()
+
+    def test_wait_interrupted_after_election_is_re_electable(self):
+        interrupt = KeyboardInterrupt("after election")
+        nested_interrupt = SystemExit("while clearing election")
+        native_waits: list[int] = []
+        released_runs: list[int] = []
+
+        class InterruptingHandle(RunHandle):
+            interrupt_clear = False
+
+            def __setattr__(self, name, value):
+                if name == "_wait_in_progress" and value is False and self.interrupt_clear:
+                    self.interrupt_clear = False
+                    raise nested_interrupt
+                return super().__setattr__(name, value)
+
+        class NativeOrchestrator:
+            def _run_done(self, run_id):
+                assert run_id == 1
+                return False
+
+            def _wait_run(self, run_id):
+                native_waits.append(run_id)
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._orch = cast(Any, NativeOrchestrator())
+        handle = InterruptingHandle(worker, 1, ())
+        worker._accepted_run_handles.add(handle)
+        interrupted = False
+
+        def interrupt_after_election(phase: str) -> None:
+            nonlocal interrupted
+            if phase == "after_election" and not interrupted:
+                interrupted = True
+                raise interrupt
+
+        handle._wait_boundary_hook = interrupt_after_election
+        handle.interrupt_clear = True
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.wait()
+
+        assert caught.value is interrupt
+        assert not handle._wait_in_progress
+        assert not handle.done
+        assert native_waits == []
+        assert released_runs == []
+        assert handle in worker._accepted_run_handles
+
+        handle.wait()
+
+        assert native_waits == [1]
+        assert released_runs == [1]
+        assert handle.done
+        assert handle not in worker._accepted_run_handles
+        worker.close()
+
+    def test_wait_interrupted_after_finalize_publishes_terminal_once(self):
+        interrupt = KeyboardInterrupt("after finalize")
+        nested_interrupt = SystemExit("while publishing terminal")
+        native_waits: list[int] = []
+        released_runs: list[int] = []
+
+        class InterruptingHandle(RunHandle):
+            interrupt_terminal = False
+
+            def __setattr__(self, name, value):
+                if name == "_terminal" and value is True and self.interrupt_terminal:
+                    self.interrupt_terminal = False
+                    raise nested_interrupt
+                return super().__setattr__(name, value)
+
+        class NativeOrchestrator:
+            def _wait_run(self, run_id):
+                native_waits.append(run_id)
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._orch = cast(Any, NativeOrchestrator())
+        handle = InterruptingHandle(worker, 1, ())
+        worker._accepted_run_handles.add(handle)
+        interrupted = False
+
+        def interrupt_after_finalize(phase: str) -> None:
+            nonlocal interrupted
+            if phase == "after_finalize" and not interrupted:
+                interrupted = True
+                raise interrupt
+
+        handle._wait_boundary_hook = interrupt_after_finalize
+        handle.interrupt_terminal = True
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.wait()
+
+        assert caught.value is interrupt
+        assert native_waits == [1]
+        assert released_runs == [1]
+        assert handle.done
+        assert not handle._wait_in_progress
+        assert handle not in worker._accepted_run_handles
+        with pytest.raises(KeyboardInterrupt) as repeated:
+            handle.wait()
+        assert repeated.value is interrupt
+        assert native_waits == [1]
+        assert released_runs == [1]
+        worker.close()
+
+    def test_finalization_recovery_survives_an_interrupt_after_accepted_retirement(self):
+        finalization_interrupt = KeyboardInterrupt("finalization escaped")
+        recovery_interrupt = SystemExit("after accepted retirement")
+        recoveries: list[str] = []
+
+        class NativeWorker:
+            def close(self):
+                return None
+
+        class NativeOrchestrator:
+            def _wait_run(self, run_id):
+                assert run_id == 1
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, NativeWorker())
+        worker._orch = cast(Any, NativeOrchestrator())
+        keepalive = object()
+        handle = RunHandle(worker, 1, (keepalive,))
+        worker._accepted_run_handles.add(handle)
+        worker._finalize_run_handle = cast(Any, lambda *_args: (_ for _ in ()).throw(finalization_interrupt))
+        recover = worker._recover_interrupted_run_finalization
+
+        def interrupt_after_recovery(recovering, error):
+            recoveries.append("recover")
+            recovered = recover(recovering, error)
+            if len(recoveries) == 1:
+                raise recovery_interrupt
+            return recovered
+
+        worker._recover_interrupted_run_finalization = cast(Any, interrupt_after_recovery)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.wait()
+
+        assert caught.value is finalization_interrupt
+        assert recoveries == ["recover", "recover"]
+        assert handle._terminal
+        assert not handle._wait_in_progress
+        assert handle._error is finalization_interrupt
+        assert handle not in worker._accepted_run_handles
+        assert worker._abandoned_run_handles == [handle]
+        assert handle._keepalive == (keepalive,)
+        with pytest.raises(KeyboardInterrupt) as repeated:
+            handle.wait()
+        assert repeated.value is finalization_interrupt
+
+        worker.close()
+        assert handle._keepalive is None
+
+    def test_wait_timeout_includes_acceptance_owner_handoff(self):
+        native_waits: list[tuple[str, Any]] = []
+        released_runs: list[int] = []
+
+        class NativeOrchestrator:
+            def _wait_run_for(self, run_id, timeout):
+                assert run_id == 1
+                native_waits.append(("timed", timeout))
+                return True
+
+            def _wait_run(self, run_id):
+                assert run_id == 1
+                native_waits.append(("untimed", None))
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._orch = cast(Any, NativeOrchestrator())
+        handle = RunHandle(worker, 1, ())
+        handle._accept_wait_in_progress = True
+        worker._accepted_run_handles.add(handle)
+        finished = threading.Event()
+        errors: list[BaseException] = []
+
+        def wait_with_expired_deadline() -> None:
+            try:
+                handle.wait(0)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        waiter = threading.Thread(target=wait_with_expired_deadline)
+        waiter.start()
+        try:
+            assert finished.wait(0.5), "RunHandle.wait(0) ignored its deadline during acceptance handoff"
+            assert len(errors) == 1
+            assert isinstance(errors[0], TimeoutError)
+            assert handle._accept_wait_in_progress
+            assert not handle._wait_in_progress
+            assert handle in worker._accepted_run_handles
+            assert released_runs == []
+        finally:
+            handle._clear_acceptance_owner()
+            waiter.join(5.0)
+
+        handle.wait()
+        assert native_waits[0][0] == "timed"
+        assert native_waits[1] == ("untimed", None)
+        assert released_runs == [1]
+        worker.close()
+
+    def test_finalizer_escape_after_retirement_preserves_cleanup_error(self):
+        cleanup_error = RuntimeError("cleanup failed")
+        boundary_error = KeyboardInterrupt("return boundary")
+        native_waits: list[int] = []
+        released_runs: list[int] = []
+
+        class SlotRef:
+            def _release_slot_ref(self):
+                raise cleanup_error
+
+        class NativeOrchestrator:
+            def _wait_run(self, run_id):
+                native_waits.append(run_id)
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._orch = cast(Any, NativeOrchestrator())
+        resources = worker_mod._RunResources()
+        resources.remote_slot_refs.append(cast(Any, SlotRef()))
+        handle = RunHandle(worker, 1, (), resources)
+        worker._accepted_run_handles.add(handle)
+        original_finalize = worker._finalize_run_handle
+
+        def interrupt_return(finalized, run_id, native_error):
+            assert original_finalize(finalized, run_id, native_error) is cleanup_error
+            raise boundary_error
+
+        worker._finalize_run_handle = cast(Any, interrupt_return)
+
+        with pytest.raises(RuntimeError) as caught:
+            handle.wait()
+
+        assert caught.value is cleanup_error
+        assert handle._error is cleanup_error
+        assert worker._ordered_cleanup_error is cleanup_error
+        assert native_waits == [1]
+        assert released_runs == [1]
+        assert handle not in worker._accepted_run_handles
+        with pytest.raises(RuntimeError) as repeated:
+            handle.wait()
+        assert repeated.value is cleanup_error
+
+    def test_acceptance_wait_interrupted_after_election_is_re_electable(self):
+        interrupt = KeyboardInterrupt("after acceptance election")
+        nested_interrupt = SystemExit("while clearing acceptance election")
+        native_waits: list[int] = []
+
+        class InterruptingHandle(RunHandle):
+            interrupt_clear = False
+
+            def __setattr__(self, name, value):
+                if name == "_accept_wait_in_progress" and value is False and self.interrupt_clear:
+                    self.interrupt_clear = False
+                    raise nested_interrupt
+                return super().__setattr__(name, value)
+
+        class FakeWorker:
+            def _wait_run_handle_accepted(self, run_id):
+                native_waits.append(run_id)
+
+        handle = InterruptingHandle(cast(Worker, FakeWorker()), 1, ())
+        interrupted = False
+
+        def interrupt_after_election(phase: str) -> None:
+            nonlocal interrupted
+            if phase == "after_acceptance_election" and not interrupted:
+                interrupted = True
+                raise interrupt
+
+        handle._wait_boundary_hook = interrupt_after_election
+        handle.interrupt_clear = True
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle._wait_for_acceptance()
+
+        assert caught.value is interrupt
+        assert not handle._accept_wait_in_progress
+        assert not handle._launch_accepted
+        assert native_waits == []
+
+        handle._wait_for_acceptance()
+
+        assert native_waits == [1]
+        assert handle._launch_accepted
+        assert not handle._accept_wait_in_progress
+
+    def test_acceptance_wait_interrupted_after_native_wait_stays_published(self):
+        interrupt = KeyboardInterrupt("after acceptance wait")
+        nested_interrupt = SystemExit("while publishing acceptance")
+        native_waits: list[int] = []
+
+        class InterruptingHandle(RunHandle):
+            interrupt_publish = False
+
+            def __setattr__(self, name, value):
+                if name == "_accept_wait_in_progress" and value is False and self.interrupt_publish:
+                    self.interrupt_publish = False
+                    raise nested_interrupt
+                return super().__setattr__(name, value)
+
+        class FakeWorker:
+            def _wait_run_handle_accepted(self, run_id):
+                native_waits.append(run_id)
+
+        handle = InterruptingHandle(cast(Worker, FakeWorker()), 1, ())
+        interrupted = False
+
+        def interrupt_after_wait(phase: str) -> None:
+            nonlocal interrupted
+            if phase == "after_acceptance_wait" and not interrupted:
+                interrupted = True
+                raise interrupt
+
+        handle._wait_boundary_hook = interrupt_after_wait
+        handle.interrupt_publish = True
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle._wait_for_acceptance()
+
+        assert caught.value is interrupt
+        assert native_waits == [1]
+        assert handle._launch_accepted
+        assert not handle._accept_wait_in_progress
+
+        handle._wait_for_acceptance()
+        assert native_waits == [1]
+
+    def test_interrupted_cleanup_is_abandoned_until_tree_teardown(self, monkeypatch):
+        interrupt = KeyboardInterrupt("ambiguous step boundary")
+        released_refs: list[str] = []
+        released_runs: list[int] = []
+        teardown_calls: list[str] = []
+
+        class SlotRef:
+            def __init__(self, name, *, interrupts=False):
+                self.name = name
+                self.interrupts = interrupts
+
+            def _release_slot_ref(self):
+                released_refs.append(self.name)
+                if self.interrupts:
+                    raise interrupt
+
+        class NativeOrchestrator:
+            def _wait_run(self, run_id):
+                assert run_id == 1
+
+            def _release_run(self, run_id):
+                released_runs.append(run_id)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        worker._orch = cast(Any, NativeOrchestrator())
+        resources = worker_mod._RunResources()
+        first_ref = SlotRef("first", interrupts=True)
+        second_ref = SlotRef("second")
+        resources.remote_slot_refs.extend([cast(Any, first_ref), cast(Any, second_ref)])
+        keepalive = object()
+        handle = RunHandle(worker, 1, (keepalive, first_ref, second_ref), resources)
+        worker._accepted_run_handles.add(handle)
+
+        def teardown_tree():
+            teardown_calls.append("teardown")
+            worker._worker = None
+            worker._orch = None
+
+        monkeypatch.setattr(worker, "_teardown_ready_tree", teardown_tree)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.wait()
+
+        assert caught.value is interrupt
+        assert released_refs == ["first"]
+        assert released_runs == []
+        assert handle not in worker._accepted_run_handles
+        assert handle._cleanup_published
+        assert handle._keepalive == (keepalive, first_ref, second_ref)
+        assert worker._abandoned_run_handles == [handle]
+        assert isinstance(worker._ordered_cleanup_error, RuntimeError)
+        assert worker._ordered_cleanup_error.__cause__ is interrupt
+
+        worker.close()
+
+        assert teardown_calls == ["teardown"]
+        assert handle._keepalive is None
+        assert not worker._abandoned_run_handles
+
+    def test_post_teardown_keepalive_drain_survives_an_interrupt(self, monkeypatch):
+        interrupt = KeyboardInterrupt("keepalive release")
+        nested_interrupt = SystemExit("keepalive traversal back-edge")
+        teardown_calls: list[str] = []
+
+        class InterruptingHandleList(list):
+            interrupt_bool = False
+
+            def __bool__(self):
+                if self.interrupt_bool:
+                    self.interrupt_bool = False
+                    raise nested_interrupt
+                return len(self) != 0
+
+        retained_handles = InterruptingHandleList()
+
+        class InterruptingRetainedHandle:
+            def __init__(self):
+                self.value = object()
+                self.interrupted = False
+
+            @property
+            def _keepalive(self):
+                return self.value
+
+            @_keepalive.setter
+            def _keepalive(self, value):
+                if not self.interrupted:
+                    self.interrupted = True
+                    retained_handles.interrupt_bool = True
+                    raise interrupt
+                self.value = value
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        retained = InterruptingRetainedHandle()
+        retained_handles.append(retained)
+        worker._abandoned_run_handles = cast(Any, retained_handles)
+
+        def teardown_tree():
+            teardown_calls.append("teardown")
+            worker._worker = None
+
+        monkeypatch.setattr(worker, "_teardown_ready_tree", teardown_tree)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker.close()
+
+        assert caught.value is interrupt
+        assert teardown_calls == ["teardown"]
+        assert retained._keepalive is None
+        assert not worker._abandoned_run_handles
+
+    def test_post_teardown_keepalive_drain_precedes_the_residual_probe(self, monkeypatch):
+        residual_probe_interrupt = KeyboardInterrupt("residual probe")
+        teardown_calls: list[str] = []
+        probe_calls: list[str] = []
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        keepalive = object()
+        retained = RunHandle(worker, 1, (keepalive,))
+        retained._finalization_abandoned = True
+        worker._abandoned_run_handles.append(retained)
+
+        def teardown_tree():
+            teardown_calls.append("teardown")
+            worker._worker = None
+
+        def has_live_resources():
+            probe_calls.append("probe")
+            if len(probe_calls) == 1:
+                return True
+            raise residual_probe_interrupt
+
+        monkeypatch.setattr(worker, "_teardown_ready_tree", teardown_tree)
+        monkeypatch.setattr(worker, "_has_live_resources", has_live_resources)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker.close()
+
+        assert caught.value is residual_probe_interrupt
+        assert teardown_calls == ["teardown"]
+        assert probe_calls == ["probe", "probe"]
+        assert retained._keepalive is None
+        assert not worker._abandoned_run_handles
+
+        replayed: list[BaseException] = []
+
+        def retry_close() -> None:
+            try:
+                worker.close()
+            except BaseException as exc:  # noqa: BLE001
+                replayed.append(exc)
+
+        retry = threading.Thread(target=retry_close)
+        retry.start()
+        retry.join(1.0)
+        assert not retry.is_alive()
+        assert replayed == [residual_probe_interrupt]
+        assert teardown_calls == ["teardown"]
+
+    def test_cancellation_abandonment_survives_nested_publication_interrupts(self):
+        lifecycle_interrupt = KeyboardInterrupt("lifecycle publication")
+        terminal_interrupt = SystemExit("terminal publication")
+        cancellation_error = RuntimeError("cancellation did not settle")
+
+        class OnceInterruptingCV:
+            def __init__(self, cv):
+                self.cv = cv
+                self.interrupted = False
+
+            def __enter__(self):
+                if not self.interrupted:
+                    self.interrupted = True
+                    raise lifecycle_interrupt
+                return self.cv.__enter__()
+
+            def __exit__(self, *exc_info):
+                return self.cv.__exit__(*exc_info)
+
+            def notify_all(self):
+                self.cv.notify_all()
+
+        class InterruptingHandle(RunHandle):
+            interrupt_terminal = False
+
+            def __setattr__(self, name, value):
+                if name == "_terminal" and value is True and self.interrupt_terminal:
+                    self.interrupt_terminal = False
+                    raise terminal_interrupt
+                return super().__setattr__(name, value)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        handle = InterruptingHandle(worker, 1, (object(),))
+        handle.interrupt_terminal = True
+        worker._accepted_run_handles.add(handle)
+        worker._hierarchical_start_cv = cast(Any, OnceInterruptingCV(worker._hierarchical_start_cv))
+
+        worker._abandon_unsettled_run(handle, str(cancellation_error), cancellation_error)
+
+        assert handle._terminal
+        assert not handle._wait_in_progress
+        assert not handle._accept_wait_in_progress
+        assert isinstance(handle._error, RuntimeError)
+        assert str(handle._error) == str(cancellation_error)
+        assert handle._error.__cause__ is cancellation_error
+        assert worker._ordered_cleanup_error is handle._error
+        assert handle._keepalive is not None
+        assert handle not in worker._accepted_run_handles
+        assert worker._abandoned_run_handles == [handle]
+
     def test_run_finalization_releases_only_its_resources(self, monkeypatch):
         class SlotRef:
             def __init__(self):
@@ -1854,6 +2781,109 @@ class TestRunHandle:
         assert native_orch.released_runs == [1]
         assert worker._accepted_run_handles == {second_handle}
 
+    def test_region_mapping_failure_still_releases_child_and_poisons_successor(self):
+        mapping_error = KeyboardInterrupt("mapping close")
+        release_error = SystemExit("child release")
+
+        class Region:
+            region_id = 11
+            _worker_id = 0
+
+            def __init__(self):
+                self.expired = False
+
+            def _close_l3_host_mapping(self):
+                raise mapping_error
+
+            def _expire(self):
+                self.expired = True
+
+        class NativeWorker:
+            def __init__(self):
+                self.released_regions = []
+
+            def control_l3_l2_region_release(self, worker_id, region_id):
+                self.released_regions.append((worker_id, region_id))
+                raise release_error
+
+        class NativeOrchestrator:
+            def _release_run(self, run_id):
+                raise AssertionError(f"ambiguous run {run_id} must stay owned until tree teardown")
+
+        worker = Worker(level=3, num_sub_workers=0)
+        native_worker = NativeWorker()
+        worker._worker = cast(Any, native_worker)
+        worker._orch = cast(Any, NativeOrchestrator())
+        resources = worker_mod._RunResources()
+        resources.requires_ordered_cleanup = True
+        region = Region()
+        resources.l3_l2_regions.append(region)
+        worker._live_l3_l2_regions.append(region)
+        handle = RunHandle(worker, 1, (), resources)
+        worker._accepted_run_handles.add(handle)
+
+        assert worker._finalize_run_handle(handle, 1, None) is mapping_error
+
+        assert native_worker.released_regions == [(0, 11)]
+        assert region.expired
+        assert resources.l3_l2_regions == []
+        assert worker._live_l3_l2_regions == []
+        assert worker._ordered_cleanup_error is not None
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+
+    def test_region_tracking_interrupt_still_retires_every_region(self):
+        interrupt = KeyboardInterrupt("region tracking removal")
+
+        class InterruptingList(list):
+            def __init__(self, values):
+                super().__init__(values)
+                self.interrupted = False
+
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                if isinstance(key, slice) and not self.interrupted:
+                    self.interrupted = True
+                    raise interrupt
+
+        class Region:
+            def __init__(self, region_id):
+                self.region_id = region_id
+                self._worker_id = 0
+                self.mapping_closes = 0
+                self.expires = 0
+
+            def _close_l3_host_mapping(self):
+                self.mapping_closes += 1
+
+            def _expire(self):
+                self.expires += 1
+
+        class NativeWorker:
+            def __init__(self):
+                self.released_regions = []
+
+            def control_l3_l2_region_release(self, worker_id, region_id):
+                self.released_regions.append((worker_id, region_id))
+
+        first, second = Region(11), Region(22)
+        resources = worker_mod._RunResources()
+        resources.l3_l2_regions = cast(Any, InterruptingList([first, second]))
+        worker = Worker(level=3, num_sub_workers=0)
+        native_worker = NativeWorker()
+        worker._worker = cast(Any, native_worker)
+        worker._live_l3_l2_regions.extend([first, second])
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker._cleanup_l3_l2_regions(resources)
+
+        assert caught.value is interrupt
+        assert native_worker.released_regions == [(0, 11), (0, 22)]
+        assert (first.mapping_closes, first.expires) == (1, 1)
+        assert (second.mapping_closes, second.expires) == (1, 1)
+        assert resources.l3_l2_regions == []
+        assert worker._live_l3_l2_regions == []
+
     def test_domain_released_after_its_run_retired_is_freed_inline(self):
         """A late release has no fence left to defer behind, so it frees now.
 
@@ -1905,6 +2935,215 @@ class TestRunHandle:
         assert freed == ["late", "later"]
         assert second.freed
         assert resources.pending_release_domains == []
+
+    def test_interrupted_domain_queue_publication_keeps_live_owners(self):
+        interrupt = KeyboardInterrupt("pending-domain publication")
+
+        class InterruptingList(list):
+            def append(self, value):
+                raise interrupt
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        resources = worker_mod._RunResources()
+        resources.pending_release_domains = cast(Any, InterruptingList())
+        handle = worker_mod.CommDomainHandle(
+            name="owned",
+            workers=(),
+            contexts={},
+            allocation_id=1,
+            _release_fn=lambda released, owner=resources: worker._release_domain_handle(released, owner),
+        )
+        resources.live_domains[handle.name] = handle
+        worker._live_domains[handle.name] = handle
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.release()
+
+        assert caught.value is interrupt
+        assert handle.released
+        assert resources.live_domains == {handle.name: handle}
+        assert worker._live_domains == {handle.name: handle}
+        assert resources.pending_release_domains == []
+
+    def test_interrupted_post_fence_domain_free_keeps_live_owners(self):
+        interrupt = KeyboardInterrupt("post-fence domain free")
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        resources = worker_mod._RunResources(retired=True)
+        handle = worker_mod.CommDomainHandle(
+            name="owned",
+            workers=(),
+            contexts={},
+            allocation_id=1,
+            _release_fn=lambda released, owner=resources: worker._release_domain_handle(released, owner),
+        )
+        resources.live_domains[handle.name] = handle
+        worker._live_domains[handle.name] = handle
+        worker._free_domain_after_fence = cast(Any, lambda _handle: (_ for _ in ()).throw(interrupt))
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            handle.release()
+
+        assert caught.value is interrupt
+        assert handle.released
+        assert resources.live_domains == {handle.name: handle}
+        assert worker._live_domains == {handle.name: handle}
+        assert resources.pending_release_domains == []
+
+    def test_pending_domain_drain_does_not_clear_unclaimed_owners(self):
+        class NoClearList(list):
+            def clear(self):
+                raise AssertionError("pending owners must stay published until backend success")
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        resources = worker_mod._RunResources()
+        handle = worker_mod.CommDomainHandle(
+            name="pending",
+            workers=(),
+            contexts={},
+            allocation_id=1,
+            _release_fn=lambda released: None,
+        )
+        handle._released = True
+        resources.pending_release_domains = cast(Any, NoClearList([handle]))
+        freed = []
+
+        def free_domain(pending):
+            freed.append(pending)
+            pending._freed = True
+
+        worker._free_domain_after_fence = cast(Any, free_domain)
+
+        worker._execute_pending_domain_releases(resources)
+
+        assert freed == [handle]
+        assert resources.pending_release_domains == []
+
+    def test_failed_pending_domain_drain_retains_its_claim(self):
+        interrupt = KeyboardInterrupt("pending domain free")
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        resources = worker_mod._RunResources()
+        handle = worker_mod.CommDomainHandle(
+            name="pending",
+            workers=(),
+            contexts={},
+            allocation_id=1,
+            _release_fn=lambda released: None,
+        )
+        handle._released = True
+        resources.pending_release_domains.append(handle)
+        worker._free_domain_after_fence = cast(Any, lambda _handle: (_ for _ in ()).throw(interrupt))
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker._execute_pending_domain_releases(resources)
+
+        assert caught.value is interrupt
+        assert resources.pending_release_domains == [handle]
+
+    def test_domain_free_outcome_precedes_caller_interrupt(self, monkeypatch):
+        interrupt = KeyboardInterrupt("after isolated domain free")
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        handle = worker_mod.CommDomainHandle(
+            name="domain",
+            workers=(),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda released: None,
+        )
+        backend_calls = []
+        worker._release_domain_claimed = cast(Any, lambda claimed: backend_calls.append(claimed.allocation_id))
+
+        def interrupt_after_target(items, target, **kwargs):
+            for item in items:
+                target(item)
+            raise interrupt
+
+        monkeypatch.setattr(worker_mod, "_start_and_join_threads", interrupt_after_target)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker._release_domain_now(handle)
+
+        assert caught.value is interrupt
+        assert backend_calls == [7]
+        assert worker._domain_free_results == {7: None}
+
+        worker._release_domain_now(handle)
+        assert backend_calls == [7]
+
+    def test_domain_free_interrupted_before_isolated_admission_is_retryable(self, monkeypatch):
+        interrupt = KeyboardInterrupt("before isolated domain free admission")
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        handle = worker_mod.CommDomainHandle(
+            name="domain",
+            workers=(),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda released: None,
+        )
+        backend_calls: list[int] = []
+        worker._release_domain_claimed = cast(Any, lambda claimed: backend_calls.append(claimed.allocation_id))
+        real_isolated_call = worker_mod._run_isolated_call
+        monkeypatch.setattr(
+            worker_mod,
+            "_run_isolated_call",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(interrupt),
+        )
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker._release_domain_now(handle)
+
+        assert caught.value is interrupt
+        assert backend_calls == []
+        assert 7 not in worker._domain_free_results
+
+        monkeypatch.setattr(worker_mod, "_run_isolated_call", real_isolated_call)
+        worker._release_domain_now(handle)
+
+        assert backend_calls == [7]
+        assert worker._domain_free_results == {7: None}
+
+    def test_domain_free_publication_failure_never_replays_backend(self):
+        publication_error = MemoryError("domain outcome store")
+
+        class InterruptingResults(dict):
+            def __init__(self):
+                super().__init__()
+                self.interrupted = False
+
+            def __setitem__(self, key, value):
+                if value is None and not self.interrupted:
+                    self.interrupted = True
+                    raise publication_error
+                super().__setitem__(key, value)
+
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        worker._domain_free_results = cast(Any, InterruptingResults())
+        handle = worker_mod.CommDomainHandle(
+            name="domain",
+            workers=(),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda released: None,
+        )
+        backend_calls = []
+        worker._release_domain_claimed = cast(Any, lambda claimed: backend_calls.append(claimed.allocation_id))
+
+        with pytest.raises(MemoryError) as caught:
+            worker._release_domain_now(handle)
+
+        assert caught.value is publication_error
+        assert backend_calls == [7]
+        assert isinstance(worker._domain_free_results[7], RuntimeError)
+
+        with pytest.raises(RuntimeError, match="refusing to replay"):
+            worker._release_domain_now(handle)
+        assert backend_calls == [7]
 
     def test_domain_released_while_its_run_retires_is_still_freed(self):
         """A release in flight across retirement must not be stranded.
@@ -2105,8 +3344,10 @@ class TestRunHandle:
         assert not contested.freed
 
         # The sweep is the second caller: it must see the failure, keep the
-        # handle, and leave `freed` false.
-        worker._release_all_live_domains()
+        # handle, leave `freed` false, and report the failure to its own caller
+        # rather than returning as if the domain were reclaimed.
+        with pytest.raises(RuntimeError, match="backend release failed"):
+            worker._release_all_live_domains()
         assert not contested.freed, "a failed release must not be reported as freed"
         assert "contested" in worker._live_domains, "a failed release must stay a detectable residual"
 
@@ -2117,6 +3358,2169 @@ class TestRunHandle:
 
         with pytest.raises(RuntimeError, match="graph is being built"):
             worker._allocate_domain(name="d", workers=(0,), window_size=4096, buffers=[])
+
+
+# ---------------------------------------------------------------------------
+# Test: conditional serial degradation
+#
+# The whole-run FIFO orders tasks. It cannot order a run's *cleanup*, which
+# happens after the native fence and reaches a child through mailbox control
+# rather than a TaskSlot. A run that acquires device-touching cleanup therefore
+# degrades this worker to depth one for exactly that run; runs that only
+# dispatch tasks keep the full pipeline depth.
+# ---------------------------------------------------------------------------
+
+
+class TestOrderedCleanupDegradation:
+    @staticmethod
+    def _worker():
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        return worker
+
+    def _accepted(self, worker, *, bears_cleanup: bool):
+        resources = worker_mod._RunResources()
+        resources.requires_ordered_cleanup = bears_cleanup
+        handle = RunHandle(worker, 1, (), resources)
+        worker._accepted_run_handles.add(handle)
+        return handle, resources
+
+    def test_only_device_touching_resources_make_a_run_cleanup_bearing(self):
+        """The sticky flag is set where teardown reaches a child, and nowhere else.
+
+        Marking every control-using run would drag a run that merely mallocs
+        down to depth one, which is the overlap the pipeline exists to buy.
+        """
+        worker = self._worker()
+
+        # A CommDomain: its release drives CTRL_RELEASE_DOMAIN on every member.
+        resources = worker_mod._RunResources()
+        assert not resources.requires_ordered_cleanup
+        handle = worker_mod.CommDomainHandle(
+            name="d", workers=(), contexts={}, allocation_id=1, _release_fn=lambda released: None
+        )
+        resources.live_domains[handle.name] = handle
+        resources.requires_ordered_cleanup = True  # set by _allocate_domain at this point
+        assert resources.requires_ordered_cleanup
+
+        # A remote slot reference: releasing it is an RPC to the owning worker.
+        # `create_l3_l2_queue` is not a fourth set-point — it builds its region
+        # through `create_l3_l2_region`, and inherits the flag from there.
+        remote = worker_mod._RunResources()
+        worker._building_run_resources = remote
+        ref = cast(Any, object())
+        worker._adopt_remote_slot_refs([ref])
+        assert remote.requires_ordered_cleanup
+        assert remote.remote_slot_refs == [ref]
+
+        # Adopting nothing is not an acquisition.
+        empty = worker_mod._RunResources()
+        worker._building_run_resources = empty
+        worker._adopt_remote_slot_refs([])
+        assert not empty.requires_ordered_cleanup
+
+    def test_a_task_only_run_does_not_block_the_next_submission(self):
+        worker = self._worker()
+        self._accepted(worker, bears_cleanup=False)
+        assert worker._cleanup_bearing_predecessor() is None
+
+    def test_a_cleanup_bearing_run_blocks_until_its_cleanup_is_published(self):
+        worker = self._worker()
+        handle, _ = self._accepted(worker, bears_cleanup=True)
+        assert worker._cleanup_bearing_predecessor() is handle
+
+        handle._cleanup_published = True
+        assert worker._cleanup_bearing_predecessor() is None
+
+    def test_a_fired_native_fence_does_not_release_the_successor(self):
+        """`done` is the device draining; it is not the cleanup boundary.
+
+        A successor keyed on the native answer would be admitted while the
+        CommDomain / L3-L2 / remote-slot teardown is still outstanding.
+        """
+        worker = self._worker()
+        handle, _ = self._accepted(worker, bears_cleanup=True)
+        with handle._cv:
+            handle._terminal = True
+        assert handle.done
+        assert not handle._cleanup_published
+
+        assert worker._cleanup_bearing_predecessor() is handle
+
+    def test_a_failed_task_does_not_poison_the_worker(self):
+        """A kernel that failed says nothing about whether cleanup succeeded.
+
+        Merging the two would shut a worker permanently for an ordinary task
+        error, and there is no reopening it.
+        """
+        worker = self._worker()
+        handle, _ = self._accepted(worker, bears_cleanup=True)
+        worker._orch = cast(Any, _StubOrch())
+
+        native = RuntimeError("kernel failed")
+        assert worker._finalize_run_handle(handle, 1, native) is native
+        assert worker._ordered_cleanup_error is None
+        assert handle._cleanup_published
+        assert handle not in worker._accepted_run_handles
+        worker._require_no_ordered_cleanup_failure("submit")  # admits
+
+    def test_a_failed_cleanup_poisons_the_worker_and_refuses_admission(self):
+        worker = self._worker()
+        handle, resources = self._accepted(worker, bears_cleanup=True)
+        worker._orch = cast(Any, _StubOrch())
+        boom = RuntimeError("domain release failed")
+
+        def failing_release(res):
+            raise boom
+
+        worker._release_all_live_domains = cast(Any, failing_release)
+        resources.live_domains["d"] = cast(Any, object())
+
+        assert worker._finalize_run_handle(handle, 1, None) is boom
+        assert worker._ordered_cleanup_error is boom
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+
+    def test_the_poison_is_published_before_the_handle_is_dropped(self):
+        """Ordering, not just outcome.
+
+        A submitter that saw neither — handle already gone, poison not yet set
+        — would find no cleanup-bearing predecessor and no reason to refuse,
+        and would be admitted on top of unreclaimed device state.
+        """
+        worker = self._worker()
+        handle, resources = self._accepted(worker, bears_cleanup=True)
+        worker._orch = cast(Any, _StubOrch())
+        observed: list[tuple[bool, bool]] = []
+
+        def watching_discard(item):
+            observed.append((worker._ordered_cleanup_error is not None, item._cleanup_published))
+
+        worker._accepted_run_handles = cast(Any, _WatchedSet(worker._accepted_run_handles, watching_discard))
+        resources.live_domains["d"] = cast(Any, object())
+        worker._release_all_live_domains = cast(Any, _raiser(RuntimeError("cleanup failed")))
+
+        worker._finalize_run_handle(handle, 1, None)
+        assert observed == [(True, True)], "the handle was dropped before its poison was visible"
+
+    def test_a_submission_waiting_on_cleanup_cannot_bypass_its_poison(self):
+        """The lease-time check cannot have seen a poison this call just waited on.
+
+        Two submissions can both pass native admission before either reaches
+        the serializer, so the refusal is re-tested under `_submit_mu`, after
+        the handoff wait.
+        """
+        worker = self._worker()
+        handle, _ = self._accepted(worker, bears_cleanup=True)
+        boom = RuntimeError("cleanup failed")
+
+        def handoff():
+            # Whoever ran the cleanup published the poison before dropping the
+            # handle; this waiter only has to let the check see it.
+            worker._ordered_cleanup_error = boom
+            handle._cleanup_published = True
+            worker._accepted_run_handles.discard(handle)
+
+        handle._wait_for_handoff = cast(Any, handoff)
+        worker._submit_l3_locked = cast(Any, _raiser(AssertionError("admitted on top of a failed cleanup")))
+
+        with pytest.raises(RuntimeError, match="no further work is admitted") as excinfo:
+            worker._submit_locked(lambda *a: None, None, None)
+        assert excinfo.value.__cause__ is boom
+
+
+class TestDirectControlOrdering:
+    """`malloc` / `free` / `copy_*` / `committed_device_memory` / domain and
+    region creation / every `remote_*` buffer call reach a child directly
+    rather than through a TaskSlot, so the ready-queue FIFO does not order
+    them. Two boundaries close that: control issued inside a run waits for that
+    run to hold the FIFO head, and control issued outside every run reserves
+    the worker for the whole call.
+    """
+
+    @staticmethod
+    def _orch(worker):
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        from simpler.orchestrator import Orchestrator  # noqa: PLC0415
+
+        native = MagicMock()
+        native.malloc.return_value = 0x1000
+        return Orchestrator(native, worker), native
+
+    def test_control_inside_a_run_waits_for_that_run_to_hold_the_fifo_head(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            orch.malloc(0, 64)
+        native.await_run_admission.assert_called_once_with(7)
+
+    def test_control_after_a_task_submission_in_the_same_run_is_refused(self):
+        """A task travels the ready queue and control travels the mailbox.
+
+        Their order is undefined, and two such pairs on different chips can
+        each hold the mailbox the other is waiting for.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            orch.malloc(0, 64)  # before any submit: fine
+            orch_mod._admit_task_submission(worker)
+            with pytest.raises(RuntimeError, match="cannot follow a task submission"):
+                orch.malloc(0, 64)
+        assert native.malloc.call_count == 1
+
+    def test_caught_submit_validation_failure_does_not_forbid_later_control(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            with pytest.raises(TypeError, match="expects a CallableHandle"):
+                orch.submit_sub(object())
+            orch.malloc(0, 64)
+
+        native.submit_sub.assert_not_called()
+        native.malloc.assert_called_once()
+
+    def test_native_submit_attempt_forbids_later_control_even_when_it_raises(self, monkeypatch):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+        monkeypatch.setattr(
+            orch_mod,
+            "_require_handle",
+            lambda *_args, **_kwargs: (b"digest", "python", "LOCAL_PYTHON", ()),
+        )
+        native.submit_sub.side_effect = RuntimeError("native submit failed")
+
+        with orch_mod._callback_run(7, worker):
+            with pytest.raises(RuntimeError, match="native submit failed"):
+                orch.submit_sub(object())
+            with pytest.raises(RuntimeError, match="cannot follow a task submission"):
+                orch.malloc(0, 64)
+
+        native.submit_sub.assert_called_once()
+        native.malloc.assert_not_called()
+
+    def test_each_run_starts_with_no_submissions_of_its_own(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, _native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            orch_mod._admit_task_submission(worker)
+        with orch_mod._callback_run(8, worker):
+            orch.malloc(0, 64)
+
+    def test_a_nested_run_restores_its_callers_marker(self):
+        """An L4 callback drives its children's runs on its own thread.
+
+        The inner run's context is not the outer one's: it must neither inherit
+        the outer submission nor erase it on the way out.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, _native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            orch_mod._admit_task_submission(worker)
+            with orch_mod._callback_run(8, worker):
+                orch.malloc(0, 64)  # the inner run has submitted nothing
+            with pytest.raises(RuntimeError, match="cannot follow a task submission"):
+                orch.malloc(0, 64)
+        assert orch_mod._callback_frames() == []
+
+    def test_the_reservation_spans_the_call_not_just_the_check(self):
+        """A sampled check leaves the command itself outside the decision.
+
+        Between "no run is in flight" and the mailbox write, a submit can be
+        admitted and dispatch a task that races it — which is the whole thing
+        the check was for. The serializer submission holds is held here too.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, _native = self._orch(worker)
+
+        in_control = threading.Event()
+        release_control = threading.Event()
+        submit_entered = threading.Event()
+
+        def _blocking_native_malloc(*_args):
+            in_control.set()
+            assert release_control.wait(5.0), "test never released the control call"
+            return 0x1000
+
+        _native.malloc = _blocking_native_malloc
+        worker._submit_l3_locked = cast(Any, lambda *a: submit_entered.set())
+
+        control = threading.Thread(target=lambda: orch.malloc(0, 64), daemon=True)
+        control.start()
+        assert in_control.wait(5.0), "the control call never reached the child"
+
+        submitter = threading.Thread(target=lambda: worker._submit_locked(lambda *a: None, None, None), daemon=True)
+        submitter.start()
+        assert not submit_entered.wait(0.5), "a run was admitted while a control call was still in flight"
+
+        release_control.set()
+        control.join(5.0)
+        assert submit_entered.wait(5.0), "the submission stayed blocked after the control call finished"
+        submitter.join(5.0)
+
+    def test_the_reservation_is_reentrant_within_one_thread(self):
+        """One control call can be built out of others — a queue out of a region.
+
+        The serializer it takes is not re-entrant, so the inner call has to
+        join the outer reservation rather than deadlock on it.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+
+        with worker._control_reservation("outer"), worker._control_reservation("inner"):
+            pass
+        # And the reservation is released, not leaked, on the way out.
+        with worker._control_reservation("again"):
+            pass
+
+    def test_a_run_on_one_worker_does_not_admit_control_on_another(self):
+        """A run id names nothing on its own — run 1 exists on every Worker.
+
+        Inside Worker A's run, a call on Worker B is B's business: it must take
+        B's own reservation, not wait on whatever B happens to call run 1, and
+        certainly not skip B's admission because A has a run open.
+        """
+        worker_a = Worker(level=3, num_sub_workers=0)
+        worker_a._worker = cast(Any, object())
+        worker_b = Worker(level=3, num_sub_workers=0)
+        worker_b._worker = cast(Any, object())
+        orch_b, native_b = self._orch(worker_b)
+
+        # B has its own run 1 in flight — colliding id, unrelated run.
+        b_handle = RunHandle(worker_b, 1, (), worker_mod._RunResources())
+        worker_b._accepted_run_handles.add(b_handle)
+
+        with orch_mod._callback_run(1, worker_a):
+            with pytest.raises(RuntimeError, match="still in flight"):
+                orch_b.malloc(0, 64)
+        native_b.await_run_admission.assert_not_called()
+
+    def test_a_reservation_on_one_worker_does_not_cover_another(self):
+        worker_a = Worker(level=3, num_sub_workers=0)
+        worker_a._worker = cast(Any, object())
+        worker_b = Worker(level=3, num_sub_workers=0)
+        worker_b._worker = cast(Any, object())
+        orch_b, _native_b = self._orch(worker_b)
+
+        b_handle = RunHandle(worker_b, 1, (), worker_mod._RunResources())
+        worker_b._accepted_run_handles.add(b_handle)
+
+        with worker_a._control_reservation("Worker.malloc"):
+            with pytest.raises(RuntimeError, match="still in flight"):
+                orch_b.malloc(0, 64)
+
+    def test_a_nested_worker_callback_keeps_its_callers_ordering(self):
+        """An L4 callback drives its child's run on its own thread.
+
+        The inner frame belongs to the child, so control on the parent still
+        finds the parent's frame rather than falling through to a reservation
+        the parent's own open callback would deadlock on.
+        """
+        parent = Worker(level=4, num_sub_workers=0)
+        parent._worker = cast(Any, object())
+        child = Worker(level=3, num_sub_workers=0)
+        child._worker = cast(Any, object())
+        orch_parent, native_parent = self._orch(parent)
+        orch_child, native_child = self._orch(child)
+
+        with orch_mod._callback_run(5, parent):
+            with orch_mod._callback_run(9, child):
+                orch_child.malloc(0, 64)
+                orch_parent.malloc(0, 64)
+        native_child.await_run_admission.assert_called_once_with(9)
+        native_parent.await_run_admission.assert_called_once_with(5)
+
+    def test_run_owned_control_rechecks_the_sticky_poison(self):
+        """A callback can catch a rollback failure and carry on.
+
+        Holding the FIFO head says nothing about whether this worker still has
+        reclaimable device state, so the refusal is re-read on every call.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            orch.malloc(0, 64)
+            worker._ordered_cleanup_error = RuntimeError("region rollback leaked")
+            with pytest.raises(RuntimeError, match="no further work is admitted"):
+                orch.malloc(0, 64)
+        assert native.malloc.call_count == 1
+
+    def test_task_submission_rechecks_the_sticky_poison(self):
+        """Same reason control does: the callback may have caught the failure.
+
+        A run whose own graph construction leaked device state must not keep
+        putting work behind it.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        worker._ordered_cleanup_error = RuntimeError("region rollback leaked")
+
+        with orch_mod._callback_run(7, worker):
+            with pytest.raises(RuntimeError, match="no further work is admitted"):
+                orch_mod._admit_task_submission(worker)
+
+    def test_owner_less_control_is_refused_after_a_cleanup_failure(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, _native = self._orch(worker)
+
+        worker._ordered_cleanup_error = RuntimeError("domain release failed")
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            orch.malloc(0, 64)
+
+    def test_a_mailbox_query_takes_the_same_ordering_as_a_command(self):
+        """`committed_device_memory` is a read, but it travels the same mailbox.
+
+        Answered from behind a run that is still allocating, the number
+        describes neither the state before nor the state after.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+        native.committed_device_memory.return_value = 4096
+
+        with orch_mod._callback_run(11, worker):
+            assert orch.committed_device_memory(0) == 4096
+        native.await_run_admission.assert_called_once_with(11)
+
+        handle = RunHandle(worker, 1, (), worker_mod._RunResources())
+        worker._accepted_run_handles.add(handle)
+        with pytest.raises(RuntimeError, match="still in flight"):
+            orch.committed_device_memory(0)
+
+    def test_owner_less_control_is_refused_while_a_run_is_in_flight(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        orch, native = self._orch(worker)
+
+        orch.malloc(0, 64)  # quiescent: admitted
+        handle = RunHandle(worker, 1, (), worker_mod._RunResources())
+        worker._accepted_run_handles.add(handle)
+
+        with pytest.raises(RuntimeError, match="still in flight"):
+            orch.malloc(0, 64)
+        native.await_run_admission.assert_not_called()
+
+        # A run whose cleanup has been published is no longer in flight, even
+        # though nothing removed the handle here.
+        handle._cleanup_published = True
+        orch.malloc(0, 64)
+        assert native.malloc.call_count == 2
+
+
+class TestRemoteControlOrdering:
+    """`remote_*` buffer commands and remote task dispatch both end up
+    contending for the endpoint's command mutex, so which arrives first is the
+    scheduler's choice. They take the same admission local control does.
+    """
+
+    @staticmethod
+    def _worker():
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        worker = Worker(level=4, num_sub_workers=0)
+        native = MagicMock()
+        native.remote_malloc.return_value = (0, 1, 1, 2, 4, 0, 0, 0)
+        worker._worker = native
+        worker._lifecycle = worker_mod._Lifecycle.READY
+        worker._require_remote_worker_started = cast(Any, lambda _wid: None)
+        native_orch = MagicMock()
+        worker._orch = cast(Any, SimpleNamespace(_o=native_orch))
+        return worker, native, native_orch
+
+    def test_a_remote_command_inside_a_run_waits_for_the_fifo_head(self):
+        worker, _native, native_orch = self._worker()
+        with orch_mod._callback_run(3, worker):
+            worker.remote_malloc(worker=0, nbytes=4)
+        native_orch.await_run_admission.assert_called_once_with(3)
+
+    def test_a_remote_command_after_a_task_submission_is_refused(self):
+        worker, native, _native_orch = self._worker()
+        with orch_mod._callback_run(3, worker):
+            orch_mod._admit_task_submission(worker)
+            with pytest.raises(RuntimeError, match="cannot follow a task submission"):
+                worker.remote_malloc(worker=0, nbytes=4)
+
+    def test_an_owner_less_remote_command_is_refused_while_a_run_is_in_flight(self):
+        worker, native, _native_orch = self._worker()
+        worker.remote_malloc(worker=0, nbytes=4)  # quiescent: admitted
+
+        handle = RunHandle(worker, 1, (), worker_mod._RunResources())
+        worker._accepted_run_handles.add(handle)
+        with pytest.raises(RuntimeError, match="still in flight"):
+            worker.remote_malloc(worker=0, nbytes=4)
+
+    def test_a_deferred_free_sends_nothing_and_is_not_ordered(self):
+        """A free behind a live slot ref only records the debt.
+
+        Nothing reaches the owner, so there is no command for admission to
+        order — and refusing it would break the ordinary shape of freeing an
+        input right after the task that reads it.
+        """
+        worker, native, _native_orch = self._worker()
+        buffer = worker.remote_malloc(worker=0, nbytes=4)
+        buffer._acquire_slot_ref()
+
+        with orch_mod._callback_run(3, worker):
+            orch_mod._admit_task_submission(worker)
+            worker.remote_free(buffer)
+
+        assert buffer.released
+        assert worker._pending_remote_buffer_frees == [buffer]
+        native.remote_free.assert_not_called()
+
+    def test_interrupted_import_release_attempts_the_rest_without_losing_debt(self, monkeypatch):
+        worker = Worker(level=4, num_sub_workers=0)
+        interrupt = KeyboardInterrupt("release import")
+
+        def imported(buffer_id, import_id):
+            owner = worker_mod.RemoteBufferHandle._from_remote_allocation(
+                worker_id=0,
+                buffer_id=buffer_id,
+                generation=1,
+                address_space=worker_mod.RemoteAddressSpace.REMOTE_DEVICE,
+                nbytes=4,
+            )
+            owner._acquire_import_ref()
+            handle = worker_mod.RemoteBufferHandle._from_imported_mapping(
+                worker_id=1,
+                owner_worker_id=0,
+                buffer_id=buffer_id,
+                generation=1,
+                import_id=import_id,
+                address_space=worker_mod.RemoteAddressSpace.REMOTE_WINDOW,
+                nbytes=4,
+                offset=0,
+                owner_handle_ref=owner,
+            )
+            return handle, owner
+
+        interrupted, interrupted_owner = imported(1, 11)
+        released, released_owner = imported(2, 22)
+        blocked, blocked_owner = imported(3, 33)
+        blocked._acquire_slot_ref()
+        worker._pending_remote_import_releases.extend([interrupted, released, blocked])
+        calls = []
+
+        def release_import(handle):
+            calls.append(handle.import_id)
+            if handle is interrupted:
+                raise interrupt
+
+        monkeypatch.setattr(worker, "_send_remote_release_import", release_import)
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker._flush_pending_remote_frees()
+
+        assert caught.value is interrupt
+        assert calls == [11, 22]
+        assert worker._pending_remote_import_releases == [interrupted, blocked]
+        assert interrupted._owner_handle_ref is interrupted_owner
+        assert interrupted_owner._live_import_refs == 1
+        assert released._owner_handle_ref is None
+        assert released_owner._live_import_refs == 0
+        assert blocked._owner_handle_ref is blocked_owner
+        assert blocked_owner._live_import_refs == 1
+
+    def test_post_rpc_import_retirement_interrupt_never_replays_the_debt(self, monkeypatch):
+        worker = Worker(level=4, num_sub_workers=0)
+        interrupt = KeyboardInterrupt("owner reference retirement")
+
+        class Owner:
+            def __init__(self, *, interrupts=False):
+                self.interrupts = interrupts
+                self.release_calls = 0
+
+            def _release_import_ref(self):
+                self.release_calls += 1
+                if self.interrupts:
+                    raise interrupt
+
+        def imported(buffer_id, import_id, owner):
+            return worker_mod.RemoteBufferHandle._from_imported_mapping(
+                worker_id=1,
+                owner_worker_id=0,
+                buffer_id=buffer_id,
+                generation=1,
+                import_id=import_id,
+                address_space=worker_mod.RemoteAddressSpace.REMOTE_WINDOW,
+                nbytes=4,
+                offset=0,
+                owner_handle_ref=cast(Any, owner),
+            )
+
+        interrupted_owner = Owner(interrupts=True)
+        released_owner = Owner()
+        interrupted = imported(1, 11, interrupted_owner)
+        released = imported(2, 22, released_owner)
+        worker._pending_remote_import_releases.extend([interrupted, released])
+        rpc_calls = []
+        monkeypatch.setattr(worker, "_send_remote_release_import", lambda handle: rpc_calls.append(handle.import_id))
+
+        with pytest.raises(KeyboardInterrupt) as caught:
+            worker._flush_pending_remote_frees()
+
+        assert caught.value is interrupt
+        assert rpc_calls == [11, 22]
+        assert interrupted_owner.release_calls == 1
+        assert released_owner.release_calls == 1
+        assert worker._pending_remote_import_releases == [interrupted]
+
+        with pytest.raises(KeyboardInterrupt) as repeated:
+            worker._flush_pending_remote_frees()
+
+        assert repeated.value is interrupt
+        assert rpc_calls == [11, 22]
+        assert interrupted_owner.release_calls == 1
+        assert released_owner.release_calls == 1
+        assert worker._pending_remote_import_releases == [interrupted]
+
+    def test_interrupted_owner_free_attempts_the_rest_without_losing_debt(self, monkeypatch):
+        worker = Worker(level=4, num_sub_workers=0)
+        interrupt = SystemExit("remote free")
+
+        def owner(buffer_id):
+            return worker_mod.RemoteBufferHandle._from_remote_allocation(
+                worker_id=0,
+                buffer_id=buffer_id,
+                generation=1,
+                address_space=worker_mod.RemoteAddressSpace.REMOTE_DEVICE,
+                nbytes=4,
+            )
+
+        interrupted = owner(1)
+        freed = owner(2)
+        blocked = owner(3)
+        blocked._acquire_import_ref()
+        worker._pending_remote_buffer_frees.extend([interrupted, freed, blocked])
+        calls = []
+
+        def remote_free(handle):
+            calls.append(handle._buffer_id)
+            if handle is interrupted:
+                raise interrupt
+
+        monkeypatch.setattr(worker, "_send_remote_free", remote_free)
+
+        with pytest.raises(SystemExit) as caught:
+            worker._flush_pending_remote_frees()
+
+        assert caught.value is interrupt
+        assert calls == [1, 2]
+        assert worker._pending_remote_buffer_frees == [interrupted, blocked]
+
+
+class TestUnreclaimedDeviceStateIsNeverSilent:
+    """Every path that leaves a resource on a chip either hands it to the run's
+    cleanup or refuses further work. Reporting a plain error over it lets the
+    next run start on top of state nothing can name.
+    """
+
+    @staticmethod
+    def _worker():
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        return worker
+
+    def test_a_partial_domain_allocation_keeps_its_original_release_ranks(self, monkeypatch):
+        """Two chips of three committed a window and no handle exists.
+
+        The release has to reach exactly the two that allocated: driving it at
+        the third would fail on a debt it does not hold, and poison the worker
+        for a partial failure that was handled correctly.
+        """
+        worker = self._worker()
+        worker._config = {"device_ids": [0, 1, 2]}
+        resources = worker_mod._RunResources()
+        worker._building_run_resources = resources
+        monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+
+        def partial_failure(*, reply_shms, **_kwargs):
+            assert reply_shms is not None
+            for chip_idx in (0, 2):
+                reply_buf = reply_shms[chip_idx].buf
+                assert reply_buf is not None
+                struct.pack_into("<Q", reply_buf, worker_mod._OFF_DOMAIN_REPLY_COMMITTED, 1)
+            raise RuntimeError("rank 1 failed")
+
+        monkeypatch.setattr(worker, "_dispatch_control_domain", partial_failure)
+        with pytest.raises(RuntimeError, match="rank 1 failed"):
+            worker._allocate_domain(name="d", workers=(0, 1, 2), window_size=64, buffers=[])
+
+        handle = resources.live_domains["d"]
+        assert handle.workers == (0, 2), "release would reach a chip that never allocated"
+        assert worker._live_domains["d"] is handle
+        assert resources.requires_ordered_cleanup, "a leaked window did not degrade the successor"
+
+        release_headers = {}
+
+        def capture_release(*, workers, request_shms, **_kwargs):
+            for chip_idx in workers:
+                request_buf = request_shms[chip_idx].buf
+                assert request_buf is not None
+                release_headers[chip_idx] = worker_mod._DOMAIN_REQ_HEADER.unpack_from(request_buf, 0)[:3]
+
+        monkeypatch.setattr(worker, "_dispatch_control_domain", capture_release)
+        worker._release_domain_claimed(handle)
+
+        assert release_headers == {
+            0: (handle.allocation_id, 3, 0),
+            2: (handle.allocation_id, 3, 2),
+        }
+
+    def test_a_chip_that_committed_before_its_reply_failed_is_still_reclaimed(self):
+        """The window exists before the reply is written.
+
+        A chip whose RPC failed after `comm_alloc_domain_windows` returned is
+        holding an allocation, so "which RPCs failed" is the wrong question —
+        each chip publishes its own commit and the parent reads that.
+        """
+        reply = SharedMemory(create=True, size=worker_mod._DOMAIN_REPLY_HEADER.size)
+        try:
+            assert not worker_mod._domain_reply_committed(reply), "a zero-filled reply must not read as committed"
+            struct.pack_into("<Q", cast(Any, reply.buf), worker_mod._OFF_DOMAIN_REPLY_COMMITTED, 1)
+            assert worker_mod._domain_reply_committed(reply)
+        finally:
+            reply.close()
+            reply.unlink()
+
+        assert not worker_mod._domain_reply_committed(None), "a chip that never got a reply slot owes nothing"
+
+    def test_the_child_publishes_its_commit_before_anything_that_can_fail(self):
+        """A carving overflow is raised after the window is already allocated.
+
+        The chip must have said so first, or the parent excludes it from
+        cleanup and the window is leaked for the worker's lifetime.
+        """
+        request = SharedMemory(create=True, size=worker_mod._DOMAIN_REQ_HEADER.size + 8 + 4)
+        reply = SharedMemory(create=True, size=worker_mod._DOMAIN_REPLY_HEADER.size + 8)
+        try:
+            req_buf = cast(Any, request.buf)
+            worker_mod._DOMAIN_REQ_HEADER.pack_into(
+                req_buf, 0, 7, 1, 0, 64, 1
+            )  # allocation_id, rank_count, domain_rank, window_size, buffer_count
+            # One buffer larger than the window: the carve raises after the
+            # collective has already committed.
+            struct.pack_into("<Q", req_buf, worker_mod._DOMAIN_REQ_HEADER.size, 4096)
+            struct.pack_into("<I", req_buf, worker_mod._DOMAIN_REQ_HEADER.size + 8, 0)
+
+            cw = cast(Any, SimpleNamespace(_impl=SimpleNamespace()))
+
+            def committed(*args):
+                ctypes.c_uint64.from_address(args[5]).value = 1
+                return 0xC7, 0xB000
+
+            cw._impl.comm_alloc_domain_windows = committed
+            mailbox = memoryview(bytearray(MAILBOX_SIZE))
+            for offset, shm_name in (
+                (worker_mod._OFF_ARGS, request.name),
+                (worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES, reply.name),
+            ):
+                encoded = shm_name.encode("utf-8")
+                mailbox[offset : offset + len(encoded)] = encoded
+
+            with (
+                patch.object(worker_mod, "_comm_base_handle", lambda _cw: 1),
+                pytest.raises(ValueError, match="overflows window_size"),
+            ):
+                worker_mod._handle_ctrl_alloc_domain(cw, mailbox)
+
+            assert worker_mod._domain_reply_committed(reply), (
+                "the window was allocated and the chip did not say so before failing"
+            )
+        finally:
+            for shm in (request, reply):
+                shm.close()
+                shm.unlink()
+
+    def test_native_commit_publication_survives_result_conversion_failure(self):
+        request = SharedMemory(create=True, size=worker_mod._DOMAIN_REQ_HEADER.size + 4)
+        reply = SharedMemory(create=True, size=worker_mod._DOMAIN_REPLY_HEADER.size)
+        try:
+            req_buf = cast(Any, request.buf)
+            worker_mod._DOMAIN_REQ_HEADER.pack_into(req_buf, 0, 7, 1, 0, 64, 0)
+            struct.pack_into("<I", req_buf, worker_mod._DOMAIN_REQ_HEADER.size, 0)
+
+            def committed_then_failed(*args):
+                commit_address = args[5]
+                ctypes.c_uint64.from_address(commit_address).value = 1
+                raise MemoryError("tuple conversion failed")
+
+            cw = cast(Any, SimpleNamespace(_impl=SimpleNamespace()))
+            cw._impl.comm_alloc_domain_windows = committed_then_failed
+            mailbox = memoryview(bytearray(MAILBOX_SIZE))
+            for offset, shm_name in (
+                (worker_mod._OFF_ARGS, request.name),
+                (worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES, reply.name),
+            ):
+                encoded = shm_name.encode("utf-8")
+                mailbox[offset : offset + len(encoded)] = encoded
+
+            with (
+                patch.object(worker_mod, "_comm_base_handle", lambda _cw: 1),
+                pytest.raises(MemoryError, match="tuple conversion failed"),
+            ):
+                worker_mod._handle_ctrl_alloc_domain(cw, mailbox)
+
+            assert worker_mod._domain_reply_committed(reply)
+        finally:
+            for shm in (request, reply):
+                shm.close()
+                shm.unlink()
+
+    def test_a_fully_failed_domain_allocation_owes_nothing(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"device_ids": [0, 1, 2]}
+        resources = worker_mod._RunResources()
+        worker._building_run_resources = resources
+        monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+        monkeypatch.setattr(
+            worker,
+            "_dispatch_control_domain",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("no rank committed")),
+        )
+
+        with pytest.raises(RuntimeError, match="no rank committed"):
+            worker._allocate_domain(name="d", workers=(0, 1, 2), window_size=64, buffers=[])
+
+        assert "d" not in resources.live_domains
+        assert "d" not in worker._live_domains
+        assert not resources.requires_ordered_cleanup
+
+    def test_domain_fanout_launches_later_ranks_after_a_start_boundary_interrupt(self, monkeypatch):
+        worker = self._worker()
+        calls: list[int] = []
+        worker._worker = cast(
+            Any,
+            SimpleNamespace(control_release_domain=lambda chip_idx, _request_name: calls.append(chip_idx)),
+        )
+        requests = {chip_idx: SharedMemory(create=True, size=worker_mod._DOMAIN_REQ_HEADER.size) for chip_idx in (0, 1)}
+        real_thread = threading.Thread
+
+        class StartBoundaryInterrupt(real_thread):
+            armed = True
+
+            def start(self):
+                super().start()
+                if StartBoundaryInterrupt.armed:
+                    StartBoundaryInterrupt.armed = False
+                    raise KeyboardInterrupt
+
+        monkeypatch.setattr(worker_mod.threading, "Thread", StartBoundaryInterrupt)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                worker._dispatch_control_domain(
+                    workers=(0, 1),
+                    request_shms=requests,
+                    reply_shms=None,
+                    op="release",
+                    allocation_id=7,
+                )
+            assert sorted(calls) == [0, 1]
+        finally:
+            for request in requests.values():
+                request.close()
+                request.unlink()
+
+    def test_fanout_defers_an_interrupt_after_a_confirmed_launch_until_every_target_finishes(self):
+        rank_zero_entered = threading.Event()
+        rank_one_completed = threading.Event()
+        allow_rank_zero = threading.Event()
+        runner_completed = threading.Event()
+        calls: list[int] = []
+        first_interrupt = KeyboardInterrupt("after confirmed launch")
+        raised: list[BaseException] = []
+        hook_calls: list[int] = []
+
+        def target(rank: int) -> None:
+            if rank == 0:
+                rank_zero_entered.set()
+                assert allow_rank_zero.wait(5.0)
+            calls.append(rank)
+            if rank == 1:
+                rank_one_completed.set()
+
+        def interrupt_after_first_start(rank: int) -> None:
+            hook_calls.append(rank)
+            if rank == 0:
+                raise first_interrupt
+
+        def run_fanout() -> None:
+            try:
+                worker_mod._start_and_join_threads(
+                    (0, 1),
+                    target,
+                    name_prefix="test_post_launch_",
+                    _after_start=interrupt_after_first_start,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                raised.append(exc)
+            finally:
+                runner_completed.set()
+
+        runner = threading.Thread(target=run_fanout)
+        try:
+            runner.start()
+            assert rank_zero_entered.wait(5.0)
+            assert rank_one_completed.wait(5.0), "the later rank was not launched after the boundary interrupt"
+            assert not runner_completed.wait(0.1), "fanout returned while rank zero still owned caller state"
+            allow_rank_zero.set()
+            runner.join(5.0)
+
+            assert not runner.is_alive()
+            assert sorted(calls) == [0, 1]
+            assert hook_calls == [0, 1]
+            assert raised == [first_interrupt]
+        finally:
+            allow_rank_zero.set()
+            runner.join(5.0)
+
+    def test_fanout_defers_a_phase_advance_interrupt_until_every_target_finishes(self):
+        rank_zero_entered = threading.Event()
+        rank_one_completed = threading.Event()
+        allow_rank_zero = threading.Event()
+        runner_completed = threading.Event()
+        first_interrupt = KeyboardInterrupt("phase advance")
+        phase_advances: list[int] = []
+        raised: list[BaseException] = []
+
+        def target(rank: int) -> None:
+            if rank == 0:
+                rank_zero_entered.set()
+                assert allow_rank_zero.wait(5.0)
+            if rank == 1:
+                rank_one_completed.set()
+
+        def interrupt_after_launch_phase(phase: int) -> None:
+            phase_advances.append(phase)
+            if phase == 0:
+                raise first_interrupt
+
+        def run_fanout() -> None:
+            try:
+                worker_mod._start_and_join_threads(
+                    (0, 1),
+                    target,
+                    name_prefix="test_phase_advance_",
+                    _after_phase=interrupt_after_launch_phase,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                raised.append(exc)
+            finally:
+                runner_completed.set()
+
+        runner = threading.Thread(target=run_fanout)
+        try:
+            runner.start()
+            assert rank_zero_entered.wait(5.0)
+            assert rank_one_completed.wait(5.0)
+            assert not runner_completed.wait(0.1), "fanout returned before the launched target released caller state"
+            allow_rank_zero.set()
+            runner.join(5.0)
+
+            assert not runner.is_alive()
+            assert phase_advances == [0, 1, 2, 3]
+            assert len(raised) == 1 and raised[0] is first_interrupt
+        finally:
+            allow_rank_zero.set()
+            runner.join(5.0)
+
+    def test_domain_fanout_cancels_and_retries_an_ambiguously_launched_thread(self, monkeypatch):
+        worker = self._worker()
+        rank_zero_entered = threading.Event()
+        rank_one_completed = threading.Event()
+        allow_rank_zero = threading.Event()
+        calls: list[int] = []
+
+        def release(chip_idx, _request_name):
+            if chip_idx == 0:
+                rank_zero_entered.set()
+                assert allow_rank_zero.wait(5.0)
+            calls.append(chip_idx)
+            if chip_idx == 1:
+                rank_one_completed.set()
+
+        worker._worker = cast(Any, SimpleNamespace(control_release_domain=release))
+        requests = {chip_idx: SharedMemory(create=True, size=worker_mod._DOMAIN_REQ_HEADER.size) for chip_idx in (0, 1)}
+        real_thread = threading.Thread
+        backing_threads: list[threading.Thread] = []
+
+        class AmbiguousStartInterrupt(real_thread):
+            armed = True
+
+            def start(self):
+                if AmbiguousStartInterrupt.armed:
+                    AmbiguousStartInterrupt.armed = False
+                    backing = real_thread(target=self.run)
+                    backing_threads.append(backing)
+                    backing.start()
+                    raise KeyboardInterrupt("ambiguous start")
+                return super().start()
+
+        monkeypatch.setattr(worker_mod.threading, "Thread", AmbiguousStartInterrupt)
+        raised: list[BaseException] = []
+        runner_completed = threading.Event()
+
+        def run_dispatch():
+            try:
+                worker._dispatch_control_domain(
+                    workers=(0, 1),
+                    request_shms=requests,
+                    reply_shms=None,
+                    op="release",
+                    allocation_id=7,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                raised.append(exc)
+            finally:
+                runner_completed.set()
+
+        runner = real_thread(target=run_dispatch)
+        try:
+            runner.start()
+            assert rank_one_completed.wait(5.0), "a later collective rank was not launched"
+            assert rank_zero_entered.wait(5.0), "the interrupted rank was not retried"
+            assert not runner_completed.wait(0.1), "fanout returned while the retried rank still owned the request shm"
+            allow_rank_zero.set()
+            runner.join(5.0)
+
+            assert not runner.is_alive()
+            assert sorted(calls) == [0, 1]
+            assert len(raised) == 1 and isinstance(raised[0], KeyboardInterrupt)
+        finally:
+            allow_rank_zero.set()
+            runner.join(5.0)
+            for backing in backing_threads:
+                backing.join(5.0)
+            for request in requests.values():
+                request.close()
+                request.unlink()
+
+    def test_domain_fanout_joins_through_repeated_interruptions(self, monkeypatch):
+        worker = self._worker()
+        entered = threading.Event()
+        allow_finish = threading.Event()
+        completed: list[int] = []
+
+        def release(chip_idx, _request_name):
+            entered.set()
+            assert allow_finish.wait(5.0)
+            completed.append(chip_idx)
+
+        worker._worker = cast(Any, SimpleNamespace(control_release_domain=release))
+        request = SharedMemory(create=True, size=worker_mod._DOMAIN_REQ_HEADER.size)
+        real_thread = threading.Thread
+        instances = []
+
+        class RepeatedJoinInterrupt(real_thread):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.join_attempts = 0
+                instances.append(self)
+
+            def join(self, *args, **kwargs):
+                self.join_attempts += 1
+                if self.join_attempts <= 3:
+                    raise KeyboardInterrupt
+                return super().join(*args, **kwargs)
+
+        monkeypatch.setattr(worker_mod.threading, "Thread", RepeatedJoinInterrupt)
+        raised: list[BaseException] = []
+
+        def run_dispatch():
+            try:
+                worker._dispatch_control_domain(
+                    workers=(0,),
+                    request_shms={0: request},
+                    reply_shms=None,
+                    op="release",
+                    allocation_id=7,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                raised.append(exc)
+
+        runner = real_thread(target=run_dispatch)
+        try:
+            runner.start()
+            assert entered.wait(5.0)
+            assert runner.is_alive(), "fanout returned while its target still owned the request shm"
+            allow_finish.set()
+            runner.join(5.0)
+
+            assert not runner.is_alive()
+            assert completed == [0]
+            assert instances[0].join_attempts == 4
+            assert len(raised) == 1 and isinstance(raised[0], KeyboardInterrupt)
+        finally:
+            allow_finish.set()
+            runner.join(5.0)
+            for instance in instances:
+                if instance.ident is not None:
+                    real_thread.join(instance, 5.0)
+            request.close()
+            request.unlink()
+
+    def test_comm_init_launches_later_ranks_after_a_start_boundary_interrupt(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"device_ids": [0, 1]}
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        calls: list[int] = []
+        worker._worker = cast(
+            Any,
+            SimpleNamespace(control_comm_init=lambda chip_idx, _request_name: calls.append(chip_idx)),
+        )
+        real_thread = threading.Thread
+
+        class StartBoundaryInterrupt(real_thread):
+            armed = True
+
+            def start(self):
+                super().start()
+                if StartBoundaryInterrupt.armed and not self.name.startswith("shm-"):
+                    StartBoundaryInterrupt.armed = False
+                    raise KeyboardInterrupt
+
+        monkeypatch.setattr(worker_mod.threading, "Thread", StartBoundaryInterrupt)
+
+        with pytest.raises(KeyboardInterrupt):
+            worker._ensure_comm_base()
+
+        assert sorted(calls) == [0, 1]
+        assert not worker._comm_base_ready
+
+    def test_comm_init_preserves_the_first_interrupt_through_shm_cleanup(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"device_ids": [0]}
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        worker._worker = cast(Any, SimpleNamespace(control_comm_init=lambda _chip_idx, _request_name: None))
+
+        created: list[SharedMemory] = []
+        created_fds: list[int] = []
+        real_init = SharedMemory.__init__
+
+        def tracked_shared_memory(shm, *args, **kwargs):
+            real_init(shm, *args, **kwargs)
+            created.append(shm)
+            created_fds.append(shm._fd)
+
+        monkeypatch.setattr(SharedMemory, "__init__", tracked_shared_memory)
+        first_interrupt = KeyboardInterrupt("start boundary")
+        real_thread = threading.Thread
+
+        class StartBoundaryInterrupt(real_thread):
+            armed = True
+
+            def start(self):
+                super().start()
+                if StartBoundaryInterrupt.armed:
+                    StartBoundaryInterrupt.armed = False
+                    raise first_interrupt
+
+        monkeypatch.setattr(worker_mod.threading, "Thread", StartBoundaryInterrupt)
+        real_close = worker_mod.os.close
+        close_interrupted = False
+
+        def interrupt_first_close(fd):
+            nonlocal close_interrupted
+            if created_fds and fd == created_fds[0] and not close_interrupted:
+                close_interrupted = True
+                raise SystemExit("shm close")
+            return real_close(fd)
+
+        monkeypatch.setattr(worker_mod.os, "close", interrupt_first_close)
+        try:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                worker._ensure_comm_base()
+            assert caught.value is first_interrupt
+            assert close_interrupted
+        finally:
+            monkeypatch.setattr(worker_mod.os, "close", real_close)
+            for shm in created:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_drains_later_owners_after_a_traversal_interrupt(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(2)
+        shms = [owner.create(1), owner.create(1)]
+        names = [shm.name for shm in shms]
+        first_interrupt = KeyboardInterrupt("between shm owners")
+        real_unlink = SharedMemory.unlink
+        interrupted = False
+
+        def interrupt_after_first_unlink(shm):
+            nonlocal interrupted
+            real_unlink(shm)
+            if shm is shms[0] and not interrupted:
+                interrupted = True
+                raise first_interrupt
+
+        monkeypatch.setattr(SharedMemory, "unlink", interrupt_after_first_unlink)
+
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is first_interrupt
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            for shm in shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_recovers_an_interrupt_during_cursor_setup(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        shm = owner.create(1)
+        name = shm.name
+        interrupt = KeyboardInterrupt("before shm cleanup fanout")
+        real_cursor = worker_mod._SharedMemoryCleanupCursor
+        attempts = 0
+
+        def interrupt_first_cursor(*args, **kwargs):
+            nonlocal attempts
+            cursor = real_cursor(*args, **kwargs)
+            attempts += 1
+            if attempts == 1:
+                raise interrupt
+            return cursor
+
+        monkeypatch.setattr(worker_mod, "_SharedMemoryCleanupCursor", interrupt_first_cursor)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is interrupt
+            assert owner._cleanup_step == worker_mod._SHM_CLEANUP_PHASES
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=name)
+        finally:
+            try:
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+
+    @pytest.mark.parametrize("operation", ("comm_init", "domain_alloc", "domain_release"))
+    def test_shm_owner_retries_an_interrupt_at_cleanup_call_entry(self, monkeypatch, operation):
+        worker = self._worker()
+        worker._config = {"device_ids": [0]}
+        resources = worker_mod._RunResources()
+        worker._building_run_resources = resources
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        real_ensure_comm_base = worker._ensure_comm_base
+
+        if operation == "comm_init":
+            worker._worker = cast(Any, SimpleNamespace(control_comm_init=lambda *_args: None))
+        elif operation == "domain_alloc":
+            monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+
+            def commit_domain(*, reply_shms, **_kwargs):
+                assert reply_shms is not None
+                reply = reply_shms[0]
+                assert reply.buf is not None
+                worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply.buf, 0, 1, 0, 0, 0)
+
+            monkeypatch.setattr(worker, "_dispatch_control_domain", commit_domain)
+        else:
+            monkeypatch.setattr(worker, "_dispatch_control_domain", lambda **_kwargs: None)
+
+        real_init = SharedMemory.__init__
+        created: list[SharedMemory] = []
+        names: list[str] = []
+
+        def track_created(shm, *args, **kwargs):
+            real_init(shm, *args, **kwargs)
+            if kwargs.get("create"):
+                created.append(shm)
+                names.append(shm.name)
+
+        monkeypatch.setattr(SharedMemory, "__init__", track_created)
+        real_cleanup = worker_mod._close_unlink_shms
+        boundary_interrupt = KeyboardInterrupt(f"{operation} cleanup call entry")
+        cleanup_calls = 0
+
+        def interrupt_first_cleanup(*args, **kwargs):
+            nonlocal cleanup_calls
+            cleanup_calls += 1
+            if cleanup_calls == 1:
+                raise boundary_interrupt
+            return real_cleanup(*args, **kwargs)
+
+        monkeypatch.setattr(worker_mod, "_close_unlink_shms", interrupt_first_cleanup)
+        handle = worker_mod.CommDomainHandle(
+            name="d",
+            workers=(0,),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda _released: None,
+            _domain_ranks={0: 0},
+        )
+        try:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                if operation == "comm_init":
+                    real_ensure_comm_base()
+                elif operation == "domain_alloc":
+                    worker._allocate_domain(name="d", workers=(0,), window_size=64, buffers=[])
+                else:
+                    worker._release_domain_claimed(handle)
+
+            assert caught.value is boundary_interrupt
+            assert cleanup_calls == 2
+            assert names
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            for shm in created:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    @pytest.mark.parametrize("operation", ("comm_init", "domain_alloc", "domain_release"))
+    def test_shm_lifecycle_defers_main_thread_interrupt_until_cleanup(self, monkeypatch, operation):
+        worker = self._worker()
+        worker._config = {"device_ids": [0]}
+        resources = worker_mod._RunResources()
+        worker._building_run_resources = resources
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        real_ensure_comm_base = worker._ensure_comm_base
+        interrupt_sent = threading.Event()
+
+        def interrupt_main() -> None:
+            if interrupt_sent.is_set():
+                return
+            interrupt_sent.set()
+            _thread.interrupt_main()
+            # Keep the lifecycle active long enough for the main thread to
+            # observe the signal while the owned name is still live.
+            time.sleep(0.01)
+
+        if operation == "comm_init":
+            worker._worker = cast(Any, SimpleNamespace(control_comm_init=lambda *_args: interrupt_main()))
+        elif operation == "domain_alloc":
+            monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+
+            def commit_domain(*, reply_shms, **_kwargs):
+                assert reply_shms is not None
+                interrupt_main()
+                reply = reply_shms[0]
+                assert reply.buf is not None
+                worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply.buf, 0, 1, 0, 0, 0)
+
+            monkeypatch.setattr(worker, "_dispatch_control_domain", commit_domain)
+        else:
+            monkeypatch.setattr(worker, "_dispatch_control_domain", lambda **_kwargs: interrupt_main())
+
+        real_init = SharedMemory.__init__
+        created: list[SharedMemory] = []
+        names: list[str] = []
+
+        def track_created(shm, *args, **kwargs):
+            real_init(shm, *args, **kwargs)
+            if kwargs.get("create"):
+                created.append(shm)
+                names.append(shm.name)
+
+        monkeypatch.setattr(SharedMemory, "__init__", track_created)
+        handle = worker_mod.CommDomainHandle(
+            name="d",
+            workers=(0,),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda _released: None,
+            _domain_ranks={0: 0},
+        )
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                if operation == "comm_init":
+                    real_ensure_comm_base()
+                elif operation == "domain_alloc":
+                    worker._allocate_domain(name="d", workers=(0,), window_size=64, buffers=[])
+                else:
+                    worker._release_domain_claimed(handle)
+
+            assert interrupt_sent.is_set()
+            assert names
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            for shm in created:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_drains_when_error_recording_is_interrupted(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(2)
+        shms = [owner.create(1), owner.create(1)]
+        names = [shm.name for shm in shms]
+        first_interrupt = KeyboardInterrupt("unlink return")
+        recording_interrupt = SystemExit("recording cleanup error")
+        real_unlink = SharedMemory.unlink
+        real_remember = worker_mod._remember_cleanup_error
+        unlink_interrupted = False
+        recording_interrupted = False
+
+        def interrupt_after_unlink(shm):
+            nonlocal unlink_interrupted
+            real_unlink(shm)
+            if not unlink_interrupted:
+                unlink_interrupted = True
+                raise first_interrupt
+
+        def interrupt_error_recording(first_error, cleanup_error):
+            nonlocal recording_interrupted
+            if not recording_interrupted:
+                recording_interrupted = True
+                raise recording_interrupt
+            return real_remember(first_error, cleanup_error)
+
+        monkeypatch.setattr(SharedMemory, "unlink", interrupt_after_unlink)
+        monkeypatch.setattr(worker_mod, "_remember_cleanup_error", interrupt_error_recording)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is first_interrupt
+            assert recording_interrupted
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "unlink", real_unlink)
+            monkeypatch.setattr(worker_mod, "_remember_cleanup_error", real_remember)
+            for shm in shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_replays_an_ordinary_unlink_error_after_draining(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(2)
+        shms = [owner.create(1), owner.create(1)]
+        names = [shm.name for shm in shms]
+        first_error = OSError("resource tracker write failed")
+        real_unlink = SharedMemory.unlink
+        injected = False
+
+        def unlink_then_fail(shm):
+            nonlocal injected
+            real_unlink(shm)
+            if not injected:
+                injected = True
+                raise first_error
+
+        monkeypatch.setattr(SharedMemory, "unlink", unlink_then_fail)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is first_error
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "unlink", real_unlink)
+            for shm in shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_drains_through_repeated_error_and_step_boundary_interrupts(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(2)
+        shms = [owner.create(1), owner.create(1)]
+        names = [shm.name for shm in shms]
+        first_error = OSError("unlink completion")
+        real_unlink = SharedMemory.unlink
+        unlink_interrupted = False
+        error_boundary_interrupts = 0
+        step_boundary_interrupts = 0
+
+        def unlink_then_fail(shm):
+            nonlocal unlink_interrupted
+            real_unlink(shm)
+            if not unlink_interrupted:
+                unlink_interrupted = True
+                raise first_error
+
+        def interrupt_error_boundary():
+            nonlocal error_boundary_interrupts
+            if error_boundary_interrupts < 2:
+                error_boundary_interrupts += 1
+                raise KeyboardInterrupt(f"error boundary {error_boundary_interrupts}")
+
+        def interrupt_step_boundary():
+            nonlocal step_boundary_interrupts
+            if unlink_interrupted and step_boundary_interrupts < 2:
+                step_boundary_interrupts += 1
+                raise SystemExit(f"step boundary {step_boundary_interrupts}")
+
+        monkeypatch.setattr(SharedMemory, "unlink", unlink_then_fail)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(
+                owner,
+                _after_error=interrupt_error_boundary,
+                _after_step=interrupt_step_boundary,
+            )
+
+            assert cleanup_error is first_error
+            assert error_boundary_interrupts == 2
+            assert step_boundary_interrupts == 2
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "unlink", real_unlink)
+            for shm in shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_protects_the_recursive_handoff_from_a_second_interrupt(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(2)
+        shms = [owner.create(1), owner.create(1)]
+        names = [shm.name for shm in shms]
+        first_interrupt = KeyboardInterrupt("step boundary")
+        second_interrupt = SystemExit("recursive handoff")
+        step_interrupted = False
+        handoff_interrupted = False
+        first_seen = threading.Event()
+        real_thread = threading.Thread
+
+        class HandoffInterrupt(real_thread):
+            def join(self, *args, **kwargs):
+                nonlocal handoff_interrupted
+                if not handoff_interrupted:
+                    assert first_seen.wait(5.0)
+                    handoff_interrupted = True
+                    raise second_interrupt
+                return super().join(*args, **kwargs)
+
+        def interrupt_step_boundary():
+            nonlocal step_interrupted
+            if not step_interrupted:
+                step_interrupted = True
+                first_seen.set()
+                raise first_interrupt
+
+        monkeypatch.setattr(worker_mod.threading, "Thread", HandoffInterrupt)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner, _after_step=interrupt_step_boundary)
+
+            assert cleanup_error is first_interrupt
+            assert handoff_interrupted
+            for name in names:
+                with pytest.raises(FileNotFoundError):
+                    SharedMemory(name=name)
+        finally:
+            for shm in shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    @pytest.mark.parametrize(
+        ("operation", "interrupt_create_call"),
+        (("comm_init", 1), ("domain_alloc", 1), ("domain_alloc", 2), ("domain_release", 1)),
+    )
+    def test_created_shm_is_owned_before_the_caller_can_register_it(
+        self, monkeypatch, operation, interrupt_create_call
+    ):
+        worker = self._worker()
+        worker._config = {"device_ids": [0]}
+        resources = worker_mod._RunResources()
+        worker._building_run_resources = resources
+        monkeypatch.setattr(worker, "_comm_plan_rootinfo_path", lambda: "/tmp/comm-rootinfo")
+        if operation == "domain_alloc":
+            monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+
+        real_init = SharedMemory.__init__
+        create_calls = 0
+        created: list[SharedMemory] = []
+        interrupted_name = None
+        first_interrupt = KeyboardInterrupt(f"{operation} create return")
+
+        def interrupt_after_create(shm, *args, **kwargs):
+            nonlocal create_calls, interrupted_name
+            real_init(shm, *args, **kwargs)
+            if kwargs.get("create"):
+                create_calls += 1
+                created.append(shm)
+                if create_calls == interrupt_create_call:
+                    interrupted_name = shm.name
+                    raise first_interrupt
+
+        monkeypatch.setattr(SharedMemory, "__init__", interrupt_after_create)
+        handle = worker_mod.CommDomainHandle(
+            name="d",
+            workers=(0,),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda _released: None,
+        )
+        try:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                if operation == "comm_init":
+                    worker._ensure_comm_base()
+                elif operation == "domain_alloc":
+                    worker._allocate_domain(name="d", workers=(0,), window_size=64, buffers=[])
+                else:
+                    worker._release_domain_claimed(handle)
+
+            assert caught.value is first_interrupt
+            assert interrupted_name is not None
+            with pytest.raises(FileNotFoundError):
+                worker_mod.SharedMemory(name=interrupted_name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            for shm in created:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_owner_unlinks_a_name_interrupted_before_ftruncate(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        first_interrupt = KeyboardInterrupt("before ftruncate")
+        real_ftruncate = worker_mod.os.ftruncate
+
+        monkeypatch.setattr(
+            worker_mod.os,
+            "ftruncate",
+            lambda _fd, _size: (_ for _ in ()).throw(first_interrupt),
+        )
+        with pytest.raises(KeyboardInterrupt) as caught:
+            owner.create(1)
+        assert caught.value is first_interrupt
+
+        shm = owner._slots[0].shm
+        assert shm is not None
+        name = shm.name
+        monkeypatch.setattr(worker_mod.os, "ftruncate", real_ftruncate)
+
+        assert worker_mod._close_unlink_shms(owner) is None
+        with pytest.raises(FileNotFoundError):
+            SharedMemory(name=name)
+
+    def test_shm_owner_unlinks_a_name_created_before_handle_publication(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        first_interrupt = KeyboardInterrupt("after shm_open")
+        real_init = SharedMemory.__init__
+        created = None
+
+        def create_then_interrupt(shm, *args, **kwargs):
+            nonlocal created
+            real_init(shm, *args, **kwargs)
+            created = shm
+            raise first_interrupt
+
+        monkeypatch.setattr(SharedMemory, "__init__", create_then_interrupt)
+        try:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                owner.create(1)
+            assert caught.value is first_interrupt
+            assert created is not None
+            name = created.name
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+
+            assert worker_mod._close_unlink_shms(owner) is None
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            if created is not None:
+                created.close()
+                try:
+                    created.unlink()
+                except FileNotFoundError:
+                    pass
+
+    @pytest.mark.skipif(worker_mod.os.name != "posix", reason="requires POSIX shm_open")
+    def test_shm_owner_isolates_the_shm_open_to_fd_publication_gap(self):
+        owner = worker_mod._SharedMemoryOwner(1)
+        instructions = list(dis.get_instructions(SharedMemory.__init__))
+        fd_stores = [
+            index
+            for index, instruction in enumerate(instructions)
+            if instruction.opname == "STORE_ATTR" and instruction.argval == "_fd"
+        ]
+        assert fd_stores
+        gap_offset = instructions[fd_stores[-1] - 1].offset
+        interrupted = False
+        first_interrupt = KeyboardInterrupt("after shm_open before fd publication")
+
+        def interrupt_fd_publication(frame, event, _arg):
+            nonlocal interrupted
+            if frame.f_code is SharedMemory.__init__.__code__:
+                frame.f_trace_opcodes = True
+                if event == "opcode" and frame.f_lasti == gap_offset:
+                    interrupted = True
+                    sys.settrace(None)
+                    raise first_interrupt
+            return interrupt_fd_publication
+
+        create_error = None
+        leaked = False
+        name = None
+        try:
+            sys.settrace(interrupt_fd_publication)
+            try:
+                owner.create(1)
+            except BaseException as exc:  # noqa: BLE001
+                create_error = exc
+            finally:
+                sys.settrace(None)
+
+            shm = owner._slots[0].shm
+            assert shm is not None
+            name = shm.name
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+            try:
+                getattr(shared_memory_mod, "_posixshmem").shm_unlink(name)
+            except FileNotFoundError:
+                pass
+            else:
+                leaked = True
+
+            assert create_error is None
+            assert not interrupted
+            assert cleanup_error is None
+            assert not leaked
+        finally:
+            sys.settrace(None)
+            if name is not None and not leaked:
+                try:
+                    getattr(shared_memory_mod, "_posixshmem").shm_unlink(name)
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_owner_never_unlinks_a_colliding_foreign_name(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        real_init = SharedMemory.__init__
+        foreign = None
+        collide = True
+
+        def collide_once(shm, *args, **kwargs):
+            nonlocal collide, foreign
+            if collide:
+                collide = False
+                foreign = SharedMemory.__new__(SharedMemory)
+                real_init(foreign, *args, **kwargs)
+                raise FileExistsError(kwargs["name"])
+            real_init(shm, *args, **kwargs)
+
+        monkeypatch.setattr(SharedMemory, "__init__", collide_once)
+        attached = None
+        try:
+            owned = owner.create(1)
+            assert foreign is not None
+            foreign_name = foreign.name
+            assert owned.name != foreign_name
+
+            assert worker_mod._close_unlink_shms(owner) is None
+            attached = SharedMemory(name=foreign_name)
+        finally:
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            if attached is not None:
+                attached.close()
+            if foreign is not None:
+                foreign.close()
+                try:
+                    foreign.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_owner_collision_stays_unowned_when_the_handler_is_interrupted(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        real_init = SharedMemory.__init__
+        foreign = None
+        first_interrupt = KeyboardInterrupt("collision handler")
+
+        def collide(shm, *args, **kwargs):
+            nonlocal foreign
+            foreign = SharedMemory.__new__(SharedMemory)
+            real_init(foreign, *args, **kwargs)
+            raise FileExistsError(kwargs["name"])
+
+        source, first_line = inspect.getsourcelines(worker_mod._SharedMemoryOwner._create_in_helper)
+        disarm_line = next(first_line + offset for offset, line in enumerate(source) if "slot.shm = None" in line)
+
+        def interrupt_disarm(frame, event, _arg):
+            if (
+                frame.f_code is worker_mod._SharedMemoryOwner._create_in_helper.__code__
+                and event == "line"
+                and frame.f_lineno == disarm_line
+            ):
+                raise first_interrupt
+            return interrupt_disarm
+
+        monkeypatch.setattr(SharedMemory, "__init__", collide)
+        attached = None
+        try:
+            threading.settrace(interrupt_disarm)
+            with pytest.raises(KeyboardInterrupt) as caught:
+                owner.create(1)
+            assert caught.value is first_interrupt
+            assert foreign is not None
+            foreign_name = foreign.name
+
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            worker_mod._close_unlink_shms(owner)
+            attached = SharedMemory(name=foreign_name)
+        finally:
+            threading.settrace(cast(Any, None))
+            monkeypatch.setattr(SharedMemory, "__init__", real_init)
+            if attached is not None:
+                attached.close()
+            if foreign is not None:
+                foreign.close()
+                try:
+                    foreign.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_shm_cleanup_closes_fd_after_an_interrupt_returning_from_mmap_close(self):
+        owner = worker_mod._SharedMemoryOwner(1)
+        shm = owner.create(1)
+        fd = shm._fd
+        underlying_mmap = shm._mmap
+        first_interrupt = KeyboardInterrupt("mmap close return")
+
+        class InterruptingMmap:
+            interrupted = False
+
+            @property
+            def closed(self):
+                return underlying_mmap.closed
+
+            def close(self):
+                if underlying_mmap.closed:
+                    raise AssertionError("closed mmap was closed twice")
+                underlying_mmap.close()
+                if not self.interrupted:
+                    self.interrupted = True
+                    raise first_interrupt
+
+        shm._mmap = InterruptingMmap()
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is first_interrupt
+            with pytest.raises(OSError):
+                worker_mod.os.fstat(fd)
+        finally:
+            if shm._buf is not None:
+                shm._buf.release()
+                shm._buf = None
+            if not underlying_mmap.closed:
+                underlying_mmap.close()
+            try:
+                worker_mod.os.close(fd)
+            except OSError:
+                pass
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+
+    def test_shm_cleanup_does_not_retry_close_on_a_reused_fd(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        shm = owner.create(1)
+        fd = shm._fd
+        real_close = worker_mod.os.close
+        sentinel_fd = worker_mod.os.open("/dev/null", worker_mod.os.O_RDONLY)
+        first_interrupt = KeyboardInterrupt("fd close return")
+        injected = False
+        replacement_installed = False
+
+        def close_then_reuse(close_fd):
+            nonlocal injected, replacement_installed
+            if close_fd == fd and not injected:
+                injected = True
+                real_close(close_fd)
+                worker_mod.os.dup2(sentinel_fd, close_fd)
+                replacement_installed = True
+                raise first_interrupt
+            real_close(close_fd)
+
+        monkeypatch.setattr(worker_mod.os, "close", close_then_reuse)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is first_interrupt
+            assert replacement_installed
+            worker_mod.os.fstat(fd)
+        finally:
+            monkeypatch.setattr(worker_mod.os, "close", real_close)
+            if replacement_installed:
+                try:
+                    real_close(fd)
+                except OSError:
+                    pass
+            real_close(sentinel_fd)
+            try:
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+
+    def test_shm_cleanup_does_not_retry_close_on_a_same_inode_reused_fd(self, monkeypatch):
+        owner = worker_mod._SharedMemoryOwner(1)
+        shm = owner.create(1)
+        fd = shm._fd
+        real_close = worker_mod.os.close
+        duplicate_fd = worker_mod.os.dup(fd)
+        first_interrupt = KeyboardInterrupt("fd close return")
+        injected = False
+        replacement_installed = False
+
+        def close_then_reuse(close_fd):
+            nonlocal injected, replacement_installed
+            if close_fd == fd and not injected:
+                injected = True
+                real_close(close_fd)
+                worker_mod.os.dup2(duplicate_fd, close_fd)
+                replacement_installed = True
+                raise first_interrupt
+            real_close(close_fd)
+
+        monkeypatch.setattr(worker_mod.os, "close", close_then_reuse)
+        try:
+            cleanup_error = worker_mod._close_unlink_shms(owner)
+
+            assert cleanup_error is first_interrupt
+            assert replacement_installed
+            worker_mod.os.fstat(fd)
+        finally:
+            monkeypatch.setattr(worker_mod.os, "close", real_close)
+            if replacement_installed:
+                try:
+                    real_close(fd)
+                except OSError:
+                    pass
+            real_close(duplicate_fd)
+            try:
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+
+    def test_domain_release_preserves_the_dispatch_interrupt_through_shm_cleanup(self, monkeypatch):
+        worker = self._worker()
+        first_interrupt = KeyboardInterrupt("dispatch join")
+        monkeypatch.setattr(
+            worker,
+            "_dispatch_control_domain",
+            lambda **_kwargs: (_ for _ in ()).throw(first_interrupt),
+        )
+        handle = worker_mod.CommDomainHandle(
+            name="d",
+            workers=(0,),
+            contexts={},
+            allocation_id=7,
+            _release_fn=lambda _released: None,
+        )
+
+        created: list[SharedMemory] = []
+        created_fds: list[int] = []
+        real_init = SharedMemory.__init__
+
+        def tracked_shared_memory(shm, *args, **kwargs):
+            real_init(shm, *args, **kwargs)
+            created.append(shm)
+            created_fds.append(shm._fd)
+
+        monkeypatch.setattr(SharedMemory, "__init__", tracked_shared_memory)
+        real_close = worker_mod.os.close
+        close_interrupted = False
+
+        def interrupt_first_close(fd):
+            nonlocal close_interrupted
+            if created_fds and fd == created_fds[0] and not close_interrupted:
+                close_interrupted = True
+                raise SystemExit("shm close")
+            return real_close(fd)
+
+        monkeypatch.setattr(worker_mod.os, "close", interrupt_first_close)
+        try:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                worker._release_domain_claimed(handle)
+            assert caught.value is first_interrupt
+            assert close_interrupted
+        finally:
+            monkeypatch.setattr(worker_mod.os, "close", real_close)
+            for shm in created:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_committed_domain_is_owned_before_reply_shm_teardown(self, monkeypatch):
+        worker = self._worker()
+        worker._config = {"device_ids": [0]}
+        resources = worker_mod._RunResources()
+        worker._building_run_resources = resources
+        monkeypatch.setattr(worker, "_ensure_comm_base", lambda: None)
+        staged_shms: list[SharedMemory] = []
+
+        def successful_dispatch(*, request_shms, reply_shms, **_kwargs):
+            assert reply_shms is not None
+            staged_shms.extend(request_shms.values())
+            staged_shms.extend(reply_shms.values())
+            reply_buf = reply_shms[0].buf
+            assert reply_buf is not None
+            worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply_buf, 0, 1, 0xC7, 0xB000, 0)
+
+        monkeypatch.setattr(worker, "_dispatch_control_domain", successful_dispatch)
+        real_close = worker_mod.os.close
+        interrupted = False
+        target_fd = None
+
+        def remember_target_fd(*, request_shms, reply_shms, **kwargs):
+            nonlocal target_fd
+            successful_dispatch(request_shms=request_shms, reply_shms=reply_shms, **kwargs)
+            target_fd = staged_shms[0]._fd
+
+        def interrupt_first_close(fd):
+            nonlocal interrupted
+            if target_fd is not None and fd == target_fd and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return real_close(fd)
+
+        monkeypatch.setattr(worker, "_dispatch_control_domain", remember_target_fd)
+        monkeypatch.setattr(worker_mod.os, "close", interrupt_first_close)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                worker._allocate_domain(name="d", workers=(0,), window_size=64, buffers=[])
+
+            handle = resources.live_domains["d"]
+            assert worker._live_domains["d"] is handle
+            assert handle.workers == (0,)
+            assert resources.requires_ordered_cleanup
+            assert interrupted
+        finally:
+            monkeypatch.setattr(worker_mod.os, "close", real_close)
+            for shm in staged_shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def test_an_interrupt_through_a_region_create_refuses_further_work(self):
+        """The create releases the GIL, so an interrupt can land mid-flight.
+
+        The child may still be finishing a region whose id would be written
+        into a reply this frame is about to unlink — something on the chip that
+        nothing here can name. An ordinary create failure is not that case: the
+        child releases its own region before reporting one.
+        """
+        worker = self._worker()
+        worker._config = {"platform": "a2a3sim"}
+        worker._validate_l3_l2_worker_id = cast(Any, lambda _wid: None)
+
+        def _interrupted(*_args):
+            raise KeyboardInterrupt
+
+        worker._worker = cast(Any, SimpleNamespace(control_l3_l2_region_create=_interrupted))
+        with pytest.raises(KeyboardInterrupt):
+            worker._create_l3_l2_region(0, 4096, 64)
+        assert worker._ordered_cleanup_error is not None
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+
+    def test_an_ordinary_region_create_failure_does_not_refuse_further_work(self):
+        worker = self._worker()
+        worker._config = {"platform": "a2a3sim"}
+        worker._validate_l3_l2_worker_id = cast(Any, lambda _wid: None)
+
+        def _failed(*_args):
+            raise RuntimeError("chip refused the region")
+
+        worker._worker = cast(Any, SimpleNamespace(control_l3_l2_region_create=_failed))
+        with pytest.raises(RuntimeError, match="chip refused the region"):
+            worker._create_l3_l2_region(0, 4096, 64)
+        assert worker._ordered_cleanup_error is None, "an ordinary failure must not shut the worker"
+
+    def test_a_region_rollback_that_cannot_release_refuses_further_work(self):
+        """The id was never tracked, so no later cleanup can reclaim it.
+
+        There is no handle for a fence to fail on, which is why the refusal is
+        recorded here rather than left to one.
+        """
+        worker = self._worker()
+        assert worker._ordered_cleanup_error is None
+
+        # The shape _create_l3_l2_region's rollback reaches: the region exists
+        # on the chip and the release for it failed.
+        leaked = RuntimeError("create_l3_l2_region: rollback could not release region 4")
+        with worker._hierarchical_start_cv:
+            worker._ordered_cleanup_error = leaked
+
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            with worker._control_reservation("Worker.malloc"):
+                pass
+
+
+class _StubOrch:
+    def _release_run(self, run_id: int) -> None:
+        pass
+
+
+class _WatchedSet(set):
+    """A set that reports each discard to `on_discard` before performing it."""
+
+    def __init__(self, source, on_discard):
+        super().__init__(source)
+        self._on_discard = on_discard
+
+    def discard(self, item) -> None:
+        self._on_discard(item)
+        super().discard(item)
+
+
+def _raiser(exc):
+    def _raise(*args, **kwargs):
+        raise exc
+
+    return _raise
 
 
 # ---------------------------------------------------------------------------

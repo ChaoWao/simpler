@@ -925,6 +925,119 @@ class TestLevel2Lifecycle:
             w._hierarchical_start_cv = real_cv
             assert _run_catch(w.close) is None
 
+    def test_close_outcome_retries_an_interrupt_before_publication(self, monkeypatch):
+        import simpler.worker as worker_mod  # noqa: PLC0415
+
+        interrupt = SystemExit("before close outcome publication")
+        entered = threading.Event()
+        release = threading.Event()
+        attempt_type = worker_mod._CloseAttempt
+
+        class _InterruptBeforeOutcome(attempt_type):
+            __slots__ = ("_armed",)
+
+            def __init__(self):
+                super().__init__()
+                object.__setattr__(self, "_armed", True)
+
+            def publish(self, error, incomplete):
+                if self._armed:
+                    object.__setattr__(self, "_armed", False)
+                    entered.set()
+                    assert release.wait(10.0)
+                    raise interrupt
+                return super().publish(error, incomplete)
+
+        monkeypatch.setattr(worker_mod, "_CloseAttempt", _InterruptBeforeOutcome)
+        w = self._make_l2(monkeypatch)
+        owner_result: list = []
+        joiner_result: list = []
+
+        def owner():
+            w.init()
+            owner_result.append(_run_catch(w.close))
+
+        owner_thread = threading.Thread(target=owner)
+        joiner_thread = threading.Thread(target=lambda: joiner_result.append(_run_catch(w.close)))
+        owner_thread.start()
+        try:
+            assert entered.wait(5.0)
+            joiner_thread.start()
+            time.sleep(0.1)
+            assert joiner_thread.is_alive()
+            release.set()
+            owner_thread.join(5.0)
+            joiner_thread.join(5.0)
+
+            assert not owner_thread.is_alive()
+            assert not joiner_thread.is_alive()
+            assert owner_result == [interrupt]
+            assert joiner_result == [interrupt]
+            assert w._close_completion is not None and w._close_completion.done
+            assert w._close_completion.error is interrupt
+            assert _run_catch(w.close) is interrupt
+        finally:
+            release.set()
+            owner_thread.join(5.0)
+            if joiner_thread.ident is not None:
+                joiner_thread.join(5.0)
+
+    def test_close_outcome_survives_an_interrupt_after_publication(self, monkeypatch):
+        import simpler.worker as worker_mod  # noqa: PLC0415
+
+        interrupt = SystemExit("after close outcome publication")
+        entered = threading.Event()
+        release = threading.Event()
+        attempt_type = worker_mod._CloseAttempt
+
+        class _InterruptAfterOutcome(attempt_type):
+            __slots__ = ("_armed",)
+
+            def __init__(self):
+                super().__init__()
+                object.__setattr__(self, "_armed", True)
+
+            def __setattr__(self, name, value):
+                if name == "_outcome" and value is not None and self._armed:
+                    super().__setattr__(name, value)
+                    object.__setattr__(self, "_armed", False)
+                    entered.set()
+                    assert release.wait(10.0)
+                    raise interrupt
+                return super().__setattr__(name, value)
+
+        monkeypatch.setattr(worker_mod, "_CloseAttempt", _InterruptAfterOutcome)
+        w = self._make_l2(monkeypatch)
+        owner_result: list = []
+        joiner_result: list = []
+
+        def owner():
+            w.init()
+            owner_result.append(_run_catch(w.close))
+
+        owner_thread = threading.Thread(target=owner)
+        joiner_thread = threading.Thread(target=lambda: joiner_result.append(_run_catch(w.close)))
+        owner_thread.start()
+        try:
+            assert entered.wait(5.0)
+            assert w._close_completion is not None and w._close_completion.done
+            joiner_thread.start()
+            joiner_thread.join(5.0)
+            assert not joiner_thread.is_alive()
+            assert joiner_result == [None]
+
+            release.set()
+            owner_thread.join(5.0)
+            assert not owner_thread.is_alive()
+            assert owner_result == [interrupt]
+            assert w._close_completion.error is None
+            assert _run_catch(w.close) is None
+        finally:
+            release.set()
+            owner_thread.join(5.0)
+            if joiner_thread.ident is not None:
+                joiner_thread.join(5.0)
+
     def test_reap_deadline_starts_after_shutdown_broadcast(self, monkeypatch):
         # The child-reap grace must be measured from when SHUTDOWN is broadcast,
         # not from teardown entry: a slow pre-child cleanup step must not consume

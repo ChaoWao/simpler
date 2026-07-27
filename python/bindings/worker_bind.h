@@ -245,6 +245,7 @@ inline void bind_worker(nb::module_ &m) {
     // --- TaskState ---
     nb::enum_<TaskState>(m, "TaskState")
         .value("FREE", TaskState::FREE)
+        .value("BUILDING", TaskState::BUILDING)
         .value("PENDING", TaskState::PENDING)
         .value("READY", TaskState::READY)
         .value("RUNNING", TaskState::RUNNING)
@@ -308,18 +309,29 @@ inline void bind_worker(nb::module_ &m) {
             "Submit a group of SUB tasks: N args -> N workers, 1 DAG node."
         )
         .def(
+            "await_run_admission",
+            [](Orchestrator &self, uint64_t run_id) {
+                self.await_run_admission(static_cast<RunId>(run_id));
+            },
+            nb::arg("run_id"), nb::call_guard<nb::gil_scoped_release>(),
+            "Block until run_id holds the whole-run FIFO head, or is terminal. Releases "
+            "the GIL: the wait is unbounded, and holding it would stop the very threads "
+            "that let the active run finish."
+        )
+        .def(
             "malloc",
             [](Orchestrator &self, int worker_id, size_t size) {
                 return self.malloc(worker_id, size);
             },
-            nb::arg("worker_id"), nb::arg("size"), "Allocate memory on next-level worker."
+            nb::arg("worker_id"), nb::arg("size"), nb::call_guard<nb::gil_scoped_release>(),
+            "Allocate memory on next-level worker."
         )
         .def(
             "committed_device_memory",
             [](Orchestrator &self, int worker_id) {
                 return self.committed_device_memory(worker_id);
             },
-            nb::arg("worker_id"),
+            nb::arg("worker_id"), nb::call_guard<nb::gil_scoped_release>(),
             "Total device HBM (bytes) committed by next-level worker's MemoryAllocator "
             "(tensors + pooled arenas + runtime buffers)."
         )
@@ -328,21 +340,24 @@ inline void bind_worker(nb::module_ &m) {
             [](Orchestrator &self, int worker_id, uint64_t ptr) {
                 self.free(worker_id, ptr);
             },
-            nb::arg("worker_id"), nb::arg("ptr"), "Free memory on next-level worker."
+            nb::arg("worker_id"), nb::arg("ptr"), nb::call_guard<nb::gil_scoped_release>(),
+            "Free memory on next-level worker."
         )
         .def(
             "copy_to",
             [](Orchestrator &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
                 self.copy_to(worker_id, dst, src, size);
             },
-            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"), "Copy host src to worker dst."
+            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"),
+            nb::call_guard<nb::gil_scoped_release>(), "Copy host src to next-level worker."
         )
         .def(
             "copy_from",
             [](Orchestrator &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
                 self.copy_from(worker_id, dst, src, size);
             },
-            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"), "Copy worker src to host dst."
+            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"),
+            nb::call_guard<nb::gil_scoped_release>(), "Copy worker src to next-level worker."
         )
         .def(
             "alloc",
@@ -359,7 +374,7 @@ inline void bind_worker(nb::module_ &m) {
         .def("scope_end", &Orchestrator::scope_end, "Close the innermost scope. Non-blocking.")
         .def("_scope_begin", &Orchestrator::scope_begin)
         .def("_scope_end", &Orchestrator::scope_end)
-        .def("_begin_run", &Orchestrator::begin_run)
+        .def("_begin_run", &Orchestrator::begin_run, nb::call_guard<nb::gil_scoped_release>())
         .def("_close_run_submission", &Orchestrator::close_run_submission, nb::arg("run_id"))
         .def(
             "_fail_run_submission",
@@ -418,6 +433,10 @@ inline void bind_worker(nb::module_ &m) {
             },
             nb::arg("worker_id"), nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1,
             "Add a NEXT_LEVEL sub-worker with an explicit worker id."
+        )
+        .def(
+            "configure_pipeline_depth", &Worker::configure_pipeline_depth, nb::arg("depth"),
+            "Set run admission depth from the minimum direct-chip runtime capability before init."
         )
         .def(
             "add_sub_worker",
@@ -775,6 +794,7 @@ inline void bind_worker(nb::module_ &m) {
     m.attr("MAILBOX_SIZE") = static_cast<int>(MAILBOX_SIZE);
     m.attr("MAILBOX_OFF_ERROR_MSG") = static_cast<int>(MAILBOX_OFF_ERROR_MSG);
     m.attr("MAILBOX_ERROR_MSG_SIZE") = static_cast<int>(MAILBOX_ERROR_MSG_SIZE);
+    m.attr("PTO_PIPELINE_MAX_DEPTH") = static_cast<uint32_t>(PTO_PIPELINE_MAX_DEPTH);
     m.attr("MAX_RING_DEPTH") = static_cast<int32_t>(MAX_RING_DEPTH);
     m.attr("MAX_SCOPE_DEPTH") = static_cast<int32_t>(MAX_SCOPE_DEPTH);
 

@@ -37,6 +37,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -51,6 +52,22 @@ class Ring;           // forward decl
 // Scheduler — DAG engine (no worker pool ownership)
 // =============================================================================
 
+/**
+ * Take ownership of a READY slot for dispatch, atomically.
+ *
+ * Reading READY and later storing RUNNING are not the same thing. A run whose
+ * graph callback throws fails its own unstarted slots and consumes them, and
+ * its fence can then release the run's pipeline lease — all while the scheduler
+ * sits between those two points picking workers. A plain store would overwrite
+ * that cancelled state and dispatch a task whose run is already terminal and
+ * whose slot may have been reused. A failed claim means the slot is no longer
+ * ours: whoever moved it out of READY owns its consume.
+ *
+ * Call this at the point of dispatch, after every other admission check — the
+ * window this closes is exactly the code between the queue pop and the launch.
+ */
+bool claim_for_dispatch(TaskSlotState &s);
+
 class Scheduler {
 public:
     struct Config {
@@ -60,11 +77,21 @@ public:
         WorkerManager *manager;  // not owned — Scheduler calls manager for dispatch
         // Shared READY routing path owned by Orchestrator.
         std::function<void(TaskSlot)> enqueue_ready_cb;
+        // Production workers expose exactly one whole-run FIFO head. Tests
+        // that omit this callback retain the legacy unpartitioned queue path.
+        std::function<RunId()> active_run_cb;
         // Called when a task reaches CONSUMED (TensorMap cleanup + ring release).
         std::function<void(TaskSlot)> on_consumed_cb;
         // Called as soon as an endpoint reports failure so the error is
         // attached to the task's run even when a group has other members live.
         std::function<void(TaskSlot, const std::string &)> on_task_failed_cb;
+        // Test seam. Invoked immediately before the dispatch claim, which is
+        // the one instant a cancelling run can still take a slot away. The
+        // window is unreachable from outside — every other observable point is
+        // either before the pop or after the launch — so a test that wants to
+        // exercise the losing side of the claim has to be let in here.
+        // Unset in production.
+        std::function<void(TaskSlot)> before_claim_cb;
     };
 
     void start(const Config &cfg);
@@ -104,7 +131,9 @@ private:
     void poison_task(TaskSlot slot, const std::string &root_message);
     void try_consume(TaskSlot slot);
     void dispatch_ready();
-    std::unordered_set<int32_t> dispatch_next_level_group();
-    void dispatch_next_level_singles(const std::unordered_set<int32_t> &reserved_worker_ids);
-    void dispatch_sub_ready();
+    std::unordered_set<int32_t> dispatch_next_level_group(const std::optional<RunId> &run_snapshot);
+    void dispatch_next_level_singles(
+        const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot
+    );
+    void dispatch_sub_ready(const std::optional<RunId> &run_snapshot);
 };

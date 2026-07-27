@@ -64,8 +64,9 @@ to C++:
 | `w3.submit_sub(handle, …)` dispatched to a SUB child | `LOCAL_PYTHON` | child resolves digest to a Python callable and calls `fn(args)` |
 
 All three paths share one mailbox wire format: `MAILBOX_OFF_CALLABLE` is
-reserved, and the 32-byte digest prefixes the args blob. The receiving child
-does the digest-to-slot resolve in its own address space.
+reserved, the run's generation-safe pipeline lease follows `CallConfig`, and
+the 32-byte digest prefixes the args blob. The receiving child does the
+digest-to-slot resolve in its own address space.
 
 The proposed remote L3 path keeps the same callable identity contract, but
 sends it in a versioned TASK frame. The remote endpoint resolves the digest
@@ -292,12 +293,52 @@ own AICore stream and retires it on every exit path, and no record of which
 image a stream last ran is load-bearing. The AICPU stream carries no such state
 and stays with its slot.
 
-This is dormant capacity at this layer. The ordinary synchronous entry point
-continues to use slot 0, and the chip child's mailbox loop passes no lease, so
-every production run is unleased. This contract does not enable a second
-mailbox frame, a second device execution, or cross-run publication overlap.
-Carrying a lease across the mailbox, and deciding when slot 1 may be leased at
-all, belong to whole-run admission.
+#### Whole-run FIFO admission
+
+L3 graph callbacks remain synchronous and serialized, and how many live run
+reservations native admission allows is the depth the child backends
+negotiated — not a constant. At the negotiated depth two:
+
+```text
+run N:     EXECUTING
+run N+1:   PREPARED
+run N+2:   blocked in begin_run before its graph callback
+```
+
+Where a backend publishes depth one — A5, or any runtime without a depth-two
+contract — the *second* submission is the one that blocks in `begin_run`, and
+there is no prepared successor at all. Code that relies on a later callback to
+unblock an earlier run deadlocks on such a backend.
+
+`begin_run` acquires a generation-safe lease before invoking the callback.
+The FIFO head may enter `EXECUTING` while its callback is still building, which
+preserves orchestration callbacks that submit device work and wait for L2
+communication before returning. A non-head run remains `BUILDING` or becomes
+`PREPARED` when graph construction closes; it cannot execute until every prior
+run is terminal. The scheduler observes only the ready-queue partition belonging
+to that single active FIFO head. A run's device effects therefore cannot
+interleave with another run even when both graphs contain ready tasks. TensorMap
+keys remain `(run_id, tensor_key)`, so adjacent runs may reuse the same tensor
+address without creating cross-run dependencies.
+
+The terminal transition releases the reservation and lease exactly once,
+wakes whichever submission was blocked on capacity, and activates the next prepared run. Empty
+runs take the same transition immediately. If graph construction fails, every
+unstarted slot is poisoned and consumed, its ready-queue partition is erased,
+and the lease is returned without dispatching device work.
+
+Each direct chip child publishes its runtime contract's `pipeline_depth` in
+the startup mailbox before `INIT_READY`. The parent configures admission to the
+minimum published depth. Backends without a depth-two contract therefore keep
+depth-one serial behavior instead of receiving an invalid slot-1 lease.
+
+Whole-run admission decides when a slot may be leased and carries the lease
+from `TaskSlot` through the chip mailbox into the runtime slot, so a production
+run now executes under the lease its run holds rather than unconditionally on
+slot 0. What this contract still does not enable is a second mailbox frame, a
+second device execution, or cross-run publication overlap: the endpoint remains
+a single synchronous round trip, and the scheduler dispatches only the run that
+holds the FIFO head and still owns its lease.
 
 Simulation implements the same depth, so the contract means the same thing on
 both platforms: its runner owns one arena bank and one retained temporary
@@ -382,6 +423,9 @@ Where the data goes after submit:
    Tags are consumed during the same submit call for dep inference and
    **never carried further**.
 3. `CallConfig` — copied into `slot.config` (parent heap, POD)
+4. `PipelineSlotLease` — copied from the owning run into
+   `slot.pipeline_lease`; local chip mailboxes forward `{slot_id, generation}`
+   to `ChipWorker::run_with_lease`.
 
 For the full submit mechanics (ring alloc, TensorMap lookup/insert, scope ref,
 fanout wiring), see [orchestrator.md](orchestrator.md).
@@ -390,7 +434,8 @@ fanout wiring), see [orchestrator.md](orchestrator.md).
 
 For local endpoints, after the Scheduler resolves the submitted NEXT_LEVEL
 target (or chooses an idle SUB worker), `LocalMailboxEndpoint` encodes
-`(callable digest, CallConfig, TaskArgs)` into the per-worker shm mailbox and
+`(callable digest, CallConfig, PipelineSlotLease, TaskArgs)` into the
+per-worker shm mailbox and
 the forked child decodes it. Remote NEXT_LEVEL dispatch through
 `RemoteL3Endpoint` serializes the same logical payload into a framed TASK
 request instead.
@@ -399,10 +444,11 @@ Every dispatched group member contributes one run-acceptance obligation. For
 an A2A3 onboard chip endpoint, the child-side native runner writes
 `TASK_ACCEPTED` after its AICore and AICPU kernels are both enqueued; the parent
 observes it without releasing the mailbox. Other endpoint paths satisfy the
-same obligation conservatively when their completion returns. Once submission
-is closed and all obligations are satisfied, the next serialized orchestration
-callback may build its DAG even though the prior run has not reached its
-completion fence.
+same obligation conservatively when their completion returns. Acceptance is the
+launch fence for that run's own dispatches; it does not admit the next graph
+callback. Once the prior callback returns, `begin_run` may invoke the next
+serialized callback whenever a negotiated pipeline lease is free, even while
+the prior run remains below its acceptance or completion fence.
 
 Local mailbox path:
 

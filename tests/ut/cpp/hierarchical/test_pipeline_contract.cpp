@@ -217,6 +217,16 @@ TEST(PipelineSlotPool, DepthTwoProvidesExactlyTwoIndependentLeases) {
     EXPECT_TRUE(pool.owns(*second));
 }
 
+TEST(PipelineSlotPool, AdmissionDepthCanConservativelyLimitACapablePool) {
+    PipelineSlotPool pool(2);
+    auto first = pool.try_acquire(/*admission_depth=*/1);
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->slot_id, 0u);
+    EXPECT_FALSE(pool.try_acquire(/*admission_depth=*/1).has_value());
+    EXPECT_TRUE(pool.release(*first));
+    EXPECT_THROW((void)pool.try_acquire(/*admission_depth=*/3), std::invalid_argument);
+}
+
 TEST(PipelineSlotPool, StaleGenerationCannotAccessOrReleaseAReusedSlot) {
     PipelineSlotPool pool(1);
     const PipelineSlotLease first = *pool.try_acquire();

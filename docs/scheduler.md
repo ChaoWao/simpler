@@ -37,10 +37,19 @@ Both immediately-ready submissions and dependency-released consumers use
 this function. A directed task therefore cannot re-enter a shared
 NEXT_LEVEL queue after waiting in PENDING.
 
-Each `ReadyQueue` is a mutex-protected non-blocking FIFO. Root submission,
-worker completion, and stop requests notify the Scheduler condition variable;
-its wait predicate checks the completion FIFO, every ready queue, and the stop
-flag. Ready queues have no blocking pop or shutdown state.
+Each `ReadyQueue` is a mutex-protected non-blocking FIFO, partitioned by run:
+a task is enqueued under its own `run_id`, and the Scheduler pops only from the
+partition of the run that currently holds the FIFO head. That is what keeps two
+admitted runs from interleaving their device work while both are live. Root
+submission, worker completion, and stop requests notify the Scheduler condition
+variable; its wait predicate checks the completion FIFO, the dispatchable run's
+partitions, and the stop flag. Ready queues have no blocking pop or shutdown
+state.
+
+Popping a slot is not the same as owning it. A run whose graph callback throws
+fails and consumes its own unstarted slots, so the Scheduler claims each slot
+with an atomic `READY -> RUNNING` compare-exchange at the moment it dispatches;
+a lost claim means the cancelling path already owns that slot.
 
 ## 2. Scheduler loop
 

@@ -7,6 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import contextlib
 import ctypes
 import hashlib
 import os
@@ -14,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from multiprocessing.shared_memory import SharedMemory
 from typing import cast
@@ -540,6 +542,7 @@ def test_remote_worker_id_stays_stable_when_local_worker_is_added_later(monkeypa
         def __init__(self, *args):
             self.remote_worker_ids = []
             self.closed = False
+            self.pipeline_depth = None
 
         def add_remote_l3_socket(self, worker_id, *args):
             self.remote_worker_ids.append(worker_id)
@@ -554,6 +557,9 @@ def test_remote_worker_id_stays_stable_when_local_worker_is_added_later(monkeypa
 
         def add_next_level_worker_at(self, *args):
             pass
+
+        def configure_pipeline_depth(self, depth):
+            self.pipeline_depth = depth
 
         def init(self):
             pass
@@ -597,6 +603,7 @@ def test_remote_worker_id_stays_stable_when_local_worker_is_added_later(monkeypa
         assert worker._resolve_handle(handle).eligible_worker_ids == (remote_worker_id,)
 
         worker.init()
+        assert fake_c_worker.pipeline_depth == 2
 
         assert opened_worker_ids == [remote_worker_id]
         assert fake_c_worker.remote_worker_ids == [remote_worker_id]
@@ -848,7 +855,8 @@ def test_submit_sub_group_rejects_remote_tensor_ref_sidecar():
     assert not fake.called
 
 
-def test_capture_remote_sidecar_refs_rolls_back_partial_acquires():
+@pytest.mark.parametrize("acquire_committed", [False, True])
+def test_remote_slot_ref_journal_cleans_both_sides_of_acquire_boundary(monkeypatch, acquire_committed):
     class FakeTensorSidecar:
         present = True
 
@@ -860,26 +868,135 @@ def test_capture_remote_sidecar_refs_rolls_back_partial_acquires():
             self.tensors = tuple(FakeTensorSidecar(handle) for handle in handles)
 
     worker = Worker(level=4, num_sub_workers=0)
-    first = RemoteBufferHandle._from_remote_allocation(
+    remote_buf = RemoteBufferHandle._from_remote_allocation(
         worker_id=0,
         buffer_id=1,
         generation=1,
         address_space=RemoteAddressSpace.REMOTE_DEVICE,
         nbytes=4,
     )
-    released = RemoteBufferHandle._from_remote_allocation(
-        worker_id=0,
-        buffer_id=2,
-        generation=1,
-        address_space=RemoteAddressSpace.REMOTE_DEVICE,
-        nbytes=4,
-        released=True,
-    )
+    resources = worker_mod._RunResources()
+    worker._building_run_resources = resources
+    real_acquire = RemoteBufferHandle._acquire_slot_ref
+    interrupt = SystemExit("slot-ref acquire boundary")
 
-    with pytest.raises(RuntimeError, match="already been released"):
-        worker._capture_remote_sidecar_refs(FakeRemoteSidecar(first, released))
+    def interrupt_acquire(handle, token):
+        if acquire_committed:
+            real_acquire(handle, token)
+        raise interrupt
 
-    assert first._live_slot_refs == 0
+    monkeypatch.setattr(RemoteBufferHandle, "_acquire_slot_ref", interrupt_acquire)
+
+    with pytest.raises(SystemExit) as caught:
+        worker._adopt_remote_sidecar_refs([FakeRemoteSidecar(remote_buf)])
+
+    assert caught.value is interrupt
+    assert remote_buf._live_slot_refs == int(acquire_committed)
+    assert len(resources.remote_slot_refs) == 1
+    assert resources.requires_ordered_cleanup
+
+    worker._release_active_remote_slot_refs(resources)
+    assert remote_buf._live_slot_refs == 0
+    assert resources.remote_slot_refs == []
+
+
+def test_remote_submit_keeps_slot_ref_after_native_commit_boundary_interrupt():
+    interrupt = SystemExit("after native slot commit")
+
+    class FakeCOrchestrator:
+        committed = False
+
+        def submit_next_level(self, *args):
+            self.committed = True
+            raise interrupt
+
+    worker = Worker(level=4, num_sub_workers=0)
+    resources = worker_mod._RunResources()
+    worker._building_run_resources = resources
+    try:
+        worker_id = worker.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+        handle = worker.register(RemoteCallable("pkg.remote:orch"), workers=[worker_id])
+        fake = FakeCOrchestrator()
+        orch = Orchestrator(fake, worker=worker)  # type: ignore[arg-type]
+        remote_buf = RemoteBufferHandle._from_remote_allocation(
+            worker_id=worker_id,
+            buffer_id=1,
+            generation=1,
+            address_space=RemoteAddressSpace.REMOTE_DEVICE,
+            nbytes=4,
+        )
+        args = TaskArgs()
+        args.add_tensor(RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+
+        with pytest.raises(SystemExit) as caught:
+            orch.submit_next_level(handle, args, worker=worker_id)
+
+        assert caught.value is interrupt
+        assert fake.committed
+        assert remote_buf._live_slot_refs == 1
+        assert len(resources.remote_slot_refs) == 1
+
+        worker._release_active_remote_slot_refs(resources)
+        assert remote_buf._live_slot_refs == 0
+        assert resources.remote_slot_refs == []
+    finally:
+        worker._building_run_resources = None
+        worker._release_active_remote_slot_refs(resources)
+        worker.close()
+
+
+def test_remote_group_submit_keeps_all_slot_refs_after_native_commit_boundary_interrupt():
+    interrupt = SystemExit("after native group slot commit")
+
+    class FakeCOrchestrator:
+        committed = False
+
+        def submit_next_level_group(self, *args):
+            self.committed = True
+            raise interrupt
+
+    worker = Worker(level=4, num_sub_workers=0)
+    resources = worker_mod._RunResources()
+    worker._building_run_resources = resources
+    try:
+        worker_ids = [
+            worker.add_remote_worker(RemoteWorkerSpec(endpoint=f"127.0.0.1:{19073 + i}", platform="a2a3sim"))
+            for i in range(2)
+        ]
+        handle = worker.register(RemoteCallable("pkg.remote:orch"), workers=worker_ids)
+        fake = FakeCOrchestrator()
+        orch = Orchestrator(fake, worker=worker)  # type: ignore[arg-type]
+        remote_bufs = [
+            RemoteBufferHandle._from_remote_allocation(
+                worker_id=worker_id,
+                buffer_id=i + 1,
+                generation=1,
+                address_space=RemoteAddressSpace.REMOTE_DEVICE,
+                nbytes=4,
+            )
+            for i, worker_id in enumerate(worker_ids)
+        ]
+        args_list = []
+        for remote_buf in remote_bufs:
+            args = TaskArgs()
+            args.add_tensor(RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+            args_list.append(args)
+
+        with pytest.raises(SystemExit) as caught:
+            orch.submit_next_level_group(handle, args_list, workers=worker_ids)
+
+        assert caught.value is interrupt
+        assert fake.committed
+        assert [remote_buf._live_slot_refs for remote_buf in remote_bufs] == [1, 1]
+        assert len(resources.remote_slot_refs) == 2
+
+        worker._release_active_remote_slot_refs(resources)
+        assert [remote_buf._live_slot_refs for remote_buf in remote_bufs] == [0, 0]
+        assert resources.remote_slot_refs == []
+    finally:
+        worker._building_run_resources = None
+        worker._release_active_remote_slot_refs(resources)
+        worker.close()
 
 
 @pytest.mark.parametrize(
@@ -1392,6 +1509,55 @@ def test_remote_sim_imported_buffer_runs_on_peer_worker():
             daemon.stop()
 
 
+def _make_remote_import_test_values(worker):
+    owner = RemoteBufferHandle._from_remote_allocation(
+        worker_id=0,
+        buffer_id=1,
+        generation=1,
+        address_space=RemoteAddressSpace.REMOTE_DEVICE,
+        nbytes=4,
+    )
+    exported = RemoteBufferExport._from_remote_export(
+        owner_worker_id=0,
+        buffer_id=1,
+        generation=1,
+        address_space=RemoteAddressSpace.REMOTE_WINDOW,
+        offset=0,
+        nbytes=4,
+        export_id=1,
+        remote_addr=0,
+        rkey_or_token=1,
+        ub_ldst_va=0,
+        access_flags=3,
+        transport_profile="sim",
+        _owner_handle=owner,
+        worker_owner_id=worker._owner_id,
+    )
+    return owner, exported
+
+
+def _make_remote_import_test_handle(owner):
+    owner._acquire_import_ref()
+    return RemoteBufferHandle._from_imported_mapping(
+        worker_id=0,
+        owner_worker_id=0,
+        buffer_id=1,
+        generation=1,
+        import_id=7,
+        address_space=RemoteAddressSpace.REMOTE_WINDOW,
+        nbytes=4,
+        offset=0,
+        owner_handle_ref=owner,
+    )
+
+
+def _start_fake_remote_worker(worker, fake):
+    worker_id = worker.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+    worker._worker = fake
+    worker._lifecycle = worker_mod._Lifecycle.READY
+    return worker_id
+
+
 def test_remote_owner_free_waits_for_import_release():
     worker = Worker(level=4, num_sub_workers=0)
     owner = RemoteBufferHandle._from_remote_allocation(
@@ -1448,7 +1614,7 @@ def test_remote_owner_free_waits_for_import_release():
     assert worker._pending_remote_buffer_frees == []
 
 
-def test_remote_import_pins_owner_during_control_and_rolls_back_on_error():
+def test_remote_import_pins_owner_and_retains_it_after_ambiguous_transport_error():
     worker = Worker(level=4, num_sub_workers=0)
     owner = RemoteBufferHandle._from_remote_allocation(
         worker_id=0,
@@ -1491,7 +1657,86 @@ def test_remote_import_pins_owner_during_control_and_rolls_back_on_error():
         worker.remote_import(exported, worker=worker_id)
 
     assert fake.owner_ref_seen == 1
+    assert owner._live_import_refs == 1
+    assert worker._ordered_cleanup_error is not None
+
+
+def test_remote_import_interrupt_after_owner_pin_retires_the_pin(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, exported = _make_remote_import_test_values(worker)
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.import_calls = 0
+
+        def remote_import(self, *args):
+            self.import_calls += 1
+            raise AssertionError("transport must not start after the acquisition interruption")
+
+    fake = FakeRemoteWorker()
+    worker_id = _start_fake_remote_worker(worker, fake)
+    interrupt = KeyboardInterrupt("after owner reference acquisition")
+    helper_calls = 0
+
+    def interrupt_after_acquire(items, target, **_kwargs):
+        nonlocal helper_calls
+        helper_calls += 1
+        for item in items:
+            target(item)
+        if helper_calls == 1:
+            raise interrupt
+
+    monkeypatch.setattr(worker_mod, "_start_and_join_threads", interrupt_after_acquire)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        worker.remote_import(exported, worker=worker_id)
+
+    assert caught.value is interrupt
+    assert fake.import_calls == 0
     assert owner._live_import_refs == 0
+    assert worker._ordered_cleanup_error is None
+
+
+def test_remote_import_owner_pin_token_recovers_an_acquire_error_after_mutation(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, exported = _make_remote_import_test_values(worker)
+    interrupt = KeyboardInterrupt("owner acquire failed after mutation")
+    real_acquire = RemoteBufferHandle._acquire_import_ref
+
+    def acquire_then_interrupt(handle, token=None):
+        real_acquire(handle, token)
+        raise interrupt
+
+    class FakeRemoteWorker:
+        def remote_import(self, *args):
+            raise AssertionError("transport must not start after the acquisition error")
+
+    worker_id = _start_fake_remote_worker(worker, FakeRemoteWorker())
+    monkeypatch.setattr(RemoteBufferHandle, "_acquire_import_ref", acquire_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        worker.remote_import(exported, worker=worker_id)
+
+    assert caught.value is interrupt
+    assert owner._live_import_refs == 0
+    assert worker._ordered_cleanup_error is None
+
+
+def test_remote_import_completion_without_descriptor_retains_owner_and_poisons():
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, exported = _make_remote_import_test_values(worker)
+
+    class FakeRemoteWorker:
+        def remote_import(self, *args):
+            return None
+
+    worker_id = _start_fake_remote_worker(worker, FakeRemoteWorker())
+
+    with pytest.raises(RuntimeError, match="returned no import descriptor"):
+        worker.remote_import(exported, worker=worker_id)
+
+    assert owner._live_import_refs == 1
+    assert worker._ordered_cleanup_error is not None
 
 
 def test_remote_import_releases_remote_mapping_when_handle_build_fails(monkeypatch):
@@ -1544,6 +1789,447 @@ def test_remote_import_releases_remote_mapping_when_handle_build_fails(monkeypat
 
     assert fake.released == (0, 0, 1, 1, 7)
     assert owner._live_import_refs == 0
+
+
+def test_remote_import_rolls_back_a_mapping_published_before_caller_interruption(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner = RemoteBufferHandle._from_remote_allocation(
+        worker_id=0,
+        buffer_id=1,
+        generation=1,
+        address_space=RemoteAddressSpace.REMOTE_DEVICE,
+        nbytes=4,
+    )
+    exported = RemoteBufferExport._from_remote_export(
+        owner_worker_id=0,
+        buffer_id=1,
+        generation=1,
+        address_space=RemoteAddressSpace.REMOTE_WINDOW,
+        offset=0,
+        nbytes=4,
+        export_id=1,
+        remote_addr=0,
+        rkey_or_token=1,
+        ub_ldst_va=0,
+        access_flags=3,
+        transport_profile="sim",
+        _owner_handle=owner,
+        worker_owner_id=worker._owner_id,
+    )
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.import_calls = 0
+            self.release_calls = 0
+
+        def remote_import(self, *args):
+            self.import_calls += 1
+            return (0, 0, 1, 1, 7, int(RemoteAddressSpace.REMOTE_WINDOW), 4, 0, 0, 7, 0, 3)
+
+        def remote_release_import(self, *args):
+            self.release_calls += 1
+
+    fake = FakeRemoteWorker()
+    worker_id = worker.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+    worker._worker = fake  # type: ignore[assignment]
+    worker._lifecycle = worker_mod._Lifecycle.READY
+    interrupt = KeyboardInterrupt("after remote import returned")
+    helper_calls = 0
+
+    def interrupt_after_import_target(items, target, **_kwargs):
+        nonlocal helper_calls
+        helper_calls += 1
+        for item in items:
+            target(item)
+        if helper_calls == 2:
+            raise interrupt
+
+    monkeypatch.setattr(worker_mod, "_start_and_join_threads", interrupt_after_import_target)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        worker.remote_import(exported, worker=worker_id)
+
+    assert caught.value is interrupt
+    assert fake.import_calls == 1
+    assert fake.release_calls == 1
+    assert owner._live_import_refs == 0
+    assert worker._ordered_cleanup_error is None
+
+
+def test_direct_import_release_publishes_completion_before_caller_interruption(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner = RemoteBufferHandle._from_remote_allocation(
+        worker_id=0,
+        buffer_id=1,
+        generation=1,
+        address_space=RemoteAddressSpace.REMOTE_DEVICE,
+        nbytes=4,
+    )
+    owner._acquire_import_ref()
+    imported = RemoteBufferHandle._from_imported_mapping(
+        worker_id=0,
+        owner_worker_id=0,
+        buffer_id=1,
+        generation=1,
+        import_id=7,
+        address_space=RemoteAddressSpace.REMOTE_WINDOW,
+        nbytes=4,
+        offset=0,
+        owner_handle_ref=owner,
+    )
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.release_calls = 0
+
+        def remote_release_import(self, *args):
+            self.release_calls += 1
+
+    fake = FakeRemoteWorker()
+    worker.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+    worker._worker = fake  # type: ignore[assignment]
+    worker._lifecycle = worker_mod._Lifecycle.READY
+    interrupt = KeyboardInterrupt("after remote release returned")
+    helper_calls = 0
+
+    def interrupt_after_first_target(items, target, **_kwargs):
+        nonlocal helper_calls
+        helper_calls += 1
+        for item in items:
+            target(item)
+        if helper_calls == 1:
+            raise interrupt
+
+    monkeypatch.setattr(worker_mod, "_start_and_join_threads", interrupt_after_first_target)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        worker.remote_release_import(imported)
+
+    assert caught.value is interrupt
+    assert fake.release_calls == 1
+    assert imported.released
+    assert imported._owner_handle_ref is None
+    assert owner._live_import_refs == 0
+    assert worker._pending_remote_import_releases == []
+    worker._flush_pending_remote_frees()
+    worker.remote_release_import(imported)
+    assert fake.release_calls == 1
+
+
+def test_concurrent_direct_import_releases_send_one_rpc(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+    imported = _make_remote_import_test_handle(owner)
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.release_calls = 0
+
+        def remote_release_import(self, *args):
+            self.release_calls += 1
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+    barrier = threading.Barrier(2)
+    real_operation_lease = worker._operation_lease
+
+    @contextlib.contextmanager
+    def synchronized_operation_lease(api):
+        with real_operation_lease(api):
+            barrier.wait(timeout=5)
+            yield
+
+    monkeypatch.setattr(worker, "_operation_lease", synchronized_operation_lease)
+    errors = []
+
+    def release_import():
+        try:
+            worker.remote_release_import(imported)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=release_import) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert fake.release_calls == 1
+    assert owner._live_import_refs == 0
+
+
+def test_concurrent_direct_owner_frees_send_one_rpc(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.free_calls = 0
+
+        def remote_free(self, *args):
+            self.free_calls += 1
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+    barrier = threading.Barrier(2)
+    real_operation_lease = worker._operation_lease
+
+    @contextlib.contextmanager
+    def synchronized_operation_lease(api):
+        with real_operation_lease(api):
+            barrier.wait(timeout=5)
+            yield
+
+    monkeypatch.setattr(worker, "_operation_lease", synchronized_operation_lease)
+    errors = []
+
+    def free_owner():
+        try:
+            worker.remote_free(owner)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=free_owner) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert fake.free_calls == 1
+
+
+def test_owner_free_is_durably_published_before_rpc():
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.free_calls = 0
+
+        def remote_free(self, *args):
+            assert owner.released
+            assert worker._pending_remote_buffer_frees == [owner]
+            self.free_calls += 1
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+
+    worker.remote_free(owner)
+
+    assert fake.free_calls == 1
+    assert worker._pending_remote_buffer_frees == []
+
+
+def test_failed_owner_free_can_be_retried_explicitly():
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.free_calls = 0
+
+        def remote_free(self, *args):
+            self.free_calls += 1
+            if self.free_calls == 1:
+                raise RuntimeError("transient free failure")
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+
+    with pytest.raises(RuntimeError, match="transient free failure"):
+        worker.remote_free(owner)
+
+    assert owner.released
+    assert worker._pending_remote_buffer_frees == [owner]
+
+    worker.remote_free(owner)
+    worker.remote_free(owner)
+
+    assert fake.free_calls == 2
+    assert worker._pending_remote_buffer_frees == []
+
+
+def test_owner_free_flush_cannot_miss_half_published_debt(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+    slot_ref_token = owner._acquire_slot_ref()
+    mark_entered = threading.Event()
+    allow_mark = threading.Event()
+    flush_lock_attempted = threading.Event()
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.free_calls = 0
+
+        def remote_free(self, *args):
+            self.free_calls += 1
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+    real_mark_released = RemoteBufferHandle._mark_released
+    real_release_lock = worker._remote_import_release_mu
+
+    class ObservedReleaseLock:
+        def __enter__(self):
+            if threading.current_thread().name == "owner-free-flusher":
+                flush_lock_attempted.set()
+            real_release_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            real_release_lock.release()
+
+    monkeypatch.setattr(worker, "_remote_import_release_mu", ObservedReleaseLock())
+
+    def blocked_mark_released(handle):
+        if handle is owner:
+            mark_entered.set()
+            allow_mark.wait(timeout=5)
+        real_mark_released(handle)
+
+    monkeypatch.setattr(RemoteBufferHandle, "_mark_released", blocked_mark_released)
+    errors = []
+
+    def publish():
+        try:
+            worker.remote_free(owner)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def retire_and_flush():
+        try:
+            owner._release_slot_ref(slot_ref_token)
+            worker._flush_pending_remote_frees()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert mark_entered.wait(timeout=5)
+    flusher = threading.Thread(target=retire_and_flush, name="owner-free-flusher")
+    flusher.start()
+    assert flush_lock_attempted.wait(timeout=5)
+    assert fake.free_calls == 0
+    allow_mark.set()
+    publisher.join(timeout=5)
+    flusher.join(timeout=5)
+
+    assert not publisher.is_alive()
+    assert not flusher.is_alive()
+    assert errors == []
+    assert fake.free_calls == 1
+    assert worker._pending_remote_buffer_frees == []
+
+
+def test_import_release_flush_cannot_observe_half_published_state(monkeypatch):
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+    imported = _make_remote_import_test_handle(owner)
+    mark_entered = threading.Event()
+    allow_mark = threading.Event()
+    flush_lock_attempted = threading.Event()
+    rpc_started = threading.Event()
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.release_calls = 0
+
+        def remote_release_import(self, *args):
+            self.release_calls += 1
+            rpc_started.set()
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+    real_mark_released = RemoteBufferHandle._mark_released
+    real_release_lock = worker._remote_import_release_mu
+
+    class ObservedReleaseLock:
+        def __enter__(self):
+            if threading.current_thread().name == "import-release-flusher":
+                flush_lock_attempted.set()
+            real_release_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            real_release_lock.release()
+
+    monkeypatch.setattr(worker, "_remote_import_release_mu", ObservedReleaseLock())
+
+    def blocked_mark_released(handle):
+        if handle is imported:
+            mark_entered.set()
+            allow_mark.wait(timeout=5)
+        real_mark_released(handle)
+
+    monkeypatch.setattr(RemoteBufferHandle, "_mark_released", blocked_mark_released)
+    errors = []
+
+    def publish():
+        try:
+            worker._publish_pending_remote_import_release(
+                imported,
+                worker_mod._PendingRemoteImportReleaseState(owner_ref=owner),
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def flush():
+        try:
+            worker._flush_pending_remote_frees()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert mark_entered.wait(timeout=5)
+    flusher = threading.Thread(target=flush, name="import-release-flusher")
+    flusher.start()
+    assert flush_lock_attempted.wait(timeout=5)
+    assert not rpc_started.is_set()
+    allow_mark.set()
+    publisher.join(timeout=5)
+    flusher.join(timeout=5)
+
+    assert not publisher.is_alive()
+    assert not flusher.is_alive()
+    assert errors == []
+    assert fake.release_calls == 1
+    assert owner._live_import_refs == 0
+
+
+def test_import_release_reply_loss_is_poisoned_and_never_replayed():
+    worker = Worker(level=4, num_sub_workers=0)
+    owner, _exported = _make_remote_import_test_values(worker)
+    imported = _make_remote_import_test_handle(owner)
+
+    class FakeRemoteWorker:
+        def __init__(self):
+            self.release_calls = 0
+
+        def remote_release_import(self, *args):
+            self.release_calls += 1
+            raise RuntimeError("release reply lost")
+
+    fake = FakeRemoteWorker()
+    _start_fake_remote_worker(worker, fake)
+
+    with pytest.raises(RuntimeError, match="release reply lost"):
+        worker.remote_release_import(imported)
+
+    assert fake.release_calls == 1
+    assert owner._live_import_refs == 1
+    assert worker._ordered_cleanup_error is not None
+    assert worker._pending_remote_import_releases == [imported]
+
+    with pytest.raises(RuntimeError, match="release reply lost"):
+        worker._flush_pending_remote_frees()
+
+    assert fake.release_calls == 1
+    assert owner._live_import_refs == 1
 
 
 def test_remote_import_rejects_cross_worker_or_stale_export():
@@ -1605,7 +2291,11 @@ def test_remote_pending_free_is_retained_when_control_fails():
     worker._lifecycle = worker_mod._Lifecycle.READY
     worker._pending_remote_buffer_frees = [owner]
 
-    worker._flush_pending_remote_frees()
+    # Retained for a retry, and reported: this runs inside a run's fence-owned
+    # cleanup, where returning normally publishes the run as cleanly finished
+    # over a remote allocation it still owns.
+    with pytest.raises(RuntimeError, match="remain owed"):
+        worker._flush_pending_remote_frees()
 
     assert worker._pending_remote_buffer_frees == [owner]
 

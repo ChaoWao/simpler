@@ -12,6 +12,10 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <new>
+#include <utility>
 
 #include "call_config.h"
 #include "ring.h"
@@ -42,6 +46,7 @@ struct OrchestratorFixture : public ::testing::Test {
     struct WorkerQueueView {
         NextLevelReadyQueues *queues;
         bool try_pop(TaskSlot &out) { return queues->try_pop_single(0, out); }
+        bool try_pop(RunId run_id, TaskSlot &out) { return queues->try_pop_single(0, run_id, out); }
     } rq{&rq_next_level};
 
     void SetUp() override {
@@ -78,6 +83,24 @@ struct OrchestratorFixture : public ::testing::Test {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+TEST(ReadyQueueTest, UnscopedAccessPreservesRunInsertionOrder) {
+    ReadyQueue queue;
+    queue.push(/*run_id=*/7, /*slot=*/70);
+    queue.push(/*run_id=*/8, /*slot=*/80);
+    queue.push(/*run_id=*/7, /*slot=*/71);
+
+    TaskSlot slot = INVALID_SLOT;
+    ASSERT_TRUE(queue.try_front(slot));
+    EXPECT_EQ(slot, 70);
+    ASSERT_TRUE(queue.try_pop(slot));
+    EXPECT_EQ(slot, 70);
+    ASSERT_TRUE(queue.try_pop(slot));
+    EXPECT_EQ(slot, 71);
+    ASSERT_TRUE(queue.try_pop(slot));
+    EXPECT_EQ(slot, 80);
+    EXPECT_TRUE(queue.empty());
+}
 
 TEST_F(OrchestratorFixture, IndependentTaskIsImmediatelyReady) {
     auto a = single_tensor_args(0xCAFE, TensorArgType::OUTPUT);
@@ -494,11 +517,7 @@ TEST_F(OrchestratorFixture, RunAcceptanceWaitsForEveryDispatchedGroupMember) {
 TEST_F(OrchestratorFixture, TerminalFailureUnblocksRunAcceptance) {
     auto result = orch.submit_next_level(C(80), single_tensor_args(0x8030, TensorArgType::OUTPUT), cfg, 0);
     orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("graph build failed")));
-    EXPECT_FALSE(orch.run_accepted(run_id));
-
-    S(result.task_slot).state.store(TaskState::FAILED, std::memory_order_release);
-    EXPECT_TRUE(orch.on_consumed(result.task_slot));
-
+    EXPECT_EQ(S(result.task_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
     EXPECT_TRUE(orch.run_accepted(run_id));
     EXPECT_NO_THROW(orch.wait_run_accepted(run_id));
 }
@@ -674,4 +693,653 @@ TEST_F(OrchestratorFixture, FailedSubmissionCarriesItsMessageToTheFence) {
         EXPECT_STREQ(e.what(), "orchestration: ValueError: bad arg");
     }
     orch.release_run(run_id);
+}
+
+// Cancelling a run must not release a producer reference that a RUNNING
+// consumer still holds. Releasing it early lets the producer reach CONSUMED —
+// and its HeapRing output be reclaimed — while the device is still reading it,
+// and the consumer's real completion then releases the same reference twice.
+TEST_F(OrchestratorFixture, CancelKeepsProducerRefsHeldByARunningConsumer) {
+    orch.scope_begin();
+    auto producer = orch.submit_next_level(C(70), single_tensor_args(0x7000, TensorArgType::OUTPUT), cfg, 0);
+    auto consumer = orch.submit_next_level(C(71), single_tensor_args(0x7000, TensorArgType::INPUT), cfg, 0);
+    ASSERT_EQ(S(consumer.task_slot).fanin_producers.size(), 1u);
+    ASSERT_EQ(S(consumer.task_slot).fanin_producers[0], producer.task_slot);
+
+    // The consumer is on the device when the graph callback throws.
+    S(consumer.task_slot).state.store(TaskState::RUNNING, std::memory_order_release);
+    const int32_t released_before = S(producer.task_slot).fanout_released.load(std::memory_order_acquire);
+
+    orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("orchestration: boom")));
+
+    EXPECT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::RUNNING)
+        << "a RUNNING slot is owned by the device and must not be cancelled";
+    // Exactly one release: the producer's own terminal self-release, because
+    // the cancel path failed it. The reference the RUNNING consumer holds is
+    // NOT among them — releasing that one too would make this 2, and would let
+    // the producer be reclaimed under a consumer still reading it.
+    EXPECT_EQ(S(producer.task_slot).fanout_released.load(std::memory_order_acquire), released_before + 1)
+        << "cancellation released a producer reference still held by a RUNNING consumer";
+
+    // The run stays live on purpose: only the consumer's real completion can
+    // release the last reference, and that path belongs to the scheduler.
+    S(consumer.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    (void)orch.on_consumed(consumer.task_slot);
+    orch.scope_end();
+}
+
+// The converse: a consumer the cancel path *did* fail must release the producer
+// it will never read, or an unstarted consumer pins its producer forever.
+TEST_F(OrchestratorFixture, CancelReleasesProducerRefsHeldByAnUnstartedConsumer) {
+    orch.scope_begin();
+    auto producer = orch.submit_next_level(C(72), single_tensor_args(0x7200, TensorArgType::OUTPUT), cfg, 0);
+    auto consumer = orch.submit_next_level(C(73), single_tensor_args(0x7200, TensorArgType::INPUT), cfg, 0);
+    ASSERT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::PENDING);
+    const int32_t released_before = S(producer.task_slot).fanout_released.load(std::memory_order_acquire);
+
+    orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("orchestration: boom")));
+
+    EXPECT_GT(S(producer.task_slot).fanout_released.load(std::memory_order_acquire), released_before)
+        << "a cancelled consumer must release the producer it will never read";
+
+    orch.scope_end();
+}
+
+// retire erases a run's ready-queue partitions. A late enqueue — a dependency
+// releasing its consumer, or the scheduler requeueing a task whose SUB worker
+// was busy — must not rebuild one: nothing drains a partition whose run will
+// never hold the FIFO head again.
+// A failure claim won while a slot was BUILDING leaves the propagation to the
+// submitting thread. If that thread throws before it gets there, the slot is
+// FAILED with its references still held — and skipping it for being FAILED is
+// what would leave the run's fence unreachable forever.
+TEST_F(OrchestratorFixture, ACancelledRunTakesOverAPropagationItsSubmitAbandoned) {
+    auto task = orch.submit_next_level(C(76), single_tensor_args(0x7600, TensorArgType::OUTPUT), cfg, 0);
+    TaskSlot slot = task.task_slot;
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+
+    // The state an abandoned submit leaves behind.
+    S(slot).state.store(TaskState::BUILDING, std::memory_order_release);
+    ASSERT_TRUE(claim_task_failure(S(slot), "producer failed").has_value());
+    ASSERT_TRUE(S(slot).failure_propagation_pending.load(std::memory_order_acquire));
+
+    orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("callback threw")));
+
+    EXPECT_EQ(S(slot).state.load(std::memory_order_acquire), TaskState::CONSUMED)
+        << "an abandoned propagation stranded the slot";
+    EXPECT_FALSE(S(slot).failure_propagation_pending.load(std::memory_order_acquire));
+    EXPECT_TRUE(orch.run_done(run_id)) << "the run fence never became reachable";
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, CancellationRetriesBeforeAnyPreparedFailureReleasesCommit) {
+    auto producer = orch.submit_next_level(C(77), single_tensor_args(0x7700, TensorArgType::OUTPUT), cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+    auto consumer = orch.submit_next_level(C(78), single_tensor_args(0x7700, TensorArgType::INPUT), cfg, 0);
+    ASSERT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::PENDING);
+
+    int32_t snapshots = 0;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::FAILURE_FANIN_SNAPSHOT && ++snapshots == 2) throw std::bad_alloc();
+    });
+
+    EXPECT_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("graph construction failed"))),
+        std::bad_alloc
+    );
+
+    EXPECT_TRUE(S(producer.task_slot).failure_propagation_pending.load(std::memory_order_acquire));
+    EXPECT_TRUE(S(consumer.task_slot).failure_propagation_pending.load(std::memory_order_acquire));
+    EXPECT_EQ(S(producer.task_slot).fanout_released.load(std::memory_order_acquire), 0);
+    EXPECT_EQ(S(consumer.task_slot).fanout_released.load(std::memory_order_acquire), 0)
+        << "one prepared slot released before every cancellation snapshot succeeded";
+
+    orch.set_test_hook({});
+    EXPECT_NO_THROW(orch.fail_run_submission(run_id));
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_EQ(S(producer.task_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(S(consumer.task_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, FailedReverseEdgePublicationRollsBackTheProducerReference) {
+    auto producer = orch.submit_next_level(C(79), single_tensor_args(0x7900, TensorArgType::OUTPUT), cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::PRODUCER_FORWARD_EDGE_PUBLISHED && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+    EXPECT_THROW(
+        (void)orch.submit_next_level(C(80), single_tensor_args(0x7900, TensorArgType::INPUT), cfg, 0), std::bad_alloc
+    );
+    ASSERT_TRUE(injected);
+
+    {
+        std::lock_guard<std::mutex> lk(S(producer.task_slot).fanout_mu);
+        EXPECT_TRUE(S(producer.task_slot).fanout_consumers.empty());
+        EXPECT_EQ(S(producer.task_slot).fanout_total, 0);
+    }
+
+    orch.set_test_hook({});
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("edge publication failed")))
+    );
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_EQ(S(producer.task_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    orch.release_run(run_id);
+}
+
+// Every route back into a ready queue goes through enqueue_ready — including
+// the scheduler's requeue of a task whose target worker was busy, which is the
+// one that can fire after its run is already terminal.
+TEST_F(OrchestratorFixture, ATerminalRunsQueuePartitionIsNotRebuilt) {
+    auto task = orch.submit_next_level(C(74), single_tensor_args(0x7400, TensorArgType::OUTPUT), cfg, 0);
+    auto sub = orch.submit_sub(C(75), single_tensor_args(0x7500, TensorArgType::OUTPUT));
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+    ASSERT_EQ(ready, task.task_slot);
+    ASSERT_TRUE(rq_sub.try_pop(run_id, ready));
+    ASSERT_EQ(ready, sub.task_slot);
+
+    for (TaskSlot slot : {task.task_slot, sub.task_slot}) {
+        S(slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+        ASSERT_TRUE(orch.on_consumed(slot));
+    }
+    orch.close_run_submission(run_id);
+    ASSERT_TRUE(orch.run_done(run_id));
+
+    // The slots are long gone, but a stale enqueue can still arrive here.
+    orch.enqueue_ready(task.task_slot);
+    orch.enqueue_ready(sub.task_slot);
+
+    TaskSlot leaked;
+    EXPECT_FALSE(rq.try_pop(run_id, leaked)) << "a terminal run's partition was rebuilt by a late enqueue";
+    EXPECT_FALSE(rq_next_level.try_front_group(run_id, leaked));
+    EXPECT_FALSE(rq_sub.try_pop(run_id, leaked)) << "a busy-worker requeue bypassed the terminal-run guard";
+    EXPECT_TRUE(rq_sub.empty());
+    orch.release_run(run_id);
+}
+
+// A run whose lease has been released is not dispatchable, even while its id is
+// still the FIFO head the scheduler last observed.
+TEST_F(OrchestratorFixture, ReleasedLeaseMakesTheRunUndispatchable) {
+    EXPECT_EQ(orch.dispatchable_run_id(), run_id);
+    EXPECT_TRUE(orch.can_dispatch_run(run_id));
+
+    orch.close_run_submission(run_id);
+    EXPECT_TRUE(orch.run_done(run_id));
+
+    EXPECT_EQ(orch.dispatchable_run_id(), INVALID_RUN_ID)
+        << "a terminal run must not be offered to the scheduler as dispatchable";
+    EXPECT_FALSE(orch.can_dispatch_run(run_id));
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, FifoHeadCanExecuteWhileGraphConstructionIsOpen) {
+    EXPECT_TRUE(orch.can_dispatch_run(run_id));
+    auto task = orch.submit_next_level(C(89), single_tensor_args(0x8900, TensorArgType::OUTPUT), cfg, 0);
+
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+    EXPECT_EQ(ready, task.task_slot);
+    S(task.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    ASSERT_TRUE(orch.on_consumed(task.task_slot));
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    orch.close_run_submission(run_id);
+    EXPECT_TRUE(orch.run_done(run_id));
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, BuildingSuccessorActivatesAfterPriorRunIsTerminal) {
+    auto first = orch.submit_next_level(C(90), single_tensor_args(0x9000, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+    RunId second = orch.begin_run();
+    auto interactive = orch.submit_next_level(C(91), single_tensor_args(0x9100, TensorArgType::OUTPUT), cfg, 0);
+    EXPECT_FALSE(orch.can_dispatch_run(second));
+
+    S(first.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    ASSERT_TRUE(orch.on_consumed(first.task_slot));
+    EXPECT_TRUE(orch.can_dispatch_run(second));
+    ASSERT_TRUE(rq.try_pop(second, ready));
+    EXPECT_EQ(ready, interactive.task_slot);
+
+    S(interactive.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    ASSERT_TRUE(orch.on_consumed(interactive.task_slot));
+    EXPECT_FALSE(orch.run_done(second));
+    orch.close_run_submission(second);
+    EXPECT_TRUE(orch.run_done(second));
+
+    orch.release_run(run_id);
+    orch.release_run(second);
+}
+
+TEST_F(OrchestratorFixture, PreparedRunWaitsForActiveRunAndThirdAdmissionBlocks) {
+    auto first = orch.submit_next_level(C(90), single_tensor_args(0x9000, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+
+    TaskSlot active_slot;
+    ASSERT_TRUE(rq.try_pop(run_id, active_slot));
+    ASSERT_EQ(active_slot, first.task_slot);
+
+    RunId second = orch.begin_run();
+    auto prepared = orch.submit_next_level(C(91), single_tensor_args(0x9100, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(second);
+
+    EXPECT_FALSE(orch.can_dispatch_run(second));
+
+    auto third = std::async(std::launch::async, [this] {
+        return orch.begin_run();
+    });
+    EXPECT_EQ(third.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout)
+        << "third admission must block before graph construction";
+
+    S(first.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    ASSERT_TRUE(orch.on_consumed(first.task_slot));
+
+    ASSERT_EQ(third.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    RunId third_id = third.get();
+    ASSERT_TRUE(rq.try_pop(second, active_slot));
+    EXPECT_EQ(active_slot, prepared.task_slot);
+
+    S(prepared.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    ASSERT_TRUE(orch.on_consumed(prepared.task_slot));
+    orch.close_run_submission(third_id);
+
+    EXPECT_NO_THROW(orch.wait_run(run_id));
+    EXPECT_NO_THROW(orch.wait_run(second));
+    EXPECT_NO_THROW(orch.wait_run(third_id));
+    orch.release_run(run_id);
+    orch.release_run(second);
+    orch.release_run(third_id);
+}
+
+// At depth one the pipeline slot a retiring run gives back is the only one
+// there is, so the waiter in begin_run has exactly one wakeup to catch. It is
+// caught because the release happens under the mutex whose predicate reads it:
+// releasing outside it can land between a waiter finding "full" and its
+// registering on the condition variable, and the notify then reaches nobody.
+//
+// The loop is what exercises the window — a single pass would rarely place the
+// release there — so a stranded slot shows up as this test not finishing.
+TEST(DepthOneAdmission, ARetiringRunAlwaysWakesTheOneWaiterItUnblocks) {
+    for (int round = 0; round < 200; ++round) {
+        TensorMap tm;
+        Ring allocator;
+        Scope scope;
+        NextLevelReadyQueues rq_next_level;
+        ReadyQueue rq_sub;
+        Orchestrator orch;
+        allocator.init(/*heap_bytes=*/1ULL << 20);
+        rq_next_level.reset({0});
+        orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level);
+        orch.configure_pipeline_depth(1);
+
+        RunId first = orch.begin_run();
+        CallConfig cfg;
+        TaskArgs args;
+        Tensor t{};
+        t.buffer.addr = 0xD000 + static_cast<uint64_t>(round);
+        t.ndims = 1;
+        t.shapes[0] = 1;
+        t.dtype = DataType::UINT8;
+        args.add_tensor(t, TensorArgType::OUTPUT);
+        CallableIdentity callable;
+        callable.digest.fill(77);
+        auto task = orch.submit_next_level(callable, args, cfg, 0);
+        orch.close_run_submission(first);
+        TaskSlot ready = INVALID_SLOT;
+        ASSERT_TRUE(rq_next_level.try_pop_single(0, first, ready));
+
+        // The successor races the retirement for the only slot in the pool.
+        auto successor = std::async(std::launch::async, [&orch] {
+            return orch.begin_run();
+        });
+        allocator.slot_state(task.task_slot)->state.store(TaskState::COMPLETED, std::memory_order_release);
+        ASSERT_TRUE(orch.on_consumed(task.task_slot));
+
+        ASSERT_EQ(successor.wait_for(std::chrono::seconds(5)), std::future_status::ready)
+            << "round " << round << ": the freed pipeline slot never woke its waiter";
+        RunId second = successor.get();
+        orch.close_run_submission(second);
+        orch.release_run(first);
+        orch.release_run(second);
+        allocator.shutdown();
+    }
+}
+
+TEST(DepthOneAdmission, FailedBeginRollsBackEveryPublishedOwnerAndKeepsRunIdsMonotonic) {
+    for (OrchestratorTestPoint failure_point :
+         {OrchestratorTestPoint::BEGIN_RUN_MAP_PUBLISHED, OrchestratorTestPoint::BEGIN_RUN_FIFO_PUBLISHED}) {
+        TensorMap tm;
+        Ring allocator;
+        Scope scope;
+        NextLevelReadyQueues rq_next_level;
+        ReadyQueue rq_sub;
+        Orchestrator orch;
+        allocator.init(/*heap_bytes=*/1ULL << 20);
+        rq_next_level.reset({0});
+        orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level);
+        orch.configure_pipeline_depth(1);
+
+        bool injected = false;
+        orch.set_test_hook([&](OrchestratorTestPoint point) {
+            if (point == failure_point && !std::exchange(injected, true)) {
+                throw std::runtime_error("injected begin_run publication failure");
+            }
+        });
+        EXPECT_THROW(orch.begin_run(), std::runtime_error);
+        ASSERT_TRUE(injected);
+
+        orch.set_test_hook({});
+        RunId recovered = orch.begin_run();
+        EXPECT_EQ(recovered, 2U);
+        EXPECT_EQ(orch.active_run_id(), recovered);
+        orch.close_run_submission(recovered);
+        EXPECT_TRUE(orch.run_done(recovered));
+        orch.release_run(recovered);
+        allocator.shutdown();
+    }
+}
+
+// A submit that throws after scope registration but before the matching charge
+// leaves only an extra release, never a reference nothing can release. Python
+// closes the scope before cancelling, which is the order used here.
+TEST(SubmitFailure, ASlotWhoseSubmitThrewIsFullyReclaimedByCancellation) {
+    TensorMap tm;
+    Ring allocator;
+    Scope scope;
+    NextLevelReadyQueues rq_next_level;
+    ReadyQueue rq_sub;
+    Orchestrator orch;
+    allocator.init(/*heap_bytes=*/1ULL << 20);
+    rq_next_level.reset({0});
+    orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level);
+
+    RunId run = orch.begin_run();
+    orch.scope_begin();
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::SCOPE_REGISTERED && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+
+    CallConfig cfg;
+    TaskArgs args;
+    Tensor t{};
+    t.buffer.addr = 0xE100;
+    t.ndims = 1;
+    t.shapes[0] = 1;
+    t.dtype = DataType::UINT8;
+    args.add_tensor(t, TensorArgType::OUTPUT);
+    CallableIdentity callable;
+    callable.digest.fill(88);
+    EXPECT_THROW((void)orch.submit_next_level(callable, args, cfg, 0), std::bad_alloc);
+    ASSERT_TRUE(injected);
+
+    orch.set_test_hook({});
+    orch.scope_end();
+    orch.fail_run_submission(run, std::make_exception_ptr(std::runtime_error("graph construction failed")));
+
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED)
+        << "a slot charged a scope reference it never registered stalls the run fence";
+    EXPECT_TRUE(orch.run_done(run));
+    EXPECT_THROW(orch.wait_run(run), std::runtime_error);
+    orch.release_run(run);
+    allocator.shutdown();
+}
+
+TEST_F(OrchestratorFixture, AllocRegistrationFailureReleasesTheUnownedRingSlot) {
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::ALLOC_RUN_SLOT_REGISTERING && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+
+    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8), std::bad_alloc);
+    ASSERT_TRUE(injected);
+    ASSERT_NE(allocator.slot_state(0), nullptr);
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(allocator.active_count(), 0) << "a slot the run never owned was left live in the Ring";
+
+    orch.set_test_hook({});
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("alloc registration failed")))
+    );
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, AllocFailureAfterScopeRegistrationRemainsCancellationClaimable) {
+    orch.scope_begin();
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::SCOPE_REGISTERED && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+
+    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8), std::bad_alloc);
+    ASSERT_TRUE(injected);
+    ASSERT_NE(allocator.slot_state(0), nullptr);
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::BUILDING);
+    EXPECT_EQ(allocator.slot_state(0)->fanout_total, 0)
+        << "alloc charged a scope reference before scope registration completed";
+
+    orch.set_test_hook({});
+    orch.scope_end();
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("alloc scope failed")))
+    );
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(allocator.active_count(), 0);
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, AllocOutputPublicationFailureLeavesAReclaimableJournal) {
+    orch.scope_begin();
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::ALLOC_OUTPUT_KEY_PREPARED && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+
+    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8), std::bad_alloc);
+    ASSERT_TRUE(injected);
+    ASSERT_NE(allocator.slot_state(0), nullptr);
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::BUILDING);
+    EXPECT_EQ(allocator.slot_state(0)->output_keys.size(), 1u);
+    EXPECT_EQ(tm.size(), 0) << "alloc published an output mapping before its cleanup journal";
+
+    orch.set_test_hook({});
+    orch.scope_end();
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("alloc output failed")))
+    );
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(allocator.active_count(), 0);
+    EXPECT_EQ(tm.size(), 0);
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, SubmitRegistrationFailureReleasesTheUnownedHeapRingSlot) {
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::SUBMIT_RUN_SLOT_REGISTERING && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+
+    TaskArgs args;
+    Tensor output{};
+    output.buffer.addr = 0;
+    output.ndims = 1;
+    output.shapes[0] = 16;
+    output.dtype = DataType::UINT8;
+    args.add_tensor(output, TensorArgType::OUTPUT);
+    EXPECT_THROW((void)orch.submit_next_level(C(90), args, cfg, 0), std::bad_alloc);
+    ASSERT_TRUE(injected);
+    ASSERT_NE(allocator.slot_state(0), nullptr);
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(allocator.active_count(), 0) << "a task slot absent from its run kept the HeapRing slab live";
+    EXPECT_EQ(tm.size(), 0);
+
+    orch.set_test_hook({});
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("submit registration failed")))
+    );
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, SubmitOutputJournalFailurePreservesThePreviousOwnerAndReclaims) {
+    constexpr uint64_t first_key_addr = 0xE300;
+    constexpr uint64_t previous_key_addr = 0xE301;
+    TensorKey first_key = TensorKey::local_host(first_key_addr);
+    TensorKey previous_key = TensorKey::local_host(previous_key_addr);
+
+    auto previous =
+        orch.submit_next_level(C(91), single_tensor_args(previous_key_addr, TensorArgType::OUTPUT_EXISTING), cfg, 0);
+    TaskSlot ready = INVALID_SLOT;
+    ASSERT_TRUE(rq.try_pop(run_id, ready));
+    ASSERT_EQ(ready, previous.task_slot);
+    TaskState expected = TaskState::READY;
+    ASSERT_TRUE(S(previous.task_slot)
+                    .state.compare_exchange_strong(
+                        expected, TaskState::RUNNING, std::memory_order_acq_rel, std::memory_order_acquire
+                    ));
+
+    int32_t prepared_keys = 0;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::SUBMIT_OUTPUT_KEY_PREPARED && ++prepared_keys == 2) {
+            throw std::bad_alloc();
+        }
+    });
+
+    TaskArgs replacement;
+    Tensor first{};
+    first.buffer.addr = first_key_addr;
+    first.ndims = 1;
+    first.shapes[0] = 1;
+    first.dtype = DataType::UINT8;
+    replacement.add_tensor(first, TensorArgType::OUTPUT_EXISTING);
+    Tensor second = first;
+    second.buffer.addr = previous_key_addr;
+    replacement.add_tensor(second, TensorArgType::OUTPUT_EXISTING);
+
+    EXPECT_THROW((void)orch.submit_next_level(C(92), replacement, cfg, 0), std::bad_alloc);
+    ASSERT_EQ(prepared_keys, 2);
+    TaskSlot failed_slot = allocator.next_task_id() - 1;
+    ASSERT_NE(failed_slot, previous.task_slot);
+    EXPECT_EQ(S(failed_slot).state.load(std::memory_order_acquire), TaskState::BUILDING);
+    ASSERT_EQ(S(failed_slot).output_keys.size(), 2u);
+    EXPECT_EQ(tm.lookup(run_id, first_key), failed_slot)
+        << "the first fully-published output is needed to exercise cancellation cleanup";
+    EXPECT_EQ(tm.lookup(run_id, previous_key), previous.task_slot)
+        << "a failed second insert displaced the prior owner before publication";
+
+    orch.set_test_hook({});
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("output publication failed")))
+    );
+    EXPECT_EQ(S(failed_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_EQ(tm.lookup(run_id, first_key), INVALID_SLOT);
+    EXPECT_EQ(tm.lookup(run_id, previous_key), previous.task_slot)
+        << "failed-slot cleanup erased a TensorMap entry still owned by the running producer";
+    EXPECT_FALSE(orch.run_done(run_id));
+
+    S(previous.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    EXPECT_TRUE(orch.on_consumed(previous.task_slot));
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_EQ(tm.lookup(run_id, previous_key), INVALID_SLOT);
+    EXPECT_EQ(allocator.active_count(), 0);
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+// Group bookkeeping is prepared by the real submit path while its slot is
+// still BUILDING. Fault exactly between the two vector allocations: publishing
+// RUNNING first would make this slot neither dispatchable nor cancellable, but
+// BUILDING leaves it owned by the submission-failure cancellation path.
+TEST_F(OrchestratorFixture, AGroupBookkeepingAllocationFailureLeavesAReclaimableSlot) {
+    bool injected = false;
+    orch.set_test_hook([&](OrchestratorTestPoint point) {
+        if (point == OrchestratorTestPoint::GROUP_MEMBER_STATES_PREPARED && !injected) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+
+    TaskArgs first = single_tensor_args(0xE200, TensorArgType::OUTPUT);
+    TaskArgs second = single_tensor_args(0xE201, TensorArgType::OUTPUT);
+    EXPECT_THROW((void)orch.submit_sub_group(C(89), {first, second}), std::bad_alloc);
+    ASSERT_TRUE(injected);
+    ASSERT_NE(allocator.slot_state(0), nullptr);
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::BUILDING)
+        << "group preparation published a non-cancellable state before both allocations succeeded";
+
+    orch.set_test_hook({});
+    EXPECT_NO_THROW(
+        orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("group preparation failed")))
+    );
+    EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    EXPECT_TRUE(orch.run_done(run_id));
+    EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
+    orch.release_run(run_id);
+}
+
+TEST_F(OrchestratorFixture, FailedPreparedConstructionReturnsAdmissionWithoutDispatch) {
+    auto active = orch.submit_next_level(C(92), single_tensor_args(0x9200, TensorArgType::OUTPUT), cfg, 0);
+    orch.close_run_submission(run_id);
+    TaskSlot active_slot;
+    ASSERT_TRUE(rq.try_pop(run_id, active_slot));
+
+    RunId failed = orch.begin_run();
+    auto cancelled = orch.submit_next_level(C(93), single_tensor_args(0x9300, TensorArgType::OUTPUT), cfg, 0);
+    orch.fail_run_submission(failed, std::make_exception_ptr(std::runtime_error("graph build failed")));
+
+    EXPECT_TRUE(orch.run_done(failed));
+    EXPECT_EQ(S(cancelled.task_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
+    TaskSlot unexpected;
+    EXPECT_FALSE(rq.try_pop(failed, unexpected));
+
+    auto replacement = std::async(std::launch::async, [this] {
+        return orch.begin_run();
+    });
+    ASSERT_EQ(replacement.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    RunId replacement_id = replacement.get();
+
+    S(active.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
+    ASSERT_TRUE(orch.on_consumed(active.task_slot));
+    orch.close_run_submission(replacement_id);
+
+    EXPECT_THROW(orch.wait_run(failed), std::runtime_error);
+    EXPECT_NO_THROW(orch.wait_run(replacement_id));
+    orch.release_run(run_id);
+    orch.release_run(failed);
+    orch.release_run(replacement_id);
 }

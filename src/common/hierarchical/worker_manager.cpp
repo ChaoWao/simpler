@@ -386,6 +386,7 @@ WorkerCompletion LocalMailboxEndpoint::run_with_accept(
 
     // Write config as a single packed POD block (see call_config.h).
     std::memcpy(mbox() + MAILBOX_OFF_CONFIG, &s.config, sizeof(CallConfig));
+    std::memcpy(mbox() + MAILBOX_OFF_PIPELINE_LEASE, &s.pipeline_lease, sizeof(PipelineSlotLease));
 
     // Write length-prefixed TaskArgs blob: [T][S][tensors][scalars].
     size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor) +

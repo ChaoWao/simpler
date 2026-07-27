@@ -37,9 +37,14 @@ public:
         }
     }
 
-    std::optional<PipelineSlotLease> try_acquire() {
+    std::optional<PipelineSlotLease> try_acquire() { return try_acquire(depth_); }
+
+    std::optional<PipelineSlotLease> try_acquire(uint32_t admission_depth) {
+        if (admission_depth == 0 || admission_depth > depth_) {
+            throw std::invalid_argument("pipeline admission depth is outside the pool range");
+        }
         std::lock_guard<std::mutex> lock(mu_);
-        for (uint32_t slot = 0; slot < depth_; ++slot) {
+        for (uint32_t slot = 0; slot < admission_depth; ++slot) {
             SlotState &state = slots_[slot];
             if (state.in_use) continue;
             if (state.generation == std::numeric_limits<uint64_t>::max()) {
