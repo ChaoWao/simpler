@@ -205,6 +205,15 @@ git pull "$PUSH_REMOTE" "$HEAD_BRANCH"
 
 Run [checkout-fork-branch](../../lib/github/checkout-fork-branch.md) to create/switch to the local working branch and set the push refspec.
 
+**Land on the current base before editing anything.** `$BASE_REF` moves while a
+PR is open and everything below measures against it. Doing it here also keeps the
+rebase off a dirty worktree, which git refuses to rebase:
+
+```bash
+git fetch upstream                        # $BASE_REF is a remote-tracking ref — refresh it
+git rebase "$BASE_REF"                    # see [commit-and-push](../../lib/github/commit-and-push.md) §1
+```
+
 **Fix:**
 
 1. Read affected files, make changes with Edit tool
@@ -215,13 +224,18 @@ The PR must stay as **one commit** (its original commit + your fixes squashed
 in), so reviewers see a single clean diff, not a running log of review
 churn. This is the default on **every** iteration.
 
-Stage all changes, then squash based on how many commits the PR has ahead of
-`$BASE_REF`:
+Stage the fix and count what is ahead of the base you rebased onto above:
 
 ```bash
 git add -A
 COMMITS_AHEAD=$(git rev-list HEAD --not "$BASE_REF" --count)
 ```
+
+That rebase is why this is safe. `git reset --soft "$BASE_REF"` moves HEAD to the
+base but keeps *your* index, so on a stale base every file the base gained since
+you branched is recorded as **your deletion**. Rebasing afterwards does not undo
+it — the revert is already part of your diff and replays cleanly. It surfaces as
+unrelated files being reverted in the PR, easy to miss in a large diff.
 
 | `COMMITS_AHEAD` | How to fold the fix in |
 | --------------- | ---------------------- |
@@ -233,10 +247,19 @@ Do NOT run `/git-commit` to create a *new* commit here — that is what causes
 the appended-commit problem. `/git-commit` is only for regenerating the
 squashed message when `COMMITS_AHEAD > 1`.
 
-Then push and verify exactly one commit landed:
+Then verify and push:
 
-1. Rebase onto `$BASE_REF` (see [commit-and-push](../../lib/github/commit-and-push.md) §1)
-2. **Verify single commit:** `git rev-list HEAD --not "$BASE_REF" --count` must print `1`. If not, squash again before pushing — never push a multi-commit PR.
+1. **Verify single commit:** `git rev-list HEAD --not "$BASE_REF" --count` must print `1` — never push a multi-commit PR. `> 1` means squash again; `0` means the fold produced nothing and is the same stop-and-investigate as in the table above, not something to re-squash.
+2. **Verify you reverted nothing.** Review the file list with a **three-dot** diff:
+
+   ```bash
+   git diff "$BASE_REF"...HEAD --stat     # three dots: your changes only
+   ```
+
+   Two dots (`$BASE_REF..HEAD`) also reports files the base has and you do not,
+   rendering them as deletions you made — so it hides a real revert among noise
+   and invents fake ones. Any file here you did not intend to touch is a bug:
+   restore it with `git checkout "$BASE_REF" -- <path>` and amend.
 3. Push (update push with `--force-with-lease` to `$PUSH_REMOTE`)
 
 **Commit message — evolve it, don't replace or freeze it.** The message must
