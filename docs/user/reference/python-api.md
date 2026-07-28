@@ -4,11 +4,13 @@ The surface you write against, hand-maintained. There is no generated API
 reference in this repo, so treat the source as authoritative when the two
 disagree and fix this page in the same change.
 
-Import paths matter: `simpler.__all__` currently exports only the logging
-helpers, so the runtime types are imported from their submodules.
+`Worker` is available from the package root; the remaining task and callable
+types live in `simpler.task_interface`. Both resolve on first access, so
+`import simpler` alone stays cheap and does not require the `_task_interface`
+extension.
 
 ```python
-from simpler.worker import Worker
+from simpler import Worker           # or: from simpler.worker import Worker
 from simpler.task_interface import (
     ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs,
     CoreCallable, DataType, Tensor,

@@ -6,9 +6,16 @@ How this repo organizes Python packages, the build system, and example / test di
 
 | Package | Source | What's in wheel | Use for |
 | ------- | ------ | --------------- | ------- |
-| `simpler` | `python/simpler/` | `task_interface`, `worker`, `env_manager` only | Stable user API at runtime |
-| `simpler_setup` | `simpler_setup/` | All files + `_assets/{src,build/lib}` | Test framework, compilers, path resolution |
+| `simpler` | `python/simpler/` | `task_interface`, `worker`, `env_manager` only | Runtime user API: `Worker` plus the task/callable types |
+| `simpler_setup` | `simpler_setup/` | All files + `_assets/{src,build/lib}` | **Also user-facing**, not internal-only: `KernelCompiler`, `SceneTestCase` / `scene_test`, `Tensor`, `Scalar`, `TaskArgsBuilder`, `ensure_pto_isa_root`, `make_tensor_arg`, plus the `simpler_setup.tools` CLIs. A kernel cannot be compiled without it |
 | `_task_interface` | `python/bindings/` | nanobind `.so` at wheel root | Internal nanobind module |
+
+`simpler` exposes `Worker` and the `task_interface` submodule lazily (PEP 562
+`__getattr__`), so `from simpler import Worker` works while `import simpler`
+still costs nothing and does not require the `_task_interface` extension. Note
+that `simpler.task_interface.Tensor` (a device tensor descriptor) and
+`simpler_setup.Tensor` (a scene-test arg spec `NamedTuple`) are **different
+types with the same name** — do not flatten them into one namespace.
 
 The 4 files `kernel_compiler.py`, `runtime_compiler.py`, `toolchain.py`, `elf_parser.py` exist in **both** `python/simpler/` and `simpler_setup/` during transition. The `simpler_setup/` copies are authoritative; the `python/simpler/` copies are excluded from wheel via `pyproject.toml::wheel.exclude`. New code must `import` from `simpler_setup.*`, not `simpler.*`, for these four.
 
