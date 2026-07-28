@@ -1049,11 +1049,21 @@ void SchedulerContext::on_orchestration_done(
 
     // Allocate the per-S CompletedTaskQueues here on the boot leader, before it
     // releases runtime_init_ready_ — no scheduler thread can push until then.
-    // Capacity is bounded by total_tasks (no more completions can be in flight
-    // than exist), rounded up to a power of two and floored at 256.
+    // Completed-but-unresolved tasks in flight are bounded by BOTH the total task
+    // count and the ring's task window (a task must occupy a ring slot to run and
+    // complete), so size to the tighter of the two, rounded up to a power of two
+    // and floored at 256. The window already caps this, so there is no artificial
+    // ceiling and a producer never has to spin on a full queue.
     if (p_thread_mode_) {
+        uint64_t bound = static_cast<uint64_t>(total_tasks);
+        if (sched_->ring_sched_state.ring != nullptr) {
+            uint64_t window = static_cast<uint64_t>(sched_->ring_sched_state.ring->task_window_mask) + 1;
+            if (window < bound) {
+                bound = window;
+            }
+        }
         uint64_t cap = 256;
-        while (cap < static_cast<uint64_t>(total_tasks) && cap < (1u << 20)) {
+        while (cap < bound) {
             cap <<= 1;
         }
         for (int32_t t = 0; t < active_sched_threads_; t++) {

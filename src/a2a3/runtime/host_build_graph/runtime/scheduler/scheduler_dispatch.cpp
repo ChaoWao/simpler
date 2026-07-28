@@ -874,6 +874,12 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     }
     LOG_INFO_V0("Thread %d: resolution (P) thread starting, serving %d schedulers", thread_idx, active_sched_threads_);
 
+#if SIMPLER_DFX
+    auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
+    l2_swimlane.reset();
+    l2_swimlane.l2_swimlane_enabled = (l2_swimlane_level_ != L2SwimlaneLevel::DISABLED);
+#endif
+
     uint64_t last_progress_ts = get_sys_cnt_aicpu();
     uint64_t scheduler_timeout_cycles = SCHEDULER_TIMEOUT_CYCLES;
     const int32_t scheduler_timeout_ms_override = get_scheduler_timeout_ms();
@@ -957,6 +963,11 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
         if (resolved_this_pass > 0) {
             int32_t new_total =
                 completed_tasks_.fetch_add(resolved_this_pass, std::memory_order_relaxed) + resolved_this_pass;
+#if SIMPLER_SCHED_PROFILING
+            // P owns the completion accounting, so it owns the profiling mirror too
+            // (the S threads' completed_this_turn no longer feeds it in P mode).
+            sched_->tasks_completed.fetch_add(resolved_this_pass, std::memory_order_relaxed);
+#endif
             last_progress_ts = get_sys_cnt_aicpu();
             if (total_tasks_ > 0 && new_total >= total_tasks_) {
                 completed_.store(true, std::memory_order_release);
@@ -966,26 +977,56 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
             continue;  // fast re-drain while work keeps arriving
         }
 
-        // Idle: nothing to resolve. Latch a hang only when work is genuinely
-        // outstanding and no completion has arrived for the whole budget.
+        // Idle: nothing to resolve this pass. A task legitimately in flight — some
+        // thread still owns a RUNNING core — means P is merely waiting for that
+        // task to finish, not stalled: refresh the budget and keep spinning
+        // (mirrors resolve_and_dispatch's sibling-owns-running guard, so a task
+        // that runs longer than the timeout does not false-latch here). Only latch
+        // a hang when work is outstanding AND no thread anywhere owns a running
+        // task — a genuine forward-progress stall / pre-dispatch deadlock.
         uint64_t now = get_sys_cnt_aicpu();
-        if (now - last_progress_ts > scheduler_timeout_cycles && total_tasks_ > 0 &&
-            completed_tasks_.load(std::memory_order_relaxed) < total_tasks_) {
-            LOG_ERROR(
-                "Thread %d: P resolution stall (%d/%d resolved)", thread_idx,
-                completed_tasks_.load(std::memory_order_relaxed), total_tasks_
-            );
-            int32_t expected = PTO2_ERROR_NONE;
-            header->sched_error_code.compare_exchange_strong(
-                expected, PTO2_ERROR_SCHEDULER_TIMEOUT, std::memory_order_acq_rel, std::memory_order_acquire
-            );
-            if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-                emergency_shutdown(runtime);
+        if (now - last_progress_ts > scheduler_timeout_cycles) {
+            bool outstanding = total_tasks_ > 0 && completed_tasks_.load(std::memory_order_relaxed) < total_tasks_;
+            if (outstanding && no_thread_owns_running_task()) {
+                LOG_ERROR(
+                    "Thread %d: P resolution stall (%d/%d resolved)", thread_idx,
+                    completed_tasks_.load(std::memory_order_relaxed), total_tasks_
+                );
+                int32_t expected = PTO2_ERROR_NONE;
+                header->sched_error_code.compare_exchange_strong(
+                    expected, PTO2_ERROR_SCHEDULER_TIMEOUT, std::memory_order_acq_rel, std::memory_order_acquire
+                );
+                if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+                    emergency_shutdown(runtime);
+                }
+                break;
             }
-            break;
+            last_progress_ts = now;  // a task is still running (or none outstanding): not a stall
         }
         SPIN_WAIT_HINT();
     }
+
+#if SIMPLER_DFX
+    // P owns no cores, so the AICore-keyed flushes below iterate an empty core
+    // list; the sched-phase-buffer flush is the one that matters — it drains any
+    // per-thread records P wrote (e.g. under SCHED_PROFILING) so they are not lost.
+    if (l2_swimlane.l2_swimlane_enabled) {
+        l2_swimlane_aicpu_flush(
+            thread_idx, core_trackers_[thread_idx].core_ids(), core_trackers_[thread_idx].core_num()
+        );
+        if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) {
+            l2_swimlane_aicpu_flush_sched_phase_buffer(thread_idx);
+        }
+    }
+    if (is_dump_args_enabled()) {
+        dump_args_flush(thread_idx);
+    }
+    if (is_pmu_enabled()) {
+        pmu_aicpu_flush_buffers(
+            thread_idx, core_trackers_[thread_idx].core_ids(), core_trackers_[thread_idx].core_num()
+        );
+    }
+#endif
 
     return completed_tasks_.load(std::memory_order_relaxed);
 }
