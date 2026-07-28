@@ -157,3 +157,43 @@
     Do **not** open a repo-wide mechanical rename PR: it collides with every
     in-flight branch, and a 6k-line diff cannot be reviewed for the handful
     of Tier-C names hiding in it.
+
+11. **Prefer `pto::`-qualified names in kernels; let the tree converge, never
+    sweep it.** Two conventions coexist in kernel sources today. The
+    collectives kernels qualify (`pto::Stride<…>`) and carry no
+    using-directive; the older scene-test kernels open with `using namespace
+    pto;` and use bare names. Both are internally consistent, so neither is a
+    defect on its own.
+
+    **Qualification is the direction.** It is the only spelling that compiles
+    regardless of whether a using-directive is in scope, and a file-scope
+    `using namespace` is what most style guides steer away from. So:
+
+    - **New kernels qualify, and do not add `using namespace pto;`.** Adding
+      the directive to a file that does not have it is a step backwards.
+    - **When you already edit a kernel, you may qualify it** — but see the
+      constraint below, which is not optional.
+    - **Existing files that use bare names are not defects.** Leave them
+      unless you have another reason to touch them.
+
+    **The constraint: qualify a file completely or not at all.** `Shape`,
+    `Stride`, `Tile` and `GlobalTensor` all live in `namespace pto`, so
+    qualifying one of them and leaving its siblings bare produces adjacent
+    lines like
+
+    ```cpp
+    using DynShapeDim5 = Shape<1, 1, 1, vRows, vCols>;
+    using DynStridDim5 = pto::Stride<1, 1, 1, kTCols_, 1>;
+    ```
+
+    which reads worse than either consistent state. A half-qualified file is
+    a defect where a fully bare one is not.
+
+    **No repo-wide sweep.** As of 2026-07-28 the 142 files carrying `using
+    namespace pto;` contain roughly 3,200 bare uses — `Tile` 2080,
+    `GlobalTensor` 796, `Shape` 211, `Stride` 137. Rewriting them is a purely
+    stylistic change that would touch every kernel in the repo, collide with
+    every in-flight branch, and risk regex damage to member aliases and
+    comments for no functional gain. If the tree is ever to be unified in one
+    go, it needs its own decision plus a lint rule to hold the line — not a
+    hand-edited PR.
