@@ -453,9 +453,15 @@ class Orchestrator:
     #         orch.submit_next_level(c, ..., worker=0)  # outer-scope ring
 
     def scope_begin(self) -> None:
+        """Open a nested scope explicitly.
+
+        Prefer the ``scope()`` context manager, which pairs the end for you. Every
+        ``scope_begin()`` must be matched by a ``scope_end()``.
+        """
         self._o.scope_begin()
 
     def scope_end(self) -> None:
+        """Close the scope opened by the matching ``scope_begin()``."""
         self._o.scope_end()
 
     @contextlib.contextmanager
