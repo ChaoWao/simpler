@@ -855,6 +855,142 @@ int32_t SchedulerContext::try_early_dispatch(
 }
 
 // =============================================================================
+// Dedicated resolution (P) thread — 3S+1P
+// =============================================================================
+
+// P owns no AICore cores. It drains the per-S CompletedTaskQueues and runs
+// on_task_complete for every finished task: publish completion_flags, drain the
+// wake list (route/re-register waiters into the ready queues), advance the
+// watermark. As the sole producer of the ready queues its enqueues never
+// contend. P owns completed_tasks_ and the terminal completed_ flip, so the S
+// threads keep dispatching until P has resolved the whole graph (watermark fully
+// advanced) — the host's wait_for_consumers never observes a stranded prefix.
+int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread_idx) {
+    always_assert(sched_ != nullptr);
+    PTO2SharedMemoryHeader *header = sched_->sm_header;
+    if (!header) {
+        LOG_ERROR("PTO2 resolution: header is null");
+        return -1;
+    }
+    LOG_INFO_V0("Thread %d: resolution (P) thread starting, serving %d schedulers", thread_idx, active_sched_threads_);
+
+    uint64_t last_progress_ts = get_sys_cnt_aicpu();
+    uint64_t scheduler_timeout_cycles = SCHEDULER_TIMEOUT_CYCLES;
+    const int32_t scheduler_timeout_ms_override = get_scheduler_timeout_ms();
+    if (scheduler_timeout_ms_override > 0) {
+        scheduler_timeout_cycles =
+            static_cast<uint64_t>(scheduler_timeout_ms_override) * PLATFORM_PROF_SYS_CNT_FREQ / 1000;
+    }
+
+    while (true) {
+        if (completed_.load(std::memory_order_acquire)) break;
+
+        // Propagate a fatal error latched by the orchestrator (host) or a
+        // scheduler thread; mirror resolve_and_dispatch's exit behavior.
+        if (header->orch_error_code.load(std::memory_order_acquire) != PTO2_ERROR_NONE ||
+            header->sched_error_code.load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
+            if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+                emergency_shutdown(runtime);
+            }
+            break;
+        }
+
+        int32_t resolved_this_pass = 0;
+        for (int32_t s = 0; s < active_sched_threads_; s++) {
+            PTO2TaskSlotState *slot;
+            while ((slot = sp_queues_[s].pop()) != nullptr) {
+#if SIMPLER_SCHED_PROFILING
+                (void)sched_->on_task_complete(*slot, thread_idx);
+#else
+                (void)sched_->on_task_complete(*slot);
+#endif
+                resolved_this_pass++;
+            }
+        }
+
+        // Async deferred completions, moved off the scheduler threads. Every
+        // condition that fires resolves via on_task_complete inside
+        // poll_and_complete, so async ready tasks also enter the ready queues
+        // through P alone.
+        if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
+            (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
+            AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
+                rt_->aicore_mailbox, sched_
+#if SIMPLER_SCHED_PROFILING
+                ,
+                thread_idx
+#endif
+            );
+            if (poll_result.error_code != PTO2_ERROR_NONE) {
+                int32_t expected = PTO2_ERROR_NONE;
+                header->sched_error_code.compare_exchange_strong(
+                    expected, poll_result.error_code, std::memory_order_acq_rel, std::memory_order_acquire
+                );
+                if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+                    emergency_shutdown(runtime);
+                }
+                break;
+            }
+            resolved_this_pass += poll_result.completed;
+        }
+
+        // Dependency-only tasks (empty active_mask, or a predicate that failed)
+        // route to dummy_ready_queue during resolution; P produces and drains it,
+        // so the queue is single-threaded end to end. Loop until empty — a dummy's
+        // resolution can make further dummies ready in the same pass.
+        {
+            constexpr int DUMMY_DRAIN_BATCH = 8;
+            PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
+            int dummy_got;
+            while ((dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH)) > 0) {
+                for (int di = 0; di < dummy_got; di++) {
+#if SIMPLER_SCHED_PROFILING
+                    (void)sched_->on_task_complete(*dummy_batch[di], thread_idx);
+#else
+                    (void)sched_->on_task_complete(*dummy_batch[di]);
+#endif
+                    resolved_this_pass++;
+                }
+            }
+        }
+
+        if (resolved_this_pass > 0) {
+            int32_t new_total =
+                completed_tasks_.fetch_add(resolved_this_pass, std::memory_order_relaxed) + resolved_this_pass;
+            last_progress_ts = get_sys_cnt_aicpu();
+            if (total_tasks_ > 0 && new_total >= total_tasks_) {
+                completed_.store(true, std::memory_order_release);
+                LOG_INFO_V0("Thread %d: P resolved all tasks %d/%d", thread_idx, new_total, total_tasks_);
+                break;
+            }
+            continue;  // fast re-drain while work keeps arriving
+        }
+
+        // Idle: nothing to resolve. Latch a hang only when work is genuinely
+        // outstanding and no completion has arrived for the whole budget.
+        uint64_t now = get_sys_cnt_aicpu();
+        if (now - last_progress_ts > scheduler_timeout_cycles && total_tasks_ > 0 &&
+            completed_tasks_.load(std::memory_order_relaxed) < total_tasks_) {
+            LOG_ERROR(
+                "Thread %d: P resolution stall (%d/%d resolved)", thread_idx,
+                completed_tasks_.load(std::memory_order_relaxed), total_tasks_
+            );
+            int32_t expected = PTO2_ERROR_NONE;
+            header->sched_error_code.compare_exchange_strong(
+                expected, PTO2_ERROR_SCHEDULER_TIMEOUT, std::memory_order_acq_rel, std::memory_order_acquire
+            );
+            if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+                emergency_shutdown(runtime);
+            }
+            break;
+        }
+        SPIN_WAIT_HINT();
+    }
+
+    return completed_tasks_.load(std::memory_order_relaxed);
+}
+
+// =============================================================================
 // Main scheduler dispatch loop
 // =============================================================================
 
@@ -1031,7 +1167,11 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             }
         }
 
-        if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
+        // 3S+1P: async deferred-completion polling belongs to P — it resolves
+        // (on_task_complete) and so must stay the sole ready-queue producer. The
+        // scheduler threads keep their loop core-local (poll own COND, dispatch
+        // own cores) and never touch the shared mailbox on the hot path.
+        if (!p_thread_mode_ && rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
                 rt_->aicore_mailbox, sched_
@@ -1118,12 +1258,14 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 
         // Phase 3: Drain dummy ready queue (S0/S1/S2).
         //
-        // Dependency-only tasks bypass AICore dispatch: they go through the
-        // scheduler so fanin/fanout edges stay consistent, but completion is
-        // signalled inline here. The ready queue is MPMC, and the fanout path
-        // uses per-slot locks/atomics, so multiple scheduler threads can share
-        // the dependency-only resolve work.
-        if (thread_idx < 3) {
+        // Dependency-only tasks (empty active_mask, or a predicate that failed)
+        // bypass AICore dispatch: they go through the scheduler so fanin/fanout
+        // edges stay consistent, but completion is signalled inline here.
+        //
+        // 3S+1P: this resolve work moves to P together with the async/main
+        // completion paths, so P stays the sole ready-queue producer and the
+        // scheduler threads keep their loop core-local.
+        if (!p_thread_mode_ && thread_idx < 3) {
             constexpr int DUMMY_DRAIN_BATCH = 8;
             PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
             int dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH);
