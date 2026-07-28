@@ -17,9 +17,10 @@
 
 namespace pto::a5 {
 
-// Per-cpu_id metadata used by the packing algorithm. Filled from DSMI
-// CPU_TOPO + halGetDeviceInfo(AICPU, OCCUPY). cluster/die ids derive from
-// phy_cpu_id via the a5 mapping (cluster = phy/2, die = phy/4).
+// Per-cpu_id metadata used by the packing algorithm. Filled from the driver
+// CPU_TOPO data when available, otherwise derived from the AICPU OCCUPY
+// bitmap. cluster/die ids follow the a5 mapping (cluster = phy/2,
+// die = phy/4).
 struct AicpuLogicalCpu {
     int32_t cpu_id;
     int32_t phy_cpu_id;
@@ -33,14 +34,20 @@ struct AicpuLogicalCpu {
 // only contains cpu_ids that are in the device-side OCCUPY bitmap (i.e.
 // user-schedulable), sorted by cpu_id ascending.
 //
-// This function performs three driver calls:
+// This function uses these driver calls:
 //   * halGetDeviceInfo(AICPU, OCCUPY) — user-schedulable bitmap
 //   * halGetDeviceInfoByBuff(SYSTEM, CPU_TOPO)  (primary)
 //   * dsmi_get_device_info(SOC_INFO, CPU_TOPO)  (fallback)
 //
+// Drivers that do not expose CPU_TOPO use the OCCUPY-only topology below.
 // All driver entry points are dlsym'd from the host process (CANN is
 // expected to be already loaded by the surrounding `aclInit` path).
 bool probe_aicpu_topology(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus);
+
+// Build conservative a5 topology metadata from a user-schedulable OCCUPY
+// bitmap. Every set bit is a distinct non-SMT physical CPU; AICPU cpu_ids
+// retain the a5 two-physical-CPUs-per-cluster, two-clusters-per-die layout.
+bool derive_topology_from_occupy(uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus);
 
 // Compute the `ALLOWED_CPUS` selection for the surviving threads.
 //

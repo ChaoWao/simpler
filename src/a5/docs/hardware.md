@@ -150,6 +150,24 @@ For cross-generation portable code: **always go through ACL or CANN
 ini, never HAL**. HAL's CORE_NUM semantics shift between a3 and a5 in
 ways that have no public documentation.
 
+### CPU_TOPO compatibility on newer a5 drivers
+
+On `Ascend950PR_9579` with driver `25.7.rc1.6`, both host-side and
+device-side `AICPU + OCCUPY` report `0x3e`, so cpu_ids 1 through 5 are
+the complete user-schedulable pool. Launching five AICPU threads reaches
+each of those cpu_ids exactly once.
+
+The same driver returns `DRV_ERROR_NOT_SUPPORT` for both
+`halGetDeviceInfoByBuff(SYSTEM, CPU_TOPO)` and
+`dsmi_get_device_info(SOC_INFO, CPU_TOPO)`. Its public DSMI header only
+defines SOC_INFO subcommands 0 and 1.
+
+When CPU_TOPO is unavailable, the host runtime enumerates OCCUPY directly
+and treats each set bit as a distinct non-SMT physical CPU. This preserves
+the a5 cpu_id-to-cluster mapping while keeping the launch count equal to the
+actual user pool. Drivers that provide CPU_TOPO continue to use its detailed
+physical and hyperthread metadata.
+
 ## CANN AICPU thread dispatch under varying launch budgets
 
 How CANN distributes N AICPU threads across the user pool determines

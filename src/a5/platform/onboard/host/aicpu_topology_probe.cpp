@@ -144,7 +144,13 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
     if (!query_occupy(device_id, occupy)) return false;
 
     DsmiCpuTopo topo{};
-    if (!query_cpu_topo(device_id, topo)) return false;
+    if (!query_cpu_topo(device_id, topo)) {
+        LOG_WARN(
+            "aicpu_topology_probe: CPU_TOPO unavailable; deriving topology from OCCUPY=0x%llx",
+            static_cast<unsigned long long>(occupy)
+        );
+        return derive_topology_from_occupy(occupy, out_user_cpus);
+    }
 
     for (uint32_t i = 0; i < topo.total_nums; ++i) {
         const DsmiSingleCpu &c = topo.cpus[i];
@@ -169,6 +175,21 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
 }
 
 }  // namespace
+
+bool derive_topology_from_occupy(uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus) {
+    out_user_cpus.clear();
+    for (int32_t cpu_id = 0; cpu_id < 64; ++cpu_id) {
+        if (((occupy >> cpu_id) & 1ULL) == 0) continue;
+        AicpuLogicalCpu cpu{};
+        cpu.cpu_id = cpu_id;
+        cpu.phy_cpu_id = cpu_id;
+        cpu.hyperthread_id = 0;
+        cpu.cluster_id = cpu.phy_cpu_id / 2;
+        cpu.die_id = cpu.phy_cpu_id / 4;
+        out_user_cpus.push_back(cpu);
+    }
+    return !out_user_cpus.empty();
+}
 
 bool probe_aicpu_topology(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus) {
     {
