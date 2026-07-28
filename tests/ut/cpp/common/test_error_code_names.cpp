@@ -69,7 +69,7 @@ TEST(RuntimeErrorNames, NoErrorIsNotAnError) {
 // An unrecognised code must be reported as such. Annotating it with a neighbouring code's
 // text would be worse than printing the bare number.
 TEST(RuntimeErrorNames, UnknownCodeFallsBack) {
-    for (int32_t code : {6, 12, 42, 99, 104, 9999, -1}) {
+    for (int32_t code : {6, 12, 42, 99, 105, 9999, -1}) {
         EXPECT_STREQ(error_name(code), "unknown") << "code " << code;
         EXPECT_TRUE(is_blank(error_desc(code))) << "code " << code;
         EXPECT_TRUE(is_blank(error_hint(code))) << "code " << code;

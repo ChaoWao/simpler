@@ -1146,7 +1146,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             handle_drain_mode(thread_idx, &drain_stage_wall);
             // Record a Drain bar only when this thread actually did drain work (reached
             // drain_stage_cores). The many no-op entries — ack + availability-insufficient
-            // reset, stale-elected, non-elected bail before stage_go — never stage, so they
+            // reset or follower bail before stage_go — never stage, so they
             // would otherwise clutter the lane with zero-work drain(0) bars.
             if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES && drain_stage_wall != 0) {
                 l2_swimlane_aicpu_record_sched_phase(
