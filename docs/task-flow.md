@@ -22,7 +22,7 @@ scheduled), see:
 - [orchestrator.md](orchestrator.md) — submit flow, Ring, TensorMap, Scope
 - [scheduler.md](scheduler.md) — dispatch loop, queues, completion handling
 - [worker-manager.md](worker-manager.md) — WorkerThread, mailbox IPC mechanics
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — level model
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — level model
   and how components compose
 
 ---
@@ -348,6 +348,15 @@ the forked child decodes it. Remote NEXT_LEVEL dispatch through
 `RemoteL3Endpoint` serializes the same logical payload into a framed TASK
 request instead.
 
+Every dispatched group member contributes one run-acceptance obligation. For
+an A2A3 onboard chip endpoint, the child-side native runner writes
+`TASK_ACCEPTED` after its AICore and AICPU kernels are both enqueued; the parent
+observes it without releasing the mailbox. Other endpoint paths satisfy the
+same obligation conservatively when their completion returns. Once submission
+is closed and all obligations are satisfied, the next serialized orchestration
+callback may build its DAG even though the prior run has not reached its
+completion fence.
+
 Local mailbox path:
 
 ```text
@@ -612,7 +621,7 @@ lives in the mailbox blob bytes on the child side — view doesn't care.
 
 ## Related
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — L0–L6 level
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — L0–L6 level
   model, three-component composition
 - [orchestrator.md](orchestrator.md) — how `submit_*` actually builds the DAG
 - [scheduler.md](scheduler.md) — how dispatched slots get worker threads

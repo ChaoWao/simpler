@@ -23,6 +23,33 @@
 #include "scheduler/scheduler_types.h"
 #include "scheduler/pto_scheduler.h"
 
+TEST(SyncStartDrainAttemptTest, LateAckCannotSatisfyNextAttemptBarrier) {
+    std::atomic<uint64_t> ack_tokens[3]{};
+    uint64_t old_attempt = 41;
+    uint64_t next_attempt = sync_start_drain_next_attempt(old_attempt);
+    uint64_t old_subtree = sync_start_drain_ack_subtree_token(old_attempt);
+    uint64_t next_subtree = sync_start_drain_ack_subtree_token(next_attempt);
+
+    ack_tokens[1].store(old_subtree, std::memory_order_relaxed);
+    ack_tokens[2].store(old_subtree, std::memory_order_relaxed);
+    EXPECT_EQ(ack_tokens[1].load(std::memory_order_relaxed), old_subtree);
+    EXPECT_EQ(ack_tokens[2].load(std::memory_order_relaxed), old_subtree);
+
+    // A late child token from attempt 41 cannot satisfy attempt 42's tree barrier.
+    ack_tokens[1].store(next_subtree, std::memory_order_relaxed);
+    ack_tokens[2].store(old_subtree, std::memory_order_relaxed);
+    EXPECT_EQ(ack_tokens[1].load(std::memory_order_relaxed), next_subtree);
+    EXPECT_NE(ack_tokens[2].load(std::memory_order_relaxed), next_subtree);
+
+    ack_tokens[2].store(next_subtree, std::memory_order_relaxed);
+    ack_tokens[0].store(old_subtree, std::memory_order_relaxed);
+    EXPECT_NE(ack_tokens[0].load(std::memory_order_relaxed), next_subtree);
+    ack_tokens[0].store(next_subtree, std::memory_order_relaxed);
+    EXPECT_EQ(ack_tokens[0].load(std::memory_order_relaxed), next_subtree);
+
+    EXPECT_EQ(sync_start_drain_next_attempt(SYNC_START_DRAIN_ATTEMPT_MASK), 1u);
+}
+
 class SchedulerStateTest : public ::testing::Test {
 protected:
     PTO2SchedulerState sched;

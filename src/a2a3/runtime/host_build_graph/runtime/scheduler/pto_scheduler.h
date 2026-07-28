@@ -500,9 +500,7 @@ struct PTO2SchedulerState {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (ring.completion_flags[p.fanin_local_ids[i] & ring.task_window_mask].load(std::memory_order_acquire) ==
-                0)
-                return false;
+            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return false;
         }
         return true;
     }
@@ -515,9 +513,7 @@ struct PTO2SchedulerState {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (ring.completion_flags[p.fanin_local_ids[i] & ring.task_window_mask].load(std::memory_order_acquire) ==
-                0)
-                return i;
+            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return i;
         }
         return -1;
     }
@@ -554,11 +550,11 @@ struct PTO2SchedulerState {
     // watermark >= producer.last_consumer_local_id). Whole-graph-resident hbg
     // has no device slot reclaim, so no advance_ring_pointers here.
     void on_mixed_task_complete(PTO2TaskSlotState &slot_state) {
-        const int32_t my_id = static_cast<int32_t>(slot_state.task->task_id.local());
+        const int32_t task_id = static_cast<int32_t>(slot_state.task->task_id.local());
         PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
 
         slot_state.mark_completed();  // host-visible mirror (task_state = COMPLETED)
-        ring.completion_flags[my_id & ring.task_window_mask].store(1, std::memory_order_release);
+        ring.set_completion_flag(task_id);
 
         PTO2TaskSlotState *waiter = slot_state.wake_list_head.exchange(WAKE_LIST_SENTINEL, std::memory_order_acq_rel);
         while (waiter != nullptr && waiter != WAKE_LIST_SENTINEL) {
@@ -580,21 +576,11 @@ struct PTO2SchedulerState {
         // completed_watermark = highest id such that every task in [0, watermark]
         // has its completion_flags byte set. The host wait_for_consumers gates on
         // watermark >= producer.last_consumer_local_id, so the walk must extend to
-        // the full contiguous completed prefix — NOT cap at my_id. Capping at my_id
+        // the full contiguous completed prefix — NOT cap at task_id. Capping at task_id
         // makes the final value order-dependent: a low-id task completing after a
         // higher one would leave the watermark stuck below the true prefix, hanging
         // any wait_for_consumers whose last_consumer sits in the gap.
-        const int32_t submitted = ring.fc.current_task_index.load(std::memory_order_acquire);
-        int32_t w = ring.completed_watermark.load(std::memory_order_acquire);
-        while (w + 1 < submitted) {
-            int32_t next = w + 1;
-            if (ring.completion_flags[next & ring.task_window_mask].load(std::memory_order_acquire) == 0) break;
-            if (ring.completed_watermark.compare_exchange_weak(
-                    w, next, std::memory_order_acq_rel, std::memory_order_acquire
-                )) {
-                w = next;
-            }
-        }
+        ring.update_completed_watermark();
     }
 
     // Polling: there is no ready-claim CAS (a producer routes each waiter exactly

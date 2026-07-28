@@ -12,7 +12,7 @@ that turn a sequence of `submit_*` calls into a scheduled DAG: `Ring`,
 `TensorMap`, and `Scope`.
 
 For the high-level role of the Orchestrator among the three engine components,
-see [hierarchical_level_runtime.md](hierarchical_level_runtime.md). For what
+see [hierarchical-level-runtime.md](hierarchical-level-runtime.md). For what
 flows through `submit`, see [task-flow.md](task-flow.md).
 
 ---
@@ -55,6 +55,8 @@ public:
     RunId begin_run();
     void close_run_submission(RunId run_id);
     void fail_run_submission(RunId run_id, std::exception_ptr error);
+    void wait_run_accepted(RunId run_id);
+    bool run_accepted(RunId run_id) const;
     void wait_run(RunId run_id);
     bool wait_run_for(RunId run_id, double timeout_seconds);
     bool run_done(RunId run_id) const;
@@ -96,9 +98,12 @@ worker.submit(orchestration, args, config).wait()
 ```
 
 The current L2 backend is synchronous, so L2 `submit()` executes the existing
-blocking path and returns an already-completed handle. L3 asynchronous return
-does not yet imply overlapping runs: a later submit waits for the prior run's
-fence and cleanup before building the next DAG.
+blocking path and returns an already-completed handle. At L3 and above, graph
+callbacks remain serialized, but a later submit waits only for every dispatch
+in the prior run to cross its endpoint acceptance boundary. On A2A3 onboard,
+that boundary is after both device kernels are enqueued and before stream
+synchronization. Endpoints without an earlier signal fall back to completion.
+Each run still owns its completion error, keepalives, and cleanup independently.
 
 Remote L3 submit adds two hidden pieces of metadata: final eligible worker-id
 sets and optional `RemoteTaskArgsSidecar` entries aligned by tensor index.
@@ -745,7 +750,7 @@ instead of stalling forever. Default timeout: 10 s.
 
 ## 10. Related
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — how
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — how
   Orchestrator fits alongside Scheduler and Worker
 - [scheduler.md](scheduler.md) — READY dispatch and completion-time dependency
   release

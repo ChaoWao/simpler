@@ -55,8 +55,7 @@ list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform_comm/comm_sim.cpp"
 )
 # Shared sim host sources (DeviceRunnerBase + c_api glue + MemoryAllocator),
-# linked once per arch's libhost_runtime.so. Mirrors the onboard split from
-# PR #928. See .docs/ONBOARD_HOST_COMMON_REFACTOR.md for the migration story.
+# linked once per arch's libhost_runtime.so. Mirrors the onboard split.
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/host/device_runner_base.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/host/c_api_shared.cpp"

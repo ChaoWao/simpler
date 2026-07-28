@@ -25,6 +25,7 @@
  *                   copy_to_device_ctx, copy_from_device_ctx
  *   - prepared run: simpler_register_callable, simpler_run, unregister_callable,
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
+ *                   get_run_stream_set_create_count,
  *                   simpler_provision_dma_workspace
  *   - ACL/stream:   ensure_acl_ready_ctx, create_comm_stream_ctx,
  *                   destroy_comm_stream_ctx
@@ -255,7 +256,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
  * Per-stage run timing is not returned — the platform emits it as `[STRACE]`
  * log markers (see docs/dfx/host-trace.md).
  *
- * `config` carries block_dim (0 = auto), aicpu_thread_num, the five diagnostic
+ * `config` carries aicpu_thread_num, the five diagnostic
  * enables + output_prefix, and the per-task ring sizing overrides
  * (`runtime_env.ring_task_window` / `.ring_heap` / `.ring_dep_pool`, each a
  * per-scope-depth-ring array of RUNTIME_ENV_RING_COUNT entries; 0 = unset,
@@ -269,6 +270,13 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
 int simpler_run(
     DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
 );
+
+/**
+ * Bind an optional host state word that the runner publishes after both device
+ * kernels have been enqueued. Onboard runtimes may export this symbol; callers
+ * must fall back to completion when it is absent.
+ */
+int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value);
 
 /**
  * Drop the prepared state for `callable_id` and release the per-id share of
@@ -304,6 +312,14 @@ size_t get_aicpu_dlopen_count(DeviceContextHandle ctx);
  * the device.
  */
 size_t get_host_dlopen_count(DeviceContextHandle ctx);
+
+/**
+ * Number of run stream generations the runner bound to `ctx` has created.
+ * AICPU streams belong to pipeline slots; AICore streams are reused only while
+ * their loaded code image is unchanged. Returns 0 on platforms whose runs use
+ * the persistent bootstrap pair.
+ */
+size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
 
 /**
  * Provision the async-DMA workspaces named in `required_mask` (a bitmask of

@@ -562,8 +562,18 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
 // Module definition
 // ============================================================================
 
+#ifndef SIMPLER_BUILD_COMMIT
+#define SIMPLER_BUILD_COMMIT ""
+#endif
+
 NB_MODULE(_task_interface, m) {
     m.doc() = "Nanobind bindings for task_interface (DataType, Tensor, TaskArgs variants)";
+
+    // Source commit this extension was compiled from; "" when git was
+    // unavailable at build time. simpler.task_interface compares it against the
+    // working tree so a binding built from other sources cannot be used
+    // silently — struct layouts differ and fields read as garbage.
+    m.attr("__build_commit__") = SIMPLER_BUILD_COMMIT;
 
     // --- DataType enum ---
     nb::enum_<DataType>(m, "DataType")
@@ -1423,7 +1433,7 @@ NB_MODULE(_task_interface, m) {
         .def(
             "run_from_blob",
             [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
-               const CallConfig &config) {
+               const CallConfig &config, uint64_t accepted_state_addr, int32_t accepted_value) {
                 // The mailbox region is the on-wire format `write_blob` produced;
                 // `read_blob` is the matching reader that returns a zero-copy
                 // TaskArgsView into the caller-owned bytes. Forwards to the
@@ -1431,9 +1441,12 @@ NB_MODULE(_task_interface, m) {
                 // loops never re-implement the tensor/scalar layout in Python
                 // (where it has historically dropped fields like child_memory).
                 TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
-                self.run(callable_id, view, config);
+                self.run(
+                    callable_id, view, config, reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value
+                );
             },
             nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
+            nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0,
             "Launch a callable_id from a raw mailbox-blob pointer + capacity "
             "(used by chip-child mailbox loops to avoid Python-side re-deserialisation "
             "of the per-task tensor/scalar layout). The blob must be in the format "
@@ -1463,6 +1476,14 @@ NB_MODULE(_task_interface, m) {
             "Number of host-side dlopens triggered by register_callable on "
             "host_build_graph variants. Mirrors aicpu_dlopen_count for the "
             "host-orchestration path; 0 on device-orch variants."
+        )
+        .def_prop_ro(
+            "run_stream_set_create_count", &ChipWorker::run_stream_set_create_count,
+            "Number of run stream sets the bound runner has created. A set "
+            "belongs to a pipeline slot and is reused for every run on that "
+            "slot, so a worker that has served any number of runs reports 1; "
+            "platforms whose runs use the persistent bootstrap pair report 0. "
+            "Tests assert this to verify repeated runs do not rebuild the set."
         )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))

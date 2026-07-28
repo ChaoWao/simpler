@@ -15,7 +15,6 @@
 
 #include "common/unified_log.h"
 #include "aicpu/aicpu_device_config.h"
-#include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/device_time.h"
 #include "aicpu/l2_swimlane_collector_aicpu.h"
@@ -661,7 +660,6 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
             LOG_ERROR("Thread %d: Core %d has invalid register address", thread_idx, core_id);
         }
     }
-    LOG_INFO_V0("Thread %d: Shutdown complete", thread_idx);
     return rc;
 }
 
@@ -971,9 +969,7 @@ void SchedulerContext::post_handshake_profiling_init() {
     }
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
-        LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
     }
-    if (is_dep_gen_enabled()) {}
 #endif
 }
 
@@ -1023,11 +1019,11 @@ bool SchedulerContext::assign_cores_to_threads() {
 
         core_trackers_[t].set_cluster(cluster_idx_per_thread[t]++, aic_wid, aiv0_wid, aiv1_wid);
 
-        LOG_INFO_V0("Thread %d: cluster %d (AIC=%d, AIV0=%d, AIV1=%d)", t, ci, aic_wid, aiv0_wid, aiv1_wid);
+        LOG_DEBUG("Thread %d: cluster %d (AIC=%d, AIV0=%d, AIV1=%d)", t, ci, aic_wid, aiv0_wid, aiv1_wid);
     }
 
     for (int32_t t = 0; t < aicpu_thread_num_; t++) {
-        LOG_INFO_V0(
+        LOG_DEBUG(
             "Thread %d: total %d cores (%d clusters)", t, core_trackers_[t].core_num(),
             core_trackers_[t].get_cluster_count()
         );
@@ -1061,7 +1057,6 @@ void SchedulerContext::emergency_shutdown(Runtime *runtime) {
     if (timeout_count > 0) {
         LOG_ERROR("Emergency shutdown: %d cores did not acknowledge exit", timeout_count);
     }
-    LOG_WARN("Emergency shutdown complete");
 }
 
 // =============================================================================
@@ -1211,14 +1206,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     }
     if (is_pmu_enabled()) {
         pmu_aicpu_init(physical_core_ids_, cores_total_num_);
-        LOG_INFO_V0("PMU profiling started on %d cores", cores_total_num_);
     }
-    // dep_gen is host-driven (SubmitTrace) — runtime-gated by the host flag —
-    // and compiles out with the other profiling subsystems at SIMPLER_DFX=0.
-    // init() only pops the initial buffer from instance 0's free_queue; the
-    // orchestrator thread still records its idx via
-    // dep_gen_aicpu_set_orch_thread_idx() before the first record_submit.
-    if (is_dep_gen_enabled()) {}
 #endif
 
     // total_tasks_ is read in pre_handshake_init (before the orchestrator's early
@@ -1285,10 +1273,12 @@ void SchedulerContext::deinit() {
     // the count-gated consumer never reads entries[] past the fresh count.
 
     // Reset sync-start drain coordination — a previous run that aborted mid-drain
-    // would otherwise leave dirty pending/elected/ack state for the next reuse.
+    // would otherwise leave dirty pending/ack state for the next reuse.
     drain_state_.sync_start_pending.store(0, std::memory_order_release);
-    drain_state_.drain_worker_elected.store(0, std::memory_order_release);
-    drain_state_.drain_ack_mask.store(0, std::memory_order_release);
+    drain_state_.drain_attempt.store(0, std::memory_order_release);
+    for (int32_t t = 0; t < MAX_AICPU_THREADS; t++) {
+        drain_ack_tokens_[t].store(0, std::memory_order_release);
+    }
     drain_state_.pending_task.store(nullptr, std::memory_order_release);
     drain_state_.drain_stage_go.store(0, std::memory_order_release);
     drain_state_.drain_stage_done_mask.store(0, std::memory_order_release);

@@ -52,1082 +52,1926 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     const Tensor &ext_post_rms_weight = orch_args.tensor(18).ref();
     const Tensor &ext_out = orch_args.tensor(19).ref();
 
+    // Dynamic-dim symbols (extent of the declaring argument)
+    int64_t BLOCK_TABLE_FLAT_DYN = (int64_t)orch_args.tensor(8).ref().shapes[0];
+    int64_t KV_CACHE_ROWS_DYN = (int64_t)orch_args.tensor(12).ref().shapes[0];
+
     PTO2_SCOPE() {
+        uint32_t pa_metadata_ci_shapes[1] = {27840};
+        TensorCreateInfo pa_metadata_ci(pa_metadata_ci_shapes, 1, DataType::UINT8);
+        uint32_t pa_workspace_ci_shapes[1] = {66132544};
+        TensorCreateInfo pa_workspace_ci(pa_workspace_ci_shapes, 1, DataType::UINT8);
         uint32_t cur_ci_shapes[2] = {16, 5120};
-        TensorCreateInfo cur_ci(cur_ci_shapes, 2, DataType::BFLOAT16);
-        TaskOutputTensors alloc_0 = alloc_tensors(cur_ci);
-        const Tensor &cur = alloc_0.get_ref(0);
+        TensorCreateInfo cur_ci(cur_ci_shapes, 2, DataType::FLOAT32);
+        uint32_t normed_ci_shapes[2] = {16, 5120};
+        TensorCreateInfo normed_ci(normed_ci_shapes, 2, DataType::BFLOAT16);
+        TaskOutputTensors alloc_0 = alloc_tensors(pa_metadata_ci, pa_workspace_ci, cur_ci, normed_ci);
+        const Tensor &pa_metadata = alloc_0.get_ref(0);
+        const Tensor &pa_workspace = alloc_0.get_ref(1);
+        const Tensor &cur = alloc_0.get_ref(2);
+        const Tensor &normed = alloc_0.get_ref(3);
+        int64_t pa_num_layers = 40;
+        int64_t pa_num_pages = (KV_CACHE_ROWS_DYN / (pa_num_layers * 1024));
+        int64_t pa_max_blocks = (BLOCK_TABLE_FLAT_DYN / 16);
+        int32_t pa_num_pages_i32 = static_cast<int32_t>(pa_num_pages);
+        int32_t pa_max_blocks_i32 = static_cast<int32_t>(pa_max_blocks);
+
+        // Spmd pa_tiling: paged_attention_tiling_cce
+        L0TaskArgs params_t0;
+        params_t0.add_input(ext_seq_lens);
+        params_t0.add_output(pa_metadata);
+        params_t0.add_scalar(pa_max_blocks_i32);
+        params_t0.add_scalar(pa_num_pages_i32);
+        params_t0.launch_spec.set_block_num(1);
+        params_t0.set_allow_early_resolve(true);
+        TaskOutputTensors task_0_outs = rt_submit_aiv_task(0, params_t0);
+        PTO2TaskId tiling_tid_inline0 = task_0_outs.task_id();
+        PTO2TaskId pa_tiling_tid = tiling_tid_inline0;
+        PTO2TaskId prev_out_tid[1];
+        for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+            prev_out_tid[__init_i] = PTO2TaskId::invalid();
+
+        // Phase-fence barrier 0: dependency-only dummy task
+        L0TaskArgs params_phase_fence_barrier_0;
+        TaskOutputTensors phase_fence_barrier_0_outs = rt_submit_dummy_task(params_phase_fence_barrier_0);
+        PTO2TaskId t = phase_fence_barrier_0_outs.task_id();
+        prev_out_tid[0] = t;
         for (int64_t cb0 = 0; cb0 < 16; cb0 += 16) {
             PTO2_SCOPE() {
-                // Task 0: copy_hidden
-                L0TaskArgs params_t0;
-                params_t0.add_output(cur);
-                params_t0.add_input(ext_hidden_states);
-                params_t0.add_scalar(cb0);
-                rt_submit_aiv_task(0, params_t0);
+                // Task 1: copy_hidden
+                L0TaskArgs params_t1;
+                params_t1.add_output(cur);
+                params_t1.add_input(ext_hidden_states);
+                params_t1.add_scalar(cb0);
+                TaskOutputTensors task_1_outs = rt_submit_aiv_task(1, params_t1);
+                PTO2TaskId ch_tid = task_1_outs.task_id();
+                prev_out_tid[0] = ch_tid;
             }
         }
+        PTO2TaskId prev_normed_tid[1];
+        for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+            prev_normed_tid[__init_i] = PTO2TaskId::invalid();
+        PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+            PTO2TaskId _submit_deps_buf[1];
+            for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                _submit_deps_buf[__init_i] = PTO2TaskId::invalid();
+            PTO2TaskId t__tmp_v3 = prev_out_tid[0];
+            _submit_deps_buf[0] = t__tmp_v3;
+
+            // Spmd x_gamma0_spmd: x_gamma0
+            L0TaskArgs params_t2;
+            params_t2.add_output(normed);
+            params_t2.add_input(cur);
+            params_t2.add_input(ext_input_rms_weight);
+            params_t2.launch_spec.set_block_num(5);
+            params_t2.set_allow_early_resolve(true);
+            PTO2TaskId params_t2_deps[1];
+            uint32_t params_t2_deps_count = 0;
+            if (_submit_deps_buf[0].is_valid()) params_t2_deps[params_t2_deps_count++] = _submit_deps_buf[0];
+            params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);
+            TaskOutputTensors task_2_outs = rt_submit_aiv_task(2, params_t2);
+            PTO2TaskId xgamma_tid = task_2_outs.task_id();
+            prev_normed_tid[0] = xgamma_tid;
+        }
         Tensor cur__rv_v7 = cur;
-        for (int64_t i = 0; i < 2; i += 1) {
+        Tensor normed__rv_v5 = normed;
+        for (int64_t i = 0; i < 40; i += 1) {
             PTO2_SCOPE() {
                 uint32_t next_hidden_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo next_hidden_ci(next_hidden_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t normed_states_inline146_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo normed_states_inline146_ci(normed_states_inline146_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t out_partial_inline312_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo out_partial_inline312_ci(out_partial_inline312_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t inv_rms_states_inline160_ci_shapes[2] = {16, 1};
-                TensorCreateInfo inv_rms_states_inline160_ci(inv_rms_states_inline160_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t q_proj_inline129_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo q_proj_inline129_ci(q_proj_inline129_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t k_proj_inline128_ci_shapes[2] = {16, 1024};
-                TensorCreateInfo k_proj_inline128_ci(k_proj_inline128_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t v_proj_inline152_ci_shapes[2] = {16, 1024};
-                TensorCreateInfo v_proj_inline152_ci(v_proj_inline152_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t all_q_padded_inline168_ci_shapes[2] = {2048, 128};
-                TensorCreateInfo all_q_padded_inline168_ci(all_q_padded_inline168_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t attn_out_inline157_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo attn_out_inline157_ci(attn_out_inline157_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t all_oi_tmp_inline145_ci_shapes[2] = {88064, 128};
-                TensorCreateInfo all_oi_tmp_inline145_ci(all_oi_tmp_inline145_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t all_cur_mi_inline174_ci_shapes[2] = {88064, 1};
-                TensorCreateInfo all_cur_mi_inline174_ci(all_cur_mi_inline174_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t all_cur_li_inline190_ci_shapes[2] = {88064, 1};
-                TensorCreateInfo all_cur_li_inline190_ci(all_cur_li_inline190_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t fa_work_table_inline126_ci_shapes[2] = {688, 1};
-                TensorCreateInfo fa_work_table_inline126_ci(fa_work_table_inline126_ci_shapes, 2, DataType::INT32);
-                uint32_t fa_total_inline183_ci_shapes[2] = {1, 1};
-                TensorCreateInfo fa_total_inline183_ci(fa_total_inline183_ci_shapes, 2, DataType::INT32);
-                uint32_t q_proj_norm_inline197_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo q_proj_norm_inline197_ci(q_proj_norm_inline197_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t k_proj_norm_inline155_ci_shapes[2] = {16, 1024};
-                TensorCreateInfo k_proj_norm_inline155_ci(k_proj_norm_inline155_ci_shapes, 2, DataType::FLOAT32);
+                TensorCreateInfo next_hidden_ci(next_hidden_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t next_normed_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo next_normed_ci(next_normed_ci_shapes, 2, DataType::BFLOAT16);
+                uint32_t inv_rms_states_inline176_ci_shapes[2] = {16, 1};
+                TensorCreateInfo inv_rms_states_inline176_ci(inv_rms_states_inline176_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t q_proj_inline139_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo q_proj_inline139_ci(q_proj_inline139_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t k_proj_inline135_ci_shapes[2] = {16, 1024};
+                TensorCreateInfo k_proj_inline135_ci(k_proj_inline135_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t v_proj_inline255_ci_shapes[2] = {16, 1024};
+                TensorCreateInfo v_proj_inline255_ci(v_proj_inline255_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t q_tnd_flat_inline127_ci_shapes[2] = {640, 128};
+                TensorCreateInfo q_tnd_flat_inline127_ci(q_tnd_flat_inline127_ci_shapes, 2, DataType::BFLOAT16);
+                uint32_t attn_out_inline282_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo attn_out_inline282_ci(attn_out_inline282_ci_shapes, 2, DataType::BFLOAT16);
                 TaskOutputTensors alloc_1 = alloc_tensors(
-                    next_hidden_ci, normed_states_inline146_ci, out_partial_inline312_ci, inv_rms_states_inline160_ci,
-                    q_proj_inline129_ci, k_proj_inline128_ci, v_proj_inline152_ci, all_q_padded_inline168_ci,
-                    attn_out_inline157_ci, all_oi_tmp_inline145_ci, all_cur_mi_inline174_ci, all_cur_li_inline190_ci,
-                    fa_work_table_inline126_ci, fa_total_inline183_ci, q_proj_norm_inline197_ci,
-                    k_proj_norm_inline155_ci
+                    next_hidden_ci, next_normed_ci, inv_rms_states_inline176_ci, q_proj_inline139_ci,
+                    k_proj_inline135_ci, v_proj_inline255_ci, q_tnd_flat_inline127_ci, attn_out_inline282_ci
                 );
                 const Tensor &next_hidden = alloc_1.get_ref(0);
-                const Tensor &normed_states_inline146 = alloc_1.get_ref(1);
-                const Tensor &out_partial_inline312 = alloc_1.get_ref(2);
-                const Tensor &inv_rms_states_inline160 = alloc_1.get_ref(3);
-                const Tensor &q_proj_inline129 = alloc_1.get_ref(4);
-                const Tensor &k_proj_inline128 = alloc_1.get_ref(5);
-                const Tensor &v_proj_inline152 = alloc_1.get_ref(6);
-                const Tensor &all_q_padded_inline168 = alloc_1.get_ref(7);
-                const Tensor &attn_out_inline157 = alloc_1.get_ref(8);
-                const Tensor &all_oi_tmp_inline145 = alloc_1.get_ref(9);
-                const Tensor &all_cur_mi_inline174 = alloc_1.get_ref(10);
-                const Tensor &all_cur_li_inline190 = alloc_1.get_ref(11);
-                const Tensor &fa_work_table_inline126 = alloc_1.get_ref(12);
-                const Tensor &fa_total_inline183 = alloc_1.get_ref(13);
-                const Tensor &q_proj_norm_inline197 = alloc_1.get_ref(14);
-                const Tensor &k_proj_norm_inline155 = alloc_1.get_ref(15);
-                uint32_t q_inv_states_inline99_ci_shapes[2] = {640, 1};
-                TensorCreateInfo q_inv_states_inline99_ci(q_inv_states_inline99_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t k_inv_states_inline90_ci_shapes[2] = {128, 1};
-                TensorCreateInfo k_inv_states_inline90_ci(k_inv_states_inline90_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t down_acc_all_inline251_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo down_acc_all_inline251_ci(down_acc_all_inline251_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t gate_acc_all_inline170_ci_shapes[2] = {16, 17408};
-                TensorCreateInfo gate_acc_all_inline170_ci(gate_acc_all_inline170_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t up_acc_all_inline247_ci_shapes[2] = {16, 17408};
-                TensorCreateInfo up_acc_all_inline247_ci(up_acc_all_inline247_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t gm_pipe_buffer_0_ci_shapes[1] = {static_cast<uint32_t>((8192) * (24))};
-                TensorCreateInfo gm_pipe_buffer_0_ci(
-                    gm_pipe_buffer_0_ci_shapes, 1, DataType::FLOAT32, /*manual_dep=*/true
+                const Tensor &next_normed = alloc_1.get_ref(1);
+                const Tensor &inv_rms_states_inline176 = alloc_1.get_ref(2);
+                const Tensor &q_proj_inline139 = alloc_1.get_ref(3);
+                const Tensor &k_proj_inline135 = alloc_1.get_ref(4);
+                const Tensor &v_proj_inline255 = alloc_1.get_ref(5);
+                const Tensor &q_tnd_flat_inline127 = alloc_1.get_ref(6);
+                const Tensor &attn_out_inline282 = alloc_1.get_ref(7);
+                int64_t next_gamma_idx = std::min<int64_t>((i + 1), 39);
+                int64_t layer_hidden_base_inline151 = (static_cast<int64_t>(i) * 5120);
+                int64_t layer_inter_base_inline107 = (static_cast<int64_t>(i) * 17408);
+                int64_t num_layers_actual_inline152 = 40;
+                int64_t t__tmp_v6 = (int64_t)orch_args.tensor(12).ref().shapes[0];
+                int64_t layer_cache_rows_inline128 = (t__tmp_v6 / num_layers_actual_inline152);
+                int64_t layer_cache_base_inline193 = (static_cast<int64_t>(i) * layer_cache_rows_inline128);
+                uint32_t q_norm_w_inline124_offsets[2] = {static_cast<uint32_t>(i), 0};
+                uint32_t q_norm_w_inline124_shapes[2] = {
+                    (q_norm_w_inline124_offsets[0] >= ext_q_norm_weight.shapes[0] ?
+                         0u :
+                         std::min<uint32_t>(1, ext_q_norm_weight.shapes[0] - q_norm_w_inline124_offsets[0])),
+                    (q_norm_w_inline124_offsets[1] >= ext_q_norm_weight.shapes[1] ?
+                         0u :
+                         std::min<uint32_t>(128, ext_q_norm_weight.shapes[1] - q_norm_w_inline124_offsets[1]))
+                };
+                Tensor q_norm_w_inline124 =
+                    ext_q_norm_weight.view(q_norm_w_inline124_shapes, q_norm_w_inline124_offsets);
+                uint32_t k_norm_w_inline114_offsets[2] = {static_cast<uint32_t>(i), 0};
+                uint32_t k_norm_w_inline114_shapes[2] = {
+                    (k_norm_w_inline114_offsets[0] >= ext_k_norm_weight.shapes[0] ?
+                         0u :
+                         std::min<uint32_t>(1, ext_k_norm_weight.shapes[0] - k_norm_w_inline114_offsets[0])),
+                    (k_norm_w_inline114_offsets[1] >= ext_k_norm_weight.shapes[1] ?
+                         0u :
+                         std::min<uint32_t>(128, ext_k_norm_weight.shapes[1] - k_norm_w_inline114_offsets[1]))
+                };
+                Tensor k_norm_w_inline114 =
+                    ext_k_norm_weight.view(k_norm_w_inline114_shapes, k_norm_w_inline114_offsets);
+                PTO2TaskId down_tids_inline156[85];
+                for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
+                    down_tids_inline156[__init_i] = PTO2TaskId::invalid();
+                uint32_t down_acc_all_inline168_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo down_acc_all_inline168_ci(down_acc_all_inline168_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t gate_acc_all_inline203_ci_shapes[2] = {16, 17408};
+                TensorCreateInfo gate_acc_all_inline203_ci(gate_acc_all_inline203_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t up_acc_all_inline303_ci_shapes[2] = {16, 17408};
+                TensorCreateInfo up_acc_all_inline303_ci(up_acc_all_inline303_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t attn_proj_fp32_inline220_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo attn_proj_fp32_inline220_ci(attn_proj_fp32_inline220_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t post_norm_partial_inline118_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo post_norm_partial_inline118_ci(
+                    post_norm_partial_inline118_ci_shapes, 2, DataType::FLOAT32
                 );
-                uint32_t attn_proj_fp32_inline248_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo attn_proj_fp32_inline248_ci(attn_proj_fp32_inline248_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t post_norm_partial_inline130_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo post_norm_partial_inline130_ci(
-                    post_norm_partial_inline130_ci_shapes, 2, DataType::BFLOAT16
-                );
-                uint32_t mlp_norm_in_inline250_ci_shapes[2] = {16, 5120};
-                TensorCreateInfo mlp_norm_in_inline250_ci(mlp_norm_in_inline250_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t inv_rms_tile_inline255_ci_shapes[2] = {16, 1};
-                TensorCreateInfo inv_rms_tile_inline255_ci(inv_rms_tile_inline255_ci_shapes, 2, DataType::FLOAT32);
-                uint32_t mlp_tile_inline238_ci_shapes[2] = {16, 17408};
-                TensorCreateInfo mlp_tile_inline238_ci(mlp_tile_inline238_ci_shapes, 2, DataType::BFLOAT16);
-                uint32_t attn_fence_dummy_inline258_ci_shapes[2] = {16, 1};
-                TensorCreateInfo attn_fence_dummy_inline258_ci(
-                    attn_fence_dummy_inline258_ci_shapes, 2, DataType::FLOAT32
-                );
+                uint32_t mlp_norm_in_inline71_ci_shapes[2] = {16, 5120};
+                TensorCreateInfo mlp_norm_in_inline71_ci(mlp_norm_in_inline71_ci_shapes, 2, DataType::BFLOAT16);
+                uint32_t inv_rms_tile_inline126_ci_shapes[2] = {16, 1};
+                TensorCreateInfo inv_rms_tile_inline126_ci(inv_rms_tile_inline126_ci_shapes, 2, DataType::FLOAT32);
+                uint32_t mlp_tile_inline149_ci_shapes[2] = {16, 17408};
+                TensorCreateInfo mlp_tile_inline149_ci(mlp_tile_inline149_ci_shapes, 2, DataType::BFLOAT16);
                 TaskOutputTensors alloc_2 = alloc_tensors(
-                    q_inv_states_inline99_ci, k_inv_states_inline90_ci, down_acc_all_inline251_ci,
-                    gate_acc_all_inline170_ci, up_acc_all_inline247_ci, gm_pipe_buffer_0_ci,
-                    attn_proj_fp32_inline248_ci, post_norm_partial_inline130_ci, mlp_norm_in_inline250_ci,
-                    inv_rms_tile_inline255_ci, mlp_tile_inline238_ci, attn_fence_dummy_inline258_ci
+                    down_acc_all_inline168_ci, gate_acc_all_inline203_ci, up_acc_all_inline303_ci,
+                    attn_proj_fp32_inline220_ci, post_norm_partial_inline118_ci, mlp_norm_in_inline71_ci,
+                    inv_rms_tile_inline126_ci, mlp_tile_inline149_ci
                 );
-                const Tensor &q_inv_states_inline99 = alloc_2.get_ref(0);
-                const Tensor &k_inv_states_inline90 = alloc_2.get_ref(1);
-                const Tensor &down_acc_all_inline251 = alloc_2.get_ref(2);
-                const Tensor &gate_acc_all_inline170 = alloc_2.get_ref(3);
-                const Tensor &up_acc_all_inline247 = alloc_2.get_ref(4);
-                const Tensor &gm_pipe_buffer_0 = alloc_2.get_ref(5);
-                const Tensor &attn_proj_fp32_inline248 = alloc_2.get_ref(6);
-                const Tensor &post_norm_partial_inline130 = alloc_2.get_ref(7);
-                const Tensor &mlp_norm_in_inline250 = alloc_2.get_ref(8);
-                const Tensor &inv_rms_tile_inline255 = alloc_2.get_ref(9);
-                const Tensor &mlp_tile_inline238 = alloc_2.get_ref(10);
-                const Tensor &attn_fence_dummy_inline258 = alloc_2.get_ref(11);
-                int64_t layer_hidden_base_inline135 = (static_cast<int64_t>(i) * 5120);
-                int64_t layer_inter_base_inline231 = (static_cast<int64_t>(i) * 17408);
-                int64_t num_layers_actual_inline140 = 2;
-                int64_t t = 1409024;
-                int64_t layer_cache_rows_inline153 = (t / num_layers_actual_inline140);
-                int64_t layer_cache_base_inline137 = (static_cast<int64_t>(i) * layer_cache_rows_inline153);
-                int64_t user_batch_inline123 = 16;
-                int64_t t__tmp_v2 = 688;
-                int64_t max_blocks_per_seq_inline165 = (t__tmp_v2 / user_batch_inline123);
-                uint32_t q_norm_w_inline242_offsets[2] = {static_cast<uint32_t>(i), 0};
-                uint32_t q_norm_w_inline242_shapes[2] = {
-                    (q_norm_w_inline242_offsets[0] >= ext_q_norm_weight.shapes[0] ?
-                         0u :
-                         std::min<uint32_t>(1, ext_q_norm_weight.shapes[0] - q_norm_w_inline242_offsets[0])),
-                    (q_norm_w_inline242_offsets[1] >= ext_q_norm_weight.shapes[1] ?
-                         0u :
-                         std::min<uint32_t>(128, ext_q_norm_weight.shapes[1] - q_norm_w_inline242_offsets[1]))
-                };
-                Tensor q_norm_w_inline242 =
-                    ext_q_norm_weight.view(q_norm_w_inline242_shapes, q_norm_w_inline242_offsets);
-                uint32_t k_norm_w_inline138_offsets[2] = {static_cast<uint32_t>(i), 0};
-                uint32_t k_norm_w_inline138_shapes[2] = {
-                    (k_norm_w_inline138_offsets[0] >= ext_k_norm_weight.shapes[0] ?
-                         0u :
-                         std::min<uint32_t>(1, ext_k_norm_weight.shapes[0] - k_norm_w_inline138_offsets[0])),
-                    (k_norm_w_inline138_offsets[1] >= ext_k_norm_weight.shapes[1] ?
-                         0u :
-                         std::min<uint32_t>(128, ext_k_norm_weight.shapes[1] - k_norm_w_inline138_offsets[1]))
-                };
-                Tensor k_norm_w_inline138 =
-                    ext_k_norm_weight.view(k_norm_w_inline138_shapes, k_norm_w_inline138_offsets);
-                PTO2TaskId dcr_tids_inline154[5];
-                for (int64_t __init_i = 0; __init_i < 5; ++__init_i)
-                    dcr_tids_inline154[__init_i] = PTO2TaskId::invalid();
-
-                // Spmd x_gamma_spmd: x_gamma
-                L0TaskArgs params_t1;
-                params_t1.add_inout(normed_states_inline146);
-                params_t1.add_input(cur__rv_v7);
-                params_t1.add_input(ext_input_rms_weight);
-                params_t1.add_scalar(i);
-                params_t1.launch_spec.set_block_num(5);
-                rt_submit_aiv_task(1, params_t1);
-
-                // Task 2: rms_recip
-                L0TaskArgs params_t2;
-                params_t2.add_input(cur__rv_v7);
-                params_t2.add_inout(inv_rms_states_inline160);
-                rt_submit_aiv_task(2, params_t2);
-
-                // Task 3: q_seed
-                L0TaskArgs params_t3;
-                params_t3.add_inout(q_proj_inline129);
-                rt_submit_aiv_task(3, params_t3);
-
-                // Spmd q_proj_spmd: q_proj
-                L0TaskArgs params_t4;
-                params_t4.add_inout(q_proj_inline129);
-                params_t4.add_input(normed_states_inline146);
-                params_t4.add_input(ext_wq);
-                params_t4.add_scalar(layer_hidden_base_inline135);
-                params_t4.launch_spec.set_block_num(40);
-                rt_submit_aic_task(4, params_t4);
-
-                // Task 5: k_seed
-                L0TaskArgs params_t5;
-                params_t5.add_inout(k_proj_inline128);
-                rt_submit_aiv_task(5, params_t5);
-
-                // Spmd k_proj_spmd: k_proj
-                L0TaskArgs params_t6;
-                params_t6.add_inout(k_proj_inline128);
-                params_t6.add_input(normed_states_inline146);
-                params_t6.add_input(ext_wk);
-                params_t6.add_scalar(layer_hidden_base_inline135);
-                params_t6.launch_spec.set_block_num(8);
-                rt_submit_aic_task(6, params_t6);
-
-                // Task 7: v_seed
-                L0TaskArgs params_t7;
-                params_t7.add_inout(v_proj_inline152);
-                rt_submit_aiv_task(7, params_t7);
-
-                // Spmd v_proj_spmd: v_proj
-                L0TaskArgs params_t8;
-                params_t8.add_inout(v_proj_inline152);
-                params_t8.add_input(normed_states_inline146);
-                params_t8.add_input(ext_wv);
-                params_t8.add_scalar(layer_hidden_base_inline135);
-                params_t8.launch_spec.set_block_num(8);
-                rt_submit_aic_task(8, params_t8);
-
-                // Task 9: fa_work_build
-                L0TaskArgs params_t9;
-                params_t9.add_input(ext_seq_lens);
-                params_t9.add_inout(fa_work_table_inline126);
-                params_t9.add_inout(fa_total_inline183);
-                rt_submit_aiv_task(9, params_t9);
-                uint32_t inv_rms_col_inline89_offsets[2] = {0, 0};
-                uint32_t inv_rms_col_inline89_shapes[2] = {
-                    (inv_rms_col_inline89_offsets[0] >= inv_rms_states_inline160.shapes[0] ?
-                         0u :
-                         std::min<uint32_t>(16, inv_rms_states_inline160.shapes[0] - inv_rms_col_inline89_offsets[0])),
-                    (inv_rms_col_inline89_offsets[1] >= inv_rms_states_inline160.shapes[1] ?
-                         0u :
-                         std::min<uint32_t>(1, inv_rms_states_inline160.shapes[1] - inv_rms_col_inline89_offsets[1]))
-                };
-                Tensor inv_rms_col_inline89 =
-                    inv_rms_states_inline160.view(inv_rms_col_inline89_shapes, inv_rms_col_inline89_offsets);
-
-                // Task 10: qk_gamma
-                L0TaskArgs params_t10;
-                params_t10.add_inout(k_proj_norm_inline155);
-                params_t10.add_inout(q_proj_norm_inline197);
-                params_t10.add_input(q_proj_inline129);
-                params_t10.add_input(inv_rms_col_inline89);
-                params_t10.add_input(q_norm_w_inline242);
-                params_t10.add_input(k_proj_inline128);
-                params_t10.add_input(k_norm_w_inline138);
-                rt_submit_aiv_task(10, params_t10);
-
-                // Task 11: qk_recip
-                L0TaskArgs params_t11;
-                params_t11.add_inout(k_inv_states_inline90);
-                params_t11.add_inout(q_inv_states_inline99);
-                params_t11.add_input(q_proj_inline129);
-                params_t11.add_input(inv_rms_col_inline89);
-                params_t11.add_input(k_proj_inline128);
-                rt_submit_aiv_task(11, params_t11);
-
-                // Spmd rope_qkv_spmd: rope_qkv
-                L0TaskArgs params_t12;
-                params_t12.add_input(ext_seq_lens);
-                params_t12.add_input(inv_rms_states_inline160);
-                params_t12.add_input(ext_slot_mapping);
-                params_t12.add_input(ext_rope_cos);
-                params_t12.add_input(ext_rope_sin);
-                params_t12.add_inout(all_q_padded_inline168);
-                params_t12.add_inout(ext_k_cache);
-                params_t12.add_inout(ext_v_cache);
-                params_t12.add_input(k_inv_states_inline90);
-                params_t12.add_input(k_proj_norm_inline155);
-                params_t12.add_input(v_proj_inline152);
-                params_t12.add_input(q_inv_states_inline99);
-                params_t12.add_input(q_proj_norm_inline197);
-                params_t12.add_scalar(layer_cache_base_inline137);
-                params_t12.launch_spec.set_block_num(16);
-                rt_submit_aiv_task(12, params_t12);
-
-                // Task 13: down_seed
-                L0TaskArgs params_t13;
-                params_t13.add_inout(down_acc_all_inline251);
-                TaskOutputTensors task_13_outs = rt_submit_aiv_task(13, params_t13);
-                PTO2TaskId seed_tid_inline132 = task_13_outs.task_id();
-
-                // Task 14: gate_seed
-                L0TaskArgs params_t14;
-                params_t14.add_inout(gate_acc_all_inline170);
-                TaskOutputTensors task_14_outs = rt_submit_aiv_task(14, params_t14);
-                PTO2TaskId gate_seed_tid_inline304 = task_14_outs.task_id();
-
-                // Task 15: up_seed
-                L0TaskArgs params_t15;
-                params_t15.add_inout(up_acc_all_inline247);
-                TaskOutputTensors task_15_outs = rt_submit_aiv_task(15, params_t15);
-                PTO2TaskId up_seed_tid_inline49 = task_15_outs.task_id();
-
-                // Group fa_fused: MixedKernels (AIC + AIV lanes)
-                L0TaskArgs params_t16;
-                params_t16.add_input(fa_total_inline183);
-                params_t16.add_inout(all_cur_li_inline190);
-                params_t16.add_inout(all_cur_mi_inline174);
-                params_t16.add_inout(all_oi_tmp_inline145);
-                params_t16.add_input(fa_work_table_inline126);
-                params_t16.add_input(ext_seq_lens);
-                params_t16.add_input(ext_block_table);
-                params_t16.add_input(all_q_padded_inline168);
-                params_t16.add_input(ext_k_cache);
-                params_t16.add_input(ext_v_cache);
-                params_t16.add_inout(gm_pipe_buffer_0);
-                params_t16.add_scalar(max_blocks_per_seq_inline165);
-                params_t16.add_scalar(layer_cache_base_inline137);
-                MixedKernels mixed_16 = {16, 17, 17};
-                params_t16.launch_spec.set_block_num(24);
-                rt_submit_task(mixed_16, params_t16);
-
-                // Spmd online_softmax_spmd: online_softmax
-                L0TaskArgs params_t17;
-                params_t17.add_inout(attn_out_inline157);
-                params_t17.add_input(ext_seq_lens);
-                params_t17.add_input(all_oi_tmp_inline145);
-                params_t17.add_input(all_cur_mi_inline174);
-                params_t17.add_input(all_cur_li_inline190);
-                params_t17.launch_spec.set_block_num(48);
-                rt_submit_aiv_task(18, params_t17);
-
-                // Task 18: out_seed
-                L0TaskArgs params_t18;
-                params_t18.add_inout(attn_proj_fp32_inline248);
-                TaskOutputTensors task_18_outs = rt_submit_aiv_task(19, params_t18);
-                PTO2TaskId out_seed_tid_inline253 = task_18_outs.task_id();
-
-                // Task 19: attn_fence
-                L0TaskArgs params_t19;
-                params_t19.add_input(attn_out_inline157);
-                params_t19.add_inout(attn_fence_dummy_inline258);
-                TaskOutputTensors task_19_outs = rt_submit_aiv_task(20, params_t19);
-                PTO2TaskId attn_done_tid_inline181 = task_19_outs.task_id();
+                const Tensor &down_acc_all_inline168 = alloc_2.get_ref(0);
+                const Tensor &gate_acc_all_inline203 = alloc_2.get_ref(1);
+                const Tensor &up_acc_all_inline303 = alloc_2.get_ref(2);
+                const Tensor &attn_proj_fp32_inline220 = alloc_2.get_ref(3);
+                const Tensor &post_norm_partial_inline118 = alloc_2.get_ref(4);
+                const Tensor &mlp_norm_in_inline71 = alloc_2.get_ref(5);
+                const Tensor &inv_rms_tile_inline126 = alloc_2.get_ref(6);
+                const Tensor &mlp_tile_inline149 = alloc_2.get_ref(7);
                 PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
-                    PTO2TaskId silu_tids_inline169[17];
+                    // Phase-fence barrier 1: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_1;
+                    TaskOutputTensors phase_fence_barrier_1_outs = rt_submit_dummy_task(params_phase_fence_barrier_1);
+                    PTO2TaskId seed_dummy_inline49 = phase_fence_barrier_1_outs.task_id();
+                    PTO2TaskId prev_normed_seed_deps_inline120[2];
+                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
+                        prev_normed_seed_deps_inline120[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v7 = prev_normed_tid[0];
+                    prev_normed_seed_deps_inline120[0] = t__tmp_v7;
+                    prev_normed_seed_deps_inline120[1] = seed_dummy_inline49;
+
+                    // Task 3: attn_out_seed
+                    L0TaskArgs params_t3;
+                    params_t3.add_input(attn_out_inline282);
+                    params_t3.set_allow_early_resolve(true);
+                    TaskOutputTensors task_3_outs = rt_submit_aiv_task(3, params_t3);
+                    PTO2TaskId attn_out_seed_tid_inline116 = task_3_outs.task_id();
+                    PTO2TaskId _submit_deps_buf_inline42[2];
+                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
+                        _submit_deps_buf_inline42[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v8 = prev_normed_seed_deps_inline120[0];
+                    _submit_deps_buf_inline42[0] = t__tmp_v8;
+                    PTO2TaskId t__tmp_v9 = prev_normed_seed_deps_inline120[1];
+                    _submit_deps_buf_inline42[1] = t__tmp_v9;
+
+                    // Task 4: rms_recip
+                    L0TaskArgs params_t4;
+                    params_t4.add_input(cur__rv_v7);
+                    params_t4.add_inout(inv_rms_states_inline176);
+                    PTO2TaskId params_t4_deps[2];
+                    uint32_t params_t4_deps_count = 0;
+                    if (_submit_deps_buf_inline42[0].is_valid())
+                        params_t4_deps[params_t4_deps_count++] = _submit_deps_buf_inline42[0];
+                    if (_submit_deps_buf_inline42[1].is_valid())
+                        params_t4_deps[params_t4_deps_count++] = _submit_deps_buf_inline42[1];
+                    params_t4.set_dependencies(params_t4_deps, params_t4_deps_count);
+                    params_t4.set_allow_early_resolve(true);
+                    TaskOutputTensors task_4_outs = rt_submit_aiv_task(4, params_t4);
+                    PTO2TaskId rms_tid_inline148 = task_4_outs.task_id();
+
+                    // Task 5: q_seed
+                    L0TaskArgs params_t5;
+                    params_t5.add_inout(q_proj_inline139);
+                    params_t5.set_allow_early_resolve(true);
+                    TaskOutputTensors task_5_outs = rt_submit_aiv_task(5, params_t5);
+                    PTO2TaskId q_seed_tid_inline162 = task_5_outs.task_id();
+                    PTO2TaskId prev_normed_q_deps_inline105[2];
+                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
+                        prev_normed_q_deps_inline105[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v17 = prev_normed_tid[0];
+                    prev_normed_q_deps_inline105[0] = t__tmp_v17;
+                    prev_normed_q_deps_inline105[1] = q_seed_tid_inline162;
+                    PTO2TaskId _submit_deps_buf_inline182[2];
+                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
+                        _submit_deps_buf_inline182[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v18 = prev_normed_q_deps_inline105[0];
+                    _submit_deps_buf_inline182[0] = t__tmp_v18;
+                    PTO2TaskId t__tmp_v19 = prev_normed_q_deps_inline105[1];
+                    _submit_deps_buf_inline182[1] = t__tmp_v19;
+
+                    // Spmd q_proj_spmd: q_proj
+                    L0TaskArgs params_t6;
+                    params_t6.add_inout(q_proj_inline139);
+                    params_t6.add_input(normed__rv_v5);
+                    params_t6.add_input(ext_wq);
+                    params_t6.add_scalar(layer_hidden_base_inline151);
+                    params_t6.launch_spec.set_block_num(50);
+                    params_t6.set_allow_early_resolve(true);
+                    PTO2TaskId params_t6_deps[2];
+                    uint32_t params_t6_deps_count = 0;
+                    if (_submit_deps_buf_inline182[0].is_valid())
+                        params_t6_deps[params_t6_deps_count++] = _submit_deps_buf_inline182[0];
+                    if (_submit_deps_buf_inline182[1].is_valid())
+                        params_t6_deps[params_t6_deps_count++] = _submit_deps_buf_inline182[1];
+                    params_t6.set_dependencies(params_t6_deps, params_t6_deps_count);
+                    TaskOutputTensors task_6_outs = rt_submit_aic_task(6, params_t6);
+                    PTO2TaskId q_proj_tid_inline183 = task_6_outs.task_id();
+                    PTO2TaskId _submit_deps_buf_inline261[2];
+                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
+                        _submit_deps_buf_inline261[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v24 = prev_normed_seed_deps_inline120[0];
+                    _submit_deps_buf_inline261[0] = t__tmp_v24;
+                    PTO2TaskId t__tmp_v25 = prev_normed_seed_deps_inline120[1];
+                    _submit_deps_buf_inline261[1] = t__tmp_v25;
+
+                    // Task 7: kv_seed
+                    L0TaskArgs params_t7;
+                    params_t7.add_inout(k_proj_inline135);
+                    params_t7.add_inout(v_proj_inline255);
+                    PTO2TaskId params_t7_deps[2];
+                    uint32_t params_t7_deps_count = 0;
+                    if (_submit_deps_buf_inline261[0].is_valid())
+                        params_t7_deps[params_t7_deps_count++] = _submit_deps_buf_inline261[0];
+                    if (_submit_deps_buf_inline261[1].is_valid())
+                        params_t7_deps[params_t7_deps_count++] = _submit_deps_buf_inline261[1];
+                    params_t7.set_dependencies(params_t7_deps, params_t7_deps_count);
+                    TaskOutputTensors task_7_outs = rt_submit_aiv_task(7, params_t7);
+                    PTO2TaskId kv_seed_tid_inline238 = task_7_outs.task_id();
+                    PTO2TaskId _submit_deps_buf_inline267[2];
+                    for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
+                        _submit_deps_buf_inline267[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v28 = prev_normed_seed_deps_inline120[0];
+                    _submit_deps_buf_inline267[0] = t__tmp_v28;
+                    PTO2TaskId t__tmp_v29 = prev_normed_seed_deps_inline120[1];
+                    _submit_deps_buf_inline267[1] = t__tmp_v29;
+
+                    // Task 8: mlp_out_seed
+                    L0TaskArgs params_t8;
+                    params_t8.add_inout(down_acc_all_inline168);
+                    params_t8.add_inout(gate_acc_all_inline203);
+                    params_t8.add_inout(up_acc_all_inline303);
+                    params_t8.add_inout(attn_proj_fp32_inline220);
+                    PTO2TaskId params_t8_deps[2];
+                    uint32_t params_t8_deps_count = 0;
+                    if (_submit_deps_buf_inline267[0].is_valid())
+                        params_t8_deps[params_t8_deps_count++] = _submit_deps_buf_inline267[0];
+                    if (_submit_deps_buf_inline267[1].is_valid())
+                        params_t8_deps[params_t8_deps_count++] = _submit_deps_buf_inline267[1];
+                    params_t8.set_dependencies(params_t8_deps, params_t8_deps_count);
+                    params_t8.set_allow_early_resolve(true);
+                    TaskOutputTensors task_8_outs = rt_submit_aiv_task(8, params_t8);
+                    PTO2TaskId mlp_out_seed_tid_inline206 = task_8_outs.task_id();
+
+                    // Spmd k_proj_spmd: k_proj
+                    L0TaskArgs params_t9;
+                    params_t9.add_inout(k_proj_inline135);
+                    params_t9.add_input(normed__rv_v5);
+                    params_t9.add_input(ext_wk);
+                    params_t9.add_scalar(layer_hidden_base_inline151);
+                    params_t9.launch_spec.set_block_num(10);
+                    params_t9.set_allow_early_resolve(true);
+                    PTO2TaskId params_t9_deps[1];
+                    uint32_t params_t9_deps_count = 0;
+                    params_t9_deps[params_t9_deps_count++] = kv_seed_tid_inline238;
+                    params_t9.set_dependencies(params_t9_deps, params_t9_deps_count);
+                    TaskOutputTensors task_9_outs = rt_submit_aic_task(9, params_t9);
+                    PTO2TaskId k_proj_tid_inline136 = task_9_outs.task_id();
+
+                    // Spmd v_proj_spmd: v_proj
+                    L0TaskArgs params_t10;
+                    params_t10.add_inout(v_proj_inline255);
+                    params_t10.add_input(normed__rv_v5);
+                    params_t10.add_input(ext_wv);
+                    params_t10.add_scalar(layer_hidden_base_inline151);
+                    params_t10.launch_spec.set_block_num(10);
+                    params_t10.set_allow_early_resolve(true);
+                    PTO2TaskId params_t10_deps[1];
+                    uint32_t params_t10_deps_count = 0;
+                    params_t10_deps[params_t10_deps_count++] = kv_seed_tid_inline238;
+                    params_t10.set_dependencies(params_t10_deps, params_t10_deps_count);
+                    TaskOutputTensors task_10_outs = rt_submit_aic_task(10, params_t10);
+                    PTO2TaskId v_proj_tid_inline63 = task_10_outs.task_id();
+                    uint32_t q_tnd_inline191_shapes[3] = {16, 40, 128};
+                    Tensor q_tnd_inline191 = q_tnd_flat_inline127.reshape(q_tnd_inline191_shapes, 3);
+                    uint32_t attn_out_tnd_inline79_shapes[3] = {16, 40, 128};
+                    Tensor attn_out_tnd_inline79 = attn_out_inline282.reshape(attn_out_tnd_inline79_shapes, 3);
+                    int64_t attention_core_num_inline188 = 24;
+
+                    // Group paged_attention_rope_cce: MixedKernels (AIC + AIV lanes)
+                    L0TaskArgs params_t11;
+                    params_t11.add_inout(attn_out_tnd_inline79);
+                    params_t11.add_inout(q_tnd_inline191);
+                    params_t11.add_inout(ext_k_cache);
+                    params_t11.add_inout(ext_v_cache);
+                    params_t11.add_input(ext_block_table);
+                    params_t11.add_inout(pa_workspace);
+                    params_t11.add_inout(pa_metadata);
+                    params_t11.add_input(q_proj_inline139);
+                    params_t11.add_input(k_proj_inline135);
+                    params_t11.add_input(v_proj_inline255);
+                    params_t11.add_input(q_norm_w_inline124);
+                    params_t11.add_input(k_norm_w_inline114);
+                    params_t11.add_input(ext_rope_cos);
+                    params_t11.add_input(ext_rope_sin);
+                    params_t11.add_input(inv_rms_states_inline176);
+                    params_t11.add_input(ext_slot_mapping);
+                    params_t11.add_input(ext_seq_lens);
+                    params_t11.add_scalar(layer_cache_base_inline193);
+                    MixedKernels mixed_11 = {11, 12, 12};
+                    params_t11.launch_spec.set_block_num(attention_core_num_inline188);
+                    params_t11.launch_spec.set_require_sync_start(true);
+                    params_t11.set_allow_early_resolve(true);
+                    PTO2TaskId params_t11_deps[7];
+                    uint32_t params_t11_deps_count = 0;
+                    params_t11_deps[params_t11_deps_count++] = q_proj_tid_inline183;
+                    params_t11_deps[params_t11_deps_count++] = k_proj_tid_inline136;
+                    params_t11_deps[params_t11_deps_count++] = v_proj_tid_inline63;
+                    params_t11_deps[params_t11_deps_count++] = rms_tid_inline148;
+                    params_t11_deps[params_t11_deps_count++] = tiling_tid_inline0;
+                    params_t11_deps[params_t11_deps_count++] = attn_out_seed_tid_inline116;
+                    params_t11_deps[params_t11_deps_count++] = mlp_out_seed_tid_inline206;
+                    params_t11.set_dependencies(params_t11_deps, params_t11_deps_count);
+                    TaskOutputTensors task_11_outs = rt_submit_task(mixed_11, params_t11);
+                    const Tensor &attn_out_tnd_inline79__ssa_v1 = attn_out_tnd_inline79;
+                    PTO2TaskId attn_done_tid_inline78 = task_11_outs.task_id();
+                    uint32_t attn_out_inline282__ssa_v4_shapes[2] = {16, 5120};
+                    Tensor attn_out_inline282__ssa_v4 =
+                        attn_out_tnd_inline79__ssa_v1.reshape(attn_out_inline282__ssa_v4_shapes, 2);
+                    PTO2TaskId silu_tids_inline265[17];
                     for (int64_t __init_i = 0; __init_i < 17; ++__init_i)
-                        silu_tids_inline169[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId down_tids_inline261[85];
+                        silu_tids_inline265[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId gate_tids_inline56[85];
                     for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
-                        down_tids_inline261[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId gate_tids_inline263[85];
+                        gate_tids_inline56[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId up_tids_inline310[85];
                     for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
-                        gate_tids_inline263[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId up_tids_inline265[85];
-                    for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
-                        up_tids_inline265[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId cast_tids_inline267[5];
+                        up_tids_inline310[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId cast_tids_inline88[5];
                     for (int64_t __init_i = 0; __init_i < 5; ++__init_i)
-                        cast_tids_inline267[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId out_tids_inline268[50];
+                        cast_tids_inline88[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId gate_late_tids_inline249[5];
+                    for (int64_t __init_i = 0; __init_i < 5; ++__init_i)
+                        gate_late_tids_inline249[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId up_late_tids_inline69[5];
+                    for (int64_t __init_i = 0; __init_i < 5; ++__init_i)
+                        up_late_tids_inline69[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId out_tids_inline271[50];
                     for (int64_t __init_i = 0; __init_i < 50; ++__init_i)
-                        out_tids_inline268[__init_i] = PTO2TaskId::invalid();
-                    for (int64_t n_out_proj_inline71 = 0; n_out_proj_inline71 < 10; n_out_proj_inline71 += 1) {
-                        int64_t n_op_inline211 = (n_out_proj_inline71 * 512);
-                        for (int64_t k_split_out_inline193 = 0; k_split_out_inline193 < 5; k_split_out_inline193 += 1) {
-                            int64_t k_op_inline151 = (k_split_out_inline193 * 1024);
+                        out_tids_inline271[__init_i] = PTO2TaskId::invalid();
 
-                            // Task 20: out_proj
-                            L0TaskArgs params_t20;
-                            params_t20.add_input(attn_out_inline157);
-                            params_t20.add_input(ext_wo);
-                            params_t20.add_inout(attn_proj_fp32_inline248);
-                            params_t20.add_scalar(k_op_inline151);
-                            params_t20.add_scalar(layer_hidden_base_inline135);
-                            params_t20.add_scalar(n_op_inline211);
-                            PTO2TaskId params_t20_deps[2];
-                            uint32_t params_t20_deps_count = 0;
-                            if (out_seed_tid_inline253.is_valid())
-                                params_t20_deps[params_t20_deps_count++] = out_seed_tid_inline253;
-                            if (attn_done_tid_inline181.is_valid())
-                                params_t20_deps[params_t20_deps_count++] = attn_done_tid_inline181;
-                            params_t20.set_dependencies(params_t20_deps, params_t20_deps_count);
-                            TaskOutputTensors task_20_outs = rt_submit_aic_task(21, params_t20);
-                            PTO2TaskId out_tid_inline269 = task_20_outs.task_id();
-                            out_tids_inline268[((n_out_proj_inline71 * 5) + k_split_out_inline193)] = out_tid_inline269;
-                        }
+                    // Phase-fence barrier 2: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_2;
+                    PTO2TaskId params_phase_fence_barrier_2_deps[1];
+                    uint32_t params_phase_fence_barrier_2_deps_count = 0;
+                    params_phase_fence_barrier_2_deps[params_phase_fence_barrier_2_deps_count++] =
+                        attn_done_tid_inline78;
+                    params_phase_fence_barrier_2.set_dependencies(
+                        params_phase_fence_barrier_2_deps, params_phase_fence_barrier_2_deps_count
+                    );
+                    PTO2TaskId out_proj_dummy_inline257 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_2_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_2_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_2);
+                        out_proj_dummy_inline257 = phase_fence_barrier_2_outs.task_id();
                     }
-                    int64_t k_base_inline177 = 0;
-                    int64_t n_split_base_inline47 = 0;
-                    PTO2TaskId _submit_deps_buf_inline75[10];
-                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
-                        _submit_deps_buf_inline75[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId t__tmp_v86 = out_tids_inline268[(n_split_base_inline47 * 5)];
-                    _submit_deps_buf_inline75[0] = t__tmp_v86;
-                    PTO2TaskId t__tmp_v87 = out_tids_inline268[((n_split_base_inline47 * 5) + 1)];
-                    _submit_deps_buf_inline75[1] = t__tmp_v87;
-                    PTO2TaskId t__tmp_v88 = out_tids_inline268[((n_split_base_inline47 * 5) + 2)];
-                    _submit_deps_buf_inline75[2] = t__tmp_v88;
-                    PTO2TaskId t__tmp_v89 = out_tids_inline268[((n_split_base_inline47 * 5) + 3)];
-                    _submit_deps_buf_inline75[3] = t__tmp_v89;
-                    PTO2TaskId t__tmp_v90 = out_tids_inline268[((n_split_base_inline47 * 5) + 4)];
-                    _submit_deps_buf_inline75[4] = t__tmp_v90;
-                    PTO2TaskId t__tmp_v91 = out_tids_inline268[((n_split_base_inline47 * 5) + 5)];
-                    _submit_deps_buf_inline75[5] = t__tmp_v91;
-                    PTO2TaskId t__tmp_v92 = out_tids_inline268[((n_split_base_inline47 * 5) + 6)];
-                    _submit_deps_buf_inline75[6] = t__tmp_v92;
-                    PTO2TaskId t__tmp_v93 = out_tids_inline268[((n_split_base_inline47 * 5) + 7)];
-                    _submit_deps_buf_inline75[7] = t__tmp_v93;
-                    PTO2TaskId t__tmp_v94 = out_tids_inline268[((n_split_base_inline47 * 5) + 8)];
-                    _submit_deps_buf_inline75[8] = t__tmp_v94;
-                    PTO2TaskId t__tmp_v95 = out_tids_inline268[((n_split_base_inline47 * 5) + 9)];
-                    _submit_deps_buf_inline75[9] = t__tmp_v95;
+                    int64_t N_OUT_DIRECT_inline61 = 26;
+                    for (int64_t out_idx_inline74 = 0; out_idx_inline74 < N_OUT_DIRECT_inline61;
+                         out_idx_inline74 += 1) {
+                        int64_t n_out_proj_inline185 = (out_idx_inline74 / 5);
+                        int64_t k_split_out_inline66 = (out_idx_inline74 % 5);
+                        int64_t n_op_inline64 = (n_out_proj_inline185 * 512);
+                        int64_t k_op_inline266 = (k_split_out_inline66 * 1024);
 
-                    // Task 21: residual_rms_cast
+                        // Task 12: out_proj
+                        L0TaskArgs params_t12;
+                        params_t12.add_input(attn_out_inline282__ssa_v4);
+                        params_t12.add_input(ext_wo);
+                        params_t12.add_inout(attn_proj_fp32_inline220);
+                        params_t12.add_scalar(k_op_inline266);
+                        params_t12.add_scalar(layer_hidden_base_inline151);
+                        params_t12.add_scalar(n_op_inline64);
+                        PTO2TaskId params_t12_deps[1];
+                        uint32_t params_t12_deps_count = 0;
+                        if (out_proj_dummy_inline257.is_valid())
+                            params_t12_deps[params_t12_deps_count++] = out_proj_dummy_inline257;
+                        params_t12.set_dependencies(params_t12_deps, params_t12_deps_count);
+                        TaskOutputTensors task_12_outs = rt_submit_aic_task(13, params_t12);
+                        PTO2TaskId out_tid_inline141 = task_12_outs.task_id();
+                        out_tids_inline271[out_idx_inline74] = out_tid_inline141;
+                    }
+
+                    // Spmd out_proj_spmd: out_proj_0
+                    L0TaskArgs params_t13;
+                    params_t13.add_input(attn_out_inline282__ssa_v4);
+                    params_t13.add_input(ext_wo);
+                    params_t13.add_inout(attn_proj_fp32_inline220);
+                    params_t13.add_scalar(N_OUT_DIRECT_inline61);
+                    params_t13.add_scalar(layer_hidden_base_inline151);
+                    params_t13.launch_spec.set_block_num(24);
+                    PTO2TaskId params_t13_deps[1];
+                    uint32_t params_t13_deps_count = 0;
+                    params_t13_deps[params_t13_deps_count++] = attn_done_tid_inline78;
+                    params_t13.set_dependencies(params_t13_deps, params_t13_deps_count);
+                    TaskOutputTensors task_13_outs = rt_submit_aic_task(14, params_t13);
+                    PTO2TaskId out_proj_direct_tid_inline70 = task_13_outs.task_id();
+                    out_tids_inline271[N_OUT_DIRECT_inline61] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 1)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 2)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 3)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 4)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 5)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 6)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 7)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 8)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 9)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 10)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 11)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 12)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 13)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 14)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 15)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 16)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 17)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 18)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 19)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 20)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 21)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 22)] = out_proj_direct_tid_inline70;
+                    out_tids_inline271[(N_OUT_DIRECT_inline61 + 23)] = out_proj_direct_tid_inline70;
+                    int64_t k_base_inline111 = 0;
+                    int64_t n_split_base_inline163 = 0;
+                    PTO2TaskId _submit_deps_buf_inline165[10];
+                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
+                        _submit_deps_buf_inline165[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v39 = out_tids_inline271[(n_split_base_inline163 * 5)];
+                    _submit_deps_buf_inline165[0] = t__tmp_v39;
+                    PTO2TaskId t__tmp_v40 = out_tids_inline271[((n_split_base_inline163 * 5) + 1)];
+                    _submit_deps_buf_inline165[1] = t__tmp_v40;
+                    PTO2TaskId t__tmp_v41 = out_tids_inline271[((n_split_base_inline163 * 5) + 2)];
+                    _submit_deps_buf_inline165[2] = t__tmp_v41;
+                    PTO2TaskId t__tmp_v42 = out_tids_inline271[((n_split_base_inline163 * 5) + 3)];
+                    _submit_deps_buf_inline165[3] = t__tmp_v42;
+                    PTO2TaskId t__tmp_v43 = out_tids_inline271[((n_split_base_inline163 * 5) + 4)];
+                    _submit_deps_buf_inline165[4] = t__tmp_v43;
+                    PTO2TaskId t__tmp_v44 = out_tids_inline271[((n_split_base_inline163 * 5) + 5)];
+                    _submit_deps_buf_inline165[5] = t__tmp_v44;
+                    PTO2TaskId t__tmp_v45 = out_tids_inline271[((n_split_base_inline163 * 5) + 6)];
+                    _submit_deps_buf_inline165[6] = t__tmp_v45;
+                    PTO2TaskId t__tmp_v46 = out_tids_inline271[((n_split_base_inline163 * 5) + 7)];
+                    _submit_deps_buf_inline165[7] = t__tmp_v46;
+                    PTO2TaskId t__tmp_v47 = out_tids_inline271[((n_split_base_inline163 * 5) + 8)];
+                    _submit_deps_buf_inline165[8] = t__tmp_v47;
+                    PTO2TaskId t__tmp_v48 = out_tids_inline271[((n_split_base_inline163 * 5) + 9)];
+                    _submit_deps_buf_inline165[9] = t__tmp_v48;
+
+                    // Task 14: residual_rms_cast
+                    L0TaskArgs params_t14;
+                    params_t14.add_inout(mlp_norm_in_inline71);
+                    params_t14.add_inout(post_norm_partial_inline118);
+                    params_t14.add_input(attn_proj_fp32_inline220);
+                    params_t14.add_input(cur__rv_v7);
+                    params_t14.add_input(ext_post_rms_weight);
+                    params_t14.add_scalar(k_base_inline111);
+                    params_t14.add_scalar(i);
+                    PTO2TaskId params_t14_deps[10];
+                    uint32_t params_t14_deps_count = 0;
+                    if (_submit_deps_buf_inline165[0].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[0];
+                    if (_submit_deps_buf_inline165[1].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[1];
+                    if (_submit_deps_buf_inline165[2].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[2];
+                    if (_submit_deps_buf_inline165[3].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[3];
+                    if (_submit_deps_buf_inline165[4].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[4];
+                    if (_submit_deps_buf_inline165[5].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[5];
+                    if (_submit_deps_buf_inline165[6].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[6];
+                    if (_submit_deps_buf_inline165[7].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[7];
+                    if (_submit_deps_buf_inline165[8].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[8];
+                    if (_submit_deps_buf_inline165[9].is_valid())
+                        params_t14_deps[params_t14_deps_count++] = _submit_deps_buf_inline165[9];
+                    params_t14.set_dependencies(params_t14_deps, params_t14_deps_count);
+                    params_t14.set_allow_early_resolve(true);
+                    TaskOutputTensors task_14_outs = rt_submit_aiv_task(15, params_t14);
+                    PTO2TaskId cast_tid_k_inline76 = task_14_outs.task_id();
+                    cast_tids_inline88[0] = cast_tid_k_inline76;
+                    int64_t k_base_inline111__ssa_v1 = 1024;
+                    int64_t n_split_base_inline163__ssa_v1 = 2;
+                    PTO2TaskId _submit_deps_buf_inline165__ssa_v1[10];
+                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
+                        _submit_deps_buf_inline165__ssa_v1[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v51 = out_tids_inline271[(n_split_base_inline163__ssa_v1 * 5)];
+                    _submit_deps_buf_inline165__ssa_v1[0] = t__tmp_v51;
+                    PTO2TaskId t__tmp_v52 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 1)];
+                    _submit_deps_buf_inline165__ssa_v1[1] = t__tmp_v52;
+                    PTO2TaskId t__tmp_v53 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 2)];
+                    _submit_deps_buf_inline165__ssa_v1[2] = t__tmp_v53;
+                    PTO2TaskId t__tmp_v54 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 3)];
+                    _submit_deps_buf_inline165__ssa_v1[3] = t__tmp_v54;
+                    PTO2TaskId t__tmp_v55 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 4)];
+                    _submit_deps_buf_inline165__ssa_v1[4] = t__tmp_v55;
+                    PTO2TaskId t__tmp_v56 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 5)];
+                    _submit_deps_buf_inline165__ssa_v1[5] = t__tmp_v56;
+                    PTO2TaskId t__tmp_v57 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 6)];
+                    _submit_deps_buf_inline165__ssa_v1[6] = t__tmp_v57;
+                    PTO2TaskId t__tmp_v58 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 7)];
+                    _submit_deps_buf_inline165__ssa_v1[7] = t__tmp_v58;
+                    PTO2TaskId t__tmp_v59 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 8)];
+                    _submit_deps_buf_inline165__ssa_v1[8] = t__tmp_v59;
+                    PTO2TaskId t__tmp_v60 = out_tids_inline271[((n_split_base_inline163__ssa_v1 * 5) + 9)];
+                    _submit_deps_buf_inline165__ssa_v1[9] = t__tmp_v60;
+
+                    // Task 15: residual_rms_cast_0
+                    L0TaskArgs params_t15;
+                    params_t15.add_inout(mlp_norm_in_inline71);
+                    params_t15.add_inout(post_norm_partial_inline118);
+                    params_t15.add_input(attn_proj_fp32_inline220);
+                    params_t15.add_input(cur__rv_v7);
+                    params_t15.add_input(ext_post_rms_weight);
+                    params_t15.add_scalar(k_base_inline111__ssa_v1);
+                    params_t15.add_scalar(i);
+                    PTO2TaskId params_t15_deps[10];
+                    uint32_t params_t15_deps_count = 0;
+                    if (_submit_deps_buf_inline165__ssa_v1[0].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[0];
+                    if (_submit_deps_buf_inline165__ssa_v1[1].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[1];
+                    if (_submit_deps_buf_inline165__ssa_v1[2].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[2];
+                    if (_submit_deps_buf_inline165__ssa_v1[3].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[3];
+                    if (_submit_deps_buf_inline165__ssa_v1[4].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[4];
+                    if (_submit_deps_buf_inline165__ssa_v1[5].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[5];
+                    if (_submit_deps_buf_inline165__ssa_v1[6].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[6];
+                    if (_submit_deps_buf_inline165__ssa_v1[7].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[7];
+                    if (_submit_deps_buf_inline165__ssa_v1[8].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[8];
+                    if (_submit_deps_buf_inline165__ssa_v1[9].is_valid())
+                        params_t15_deps[params_t15_deps_count++] = _submit_deps_buf_inline165__ssa_v1[9];
+                    params_t15.set_dependencies(params_t15_deps, params_t15_deps_count);
+                    params_t15.set_allow_early_resolve(true);
+                    TaskOutputTensors task_15_outs = rt_submit_aiv_task(16, params_t15);
+                    PTO2TaskId cast_tid_k_inline76__ssa_v1 = task_15_outs.task_id();
+                    cast_tids_inline88[1] = cast_tid_k_inline76__ssa_v1;
+                    int64_t k_base_inline111__ssa_v2 = 2048;
+                    int64_t n_split_base_inline163__ssa_v2 = 4;
+                    PTO2TaskId _submit_deps_buf_inline165__ssa_v2[10];
+                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
+                        _submit_deps_buf_inline165__ssa_v2[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v63 = out_tids_inline271[(n_split_base_inline163__ssa_v2 * 5)];
+                    _submit_deps_buf_inline165__ssa_v2[0] = t__tmp_v63;
+                    PTO2TaskId t__tmp_v64 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 1)];
+                    _submit_deps_buf_inline165__ssa_v2[1] = t__tmp_v64;
+                    PTO2TaskId t__tmp_v65 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 2)];
+                    _submit_deps_buf_inline165__ssa_v2[2] = t__tmp_v65;
+                    PTO2TaskId t__tmp_v66 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 3)];
+                    _submit_deps_buf_inline165__ssa_v2[3] = t__tmp_v66;
+                    PTO2TaskId t__tmp_v67 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 4)];
+                    _submit_deps_buf_inline165__ssa_v2[4] = t__tmp_v67;
+                    PTO2TaskId t__tmp_v68 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 5)];
+                    _submit_deps_buf_inline165__ssa_v2[5] = t__tmp_v68;
+                    PTO2TaskId t__tmp_v69 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 6)];
+                    _submit_deps_buf_inline165__ssa_v2[6] = t__tmp_v69;
+                    PTO2TaskId t__tmp_v70 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 7)];
+                    _submit_deps_buf_inline165__ssa_v2[7] = t__tmp_v70;
+                    PTO2TaskId t__tmp_v71 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 8)];
+                    _submit_deps_buf_inline165__ssa_v2[8] = t__tmp_v71;
+                    PTO2TaskId t__tmp_v72 = out_tids_inline271[((n_split_base_inline163__ssa_v2 * 5) + 9)];
+                    _submit_deps_buf_inline165__ssa_v2[9] = t__tmp_v72;
+
+                    // Task 16: residual_rms_cast_1
+                    L0TaskArgs params_t16;
+                    params_t16.add_inout(mlp_norm_in_inline71);
+                    params_t16.add_inout(post_norm_partial_inline118);
+                    params_t16.add_input(attn_proj_fp32_inline220);
+                    params_t16.add_input(cur__rv_v7);
+                    params_t16.add_input(ext_post_rms_weight);
+                    params_t16.add_scalar(k_base_inline111__ssa_v2);
+                    params_t16.add_scalar(i);
+                    PTO2TaskId params_t16_deps[10];
+                    uint32_t params_t16_deps_count = 0;
+                    if (_submit_deps_buf_inline165__ssa_v2[0].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[0];
+                    if (_submit_deps_buf_inline165__ssa_v2[1].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[1];
+                    if (_submit_deps_buf_inline165__ssa_v2[2].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[2];
+                    if (_submit_deps_buf_inline165__ssa_v2[3].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[3];
+                    if (_submit_deps_buf_inline165__ssa_v2[4].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[4];
+                    if (_submit_deps_buf_inline165__ssa_v2[5].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[5];
+                    if (_submit_deps_buf_inline165__ssa_v2[6].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[6];
+                    if (_submit_deps_buf_inline165__ssa_v2[7].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[7];
+                    if (_submit_deps_buf_inline165__ssa_v2[8].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[8];
+                    if (_submit_deps_buf_inline165__ssa_v2[9].is_valid())
+                        params_t16_deps[params_t16_deps_count++] = _submit_deps_buf_inline165__ssa_v2[9];
+                    params_t16.set_dependencies(params_t16_deps, params_t16_deps_count);
+                    params_t16.set_allow_early_resolve(true);
+                    TaskOutputTensors task_16_outs = rt_submit_aiv_task(17, params_t16);
+                    PTO2TaskId cast_tid_k_inline76__ssa_v2 = task_16_outs.task_id();
+                    cast_tids_inline88[2] = cast_tid_k_inline76__ssa_v2;
+                    int64_t k_base_inline111__ssa_v3 = 3072;
+                    int64_t n_split_base_inline163__ssa_v3 = 6;
+                    PTO2TaskId _submit_deps_buf_inline165__ssa_v3[10];
+                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
+                        _submit_deps_buf_inline165__ssa_v3[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v75 = out_tids_inline271[(n_split_base_inline163__ssa_v3 * 5)];
+                    _submit_deps_buf_inline165__ssa_v3[0] = t__tmp_v75;
+                    PTO2TaskId t__tmp_v76 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 1)];
+                    _submit_deps_buf_inline165__ssa_v3[1] = t__tmp_v76;
+                    PTO2TaskId t__tmp_v77 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 2)];
+                    _submit_deps_buf_inline165__ssa_v3[2] = t__tmp_v77;
+                    PTO2TaskId t__tmp_v78 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 3)];
+                    _submit_deps_buf_inline165__ssa_v3[3] = t__tmp_v78;
+                    PTO2TaskId t__tmp_v79 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 4)];
+                    _submit_deps_buf_inline165__ssa_v3[4] = t__tmp_v79;
+                    PTO2TaskId t__tmp_v80 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 5)];
+                    _submit_deps_buf_inline165__ssa_v3[5] = t__tmp_v80;
+                    PTO2TaskId t__tmp_v81 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 6)];
+                    _submit_deps_buf_inline165__ssa_v3[6] = t__tmp_v81;
+                    PTO2TaskId t__tmp_v82 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 7)];
+                    _submit_deps_buf_inline165__ssa_v3[7] = t__tmp_v82;
+                    PTO2TaskId t__tmp_v83 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 8)];
+                    _submit_deps_buf_inline165__ssa_v3[8] = t__tmp_v83;
+                    PTO2TaskId t__tmp_v84 = out_tids_inline271[((n_split_base_inline163__ssa_v3 * 5) + 9)];
+                    _submit_deps_buf_inline165__ssa_v3[9] = t__tmp_v84;
+
+                    // Task 17: residual_rms_cast_2
+                    L0TaskArgs params_t17;
+                    params_t17.add_inout(mlp_norm_in_inline71);
+                    params_t17.add_inout(post_norm_partial_inline118);
+                    params_t17.add_input(attn_proj_fp32_inline220);
+                    params_t17.add_input(cur__rv_v7);
+                    params_t17.add_input(ext_post_rms_weight);
+                    params_t17.add_scalar(k_base_inline111__ssa_v3);
+                    params_t17.add_scalar(i);
+                    PTO2TaskId params_t17_deps[10];
+                    uint32_t params_t17_deps_count = 0;
+                    if (_submit_deps_buf_inline165__ssa_v3[0].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[0];
+                    if (_submit_deps_buf_inline165__ssa_v3[1].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[1];
+                    if (_submit_deps_buf_inline165__ssa_v3[2].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[2];
+                    if (_submit_deps_buf_inline165__ssa_v3[3].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[3];
+                    if (_submit_deps_buf_inline165__ssa_v3[4].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[4];
+                    if (_submit_deps_buf_inline165__ssa_v3[5].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[5];
+                    if (_submit_deps_buf_inline165__ssa_v3[6].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[6];
+                    if (_submit_deps_buf_inline165__ssa_v3[7].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[7];
+                    if (_submit_deps_buf_inline165__ssa_v3[8].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[8];
+                    if (_submit_deps_buf_inline165__ssa_v3[9].is_valid())
+                        params_t17_deps[params_t17_deps_count++] = _submit_deps_buf_inline165__ssa_v3[9];
+                    params_t17.set_dependencies(params_t17_deps, params_t17_deps_count);
+                    params_t17.set_allow_early_resolve(true);
+                    TaskOutputTensors task_17_outs = rt_submit_aiv_task(18, params_t17);
+                    PTO2TaskId cast_tid_k_inline76__ssa_v3 = task_17_outs.task_id();
+                    cast_tids_inline88[3] = cast_tid_k_inline76__ssa_v3;
+                    int64_t k_base_inline111__ssa_v4 = 4096;
+                    int64_t n_split_base_inline163__ssa_v4 = 8;
+                    PTO2TaskId _submit_deps_buf_inline165__ssa_v4[10];
+                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
+                        _submit_deps_buf_inline165__ssa_v4[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v87 = out_tids_inline271[(n_split_base_inline163__ssa_v4 * 5)];
+                    _submit_deps_buf_inline165__ssa_v4[0] = t__tmp_v87;
+                    PTO2TaskId t__tmp_v88 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 1)];
+                    _submit_deps_buf_inline165__ssa_v4[1] = t__tmp_v88;
+                    PTO2TaskId t__tmp_v89 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 2)];
+                    _submit_deps_buf_inline165__ssa_v4[2] = t__tmp_v89;
+                    PTO2TaskId t__tmp_v90 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 3)];
+                    _submit_deps_buf_inline165__ssa_v4[3] = t__tmp_v90;
+                    PTO2TaskId t__tmp_v91 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 4)];
+                    _submit_deps_buf_inline165__ssa_v4[4] = t__tmp_v91;
+                    PTO2TaskId t__tmp_v92 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 5)];
+                    _submit_deps_buf_inline165__ssa_v4[5] = t__tmp_v92;
+                    PTO2TaskId t__tmp_v93 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 6)];
+                    _submit_deps_buf_inline165__ssa_v4[6] = t__tmp_v93;
+                    PTO2TaskId t__tmp_v94 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 7)];
+                    _submit_deps_buf_inline165__ssa_v4[7] = t__tmp_v94;
+                    PTO2TaskId t__tmp_v95 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 8)];
+                    _submit_deps_buf_inline165__ssa_v4[8] = t__tmp_v95;
+                    PTO2TaskId t__tmp_v96 = out_tids_inline271[((n_split_base_inline163__ssa_v4 * 5) + 9)];
+                    _submit_deps_buf_inline165__ssa_v4[9] = t__tmp_v96;
+
+                    // Task 18: residual_rms_cast_3
+                    L0TaskArgs params_t18;
+                    params_t18.add_inout(mlp_norm_in_inline71);
+                    params_t18.add_inout(post_norm_partial_inline118);
+                    params_t18.add_input(attn_proj_fp32_inline220);
+                    params_t18.add_input(cur__rv_v7);
+                    params_t18.add_input(ext_post_rms_weight);
+                    params_t18.add_scalar(k_base_inline111__ssa_v4);
+                    params_t18.add_scalar(i);
+                    PTO2TaskId params_t18_deps[10];
+                    uint32_t params_t18_deps_count = 0;
+                    if (_submit_deps_buf_inline165__ssa_v4[0].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[0];
+                    if (_submit_deps_buf_inline165__ssa_v4[1].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[1];
+                    if (_submit_deps_buf_inline165__ssa_v4[2].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[2];
+                    if (_submit_deps_buf_inline165__ssa_v4[3].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[3];
+                    if (_submit_deps_buf_inline165__ssa_v4[4].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[4];
+                    if (_submit_deps_buf_inline165__ssa_v4[5].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[5];
+                    if (_submit_deps_buf_inline165__ssa_v4[6].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[6];
+                    if (_submit_deps_buf_inline165__ssa_v4[7].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[7];
+                    if (_submit_deps_buf_inline165__ssa_v4[8].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[8];
+                    if (_submit_deps_buf_inline165__ssa_v4[9].is_valid())
+                        params_t18_deps[params_t18_deps_count++] = _submit_deps_buf_inline165__ssa_v4[9];
+                    params_t18.set_dependencies(params_t18_deps, params_t18_deps_count);
+                    params_t18.set_allow_early_resolve(true);
+                    TaskOutputTensors task_18_outs = rt_submit_aiv_task(19, params_t18);
+                    PTO2TaskId cast_tid_k_inline76__ssa_v4 = task_18_outs.task_id();
+                    cast_tids_inline88[4] = cast_tid_k_inline76__ssa_v4;
+
+                    // Task 19: post_rms_reduce
+                    L0TaskArgs params_t19;
+                    params_t19.add_input(attn_proj_fp32_inline220);
+                    params_t19.add_input(cur__rv_v7);
+                    params_t19.add_inout(inv_rms_tile_inline126);
+                    PTO2TaskId params_t19_deps[50];
+                    uint32_t params_t19_deps_count = 0;
+                    if (out_tids_inline271[0].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[0];
+                    if (out_tids_inline271[1].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[1];
+                    if (out_tids_inline271[2].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[2];
+                    if (out_tids_inline271[3].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[3];
+                    if (out_tids_inline271[4].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[4];
+                    if (out_tids_inline271[5].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[5];
+                    if (out_tids_inline271[6].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[6];
+                    if (out_tids_inline271[7].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[7];
+                    if (out_tids_inline271[8].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[8];
+                    if (out_tids_inline271[9].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[9];
+                    if (out_tids_inline271[10].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[10];
+                    if (out_tids_inline271[11].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[11];
+                    if (out_tids_inline271[12].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[12];
+                    if (out_tids_inline271[13].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[13];
+                    if (out_tids_inline271[14].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[14];
+                    if (out_tids_inline271[15].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[15];
+                    if (out_tids_inline271[16].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[16];
+                    if (out_tids_inline271[17].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[17];
+                    if (out_tids_inline271[18].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[18];
+                    if (out_tids_inline271[19].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[19];
+                    if (out_tids_inline271[20].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[20];
+                    if (out_tids_inline271[21].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[21];
+                    if (out_tids_inline271[22].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[22];
+                    if (out_tids_inline271[23].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[23];
+                    if (out_tids_inline271[24].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[24];
+                    if (out_tids_inline271[25].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[25];
+                    if (out_tids_inline271[26].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[26];
+                    if (out_tids_inline271[27].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[27];
+                    if (out_tids_inline271[28].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[28];
+                    if (out_tids_inline271[29].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[29];
+                    if (out_tids_inline271[30].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[30];
+                    if (out_tids_inline271[31].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[31];
+                    if (out_tids_inline271[32].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[32];
+                    if (out_tids_inline271[33].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[33];
+                    if (out_tids_inline271[34].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[34];
+                    if (out_tids_inline271[35].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[35];
+                    if (out_tids_inline271[36].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[36];
+                    if (out_tids_inline271[37].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[37];
+                    if (out_tids_inline271[38].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[38];
+                    if (out_tids_inline271[39].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[39];
+                    if (out_tids_inline271[40].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[40];
+                    if (out_tids_inline271[41].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[41];
+                    if (out_tids_inline271[42].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[42];
+                    if (out_tids_inline271[43].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[43];
+                    if (out_tids_inline271[44].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[44];
+                    if (out_tids_inline271[45].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[45];
+                    if (out_tids_inline271[46].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[46];
+                    if (out_tids_inline271[47].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[47];
+                    if (out_tids_inline271[48].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[48];
+                    if (out_tids_inline271[49].is_valid())
+                        params_t19_deps[params_t19_deps_count++] = out_tids_inline271[49];
+                    params_t19.set_dependencies(params_t19_deps, params_t19_deps_count);
+                    TaskOutputTensors task_19_outs = rt_submit_aiv_task(20, params_t19);
+                    PTO2TaskId reduce_tid_inline226 = task_19_outs.task_id();
+                    int64_t gu_k0_inline131 = 0;
+                    PTO2TaskId _submit_deps_buf_inline236[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline236[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v105 = cast_tids_inline88[0];
+                    _submit_deps_buf_inline236[0] = t__tmp_v105;
+
+                    // Phase-fence barrier 3: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_3;
+                    PTO2TaskId params_phase_fence_barrier_3_deps[1];
+                    uint32_t params_phase_fence_barrier_3_deps_count = 0;
+                    if (_submit_deps_buf_inline236[0].is_valid())
+                        params_phase_fence_barrier_3_deps[params_phase_fence_barrier_3_deps_count++] =
+                            _submit_deps_buf_inline236[0];
+                    params_phase_fence_barrier_3.set_dependencies(
+                        params_phase_fence_barrier_3_deps, params_phase_fence_barrier_3_deps_count
+                    );
+                    PTO2TaskId t__tmp_v106 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_3_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_3_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_3);
+                        t__tmp_v106 = phase_fence_barrier_3_outs.task_id();
+                    }
+                    gate_late_tids_inline249[0] = t__tmp_v106;
+                    PTO2TaskId _submit_deps_buf_inline225[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline225[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v107 = cast_tids_inline88[0];
+                    _submit_deps_buf_inline225[0] = t__tmp_v107;
+
+                    // Phase-fence barrier 4: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_4;
+                    PTO2TaskId params_phase_fence_barrier_4_deps[1];
+                    uint32_t params_phase_fence_barrier_4_deps_count = 0;
+                    if (_submit_deps_buf_inline225[0].is_valid())
+                        params_phase_fence_barrier_4_deps[params_phase_fence_barrier_4_deps_count++] =
+                            _submit_deps_buf_inline225[0];
+                    params_phase_fence_barrier_4.set_dependencies(
+                        params_phase_fence_barrier_4_deps, params_phase_fence_barrier_4_deps_count
+                    );
+                    PTO2TaskId t__tmp_v108 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_4_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_4_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_4);
+                        t__tmp_v108 = phase_fence_barrier_4_outs.task_id();
+                    }
+                    up_late_tids_inline69[0] = t__tmp_v108;
+                    PTO2TaskId _submit_deps_buf_inline237[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline237[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v109 = cast_tids_inline88[0];
+                    _submit_deps_buf_inline237[0] = t__tmp_v109;
+
+                    // Spmd gate_proj_spmd: gate_proj
+                    L0TaskArgs params_t20;
+                    params_t20.add_input(mlp_norm_in_inline71);
+                    params_t20.add_input(ext_w_gate);
+                    params_t20.add_inout(gate_acc_all_inline203);
+                    params_t20.add_scalar(gu_k0_inline131);
+                    params_t20.add_scalar(layer_hidden_base_inline151);
+                    params_t20.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t20_deps[1];
+                    uint32_t params_t20_deps_count = 0;
+                    if (_submit_deps_buf_inline237[0].is_valid())
+                        params_t20_deps[params_t20_deps_count++] = _submit_deps_buf_inline237[0];
+                    params_t20.set_dependencies(params_t20_deps, params_t20_deps_count);
+                    TaskOutputTensors task_20_outs = rt_submit_aic_task(21, params_t20);
+                    PTO2TaskId gate_spmd_tid_inline245 = task_20_outs.task_id();
+                    gate_tids_inline56[0] = gate_spmd_tid_inline245;
+                    gate_tids_inline56[5] = gate_spmd_tid_inline245;
+                    gate_tids_inline56[10] = gate_spmd_tid_inline245;
+                    gate_tids_inline56[15] = gate_spmd_tid_inline245;
+                    gate_tids_inline56[20] = gate_spmd_tid_inline245;
+                    gate_tids_inline56[25] = gate_spmd_tid_inline245;
+                    PTO2TaskId _submit_deps_buf_inline260[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline260[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v110 = cast_tids_inline88[0];
+                    _submit_deps_buf_inline260[0] = t__tmp_v110;
+
+                    // Spmd up_proj_spmd: up_proj
                     L0TaskArgs params_t21;
-                    params_t21.add_inout(mlp_norm_in_inline250);
-                    params_t21.add_inout(post_norm_partial_inline130);
-                    params_t21.add_input(attn_proj_fp32_inline248);
-                    params_t21.add_input(cur__rv_v7);
-                    params_t21.add_input(ext_post_rms_weight);
-                    params_t21.add_scalar(k_base_inline177);
-                    params_t21.add_scalar(i);
-                    PTO2TaskId params_t21_deps[10];
+                    params_t21.add_input(mlp_norm_in_inline71);
+                    params_t21.add_input(ext_w_up);
+                    params_t21.add_inout(up_acc_all_inline303);
+                    params_t21.add_scalar(gu_k0_inline131);
+                    params_t21.add_scalar(layer_hidden_base_inline151);
+                    params_t21.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t21_deps[1];
                     uint32_t params_t21_deps_count = 0;
-                    if (_submit_deps_buf_inline75[0].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[0];
-                    if (_submit_deps_buf_inline75[1].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[1];
-                    if (_submit_deps_buf_inline75[2].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[2];
-                    if (_submit_deps_buf_inline75[3].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[3];
-                    if (_submit_deps_buf_inline75[4].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[4];
-                    if (_submit_deps_buf_inline75[5].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[5];
-                    if (_submit_deps_buf_inline75[6].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[6];
-                    if (_submit_deps_buf_inline75[7].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[7];
-                    if (_submit_deps_buf_inline75[8].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[8];
-                    if (_submit_deps_buf_inline75[9].is_valid())
-                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline75[9];
+                    if (_submit_deps_buf_inline260[0].is_valid())
+                        params_t21_deps[params_t21_deps_count++] = _submit_deps_buf_inline260[0];
                     params_t21.set_dependencies(params_t21_deps, params_t21_deps_count);
-                    TaskOutputTensors task_21_outs = rt_submit_aiv_task(22, params_t21);
-                    PTO2TaskId cast_tid_k_inline171 = task_21_outs.task_id();
-                    cast_tids_inline267[0] = cast_tid_k_inline171;
-                    int64_t k_base_inline177__ssa_v1 = 1024;
-                    int64_t n_split_base_inline47__ssa_v1 = 2;
-                    PTO2TaskId _submit_deps_buf_inline75__ssa_v1[10];
-                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
-                        _submit_deps_buf_inline75__ssa_v1[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId t__tmp_v100 = out_tids_inline268[(n_split_base_inline47__ssa_v1 * 5)];
-                    _submit_deps_buf_inline75__ssa_v1[0] = t__tmp_v100;
-                    PTO2TaskId t__tmp_v101 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 1)];
-                    _submit_deps_buf_inline75__ssa_v1[1] = t__tmp_v101;
-                    PTO2TaskId t__tmp_v102 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 2)];
-                    _submit_deps_buf_inline75__ssa_v1[2] = t__tmp_v102;
-                    PTO2TaskId t__tmp_v103 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 3)];
-                    _submit_deps_buf_inline75__ssa_v1[3] = t__tmp_v103;
-                    PTO2TaskId t__tmp_v104 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 4)];
-                    _submit_deps_buf_inline75__ssa_v1[4] = t__tmp_v104;
-                    PTO2TaskId t__tmp_v105 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 5)];
-                    _submit_deps_buf_inline75__ssa_v1[5] = t__tmp_v105;
-                    PTO2TaskId t__tmp_v106 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 6)];
-                    _submit_deps_buf_inline75__ssa_v1[6] = t__tmp_v106;
-                    PTO2TaskId t__tmp_v107 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 7)];
-                    _submit_deps_buf_inline75__ssa_v1[7] = t__tmp_v107;
-                    PTO2TaskId t__tmp_v108 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 8)];
-                    _submit_deps_buf_inline75__ssa_v1[8] = t__tmp_v108;
-                    PTO2TaskId t__tmp_v109 = out_tids_inline268[((n_split_base_inline47__ssa_v1 * 5) + 9)];
-                    _submit_deps_buf_inline75__ssa_v1[9] = t__tmp_v109;
+                    TaskOutputTensors task_21_outs = rt_submit_aic_task(22, params_t21);
+                    PTO2TaskId up_spmd_tid_inline264 = task_21_outs.task_id();
+                    up_tids_inline310[0] = up_spmd_tid_inline264;
+                    up_tids_inline310[5] = up_spmd_tid_inline264;
+                    up_tids_inline310[10] = up_spmd_tid_inline264;
+                    up_tids_inline310[15] = up_spmd_tid_inline264;
+                    up_tids_inline310[20] = up_spmd_tid_inline264;
+                    up_tids_inline310[25] = up_spmd_tid_inline264;
+                    int64_t gu_k0_inline131__ssa_v1 = 1024;
+                    PTO2TaskId _submit_deps_buf_inline236__ssa_v1[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline236__ssa_v1[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v111 = cast_tids_inline88[1];
+                    _submit_deps_buf_inline236__ssa_v1[0] = t__tmp_v111;
 
-                    // Task 22: residual_rms_cast_0
+                    // Phase-fence barrier 5: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_5;
+                    PTO2TaskId params_phase_fence_barrier_5_deps[1];
+                    uint32_t params_phase_fence_barrier_5_deps_count = 0;
+                    if (_submit_deps_buf_inline236__ssa_v1[0].is_valid())
+                        params_phase_fence_barrier_5_deps[params_phase_fence_barrier_5_deps_count++] =
+                            _submit_deps_buf_inline236__ssa_v1[0];
+                    params_phase_fence_barrier_5.set_dependencies(
+                        params_phase_fence_barrier_5_deps, params_phase_fence_barrier_5_deps_count
+                    );
+                    PTO2TaskId t__tmp_v112 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_5_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_5_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_5);
+                        t__tmp_v112 = phase_fence_barrier_5_outs.task_id();
+                    }
+                    gate_late_tids_inline249[1] = t__tmp_v112;
+                    PTO2TaskId _submit_deps_buf_inline225__ssa_v1[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline225__ssa_v1[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v113 = cast_tids_inline88[1];
+                    _submit_deps_buf_inline225__ssa_v1[0] = t__tmp_v113;
+
+                    // Phase-fence barrier 6: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_6;
+                    PTO2TaskId params_phase_fence_barrier_6_deps[1];
+                    uint32_t params_phase_fence_barrier_6_deps_count = 0;
+                    if (_submit_deps_buf_inline225__ssa_v1[0].is_valid())
+                        params_phase_fence_barrier_6_deps[params_phase_fence_barrier_6_deps_count++] =
+                            _submit_deps_buf_inline225__ssa_v1[0];
+                    params_phase_fence_barrier_6.set_dependencies(
+                        params_phase_fence_barrier_6_deps, params_phase_fence_barrier_6_deps_count
+                    );
+                    PTO2TaskId t__tmp_v114 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_6_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_6_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_6);
+                        t__tmp_v114 = phase_fence_barrier_6_outs.task_id();
+                    }
+                    up_late_tids_inline69[1] = t__tmp_v114;
+                    PTO2TaskId _submit_deps_buf_inline237__ssa_v1[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline237__ssa_v1[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v115 = cast_tids_inline88[1];
+                    _submit_deps_buf_inline237__ssa_v1[0] = t__tmp_v115;
+
+                    // Spmd gate_proj_spmd_0: gate_proj_0
                     L0TaskArgs params_t22;
-                    params_t22.add_inout(mlp_norm_in_inline250);
-                    params_t22.add_inout(post_norm_partial_inline130);
-                    params_t22.add_input(attn_proj_fp32_inline248);
-                    params_t22.add_input(cur__rv_v7);
-                    params_t22.add_input(ext_post_rms_weight);
-                    params_t22.add_scalar(k_base_inline177__ssa_v1);
-                    params_t22.add_scalar(i);
-                    PTO2TaskId params_t22_deps[10];
+                    params_t22.add_input(mlp_norm_in_inline71);
+                    params_t22.add_input(ext_w_gate);
+                    params_t22.add_inout(gate_acc_all_inline203);
+                    params_t22.add_scalar(gu_k0_inline131__ssa_v1);
+                    params_t22.add_scalar(layer_hidden_base_inline151);
+                    params_t22.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t22_deps[1];
                     uint32_t params_t22_deps_count = 0;
-                    if (_submit_deps_buf_inline75__ssa_v1[0].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[0];
-                    if (_submit_deps_buf_inline75__ssa_v1[1].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[1];
-                    if (_submit_deps_buf_inline75__ssa_v1[2].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[2];
-                    if (_submit_deps_buf_inline75__ssa_v1[3].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[3];
-                    if (_submit_deps_buf_inline75__ssa_v1[4].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[4];
-                    if (_submit_deps_buf_inline75__ssa_v1[5].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[5];
-                    if (_submit_deps_buf_inline75__ssa_v1[6].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[6];
-                    if (_submit_deps_buf_inline75__ssa_v1[7].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[7];
-                    if (_submit_deps_buf_inline75__ssa_v1[8].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[8];
-                    if (_submit_deps_buf_inline75__ssa_v1[9].is_valid())
-                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline75__ssa_v1[9];
+                    if (_submit_deps_buf_inline237__ssa_v1[0].is_valid())
+                        params_t22_deps[params_t22_deps_count++] = _submit_deps_buf_inline237__ssa_v1[0];
                     params_t22.set_dependencies(params_t22_deps, params_t22_deps_count);
-                    TaskOutputTensors task_22_outs = rt_submit_aiv_task(23, params_t22);
-                    PTO2TaskId cast_tid_k_inline171__ssa_v1 = task_22_outs.task_id();
-                    cast_tids_inline267[1] = cast_tid_k_inline171__ssa_v1;
-                    int64_t k_base_inline177__ssa_v2 = 2048;
-                    int64_t n_split_base_inline47__ssa_v2 = 4;
-                    PTO2TaskId _submit_deps_buf_inline75__ssa_v2[10];
-                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
-                        _submit_deps_buf_inline75__ssa_v2[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId t__tmp_v114 = out_tids_inline268[(n_split_base_inline47__ssa_v2 * 5)];
-                    _submit_deps_buf_inline75__ssa_v2[0] = t__tmp_v114;
-                    PTO2TaskId t__tmp_v115 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 1)];
-                    _submit_deps_buf_inline75__ssa_v2[1] = t__tmp_v115;
-                    PTO2TaskId t__tmp_v116 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 2)];
-                    _submit_deps_buf_inline75__ssa_v2[2] = t__tmp_v116;
-                    PTO2TaskId t__tmp_v117 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 3)];
-                    _submit_deps_buf_inline75__ssa_v2[3] = t__tmp_v117;
-                    PTO2TaskId t__tmp_v118 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 4)];
-                    _submit_deps_buf_inline75__ssa_v2[4] = t__tmp_v118;
-                    PTO2TaskId t__tmp_v119 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 5)];
-                    _submit_deps_buf_inline75__ssa_v2[5] = t__tmp_v119;
-                    PTO2TaskId t__tmp_v120 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 6)];
-                    _submit_deps_buf_inline75__ssa_v2[6] = t__tmp_v120;
-                    PTO2TaskId t__tmp_v121 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 7)];
-                    _submit_deps_buf_inline75__ssa_v2[7] = t__tmp_v121;
-                    PTO2TaskId t__tmp_v122 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 8)];
-                    _submit_deps_buf_inline75__ssa_v2[8] = t__tmp_v122;
-                    PTO2TaskId t__tmp_v123 = out_tids_inline268[((n_split_base_inline47__ssa_v2 * 5) + 9)];
-                    _submit_deps_buf_inline75__ssa_v2[9] = t__tmp_v123;
+                    TaskOutputTensors task_22_outs = rt_submit_aic_task(23, params_t22);
+                    PTO2TaskId gate_spmd_tid_inline245__ssa_v1 = task_22_outs.task_id();
+                    gate_tids_inline56[1] = gate_spmd_tid_inline245__ssa_v1;
+                    gate_tids_inline56[6] = gate_spmd_tid_inline245__ssa_v1;
+                    gate_tids_inline56[11] = gate_spmd_tid_inline245__ssa_v1;
+                    gate_tids_inline56[16] = gate_spmd_tid_inline245__ssa_v1;
+                    gate_tids_inline56[21] = gate_spmd_tid_inline245__ssa_v1;
+                    gate_tids_inline56[26] = gate_spmd_tid_inline245__ssa_v1;
+                    PTO2TaskId _submit_deps_buf_inline260__ssa_v1[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline260__ssa_v1[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v116 = cast_tids_inline88[1];
+                    _submit_deps_buf_inline260__ssa_v1[0] = t__tmp_v116;
 
-                    // Task 23: residual_rms_cast_1
+                    // Spmd up_proj_spmd_0: up_proj_0
                     L0TaskArgs params_t23;
-                    params_t23.add_inout(mlp_norm_in_inline250);
-                    params_t23.add_inout(post_norm_partial_inline130);
-                    params_t23.add_input(attn_proj_fp32_inline248);
-                    params_t23.add_input(cur__rv_v7);
-                    params_t23.add_input(ext_post_rms_weight);
-                    params_t23.add_scalar(k_base_inline177__ssa_v2);
-                    params_t23.add_scalar(i);
-                    PTO2TaskId params_t23_deps[10];
+                    params_t23.add_input(mlp_norm_in_inline71);
+                    params_t23.add_input(ext_w_up);
+                    params_t23.add_inout(up_acc_all_inline303);
+                    params_t23.add_scalar(gu_k0_inline131__ssa_v1);
+                    params_t23.add_scalar(layer_hidden_base_inline151);
+                    params_t23.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t23_deps[1];
                     uint32_t params_t23_deps_count = 0;
-                    if (_submit_deps_buf_inline75__ssa_v2[0].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[0];
-                    if (_submit_deps_buf_inline75__ssa_v2[1].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[1];
-                    if (_submit_deps_buf_inline75__ssa_v2[2].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[2];
-                    if (_submit_deps_buf_inline75__ssa_v2[3].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[3];
-                    if (_submit_deps_buf_inline75__ssa_v2[4].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[4];
-                    if (_submit_deps_buf_inline75__ssa_v2[5].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[5];
-                    if (_submit_deps_buf_inline75__ssa_v2[6].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[6];
-                    if (_submit_deps_buf_inline75__ssa_v2[7].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[7];
-                    if (_submit_deps_buf_inline75__ssa_v2[8].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[8];
-                    if (_submit_deps_buf_inline75__ssa_v2[9].is_valid())
-                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline75__ssa_v2[9];
+                    if (_submit_deps_buf_inline260__ssa_v1[0].is_valid())
+                        params_t23_deps[params_t23_deps_count++] = _submit_deps_buf_inline260__ssa_v1[0];
                     params_t23.set_dependencies(params_t23_deps, params_t23_deps_count);
-                    TaskOutputTensors task_23_outs = rt_submit_aiv_task(24, params_t23);
-                    PTO2TaskId cast_tid_k_inline171__ssa_v2 = task_23_outs.task_id();
-                    cast_tids_inline267[2] = cast_tid_k_inline171__ssa_v2;
-                    int64_t k_base_inline177__ssa_v3 = 3072;
-                    int64_t n_split_base_inline47__ssa_v3 = 6;
-                    PTO2TaskId _submit_deps_buf_inline75__ssa_v3[10];
-                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
-                        _submit_deps_buf_inline75__ssa_v3[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId t__tmp_v128 = out_tids_inline268[(n_split_base_inline47__ssa_v3 * 5)];
-                    _submit_deps_buf_inline75__ssa_v3[0] = t__tmp_v128;
-                    PTO2TaskId t__tmp_v129 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 1)];
-                    _submit_deps_buf_inline75__ssa_v3[1] = t__tmp_v129;
-                    PTO2TaskId t__tmp_v130 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 2)];
-                    _submit_deps_buf_inline75__ssa_v3[2] = t__tmp_v130;
-                    PTO2TaskId t__tmp_v131 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 3)];
-                    _submit_deps_buf_inline75__ssa_v3[3] = t__tmp_v131;
-                    PTO2TaskId t__tmp_v132 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 4)];
-                    _submit_deps_buf_inline75__ssa_v3[4] = t__tmp_v132;
-                    PTO2TaskId t__tmp_v133 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 5)];
-                    _submit_deps_buf_inline75__ssa_v3[5] = t__tmp_v133;
-                    PTO2TaskId t__tmp_v134 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 6)];
-                    _submit_deps_buf_inline75__ssa_v3[6] = t__tmp_v134;
-                    PTO2TaskId t__tmp_v135 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 7)];
-                    _submit_deps_buf_inline75__ssa_v3[7] = t__tmp_v135;
-                    PTO2TaskId t__tmp_v136 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 8)];
-                    _submit_deps_buf_inline75__ssa_v3[8] = t__tmp_v136;
-                    PTO2TaskId t__tmp_v137 = out_tids_inline268[((n_split_base_inline47__ssa_v3 * 5) + 9)];
-                    _submit_deps_buf_inline75__ssa_v3[9] = t__tmp_v137;
+                    TaskOutputTensors task_23_outs = rt_submit_aic_task(24, params_t23);
+                    PTO2TaskId up_spmd_tid_inline264__ssa_v1 = task_23_outs.task_id();
+                    up_tids_inline310[1] = up_spmd_tid_inline264__ssa_v1;
+                    up_tids_inline310[6] = up_spmd_tid_inline264__ssa_v1;
+                    up_tids_inline310[11] = up_spmd_tid_inline264__ssa_v1;
+                    up_tids_inline310[16] = up_spmd_tid_inline264__ssa_v1;
+                    up_tids_inline310[21] = up_spmd_tid_inline264__ssa_v1;
+                    up_tids_inline310[26] = up_spmd_tid_inline264__ssa_v1;
+                    int64_t gu_k0_inline131__ssa_v2 = 2048;
+                    PTO2TaskId _submit_deps_buf_inline236__ssa_v2[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline236__ssa_v2[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v117 = cast_tids_inline88[2];
+                    _submit_deps_buf_inline236__ssa_v2[0] = t__tmp_v117;
 
-                    // Task 24: residual_rms_cast_2
+                    // Phase-fence barrier 7: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_7;
+                    PTO2TaskId params_phase_fence_barrier_7_deps[1];
+                    uint32_t params_phase_fence_barrier_7_deps_count = 0;
+                    if (_submit_deps_buf_inline236__ssa_v2[0].is_valid())
+                        params_phase_fence_barrier_7_deps[params_phase_fence_barrier_7_deps_count++] =
+                            _submit_deps_buf_inline236__ssa_v2[0];
+                    params_phase_fence_barrier_7.set_dependencies(
+                        params_phase_fence_barrier_7_deps, params_phase_fence_barrier_7_deps_count
+                    );
+                    PTO2TaskId t__tmp_v118 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_7_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_7_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_7);
+                        t__tmp_v118 = phase_fence_barrier_7_outs.task_id();
+                    }
+                    gate_late_tids_inline249[2] = t__tmp_v118;
+                    PTO2TaskId _submit_deps_buf_inline225__ssa_v2[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline225__ssa_v2[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v119 = cast_tids_inline88[2];
+                    _submit_deps_buf_inline225__ssa_v2[0] = t__tmp_v119;
+
+                    // Phase-fence barrier 8: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_8;
+                    PTO2TaskId params_phase_fence_barrier_8_deps[1];
+                    uint32_t params_phase_fence_barrier_8_deps_count = 0;
+                    if (_submit_deps_buf_inline225__ssa_v2[0].is_valid())
+                        params_phase_fence_barrier_8_deps[params_phase_fence_barrier_8_deps_count++] =
+                            _submit_deps_buf_inline225__ssa_v2[0];
+                    params_phase_fence_barrier_8.set_dependencies(
+                        params_phase_fence_barrier_8_deps, params_phase_fence_barrier_8_deps_count
+                    );
+                    PTO2TaskId t__tmp_v120 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_8_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_8_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_8);
+                        t__tmp_v120 = phase_fence_barrier_8_outs.task_id();
+                    }
+                    up_late_tids_inline69[2] = t__tmp_v120;
+                    PTO2TaskId _submit_deps_buf_inline237__ssa_v2[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline237__ssa_v2[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v121 = cast_tids_inline88[2];
+                    _submit_deps_buf_inline237__ssa_v2[0] = t__tmp_v121;
+
+                    // Spmd gate_proj_spmd_1: gate_proj_1
                     L0TaskArgs params_t24;
-                    params_t24.add_inout(mlp_norm_in_inline250);
-                    params_t24.add_inout(post_norm_partial_inline130);
-                    params_t24.add_input(attn_proj_fp32_inline248);
-                    params_t24.add_input(cur__rv_v7);
-                    params_t24.add_input(ext_post_rms_weight);
-                    params_t24.add_scalar(k_base_inline177__ssa_v3);
-                    params_t24.add_scalar(i);
-                    PTO2TaskId params_t24_deps[10];
+                    params_t24.add_input(mlp_norm_in_inline71);
+                    params_t24.add_input(ext_w_gate);
+                    params_t24.add_inout(gate_acc_all_inline203);
+                    params_t24.add_scalar(gu_k0_inline131__ssa_v2);
+                    params_t24.add_scalar(layer_hidden_base_inline151);
+                    params_t24.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t24_deps[1];
                     uint32_t params_t24_deps_count = 0;
-                    if (_submit_deps_buf_inline75__ssa_v3[0].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[0];
-                    if (_submit_deps_buf_inline75__ssa_v3[1].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[1];
-                    if (_submit_deps_buf_inline75__ssa_v3[2].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[2];
-                    if (_submit_deps_buf_inline75__ssa_v3[3].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[3];
-                    if (_submit_deps_buf_inline75__ssa_v3[4].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[4];
-                    if (_submit_deps_buf_inline75__ssa_v3[5].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[5];
-                    if (_submit_deps_buf_inline75__ssa_v3[6].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[6];
-                    if (_submit_deps_buf_inline75__ssa_v3[7].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[7];
-                    if (_submit_deps_buf_inline75__ssa_v3[8].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[8];
-                    if (_submit_deps_buf_inline75__ssa_v3[9].is_valid())
-                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline75__ssa_v3[9];
+                    if (_submit_deps_buf_inline237__ssa_v2[0].is_valid())
+                        params_t24_deps[params_t24_deps_count++] = _submit_deps_buf_inline237__ssa_v2[0];
                     params_t24.set_dependencies(params_t24_deps, params_t24_deps_count);
-                    TaskOutputTensors task_24_outs = rt_submit_aiv_task(25, params_t24);
-                    PTO2TaskId cast_tid_k_inline171__ssa_v3 = task_24_outs.task_id();
-                    cast_tids_inline267[3] = cast_tid_k_inline171__ssa_v3;
-                    int64_t k_base_inline177__ssa_v4 = 4096;
-                    int64_t n_split_base_inline47__ssa_v4 = 8;
-                    PTO2TaskId _submit_deps_buf_inline75__ssa_v4[10];
-                    for (int64_t __init_i = 0; __init_i < 10; ++__init_i)
-                        _submit_deps_buf_inline75__ssa_v4[__init_i] = PTO2TaskId::invalid();
-                    PTO2TaskId t__tmp_v142 = out_tids_inline268[(n_split_base_inline47__ssa_v4 * 5)];
-                    _submit_deps_buf_inline75__ssa_v4[0] = t__tmp_v142;
-                    PTO2TaskId t__tmp_v143 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 1)];
-                    _submit_deps_buf_inline75__ssa_v4[1] = t__tmp_v143;
-                    PTO2TaskId t__tmp_v144 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 2)];
-                    _submit_deps_buf_inline75__ssa_v4[2] = t__tmp_v144;
-                    PTO2TaskId t__tmp_v145 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 3)];
-                    _submit_deps_buf_inline75__ssa_v4[3] = t__tmp_v145;
-                    PTO2TaskId t__tmp_v146 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 4)];
-                    _submit_deps_buf_inline75__ssa_v4[4] = t__tmp_v146;
-                    PTO2TaskId t__tmp_v147 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 5)];
-                    _submit_deps_buf_inline75__ssa_v4[5] = t__tmp_v147;
-                    PTO2TaskId t__tmp_v148 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 6)];
-                    _submit_deps_buf_inline75__ssa_v4[6] = t__tmp_v148;
-                    PTO2TaskId t__tmp_v149 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 7)];
-                    _submit_deps_buf_inline75__ssa_v4[7] = t__tmp_v149;
-                    PTO2TaskId t__tmp_v150 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 8)];
-                    _submit_deps_buf_inline75__ssa_v4[8] = t__tmp_v150;
-                    PTO2TaskId t__tmp_v151 = out_tids_inline268[((n_split_base_inline47__ssa_v4 * 5) + 9)];
-                    _submit_deps_buf_inline75__ssa_v4[9] = t__tmp_v151;
+                    TaskOutputTensors task_24_outs = rt_submit_aic_task(25, params_t24);
+                    PTO2TaskId gate_spmd_tid_inline245__ssa_v2 = task_24_outs.task_id();
+                    gate_tids_inline56[2] = gate_spmd_tid_inline245__ssa_v2;
+                    gate_tids_inline56[7] = gate_spmd_tid_inline245__ssa_v2;
+                    gate_tids_inline56[12] = gate_spmd_tid_inline245__ssa_v2;
+                    gate_tids_inline56[17] = gate_spmd_tid_inline245__ssa_v2;
+                    gate_tids_inline56[22] = gate_spmd_tid_inline245__ssa_v2;
+                    gate_tids_inline56[27] = gate_spmd_tid_inline245__ssa_v2;
+                    PTO2TaskId _submit_deps_buf_inline260__ssa_v2[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline260__ssa_v2[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v122 = cast_tids_inline88[2];
+                    _submit_deps_buf_inline260__ssa_v2[0] = t__tmp_v122;
 
-                    // Task 25: residual_rms_cast_3
+                    // Spmd up_proj_spmd_1: up_proj_1
                     L0TaskArgs params_t25;
-                    params_t25.add_inout(mlp_norm_in_inline250);
-                    params_t25.add_inout(post_norm_partial_inline130);
-                    params_t25.add_input(attn_proj_fp32_inline248);
-                    params_t25.add_input(cur__rv_v7);
-                    params_t25.add_input(ext_post_rms_weight);
-                    params_t25.add_scalar(k_base_inline177__ssa_v4);
-                    params_t25.add_scalar(i);
-                    PTO2TaskId params_t25_deps[10];
+                    params_t25.add_input(mlp_norm_in_inline71);
+                    params_t25.add_input(ext_w_up);
+                    params_t25.add_inout(up_acc_all_inline303);
+                    params_t25.add_scalar(gu_k0_inline131__ssa_v2);
+                    params_t25.add_scalar(layer_hidden_base_inline151);
+                    params_t25.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t25_deps[1];
                     uint32_t params_t25_deps_count = 0;
-                    if (_submit_deps_buf_inline75__ssa_v4[0].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[0];
-                    if (_submit_deps_buf_inline75__ssa_v4[1].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[1];
-                    if (_submit_deps_buf_inline75__ssa_v4[2].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[2];
-                    if (_submit_deps_buf_inline75__ssa_v4[3].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[3];
-                    if (_submit_deps_buf_inline75__ssa_v4[4].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[4];
-                    if (_submit_deps_buf_inline75__ssa_v4[5].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[5];
-                    if (_submit_deps_buf_inline75__ssa_v4[6].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[6];
-                    if (_submit_deps_buf_inline75__ssa_v4[7].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[7];
-                    if (_submit_deps_buf_inline75__ssa_v4[8].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[8];
-                    if (_submit_deps_buf_inline75__ssa_v4[9].is_valid())
-                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline75__ssa_v4[9];
+                    if (_submit_deps_buf_inline260__ssa_v2[0].is_valid())
+                        params_t25_deps[params_t25_deps_count++] = _submit_deps_buf_inline260__ssa_v2[0];
                     params_t25.set_dependencies(params_t25_deps, params_t25_deps_count);
-                    TaskOutputTensors task_25_outs = rt_submit_aiv_task(26, params_t25);
-                    PTO2TaskId cast_tid_k_inline171__ssa_v4 = task_25_outs.task_id();
-                    cast_tids_inline267[4] = cast_tid_k_inline171__ssa_v4;
+                    TaskOutputTensors task_25_outs = rt_submit_aic_task(26, params_t25);
+                    PTO2TaskId up_spmd_tid_inline264__ssa_v2 = task_25_outs.task_id();
+                    up_tids_inline310[2] = up_spmd_tid_inline264__ssa_v2;
+                    up_tids_inline310[7] = up_spmd_tid_inline264__ssa_v2;
+                    up_tids_inline310[12] = up_spmd_tid_inline264__ssa_v2;
+                    up_tids_inline310[17] = up_spmd_tid_inline264__ssa_v2;
+                    up_tids_inline310[22] = up_spmd_tid_inline264__ssa_v2;
+                    up_tids_inline310[27] = up_spmd_tid_inline264__ssa_v2;
+                    int64_t gu_k0_inline131__ssa_v3 = 3072;
+                    PTO2TaskId _submit_deps_buf_inline236__ssa_v3[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline236__ssa_v3[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v123 = cast_tids_inline88[3];
+                    _submit_deps_buf_inline236__ssa_v3[0] = t__tmp_v123;
 
-                    // Task 26: post_rms_reduce
+                    // Phase-fence barrier 9: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_9;
+                    PTO2TaskId params_phase_fence_barrier_9_deps[1];
+                    uint32_t params_phase_fence_barrier_9_deps_count = 0;
+                    if (_submit_deps_buf_inline236__ssa_v3[0].is_valid())
+                        params_phase_fence_barrier_9_deps[params_phase_fence_barrier_9_deps_count++] =
+                            _submit_deps_buf_inline236__ssa_v3[0];
+                    params_phase_fence_barrier_9.set_dependencies(
+                        params_phase_fence_barrier_9_deps, params_phase_fence_barrier_9_deps_count
+                    );
+                    PTO2TaskId t__tmp_v124 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_9_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_9_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_9);
+                        t__tmp_v124 = phase_fence_barrier_9_outs.task_id();
+                    }
+                    gate_late_tids_inline249[3] = t__tmp_v124;
+                    PTO2TaskId _submit_deps_buf_inline225__ssa_v3[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline225__ssa_v3[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v125 = cast_tids_inline88[3];
+                    _submit_deps_buf_inline225__ssa_v3[0] = t__tmp_v125;
+
+                    // Phase-fence barrier 10: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_10;
+                    PTO2TaskId params_phase_fence_barrier_10_deps[1];
+                    uint32_t params_phase_fence_barrier_10_deps_count = 0;
+                    if (_submit_deps_buf_inline225__ssa_v3[0].is_valid())
+                        params_phase_fence_barrier_10_deps[params_phase_fence_barrier_10_deps_count++] =
+                            _submit_deps_buf_inline225__ssa_v3[0];
+                    params_phase_fence_barrier_10.set_dependencies(
+                        params_phase_fence_barrier_10_deps, params_phase_fence_barrier_10_deps_count
+                    );
+                    PTO2TaskId t__tmp_v126 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_10_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_10_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_10);
+                        t__tmp_v126 = phase_fence_barrier_10_outs.task_id();
+                    }
+                    up_late_tids_inline69[3] = t__tmp_v126;
+                    PTO2TaskId _submit_deps_buf_inline237__ssa_v3[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline237__ssa_v3[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v127 = cast_tids_inline88[3];
+                    _submit_deps_buf_inline237__ssa_v3[0] = t__tmp_v127;
+
+                    // Spmd gate_proj_spmd_2: gate_proj_2
                     L0TaskArgs params_t26;
-                    params_t26.add_input(attn_proj_fp32_inline248);
-                    params_t26.add_input(cur__rv_v7);
-                    params_t26.add_inout(inv_rms_tile_inline255);
-                    PTO2TaskId params_t26_deps[50];
+                    params_t26.add_input(mlp_norm_in_inline71);
+                    params_t26.add_input(ext_w_gate);
+                    params_t26.add_inout(gate_acc_all_inline203);
+                    params_t26.add_scalar(gu_k0_inline131__ssa_v3);
+                    params_t26.add_scalar(layer_hidden_base_inline151);
+                    params_t26.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t26_deps[1];
                     uint32_t params_t26_deps_count = 0;
-                    if (out_tids_inline268[0].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[0];
-                    if (out_tids_inline268[1].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[1];
-                    if (out_tids_inline268[2].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[2];
-                    if (out_tids_inline268[3].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[3];
-                    if (out_tids_inline268[4].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[4];
-                    if (out_tids_inline268[5].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[5];
-                    if (out_tids_inline268[6].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[6];
-                    if (out_tids_inline268[7].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[7];
-                    if (out_tids_inline268[8].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[8];
-                    if (out_tids_inline268[9].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[9];
-                    if (out_tids_inline268[10].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[10];
-                    if (out_tids_inline268[11].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[11];
-                    if (out_tids_inline268[12].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[12];
-                    if (out_tids_inline268[13].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[13];
-                    if (out_tids_inline268[14].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[14];
-                    if (out_tids_inline268[15].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[15];
-                    if (out_tids_inline268[16].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[16];
-                    if (out_tids_inline268[17].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[17];
-                    if (out_tids_inline268[18].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[18];
-                    if (out_tids_inline268[19].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[19];
-                    if (out_tids_inline268[20].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[20];
-                    if (out_tids_inline268[21].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[21];
-                    if (out_tids_inline268[22].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[22];
-                    if (out_tids_inline268[23].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[23];
-                    if (out_tids_inline268[24].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[24];
-                    if (out_tids_inline268[25].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[25];
-                    if (out_tids_inline268[26].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[26];
-                    if (out_tids_inline268[27].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[27];
-                    if (out_tids_inline268[28].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[28];
-                    if (out_tids_inline268[29].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[29];
-                    if (out_tids_inline268[30].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[30];
-                    if (out_tids_inline268[31].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[31];
-                    if (out_tids_inline268[32].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[32];
-                    if (out_tids_inline268[33].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[33];
-                    if (out_tids_inline268[34].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[34];
-                    if (out_tids_inline268[35].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[35];
-                    if (out_tids_inline268[36].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[36];
-                    if (out_tids_inline268[37].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[37];
-                    if (out_tids_inline268[38].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[38];
-                    if (out_tids_inline268[39].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[39];
-                    if (out_tids_inline268[40].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[40];
-                    if (out_tids_inline268[41].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[41];
-                    if (out_tids_inline268[42].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[42];
-                    if (out_tids_inline268[43].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[43];
-                    if (out_tids_inline268[44].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[44];
-                    if (out_tids_inline268[45].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[45];
-                    if (out_tids_inline268[46].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[46];
-                    if (out_tids_inline268[47].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[47];
-                    if (out_tids_inline268[48].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[48];
-                    if (out_tids_inline268[49].is_valid())
-                        params_t26_deps[params_t26_deps_count++] = out_tids_inline268[49];
+                    if (_submit_deps_buf_inline237__ssa_v3[0].is_valid())
+                        params_t26_deps[params_t26_deps_count++] = _submit_deps_buf_inline237__ssa_v3[0];
                     params_t26.set_dependencies(params_t26_deps, params_t26_deps_count);
-                    TaskOutputTensors task_26_outs = rt_submit_aiv_task(27, params_t26);
-                    PTO2TaskId reduce_tid_inline127 = task_26_outs.task_id();
-                    for (int64_t n_out_inline279 = 0; n_out_inline279 < 17; n_out_inline279 += 1) {
-                        int64_t n0_inline142 = (n_out_inline279 * 1024);
-                        for (int64_t k_split_inline303 = 0; k_split_inline303 < 5; k_split_inline303 += 1) {
-                            int64_t k0_inline202 = (k_split_inline303 * 1024);
-                            PTO2TaskId _submit_deps_buf_inline305[2];
-                            for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
-                                _submit_deps_buf_inline305[__init_i] = PTO2TaskId::invalid();
-                            PTO2TaskId t__tmp_v163 = cast_tids_inline267[k_split_inline303];
-                            _submit_deps_buf_inline305[0] = t__tmp_v163;
-                            _submit_deps_buf_inline305[1] = gate_seed_tid_inline304;
+                    TaskOutputTensors task_26_outs = rt_submit_aic_task(27, params_t26);
+                    PTO2TaskId gate_spmd_tid_inline245__ssa_v3 = task_26_outs.task_id();
+                    gate_tids_inline56[3] = gate_spmd_tid_inline245__ssa_v3;
+                    gate_tids_inline56[8] = gate_spmd_tid_inline245__ssa_v3;
+                    gate_tids_inline56[13] = gate_spmd_tid_inline245__ssa_v3;
+                    gate_tids_inline56[18] = gate_spmd_tid_inline245__ssa_v3;
+                    gate_tids_inline56[23] = gate_spmd_tid_inline245__ssa_v3;
+                    gate_tids_inline56[28] = gate_spmd_tid_inline245__ssa_v3;
+                    PTO2TaskId _submit_deps_buf_inline260__ssa_v3[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline260__ssa_v3[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v128 = cast_tids_inline88[3];
+                    _submit_deps_buf_inline260__ssa_v3[0] = t__tmp_v128;
 
-                            // Task 27: gate_proj
-                            L0TaskArgs params_t27;
-                            params_t27.add_input(mlp_norm_in_inline250);
-                            params_t27.add_input(ext_w_gate);
-                            params_t27.add_inout(gate_acc_all_inline170);
-                            params_t27.add_scalar(k0_inline202);
-                            params_t27.add_scalar(layer_hidden_base_inline135);
-                            params_t27.add_scalar(n0_inline142);
-                            PTO2TaskId params_t27_deps[2];
-                            uint32_t params_t27_deps_count = 0;
-                            if (_submit_deps_buf_inline305[0].is_valid())
-                                params_t27_deps[params_t27_deps_count++] = _submit_deps_buf_inline305[0];
-                            if (_submit_deps_buf_inline305[1].is_valid())
-                                params_t27_deps[params_t27_deps_count++] = _submit_deps_buf_inline305[1];
-                            params_t27.set_dependencies(params_t27_deps, params_t27_deps_count);
-                            TaskOutputTensors task_27_outs = rt_submit_aic_task(28, params_t27);
-                            PTO2TaskId gate_tid_inline121 = task_27_outs.task_id();
-                            gate_tids_inline263[((n_out_inline279 * 5) + k_split_inline303)] = gate_tid_inline121;
-                            PTO2TaskId _submit_deps_buf_inline178[2];
-                            for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
-                                _submit_deps_buf_inline178[__init_i] = PTO2TaskId::invalid();
-                            PTO2TaskId t__tmp_v164 = cast_tids_inline267[k_split_inline303];
-                            _submit_deps_buf_inline178[0] = t__tmp_v164;
-                            _submit_deps_buf_inline178[1] = up_seed_tid_inline49;
+                    // Spmd up_proj_spmd_2: up_proj_2
+                    L0TaskArgs params_t27;
+                    params_t27.add_input(mlp_norm_in_inline71);
+                    params_t27.add_input(ext_w_up);
+                    params_t27.add_inout(up_acc_all_inline303);
+                    params_t27.add_scalar(gu_k0_inline131__ssa_v3);
+                    params_t27.add_scalar(layer_hidden_base_inline151);
+                    params_t27.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t27_deps[1];
+                    uint32_t params_t27_deps_count = 0;
+                    if (_submit_deps_buf_inline260__ssa_v3[0].is_valid())
+                        params_t27_deps[params_t27_deps_count++] = _submit_deps_buf_inline260__ssa_v3[0];
+                    params_t27.set_dependencies(params_t27_deps, params_t27_deps_count);
+                    TaskOutputTensors task_27_outs = rt_submit_aic_task(28, params_t27);
+                    PTO2TaskId up_spmd_tid_inline264__ssa_v3 = task_27_outs.task_id();
+                    up_tids_inline310[3] = up_spmd_tid_inline264__ssa_v3;
+                    up_tids_inline310[8] = up_spmd_tid_inline264__ssa_v3;
+                    up_tids_inline310[13] = up_spmd_tid_inline264__ssa_v3;
+                    up_tids_inline310[18] = up_spmd_tid_inline264__ssa_v3;
+                    up_tids_inline310[23] = up_spmd_tid_inline264__ssa_v3;
+                    up_tids_inline310[28] = up_spmd_tid_inline264__ssa_v3;
+                    int64_t gu_k0_inline131__ssa_v4 = 4096;
+                    PTO2TaskId _submit_deps_buf_inline236__ssa_v4[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline236__ssa_v4[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v129 = cast_tids_inline88[4];
+                    _submit_deps_buf_inline236__ssa_v4[0] = t__tmp_v129;
 
-                            // Task 28: up_proj
-                            L0TaskArgs params_t28;
-                            params_t28.add_input(mlp_norm_in_inline250);
-                            params_t28.add_input(ext_w_up);
-                            params_t28.add_inout(up_acc_all_inline247);
-                            params_t28.add_scalar(k0_inline202);
-                            params_t28.add_scalar(layer_hidden_base_inline135);
-                            params_t28.add_scalar(n0_inline142);
-                            PTO2TaskId params_t28_deps[2];
-                            uint32_t params_t28_deps_count = 0;
-                            if (_submit_deps_buf_inline178[0].is_valid())
-                                params_t28_deps[params_t28_deps_count++] = _submit_deps_buf_inline178[0];
-                            if (_submit_deps_buf_inline178[1].is_valid())
-                                params_t28_deps[params_t28_deps_count++] = _submit_deps_buf_inline178[1];
-                            params_t28.set_dependencies(params_t28_deps, params_t28_deps_count);
-                            TaskOutputTensors task_28_outs = rt_submit_aic_task(29, params_t28);
-                            PTO2TaskId up_tid_inline266 = task_28_outs.task_id();
-                            up_tids_inline265[((n_out_inline279 * 5) + k_split_inline303)] = up_tid_inline266;
-                        }
+                    // Phase-fence barrier 11: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_11;
+                    PTO2TaskId params_phase_fence_barrier_11_deps[1];
+                    uint32_t params_phase_fence_barrier_11_deps_count = 0;
+                    if (_submit_deps_buf_inline236__ssa_v4[0].is_valid())
+                        params_phase_fence_barrier_11_deps[params_phase_fence_barrier_11_deps_count++] =
+                            _submit_deps_buf_inline236__ssa_v4[0];
+                    params_phase_fence_barrier_11.set_dependencies(
+                        params_phase_fence_barrier_11_deps, params_phase_fence_barrier_11_deps_count
+                    );
+                    PTO2TaskId t__tmp_v130 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_11_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_11_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_11);
+                        t__tmp_v130 = phase_fence_barrier_11_outs.task_id();
                     }
-                    for (int64_t n_out_inline297 = 0; n_out_inline297 < 17; n_out_inline297 += 1) {
-                        int64_t n0_inline142__ssa_v7 = (n_out_inline297 * 1024);
-                        PTO2TaskId _submit_deps_buf_inline131[11];
-                        for (int64_t __init_i = 0; __init_i < 11; ++__init_i)
-                            _submit_deps_buf_inline131[__init_i] = PTO2TaskId::invalid();
-                        _submit_deps_buf_inline131[0] = reduce_tid_inline127;
-                        PTO2TaskId t__tmp_v165 = gate_tids_inline263[(n_out_inline297 * 5)];
-                        _submit_deps_buf_inline131[1] = t__tmp_v165;
-                        PTO2TaskId t__tmp_v166 = gate_tids_inline263[((n_out_inline297 * 5) + 1)];
-                        _submit_deps_buf_inline131[2] = t__tmp_v166;
-                        PTO2TaskId t__tmp_v167 = gate_tids_inline263[((n_out_inline297 * 5) + 2)];
-                        _submit_deps_buf_inline131[3] = t__tmp_v167;
-                        PTO2TaskId t__tmp_v168 = gate_tids_inline263[((n_out_inline297 * 5) + 3)];
-                        _submit_deps_buf_inline131[4] = t__tmp_v168;
-                        PTO2TaskId t__tmp_v169 = gate_tids_inline263[((n_out_inline297 * 5) + 4)];
-                        _submit_deps_buf_inline131[5] = t__tmp_v169;
-                        PTO2TaskId t__tmp_v170 = up_tids_inline265[(n_out_inline297 * 5)];
-                        _submit_deps_buf_inline131[6] = t__tmp_v170;
-                        PTO2TaskId t__tmp_v171 = up_tids_inline265[((n_out_inline297 * 5) + 1)];
-                        _submit_deps_buf_inline131[7] = t__tmp_v171;
-                        PTO2TaskId t__tmp_v172 = up_tids_inline265[((n_out_inline297 * 5) + 2)];
-                        _submit_deps_buf_inline131[8] = t__tmp_v172;
-                        PTO2TaskId t__tmp_v173 = up_tids_inline265[((n_out_inline297 * 5) + 3)];
-                        _submit_deps_buf_inline131[9] = t__tmp_v173;
-                        PTO2TaskId t__tmp_v174 = up_tids_inline265[((n_out_inline297 * 5) + 4)];
-                        _submit_deps_buf_inline131[10] = t__tmp_v174;
+                    gate_late_tids_inline249[4] = t__tmp_v130;
+                    PTO2TaskId _submit_deps_buf_inline225__ssa_v4[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline225__ssa_v4[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v131 = cast_tids_inline88[4];
+                    _submit_deps_buf_inline225__ssa_v4[0] = t__tmp_v131;
 
-                        // Task 29: silu
-                        L0TaskArgs params_t29;
-                        params_t29.add_input(inv_rms_tile_inline255);
-                        params_t29.add_inout(mlp_tile_inline238);
-                        params_t29.add_input(gate_acc_all_inline170);
-                        params_t29.add_input(up_acc_all_inline247);
-                        params_t29.add_scalar(n0_inline142__ssa_v7);
-                        PTO2TaskId params_t29_deps[11];
-                        uint32_t params_t29_deps_count = 0;
-                        if (_submit_deps_buf_inline131[0].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[0];
-                        if (_submit_deps_buf_inline131[1].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[1];
-                        if (_submit_deps_buf_inline131[2].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[2];
-                        if (_submit_deps_buf_inline131[3].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[3];
-                        if (_submit_deps_buf_inline131[4].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[4];
-                        if (_submit_deps_buf_inline131[5].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[5];
-                        if (_submit_deps_buf_inline131[6].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[6];
-                        if (_submit_deps_buf_inline131[7].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[7];
-                        if (_submit_deps_buf_inline131[8].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[8];
-                        if (_submit_deps_buf_inline131[9].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[9];
-                        if (_submit_deps_buf_inline131[10].is_valid())
-                            params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline131[10];
-                        params_t29.set_dependencies(params_t29_deps, params_t29_deps_count);
-                        TaskOutputTensors task_29_outs = rt_submit_aiv_task(30, params_t29);
-                        PTO2TaskId silu_tid_inline88 = task_29_outs.task_id();
-                        silu_tids_inline169[n_out_inline297] = silu_tid_inline88;
+                    // Phase-fence barrier 12: dependency-only dummy task
+                    L0TaskArgs params_phase_fence_barrier_12;
+                    PTO2TaskId params_phase_fence_barrier_12_deps[1];
+                    uint32_t params_phase_fence_barrier_12_deps_count = 0;
+                    if (_submit_deps_buf_inline225__ssa_v4[0].is_valid())
+                        params_phase_fence_barrier_12_deps[params_phase_fence_barrier_12_deps_count++] =
+                            _submit_deps_buf_inline225__ssa_v4[0];
+                    params_phase_fence_barrier_12.set_dependencies(
+                        params_phase_fence_barrier_12_deps, params_phase_fence_barrier_12_deps_count
+                    );
+                    PTO2TaskId t__tmp_v132 = PTO2TaskId::invalid();
+                    if (params_phase_fence_barrier_12_deps_count > 0) {
+                        TaskOutputTensors phase_fence_barrier_12_outs =
+                            rt_submit_dummy_task(params_phase_fence_barrier_12);
+                        t__tmp_v132 = phase_fence_barrier_12_outs.task_id();
                     }
-                    for (int64_t n_out_inline25 = 0; n_out_inline25 < 5; n_out_inline25 += 1) {
-                        int64_t n0_inline142__ssa_v8 = (n_out_inline25 * 1024);
-                        for (int64_t k_split_inline122 = 0; k_split_inline122 < 17; k_split_inline122 += 1) {
-                            int64_t k0_inline202__ssa_v11 = (k_split_inline122 * 1024);
-                            PTO2TaskId _submit_deps_buf_inline24[2];
-                            for (int64_t __init_i = 0; __init_i < 2; ++__init_i)
-                                _submit_deps_buf_inline24[__init_i] = PTO2TaskId::invalid();
-                            _submit_deps_buf_inline24[0] = seed_tid_inline132;
-                            PTO2TaskId t__tmp_v180 = silu_tids_inline169[k_split_inline122];
-                            _submit_deps_buf_inline24[1] = t__tmp_v180;
+                    up_late_tids_inline69[4] = t__tmp_v132;
+                    PTO2TaskId _submit_deps_buf_inline237__ssa_v4[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline237__ssa_v4[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v133 = cast_tids_inline88[4];
+                    _submit_deps_buf_inline237__ssa_v4[0] = t__tmp_v133;
 
-                            // Task 30: down_proj
+                    // Spmd gate_proj_spmd_3: gate_proj_3
+                    L0TaskArgs params_t28;
+                    params_t28.add_input(mlp_norm_in_inline71);
+                    params_t28.add_input(ext_w_gate);
+                    params_t28.add_inout(gate_acc_all_inline203);
+                    params_t28.add_scalar(gu_k0_inline131__ssa_v4);
+                    params_t28.add_scalar(layer_hidden_base_inline151);
+                    params_t28.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t28_deps[1];
+                    uint32_t params_t28_deps_count = 0;
+                    if (_submit_deps_buf_inline237__ssa_v4[0].is_valid())
+                        params_t28_deps[params_t28_deps_count++] = _submit_deps_buf_inline237__ssa_v4[0];
+                    params_t28.set_dependencies(params_t28_deps, params_t28_deps_count);
+                    TaskOutputTensors task_28_outs = rt_submit_aic_task(29, params_t28);
+                    PTO2TaskId gate_spmd_tid_inline245__ssa_v4 = task_28_outs.task_id();
+                    gate_tids_inline56[4] = gate_spmd_tid_inline245__ssa_v4;
+                    gate_tids_inline56[9] = gate_spmd_tid_inline245__ssa_v4;
+                    gate_tids_inline56[14] = gate_spmd_tid_inline245__ssa_v4;
+                    gate_tids_inline56[19] = gate_spmd_tid_inline245__ssa_v4;
+                    gate_tids_inline56[24] = gate_spmd_tid_inline245__ssa_v4;
+                    gate_tids_inline56[29] = gate_spmd_tid_inline245__ssa_v4;
+                    PTO2TaskId _submit_deps_buf_inline260__ssa_v4[1];
+                    for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                        _submit_deps_buf_inline260__ssa_v4[__init_i] = PTO2TaskId::invalid();
+                    PTO2TaskId t__tmp_v134 = cast_tids_inline88[4];
+                    _submit_deps_buf_inline260__ssa_v4[0] = t__tmp_v134;
+
+                    // Spmd up_proj_spmd_3: up_proj_3
+                    L0TaskArgs params_t29;
+                    params_t29.add_input(mlp_norm_in_inline71);
+                    params_t29.add_input(ext_w_up);
+                    params_t29.add_inout(up_acc_all_inline303);
+                    params_t29.add_scalar(gu_k0_inline131__ssa_v4);
+                    params_t29.add_scalar(layer_hidden_base_inline151);
+                    params_t29.launch_spec.set_block_num(6);
+                    PTO2TaskId params_t29_deps[1];
+                    uint32_t params_t29_deps_count = 0;
+                    if (_submit_deps_buf_inline260__ssa_v4[0].is_valid())
+                        params_t29_deps[params_t29_deps_count++] = _submit_deps_buf_inline260__ssa_v4[0];
+                    params_t29.set_dependencies(params_t29_deps, params_t29_deps_count);
+                    TaskOutputTensors task_29_outs = rt_submit_aic_task(30, params_t29);
+                    PTO2TaskId up_spmd_tid_inline264__ssa_v4 = task_29_outs.task_id();
+                    up_tids_inline310[4] = up_spmd_tid_inline264__ssa_v4;
+                    up_tids_inline310[9] = up_spmd_tid_inline264__ssa_v4;
+                    up_tids_inline310[14] = up_spmd_tid_inline264__ssa_v4;
+                    up_tids_inline310[19] = up_spmd_tid_inline264__ssa_v4;
+                    up_tids_inline310[24] = up_spmd_tid_inline264__ssa_v4;
+                    up_tids_inline310[29] = up_spmd_tid_inline264__ssa_v4;
+                    for (int64_t n_out_inline275 = 6; n_out_inline275 < 17; n_out_inline275 += 1) {
+                        int64_t n0_inline122 = (n_out_inline275 * 1024);
+                        for (int64_t k_split_inline276 = 0; k_split_inline276 < 5; k_split_inline276 += 1) {
+                            int64_t k0_inline113 = (k_split_inline276 * 1024);
+                            PTO2TaskId _submit_deps_buf_inline102[1];
+                            for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                                _submit_deps_buf_inline102[__init_i] = PTO2TaskId::invalid();
+                            PTO2TaskId t__tmp_v135 = gate_late_tids_inline249[k_split_inline276];
+                            _submit_deps_buf_inline102[0] = t__tmp_v135;
+
+                            // Task 30: gate_proj_4
                             L0TaskArgs params_t30;
-                            params_t30.add_input(mlp_tile_inline238);
-                            params_t30.add_input(ext_w_down);
-                            params_t30.add_inout(down_acc_all_inline251);
-                            params_t30.add_scalar(k0_inline202__ssa_v11);
-                            params_t30.add_scalar(layer_inter_base_inline231);
-                            params_t30.add_scalar(n0_inline142__ssa_v8);
-                            PTO2TaskId params_t30_deps[2];
+                            params_t30.add_input(mlp_norm_in_inline71);
+                            params_t30.add_input(ext_w_gate);
+                            params_t30.add_inout(gate_acc_all_inline203);
+                            params_t30.add_scalar(k0_inline113);
+                            params_t30.add_scalar(layer_hidden_base_inline151);
+                            params_t30.add_scalar(n0_inline122);
+                            PTO2TaskId params_t30_deps[1];
                             uint32_t params_t30_deps_count = 0;
-                            if (_submit_deps_buf_inline24[0].is_valid())
-                                params_t30_deps[params_t30_deps_count++] = _submit_deps_buf_inline24[0];
-                            if (_submit_deps_buf_inline24[1].is_valid())
-                                params_t30_deps[params_t30_deps_count++] = _submit_deps_buf_inline24[1];
+                            if (_submit_deps_buf_inline102[0].is_valid())
+                                params_t30_deps[params_t30_deps_count++] = _submit_deps_buf_inline102[0];
                             params_t30.set_dependencies(params_t30_deps, params_t30_deps_count);
                             TaskOutputTensors task_30_outs = rt_submit_aic_task(31, params_t30);
-                            PTO2TaskId down_tid_inline22 = task_30_outs.task_id();
-                            down_tids_inline261[((n_out_inline25 * 17) + k_split_inline122)] = down_tid_inline22;
+                            PTO2TaskId gate_tid_inline277 = task_30_outs.task_id();
+                            gate_tids_inline56[((n_out_inline275 * 5) + k_split_inline276)] = gate_tid_inline277;
+                            PTO2TaskId _submit_deps_buf_inline246[1];
+                            for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                                _submit_deps_buf_inline246[__init_i] = PTO2TaskId::invalid();
+                            PTO2TaskId t__tmp_v136 = up_late_tids_inline69[k_split_inline276];
+                            _submit_deps_buf_inline246[0] = t__tmp_v136;
+
+                            // Task 31: up_proj_4
+                            L0TaskArgs params_t31;
+                            params_t31.add_input(mlp_norm_in_inline71);
+                            params_t31.add_input(ext_w_up);
+                            params_t31.add_inout(up_acc_all_inline303);
+                            params_t31.add_scalar(k0_inline113);
+                            params_t31.add_scalar(layer_hidden_base_inline151);
+                            params_t31.add_scalar(n0_inline122);
+                            PTO2TaskId params_t31_deps[1];
+                            uint32_t params_t31_deps_count = 0;
+                            if (_submit_deps_buf_inline246[0].is_valid())
+                                params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline246[0];
+                            params_t31.set_dependencies(params_t31_deps, params_t31_deps_count);
+                            TaskOutputTensors task_31_outs = rt_submit_aic_task(32, params_t31);
+                            PTO2TaskId up_tid_inline290 = task_31_outs.task_id();
+                            up_tids_inline310[((n_out_inline275 * 5) + k_split_inline276)] = up_tid_inline290;
                         }
                     }
-                    for (int64_t n_out_inline159 = 0; n_out_inline159 < 5; n_out_inline159 += 1) {
-                        int64_t n0_inline142__ssa_v9 = (n_out_inline159 * 1024);
-                        PTO2TaskId _submit_deps_buf_inline18[17];
-                        for (int64_t __init_i = 0; __init_i < 17; ++__init_i)
-                            _submit_deps_buf_inline18[__init_i] = PTO2TaskId::invalid();
-                        PTO2TaskId t__tmp_v181 = down_tids_inline261[(n_out_inline159 * 17)];
-                        _submit_deps_buf_inline18[0] = t__tmp_v181;
-                        PTO2TaskId t__tmp_v182 = down_tids_inline261[((n_out_inline159 * 17) + 1)];
-                        _submit_deps_buf_inline18[1] = t__tmp_v182;
-                        PTO2TaskId t__tmp_v183 = down_tids_inline261[((n_out_inline159 * 17) + 2)];
-                        _submit_deps_buf_inline18[2] = t__tmp_v183;
-                        PTO2TaskId t__tmp_v184 = down_tids_inline261[((n_out_inline159 * 17) + 3)];
-                        _submit_deps_buf_inline18[3] = t__tmp_v184;
-                        PTO2TaskId t__tmp_v185 = down_tids_inline261[((n_out_inline159 * 17) + 4)];
-                        _submit_deps_buf_inline18[4] = t__tmp_v185;
-                        PTO2TaskId t__tmp_v186 = down_tids_inline261[((n_out_inline159 * 17) + 5)];
-                        _submit_deps_buf_inline18[5] = t__tmp_v186;
-                        PTO2TaskId t__tmp_v187 = down_tids_inline261[((n_out_inline159 * 17) + 6)];
-                        _submit_deps_buf_inline18[6] = t__tmp_v187;
-                        PTO2TaskId t__tmp_v188 = down_tids_inline261[((n_out_inline159 * 17) + 7)];
-                        _submit_deps_buf_inline18[7] = t__tmp_v188;
-                        PTO2TaskId t__tmp_v189 = down_tids_inline261[((n_out_inline159 * 17) + 8)];
-                        _submit_deps_buf_inline18[8] = t__tmp_v189;
-                        PTO2TaskId t__tmp_v190 = down_tids_inline261[((n_out_inline159 * 17) + 9)];
-                        _submit_deps_buf_inline18[9] = t__tmp_v190;
-                        PTO2TaskId t__tmp_v191 = down_tids_inline261[((n_out_inline159 * 17) + 10)];
-                        _submit_deps_buf_inline18[10] = t__tmp_v191;
-                        PTO2TaskId t__tmp_v192 = down_tids_inline261[((n_out_inline159 * 17) + 11)];
-                        _submit_deps_buf_inline18[11] = t__tmp_v192;
-                        PTO2TaskId t__tmp_v193 = down_tids_inline261[((n_out_inline159 * 17) + 12)];
-                        _submit_deps_buf_inline18[12] = t__tmp_v193;
-                        PTO2TaskId t__tmp_v194 = down_tids_inline261[((n_out_inline159 * 17) + 13)];
-                        _submit_deps_buf_inline18[13] = t__tmp_v194;
-                        PTO2TaskId t__tmp_v195 = down_tids_inline261[((n_out_inline159 * 17) + 14)];
-                        _submit_deps_buf_inline18[14] = t__tmp_v195;
-                        PTO2TaskId t__tmp_v196 = down_tids_inline261[((n_out_inline159 * 17) + 15)];
-                        _submit_deps_buf_inline18[15] = t__tmp_v196;
-                        PTO2TaskId t__tmp_v197 = down_tids_inline261[((n_out_inline159 * 17) + 16)];
-                        _submit_deps_buf_inline18[16] = t__tmp_v197;
+                    for (int64_t n_out_inline292 = 0; n_out_inline292 < 17; n_out_inline292 += 1) {
+                        int64_t n0_inline122__ssa_v7 = (n_out_inline292 * 1024);
+                        PTO2TaskId _submit_deps_buf_inline167[11];
+                        for (int64_t __init_i = 0; __init_i < 11; ++__init_i)
+                            _submit_deps_buf_inline167[__init_i] = PTO2TaskId::invalid();
+                        _submit_deps_buf_inline167[0] = reduce_tid_inline226;
+                        PTO2TaskId t__tmp_v137 = gate_tids_inline56[(n_out_inline292 * 5)];
+                        _submit_deps_buf_inline167[1] = t__tmp_v137;
+                        PTO2TaskId t__tmp_v138 = gate_tids_inline56[((n_out_inline292 * 5) + 1)];
+                        _submit_deps_buf_inline167[2] = t__tmp_v138;
+                        PTO2TaskId t__tmp_v139 = gate_tids_inline56[((n_out_inline292 * 5) + 2)];
+                        _submit_deps_buf_inline167[3] = t__tmp_v139;
+                        PTO2TaskId t__tmp_v140 = gate_tids_inline56[((n_out_inline292 * 5) + 3)];
+                        _submit_deps_buf_inline167[4] = t__tmp_v140;
+                        PTO2TaskId t__tmp_v141 = gate_tids_inline56[((n_out_inline292 * 5) + 4)];
+                        _submit_deps_buf_inline167[5] = t__tmp_v141;
+                        PTO2TaskId t__tmp_v142 = up_tids_inline310[(n_out_inline292 * 5)];
+                        _submit_deps_buf_inline167[6] = t__tmp_v142;
+                        PTO2TaskId t__tmp_v143 = up_tids_inline310[((n_out_inline292 * 5) + 1)];
+                        _submit_deps_buf_inline167[7] = t__tmp_v143;
+                        PTO2TaskId t__tmp_v144 = up_tids_inline310[((n_out_inline292 * 5) + 2)];
+                        _submit_deps_buf_inline167[8] = t__tmp_v144;
+                        PTO2TaskId t__tmp_v145 = up_tids_inline310[((n_out_inline292 * 5) + 3)];
+                        _submit_deps_buf_inline167[9] = t__tmp_v145;
+                        PTO2TaskId t__tmp_v146 = up_tids_inline310[((n_out_inline292 * 5) + 4)];
+                        _submit_deps_buf_inline167[10] = t__tmp_v146;
 
-                        // Task 31: down_cast_residual
-                        L0TaskArgs params_t31;
-                        params_t31.add_input(post_norm_partial_inline130);
-                        params_t31.add_input(down_acc_all_inline251);
-                        params_t31.add_inout(out_partial_inline312);
-                        params_t31.add_scalar(n0_inline142__ssa_v9);
-                        PTO2TaskId params_t31_deps[17];
-                        uint32_t params_t31_deps_count = 0;
-                        if (_submit_deps_buf_inline18[0].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[0];
-                        if (_submit_deps_buf_inline18[1].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[1];
-                        if (_submit_deps_buf_inline18[2].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[2];
-                        if (_submit_deps_buf_inline18[3].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[3];
-                        if (_submit_deps_buf_inline18[4].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[4];
-                        if (_submit_deps_buf_inline18[5].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[5];
-                        if (_submit_deps_buf_inline18[6].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[6];
-                        if (_submit_deps_buf_inline18[7].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[7];
-                        if (_submit_deps_buf_inline18[8].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[8];
-                        if (_submit_deps_buf_inline18[9].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[9];
-                        if (_submit_deps_buf_inline18[10].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[10];
-                        if (_submit_deps_buf_inline18[11].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[11];
-                        if (_submit_deps_buf_inline18[12].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[12];
-                        if (_submit_deps_buf_inline18[13].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[13];
-                        if (_submit_deps_buf_inline18[14].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[14];
-                        if (_submit_deps_buf_inline18[15].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[15];
-                        if (_submit_deps_buf_inline18[16].is_valid())
-                            params_t31_deps[params_t31_deps_count++] = _submit_deps_buf_inline18[16];
-                        params_t31.set_dependencies(params_t31_deps, params_t31_deps_count);
-                        TaskOutputTensors task_31_outs = rt_submit_aiv_task(32, params_t31);
-                        PTO2TaskId dcr_tid_inline8 = task_31_outs.task_id();
-                        dcr_tids_inline154[n_out_inline159] = dcr_tid_inline8;
-                    }
-                }
-                for (int64_t oc_b_inline93 = 0; oc_b_inline93 < 16; oc_b_inline93 += 16) {
-                    PTO2_SCOPE() {
-                        PTO2TaskId _submit_deps_buf_inline4[5];
-                        for (int64_t __init_i = 0; __init_i < 5; ++__init_i)
-                            _submit_deps_buf_inline4[__init_i] = PTO2TaskId::invalid();
-                        PTO2TaskId t__tmp_v199 = dcr_tids_inline154[0];
-                        _submit_deps_buf_inline4[0] = t__tmp_v199;
-                        PTO2TaskId t__tmp_v200 = dcr_tids_inline154[1];
-                        _submit_deps_buf_inline4[1] = t__tmp_v200;
-                        PTO2TaskId t__tmp_v201 = dcr_tids_inline154[2];
-                        _submit_deps_buf_inline4[2] = t__tmp_v201;
-                        PTO2TaskId t__tmp_v202 = dcr_tids_inline154[3];
-                        _submit_deps_buf_inline4[3] = t__tmp_v202;
-                        PTO2TaskId t__tmp_v203 = dcr_tids_inline154[4];
-                        _submit_deps_buf_inline4[4] = t__tmp_v203;
-
-                        // Task 32: out_consolidate
+                        // Task 32: silu
                         L0TaskArgs params_t32;
-                        params_t32.add_inout(next_hidden);
-                        params_t32.add_input(out_partial_inline312);
-                        params_t32.add_scalar(oc_b_inline93);
-                        PTO2TaskId params_t32_deps[5];
+                        params_t32.add_input(inv_rms_tile_inline126);
+                        params_t32.add_inout(mlp_tile_inline149);
+                        params_t32.add_input(gate_acc_all_inline203);
+                        params_t32.add_input(up_acc_all_inline303);
+                        params_t32.add_scalar(n0_inline122__ssa_v7);
+                        PTO2TaskId params_t32_deps[11];
                         uint32_t params_t32_deps_count = 0;
-                        if (_submit_deps_buf_inline4[0].is_valid())
-                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline4[0];
-                        if (_submit_deps_buf_inline4[1].is_valid())
-                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline4[1];
-                        if (_submit_deps_buf_inline4[2].is_valid())
-                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline4[2];
-                        if (_submit_deps_buf_inline4[3].is_valid())
-                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline4[3];
-                        if (_submit_deps_buf_inline4[4].is_valid())
-                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline4[4];
+                        if (_submit_deps_buf_inline167[0].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[0];
+                        if (_submit_deps_buf_inline167[1].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[1];
+                        if (_submit_deps_buf_inline167[2].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[2];
+                        if (_submit_deps_buf_inline167[3].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[3];
+                        if (_submit_deps_buf_inline167[4].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[4];
+                        if (_submit_deps_buf_inline167[5].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[5];
+                        if (_submit_deps_buf_inline167[6].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[6];
+                        if (_submit_deps_buf_inline167[7].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[7];
+                        if (_submit_deps_buf_inline167[8].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[8];
+                        if (_submit_deps_buf_inline167[9].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[9];
+                        if (_submit_deps_buf_inline167[10].is_valid())
+                            params_t32_deps[params_t32_deps_count++] = _submit_deps_buf_inline167[10];
                         params_t32.set_dependencies(params_t32_deps, params_t32_deps_count);
                         TaskOutputTensors task_32_outs = rt_submit_aiv_task(33, params_t32);
+                        PTO2TaskId silu_tid_inline80 = task_32_outs.task_id();
+                        silu_tids_inline265[n_out_inline292] = silu_tid_inline80;
+                    }
+                    for (int64_t n_out_inline195 = 0; n_out_inline195 < 5; n_out_inline195 += 1) {
+                        int64_t n0_inline122__ssa_v8 = (n_out_inline195 * 1024);
+                        for (int64_t k_split_inline302 = 0; k_split_inline302 < 17; k_split_inline302 += 1) {
+                            int64_t k0_inline113__ssa_v8 = (k_split_inline302 * 1024);
+                            PTO2TaskId _submit_deps_buf_inline229[1];
+                            for (int64_t __init_i = 0; __init_i < 1; ++__init_i)
+                                _submit_deps_buf_inline229[__init_i] = PTO2TaskId::invalid();
+                            PTO2TaskId t__tmp_v152 = silu_tids_inline265[k_split_inline302];
+                            _submit_deps_buf_inline229[0] = t__tmp_v152;
+
+                            // Task 33: down_proj
+                            L0TaskArgs params_t33;
+                            params_t33.add_input(mlp_tile_inline149);
+                            params_t33.add_input(ext_w_down);
+                            params_t33.add_inout(down_acc_all_inline168);
+                            params_t33.add_scalar(k0_inline113__ssa_v8);
+                            params_t33.add_scalar(layer_inter_base_inline107);
+                            params_t33.add_scalar(n0_inline122__ssa_v8);
+                            PTO2TaskId params_t33_deps[1];
+                            uint32_t params_t33_deps_count = 0;
+                            if (_submit_deps_buf_inline229[0].is_valid())
+                                params_t33_deps[params_t33_deps_count++] = _submit_deps_buf_inline229[0];
+                            params_t33.set_dependencies(params_t33_deps, params_t33_deps_count);
+                            params_t33.set_allow_early_resolve(true);
+                            TaskOutputTensors task_33_outs = rt_submit_aic_task(34, params_t33);
+                            PTO2TaskId down_tid_inline210 = task_33_outs.task_id();
+                            down_tids_inline156[((n_out_inline195 * 17) + k_split_inline302)] = down_tid_inline210;
+                        }
                     }
                 }
+                PTO2TaskId _submit_deps_buf_inline123[85];
+                for (int64_t __init_i = 0; __init_i < 85; ++__init_i)
+                    _submit_deps_buf_inline123[__init_i] = PTO2TaskId::invalid();
+                PTO2TaskId t__tmp_v153 = down_tids_inline156[0];
+                _submit_deps_buf_inline123[0] = t__tmp_v153;
+                PTO2TaskId t__tmp_v154 = down_tids_inline156[1];
+                _submit_deps_buf_inline123[1] = t__tmp_v154;
+                PTO2TaskId t__tmp_v155 = down_tids_inline156[2];
+                _submit_deps_buf_inline123[2] = t__tmp_v155;
+                PTO2TaskId t__tmp_v156 = down_tids_inline156[3];
+                _submit_deps_buf_inline123[3] = t__tmp_v156;
+                PTO2TaskId t__tmp_v157 = down_tids_inline156[4];
+                _submit_deps_buf_inline123[4] = t__tmp_v157;
+                PTO2TaskId t__tmp_v158 = down_tids_inline156[5];
+                _submit_deps_buf_inline123[5] = t__tmp_v158;
+                PTO2TaskId t__tmp_v159 = down_tids_inline156[6];
+                _submit_deps_buf_inline123[6] = t__tmp_v159;
+                PTO2TaskId t__tmp_v160 = down_tids_inline156[7];
+                _submit_deps_buf_inline123[7] = t__tmp_v160;
+                PTO2TaskId t__tmp_v161 = down_tids_inline156[8];
+                _submit_deps_buf_inline123[8] = t__tmp_v161;
+                PTO2TaskId t__tmp_v162 = down_tids_inline156[9];
+                _submit_deps_buf_inline123[9] = t__tmp_v162;
+                PTO2TaskId t__tmp_v163 = down_tids_inline156[10];
+                _submit_deps_buf_inline123[10] = t__tmp_v163;
+                PTO2TaskId t__tmp_v164 = down_tids_inline156[11];
+                _submit_deps_buf_inline123[11] = t__tmp_v164;
+                PTO2TaskId t__tmp_v165 = down_tids_inline156[12];
+                _submit_deps_buf_inline123[12] = t__tmp_v165;
+                PTO2TaskId t__tmp_v166 = down_tids_inline156[13];
+                _submit_deps_buf_inline123[13] = t__tmp_v166;
+                PTO2TaskId t__tmp_v167 = down_tids_inline156[14];
+                _submit_deps_buf_inline123[14] = t__tmp_v167;
+                PTO2TaskId t__tmp_v168 = down_tids_inline156[15];
+                _submit_deps_buf_inline123[15] = t__tmp_v168;
+                PTO2TaskId t__tmp_v169 = down_tids_inline156[16];
+                _submit_deps_buf_inline123[16] = t__tmp_v169;
+                PTO2TaskId t__tmp_v170 = down_tids_inline156[17];
+                _submit_deps_buf_inline123[17] = t__tmp_v170;
+                PTO2TaskId t__tmp_v171 = down_tids_inline156[18];
+                _submit_deps_buf_inline123[18] = t__tmp_v171;
+                PTO2TaskId t__tmp_v172 = down_tids_inline156[19];
+                _submit_deps_buf_inline123[19] = t__tmp_v172;
+                PTO2TaskId t__tmp_v173 = down_tids_inline156[20];
+                _submit_deps_buf_inline123[20] = t__tmp_v173;
+                PTO2TaskId t__tmp_v174 = down_tids_inline156[21];
+                _submit_deps_buf_inline123[21] = t__tmp_v174;
+                PTO2TaskId t__tmp_v175 = down_tids_inline156[22];
+                _submit_deps_buf_inline123[22] = t__tmp_v175;
+                PTO2TaskId t__tmp_v176 = down_tids_inline156[23];
+                _submit_deps_buf_inline123[23] = t__tmp_v176;
+                PTO2TaskId t__tmp_v177 = down_tids_inline156[24];
+                _submit_deps_buf_inline123[24] = t__tmp_v177;
+                PTO2TaskId t__tmp_v178 = down_tids_inline156[25];
+                _submit_deps_buf_inline123[25] = t__tmp_v178;
+                PTO2TaskId t__tmp_v179 = down_tids_inline156[26];
+                _submit_deps_buf_inline123[26] = t__tmp_v179;
+                PTO2TaskId t__tmp_v180 = down_tids_inline156[27];
+                _submit_deps_buf_inline123[27] = t__tmp_v180;
+                PTO2TaskId t__tmp_v181 = down_tids_inline156[28];
+                _submit_deps_buf_inline123[28] = t__tmp_v181;
+                PTO2TaskId t__tmp_v182 = down_tids_inline156[29];
+                _submit_deps_buf_inline123[29] = t__tmp_v182;
+                PTO2TaskId t__tmp_v183 = down_tids_inline156[30];
+                _submit_deps_buf_inline123[30] = t__tmp_v183;
+                PTO2TaskId t__tmp_v184 = down_tids_inline156[31];
+                _submit_deps_buf_inline123[31] = t__tmp_v184;
+                PTO2TaskId t__tmp_v185 = down_tids_inline156[32];
+                _submit_deps_buf_inline123[32] = t__tmp_v185;
+                PTO2TaskId t__tmp_v186 = down_tids_inline156[33];
+                _submit_deps_buf_inline123[33] = t__tmp_v186;
+                PTO2TaskId t__tmp_v187 = down_tids_inline156[34];
+                _submit_deps_buf_inline123[34] = t__tmp_v187;
+                PTO2TaskId t__tmp_v188 = down_tids_inline156[35];
+                _submit_deps_buf_inline123[35] = t__tmp_v188;
+                PTO2TaskId t__tmp_v189 = down_tids_inline156[36];
+                _submit_deps_buf_inline123[36] = t__tmp_v189;
+                PTO2TaskId t__tmp_v190 = down_tids_inline156[37];
+                _submit_deps_buf_inline123[37] = t__tmp_v190;
+                PTO2TaskId t__tmp_v191 = down_tids_inline156[38];
+                _submit_deps_buf_inline123[38] = t__tmp_v191;
+                PTO2TaskId t__tmp_v192 = down_tids_inline156[39];
+                _submit_deps_buf_inline123[39] = t__tmp_v192;
+                PTO2TaskId t__tmp_v193 = down_tids_inline156[40];
+                _submit_deps_buf_inline123[40] = t__tmp_v193;
+                PTO2TaskId t__tmp_v194 = down_tids_inline156[41];
+                _submit_deps_buf_inline123[41] = t__tmp_v194;
+                PTO2TaskId t__tmp_v195 = down_tids_inline156[42];
+                _submit_deps_buf_inline123[42] = t__tmp_v195;
+                PTO2TaskId t__tmp_v196 = down_tids_inline156[43];
+                _submit_deps_buf_inline123[43] = t__tmp_v196;
+                PTO2TaskId t__tmp_v197 = down_tids_inline156[44];
+                _submit_deps_buf_inline123[44] = t__tmp_v197;
+                PTO2TaskId t__tmp_v198 = down_tids_inline156[45];
+                _submit_deps_buf_inline123[45] = t__tmp_v198;
+                PTO2TaskId t__tmp_v199 = down_tids_inline156[46];
+                _submit_deps_buf_inline123[46] = t__tmp_v199;
+                PTO2TaskId t__tmp_v200 = down_tids_inline156[47];
+                _submit_deps_buf_inline123[47] = t__tmp_v200;
+                PTO2TaskId t__tmp_v201 = down_tids_inline156[48];
+                _submit_deps_buf_inline123[48] = t__tmp_v201;
+                PTO2TaskId t__tmp_v202 = down_tids_inline156[49];
+                _submit_deps_buf_inline123[49] = t__tmp_v202;
+                PTO2TaskId t__tmp_v203 = down_tids_inline156[50];
+                _submit_deps_buf_inline123[50] = t__tmp_v203;
+                PTO2TaskId t__tmp_v204 = down_tids_inline156[51];
+                _submit_deps_buf_inline123[51] = t__tmp_v204;
+                PTO2TaskId t__tmp_v205 = down_tids_inline156[52];
+                _submit_deps_buf_inline123[52] = t__tmp_v205;
+                PTO2TaskId t__tmp_v206 = down_tids_inline156[53];
+                _submit_deps_buf_inline123[53] = t__tmp_v206;
+                PTO2TaskId t__tmp_v207 = down_tids_inline156[54];
+                _submit_deps_buf_inline123[54] = t__tmp_v207;
+                PTO2TaskId t__tmp_v208 = down_tids_inline156[55];
+                _submit_deps_buf_inline123[55] = t__tmp_v208;
+                PTO2TaskId t__tmp_v209 = down_tids_inline156[56];
+                _submit_deps_buf_inline123[56] = t__tmp_v209;
+                PTO2TaskId t__tmp_v210 = down_tids_inline156[57];
+                _submit_deps_buf_inline123[57] = t__tmp_v210;
+                PTO2TaskId t__tmp_v211 = down_tids_inline156[58];
+                _submit_deps_buf_inline123[58] = t__tmp_v211;
+                PTO2TaskId t__tmp_v212 = down_tids_inline156[59];
+                _submit_deps_buf_inline123[59] = t__tmp_v212;
+                PTO2TaskId t__tmp_v213 = down_tids_inline156[60];
+                _submit_deps_buf_inline123[60] = t__tmp_v213;
+                PTO2TaskId t__tmp_v214 = down_tids_inline156[61];
+                _submit_deps_buf_inline123[61] = t__tmp_v214;
+                PTO2TaskId t__tmp_v215 = down_tids_inline156[62];
+                _submit_deps_buf_inline123[62] = t__tmp_v215;
+                PTO2TaskId t__tmp_v216 = down_tids_inline156[63];
+                _submit_deps_buf_inline123[63] = t__tmp_v216;
+                PTO2TaskId t__tmp_v217 = down_tids_inline156[64];
+                _submit_deps_buf_inline123[64] = t__tmp_v217;
+                PTO2TaskId t__tmp_v218 = down_tids_inline156[65];
+                _submit_deps_buf_inline123[65] = t__tmp_v218;
+                PTO2TaskId t__tmp_v219 = down_tids_inline156[66];
+                _submit_deps_buf_inline123[66] = t__tmp_v219;
+                PTO2TaskId t__tmp_v220 = down_tids_inline156[67];
+                _submit_deps_buf_inline123[67] = t__tmp_v220;
+                PTO2TaskId t__tmp_v221 = down_tids_inline156[68];
+                _submit_deps_buf_inline123[68] = t__tmp_v221;
+                PTO2TaskId t__tmp_v222 = down_tids_inline156[69];
+                _submit_deps_buf_inline123[69] = t__tmp_v222;
+                PTO2TaskId t__tmp_v223 = down_tids_inline156[70];
+                _submit_deps_buf_inline123[70] = t__tmp_v223;
+                PTO2TaskId t__tmp_v224 = down_tids_inline156[71];
+                _submit_deps_buf_inline123[71] = t__tmp_v224;
+                PTO2TaskId t__tmp_v225 = down_tids_inline156[72];
+                _submit_deps_buf_inline123[72] = t__tmp_v225;
+                PTO2TaskId t__tmp_v226 = down_tids_inline156[73];
+                _submit_deps_buf_inline123[73] = t__tmp_v226;
+                PTO2TaskId t__tmp_v227 = down_tids_inline156[74];
+                _submit_deps_buf_inline123[74] = t__tmp_v227;
+                PTO2TaskId t__tmp_v228 = down_tids_inline156[75];
+                _submit_deps_buf_inline123[75] = t__tmp_v228;
+                PTO2TaskId t__tmp_v229 = down_tids_inline156[76];
+                _submit_deps_buf_inline123[76] = t__tmp_v229;
+                PTO2TaskId t__tmp_v230 = down_tids_inline156[77];
+                _submit_deps_buf_inline123[77] = t__tmp_v230;
+                PTO2TaskId t__tmp_v231 = down_tids_inline156[78];
+                _submit_deps_buf_inline123[78] = t__tmp_v231;
+                PTO2TaskId t__tmp_v232 = down_tids_inline156[79];
+                _submit_deps_buf_inline123[79] = t__tmp_v232;
+                PTO2TaskId t__tmp_v233 = down_tids_inline156[80];
+                _submit_deps_buf_inline123[80] = t__tmp_v233;
+                PTO2TaskId t__tmp_v234 = down_tids_inline156[81];
+                _submit_deps_buf_inline123[81] = t__tmp_v234;
+                PTO2TaskId t__tmp_v235 = down_tids_inline156[82];
+                _submit_deps_buf_inline123[82] = t__tmp_v235;
+                PTO2TaskId t__tmp_v236 = down_tids_inline156[83];
+                _submit_deps_buf_inline123[83] = t__tmp_v236;
+                PTO2TaskId t__tmp_v237 = down_tids_inline156[84];
+                _submit_deps_buf_inline123[84] = t__tmp_v237;
+
+                // Spmd dcr_xgamma_spmd: dcr_xgamma
+                L0TaskArgs params_t34;
+                params_t34.add_input(down_acc_all_inline168);
+                params_t34.add_input(post_norm_partial_inline118);
+                params_t34.add_inout(next_hidden);
+                params_t34.add_input(ext_input_rms_weight);
+                params_t34.add_inout(next_normed);
+                params_t34.add_scalar(next_gamma_idx);
+                params_t34.launch_spec.set_block_num(5);
+                params_t34.set_allow_early_resolve(true);
+                PTO2TaskId params_t34_deps[85];
+                uint32_t params_t34_deps_count = 0;
+                if (_submit_deps_buf_inline123[0].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[0];
+                if (_submit_deps_buf_inline123[1].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[1];
+                if (_submit_deps_buf_inline123[2].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[2];
+                if (_submit_deps_buf_inline123[3].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[3];
+                if (_submit_deps_buf_inline123[4].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[4];
+                if (_submit_deps_buf_inline123[5].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[5];
+                if (_submit_deps_buf_inline123[6].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[6];
+                if (_submit_deps_buf_inline123[7].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[7];
+                if (_submit_deps_buf_inline123[8].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[8];
+                if (_submit_deps_buf_inline123[9].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[9];
+                if (_submit_deps_buf_inline123[10].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[10];
+                if (_submit_deps_buf_inline123[11].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[11];
+                if (_submit_deps_buf_inline123[12].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[12];
+                if (_submit_deps_buf_inline123[13].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[13];
+                if (_submit_deps_buf_inline123[14].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[14];
+                if (_submit_deps_buf_inline123[15].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[15];
+                if (_submit_deps_buf_inline123[16].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[16];
+                if (_submit_deps_buf_inline123[17].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[17];
+                if (_submit_deps_buf_inline123[18].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[18];
+                if (_submit_deps_buf_inline123[19].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[19];
+                if (_submit_deps_buf_inline123[20].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[20];
+                if (_submit_deps_buf_inline123[21].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[21];
+                if (_submit_deps_buf_inline123[22].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[22];
+                if (_submit_deps_buf_inline123[23].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[23];
+                if (_submit_deps_buf_inline123[24].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[24];
+                if (_submit_deps_buf_inline123[25].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[25];
+                if (_submit_deps_buf_inline123[26].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[26];
+                if (_submit_deps_buf_inline123[27].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[27];
+                if (_submit_deps_buf_inline123[28].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[28];
+                if (_submit_deps_buf_inline123[29].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[29];
+                if (_submit_deps_buf_inline123[30].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[30];
+                if (_submit_deps_buf_inline123[31].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[31];
+                if (_submit_deps_buf_inline123[32].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[32];
+                if (_submit_deps_buf_inline123[33].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[33];
+                if (_submit_deps_buf_inline123[34].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[34];
+                if (_submit_deps_buf_inline123[35].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[35];
+                if (_submit_deps_buf_inline123[36].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[36];
+                if (_submit_deps_buf_inline123[37].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[37];
+                if (_submit_deps_buf_inline123[38].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[38];
+                if (_submit_deps_buf_inline123[39].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[39];
+                if (_submit_deps_buf_inline123[40].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[40];
+                if (_submit_deps_buf_inline123[41].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[41];
+                if (_submit_deps_buf_inline123[42].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[42];
+                if (_submit_deps_buf_inline123[43].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[43];
+                if (_submit_deps_buf_inline123[44].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[44];
+                if (_submit_deps_buf_inline123[45].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[45];
+                if (_submit_deps_buf_inline123[46].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[46];
+                if (_submit_deps_buf_inline123[47].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[47];
+                if (_submit_deps_buf_inline123[48].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[48];
+                if (_submit_deps_buf_inline123[49].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[49];
+                if (_submit_deps_buf_inline123[50].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[50];
+                if (_submit_deps_buf_inline123[51].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[51];
+                if (_submit_deps_buf_inline123[52].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[52];
+                if (_submit_deps_buf_inline123[53].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[53];
+                if (_submit_deps_buf_inline123[54].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[54];
+                if (_submit_deps_buf_inline123[55].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[55];
+                if (_submit_deps_buf_inline123[56].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[56];
+                if (_submit_deps_buf_inline123[57].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[57];
+                if (_submit_deps_buf_inline123[58].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[58];
+                if (_submit_deps_buf_inline123[59].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[59];
+                if (_submit_deps_buf_inline123[60].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[60];
+                if (_submit_deps_buf_inline123[61].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[61];
+                if (_submit_deps_buf_inline123[62].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[62];
+                if (_submit_deps_buf_inline123[63].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[63];
+                if (_submit_deps_buf_inline123[64].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[64];
+                if (_submit_deps_buf_inline123[65].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[65];
+                if (_submit_deps_buf_inline123[66].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[66];
+                if (_submit_deps_buf_inline123[67].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[67];
+                if (_submit_deps_buf_inline123[68].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[68];
+                if (_submit_deps_buf_inline123[69].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[69];
+                if (_submit_deps_buf_inline123[70].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[70];
+                if (_submit_deps_buf_inline123[71].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[71];
+                if (_submit_deps_buf_inline123[72].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[72];
+                if (_submit_deps_buf_inline123[73].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[73];
+                if (_submit_deps_buf_inline123[74].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[74];
+                if (_submit_deps_buf_inline123[75].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[75];
+                if (_submit_deps_buf_inline123[76].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[76];
+                if (_submit_deps_buf_inline123[77].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[77];
+                if (_submit_deps_buf_inline123[78].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[78];
+                if (_submit_deps_buf_inline123[79].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[79];
+                if (_submit_deps_buf_inline123[80].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[80];
+                if (_submit_deps_buf_inline123[81].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[81];
+                if (_submit_deps_buf_inline123[82].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[82];
+                if (_submit_deps_buf_inline123[83].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[83];
+                if (_submit_deps_buf_inline123[84].is_valid())
+                    params_t34_deps[params_t34_deps_count++] = _submit_deps_buf_inline123[84];
+                params_t34.set_dependencies(params_t34_deps, params_t34_deps_count);
+                TaskOutputTensors task_34_outs = rt_submit_aiv_task(35, params_t34);
+                PTO2TaskId dcr_tid_inline58 = task_34_outs.task_id();
+                prev_out_tid[0] = dcr_tid_inline58;
+                prev_normed_tid[0] = dcr_tid_inline58;
                 Tensor cur__ssa_v8 = next_hidden;
+                Tensor normed__ssa_v6 = next_normed;
                 cur__rv_v7 = cur__ssa_v8;
+                normed__rv_v5 = normed__ssa_v6;
             }
         }
         for (int64_t ob0 = 0; ob0 < 16; ob0 += 16) {
             PTO2_SCOPE() {
-                // Task 33: copy_out
-                L0TaskArgs params_t33;
-                params_t33.add_output(ext_out);
-                params_t33.add_input(cur__rv_v7);
-                params_t33.add_scalar(ob0);
-                rt_submit_aiv_task(34, params_t33);
+                // Task 35: copy_out
+                L0TaskArgs params_t35;
+                params_t35.add_output(ext_out);
+                params_t35.add_input(cur__rv_v7);
+                params_t35.add_scalar(ob0);
+                rt_submit_aiv_task(36, params_t35);
             }
         }
     }

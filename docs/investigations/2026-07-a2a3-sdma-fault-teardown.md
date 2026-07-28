@@ -150,8 +150,10 @@ the rest of the system on the fast path.
 - A Worker constructed without `enable_sdma` creates no SDMA streams, so an
   AICore fault on it recovers on main's fast path (`507046`, ~0.3 s reset)
   rather than the ~306 s SDMA-generation stall documented above.
-- The two-device `sdma_async_completion_demo` (a separate, pre-existing
-  comm-domain SDMA overlay, not the injection path) is unaffected by this change.
+- The two-device `sdma_async_completion_demo` is a separate, pre-existing
+  comm-domain SDMA overlay rather than the injection path, but it does
+  provision SDMA itself (`enable_sdma=True`), so it carries the same
+  teardown cost.
 
 ## When to reconsider
 

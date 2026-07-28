@@ -434,17 +434,17 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         bool needs_aicpu_register = false;
         if (artifacts.host_dlopen_handle != nullptr) {
             rc = runner->record_host_orch_callable(
-                callable_id, artifacts.chip_buffer_hash, artifacts.host_dlopen_handle, artifacts.host_orch_func_ptr,
-                std::move(kernel_addrs), std::move(artifacts.signature)
+                callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.host_dlopen_handle,
+                artifacts.host_orch_func_ptr, std::move(kernel_addrs), std::move(artifacts.signature)
             );
             if (rc != 0) return rc;
             host_dlopen_guard.dismiss();
             chip_buffer_guard.dismiss();
         } else {
             rc = runner->record_device_orch_callable(
-                callable_id, artifacts.chip_buffer_hash, artifacts.chip_buffer_dev, artifacts.orch_so_data,
-                artifacts.orch_so_size, artifacts.func_name.c_str(), artifacts.config_name.c_str(),
-                std::move(kernel_addrs), std::move(artifacts.signature)
+                callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.chip_buffer_dev,
+                artifacts.orch_so_data, artifacts.orch_so_size, artifacts.func_name.c_str(),
+                artifacts.config_name.c_str(), std::move(kernel_addrs), std::move(artifacts.signature)
             );
             if (rc != 0) return rc;
             chip_buffer_guard.dismiss();
@@ -601,6 +601,12 @@ int simpler_run(
             return validation_rc != 0 ? validation_rc : rc;
         }
 
+        // Latch the diagnostic enables before the bind: a host-orch runtime
+        // builds its whole task graph inside it, so a diagnostic that hooks the
+        // orchestrator (dep_gen) has to be armed by now. run() latches again at
+        // its entry — the call is idempotent.
+        runner->apply_call_config(*config);
+
         {
             STRACE("simpler_run.bind");
             // One-step bind: restore kernel addrs + active_callable_id and run
@@ -644,6 +650,15 @@ int simpler_run(
     }
 }
 
+int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value) {
+    if (ctx == NULL) return -1;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->set_task_accepted_state(state, accepted_value);
+    } catch (...) {
+        return -1;
+    }
+}
+
 int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
     if (ctx == NULL) return -1;
     try {
@@ -666,6 +681,15 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx) {
     if (ctx == NULL) return 0;
     try {
         return static_cast<DeviceRunnerBase *>(ctx)->host_dlopen_count();
+    } catch (...) {
+        return 0;
+    }
+}
+
+size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->run_stream_set_create_count();
     } catch (...) {
         return 0;
     }

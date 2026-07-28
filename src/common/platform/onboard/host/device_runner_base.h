@@ -87,6 +87,9 @@ public:
     DeviceRunnerBase(DeviceRunnerBase &&) = delete;
     DeviceRunnerBase &operator=(DeviceRunnerBase &&) = delete;
 
+    /** Bind this runner's launch-acceptance publication target. */
+    int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
+
     /** Allocate / free / copy on the per-Worker `MemoryAllocator` + CANN runtime. */
     void *allocate_tensor(std::size_t bytes);
     void free_tensor(void *dev_ptr);
@@ -303,8 +306,8 @@ public:
      * @return 0 on success, negative on failure.
      */
     int record_device_orch_callable(
-        int32_t callable_id, uint64_t chip_buffer_hash, uint64_t chip_dev, const void *orch_so_data,
-        size_t orch_so_size, const char *func_name, const char *config_name,
+        int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, uint64_t chip_dev,
+        const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
         std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
     );
 
@@ -319,8 +322,9 @@ public:
      * dlclose'd by `unregister_callable`. Increments `host_dlopen_total_`.
      */
     int record_host_orch_callable(
-        int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
+        void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs,
+        std::vector<ArgDirection> signature
     );
 
     /**
@@ -418,6 +422,13 @@ public:
      * never decrements.
      */
     size_t host_dlopen_count() const { return host_dlopen_total_; }
+
+    /**
+     * Number of run stream generations this runner has created. AICPU streams
+     * belong to pipeline slots, while an AICore stream is reused only for the
+     * same AICore image. Arches whose runs use the persistent pair report 0.
+     */
+    virtual size_t run_stream_set_create_count() const { return 0; }
 
     /**
      * Device-orchestration callable registration used internally by
@@ -563,6 +574,8 @@ public:
     const std::string &output_prefix() const { return output_prefix_; }
 
 protected:
+    /** Publish launch acceptance for the currently bound target, if any. */
+    void publish_task_accepted() const;
     // Ctor is protected: this class is for inheritance only — direct
     // instantiation (`new DeviceRunnerBase()`) is a compile error. The
     // public virtual dtor above lets the shared c_api delete through a
@@ -681,6 +694,9 @@ protected:
      */
     int sync_run_streams();
 
+    /** Wait for an explicit AICPU/AICore stream pair. */
+    int sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicore_stream);
+
     /**
      * Pull the device wall (ns) back from `device_wall_dev_ptr_` and
      * cache it on `device_wall_ns_`. D2H copy failure is a soft warn —
@@ -795,6 +811,7 @@ protected:
         // chip_buffer_hash, which keys the retained buffer.
         uint64_t hash{0};
         uint64_t chip_buffer_hash{0};
+        uint64_t aicore_image_hash{0};
         uint64_t dev_orch_so_addr{0};
         size_t dev_orch_so_size{0};
         std::string func_name;
@@ -828,6 +845,8 @@ protected:
     // Same re-register semantics as `aicpu_dlopen_total_`, but for hbg
     // variants.
     size_t host_dlopen_total_{0};
+    volatile int32_t *task_accepted_state_{nullptr};
+    int32_t task_accepted_value_{0};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
@@ -911,7 +930,9 @@ protected:
 
     // Persistent AICPU / AICore streams created in
     // `ensure_device_initialized()` and torn down in the subclass's
-    // `finalize()`. `nullptr` before init.
+    // `finalize()`. A2A3 reserves these for bootstrap/control operations and
+    // submits runs on its own per-slot stream sets; A5 submits runs on these.
+    // `nullptr` before init.
     rtStream_t stream_aicpu_{nullptr};
     rtStream_t stream_aicore_{nullptr};
     KernelArgsHelper kernel_args_;

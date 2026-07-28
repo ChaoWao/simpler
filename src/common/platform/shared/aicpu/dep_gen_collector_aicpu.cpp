@@ -48,6 +48,11 @@ static int s_orch_thread_idx = -1;  // set via dep_gen_aicpu_set_orch_thread_idx
 // call an empty deps.json clean. One-shot so a per-task path never floods the
 // AICPU log (see .claude/rules/codestyle.md).
 static bool s_pre_init_drop_reported = false;
+// Same one-shot treatment for records arriving before the orchestrator thread
+// index is known: with s_orch_thread_idx still negative there is no ready queue
+// to publish into, so such a record is unreachable for the host no matter how
+// much of it is written.
+static bool s_pre_orch_idx_drop_reported = false;
 
 static constexpr uint64_t kDepGenQueueBackpressureWaitCycles = PLATFORM_DFX_BACKPRESSURE_TIMEOUT_CYCLES;
 
@@ -140,6 +145,7 @@ void dep_gen_aicpu_init() {
         return;
     }
     s_pre_init_drop_reported = false;
+    s_pre_orch_idx_drop_reported = false;
     s_dep_gen_header = get_dep_gen_header(base);
     s_dep_gen_state = get_dep_gen_buffer_state(base, /*instance_index=*/0);
 
@@ -179,6 +185,24 @@ void dep_gen_aicpu_record_submit(
 
     // Account every attempted record so total == collected + dropped on host.
     s_dep_gen_state->total_record_count += 1;
+
+    // The ready queue a full buffer is published to is selected by
+    // s_orch_thread_idx; while it is negative nothing written here can ever
+    // reach the host (DeviceProfilerEngine::enqueue_ready rejects the index).
+    // Drop the record against the reconcile equation instead of filling a
+    // buffer whose only future is a "ready_queue full" error at flush.
+    if (s_orch_thread_idx < 0) {
+        if (!s_pre_orch_idx_drop_reported) {
+            s_pre_orch_idx_drop_reported = true;
+            LOG_ERROR(
+                "dep_gen: submit recorded before dep_gen_aicpu_set_orch_thread_idx(); this and any "
+                "further records are dropped because no ready queue is selected"
+            );
+        }
+        s_dep_gen_state->dropped_record_count += 1;
+        wmb();
+        return;
+    }
 
     int dc = explicit_dep_count;
     if (dc < 0) dc = 0;

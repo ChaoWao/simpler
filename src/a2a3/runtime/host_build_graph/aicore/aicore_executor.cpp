@@ -115,7 +115,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // first deref is safe here — off the dispatch→start critical path.
     __gm__ L2SwimlaneActiveHead *l2_swimlane_head = l2_swimlane_enabled ? get_l2_swimlane_aicore_head() : nullptr;
     // cached_buf_seq must start != AICPU's initial head.current_buf_seq (0)
-    // so the first record_task observes a mismatch and loads the buffer ptr.
+    // so the first reservation observes a mismatch and loads the buffer ptr.
     L2SwimlaneAicoreLocalState l2_swimlane_local = {nullptr, UINT32_MAX, 0};
 
     // Phase 4: Main execution loop - poll register for tasks until exit signal
@@ -233,6 +233,13 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 receive_time = get_sys_cnt_aicore();
             }
 
+            // Bind this task to the currently-published buffer generation
+            // before ACK makes progress visible to AICPU.
+            __gm__ L2SwimlaneAicoreTaskRecord *l2_swimlane_record = nullptr;
+            if (l2_swimlane_enabled) {
+                l2_swimlane_record = l2_swimlane_aicore_reserve_task_record(l2_swimlane_head, &l2_swimlane_local);
+            }
+
             write_reg(RegId::COND, MAKE_ACK_VALUE(task_id));
 
             // Performance profiling: record start time
@@ -245,6 +252,9 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
 
             // Execute the task
             execute_task(exec_payload);
+
+            // Keep start_time -> end_time scoped to AICore execution.
+            uint64_t end_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             if (pmu_enabled) {
                 pmu_aicore_end();
@@ -271,16 +281,10 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             last_reg_val = reg_val;
             write_reg(RegId::COND, MAKE_FIN_VALUE(task_id));
 
-            // Sample end_time AFTER the FIN write so the op-event end marks the
-            // moment the AICPU can first observe completion — any compute-end ->
-            // FIN gap (epilogue / write-back) shows directly on the bar instead
-            // of being inferred. The record write itself stays off the critical
-            // path (it runs after FIN, so it no longer delays completion).
             if (l2_swimlane_enabled) {
-                uint64_t end_time = get_sys_cnt_aicore();
                 uint64_t task_token_raw = exec_payload->local_context.async_ctx.task_token.raw;
-                l2_swimlane_aicore_record_task(
-                    l2_swimlane_head, &l2_swimlane_local, task_token_raw, task_id, receive_time, start_time, end_time
+                l2_swimlane_aicore_commit_task_record(
+                    l2_swimlane_record, task_token_raw, task_id, receive_time, start_time, end_time
                 );
             }
         }

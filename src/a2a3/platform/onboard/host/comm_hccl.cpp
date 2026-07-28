@@ -833,8 +833,7 @@ static FabricAttempt alloc_windows_via_fabric(CommHandle h, uint64_t win_size) {
     // windowsOut[] is intentionally left zero: no kernel path reads it
     // (verified by grep across simpler + pto-isa). The field is kept in
     // CommContext only to preserve byte-equivalence with pto-isa's parallel
-    // HcclDeviceContext declaration; removing it is gated on the F4
-    // private-ization decision (see .docs/28.l3-comm/ext.01.pr-774-review.md).
+    // HcclDeviceContext declaration.
     // host_ctx was value-initialized at handle construction (CommContext{}),
     // and the idempotency guard in comm_alloc_windows prevents a second entry;
     // no re-zero needed before populating it here.
@@ -937,6 +936,16 @@ static bool domain_read_announce(
     return false;
 }
 
+// Wipes a window before its shareable handle is published. Publication is the
+// point from which a peer may import the window and store into it — a barrier
+// signal lands there as soon as that peer's kernel runs — so a wipe issued any
+// later can erase a signal the owner has not yet waited on. Kernels take the
+// zeroed tail as the initial value of their barrier-signal slots.
+// The full granularity-aligned mapped range is zeroed to match ctx.winSize.
+static aclError zero_local_window(const VmmWindow &window) {
+    return aclrtMemset(window.base, window.size, 0, window.size);
+}
+
 // Tag helper for allocation-scoped file barriers.  Tag is fed straight into
 // `file_barrier`, which already namespaces the marker filename by
 // rootinfo prefix + run_token + rank, so adding allocation_id to `tag` is
@@ -977,6 +986,12 @@ static int domain_alloc_via_ipc(
     status = export_ipc_window(local_window, &shareable_handle);
     if (status != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain ipc: ExportToShareableHandle -> %d", h->rank, static_cast<int>(status));
+        return -1;
+    }
+
+    status = zero_local_window(local_window);
+    if (status != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] alloc_domain ipc: aclrtMemset -> %d", h->rank, static_cast<int>(status));
         return -1;
     }
 
@@ -1174,6 +1189,13 @@ static FabricAttempt domain_alloc_via_fabric(
             return FabricAttempt::kUnsupported;
         }
         LOG_ERROR("[comm rank %d] alloc_domain: ExportToShareableHandleV2 -> %d", h->rank, static_cast<int>(aret));
+        release_domain_windows(out);
+        return FabricAttempt::kError;
+    }
+
+    aret = zero_local_window(out->local_window);
+    if (aret != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
         release_domain_windows(out);
         return FabricAttempt::kError;
     }
@@ -1443,18 +1465,6 @@ extern "C" int comm_alloc_domain_windows(
         const int rc =
             domain_alloc_via_ipc(h, allocation_id, rank_ids, rank_count, domain_rank, window_size, alloc.get());
         if (rc != 0) return rc;
-    }
-
-    // Zero the freshly-allocated local pool so kernels do not observe stale
-    // bytes (parity with the sim backend's memset). The full granularity-aligned
-    // mapped range is zeroed to match ctx.winSize.
-    aclError aret = aclrtMemset(alloc->local_window.base, alloc->local_window.size, 0, alloc->local_window.size);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(alloc->device_ctx);
-        alloc->device_ctx = nullptr;
-        release_domain_windows(alloc.get());
-        return -1;
     }
 
     *device_ctx_out = reinterpret_cast<uint64_t>(alloc->device_ctx);

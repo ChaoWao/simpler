@@ -9,7 +9,7 @@ and L3 dequeues those outputs. The queue is built on top of the lower-level
 L3-L2 orchestration communication primitives described in
 [l3-l2-orch-comm.md](l3-l2-orch-comm.md). For where L3 and L2 sit in
 the runtime stack, see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md).
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md).
 
 ## 1. API
 

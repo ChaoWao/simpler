@@ -26,7 +26,7 @@ simulation transport, and the daemon/session runner used by
 profiles are still pending.
 
 For the high-level role of this layer among the three engine components, see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md). For what
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md). For what
 runs on the other side of the local mailbox, see [task-flow.md](task-flow.md).
 For where dispatched tasks come from, see [scheduler.md](scheduler.md).
 
@@ -46,7 +46,8 @@ public:
     void add_sub       (void *mailbox);
 
     // Lifecycle
-    void start(Ring *ring, OnCompleteFn on_complete);   // starts all WorkerThreads
+    void start(Ring *ring, OnCompleteFn on_complete,
+               OnAcceptFn on_accept);              // starts all WorkerThreads
     void stop();
 
     // Scheduler API
@@ -100,8 +101,9 @@ struct WorkerDispatch {
 
 class WorkerThread {
 public:
-    void start(Ring *ring, WorkerManager *manager,
+    void start(Ring *ring,
                const std::function<void(WorkerCompletion)> &on_complete,
+               const std::function<void(WorkerDispatch)> &on_accept,
                std::unique_ptr<WorkerEndpoint> endpoint);
     void stop();
     void dispatch(WorkerDispatch d);       // slot id + group sub-index
@@ -118,13 +120,14 @@ private:
     std::condition_variable cv_;
 
     void loop();
-    WorkerCompletion dispatch_process(WorkerDispatch d);
+    WorkerCompletion dispatch_process(WorkerDispatch d,
+                                      const std::function<void()> &on_accept);
 };
 ```
 
 The WorkerThread's `std::thread` pumps the internal queue and calls
-`endpoint->run(...)` once per dispatch. `LocalMailboxEndpoint::run` drives the
-shm handshake — one mailbox round trip per dispatch. The forked child loop
+`endpoint->run_with_accept(...)` once per dispatch. `LocalMailboxEndpoint`
+drives the shm handshake — one mailbox round trip per dispatch. The forked child loop
 that consumes the mailbox lives in Python (`_chip_process_loop` /
 `_sub_worker_loop` in `python/simpler/worker.py`); the parent does not fork
 children.
@@ -152,7 +155,11 @@ and the child polls the mailbox for the lifetime of the worker.
 ### 3.1 Parent-side dispatch
 
 ```cpp
-WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, WorkerDispatch d) {
+// `run(ring, d)` forwards here with an empty hook; the acceptance-aware
+// overload is what WorkerThread calls.
+WorkerCompletion LocalMailboxEndpoint::run_with_accept(
+    Ring *ring, const WorkerDispatch &d, const std::function<void()> &on_accept
+) {
     TaskSlotState &s = *ring->slot_state(d.task_slot);
     char *m = static_cast<char *>(mailbox_);
 
@@ -169,9 +176,35 @@ WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, WorkerDispatch d) {
     // Signal child
     write_state(mailbox_, MailboxState::TASK_READY);
 
-    // Poll for completion
-    while (read_state(mailbox_) != MailboxState::TASK_DONE)
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    // Spin-poll for completion. The task's latency runs through this wait, so
+    // it never sleeps (codestyle rule 5). A child that dies without publishing
+    // TASK_DONE would spin here forever, so its liveness is sampled on a
+    // kChildLivenessPollPeriod steady-clock period rather than an iteration
+    // count, which no longer maps to a bounded time at spin speed.
+    auto next_liveness_check = steady_clock::now() + kChildLivenessPollPeriod;
+    bool acceptance_observed = false;
+    while (true) {
+        MailboxState state = read_state(mailbox_);
+        // Launch acceptance is a sticky word, not a state: the child sets it
+        // before TASK_DONE and nothing clears it until the next TASK_READY, so
+        // a task that finishes between two polls cannot lose the ACK. Read
+        // after the state so a TASK_DONE observation implies it is visible.
+        if (!acceptance_observed && read_accepted(mailbox_)) {
+            acceptance_observed = true;
+            if (on_accept) on_accept();
+        }
+        if (state == MailboxState::TASK_DONE) break;
+        auto now = steady_clock::now();
+        if (now >= next_liveness_check) {
+            next_liveness_check = now + kChildLivenessPollPeriod;
+            std::string death = check_child_death();
+            if (!death.empty()) {
+                completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+                completion.error_message = "LocalMailboxEndpoint::run: " + death;
+                return completion;
+            }
+        }
+    }
 
     int err = read_error(mailbox_);
     write_state(mailbox_, MailboxState::IDLE);
@@ -187,7 +220,12 @@ Parent-side cost per dispatch:
 - One reserved `uint64`, one `CallConfig`, one 32-byte digest, and one
   TaskArgs blob
 - One signal (`write_state`)
-- Poll loop with `sleep_for(50us)` (not busy-wait)
+- Spin-poll loop, never a sleep — a task's latency passes through this wait
+  ([codestyle](../.claude/rules/codestyle.md) rule 5). Child liveness is sampled
+  on a steady-clock period, so a dead child ends the wait with
+  `ENDPOINT_FAILURE` instead of spinning the parent forever
+- A sticky launch-acceptance word, observed before completion and cleared only
+  when the parent publishes the next `TASK_READY`
 - One explicit completion outcome: success, task failure, or endpoint failure
 
 Total ~nanoseconds overhead; the wait is dominated by actual kernel execution.
@@ -198,7 +236,10 @@ The child loop lives in Python — see `_chip_process_loop` and
 `_sub_worker_loop` in `python/simpler/worker.py`. Each child polls
 `MAILBOX_OFF_STATE`, decodes the digest-prefixed args blob on `TASK_READY`,
 resolves the digest to its private local slot/callable, writes back any error,
-and publishes `TASK_DONE`.
+and publishes `TASK_DONE`. An A2A3 onboard chip child also exposes its mailbox
+state word to the native runner, which publishes `TASK_ACCEPTED` after both
+kernel launches succeed. SUB, remote, A5, and failure paths use WorkerThread's
+completion-time acceptance fallback.
 The child inherits the parent's full address space at fork time, so:
 
 - ChipCallable objects (pre-fork allocated) are COW-visible at the same VA
@@ -326,7 +367,7 @@ Alternative: N children share one dispatch queue. Rejected because:
 
 ## 6. Related
 
-- [hierarchical_level_runtime.md](hierarchical_level_runtime.md) — where this
+- [hierarchical-level-runtime.md](hierarchical-level-runtime.md) — where this
   layer fits in the three-component engine
 - [task-flow.md](task-flow.md) — what `ChipWorker::run` receives
 - [scheduler.md](scheduler.md) — the producer of `WorkerThread::dispatch`

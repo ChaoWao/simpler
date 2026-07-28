@@ -11,7 +11,7 @@ The intended use case is in-flight interaction: L3 can write input payload,
 publish a data-ready counter, wait for L2/AICore completion, and read output
 payload without ending the L2 orchestration task. For where L3 and L2 sit in
 the runtime stack, see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md). For dynamic
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md). For dynamic
 cross-rank communication domains, see [comm-domain.md](comm-domain.md).
 
 ## 1. API

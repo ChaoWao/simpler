@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a general bug in PTO Runtime
+description: Report a general bug in simpler
 title: "[Bug] "
 labels: ["bug"]
 body:

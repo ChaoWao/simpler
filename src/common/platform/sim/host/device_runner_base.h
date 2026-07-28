@@ -59,9 +59,9 @@ struct CallConfig;  // task_interface/call_config.h — per-run config threaded 
 // PLATFORM_MAX_BLOCKDIM (24 on a2a3, 36 on a5). The simulator runs one OS
 // thread per AICore, so taking the whole modelled chip would be 72-108 threads
 // per case; under xdist that is several hundred threads for no added coverage.
-// It is not a ceiling: an explicit block_dim is still honoured up to
-// PLATFORM_MAX_BLOCKDIM. Onboard is unaffected — it auto-resolves from the real
-// per-stream core limits.
+// CallConfig exposes no block_dim knob, so this is what a sim run takes.
+// Onboard is unaffected — it auto-resolves from the real per-stream core
+// limits.
 constexpr int SIM_AUTO_BLOCKDIM = 8;
 
 class SimDeviceRunnerBase {

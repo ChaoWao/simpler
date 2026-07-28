@@ -568,7 +568,7 @@ callback that gathers payload bytes and appends metadata to a shard-local
 record list, plus `reconcile_counters` / `export_dump_files` /
 `finalize`. The mgmt/collector threading, buffer pooling, and `Module`
 trait pattern are shared with PMU and L2Swimlane — see
-[profiling-framework.md](../profiling-framework.md) for the
+[profiling-framework.md](profiling-framework.md) for the
 framework reference.
 
 ### 5.5 a5 — same framework, host-shadow transport
@@ -990,11 +990,11 @@ their unset fallback and keep the `#897` distributed-skew trade-off.
 
 ## 9. Related docs
 
-- [profiling-framework.md](../profiling-framework.md) — shared
+- [profiling-framework.md](profiling-framework.md) — shared
   host-side collector framework (a2a3 only).
 - [chip-level-arch.md](../chip-level-arch.md) — host / AICPU /
   AICore program boundaries this feature spans.
 - [task-flow.md](../task-flow.md) — where AICPU dispatch and
   completion sit in the per-task state machine.
-- [hierarchical_level_runtime.md](../hierarchical_level_runtime.md)
+- [hierarchical-level-runtime.md](../hierarchical-level-runtime.md)
   — how L2 (this feature) relates to L3+ composition.

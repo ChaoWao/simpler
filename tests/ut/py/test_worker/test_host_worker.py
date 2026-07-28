@@ -19,7 +19,7 @@ import threading
 import time
 import weakref
 from multiprocessing.shared_memory import SharedMemory
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import simpler.worker as worker_mod
@@ -1595,6 +1595,43 @@ class TestRunHandle:
         with pytest.raises(KeyboardInterrupt):
             handle._wait_for_serialization()
 
+    def test_acceptance_wait_does_not_block_completion_waiter(self):
+        acceptance_entered = threading.Event()
+        acceptance_release = threading.Event()
+        completion_entered = threading.Event()
+        completion_release = threading.Event()
+
+        class FakeWorker:
+            def _wait_run_handle_accepted(self, run_id):
+                assert run_id == 1
+                acceptance_entered.set()
+                assert acceptance_release.wait(5.0)
+
+            def _wait_run_handle(self, run_id, timeout):
+                assert run_id == 1
+                completion_entered.set()
+                assert completion_release.wait(5.0)
+                return True
+
+            def _finalize_run_handle(self, handle, run_id, error):
+                return error
+
+        handle = RunHandle(cast(Worker, FakeWorker.__new__(FakeWorker)), 1, ())
+        completion_thread = threading.Thread(target=handle.wait)
+        acceptance_thread = threading.Thread(target=handle._wait_for_acceptance)
+        completion_thread.start()
+        assert completion_entered.wait(3.0)
+        acceptance_thread.start()
+        try:
+            assert acceptance_entered.wait(3.0)
+        finally:
+            acceptance_release.set()
+            completion_release.set()
+            acceptance_thread.join(5.0)
+            completion_thread.join(5.0)
+        assert not acceptance_thread.is_alive()
+        assert not completion_thread.is_alive()
+
     def test_done_query_cannot_race_native_run_release(self):
         done_entered = threading.Event()
         done_release = threading.Event()
@@ -1718,6 +1755,368 @@ class TestRunHandle:
 
         assert hw._finalize_run_handle(handle, 1, None) is interrupt
         assert not hw._accepted_run_handles
+
+    def test_run_finalization_releases_only_its_resources(self, monkeypatch):
+        class SlotRef:
+            def __init__(self):
+                self.releases = 0
+
+            def _release_slot_ref(self):
+                self.releases += 1
+
+        class Region:
+            def __init__(self, region_id):
+                self.region_id = region_id
+                self._worker_id = 0
+                self.mapping_closed = False
+                self.expired = False
+
+            def _close_l3_host_mapping(self):
+                self.mapping_closed = True
+
+            def _expire(self):
+                self.expired = True
+
+        class NativeWorker:
+            def __init__(self):
+                self.released_regions = []
+
+            def control_l3_l2_region_release(self, worker_id, region_id):
+                self.released_regions.append((worker_id, region_id))
+
+        class NativeOrchestrator:
+            def __init__(self):
+                self.released_runs = []
+
+            def _release_run(self, run_id):
+                self.released_runs.append(run_id)
+
+        def domain(name, allocation_id):
+            return worker_mod.CommDomainHandle(
+                name=name,
+                workers=(),
+                contexts={},
+                allocation_id=allocation_id,
+                _release_fn=lambda _handle: None,
+            )
+
+        worker = Worker(level=3, num_sub_workers=0)
+        native_worker = NativeWorker()
+        native_orch = NativeOrchestrator()
+        worker._worker = cast(Any, native_worker)
+        worker._orch = cast(Any, native_orch)
+
+        first = worker_mod._RunResources()
+        second = worker_mod._RunResources()
+        first_ref, second_ref = SlotRef(), SlotRef()
+        first_region, second_region = Region(11), Region(22)
+        first_live, second_live = domain("first-live", 1), domain("second-live", 2)
+        first_pending, second_pending = domain("first-pending", 3), domain("second-pending", 4)
+        first.remote_slot_refs.append(cast(Any, first_ref))
+        second.remote_slot_refs.append(cast(Any, second_ref))
+        first.l3_l2_regions.append(first_region)
+        second.l3_l2_regions.append(second_region)
+        first.l3_l2_orch_comm_host_buffers[0x1000] = 64
+        second.l3_l2_orch_comm_host_buffers[0x2000] = 128
+        first.live_domains[first_live.name] = first_live
+        second.live_domains[second_live.name] = second_live
+        first.pending_release_domains.append(first_pending)
+        second.pending_release_domains.append(second_pending)
+        worker._live_l3_l2_regions.extend([first_region, second_region])
+        worker._live_domains.update({first_live.name: first_live, second_live.name: second_live})
+
+        released_domains = []
+
+        def release_domain_now(handle):
+            released_domains.append(handle)
+            if worker._live_domains.get(handle.name) is handle:
+                worker._live_domains.pop(handle.name)
+
+        monkeypatch.setattr(worker, "_release_domain_now", release_domain_now)
+        first_handle = RunHandle(worker, 1, (), first)
+        second_handle = RunHandle(worker, 2, (), second)
+        worker._accepted_run_handles.update({first_handle, second_handle})
+
+        assert worker._finalize_run_handle(first_handle, 1, None) is None
+
+        assert first_ref.releases == 1
+        assert second_ref.releases == 0
+        assert native_worker.released_regions == [(0, 11)]
+        assert first_region.mapping_closed and first_region.expired
+        assert not second_region.mapping_closed and not second_region.expired
+        assert worker._live_l3_l2_regions == [second_region]
+        assert first.l3_l2_orch_comm_host_buffers == {}
+        assert second.l3_l2_orch_comm_host_buffers == {0x2000: 128}
+        assert released_domains == [first_pending, first_live]
+        assert first_pending.freed and first_live.freed
+        assert not second_pending.freed and not second_live.freed
+        assert worker._live_domains == {second_live.name: second_live}
+        assert native_orch.released_runs == [1]
+        assert worker._accepted_run_handles == {second_handle}
+
+    def test_domain_released_after_its_run_retired_is_freed_inline(self):
+        """A late release has no fence left to defer behind, so it frees now.
+
+        Both deferred paths are closed to it: the run's queue is never drained
+        again, and _release_domain_handle has already dropped the handle from
+        _live_domains, so close()'s live sweep cannot reach it either.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        worker._orch = cast(Any, type("FakeOrch", (), {"_release_run": lambda self, run_id: None})())
+
+        freed: list[str] = []
+
+        def release_now(handle):
+            freed.append(handle.name)
+            if worker._live_domains.get(handle.name) is handle:
+                worker._live_domains.pop(handle.name)
+
+        worker._release_domain_now = cast(Any, release_now)
+
+        resources = worker_mod._RunResources()
+        late = worker_mod.CommDomainHandle(
+            name="late",
+            workers=(),
+            contexts={},
+            allocation_id=1,
+            _release_fn=lambda released, owner=resources: worker._release_domain_handle(released, owner),
+        )
+        resources.live_domains[late.name] = late
+        worker._live_domains[late.name] = late
+
+        handle = RunHandle(worker, 1, (), resources)
+        worker._accepted_run_handles.add(handle)
+        assert worker._finalize_run_handle(handle, 1, None) is None
+        assert freed == ["late"], "a domain still live at its run's fence is swept there"
+
+        second = worker_mod.CommDomainHandle(
+            name="later",
+            workers=(),
+            contexts={},
+            allocation_id=2,
+            _release_fn=lambda released, owner=resources: worker._release_domain_handle(released, owner),
+        )
+        resources.live_domains[second.name] = second
+        worker._live_domains[second.name] = second
+
+        second.release()
+
+        assert freed == ["late", "later"]
+        assert second.freed
+        assert resources.pending_release_domains == []
+
+    def test_domain_released_while_its_run_retires_is_still_freed(self):
+        """A release in flight across retirement must not be stranded.
+
+        The window the fence has to close: the deferred queue has already been
+        drained for the last time, so a handle appended after that is reachable
+        from nothing — the queue is never read again, and the release itself
+        popped the handle from ``_live_domains``, blinding ``close()``'s sweep.
+
+        Forced deterministically by parking the fence in its live-domain sweep,
+        which holds no lock, while the releasing thread runs to completion.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        worker._orch = cast(Any, type("FakeOrch", (), {"_release_run": lambda self, run_id: None})())
+
+        freed: list[str] = []
+
+        def release_now(handle):
+            freed.append(handle.name)
+            if worker._live_domains.get(handle.name) is handle:
+                worker._live_domains.pop(handle.name)
+
+        worker._release_domain_now = cast(Any, release_now)
+
+        resources = worker_mod._RunResources()
+
+        def domain(name, allocation_id):
+            return worker_mod.CommDomainHandle(
+                name=name,
+                workers=(),
+                contexts={},
+                allocation_id=allocation_id,
+                _release_fn=lambda released, owner=resources: worker._release_domain_handle(released, owner),
+            )
+
+        raced = domain("raced", 1)
+        # A second domain keeps the sweep branch reachable so the fence parks there.
+        swept = domain("swept", 2)
+        for handle in (raced, swept):
+            resources.live_domains[handle.name] = handle
+            worker._live_domains[handle.name] = handle
+
+        in_sweep = threading.Event()
+        release_done = threading.Event()
+        real_sweep = worker._release_all_live_domains
+
+        def parked_sweep(res=None):
+            in_sweep.set()
+            assert release_done.wait(5.0), "releasing thread did not finish"
+            real_sweep(res)
+
+        worker._release_all_live_domains = cast(Any, parked_sweep)
+
+        def do_release():
+            assert in_sweep.wait(5.0), "fence never reached its sweep"
+            raced.release()
+            release_done.set()
+
+        releaser = threading.Thread(target=do_release)
+        releaser.start()
+        try:
+            handle = RunHandle(worker, 1, (), resources)
+            worker._accepted_run_handles.add(handle)
+            assert worker._finalize_run_handle(handle, 1, None) is None
+        finally:
+            releaser.join(5.0)
+
+        assert not releaser.is_alive()
+        assert raced.freed, "a release racing retirement was stranded on a drained queue"
+        assert swept.freed
+        assert resources.pending_release_domains == []
+        assert freed.count("raced") == 1, f"raced domain freed more than once: {freed}"
+
+    @staticmethod
+    def _gated_domain_worker(worker, target_id, outcome=None):
+        """Park `worker`'s backend release for `target_id`; optionally raise."""
+        entered: list[int] = []
+        in_backend = threading.Event()
+        let_go = threading.Event()
+
+        def gated(handle):
+            entered.append(handle.allocation_id)
+            if handle.allocation_id == target_id:
+                in_backend.set()
+                let_go.wait(10.0)
+                if outcome is not None:
+                    raise outcome
+
+        worker._release_domain_claimed = cast(Any, gated)
+        return entered, in_backend, let_go
+
+    def _retired_domain(self, worker, resources, name, allocation_id):
+        handle = worker_mod.CommDomainHandle(
+            name=name,
+            workers=(),
+            contexts={},
+            allocation_id=allocation_id,
+            _release_fn=lambda released, owner=resources: worker._release_domain_handle(released, owner),
+        )
+        worker._live_domains[name] = handle
+        return handle
+
+    def test_sweep_and_post_fence_release_free_a_domain_once(self):
+        """Two paths reaching one handle must not both drive the backend free.
+
+        The dangerous order is release-then-sweep: ``release()`` wins the
+        ``_released`` flag, so the sweep — still holding the handle in the
+        snapshot it took earlier — skips setting that flag and goes straight to
+        the backend call the release is already making. (Sweep-then-release is
+        already safe: the sweep sets ``_released`` before freeing, which makes
+        the later ``release()`` a no-op.)
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        entered, in_backend, let_go = self._gated_domain_worker(worker, target_id=7)
+
+        resources = worker_mod._RunResources()
+        resources.retired = True  # the owning run's fence has already passed
+        contested = self._retired_domain(worker, resources, "contested", 7)
+
+        releaser = threading.Thread(target=contested.release)
+        releaser.start()
+        try:
+            assert in_backend.wait(5.0), "release never reached the backend"
+            # The sweep's snapshot still holds `contested`; it must not free it
+            # a second time.
+            sweeper = threading.Thread(target=worker._release_all_live_domains)
+            sweeper.start()
+            let_go.set()
+            sweeper.join(5.0)
+            assert not sweeper.is_alive()
+        finally:
+            let_go.set()
+            releaser.join(5.0)
+
+        assert entered.count(7) == 1, f"allocation 7 was released {entered.count(7)} times"
+        assert contested.freed
+
+    def test_second_domain_release_waits_for_the_first(self):
+        """A second caller blocks until the owner's backend call returns.
+
+        Returning early would let the caller mark the handle freed, drop it
+        from ``_live_domains`` and — on the ``close()`` path — tear down the
+        mailboxes the in-flight release is still using, which is exactly what
+        ``close()`` orders its domain sweep before ``_worker.close()`` to avoid.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        entered, in_backend, let_go = self._gated_domain_worker(worker, target_id=7)
+
+        resources = worker_mod._RunResources()
+        contested = self._retired_domain(worker, resources, "contested", 7)
+
+        owner = threading.Thread(target=worker._release_domain_now, args=(contested,))
+        second_done = threading.Event()
+
+        def second_caller():
+            worker._release_domain_now(contested)
+            second_done.set()
+
+        second = threading.Thread(target=second_caller)
+        owner.start()
+        try:
+            assert in_backend.wait(5.0), "owner never reached the backend"
+            assert not contested.freed, "freed must stay false while the backend call is in flight"
+            second.start()
+            assert not second_done.wait(0.5), "the second caller returned while the owner was still releasing"
+            assert not contested.freed
+        finally:
+            let_go.set()
+            owner.join(5.0)
+            second.join(5.0)
+
+        assert second_done.is_set()
+        assert entered.count(7) == 1, f"allocation 7 reached the backend {entered.count(7)} times"
+
+    def test_failed_domain_release_is_replayed_to_a_second_caller(self):
+        """The owner's failure reaches every later caller, so no path reports
+        success for an allocation whose backend release did not happen.
+
+        ``_release_all_live_domains`` keeps an un-freed handle in
+        ``_live_domains`` precisely so ``close()`` reports it as a residual; a
+        second caller that returned success would erase that.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        boom = RuntimeError("backend release failed")
+        _entered, in_backend, let_go = self._gated_domain_worker(worker, target_id=7, outcome=boom)
+        let_go.set()
+
+        resources = worker_mod._RunResources()
+        contested = self._retired_domain(worker, resources, "contested", 7)
+
+        with pytest.raises(RuntimeError, match="backend release failed"):
+            worker._release_domain_now(contested)
+        assert in_backend.is_set()
+        assert not contested.freed
+
+        # The sweep is the second caller: it must see the failure, keep the
+        # handle, and leave `freed` false.
+        worker._release_all_live_domains()
+        assert not contested.freed, "a failed release must not be reported as freed"
+        assert "contested" in worker._live_domains, "a failed release must stay a detectable residual"
+
+    def test_allocate_domain_outside_graph_construction_is_rejected(self):
+        worker = Worker(level=3, num_sub_workers=0)
+        worker._worker = cast(Any, object())
+        assert worker._building_run_resources is None
+
+        with pytest.raises(RuntimeError, match="graph is being built"):
+            worker._allocate_domain(name="d", workers=(0,), window_size=4096, buffers=[])
 
 
 # ---------------------------------------------------------------------------

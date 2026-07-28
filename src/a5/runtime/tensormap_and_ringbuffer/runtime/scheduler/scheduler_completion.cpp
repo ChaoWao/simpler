@@ -77,7 +77,7 @@ SlotTransition SchedulerContext::decide_slot_transition(
 // Complete one slot's task: subtask counting, mixed completion, deferred release, profiling.
 void SchedulerContext::complete_slot_task(
     PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
-    int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
+    [[maybe_unused]] int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
     PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 #if SIMPLER_DFX
     ,
@@ -172,7 +172,6 @@ void SchedulerContext::complete_slot_task(
         if (deferred_release_count < PTO2_DEFERRED_RELEASE_CAP) {
             deferred_release_slot_states[deferred_release_count++] = &slot_state;
         } else {
-            LOG_INFO_V9("Thread %d: release", thread_idx);
             while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
                 // SCHED_PROFILING variant takes thread_idx for the per-thread
@@ -411,19 +410,20 @@ void SchedulerContext::check_running_cores_for_completion(
 // Returns false if another thread already holds drain; caller must re-push slot_state.
 //
 // Two-phase protocol: CAS 0 -> -1 (sentinel) to claim ownership, store task and
-// reset election flag, then release-store block_num.  Other threads acquire-load
+// reset staging state, then release-store block_num. Other threads acquire-load
 // sync_start_pending; seeing block_num > 0 ensures all relaxed stores are visible.
 bool SchedulerContext::enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num) {
     int32_t expected = 0;
     if (!drain_state_.sync_start_pending.compare_exchange_strong(
-            expected, -1, std::memory_order_relaxed, std::memory_order_relaxed
+            expected, -1, std::memory_order_acquire, std::memory_order_relaxed
         )) {
         return false;  // Another thread already holds the drain slot.
     }
-    // We own the drain slot.  Store the task and reset election flag before making it visible.
+    // Advance the attempt before publishing the new task so delayed participants
+    // from the previous round cannot satisfy this round's ack tree.
+    uint64_t next_attempt = sync_start_drain_next_attempt(drain_state_.drain_attempt.load(std::memory_order_relaxed));
+    drain_state_.drain_attempt.store(next_attempt, std::memory_order_release);
     drain_state_.pending_task.store(slot_state, std::memory_order_release);
-    drain_state_.drain_ack_mask.store(0, std::memory_order_relaxed);
-    drain_state_.drain_worker_elected.store(0, std::memory_order_relaxed);
     drain_state_.drain_stage_go.store(0, std::memory_order_relaxed);
     drain_state_.drain_stage_done_mask.store(0, std::memory_order_relaxed);
     drain_state_.drain_running_staged.store(0, std::memory_order_relaxed);
@@ -533,38 +533,37 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     if (block_num == 0) return;
 
     uint32_t all_acked = (1u << active_sched_threads_) - 1;
+    uint64_t drain_attempt = drain_state_.drain_attempt.load(std::memory_order_acquire);
+    uint64_t subtree_token = sync_start_drain_ack_subtree_token(drain_attempt);
 
-    drain_state_.drain_ack_mask.fetch_or(1u << thread_idx, std::memory_order_release);
-
-    while (true) {
-        if (is_completed()) return;
-        uint32_t ack = drain_state_.drain_ack_mask.load(std::memory_order_acquire);
-        if ((ack & all_acked) == all_acked) break;
-        if ((ack & (1u << thread_idx)) == 0) return;
-        SPIN_WAIT_HINT();
+    // O(log N) reduction with O(1) fan-out per thread and no shared RMW.
+    for (int32_t child : {thread_idx * 2 + 1, thread_idx * 2 + 2}) {
+        if (child >= active_sched_threads_) continue;
+        while (drain_ack_tokens_[child].load(std::memory_order_acquire) != subtree_token) {
+            if (is_completed()) return;
+            if (drain_state_.drain_attempt.load(std::memory_order_acquire) != drain_attempt) return;
+            SPIN_WAIT_HINT();
+        }
     }
-
-    int32_t expected = 0;
-    drain_state_.drain_worker_elected.compare_exchange_strong(
-        expected, thread_idx + 1, std::memory_order_acquire, std::memory_order_relaxed
-    );
-    bool elected = drain_state_.drain_worker_elected.load(std::memory_order_relaxed) == thread_idx + 1;
+    drain_ack_tokens_[thread_idx].store(subtree_token, std::memory_order_release);
+    if (thread_idx != 0) {
+        while (drain_ack_tokens_[0].load(std::memory_order_acquire) != subtree_token) {
+            if (is_completed()) return;
+            if (drain_state_.drain_attempt.load(std::memory_order_acquire) != drain_attempt) return;
+            SPIN_WAIT_HINT();
+        }
+    }
+    bool coordinator = thread_idx == 0;
 
     PTO2TaskSlotState *slot_state = drain_state_.pending_task.load(std::memory_order_acquire);
-    bool gated = slot_state != nullptr && slot_state->payload != nullptr &&
-                 PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
+    bool gated = slot_state->payload != nullptr && PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
 
-    if (elected) {
-        if (slot_state == nullptr) {
-            drain_state_.drain_worker_elected.store(0, std::memory_order_release);
-            return;
-        }
+    if (coordinator) {
         PTO2ResourceShape shape = slot_state->active_mask.to_shape();
         int32_t available =
             count_global_available(shape, slot_state->active_mask.core_mask(), /*include_pending=*/gated);
         if (available < block_num) {
-            drain_state_.drain_ack_mask.store(0, std::memory_order_release);
-            drain_state_.drain_worker_elected.store(0, std::memory_order_release);
+            drain_state_.drain_attempt.store(sync_start_drain_next_attempt(drain_attempt), std::memory_order_release);
             return;
         }
         drain_state_.drain_running_staged.store(0, std::memory_order_relaxed);
@@ -573,12 +572,9 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     } else {
         while (drain_state_.drain_stage_go.load(std::memory_order_acquire) == 0) {
             if (is_completed()) return;
-            if (drain_state_.drain_worker_elected.load(std::memory_order_acquire) == 0) return;
+            if (drain_state_.drain_attempt.load(std::memory_order_acquire) != drain_attempt) return;
             SPIN_WAIT_HINT();
         }
-        slot_state = drain_state_.pending_task.load(std::memory_order_acquire);
-        if (slot_state == nullptr) return;
-        gated = slot_state->payload != nullptr && PTO2SchedulerState::owns_early_sync_drain(*slot_state->payload);
     }
 
 #if SIMPLER_DFX
@@ -591,10 +587,10 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     drain_state_.drain_running_staged.fetch_add(my_running, std::memory_order_acq_rel);
     drain_state_.drain_stage_done_mask.fetch_or(1u << thread_idx, std::memory_order_release);
 
-    if (!elected) {
+    if (!coordinator) {
         while (drain_state_.sync_start_pending.load(std::memory_order_acquire) != 0) {
             if (is_completed()) return;
-            if (drain_state_.drain_worker_elected.load(std::memory_order_acquire) == 0) return;
+            if (drain_state_.drain_attempt.load(std::memory_order_acquire) != drain_attempt) return;
             SPIN_WAIT_HINT();
         }
         return;
@@ -614,8 +610,6 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     drain_state_.pending_task.store(nullptr, std::memory_order_release);
     drain_state_.drain_stage_go.store(0, std::memory_order_relaxed);
     drain_state_.drain_stage_done_mask.store(0, std::memory_order_relaxed);
-    drain_state_.drain_ack_mask.store(0, std::memory_order_relaxed);
-    drain_state_.drain_worker_elected.store(0, std::memory_order_relaxed);
     drain_state_.sync_start_pending.store(0, std::memory_order_release);
 
     if (gated) {

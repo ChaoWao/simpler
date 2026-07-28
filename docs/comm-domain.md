@@ -7,7 +7,7 @@ function** via `orch.allocate_domain(...)` — there is no init-time / static
 declaration path.
 
 For where the Orchestrator sits among the engine components see
-[hierarchical_level_runtime.md](hierarchical_level_runtime.md); for the DAG
+[hierarchical-level-runtime.md](hierarchical-level-runtime.md); for the DAG
 submission internals see [orchestrator.md](orchestrator.md).
 
 ---
@@ -108,13 +108,21 @@ symmetric window is realized:
 
 | Aspect | Sim | HCCL (onboard) |
 | ------ | --- | -------------- |
-| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | VMM physical allocation + shareable-handle import; peer access via `aclrtDeviceEnablePeerAccess` |
+| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | a2a3: Fabric V2 handle exchange (`ACL_MEM_SHARE_HANDLE_TYPE_FABRIC`), falling back to VMM + shareable-handle IPC where Fabric is unsupported. a5: VMM shareable handles only. Cross-card P2P via `aclrtDeviceEnablePeerAccess` on both |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
-| Window init | window zeroed after handshake (`memset`) | window zeroed after handshake (`aclrtMemset`) |
+| Window init | window zeroed before the subset barrier (`memset`) | window zeroed before the handle is announced (`aclrtMemset`) |
 | Async-DMA workspace | n/a | a2a3: opt-in per Worker (`enable_sdma`); a5: optional communication overlay, gated off by default |
 
 The window is zero-initialized on both backends so scratch/signal protocols see
 a known starting state (matching the historical static-path contract).
+
+The wipe happens before the window becomes reachable by any peer — before the
+shareable handle is announced on HCCL, before the `ready_count` barrier on sim.
+A peer that clears the subset barrier can return, launch its kernel and store a
+barrier signal into this rank's window immediately; a wipe issued after that
+point can erase a signal the owner has not yet waited on, and the owner then
+waits on it forever. The rank skew that opens that window grows with host load,
+so the resulting hang shows up only under a loaded box.
 
 On a2a3, async-DMA resources are a Worker-level opt-in, not a
 communication-domain property. Construct the Worker with `enable_sdma=True` and
@@ -252,5 +260,5 @@ the child — allocate it with `create_host_buffer` instead.
 - `examples/workers/l3/dual_domain_overlap/` — overlapping domains where one
   worker participates in both.
 - `examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo/` — host
-  staging via `copy_to` + cross-rank `SdmaTget`; its producer `CoreCallable`
-  declares the SDMA workspace requirement.
+  staging via `copy_to` + cross-rank `SdmaTget`; the SDMA workspace is
+  provisioned by constructing the `Worker` with `enable_sdma=True`.

@@ -8,6 +8,7 @@ dist/
 build/
 .env
 .venv/
+.venv-docs/
 venv/
 .cache
 .ccache/
@@ -44,3 +45,7 @@ python/_task_interface*.dylib
 # Log files
 *.log
 profiling_logs_*/
+
+# mkdocs build output
+_site/
+site/

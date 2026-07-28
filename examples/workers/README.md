@@ -1,6 +1,6 @@
 # Worker API Examples
 
-This directory demonstrates how to drive PTO runtime **directly through the
+This directory demonstrates how to drive the simpler runtime **directly through the
 `Worker` class**, without going through the `@scene_test` framework.
 
 If you want to **write and test kernels** with golden comparison, automatic
@@ -78,7 +78,7 @@ require an Ascend NPU box with `ASCEND_HOME_PATH` set.
 
 ## Related documentation
 
-- [`docs/hierarchical_level_runtime.md`](../../docs/hierarchical_level_runtime.md) — the L0–L6 level model
+- [`docs/hierarchical-level-runtime.md`](../../docs/hierarchical-level-runtime.md) — the L0–L6 level model
 - [`docs/chip-level-arch.md`](../../docs/chip-level-arch.md) — what L2 sees
 - [`docs/task-flow.md`](../../docs/task-flow.md) — end-to-end data flow
 - [`python/simpler/worker.py`](../../python/simpler/worker.py) — Worker source (all comments are useful)

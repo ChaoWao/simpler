@@ -223,8 +223,8 @@ SchedulerContext owns its own teardown:
 
 - `SchedulerContext::deinit()` resets every scheduler-owned field —
   per-core states, payloads, sync-start drain coordination
-  (`sync_start_pending` / `drain_worker_elected` / `drain_ack_mask` /
-  `pending_task`), task counters, worker-id lists,
+  (`sync_start_pending` / `drain_attempt` / `drain_ack_tokens_` /
+  `pending_task` / parallel-stage state), task counters, worker-id lists,
   core trackers, `cores_total_num_` / `aic_count_` / `aiv_count_`,
   `regs_`, `sched_`, `func_id_to_addr_`, and the `pto2_init_*` flags.
 - `AicpuExecutor::deinit()` calls `sched_ctx_.deinit()` first, then resets
@@ -256,7 +256,7 @@ Applies to all 4 runtime executors: a2a3 (hbg, tmr), a5 (hbg, tmr).
 | Dispatcher SO bytes | `DeviceRunnerBase::dispatcher_so_binary_` | Init-only: passed to `LoadAicpuOp::BootstrapDispatcher`, then cleared |
 | Runtime AICPU SO | Preinstall file `simpler_inner_<fp>_<device_id>.so` | Written once through dispatcher bootstrap, then registered via `rtsBinaryLoadFromFile` |
 | AICPU entry handles | `LoadAicpuOp` cached `rtFuncHandle`s | Per-runtime-group: reused by `rtsLaunchCpuKernel` on every task |
-| AICore binary | `rtRegisterAllKernel` handle | Per-run: registered each `launch_aicore_kernel()` call |
+| AICore binary | `rtRegisterAllKernel` handle | Lazily registered on the first `launch_aicore_kernel()`, then the cached handle is reused |
 | Kernel binaries | `func_id_to_addr_` (device GM addresses) | Per-task: uploaded to device GM, cached by func_id |
 | CANN HAL | `g_hal_handle` (file-scope static) | Process lifetime: loaded once for profiling, never closed |
 
@@ -354,9 +354,10 @@ device_worker_main(device_id)
               bind_callable_to_runtime()       replay + rtMalloc, rtMemcpy to device
               DeviceRunner::run()
                 ensure_binaries_loaded()       already done by init
-                rtsLaunchCpuKernel()           cached rtFuncHandle
-                rtStreamSynchronize()          wait for completion
-                launch_aicore_kernel()         rtRegisterAllKernel + rtKernelLaunch
+                launch_aicore_kernel()         cached rtRegisterAllKernel handle
+                                               + rtKernelLaunchWithHandleV2
+                launch_aicpu_kernel(Run)       rtsLaunchCpuKernel, cached rtFuncHandle
+                aclrtSynchronizeStreamWithTimeout()   wait on both streams
               validate_runtime_impl()          rtMemcpy results back to host
 
     ChipWorker.finalize()

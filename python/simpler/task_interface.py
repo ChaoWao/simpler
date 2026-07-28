@@ -29,8 +29,16 @@ import weakref
 from dataclasses import dataclass
 from enum import IntEnum
 from math import prod
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    # Annotation-only: `CallableHandle` is imported lazily at its use site, and
+    # PEP 563 keeps these annotations as strings, so nothing is imported at
+    # runtime.
+    from .callable_identity import CallableHandle
+
+import _task_interface as _ti_module  # pyright: ignore[reportMissingImports]
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_OFF_ERROR_MSG,
@@ -56,6 +64,71 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_element_size,
     read_args_from_blob,
 )
+
+
+def _assert_bindings_match_source_tree() -> None:
+    """Refuse a `_task_interface` built from a different revision of this tree.
+
+    An editable install pins the compiled extension at install time
+    (``editable.rebuild = false``) while this file is read live, so switching
+    branches or rebasing moves the Python source out from under a fixed binary.
+    Nothing then rebuilds, and a changed struct layout — `CallConfig` losing a
+    field, say — makes attributes read as 0 with no error at all. That surfaces
+    much later as a plausible-looking runtime rejection
+    (``launch_aicpu_num (0) must be in range [1, 4]``) and reads as a product
+    bug, so it is worth one git call at import to stop.
+
+    Only source-tree installs are checked: a wheel has no ``.git`` to compare
+    against, and a build with no git available carries an empty stamp.
+
+    A *missing* stamp is not the same as an empty one. The attribute only
+    disappears on an extension compiled before it existed, which in a checkout
+    new enough to run this function is by definition a different revision — the
+    exact case this guards, and the one every already-installed worktree is in
+    the moment this lands. Treating it like "cannot tell" would let precisely
+    those through.
+    """
+    import subprocess  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if not (repo_root / ".git").exists():
+        return
+    if not hasattr(_ti_module, "__build_commit__"):
+        raise ImportError(
+            "_task_interface predates the build stamp, so it was compiled before the "
+            "revision you are running and its struct layouts may not match the Python "
+            "that drives them — fields can read as 0 with no error.\n"
+            "Rebuild:  pip install --no-build-isolation -e ."
+        )
+    built_from: str = _ti_module.__build_commit__
+    if not built_from:
+        return
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    if result.returncode != 0:
+        return
+    head = result.stdout.strip()
+    if not head or head == built_from:
+        return
+    raise ImportError(
+        f"_task_interface was built from {built_from[:12]}, but this source tree is at "
+        f"{head[:12]}. The compiled extension does not rebuild on import "
+        f"(editable.rebuild = false), so its struct layouts may no longer match the "
+        f"Python that drives them — fields can read as 0 with no error.\n"
+        f"Rebuild:  pip install --no-build-isolation -e ."
+    )
+
+
+_assert_bindings_match_source_tree()
 
 __all__ = [
     "DataType",
@@ -96,6 +169,13 @@ COMM_MAX_RANK_NUM = 64
 
 
 class RemoteAddressSpace(IntEnum):
+    """How a remote buffer's bytes are reached.
+
+    ``HOST_INLINE`` carries the payload in the message itself rather than
+    naming remote memory. ``REMOTE_WINDOW`` and ``UB_LDST`` are protocol
+    placeholders: the shipped transport is simulation-backed.
+    """
+
     HOST_INLINE = 1
     REMOTE_DEVICE = 2
     REMOTE_WINDOW = 3
@@ -110,6 +190,22 @@ _REMOTE_BUFFER_EXPORT_TOKEN = object()
 
 
 class RemoteBufferHandle:
+    """A reference to memory on a remote L3 worker.
+
+    Returned by ``Worker.remote_malloc`` (an *owner* handle) or by
+    ``Worker.remote_import`` (an *imported* handle, told apart by
+    ``is_imported``). The two are not interchangeable: owner handles are freed
+    with ``remote_free``, imported ones with ``remote_release_import``.
+
+    ``RemoteTensorRef.host_inline`` produces a third form, with
+    ``address_space`` of ``HOST_INLINE``: it carries its bytes in the message
+    and names no remote allocation, so neither release call applies —
+    ``remote_free`` rejects it outright and it is never ``is_imported``.
+
+    Construct only through ``Worker`` or ``RemoteTensorRef.host_inline``; the
+    constructor is token-guarded.
+    """
+
     __slots__ = (
         "_worker_id",
         "_owner_worker_id",
@@ -261,34 +357,42 @@ class RemoteBufferHandle:
 
     @property
     def worker_id(self) -> int:
+        """Worker holding this reference — the importer, for an imported handle."""
         return self._worker_id
 
     @property
     def owner_worker_id(self) -> int:
+        """Worker that owns the underlying allocation."""
         return self._owner_worker_id
 
     @property
     def import_id(self) -> int:
+        """Nonzero on an imported handle; ``0`` on an owner handle."""
         return self._import_id
 
     @property
     def address_space(self) -> RemoteAddressSpace:
+        """How these bytes are reached; see ``RemoteAddressSpace``."""
         return self._address_space
 
     @property
     def nbytes(self) -> int:
+        """Size of the allocation in bytes, or of the payload for ``HOST_INLINE``."""
         return self._nbytes
 
     @property
     def released(self) -> bool:
+        """Whether the handle has been freed or released."""
         return self._released
 
     @property
     def access_flags(self) -> int:
+        """Permitted access as a read/write bitmask; an export may only narrow it."""
         return self._access_flags
 
     @property
     def is_imported(self) -> bool:
+        """Whether this came from ``remote_import`` rather than ``remote_malloc``."""
         return self._import_id != 0
 
     def _mark_released(self) -> None:
@@ -457,26 +561,32 @@ class RemoteBufferExport:
 
     @property
     def owner_worker_id(self) -> int:
+        """Worker that owns the exported allocation."""
         return self._owner_worker_id
 
     @property
     def address_space(self) -> RemoteAddressSpace:
+        """How the exported bytes are reached."""
         return self._address_space
 
     @property
     def offset(self) -> int:
+        """Start of the exported range within the owner buffer."""
         return self._offset
 
     @property
     def nbytes(self) -> int:
+        """Length of the exported range in bytes."""
         return self._nbytes
 
     @property
     def access_flags(self) -> int:
+        """Access granted here; a subset of the owner handle's flags."""
         return self._access_flags
 
     @property
     def transport_profile(self) -> str:
+        """Transport this export was minted for."""
         return self._transport_profile
 
     def __repr__(self) -> str:
@@ -518,6 +628,8 @@ class _RemoteTaskArgsSidecar:
 
 @dataclass(frozen=True)
 class RemoteTensorRef:
+    """A tensor argument that lives on, or travels to, a remote worker."""
+
     handle: RemoteBufferHandle
     offset: int = 0
     shape: tuple[int, ...] = ()
@@ -553,6 +665,11 @@ class RemoteTensorRef:
 
     @classmethod
     def host_inline(cls, payload: bytes, *, shape: tuple[int, ...], dtype: DataType) -> RemoteTensorRef:
+        """Build a reference whose payload travels inline, naming no remote memory.
+
+        ``payload`` length must equal the byte size implied by ``shape`` and
+        ``dtype``, and shape entries must be non-negative.
+        """
         data = bytes(payload)
         shape_tuple = tuple(int(x) for x in shape)
         if any(x < 0 for x in shape_tuple):
@@ -780,6 +897,10 @@ class CommBufferSpec:
 
 @dataclass
 class ChipDomainContext:
+    """Per-domain view handed to a chip worker: its rank within the domain and
+    the local slice of the symmetric window.
+    """
+
     name: str
     domain_rank: int
     domain_size: int
@@ -944,7 +1065,18 @@ class ChipWorker:
         self._live_handles: dict[int, bytes] = {}
         self._next_handle_id = 0
 
-    def init(self, device_id, bins, log_level=None, log_info_v=None, prewarm_config=None, enable_sdma=False):
+    def init(
+        self,
+        device_id: int,
+        # Structurally typed: any object exposing the *_path attributes below.
+        # Not RuntimeBinaries — that lives in simpler_setup, which this package
+        # must not depend on.
+        bins: Any,
+        log_level: int | None = None,
+        log_info_v: int | None = None,
+        prewarm_config: CallConfig | None = None,
+        enable_sdma: bool = False,
+    ):
         """Attach the calling thread to ``device_id``, load the host runtime
         library, and cache platform binaries.
 
@@ -1138,7 +1270,13 @@ class ChipWorker:
                 raise
         return handle
 
-    def run(self, handle, args, config=None, **kwargs):
+    def run(
+        self,
+        handle: CallableHandle,
+        args: ChipStorageTaskArgs,
+        config: CallConfig | None = None,
+        **kwargs: Any,
+    ):
         """Launch a callable previously returned by ``register_callable``.
 
         Args:
@@ -1194,6 +1332,11 @@ class ChipWorker:
     def host_dlopen_count(self):
         """Number of host-side orch SO dlopens (host_build_graph variants)."""
         return self._impl.host_dlopen_count
+
+    @property
+    def run_stream_set_create_count(self):
+        """Number of run stream generations the bound runner has created."""
+        return self._impl.run_stream_set_create_count
 
     def malloc(self, size):
         """Allocate memory. Returns a pointer (uint64)."""
@@ -1274,8 +1417,10 @@ class ChipWorker:
 
     @property
     def device_id(self):
+        """ACL device ordinal this worker is bound to."""
         return self._impl.device_id
 
     @property
     def initialized(self):
+        """Whether the underlying native worker has completed init."""
         return self._impl.initialized

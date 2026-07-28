@@ -19,8 +19,7 @@
  *
  * Scope: L3 single-host multi-card only. The VMM shareable-handle
  * exchange is host-local, so cross-host (L4) deployments need a different
- * windows backend -- see .docs/28.l3-comm/ext.01.pr-774-review.md F2 /
- * 05.plan.zh.md for the channel-API direction.
+ * windows backend.
  */
 
 #include "platform_comm/comm.h"
@@ -79,7 +78,6 @@ struct DomainAllocation {
     int rank = 0;                            // this rank's index within the subset (domain_rank)
     int nranks = 0;                          // subset size
     void *local_buf = nullptr;               // VMM-mapped device VA
-    uint64_t alloc_size = 0;                 // granularity-aligned byte size
     aclrtDrvMemHandle own_handle = nullptr;  // physical handle backing local_buf
     // Per-peer imports: (mapped VA, imported physical handle).  allocate_domain
     // can cycle repeatedly within one comm handle before any device reset, so
@@ -614,8 +612,7 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
     // windowsOut[] is intentionally left zero: no kernel path reads it
     // (verified by grep across simpler + pto-isa). The field is kept in
     // CommContext only to preserve byte-equivalence with pto-isa's parallel
-    // HcclDeviceContext declaration; removing it is gated on the F4
-    // private-ization decision (see .docs/28.l3-comm/ext.01.pr-774-review.md).
+    // HcclDeviceContext declaration.
     // host_ctx was value-initialized at handle construction (CommContext{}),
     // and the idempotency guard in comm_alloc_windows prevents a second entry;
     // no re-zero needed before populating it here.
@@ -877,8 +874,7 @@ static int domain_alloc_via_ipc(
     }
 
     // VMM own-window allocation; see alloc_windows_via_ipc for step-by-step
-    // rationale. aligned_size is also stored in the DomainAllocation so the
-    // caller can zero the full mapped range.
+    // rationale.
     aclrtPhysicalMemProp prop{};
     prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
     prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
@@ -930,6 +926,19 @@ static int domain_alloc_via_ipc(
     );
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: ExportToShareableHandle -> %d", h->rank, static_cast<int>(aret));
+        release_own_vmm_window(localBuf, handle);
+        return -1;
+    }
+
+    // Wipe before the handle is published. Publication is the point from which
+    // a peer may import this window and store into it — a barrier signal lands
+    // there as soon as that peer's kernel runs — so a wipe issued any later can
+    // erase a signal the owner has not yet waited on. Kernels take the zeroed
+    // tail as the initial value of their barrier-signal slots. The full
+    // granularity-aligned mapped range is zeroed to match ctx.winSize.
+    aret = aclrtMemset(localBuf, aligned_size, 0, aligned_size);
+    if (aret != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
         release_own_vmm_window(localBuf, handle);
         return -1;
     }
@@ -1017,7 +1026,6 @@ static int domain_alloc_via_ipc(
     out->rank = my_dr;
     out->nranks = subset_n;
     out->local_buf = localBuf;
-    out->alloc_size = aligned_size;
     out->own_handle = handle;
     // Build a host-side CommContext for the subset and upload it as device_ctx.
     // PTO-ISA async SDMA ops (SdmaTget) read the scratch workspace off
@@ -1319,19 +1327,6 @@ extern "C" int comm_alloc_domain_windows(
     auto alloc = std::make_unique<DomainAllocation>();
     int rc = domain_alloc_via_ipc(h, allocation_id, rank_ids, rank_count, domain_rank, window_size, alloc.get());
     if (rc != 0) return rc;
-
-    // Zero the freshly-allocated local pool so kernels do not observe stale
-    // bytes (parity with the sim backend's memset). The full granularity-aligned
-    // mapped range is zeroed to match ctx.winSize.
-    aclError aret = aclrtMemset(alloc->local_buf, alloc->alloc_size, 0, alloc->alloc_size);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(alloc->device_ctx);
-        reset_domain_urma_workspace(*alloc);
-        release_domain_peer_windows(*alloc);
-        release_own_vmm_window(alloc->local_buf, alloc->own_handle);
-        return -1;
-    }
 
     *device_ctx_out = reinterpret_cast<uint64_t>(alloc->device_ctx);
     *local_window_base_out = reinterpret_cast<uint64_t>(alloc->local_buf);

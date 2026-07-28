@@ -52,7 +52,8 @@ The primary production runtime. Uses ring buffers for task slots and output memo
 - **Task storage**: `PTO2TaskDescriptor[]` in shared memory ring buffer
 - **Memory**: GM Heap ring for output buffer allocation
 - **Dependencies**: automatically derived from tensor read/write patterns via TensorMap
-- **Thread model**: 3 scheduler threads + 1 orchestrator thread on AICPU
+- **Thread model**: `aicpu_thread_num - 1` scheduler threads + 1 orchestrator
+  thread on AICPU; the common four-thread configuration uses 3 schedulers
 - **Multi-ring**: HeapRing, TaskRing, and DepPool are split into `PTO2_MAX_RING_DEPTH` (4) independent instances for nested scope isolation. See [MULTI_RING.md](MULTI_RING.md) for details.
 - **Use case**: production workloads; supports streaming, flow control, and large batch sizes
 
@@ -62,7 +63,7 @@ The primary production runtime. Uses ring buffers for task slots and output memo
 
 Two platform implementations exist under `src/platform/`, sharing a common interface.
 
-### 2.1 a2a3 (Real Ascend Hardware)
+### 2.1 a5 (Real Ascend Hardware)
 
 | Component | Description |
 | --------- | ----------- |
@@ -72,7 +73,7 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 | `aicpu/kernel.cpp` | `DynTileFwkBackendKernelServer` entry → `aicpu_execute` |
 | `spin_hint.h` | ARM `wfe`/`yield` instructions for efficient spinning |
 
-### 2.2 a2a3sim (Thread Simulation)
+### 2.2 a5sim (Thread Simulation)
 
 | Component | Description |
 | --------- | ----------- |
@@ -85,11 +86,11 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 
 | Constant | Value | Description |
 | -------- | ----- | ----------- |
-| `PLATFORM_MAX_BLOCKDIM` | 24 | Maximum blocks (each = 1 AIC + 2 AIV) |
-| `PLATFORM_MAX_AICPU_THREADS` | 4 | AICPU thread count (3 schedulers + 1 orchestrator) |
-| `PLATFORM_MAX_AIC_PER_THREAD` | 24 | Max AIC cores per scheduler thread |
-| `PLATFORM_MAX_AIV_PER_THREAD` | 48 | Max AIV cores per scheduler thread |
-| `PLATFORM_PROF_SYS_CNT_FREQ` | 50 MHz | System counter frequency for profiling |
+| `PLATFORM_MAX_BLOCKDIM` | 36 | Maximum blocks (each = 1 AIC + 2 AIV) |
+| `PLATFORM_MAX_AICPU_THREADS` | 7 | Maximum total AICPU threads (up to 6 schedulers + 1 orchestrator) |
+| `PLATFORM_MAX_AIC_PER_THREAD` | 36 | Max AIC cores per scheduler thread |
+| `PLATFORM_MAX_AIV_PER_THREAD` | 72 | Max AIV cores per scheduler thread |
+| `PLATFORM_PROF_SYS_CNT_FREQ` | 1000 MHz | System counter frequency for profiling |
 
 ### 2.4 Host Temporary Buffer
 
@@ -223,6 +224,11 @@ The heap ring manages output buffer allocation from a circular GM heap.
 **Allocation**: Buffers are allocated contiguously from `top`. When reaching the end, allocation wraps to the beginning if `tail` has advanced far enough. Buffers never straddle the wrap-around boundary.
 
 **Reclamation**: When `last_task_alive` advances past a task, its `packed_buffer_end` is used to advance `heap_tail`, freeing the memory region.
+
+When an empty ring is parked at a non-zero offset and neither free arc can hold a request that fits the full
+capacity, allocation restarts at offset zero: `heap_tail` resets to zero and `heap_top` advances past the new
+allocation. Reclaim markers from tasks in the preceding coordinate space are ignored until the first post-rebase
+allocation retires.
 
 ### 4.3 Dependency List Pool
 
@@ -524,13 +530,16 @@ verified by review.
 
 ### 8.1 Thread Model
 
-With `aicpu_thread_num=4`, the AICPU runs 4 threads:
+With `aicpu_thread_num=4`, the AICPU runs 4 threads. The core counts below
+describe the 36-cluster target in §2.3; the runtime partitions the detected
+cores across the scheduler threads, so smaller SKUs use proportionally smaller
+slices.
 
 | Thread | Role | Cores |
 | ------ | ---- | ----- |
-| 0 | Scheduler | 6 AIC + ~13 AIV |
-| 1 | Scheduler | 6 AIC + ~13 AIV |
-| 2 | Scheduler | 6 AIC + ~13 AIV |
+| 0 | Scheduler | 12 AIC + 24 AIV |
+| 1 | Scheduler | 12 AIC + 24 AIV |
+| 2 | Scheduler | 12 AIC + 24 AIV |
 | 3 | Orchestrator | none |
 
 Core assignment: AICs and AIVs are divided equally among the 3 scheduler threads.
@@ -645,12 +654,14 @@ unconditional true for hidden alloc creators). There is no auto-chain inheritanc
 A sync_start cohort of `block_num` cores must occupy all its cores before any of them run.
 When it cannot fit inline, `enter_drain_mode` arms a stop-the-world drain:
 
-1. **Single election** — a CAS on `sync_start_pending` makes drains mutually exclusive.
-2. **All-or-nothing** — the elected thread checks global available capacity ≥ `block_num`
-   before staging; if short it aborts and retries after completions free cores.
-3. **Parallel stage** — threads barrier, then each CAS-claims a block range and stages its
-   own cores with a non-zero `src_payload` gate (`drain_stage_cores`): idle → running,
-   busy → pending (`pending_gated` when still waiting for the doorbell).
+1. **Single ownership** — a CAS on `sync_start_pending` makes drains mutually exclusive.
+2. **All-or-nothing** — scheduler thread 0 coordinates the generation-tagged ack tree and
+   checks global available capacity ≥ `block_num` before staging; if short it advances the
+   attempt and retries after completions free cores.
+3. **Parallel stage** — after thread 0 broadcasts the completed root token, each scheduler
+   thread CAS-claims a block range and stages its own cores with a non-zero `src_payload`
+   gate (`drain_stage_cores`): idle → running, busy → pending (`pending_gated` when still
+   waiting for the doorbell).
 4. **Rendezvous launch** — `running_slot_count` counts staged running-slot cores; when it
    reaches `popcount(staged_core_mask)` **and** the producer has released,
    `maybe_rendezvous_ring` rings every gated core's doorbell together — the cohort starts as one.

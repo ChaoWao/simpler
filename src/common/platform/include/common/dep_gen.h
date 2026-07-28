@@ -115,7 +115,7 @@ struct DepGenRecord {
     uint8_t tensors[CORE_MAX_TENSOR_ARGS][DEP_GEN_TENSOR_SIZE];  // opaque Tensor blobs
 } __attribute__((aligned(64)));
 
-static_assert(sizeof(DepGenRecord) == 4672, "DepGenRecord size changed — update header comment + docs/dfx/dep_gen.md");
+static_assert(sizeof(DepGenRecord) == 4672, "DepGenRecord size changed — update header comment + docs/dfx/dep-gen.md");
 static_assert(sizeof(DepGenRecord) % 64 == 0, "DepGenRecord must be cache-line aligned");
 static_assert(offsetof(DepGenRecord, tensors) % 64 == 0, "DepGenRecord::tensors[] must start on a cache-line boundary");
 static_assert(offsetof(DepGenRecord, tensors) == 576, "DepGenRecord::tensors offset changed — update header comment");

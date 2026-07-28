@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you for helping improve PTO Runtime's documentation!
+        Thank you for helping improve simpler's documentation!
 
   - type: textarea
     id: location

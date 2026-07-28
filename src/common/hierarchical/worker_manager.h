@@ -111,6 +111,13 @@ static_assert(
 );
 static constexpr ptrdiff_t MAILBOX_OFF_ERROR_MSG =
     static_cast<ptrdiff_t>(MAILBOX_SIZE) - static_cast<ptrdiff_t>(MAILBOX_ERROR_MSG_SIZE);
+// Launch acceptance is sticky, not a MailboxState: a state word carrying it
+// loses the ACK whenever the child reaches TASK_DONE between two parent polls,
+// which is exactly the short-task case the fence exists to pipeline. The child
+// sets it after both launches; the parent clears it when it publishes the next
+// TASK_READY, so nothing else can overwrite it in between.
+static constexpr int32_t MAILBOX_TASK_ACCEPTED = 1;
+static constexpr ptrdiff_t MAILBOX_OFF_ACCEPTED = MAILBOX_OFF_ERROR_MSG - 8;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_CALLABLE_HASH = MAILBOX_OFF_ARGS;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_ARGS_BLOB =
     MAILBOX_OFF_TASK_CALLABLE_HASH + static_cast<ptrdiff_t>(CALLABLE_HASH_DIGEST_SIZE);
@@ -118,7 +125,7 @@ static constexpr size_t CTRL_SHM_NAME_BYTES = 32;
 static constexpr ptrdiff_t MAILBOX_OFF_CONTROL_CALLABLE_HASH =
     MAILBOX_OFF_ARGS + static_cast<ptrdiff_t>(CTRL_SHM_NAME_BYTES);
 static constexpr size_t MAILBOX_ARGS_CAPACITY =
-    MAILBOX_SIZE - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB) - MAILBOX_ERROR_MSG_SIZE;
+    MAILBOX_SIZE - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB) - MAILBOX_ERROR_MSG_SIZE - 8;
 static_assert(
     MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
@@ -202,6 +209,10 @@ public:
 
     virtual const WorkerEndpointCaps &caps() const = 0;
     virtual WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) = 0;
+    // Endpoints with an earlier launch boundary override this. The default is a
+    // conservative completion-time acceptance for remote, SUB and A5 paths.
+    virtual WorkerCompletion
+    run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept);
 
     virtual void shutdown_child() {}
     virtual uint64_t control_malloc(size_t size);
@@ -257,6 +268,8 @@ public:
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
     WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
+    WorkerCompletion
+    run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept) override;
 
     void shutdown_child() override;
     uint64_t control_malloc(size_t size) override;
@@ -316,6 +329,10 @@ private:
     char *mbox() const { return static_cast<char *>(mailbox_); }
     MailboxState read_mailbox_state() const;
     void write_mailbox_state(MailboxState s);
+    // Sticky launch acceptance, cleared only when this endpoint publishes the
+    // next TASK_READY. See MAILBOX_OFF_ACCEPTED.
+    bool read_task_accepted() const;
+    void clear_task_accepted();
     void run_control_command(const char *op_name, double timeout_s = -1.0);
 
     // Returns a description of the child's death, or an empty string while it
@@ -361,7 +378,8 @@ public:
     // on_complete(completion) is called (in the WorkerThread) after each
     // endpoint run().
     void start(
-        Ring *ring, const std::function<void(WorkerCompletion)> &on_complete, std::unique_ptr<WorkerEndpoint> endpoint
+        Ring *ring, const std::function<void(WorkerCompletion)> &on_complete,
+        const std::function<void(WorkerDispatch)> &on_accept, std::unique_ptr<WorkerEndpoint> endpoint
     );
 
     // Enqueue a dispatch for the worker. Non-blocking.
@@ -451,6 +469,7 @@ private:
     Ring *ring_{nullptr};
     std::unique_ptr<WorkerEndpoint> endpoint_;
     std::function<void(WorkerCompletion)> on_complete_;
+    std::function<void(WorkerDispatch)> on_accept_;
 
     std::thread thread_;
     std::queue<WorkerDispatch> queue_;
@@ -460,7 +479,7 @@ private:
     std::atomic<bool> idle_{true};
 
     void loop();
-    WorkerCompletion dispatch_process(WorkerDispatch d);
+    WorkerCompletion dispatch_process(WorkerDispatch d, const std::function<void()> &on_accept);
 };
 
 // =============================================================================
@@ -470,6 +489,7 @@ private:
 class WorkerManager {
 public:
     using OnCompleteFn = std::function<void(WorkerCompletion)>;
+    using OnAcceptFn = std::function<void(WorkerDispatch)>;
 
     // Register a worker. `mailbox` is a MAILBOX_SIZE-byte MAP_SHARED
     // region; the real worker (a `ChipWorker` for NEXT_LEVEL, a Python
@@ -481,7 +501,10 @@ public:
     void add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint);
     void add_sub(void *mailbox, int child_pid = -1);
 
-    void start(Ring *ring, const OnCompleteFn &on_complete);
+    // `on_accept` advances the run's launch fence; pass an empty function only
+    // when nothing waits on that fence, since an omitted callback leaves
+    // pending_accepts non-zero forever. No default: the choice is the caller's.
+    void start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept);
     void stop();
 
     WorkerThread *get_worker_by_id(WorkerType type, int32_t worker_id) const;

@@ -45,7 +45,7 @@ enum class SdmaOp : uint8_t {
 // sync_id selects which event-record slot inside the workspace the engine
 // writes into. Concurrent dispatches must use distinct sync_ids; today every
 // caller submits one request per kernel invocation so passing 0 is safe.
-// Future work (see .docs/25.comm-api-refactor/03.implementation-plan.md §5.2)
+// Future work
 // will fold sync_id allocation into the adapter.
 template <typename DstTensor, typename SrcTensor, typename ScratchTileT>
 struct SdmaRequestDescriptor {

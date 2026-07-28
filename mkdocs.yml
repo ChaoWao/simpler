@@ -1,0 +1,157 @@
+site_name: simpler
+site_description: "Simple Runtime — make writing runtime simpler"
+site_url: https://hw-native-sys.github.io/simpler/
+repo_url: https://github.com/hw-native-sys/simpler
+repo_name: hw-native-sys/simpler
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+# Build inputs that live under docs/ but are not content.
+exclude_docs: |
+  _hooks/
+  requirements.txt
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/weather-night, name: Switch to dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/weather-sunny, name: Switch to light mode }
+
+# A page absent from nav builds fine by default and only shows up as an INFO
+# line, so it silently disappears from the site's navigation. Promote it to a
+# warning, which --strict then treats as a failure.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+
+# Deliberate omissions: these are accumulating logs and design sets, reached
+# through their own index pages rather than the sidebar. Listing every entry in
+# nav would bury the rest of the tree. Declaring them here keeps
+# omitted_files strict for everything else.
+not_in_nav: |
+  investigations/*
+  remote-l3-worker-design/*
+  troubleshooting/device-error-codes/*
+
+hooks:
+  - docs/_hooks/repo_links.py
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            members_order: source
+            filters: ["!^_"]
+            separate_signature: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight: { anchor_linenums: true }
+
+nav:
+  - Home: README.md
+  - Using simpler:
+      - Overview: user/README.md
+      - Getting Started: getting-started.md
+      - Installation: install.md
+      - Capability Survey: capability-survey.md
+      - How-to:
+          - Write and run a kernel: user/how-to/write-and-run-a-kernel.md
+          - Run on multiple chips: user/how-to/run-on-multiple-chips.md
+          - Profile a kernel: user/how-to/profile-a-kernel.md
+          - Debug a failed run: user/how-to/debug-a-failed-run.md
+      - Reference:
+          - Python API: user/reference/python-api.md
+          - Command line and tools: user/reference/cli.md
+          - Generated API:
+              - simpler.worker: user/reference/api/worker.md
+              - simpler.task_interface: user/reference/api/task_interface.md
+              - simpler.orchestrator: user/reference/api/orchestrator.md
+  - Architecture:
+      - Chip-Level Architecture: chip-level-arch.md
+      - Hierarchical Level Runtime: hierarchical-level-runtime.md
+      - Task Flow: task-flow.md
+      - Orchestrator: orchestrator.md
+      - Scheduler: scheduler.md
+      - Worker Manager: worker-manager.md
+      - Hardware:
+          - Chip architecture: hardware/chip-architecture.md
+          - Cache coherency: hardware/cache-coherency.md
+          - MMIO performance: hardware/mmio-performance.md
+          - CANN source references: hardware/cann-source-references.md
+  - Kernels:
+      - AICore Kernel Programming: aicore-kernel-programming.md
+      - a5 SIMT Launch: simt-launch.md
+      - Manual Scope: manual-scope.md
+      - WAR Anti-Dependencies: war-anti-dependency.md
+      - TPUSH/TPOP: tpush-tpop.md
+  - Launch and linking:
+      - AICPU Kernel Launch: aicpu-kernel-launch-mechanisms.md
+      - Dynamic Linking: dynamic-linking.md
+      - Callable Identity: callable-identity-registration.md
+      - Callable IPC Registration: callable-ipc-dynamic-register.md
+      - Python Callable Serialization: python-callable-serialization.md
+  - Multi-chip and comm:
+      - Communication Domains: comm-domain.md
+      - a5 SDMA Overlay: a5-sdma-overlay.md
+      - L3-L2 Orchestrator Comm: l3-l2-orch-comm.md
+      - L3-L2 Message Queue: l3-l2-message-queue.md
+      - Directed NEXT_LEVEL Scheduling: directed-next-level-scheduling.md
+      - Remote L3 Worker Design: remote-l3-worker-design.md
+  - Profiling and DFX:
+      - Overview: dfx/README.md
+      - Profiling Framework: dfx/profiling-framework.md
+      - Config naming rules: dfx/profiling-config-naming.md
+      - Name map: dfx/profiling-name-map.md
+      - Log System: logging.md
+      - L2 Timing: dfx/l2-timing.md
+      - Host trace: dfx/host-trace.md
+      - Device phases: dfx/device-phases.md
+      - Scheduler-overhead model: dfx/sched-overhead-model.md
+      - L2 Swimlane: dfx/l2-swimlane-profiling.md
+      - L0 Swimlane: dfx/l0-swimlane-profiling.md
+      - PMU: dfx/pmu-profiling.md
+      - Args dump: dfx/args-dump.md
+      - dep_gen: dfx/dep-gen.md
+      - Scope stats: dfx/scope-stats.md
+      - Global backpressure: dfx/global-backpressure-design.md
+      - Buffer capacity audit: dfx/dfx-buffer-capacity-audit.md
+  - Build and test:
+      - Developer Guide: developer-guide.md
+      - Testing: testing.md
+      - CI Pipeline: ci.md
+      - Python Packaging: python-packaging.md
+      - Sanitizers: sanitizers.md
+      - Sim Multi-Device Isolation: sim-multi-device-isolation.md
+  - Troubleshooting:
+      - Device error codes: troubleshooting/device-error-codes.md
+      - Local timeout defaults: troubleshooting/local-timeout-defaults.md
+      - a2a3 507899 AICPU shared-SO fault: troubleshooting/a2a3-507899-aicpu-shared-so-fault.md
+      - Sim oversubscription hang: troubleshooting/sim-oversubscription-hang.md
+      - macOS build: troubleshooting/macos-build.md
+      - macOS libomp collision: troubleshooting/macos-libomp-collision.md
+      - cpput gtest ABI: troubleshooting/ut-cpp-gtest-abi.md
+  - Investigations: investigations/README.md

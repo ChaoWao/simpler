@@ -43,7 +43,7 @@ available.
   in the swimlane record itself (the device hot path stays clean —
   see PR #863). Instead, `swimlane_converter` joins
   `l2_swimlane_records.json` with `deps.json` from
-  [`dep_gen`](dep_gen.md) at post-process time; see
+  [`dep_gen`](dep-gen.md) at post-process time; see
   [§3.5](#35-dependency-arrows-from-dep_gen).
 - **AICPU scheduler phases** — per-iteration breakdown into six
   mutually time-exclusive **outer** phases (`complete` / `async_poll`
@@ -410,7 +410,7 @@ class TestPagedAttention(SceneTestCase):
 
 SceneTest extracts this into `<output_prefix>/name_map_<case>.json`
 and passes it to `swimlane_converter` automatically. See
-[profiling-name-map.md](../profiling-name-map.md) for the full
+[profiling-name-map.md](profiling-name-map.md) for the full
 schema and L3 example.
 
 ### 3.5 Dependency arrows from dep_gen
@@ -427,7 +427,7 @@ Two artifacts, one join:
 
 | File | Producer | What it carries |
 | ---- | -------- | --------------- |
-| `deps.json` | `--enable-dep-gen` (a [`dep_gen`](dep_gen.md) run) | The static task graph for one topology / case |
+| `deps.json` | `--enable-dep-gen` (a [`dep_gen`](dep-gen.md) run) | The static task graph for one topology / case |
 | `l2_swimlane_records.json` | `--enable-l2-swimlane` | Per-task / per-phase timing for one run |
 | `merged_swimlane.json` | `swimlane_converter` | Perfetto trace = timing joined to the graph |
 
@@ -810,7 +810,7 @@ to copy into the right per-core or per-thread vector, plus
 `reconcile_counters` / `export_swimlane_json` / `finalize`. The
 mgmt/collector threading and `Module` trait pattern are shared with
 PMU and ArgsDump — see
-[profiling-framework.md](../profiling-framework.md) for the
+[profiling-framework.md](profiling-framework.md) for the
 framework reference.
 
 ### 5.3 a5 — same framework, host-shadow transport
@@ -1056,7 +1056,7 @@ and re-run the converter — see
 
 **Tasks show as `func_<id>` instead of human names.** `deps.json`
 resolved the `func_id`, but the CALLABLE spec lacks `"name"` fields
-or `name_map_<case>.json` was not produced. See [profiling-name-map.md](../profiling-name-map.md).
+or `name_map_<case>.json` was not produced. See [profiling-name-map.md](profiling-name-map.md).
 
 **Some tasks missing from the swimlane.** Likely dropped on device
 because the buffer pool ran out. On a2a3 check
@@ -1100,9 +1100,9 @@ rules.
   `SIMPLER_DFX` device-log markers (no swimlane capture, works with
   `--rounds > 1`); the lighter alternative when you don't need the
   per-task / phase deep dive.
-- [profiling-framework.md](../profiling-framework.md) — shared
+- [profiling-framework.md](profiling-framework.md) — shared
   host-side collector framework (a2a3 only).
-- [profiling-name-map.md](../profiling-name-map.md) — `func_id` →
+- [profiling-name-map.md](profiling-name-map.md) — `func_id` →
   human name mapping for swimlane labels.
 - [chip-level-arch.md](../chip-level-arch.md) — host / AICPU /
   AICore program boundaries this feature spans.

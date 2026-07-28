@@ -6,24 +6,28 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Golden reference + fixture for the Qwen3-14B 2-layer decode SceneTestCase.
+"""Golden reference + fixture for the Qwen3-14B 40-layer decode SceneTestCase.
 
-Ported from pypto-lib ``models/qwen3/14b/decode_layer.py`` (entry
-``decode_fwd_layers`` with ``_CHUNK_NLAYERS == 2``): a fused chunk of two
-consecutive Qwen3-14B decode layers, hidden -> hidden, no LM head. Weights and
-the paged KV pool are STACKED along dim 0 (one slice per layer); the two layers
-use the same (replicated) weights — matching the lib's ``--validate-fwd``
-const-layer-0 stack — but each reads/writes its own KV pool. The inter-layer
-hidden is carried in FP32 (no per-layer bf16 round); the only chunk-boundary
-casts are ``copy_hidden`` (bf16 input embed) and ``copy_out`` (FP32->bf16).
+Ported from pypto-lib ``models/qwen3/14b/decode_fwd.py`` (entry
+``decode_fwd_layers`` with ``_CHUNK_NLAYERS == 40``): the full Qwen3-14B decode
+stack as one fused dispatch, hidden -> hidden, no LM head. Weights and the paged
+KV pool are STACKED along dim 0 (one slice per layer); every layer uses the same
+(replicated) weights — matching the lib's ``--validate-fwd`` const-layer-0 stack
+— but each reads/writes its own KV pool. The inter-layer hidden is carried in
+FP32 (no per-layer bf16 round); the only chunk-boundary casts are
+``copy_hidden`` (bf16 input embed) and ``copy_out`` (FP32->bf16).
 
 Parameter regime matches ``stress_profile.py`` (the vLLM serving stress run):
 BATCH=16 (CONCURRENCY, aligned with decode kernel BATCH=16), MAX_SEQ=5500
 (= max_model_len), and a fixed decode sequence length of 3500 (the ~3500-token
 prompt). ``MAX_SEQ`` MUST match the harvested kernels' codegen-time value.
 
-KV-cache layout per layer pool: row = (phys_page * NUM_KV_HEADS + kv_head) *
-BLOCK_SIZE + pos_in_block; layer L's pool starts at L * CACHE_ROWS.
+KV-cache layout is vLLM's paged **BSND**: each physical page holds
+``[BLOCK_SIZE, KV_HIDDEN]`` laid out as ``[page, token, kv_head, dim]``, so a
+layer pool reads as ``[NUM_PAGES * BLOCK_SIZE, KV_HIDDEN]`` — row
+``phys_page * BLOCK_SIZE + pos_in_block``, columns
+``kv_head * HEAD_DIM``. ``slot_mapping[b]`` is already that row index. Layer L's
+pool starts at ``L * CACHE_ROWS`` in the flat ``[rows, HEAD_DIM]`` storage.
 Weight matrices are ``[in_features, out_features]`` -> ``y = x @ w``.
 """
 
@@ -49,7 +53,7 @@ ATTN_SCALE = 1.0 / (HEAD_DIM**0.5)
 ROPE_THETA = 1.0e4
 
 # ── Chunk / paging (must match the harvested kernels) ──
-N_LAYERS = 2
+N_LAYERS = 40  # Qwen3-14B num_layers; the whole model in one fused dispatch
 MAX_SEQ = 5500  # = stress_profile max_model_len; codegen-time KV-pool / RoPE sizing
 SEQ_TILE = 128
 BLOCK_SIZE = SEQ_TILE
@@ -112,12 +116,15 @@ def _paged_block_table_slot_mapping(seq_lens: torch.Tensor) -> tuple[torch.Tenso
 
 
 def generate_inputs(seed: int = 1234, seq_len: int = DEFAULT_SEQ_LEN) -> TaskArgsBuilder:
-    """Deterministic fixture for decode_fwd_layers (N=2), stacked x2 along dim 0.
+    """Deterministic fixture for decode_fwd_layers (N=40), stacked x40 along dim 0.
 
     Every lane uses sequence length ``seq_len`` (default 3500, the stress prompt).
-    Per-layer weights are replicated (stack0) so layer 1 reuses layer 0's weights,
-    matching the lib's const-layer-0 stacked-fwd reference; each layer still has
-    its own KV pool.
+    Per-layer weights are replicated (stack0) so every layer reuses layer 0's
+    weights, matching the lib's const-layer-0 stacked-fwd reference; each layer
+    still has its own KV pool.
+
+    The stacks are the bulk of the fixture: ~24.6 GiB of weights plus ~13.4 GiB
+    of paged KV at this regime.
     """
     if not (1 <= seq_len <= MAX_SEQ):
         raise ValueError(f"seq_len must be in [1, {MAX_SEQ}], got {seq_len}")
@@ -187,8 +194,9 @@ def _one_layer(args, layer: int, x: torch.Tensor) -> torch.Tensor:
     slot_mapping = args.slot_mapping
     rope_cos = args.rope_cos.float()
     rope_sin = args.rope_sin.float()
-    k_cache = args.k_cache[cb : cb + CACHE_ROWS].float()  # this layer's pool
-    v_cache = args.v_cache[cb : cb + CACHE_ROWS].float()
+    # This layer's pool, read in its native BSND shape: [page * BLOCK_SIZE + pos, kv_head * HEAD_DIM].
+    k_cache = args.k_cache[cb : cb + CACHE_ROWS].float().view(NUM_PAGES * BLOCK_SIZE, KV_HIDDEN)
+    v_cache = args.v_cache[cb : cb + CACHE_ROWS].float().view(NUM_PAGES * BLOCK_SIZE, KV_HIDDEN)
 
     inv_rms = _rmsnorm_inv(x)
     normed = _bf16(x * irw)
@@ -216,11 +224,12 @@ def _one_layer(args, layer: int, x: torch.Tensor) -> torch.Tensor:
             v_lane = torch.empty(slen, HEAD_DIM)
             for sb in range(n_blocks):
                 pbid = int(block_table[b * MAX_BLOCKS_PER_SEQ + sb].item())
-                row = (pbid * NUM_KV_HEADS + kvh) * BLOCK_SIZE
+                row = pbid * BLOCK_SIZE
+                col = kvh * HEAD_DIM
                 lo = sb * BLOCK_SIZE
                 blk = min(BLOCK_SIZE, slen - lo)
-                k_lane[lo : lo + blk] = k_cache[row : row + blk]
-                v_lane[lo : lo + blk] = v_cache[row : row + blk]
+                k_lane[lo : lo + blk] = k_cache[row : row + blk, col : col + HEAD_DIM]
+                v_lane[lo : lo + blk] = v_cache[row : row + blk, col : col + HEAD_DIM]
             k_lane[p] = k_cur[kvh]
             v_lane[p] = v_cur[kvh]
             cur_k[(b, kvh)] = k_cur[kvh]
@@ -243,12 +252,13 @@ def _one_layer(args, layer: int, x: torch.Tensor) -> torch.Tensor:
     mlp = _bf16(sg * torch.sigmoid(sg) * su)
     down = mlp @ wd
 
-    # Write the current token into THIS layer's pool (INOUT compare).
+    # Write the current token into THIS layer's pool (INOUT compare). slot_mapping
+    # is already the BSND row (phys_page * BLOCK_SIZE + pos_in_block); within that
+    # row each kv_head owns HEAD_DIM columns, i.e. one row of the flat storage.
     for b in range(BATCH):
         slot = int(slot_mapping[b].item())
-        sblk, soff = slot // BLOCK_SIZE, slot % BLOCK_SIZE
         for kvh in range(NUM_KV_HEADS):
-            row = cb + (sblk * NUM_KV_HEADS + kvh) * BLOCK_SIZE + soff
+            row = cb + slot * NUM_KV_HEADS + kvh
             args.k_cache[row] = cur_k[(b, kvh)].to(torch.bfloat16)
             args.v_cache[row] = cur_v[(b, kvh)].to(torch.bfloat16)
 
@@ -256,7 +266,7 @@ def _one_layer(args, layer: int, x: torch.Tensor) -> torch.Tensor:
 
 
 def compute_golden(args: TaskArgsBuilder) -> None:
-    """Fill ``args.out`` (and INOUT k_cache/v_cache) for the 2-layer decode chunk."""
+    """Fill ``args.out`` (and INOUT k_cache/v_cache) for the 40-layer decode chunk."""
     cur = args.hidden_states.float()  # copy_hidden: bf16 input embedded as FP32
     for layer in range(N_LAYERS):
         cur = _one_layer(args, layer, cur)

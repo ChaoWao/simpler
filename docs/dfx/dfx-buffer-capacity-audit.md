@@ -113,7 +113,20 @@ overwrite count.
 | paged_attention_unroll_manual_scope | 3/1 drop0 | 0/49 | 3/21 | 7/2 | 3/1 ovf0 |
 | benchmark_bgemm | 3/1 drop0 | 0/33 | 3/17 | 7/1 | 3/0 ovf0 |
 | paged_attention_ringbuffer | 3/1 drop0 | 0/25 | 3/12 | 7/1 | 3/1 ovf0 |
-| qwen3_14b_decode | 3/1 drop0 | 0/23 | 3/11 | 7/1 | 3/1 ovf0 |
+
+A sixth example, `qwen3_14b_decode`, was measured for this audit as well. It has
+since been re-harvested from a 2-layer chunk to all 40 decode layers
+(simpler#1484), so its row was removed rather than left showing numbers from a
+workload roughly 20x smaller than the one now under that name. It was not the
+worst case in any column, so nothing below changes.
+
+Re-adding it is not a prerequisite for anything here: this table is the
+measurement behind the right-sizing that #977 landed, not a live dashboard. Note
+also that pypto-lib warns the full 40-layer graph can overflow the per-run SHM
+record buffer under `--enable-dep-gen` (`models/qwen3/14b/decode_fwd.py`,
+`--enable-dep-gen` help text), which is an expected consequence of a 20x larger
+graph rather than a capacity regression — but that is upstream's observation,
+not a measurement taken here.
 
 Converted to worst-case margins (`free = lowest/cap`, `ready = 1 − peak/cap`,
 verdict reads the weaker dimension):
