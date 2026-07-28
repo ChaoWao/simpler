@@ -27,9 +27,25 @@ theme:
       scheme: slate
       toggle: { icon: material/weather-sunny, name: Switch to light mode }
 
+# A page absent from nav builds fine by default and only shows up as an INFO
+# line, so it silently disappears from the site's navigation. Promote it to a
+# warning, which --strict then treats as a failure.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+
+# Deliberate omissions: these are accumulating logs and design sets, reached
+# through their own index pages rather than the sidebar. Listing every entry in
+# nav would bury the rest of the tree. Declaring them here keeps
+# omitted_files strict for everything else.
+not_in_nav: |
+  investigations/*
+  remote-l3-worker-design/*
+  troubleshooting/device-error-codes/*
+
 hooks:
   - docs/_hooks/repo_links.py
-  - docs/_hooks/griffe_filter.py
 
 plugins:
   - search
