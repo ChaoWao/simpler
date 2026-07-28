@@ -377,15 +377,23 @@ class RemoteCallable:
 
     @property
     def module(self) -> str:
+        """Module half of the ``module:qualname`` target."""
         return self.target.split(":", 1)[0]
 
     @property
     def qualname(self) -> str:
+        """Qualified-name half of the ``module:qualname`` target."""
         return self.target.split(":", 1)[1]
 
 
 @dataclass(frozen=True)
 class RemoteWorkerSpec:
+    """Describes a remote L3 worker to attach via ``Worker.add_remote_worker``.
+
+    ``transport`` selects the data plane and is simulation-backed today; the
+    daemon rejects any other value.
+    """
+
     # endpoint is "host:port"; host must be a numeric IP (or "localhost").
     # Hostnames are rejected at add_remote_worker time — getaddrinfo resolution is
     # unbounded and uncancellable and would risk pinning startup on a hung DNS.
@@ -1903,9 +1911,10 @@ class _CloseAttempt:
 
     Teardown is single-shot and terminal: once it *runs* (``_teardown_attempted``
     latches True), an un-reclaimed resource LEAKS — a later close() never re-drives
-    a half-torn tree. The one retry path is a *drain-timeout*, which leaves
-    teardown UN-attempted and the tree intact; a later close() may then drive
-    drain+teardown once the in-flight operation finishes.
+    a half-torn tree. Teardown stays UN-attempted, with the tree intact and a
+    later close() free to drive drain+teardown, only where the drain itself did
+    not complete: in-flight leases outlived the cleanup budget, or an async
+    interruption left an accepted run fence undrained.
     """
 
     __slots__ = ("done", "error", "incomplete")
@@ -2396,6 +2405,16 @@ class Worker:
         return worker_id
 
     def add_remote_worker(self, spec: RemoteWorkerSpec) -> int:
+        """Register a remote L3 worker and return its NEXT_LEVEL worker id.
+
+        Must be called before ``init()`` — the topology freezes there — and only
+        on a ``level >= 4`` parent. ``spec.endpoint`` is validated here rather
+        than at activation, so a bad address fails before any process is forked;
+        its host must be a numeric IPv4 address or ``localhost``. IPv6 is not
+        reachable here: the endpoint is parsed as a single ``host:port`` pair, so
+        a literal carrying more than one colon is rejected before the numeric
+        check runs (see ``RemoteWorkerSpec``).
+        """
         # Hold the lifecycle lock across the state check and the topology
         # mutation so a concurrent init() cannot freeze the topology snapshot
         # between them.
@@ -2737,6 +2756,11 @@ class Worker:
         )
 
     def remote_malloc(self, *, worker: int, nbytes: int) -> RemoteBufferHandle:
+        """Allocate ``nbytes`` on a started remote worker and return an owner handle.
+
+        ``nbytes`` must be positive. The target remote worker must already be
+        started, so this is callable only after ``init()``.
+        """
         worker_id = int(worker)
         size = int(nbytes)
         if size <= 0:
@@ -2757,6 +2781,14 @@ class Worker:
             )
 
     def remote_free(self, handle: RemoteBufferHandle) -> None:
+        """Free an owner remote allocation.
+
+        Idempotent: freeing an already-released handle is a no-op. Rejects
+        imported handles (use ``remote_release_import``) and ``HOST_INLINE``
+        handles, which are not remote allocations. If the buffer is still
+        referenced by a live task slot or by an outstanding import, the free is
+        recorded and deferred until those references drop rather than issued now.
+        """
         if not isinstance(handle, RemoteBufferHandle):
             raise TypeError("expected a RemoteBufferHandle returned by Worker.remote_malloc/import")
         if handle.address_space == RemoteAddressSpace.HOST_INLINE:
@@ -2778,6 +2810,11 @@ class Worker:
             handle._mark_released()
 
     def remote_copy_to(self, handle: RemoteBufferHandle, host_ptr: Any, nbytes: int, *, offset: int = 0) -> None:
+        """Copy ``nbytes`` from host memory into an owner remote buffer.
+
+        Requires an owner handle, not an imported one. ``offset + nbytes`` must
+        fall within ``handle.nbytes``.
+        """
         with self._operation_lease("remote_copy_to"):
             self._require_live_remote_buffer(handle)
             if handle.is_imported:
@@ -2800,6 +2837,11 @@ class Worker:
             )
 
     def remote_copy_from(self, handle: RemoteBufferHandle, host_ptr: Any, nbytes: int, *, offset: int = 0) -> None:
+        """Copy ``nbytes`` out of an owner remote buffer into host memory.
+
+        Requires an owner handle, not an imported one. ``offset + nbytes`` must
+        fall within ``handle.nbytes``.
+        """
         with self._operation_lease("remote_copy_from"):
             self._require_live_remote_buffer(handle)
             if handle.is_imported:
@@ -2830,6 +2872,12 @@ class Worker:
         access: str | int = "readwrite",
         transport_profile: str = "sim",
     ) -> RemoteBufferExport:
+        """Export a range of an owner buffer so another worker can import it.
+
+        ``nbytes=None`` exports from ``offset`` to the end of the buffer. The
+        requested ``access`` must be a subset of the handle's own access flags —
+        an export can narrow permissions but never widen them.
+        """
         with self._operation_lease("remote_export"):
             return self._remote_export_locked(
                 handle, offset=offset, nbytes=nbytes, access=access, transport_profile=transport_profile
@@ -2889,6 +2937,11 @@ class Worker:
     def remote_import(
         self, exported: RemoteBufferExport, *, worker: int, access: str | int | None = None
     ) -> RemoteBufferHandle:
+        """Import an exported buffer on ``worker`` and return an imported handle.
+
+        ``access`` defaults to the export's own flags. Rejects an export minted
+        by a different ``Worker`` and one whose owner buffer has been freed.
+        """
         # Argument validation (type / forged / stale) is independent of lifecycle
         # and runs before admission; the lease guards the actual transport.
         if not isinstance(exported, RemoteBufferExport):
@@ -2957,6 +3010,12 @@ class Worker:
             raise
 
     def remote_release_import(self, handle: RemoteBufferHandle) -> None:
+        """Release an imported remote handle.
+
+        Idempotent, and rejects owner handles (use ``remote_free``). Deferred
+        while a live task slot still references it. Releasing the last import of
+        a buffer whose owner already called ``remote_free`` completes that free.
+        """
         if not isinstance(handle, RemoteBufferHandle):
             raise TypeError("expected a RemoteBufferHandle returned by Worker.remote_import")
         if not handle.is_imported:
@@ -6214,6 +6273,26 @@ class Worker:
         return ", ".join(parts) if parts else "(none)"
 
     def close(self) -> None:  # noqa: PLR0912, PLR0915 -- lifecycle linearization: reentrancy / init-guard / join / owner / claim / drain / teardown
+        """Release this worker's resources. Terminal and single-shot.
+
+        A permanent commitment, not a reversible attempt: CLOSED is published
+        atomically and never reverts to READY, and the leased live-tree APIs are
+        rejected from then on. Put the call in a ``finally`` — a worker that is
+        never closed keeps its device held.
+
+        - Reentrant ``close()`` from inside a leased operation is rejected.
+        - ``close()`` during an in-progress ``init()`` fails fast; this worker
+          does not cancel initialization. Wait for READY or FAILED.
+        - A concurrent ``close()`` joins the in-flight attempt and observes its
+          result; teardown never runs twice at once.
+        - Teardown is single-shot. Once it runs, a later ``close()`` re-raises
+          the same result rather than re-driving a half-torn tree. A retry is
+          permitted only where the drain did not complete and so left teardown
+          un-attempted and the tree intact: either in-flight leases outlived
+          the cleanup budget, or an asynchronous interruption left an accepted
+          run fence undrained.
+        - Native teardown runs on the ``init()``-owner thread, being device-bound.
+        """
         # close() is a permanent commitment against a resource, not a reversible
         # attempt: it publishes CLOSED atomically (the sole public admission
         # fence — the leased live-tree APIs are rejected once CLOSED) and NEVER
@@ -6225,9 +6304,11 @@ class Worker:
         #     result; the same worker's teardown never runs twice at once;
         #   - teardown is single-shot and TERMINAL: once it runs, an un-reclaimed
         #     resource leaks and a later close() re-raises the same result — it
-        #     never re-drives a half-torn tree. Only a drain-timeout (teardown
-        #     un-attempted, tree intact) lets a later close() retry once the
-        #     in-flight op finishes; a tree with a live op is never torn down;
+        #     never re-drives a half-torn tree. A later close() may retry only
+        #     where the drain left teardown un-attempted and the tree intact —
+        #     leases outliving the budget, or an async interruption leaving an
+        #     accepted run fence undrained; a tree with a live op is never torn
+        #     down;
         #   - native teardown runs only on the init-owner thread (device-bound).
         # `attempt` is None until the claim installs it. The pre-claim checks
         # raise/return before that, so the finally skips completion for them. From
@@ -6300,7 +6381,8 @@ class Worker:
                 # rejects new leases; a tree with a live op is never torn down.
                 # If an op outlives the budget, teardown stays UN-attempted and
                 # the tree intact so a later close() can retry once it drains —
-                # the one retryable close() path.
+                # one of the two paths that keep close() retryable (the other is
+                # an async interruption leaving an accepted run fence undrained).
                 if self._active_ops > 0:
                     drain_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
                     while self._active_ops > 0:

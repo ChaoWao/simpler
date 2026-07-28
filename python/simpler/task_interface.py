@@ -163,6 +163,13 @@ COMM_MAX_RANK_NUM = 64
 
 
 class RemoteAddressSpace(IntEnum):
+    """How a remote buffer's bytes are reached.
+
+    ``HOST_INLINE`` carries the payload in the message itself rather than
+    naming remote memory. ``REMOTE_WINDOW`` and ``UB_LDST`` are protocol
+    placeholders: the shipped transport is simulation-backed.
+    """
+
     HOST_INLINE = 1
     REMOTE_DEVICE = 2
     REMOTE_WINDOW = 3
@@ -177,6 +184,22 @@ _REMOTE_BUFFER_EXPORT_TOKEN = object()
 
 
 class RemoteBufferHandle:
+    """A reference to memory on a remote L3 worker.
+
+    Returned by ``Worker.remote_malloc`` (an *owner* handle) or by
+    ``Worker.remote_import`` (an *imported* handle, told apart by
+    ``is_imported``). The two are not interchangeable: owner handles are freed
+    with ``remote_free``, imported ones with ``remote_release_import``.
+
+    ``RemoteTensorRef.host_inline`` produces a third form, with
+    ``address_space`` of ``HOST_INLINE``: it carries its bytes in the message
+    and names no remote allocation, so neither release call applies —
+    ``remote_free`` rejects it outright and it is never ``is_imported``.
+
+    Construct only through ``Worker`` or ``RemoteTensorRef.host_inline``; the
+    constructor is token-guarded.
+    """
+
     __slots__ = (
         "_worker_id",
         "_owner_worker_id",
@@ -328,34 +351,42 @@ class RemoteBufferHandle:
 
     @property
     def worker_id(self) -> int:
+        """Worker holding this reference — the importer, for an imported handle."""
         return self._worker_id
 
     @property
     def owner_worker_id(self) -> int:
+        """Worker that owns the underlying allocation."""
         return self._owner_worker_id
 
     @property
     def import_id(self) -> int:
+        """Nonzero on an imported handle; ``0`` on an owner handle."""
         return self._import_id
 
     @property
     def address_space(self) -> RemoteAddressSpace:
+        """How these bytes are reached; see ``RemoteAddressSpace``."""
         return self._address_space
 
     @property
     def nbytes(self) -> int:
+        """Size of the allocation in bytes, or of the payload for ``HOST_INLINE``."""
         return self._nbytes
 
     @property
     def released(self) -> bool:
+        """Whether the handle has been freed or released."""
         return self._released
 
     @property
     def access_flags(self) -> int:
+        """Permitted access as a read/write bitmask; an export may only narrow it."""
         return self._access_flags
 
     @property
     def is_imported(self) -> bool:
+        """Whether this came from ``remote_import`` rather than ``remote_malloc``."""
         return self._import_id != 0
 
     def _mark_released(self) -> None:
@@ -524,26 +555,32 @@ class RemoteBufferExport:
 
     @property
     def owner_worker_id(self) -> int:
+        """Worker that owns the exported allocation."""
         return self._owner_worker_id
 
     @property
     def address_space(self) -> RemoteAddressSpace:
+        """How the exported bytes are reached."""
         return self._address_space
 
     @property
     def offset(self) -> int:
+        """Start of the exported range within the owner buffer."""
         return self._offset
 
     @property
     def nbytes(self) -> int:
+        """Length of the exported range in bytes."""
         return self._nbytes
 
     @property
     def access_flags(self) -> int:
+        """Access granted here; a subset of the owner handle's flags."""
         return self._access_flags
 
     @property
     def transport_profile(self) -> str:
+        """Transport this export was minted for."""
         return self._transport_profile
 
     def __repr__(self) -> str:
@@ -585,6 +622,8 @@ class _RemoteTaskArgsSidecar:
 
 @dataclass(frozen=True)
 class RemoteTensorRef:
+    """A tensor argument that lives on, or travels to, a remote worker."""
+
     handle: RemoteBufferHandle
     offset: int = 0
     shape: tuple[int, ...] = ()
@@ -620,6 +659,11 @@ class RemoteTensorRef:
 
     @classmethod
     def host_inline(cls, payload: bytes, *, shape: tuple[int, ...], dtype: DataType) -> RemoteTensorRef:
+        """Build a reference whose payload travels inline, naming no remote memory.
+
+        ``payload`` length must equal the byte size implied by ``shape`` and
+        ``dtype``, and shape entries must be non-negative.
+        """
         data = bytes(payload)
         shape_tuple = tuple(int(x) for x in shape)
         if any(x < 0 for x in shape_tuple):
@@ -847,6 +891,10 @@ class CommBufferSpec:
 
 @dataclass
 class ChipDomainContext:
+    """Per-domain view handed to a chip worker: its rank within the domain and
+    the local slice of the symmetric window.
+    """
+
     name: str
     domain_rank: int
     domain_size: int
@@ -1346,8 +1394,10 @@ class ChipWorker:
 
     @property
     def device_id(self):
+        """ACL device ordinal this worker is bound to."""
         return self._impl.device_id
 
     @property
     def initialized(self):
+        """Whether the underlying native worker has completed init."""
         return self._impl.initialized
