@@ -30,7 +30,13 @@ from dataclasses import dataclass
 from enum import IntEnum
 from math import prod
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Annotation-only: `CallableHandle` is imported lazily at its use site, and
+    # PEP 563 keeps these annotations as strings, so nothing is imported at
+    # runtime.
+    from .callable_identity import CallableHandle
 
 import _task_interface as _ti_module  # pyright: ignore[reportMissingImports]
 from _task_interface import (  # pyright: ignore[reportMissingImports]
@@ -1059,7 +1065,18 @@ class ChipWorker:
         self._live_handles: dict[int, bytes] = {}
         self._next_handle_id = 0
 
-    def init(self, device_id, bins, log_level=None, log_info_v=None, prewarm_config=None, enable_sdma=False):
+    def init(
+        self,
+        device_id: int,
+        # Structurally typed: any object exposing the *_path attributes below.
+        # Not RuntimeBinaries — that lives in simpler_setup, which this package
+        # must not depend on.
+        bins: Any,
+        log_level: int | None = None,
+        log_info_v: int | None = None,
+        prewarm_config: CallConfig | None = None,
+        enable_sdma: bool = False,
+    ):
         """Attach the calling thread to ``device_id``, load the host runtime
         library, and cache platform binaries.
 
@@ -1253,7 +1270,13 @@ class ChipWorker:
                 raise
         return handle
 
-    def run(self, handle, args, config=None, **kwargs):
+    def run(
+        self,
+        handle: CallableHandle,
+        args: ChipStorageTaskArgs,
+        config: CallConfig | None = None,
+        **kwargs: Any,
+    ):
         """Launch a callable previously returned by ``register_callable``.
 
         Args:

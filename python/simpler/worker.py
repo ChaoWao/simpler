@@ -4208,7 +4208,7 @@ class Worker:
                     f"has no eligible dispatch target (needs {need})"
                 )
 
-    def init(self, prewarm_config=None, *, _startup_deadline: float | None = None) -> None:
+    def init(self, prewarm_config: CallConfig | None = None, *, _startup_deadline: float | None = None) -> None:
         """Initialize the worker and bring its whole subtree to READY.
 
         For an L3+ worker ``init`` is the single startup submission point: it
