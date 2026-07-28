@@ -174,8 +174,8 @@ TEST_F(TaskAllocatorTest, UpdateHeapTailFromConsumedTask) {
     auto r2 = allocator.alloc(0);
     ASSERT_FALSE(r2.failed());
 
-    // top=256, tail=256: at_end = 4096-256=3840, at_begin = 256
-    EXPECT_EQ(allocator.heap_available(), HEAP_SIZE - 256u);
+    // top=256, tail=256: the ring is empty despite both cursors being non-zero.
+    EXPECT_EQ(allocator.heap_available(), HEAP_SIZE);
 }
 
 TEST_F(TaskAllocatorTest, UpdateHeapTailAtTask0) {
@@ -266,6 +266,64 @@ TEST_F(TaskAllocatorTest, HeapWrapAroundSuccess) {
     ASSERT_FALSE(r2.failed());
     EXPECT_EQ(r2.packed_base, static_cast<void *>(heap_buf));
     EXPECT_EQ(allocator.heap_top(), 64u);
+}
+
+TEST_F(TaskAllocatorTest, HeapEmptyRingRebasesForContiguousAlloc) {
+    constexpr uint64_t allocation_size = 3000;
+    auto r1 = allocator.alloc(allocation_size);
+    ASSERT_FALSE(r1.failed());
+    const uint64_t aligned_size = allocator.heap_top();
+
+    consume_up_to(descriptors, last_alive, heap_buf, WINDOW_SIZE, 1, aligned_size);
+
+    auto r2 = allocator.alloc(allocation_size);
+    ASSERT_FALSE(r2.failed()) << "an empty ring must place an allocation that fits its full capacity";
+    EXPECT_EQ(r2.packed_base, static_cast<void *>(heap_buf));
+    EXPECT_EQ(allocator.heap_top(), aligned_size);
+    EXPECT_EQ(allocator.heap_tail(), 0u);
+}
+
+TEST_F(TaskAllocatorTest, HeapAvailableReportsCapacityForParkedEmptyRing) {
+    constexpr uint64_t allocation_size = 1024;
+    auto r1 = allocator.alloc(allocation_size);
+    ASSERT_FALSE(r1.failed());
+
+    consume_up_to(descriptors, last_alive, heap_buf, WINDOW_SIZE, 1, allocation_size);
+    auto zero_size_probe = allocator.alloc(0);
+    ASSERT_FALSE(zero_size_probe.failed());
+
+    ASSERT_EQ(allocator.heap_top(), allocation_size);
+    ASSERT_EQ(allocator.heap_tail(), allocation_size);
+    EXPECT_EQ(allocator.heap_available(), HEAP_SIZE);
+}
+
+TEST_F(TaskAllocatorTest, HeapRebaseKeepsNewAllocationLiveWhenOlderZeroSizeTaskRetires) {
+    constexpr uint64_t allocation_size = 3000;
+    auto r1 = allocator.alloc(allocation_size);
+    ASSERT_FALSE(r1.failed());
+    const uint64_t aligned_size = allocator.heap_top();
+
+    consume_up_to(descriptors, last_alive, heap_buf, WINDOW_SIZE, 1, aligned_size);
+    auto old_zero_size = allocator.alloc(0);
+    ASSERT_FALSE(old_zero_size.failed());
+
+    auto rebased = allocator.alloc(allocation_size);
+    ASSERT_FALSE(rebased.failed());
+    descriptors[rebased.slot].packed_buffer_end = rebased.packed_end;
+    ASSERT_EQ(allocator.heap_tail(), 0u);
+    ASSERT_EQ(allocator.heap_used_bytes(), aligned_size);
+
+    consume_up_to(descriptors, last_alive, heap_buf, WINDOW_SIZE, 2, aligned_size);
+    auto live_probe = allocator.alloc(0);
+    ASSERT_FALSE(live_probe.failed());
+    EXPECT_EQ(allocator.heap_tail(), 0u);
+    EXPECT_EQ(allocator.heap_used_bytes(), aligned_size);
+
+    consume_up_to(descriptors, last_alive, heap_buf, WINDOW_SIZE, 3, aligned_size);
+    auto retired_probe = allocator.alloc(0);
+    ASSERT_FALSE(retired_probe.failed());
+    EXPECT_EQ(allocator.heap_tail(), aligned_size);
+    EXPECT_EQ(allocator.heap_used_bytes(), 0u);
 }
 
 // Linear-gap guard `tail - top > alloc_size` uses strict > for the same reason.
