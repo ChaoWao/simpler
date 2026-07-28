@@ -169,9 +169,24 @@ WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, WorkerDispatch d) {
     // Signal child
     write_state(mailbox_, MailboxState::TASK_READY);
 
-    // Poll for completion
-    while (read_state(mailbox_) != MailboxState::TASK_DONE)
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    // Spin-poll for completion. The task's latency runs through this wait, so
+    // it never sleeps (codestyle rule 5). A child that dies without publishing
+    // TASK_DONE would spin here forever, so its liveness is sampled on a
+    // kChildLivenessPollPeriod steady-clock period rather than an iteration
+    // count, which no longer maps to a bounded time at spin speed.
+    auto next_liveness_check = steady_clock::now() + kChildLivenessPollPeriod;
+    while (read_state(mailbox_) != MailboxState::TASK_DONE) {
+        auto now = steady_clock::now();
+        if (now >= next_liveness_check) {
+            next_liveness_check = now + kChildLivenessPollPeriod;
+            std::string death = check_child_death();
+            if (!death.empty()) {
+                completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+                completion.error_message = "LocalMailboxEndpoint::run: " + death;
+                return completion;
+            }
+        }
+    }
 
     int err = read_error(mailbox_);
     write_state(mailbox_, MailboxState::IDLE);
@@ -187,7 +202,10 @@ Parent-side cost per dispatch:
 - One reserved `uint64`, one `CallConfig`, one 32-byte digest, and one
   TaskArgs blob
 - One signal (`write_state`)
-- Poll loop with `sleep_for(50us)` (not busy-wait)
+- Spin-poll loop, never a sleep — a task's latency passes through this wait
+  ([codestyle](../.claude/rules/codestyle.md) rule 5). Child liveness is sampled
+  on a steady-clock period, so a dead child ends the wait with
+  `ENDPOINT_FAILURE` instead of spinning the parent forever
 - One explicit completion outcome: success, task failure, or endpoint failure
 
 Total ~nanoseconds overhead; the wait is dominated by actual kernel execution.

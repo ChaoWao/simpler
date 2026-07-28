@@ -256,7 +256,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
  * Per-stage run timing is not returned — the platform emits it as `[STRACE]`
  * log markers (see docs/dfx/host-trace.md).
  *
- * `config` carries block_dim (0 = auto), aicpu_thread_num, the five diagnostic
+ * `config` carries aicpu_thread_num, the five diagnostic
  * enables + output_prefix, and the per-task ring sizing overrides
  * (`runtime_env.ring_task_window` / `.ring_heap` / `.ring_dep_pool`, each a
  * per-scope-depth-ring array of RUNTIME_ENV_RING_COUNT entries; 0 = unset,

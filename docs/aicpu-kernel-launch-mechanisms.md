@@ -268,7 +268,8 @@ above stays valid.
 - Issue [#822](https://github.com/hw-native-sys/simpler/issues/822) —
   the bug report with the diagnostic D2H recipe and CANN source
   pointers
-- PR #537 — the migration that attempted Path B
+- PR #537 — the migration that shipped Path A (dispatcher bootstrap plus
+  per-task `rtsLaunchCpuKernel`)
 - [`src/common/aicpu_loader/`](../src/common/aicpu_loader/) —
   the dispatcher bootstrap, three-symbol device contract, and per-task
   launch loader

@@ -19,8 +19,7 @@
  *
  * Scope: L3 single-host multi-card only. The VMM shareable-handle
  * exchange is host-local, so cross-host (L4) deployments need a different
- * windows backend -- see .docs/28.l3-comm/ext.01.pr-774-review.md F2 /
- * 05.plan.zh.md for the channel-API direction.
+ * windows backend.
  */
 
 #include "platform_comm/comm.h"
@@ -613,8 +612,7 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
     // windowsOut[] is intentionally left zero: no kernel path reads it
     // (verified by grep across simpler + pto-isa). The field is kept in
     // CommContext only to preserve byte-equivalence with pto-isa's parallel
-    // HcclDeviceContext declaration; removing it is gated on the F4
-    // private-ization decision (see .docs/28.l3-comm/ext.01.pr-774-review.md).
+    // HcclDeviceContext declaration.
     // host_ctx was value-initialized at handle construction (CommContext{}),
     // and the idempotency guard in comm_alloc_windows prevents a second entry;
     // no re-zero needed before populating it here.

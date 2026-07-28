@@ -21,7 +21,9 @@ pre-allocates the per-rank PTO-ISA async-SDMA scratch workspace via
 read `workSpace` to submit SQEs to the SDMA hardware engine; the deferred
 completion machinery polls workspace event-records to signal consumers.
 
-This is the a5 mirror of the a2a3 SDMA path, which is always on.
+This is the a5 mirror of the a2a3 SDMA path. On a2a3 the provider is always
+compiled in, but provisioning it is opt-in at runtime: `Worker(...,
+enable_sdma=True)`, which defaults to `False`.
 
 ## Why it is gated off
 
