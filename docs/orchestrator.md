@@ -55,6 +55,8 @@ public:
     RunId begin_run();
     void close_run_submission(RunId run_id);
     void fail_run_submission(RunId run_id, std::exception_ptr error);
+    void wait_run_accepted(RunId run_id);
+    bool run_accepted(RunId run_id) const;
     void wait_run(RunId run_id);
     bool wait_run_for(RunId run_id, double timeout_seconds);
     bool run_done(RunId run_id) const;
@@ -96,9 +98,12 @@ worker.submit(orchestration, args, config).wait()
 ```
 
 The current L2 backend is synchronous, so L2 `submit()` executes the existing
-blocking path and returns an already-completed handle. L3 asynchronous return
-does not yet imply overlapping runs: a later submit waits for the prior run's
-fence and cleanup before building the next DAG.
+blocking path and returns an already-completed handle. At L3 and above, graph
+callbacks remain serialized, but a later submit waits only for every dispatch
+in the prior run to cross its endpoint acceptance boundary. On A2A3 onboard,
+that boundary is after both device kernels are enqueued and before stream
+synchronization. Endpoints without an earlier signal fall back to completion.
+Each run still owns its completion error, keepalives, and cleanup independently.
 
 Remote L3 submit adds two hidden pieces of metadata: final eligible worker-id
 sets and optional `RemoteTaskArgsSidecar` entries aligned by tensor index.

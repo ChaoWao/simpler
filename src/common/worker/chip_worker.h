@@ -69,10 +69,16 @@ public:
     // platform as `[STRACE]` log markers — see src/common/log/.../strace.h — not
     // returned, so the L3 dispatcher and L2 child are observed uniformly.
     void run(int32_t callable_id, TaskArgsView args, const CallConfig &config);
+    void
+    run(int32_t callable_id, TaskArgsView args, const CallConfig &config, volatile int32_t *accepted_state,
+        int32_t accepted_value);
     // Same launch, but the caller already holds the runtime.so-ABI POD —
     // skip the view→storage memcpy and hand the pointer straight to the C ABI.
     // Used by the ChipStorageTaskArgs path in the nanobind binding.
     void run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config);
+    void
+    run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config,
+        volatile int32_t *accepted_state, int32_t accepted_value);
 
     // Per-callable_id preparation. Requires init() first and a callable_id
     // in [0, MAX_REGISTERED_CALLABLE_IDS) (cap 64).
@@ -90,11 +96,9 @@ public:
     /// `aicpu_dlopen_count` for the trb path; returns 0 on device-orch variants.
     size_t host_dlopen_count() const;
 
-    /// Number of run stream sets the bound runner has created. A set belongs
-    /// to a pipeline slot and is reused for every run on that slot, so a
-    /// runner that has served any number of runs on one slot reports 1;
-    /// platforms whose runs use the persistent bootstrap pair report 0. Used
-    /// by tests to assert that repeated runs do not rebuild the set per run.
+    /// Number of run stream generations the bound runner has created. AICPU
+    /// streams belong to slots; AICore streams are reused only while the loaded
+    /// code image is unchanged. Platforms using the persistent pair report 0.
     size_t run_stream_set_create_count() const;
 
     uint64_t malloc(size_t size);
@@ -165,6 +169,7 @@ private:
     );
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
+    using SetTaskAcceptedStateFn = int (*)(void *, volatile int32_t *, int32_t);
     using GetPipelineContractFn = const PipelineContract *(*)();
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
@@ -212,6 +217,7 @@ private:
     SimplerInitFn simpler_init_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;
+    SetTaskAcceptedStateFn set_task_accepted_state_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;
     GetAicpuDlopenCountFn get_aicpu_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_host_dlopen_count_fn_ = nullptr;

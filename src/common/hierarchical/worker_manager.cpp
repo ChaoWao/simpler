@@ -139,6 +139,13 @@ void WorkerEndpoint::control_l3_l2_region_release(uint64_t) {
     throw_unsupported_control("control_l3_l2_region_release");
 }
 
+WorkerCompletion
+WorkerEndpoint::run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept) {
+    WorkerCompletion completion = run(ring, dispatch);
+    if (on_accept) on_accept();
+    return completion;
+}
+
 // =============================================================================
 // LocalMailboxEndpoint — mailbox helpers
 // =============================================================================
@@ -205,6 +212,19 @@ void LocalMailboxEndpoint::write_mailbox_state(MailboxState s) {
 #endif
 }
 
+bool LocalMailboxEndpoint::read_task_accepted() const {
+    const int32_t *ptr = reinterpret_cast<const int32_t *>(mbox() + MAILBOX_OFF_ACCEPTED);
+    int32_t v = 0;
+    __atomic_load(ptr, &v, __ATOMIC_ACQUIRE);
+    return v == MAILBOX_TASK_ACCEPTED;
+}
+
+void LocalMailboxEndpoint::clear_task_accepted() {
+    int32_t *ptr = reinterpret_cast<int32_t *>(mbox() + MAILBOX_OFF_ACCEPTED);
+    int32_t v = 0;
+    __atomic_store(ptr, &v, __ATOMIC_RELEASE);
+}
+
 void LocalMailboxEndpoint::shutdown_child() { write_mailbox_state(MailboxState::SHUTDOWN); }
 
 // =============================================================================
@@ -212,11 +232,13 @@ void LocalMailboxEndpoint::shutdown_child() { write_mailbox_state(MailboxState::
 // =============================================================================
 
 void WorkerThread::start(
-    Ring *ring, const std::function<void(WorkerCompletion)> &on_complete, std::unique_ptr<WorkerEndpoint> endpoint
+    Ring *ring, const std::function<void(WorkerCompletion)> &on_complete,
+    const std::function<void(WorkerDispatch)> &on_accept, std::unique_ptr<WorkerEndpoint> endpoint
 ) {
     if (!endpoint) throw std::invalid_argument("WorkerThread::start: null endpoint");
     ring_ = ring;
     on_complete_ = on_complete;
+    on_accept_ = on_accept;
     endpoint_ = std::move(endpoint);
     shutdown_ = false;
     idle_.store(true, std::memory_order_relaxed);
@@ -268,8 +290,14 @@ void WorkerThread::loop() {
         }
 
         WorkerCompletion completion;
+        bool accepted = false;
+        auto accept_once = [&]() {
+            if (accepted) return;
+            accepted = true;
+            if (on_accept_) on_accept_(d);
+        };
         try {
-            completion = dispatch_process(d);
+            completion = dispatch_process(d, accept_once);
         } catch (const std::exception &e) {
             completion.task_slot = d.task_slot;
             completion.group_index = d.group_index;
@@ -281,18 +309,42 @@ void WorkerThread::loop() {
             completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
             completion.error_message = "WorkerThread endpoint failed with unknown exception";
         }
+        // The fence must advance even when the dispatch failed — a waiter on
+        // wait_run_accepted would otherwise block forever — and it must not
+        // throw out of this thread, where an escaping exception terminates the
+        // process. mark_task_accepted is non-throwing by construction; this
+        // keeps that a local property rather than a remote assumption.
+        try {
+            accept_once();
+        } catch (const std::exception &e) {
+            if (completion.outcome == EndpointOutcome::SUCCESS) {
+                completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+                completion.error_message = std::string("WorkerThread accept fence failed: ") + e.what();
+            }
+        } catch (...) {
+            if (completion.outcome == EndpointOutcome::SUCCESS) {
+                completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+                completion.error_message = "WorkerThread accept fence failed with unknown exception";
+            }
+        }
 
         idle_.store(true, std::memory_order_release);
         on_complete_(std::move(completion));
     }
 }
 
-WorkerCompletion WorkerThread::dispatch_process(WorkerDispatch d) {
+WorkerCompletion WorkerThread::dispatch_process(WorkerDispatch d, const std::function<void()> &on_accept) {
     if (!endpoint_) throw std::runtime_error("WorkerThread::dispatch_process: null endpoint");
-    return endpoint_->run(ring_, d);
+    return endpoint_->run_with_accept(ring_, d, on_accept);
 }
 
 WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, const WorkerDispatch &dispatch) {
+    return run_with_accept(ring, dispatch, {});
+}
+
+WorkerCompletion LocalMailboxEndpoint::run_with_accept(
+    Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept
+) {
     if (ring == nullptr) throw std::invalid_argument("LocalMailboxEndpoint::run: null ring");
     TaskSlotState &s = *ring->slot_state(dispatch.task_slot);
     int32_t group_index = dispatch.group_index;
@@ -361,17 +413,31 @@ WorkerCompletion LocalMailboxEndpoint::run(Ring *ring, const WorkerDispatch &dis
         );
     }
 
+    // Clear the sticky ACK before the child can set it, so the previous task's
+    // acceptance cannot satisfy this one's fence.
+    clear_task_accepted();
+
     // Signal child process.
     write_mailbox_state(MailboxState::TASK_READY);
 
-    // Spin-poll until child signals TASK_DONE. The task's latency runs through
-    // this wait, so it never sleeps (codestyle rule 5). A child that dies
-    // without publishing TASK_DONE would otherwise leave the loop spinning
-    // forever, so its liveness is sampled on a kChildLivenessPollPeriod wall
-    // clock rather than an iteration count, which no longer maps to a wall
-    // time once the loop runs at spin speed.
+    // Spin-poll until child signals TASK_DONE, observing the sticky launch ACK
+    // on the way. The task's latency runs through this wait, so it never sleeps
+    // (codestyle rule 5). A child that dies without publishing TASK_DONE would
+    // otherwise leave the loop spinning forever, so its liveness is sampled on a
+    // kChildLivenessPollPeriod wall clock rather than an iteration count, which
+    // no longer maps to a wall time once the loop runs at spin speed.
     auto next_liveness_check = std::chrono::steady_clock::now() + kChildLivenessPollPeriod;
-    while (read_mailbox_state() != MailboxState::TASK_DONE) {
+    bool acceptance_observed = false;
+    while (true) {
+        MailboxState state = read_mailbox_state();
+        // Read the ACK after the state. The child sets the sticky word before
+        // TASK_DONE, so observing TASK_DONE here implies this load sees it —
+        // a task that finishes between two polls cannot lose its acceptance.
+        if (!acceptance_observed && read_task_accepted()) {
+            acceptance_observed = true;
+            if (on_accept) on_accept();
+        }
+        if (state == MailboxState::TASK_DONE) break;
         auto now = std::chrono::steady_clock::now();
         if (now >= next_liveness_check) {
             next_liveness_check = now + kChildLivenessPollPeriod;
@@ -425,7 +491,7 @@ void WorkerManager::add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endp
 
 void WorkerManager::add_sub(void *mailbox, int child_pid) { sub_entries_.push_back(LocalSubEntry{mailbox, child_pid}); }
 
-void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete) {
+void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept) {
     if (ring == nullptr) throw std::invalid_argument("WorkerManager::start: null ring");
 
     std::vector<int32_t> next_level_worker_ids;
@@ -453,7 +519,7 @@ void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete) {
         for (const auto &entry : next_level_entries_) {
             auto wt = std::make_unique<WorkerThread>();
             auto endpoint = std::make_unique<LocalMailboxEndpoint>(entry.worker_id, entry.mailbox, entry.child_pid);
-            wt->start(ring, on_complete, std::move(endpoint));
+            wt->start(ring, on_complete, on_accept, std::move(endpoint));
             next_level_threads_.push_back(std::move(wt));
         }
     };
@@ -464,14 +530,14 @@ void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete) {
             auto endpoint = std::make_unique<LocalMailboxEndpoint>(
                 static_cast<int32_t>(i), entries[i].mailbox, entries[i].child_pid
             );
-            wt->start(ring, on_complete, std::move(endpoint));
+            wt->start(ring, on_complete, on_accept, std::move(endpoint));
             threads.push_back(std::move(wt));
         }
     };
     make_next_level_threads();
     for (auto &endpoint : next_level_endpoint_entries_) {
         auto wt = std::make_unique<WorkerThread>();
-        wt->start(ring, on_complete, std::move(endpoint));
+        wt->start(ring, on_complete, on_accept, std::move(endpoint));
         next_level_threads_.push_back(std::move(wt));
     }
     next_level_endpoint_entries_.clear();

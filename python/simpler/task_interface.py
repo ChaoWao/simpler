@@ -1312,7 +1312,7 @@ class ChipWorker:
 
     @property
     def run_stream_set_create_count(self):
-        """Number of run stream sets the bound runner has created."""
+        """Number of run stream generations the bound runner has created."""
         return self._impl.run_stream_set_create_count
 
     def malloc(self, size):

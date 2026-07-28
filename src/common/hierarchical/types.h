@@ -141,6 +141,7 @@ struct RunState {
     RunId id{INVALID_RUN_ID};
     std::atomic<RunPhase> phase{RunPhase::BUILDING};
     std::atomic<int32_t> active_tasks{0};
+    std::atomic<int32_t> pending_accepts{0};
     mutable std::mutex completion_mu;
     std::condition_variable completion_cv;
     std::exception_ptr first_error;

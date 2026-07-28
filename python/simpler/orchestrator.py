@@ -572,6 +572,12 @@ class Orchestrator:
     def _wait_run(self, run_id: int) -> None:
         self._o._wait_run(run_id)
 
+    def _wait_run_accepted(self, run_id: int) -> None:
+        self._o._wait_run_accepted(run_id)
+
+    def _run_accepted(self, run_id: int) -> bool:
+        return bool(self._o._run_accepted(run_id))
+
     def _wait_run_for(self, run_id: int, timeout_seconds: float) -> bool:
         return bool(self._o._wait_run_for(run_id, timeout_seconds))
 

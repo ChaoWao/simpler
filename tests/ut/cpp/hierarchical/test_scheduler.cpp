@@ -116,6 +116,13 @@ struct MockMailboxWorker {
         run_cv.notify_one();
     }
 
+    // The child publishes acceptance into the sticky word, not the state.
+    void write_task_accepted() {
+        auto *ptr = reinterpret_cast<int32_t *>(static_cast<char *>(mailbox_ptr()) + MAILBOX_OFF_ACCEPTED);
+        int32_t v = MAILBOX_TASK_ACCEPTED;
+        __atomic_store(ptr, &v, __ATOMIC_RELEASE);
+    }
+
     void wait_running(int timeout_ms = 500) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (!is_running.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
@@ -288,9 +295,15 @@ struct SchedulerFixture : public ::testing::Test {
 
         mock_worker.start();
         manager.add_next_level(mock_worker.mailbox_ptr());
-        manager.start(&allocator, [this](WorkerCompletion completion) {
-            sched.worker_done(std::move(completion));
-        });
+        manager.start(
+            &allocator,
+            [this](WorkerCompletion completion) {
+                sched.worker_done(std::move(completion));
+            },
+            [this](WorkerDispatch dispatch) {
+                orch.mark_task_accepted(dispatch.task_slot);
+            }
+        );
         rq_next_level.reset(manager.next_level_worker_ids());
         orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level, &manager, [this] {
             sched.notify_ready();
@@ -351,7 +364,7 @@ TEST(WorkerManagerTest, StartRejectsDuplicateNextLevelWorkerId) {
 
     bool threw = false;
     try {
-        manager.start(&allocator, [](WorkerCompletion) {});
+        manager.start(&allocator, [](WorkerCompletion) {}, {});
     } catch (const std::runtime_error &e) {
         threw = true;
         EXPECT_NE(std::string(e.what()).find("duplicate NEXT_LEVEL worker_id 0"), std::string::npos);
@@ -360,6 +373,99 @@ TEST(WorkerManagerTest, StartRejectsDuplicateNextLevelWorkerId) {
     manager.stop();
     allocator.shutdown();
     EXPECT_TRUE(threw);
+}
+
+TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
+    MockMailboxWorker child;
+    child.start();
+
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    AllocResult ar = allocator.alloc(/*heap_bytes=*/0, /*depth=*/0);
+    ASSERT_NE(ar.slot, INVALID_SLOT);
+    TaskSlotState *slot = allocator.slot_state(ar.slot);
+    ASSERT_NE(slot, nullptr);
+    slot->reset();
+    slot->callable.digest[0] = 0x42;
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
+    std::promise<WorkerCompletion> result;
+    auto done = result.get_future();
+    std::atomic<bool> accepted{false};
+    std::thread caller([&] {
+        result.set_value(endpoint.run_with_accept(&allocator, WorkerDispatch{ar.slot, 0}, [&] {
+            accepted.store(true, std::memory_order_release);
+        }));
+    });
+
+    child.wait_running();
+    EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
+    child.write_task_accepted();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!accepted.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {}
+    EXPECT_TRUE(accepted.load(std::memory_order_acquire));
+    EXPECT_EQ(done.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+
+    // Non-fatal from here on: a fatal assertion would return with `caller`
+    // joinable, and ~std::thread would terminate the whole test binary.
+    child.complete();
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    if (done.valid() && done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        EXPECT_EQ(done.get().outcome, EndpointOutcome::SUCCESS);
+    }
+    caller.join();
+    allocator.shutdown();
+}
+
+// The ACK must not be carried by anything TASK_DONE can overwrite. The child
+// publishes acceptance only into the sticky word — never into the state — and
+// then completes immediately, so an endpoint that looks for acceptance in the
+// state word observes none at all.
+//
+// This does not force the parent to skip a poll between the two writes: the
+// parent is already spinning by then and nothing here can stop it. What it
+// pins is the property that makes that interleaving harmless — acceptance is
+// readable after TASK_DONE, so losing a poll cannot lose the ACK.
+TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
+    MockMailboxWorker child;
+    child.start();
+
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    AllocResult ar = allocator.alloc(/*heap_bytes=*/0, /*depth=*/0);
+    ASSERT_NE(ar.slot, INVALID_SLOT);
+    TaskSlotState *slot = allocator.slot_state(ar.slot);
+    ASSERT_NE(slot, nullptr);
+    slot->reset();
+    slot->callable.digest[0] = 0x42;
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
+    std::promise<WorkerCompletion> result;
+    auto done = result.get_future();
+    std::atomic<bool> accepted{false};
+
+    std::thread caller([&] {
+        result.set_value(endpoint.run_with_accept(&allocator, WorkerDispatch{ar.slot, 0}, [&] {
+            accepted.store(true, std::memory_order_release);
+        }));
+    });
+
+    child.wait_running();
+    EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
+    // Back to back, with no parent poll in between.
+    child.write_task_accepted();
+    child.complete();
+
+    // Non-fatal: a fatal assertion would return with `caller` joinable, and
+    // ~std::thread would terminate the whole test binary.
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    if (done.valid() && done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        EXPECT_EQ(done.get().outcome, EndpointOutcome::SUCCESS);
+    }
+    EXPECT_TRUE(accepted.load(std::memory_order_acquire))
+        << "the endpoint lost the launch ACK to a task that completed first";
+    caller.join();
+    allocator.shutdown();
 }
 
 // A child that dies without publishing CONTROL_DONE must be reported, not
@@ -416,7 +522,7 @@ TEST(WorkerManagerTest, ControlPrepareUsesStableNextLevelWorkerId) {
 
     manager.add_next_level_endpoint(std::make_unique<FakeEndpoint>(7, &worker7_prepares));
     manager.add_next_level_endpoint(std::make_unique<FakeEndpoint>(3, &worker3_prepares));
-    manager.start(&allocator, [](WorkerCompletion) {});
+    manager.start(&allocator, [](WorkerCompletion) {}, {});
 
     std::array<uint8_t, CALLABLE_HASH_DIGEST_SIZE> digest{};
     manager.control_prepare(3, digest.data());
@@ -550,9 +656,15 @@ struct GroupSchedulerFixture : public ::testing::Test {
         worker_b.start();
         manager.add_next_level(worker_a.mailbox_ptr());
         manager.add_next_level(worker_b.mailbox_ptr());
-        manager.start(&allocator, [this](WorkerCompletion completion) {
-            sched.worker_done(std::move(completion));
-        });
+        manager.start(
+            &allocator,
+            [this](WorkerCompletion completion) {
+                sched.worker_done(std::move(completion));
+            },
+            [this](WorkerDispatch dispatch) {
+                orch.mark_task_accepted(dispatch.task_slot);
+            }
+        );
         rq_next_level.reset(manager.next_level_worker_ids());
         orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level, &manager, [this] {
             sched.notify_ready();
@@ -911,9 +1023,15 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
     worker_b.start();
     manager.add_next_level_at(7, worker_a.mailbox_ptr());
     manager.add_next_level_at(9, worker_b.mailbox_ptr());
-    manager.start(&allocator, [&sched](WorkerCompletion completion) {
-        sched.worker_done(std::move(completion));
-    });
+    manager.start(
+        &allocator,
+        [&sched](WorkerCompletion completion) {
+            sched.worker_done(std::move(completion));
+        },
+        [&orch](WorkerDispatch dispatch) {
+            orch.mark_task_accepted(dispatch.task_slot);
+        }
+    );
     rq_next_level.reset(manager.next_level_worker_ids());
     orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level, &manager, [&sched] {
         sched.notify_ready();
@@ -1039,9 +1157,15 @@ struct MixedTypeSchedulerFixture : public ::testing::Test {
         sub_worker.start();
         manager.add_next_level(next_level_worker.mailbox_ptr());
         manager.add_sub(sub_worker.mailbox_ptr());
-        manager.start(&allocator, [this](WorkerCompletion completion) {
-            sched.worker_done(std::move(completion));
-        });
+        manager.start(
+            &allocator,
+            [this](WorkerCompletion completion) {
+                sched.worker_done(std::move(completion));
+            },
+            [this](WorkerDispatch dispatch) {
+                orch.mark_task_accepted(dispatch.task_slot);
+            }
+        );
         rq_next_level.reset(manager.next_level_worker_ids());
         orch.init(&tm, &allocator, &scope, &rq_sub, &rq_next_level, &manager, [this] {
             sched.notify_ready();

@@ -7,16 +7,16 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A2A3 run stream sets belong to a pipeline slot, not to a run.
+"""A2A3 run streams are reused only while their code image is unchanged.
 
 A2A3 submits each run's AICore and AICPU kernels on the stream set of the
-selected pipeline slot rather than on the persistent bootstrap pair. A set
-carries no per-run content, so it is created on first use and reused; rebuilding
-it per run costs two rtStreamCreate plus two rtStreamDestroy (~1.2 ms) on the
-synchronous host path around KernelLaunch and buys nothing.
+selected pipeline slot rather than on the persistent bootstrap pair. The AICPU
+stream belongs to the slot, while the AICore stream is also bound to the loaded
+code image. Reusing it after different code replaces the image can execute stale
+instructions because the platform has no explicit AICore I-cache invalidation.
 
 `Worker.run_stream_set_create_count` reports how many sets the bound runner has
-built, which is what makes that invariant assertable from here.
+built, including every fresh AICore stream created for a code transition.
 """
 
 import pytest
@@ -24,9 +24,41 @@ import torch
 from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
 
 _VECTOR_KERNELS = "../vector_example/kernels"
 _REPEATED_RUNS = 4
+
+
+@scene_test(level=2, runtime="host_build_graph")
+class _SubtractCallable(SceneTestCase):
+    CALLABLE = {
+        "orchestration": {
+            "source": f"{_VECTOR_KERNELS}/orchestration/example_orch.cpp",
+            "function_name": "aicpu_orchestration_entry",
+            "signature": [D.IN, D.IN, D.OUT],
+        },
+        "incores": [
+            {
+                "func_id": 0,
+                "source": "kernels/aiv/kernel_sub.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.IN, D.OUT],
+            },
+            {
+                "func_id": 1,
+                "source": f"{_VECTOR_KERNELS}/aiv/kernel_add_scalar.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.OUT],
+            },
+            {
+                "func_id": 2,
+                "source": f"{_VECTOR_KERNELS}/aiv/kernel_mul.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.IN, D.OUT],
+            },
+        ],
+    }
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -91,9 +123,43 @@ class TestRunStreamReuseHbg(SceneTestCase):
             pytest.skip("run stream sets are an a2a3 onboard resource")
 
         callable_obj = self.build_callable(st_platform)
-        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=_REPEATED_RUNS)
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=1)
+        after_first = st_worker.run_stream_set_create_count
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=_REPEATED_RUNS - 1)
 
-        assert st_worker.run_stream_set_create_count == 1, (
-            f"expected 1 run stream set for {_REPEATED_RUNS} runs, got "
-            f"{st_worker.run_stream_set_create_count} — the set is being rebuilt per run"
+        assert st_worker.run_stream_set_create_count == after_first, (
+            f"same-image runs advanced stream generation after the first run: "
+            f"{after_first} -> {st_worker.run_stream_set_create_count}"
         )
+
+    def _run_registered(self, worker, handle, *, subtract):
+        params = self.CASES[0]["params"]
+        test_args = self.generate_args(params)
+        chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
+        golden_args = test_args.clone()
+        a, b = golden_args.a, golden_args.b
+        base = a - b if subtract else a + b
+        golden_args.f[:] = (base + 1) * (base + 2)
+        worker.run(handle, chip_args, config=self._build_config(self.CASES[0]["config"]))
+        _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
+
+    def test_aicore_stream_tracks_code_image(self, st_platform, st_worker):
+        if st_platform != "a2a3":
+            pytest.skip("AICore stream code generations are an a2a3 onboard resource")
+
+        add_handle = st_worker.register(self.build_callable(st_platform))
+        sub_handle = st_worker.register(_SubtractCallable.compile_chip_callable(st_platform))
+        try:
+            self._run_registered(st_worker, add_handle, subtract=False)
+            after_add = st_worker.run_stream_set_create_count
+
+            self._run_registered(st_worker, add_handle, subtract=False)
+            assert st_worker.run_stream_set_create_count == after_add
+
+            for handle, subtract in ((sub_handle, True), (add_handle, False), (sub_handle, True)):
+                before_transition = st_worker.run_stream_set_create_count
+                self._run_registered(st_worker, handle, subtract=subtract)
+                assert st_worker.run_stream_set_create_count == before_transition + 1
+        finally:
+            st_worker.unregister(sub_handle)
+            st_worker.unregister(add_handle)

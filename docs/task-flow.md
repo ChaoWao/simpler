@@ -348,6 +348,15 @@ the forked child decodes it. Remote NEXT_LEVEL dispatch through
 `RemoteL3Endpoint` serializes the same logical payload into a framed TASK
 request instead.
 
+Every dispatched group member contributes one run-acceptance obligation. For
+an A2A3 onboard chip endpoint, the child-side native runner writes
+`TASK_ACCEPTED` after its AICore and AICPU kernels are both enqueued; the parent
+observes it without releasing the mailbox. Other endpoint paths satisfy the
+same obligation conservatively when their completion returns. Once submission
+is closed and all obligations are satisfied, the next serialized orchestration
+callback may build its DAG even though the prior run has not reached its
+completion fence.
+
 Local mailbox path:
 
 ```text

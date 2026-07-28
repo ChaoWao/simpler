@@ -735,9 +735,9 @@ int DeviceRunnerBase::launch_device_register(int32_t callable_id) {
 }
 
 int DeviceRunnerBase::record_device_orch_callable(
-    int32_t callable_id, uint64_t chip_buffer_hash, uint64_t chip_dev, const void *orch_so_data, size_t orch_so_size,
-    const char *func_name, const char *config_name, std::vector<std::pair<int, uint64_t>> kernel_addrs,
-    std::vector<ArgDirection> signature
+    int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, uint64_t chip_dev,
+    const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
+    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
 ) {
     // The AICPU executor reserves `orch_so_table_[MAX_REGISTERED_CALLABLE_IDS]`
     // (declared in src/common/task_interface/callable_protocol.h) and indexes
@@ -767,6 +767,7 @@ int DeviceRunnerBase::record_device_orch_callable(
     CallableState state;
     state.hash = hash;
     state.chip_buffer_hash = chip_buffer_hash;
+    state.aicore_image_hash = aicore_image_hash;
     state.dev_orch_so_addr = chip_dev + offsetof(ChipCallable, storage_);
     state.dev_orch_so_size = orch_so_size;
     state.func_name = (func_name != nullptr) ? func_name : "";
@@ -782,8 +783,8 @@ int DeviceRunnerBase::record_device_orch_callable(
 }
 
 int DeviceRunnerBase::record_host_orch_callable(
-    int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
+    void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
 ) {
     if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
@@ -806,6 +807,7 @@ int DeviceRunnerBase::record_host_orch_callable(
 
     CallableState state;
     state.chip_buffer_hash = chip_buffer_hash;
+    state.aicore_image_hash = aicore_image_hash;
     state.host_dlopen_handle = host_dlopen_handle;
     state.host_orch_func_ptr = host_orch_func_ptr;
     state.kernel_addrs = std::move(kernel_addrs);
@@ -1426,5 +1428,17 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run() {
         scope_stats_collector_.stop();
         scope_stats_collector_.reconcile_counters();
         scope_stats_collector_.write_jsonl(output_prefix_);
+    }
+}
+
+int DeviceRunnerBase::set_task_accepted_state(volatile int32_t *state, int32_t accepted_value) {
+    task_accepted_state_ = state;
+    task_accepted_value_ = accepted_value;
+    return 0;
+}
+
+void DeviceRunnerBase::publish_task_accepted() const {
+    if (task_accepted_state_ != nullptr) {
+        __atomic_store_n(task_accepted_state_, task_accepted_value_, __ATOMIC_RELEASE);
     }
 }
