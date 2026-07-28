@@ -240,8 +240,7 @@ void SchedulerContext::log_stall_diagnostics(
                 if (slot_state.payload != nullptr) {
                     for (int32_t k = 0; k < fi; k++) {
                         int32_t pid = slot_state.payload->fanin_local_ids[k];
-                        if (ring.completion_flags[pid & ring.task_window_mask].load(std::memory_order_relaxed) != 0)
-                            rc++;
+                        if (ring.is_completion_flag_set(pid, std::memory_order_relaxed)) rc++;
                     }
                 }
                 int32_t kid_aic = slot_state.task->kernel_id[0];
@@ -1076,7 +1075,7 @@ void SchedulerContext::on_orchestration_done(
         PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
         const int32_t submitted = ring.fc.current_task_index.load(std::memory_order_acquire);
         for (int32_t id = 0; id < submitted; id++) {
-            if (ring.completion_flags[id & ring.task_window_mask].load(std::memory_order_acquire) != 0) {
+            if (ring.is_completion_flag_set(id)) {
                 continue;  // completed on the host (hidden alloc); nothing to dispatch
             }
             PTO2TaskSlotState &s = ring.get_slot_state_by_task_id(id);
