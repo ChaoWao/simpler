@@ -89,7 +89,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     alignas(64) std::atomic<int32_t> completed_watermark;
 
     // Layout metadata (set once at init)
-    uint64_t task_window_size;
+    alignas(64) uint64_t task_window_size;
     int32_t task_window_mask;
     uint64_t heap_size;
     uint64_t task_descriptors_offset;  // Offset from SM base, in bytes
@@ -101,9 +101,43 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
     // Polling-completion state (device-addressed array, one byte per slot).
     // 0 = pending, 1 = task fully COMPLETED. Writer = the task's completer at
-    // on_mixed_task_complete; reader = consumer fanin polling (fanin_satisfied).
+    // on_mixed_task_complete; reader = consumer fanin polling (is_completion_flag_set).
     // Zeroed host-side at init. Indexed by local_id & task_window_mask.
     std::atomic<uint8_t> *completion_flags;
+
+    bool is_completion_flag_set(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {
+        return completion_flags[local_id & task_window_mask].load(order) != 0;
+    }
+
+    void set_completion_flag(int32_t local_id, std::memory_order order = std::memory_order_release) const {
+        completion_flags[local_id & task_window_mask].store(1, order);
+    }
+
+    // set completion flag first before updating the watermark (logic requirement)
+    void update_completed_watermark() {
+        int32_t curr_watermark = completed_watermark.load(std::memory_order_acquire);
+        const int32_t submitted = fc.current_task_index.load(std::memory_order_acquire);
+
+        int32_t next = curr_watermark;
+        while (true) {
+            while (next + 1 < submitted && is_completion_flag_set(next + 1)) {
+                ++next;
+            }
+            if (next == curr_watermark) {
+                return;
+            }
+
+            if (completed_watermark.compare_exchange_strong(
+                    curr_watermark, next, std::memory_order_acq_rel, std::memory_order_acquire
+                )) {
+                curr_watermark = next;
+            } else {
+                // The acquire release semantics of the successful CAS guarantee that in the case of failure this thread
+                // also synchronises with the thread reporting the completion through the intermediary thread(s).
+                next = std::max(next, curr_watermark);
+            }
+        }
+    }
 
     int32_t get_slot_by_task_id(int32_t local_task_id) { return local_task_id & task_window_mask; }
 
@@ -126,7 +160,7 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
 
 static_assert(sizeof(PTO2SharedMemoryRingHeader) == 256, "PTO2SharedMemoryRingHeader layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 160,
+    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 216,
     "PTO2SharedMemoryRingHeader task_descriptors_offset layout drift"
 );
 

@@ -1069,7 +1069,7 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const L0TaskArgs &args) {
         // pre-set flag when a later on-device task completes.)
         PTO2SharedMemoryRingHeader &done_ring = orch->sm_header->ring;
         int32_t done_local = static_cast<int32_t>(prepared.task_id.local());
-        done_ring.completion_flags[done_local & done_ring.task_window_mask].store(1, std::memory_order_release);
+        done_ring.set_completion_flag(done_local);
     }
     orch->inline_completed_tasks++;
 
