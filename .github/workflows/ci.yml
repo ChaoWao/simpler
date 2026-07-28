@@ -822,6 +822,10 @@ jobs:
           source .venv/bin/activate
           cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
           cmake --build tests/ut/cpp/build
+          # The no_hardware suite needs no device, so it runs outside the
+          # task-submit lock. --no-tests=error catches a label typo silently
+          # selecting nothing.
+          ctest --test-dir tests/ut/cpp/build -L no_hardware -j$(nproc) --no-tests=error --output-on-failure
           python3 -c "
           import json, os
           p = os.environ['DEVICE_RANGE'].split('-'); s, e = p[0], p[-1]  # tolerate a single id (no hyphen)
@@ -830,6 +834,10 @@ jobs:
                     open('tests/ut/cpp/build/resources.json', 'w'))
           "
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          # No test carries requires_hardware_a5 yet — the only hardware UT,
+          # test_comm_lifecycle, is a2a3-bound. This selection is therefore
+          # empty and omits --no-tests=error until the first a5 hardware UT
+          # lands; the no_hardware run above is what gives this job coverage.
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a5)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure"
 
       - name: Build cann-examples/query (CANN host-API smoke)
