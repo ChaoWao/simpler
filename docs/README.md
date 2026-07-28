@@ -4,6 +4,12 @@ Index of every document under `docs/`, grouped by what you are trying to do.
 The top-level [README](../README.md) links only the handful of entry-point docs;
 this page is the complete map.
 
+These pages are also published as a searchable site at
+<https://hw-native-sys.github.io/simpler/>, which adds a generated API reference
+for `simpler.worker`, `simpler.task_interface` and `simpler.orchestrator`. The
+site is built by `.github/workflows/docs.yml`; `mkdocs.yml` owns its navigation,
+so a new page needs a `nav` entry there as well as a row here.
+
 New docs belong in one of the groups below, and in a subdirectory when the group
 already has one (`dfx/`, `hardware/`, `troubleshooting/`, `investigations/`).
 Add the row here in the same commit — an unlisted doc is invisible.
