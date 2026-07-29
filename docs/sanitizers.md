@@ -2,7 +2,7 @@
 
 Opt-in `-fsanitize` instrumentation of **host-compiled** code, driven by a
 single `--sanitizer` selection. This page is the design + usage reference. The
-nightly CI job lives in [ci.md](ci.md#sanitizer-sim); the *scoping* rationale
+nightly CI job lives in [ci.md](ci.md#nightly-sanitizer-sweep); the *scoping* rationale
 (why macOS is excluded, why TSAN is report-only, why LSan is off) lives in
 [investigations/2026-06-sanitizer-scope.md](investigations/2026-06-sanitizer-scope.md).
 
@@ -141,7 +141,7 @@ The nightly `Sanitizers` workflow does both and uploads the files as a
 
 ## See also
 
-- [ci.md](ci.md#sanitizer-sim) — the nightly `sanitizer-sim` job (matrix,
+- [ci.md](ci.md#nightly-sanitizer-sweep) — the nightly `sanitizer-sim` job (matrix,
   scope, gating).
 - [investigations/2026-06-sanitizer-scope.md](investigations/2026-06-sanitizer-scope.md)
   — why macOS is excluded, why TSAN is report-only, why LSan is off, and the

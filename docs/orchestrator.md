@@ -185,7 +185,7 @@ SubmitResult Orchestrator::submit_next_level(const CallableIdentity &callable,
 
 ### Step details
 
-**Step 1 — `ring_.alloc()`**: See [§5 Ring](#5-ring-slot--per-scope-heap-allocator). Blocks the Orch thread
+**Step 1 — `ring_.alloc()`**: See [§5 Ring](#5-ring-slot-and-per-scope-heap-allocator). Blocks the Orch thread
 if all slots are in-flight; this is the system's back-pressure mechanism.
 
 **Step 2 — store task data**: `TaskArgs` is moved (not copied). `config` is a
@@ -301,7 +301,7 @@ SubmitResult Orchestrator::submit_sub(const CallableIdentity &callable, TaskArgs
 
 ---
 
-## 5. Ring (slot + per-scope heap allocator)
+## 5. Ring (slot and per-scope heap allocator)
 
 `Ring` owns three correlated per-task resources:
 

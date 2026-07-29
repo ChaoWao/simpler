@@ -29,5 +29,5 @@ stream-sync timeout > scheduler timeout + 1.5 s
 ```
 
 Invalid values or invalid onboard ordering are ignored with a warning and the
-compiled defaults are used instead. See [args-dump](../dfx/args-dump.md#8-faq--debug-guide)
+compiled defaults are used instead. See [args-dump](../dfx/args-dump.md#8-faq-and-debug-guide)
 for the timeout chain and dump-recovery details.

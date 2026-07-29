@@ -873,7 +873,7 @@ Per-thread arena =
 `BUFFERS_PER_THREAD × RECORDS_PER_BUFFER × AVG_TENSOR_BYTES`
 = `8 × 256 × 65536` = **128 MiB**.
 
-## 8. FAQ / Debug Guide
+## 8. FAQ and Debug Guide
 
 **No `args_dump/` directory in the output.** Check that
 `--dump-args` was passed; without it (level 0) the host does not

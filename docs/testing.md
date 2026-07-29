@@ -698,7 +698,7 @@ Opt-in `-fsanitize` instrumentation of host-compiled code via `--sanitizer`
 (build with `SIMPLER_SANITIZER=...`, run with the matching runtime preloaded).
 The design, load-bearing invariants, usage, and presets now live in their own
 page — see **[sanitizers.md](sanitizers.md)**. The nightly CI job is in
-[ci.md](ci.md#sanitizer-sim); the scoping rationale (macOS / TSAN / LSan) is in
+[ci.md](ci.md#nightly-sanitizer-sweep); the scoping rationale (macOS / TSAN / LSan) is in
 [investigations/2026-06-sanitizer-scope.md](investigations/2026-06-sanitizer-scope.md).
 
 ## CI Pipeline
