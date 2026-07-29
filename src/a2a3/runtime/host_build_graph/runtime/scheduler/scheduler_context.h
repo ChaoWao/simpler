@@ -142,9 +142,8 @@ public:
     // the sole producer of the ready queues. Owns completed_tasks_ / termination.
     int32_t run_resolution_thread(Runtime *runtime, int32_t thread_idx);
 
-    // True when the thread layout reserves the last AICPU thread as P (>= 2
-    // threads). p_thread_idx_ is that thread's index.
-    bool p_thread_mode() const { return p_thread_mode_; }
+    // Index of the dedicated resolution (P) thread — the last AICPU thread.
+    // host_build_graph always reserves it (aicpu_thread_num >= 2 is required).
     int32_t p_thread_idx() const { return p_thread_idx_; }
 
     // Shutdown AICore registers for this thread's assigned cores.
@@ -220,12 +219,11 @@ private:
     int32_t cores_total_num_{0};
 
     // --- 3S+1P dedicated resolution thread ---
-    // p_thread_mode_ splits the AICPU threads into (aicpu_thread_num_ - 1)
-    // core-owning schedulers (S) plus one core-less resolution thread (P) at
-    // index p_thread_idx_ = aicpu_thread_num_ - 1. Enabled iff aicpu_thread_num_
-    // >= 2; below that the scheduler resolves inline like before. Each S thread
-    // hands its finished tasks to P through sp_queues_[its_thread_idx].
-    bool p_thread_mode_{false};
+    // The AICPU threads split into (aicpu_thread_num_ - 1) core-owning schedulers
+    // (S) plus one core-less resolution thread (P) at index p_thread_idx_ =
+    // aicpu_thread_num_ - 1. host_build_graph requires aicpu_thread_num_ >= 2 (one
+    // S + one P). Each S thread hands its finished tasks to P through
+    // sp_queues_[its_thread_idx].
     int32_t p_thread_idx_{-1};
     CompletedTaskQueue sp_queues_[MAX_AICPU_THREADS];
 

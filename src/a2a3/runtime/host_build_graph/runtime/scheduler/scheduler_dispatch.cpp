@@ -1208,37 +1208,11 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             }
         }
 
-        // 3S+1P: async deferred-completion polling belongs to P — it resolves
-        // (on_task_complete) and so must stay the sole ready-queue producer. The
-        // scheduler threads keep their loop core-local (poll own COND, dispatch
-        // own cores) and never touch the shared mailbox on the hot path.
-        if (!p_thread_mode_ && rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
-            (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
-            AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
-                rt_->aicore_mailbox, sched_
-#if SIMPLER_SCHED_PROFILING
-                ,
-                thread_idx
-#endif
-            );
-            if (poll_result.error_code != PTO2_ERROR_NONE) {
-                int32_t expected = PTO2_ERROR_NONE;
-                header->sched_error_code.compare_exchange_strong(
-                    expected, poll_result.error_code, std::memory_order_acq_rel, std::memory_order_acquire
-                );
-                completed_.store(true, std::memory_order_release);
-                break;
-            }
-            if (poll_result.completed > 0) {
-#if SIMPLER_SCHED_PROFILING
-                sched_->tasks_completed.fetch_add(poll_result.completed, std::memory_order_relaxed);
-#endif
-                int32_t prev = completed_tasks_.fetch_add(poll_result.completed, std::memory_order_relaxed);
-                int32_t new_total = prev + poll_result.completed;
-                last_progress_count = new_total;
-                made_progress = true;
-            }
-        }
+        // Async deferred-completion polling and dependency-only (dummy /
+        // predicate-failed) retirement both run on P, which owns every
+        // completion→ready transition — the scheduler threads' loop stays purely
+        // core-local (poll own COND, dispatch own cores) and never touches the
+        // shared mailbox or dummy queue.
 
 #if SIMPLER_DFX
         if (!try_completed) {
@@ -1297,99 +1271,9 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             continue;
         }
 
-        // Phase 3: Drain dummy ready queue (S0/S1/S2).
-        //
-        // Dependency-only tasks (empty active_mask, or a predicate that failed)
-        // bypass AICore dispatch: they go through the scheduler so fanin/fanout
-        // edges stay consistent, but completion is signalled inline here.
-        //
-        // 3S+1P: this resolve work moves to P together with the async/main
-        // completion paths, so P stays the sole ready-queue producer and the
-        // scheduler threads keep their loop core-local.
-        if (!p_thread_mode_ && thread_idx < 3) {
-            constexpr int DUMMY_DRAIN_BATCH = 8;
-            PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
-            int dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH);
-#if SIMPLER_DFX
-            // Dummy outer phase: covers handling of all dummies popped this
-            // iter. Per-dummy DummyTask markers are emitted to a SEPARATE lane
-            // (Worker View AICPU_N) by the converter, so they do not nest
-            // under this bar. Resolve emits below DO land on the sched lane
-            // and nest under this Dummy outer by time containment.
-            uint64_t dummy_outer_t0 =
-                (dummy_got > 0 && l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
-#endif
-            for (int di = 0; di < dummy_got; di++) {
-                PTO2TaskSlotState &dummy_slot = *dummy_batch[di];
-
-                // ----- Resolve work: walk this dummy's consumer list. ------
-                // Same 1 µs filter as the main-path Resolve emit suppresses
-                // dummies whose consumer release runs sub-microsecond.
-#if SIMPLER_DFX
-                uint64_t dummy_resolve_t0 =
-                    (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
-#endif
-                // [[maybe_unused]] silences -Werror=unused-but-set-variable on
-                // the profiling-flags-smoke build path where SIMPLER_DFX is
-                // OFF and the Resolve emit below is excluded.
-                [[maybe_unused]] uint32_t dummy_consumers = 0;
-#if SIMPLER_SCHED_PROFILING
-                dummy_consumers = sched_->on_task_complete(dummy_slot, thread_idx).fanout_edges;
-#else
-                dummy_consumers = sched_->on_task_complete(dummy_slot);
-#endif
-#if SIMPLER_DFX
-                if (dummy_resolve_t0 != 0) {
-                    uint64_t dummy_resolve_t1 = get_sys_cnt_aicpu();
-                    constexpr uint64_t RESOLVE_EMIT_MIN_CYCLES = PLATFORM_PROF_SYS_CNT_FREQ / 1'000'000;  // 1 µs
-                    if (dummy_resolve_t1 - dummy_resolve_t0 >= RESOLVE_EMIT_MIN_CYCLES) {
-                        l2_swimlane_aicpu_record_sched_phase(
-                            thread_idx, L2SwimlaneSchedPhaseKind::Resolve, dummy_resolve_t0, dummy_resolve_t1,
-                            sched_l2_swimlane_[thread_idx].sched_loop_count, dummy_consumers
-                        );
-                    }
-                    l2_swimlane_aicpu_record_dummy_task(
-                        thread_idx, dummy_resolve_t0, sched_l2_swimlane_[thread_idx].sched_loop_count,
-                        dummy_slot.task->task_id.raw
-                    );
-                }
-#endif
-                // Polling: on_task_complete already published this slot's
-                // completion + drained its wake list inline. There is no deferred
-                // producer-release phase — consumer retirement is observed via the
-                // per-ring completed_watermark, not by bumping producer refcounts.
-                int32_t prev = completed_tasks_.fetch_add(1, std::memory_order_relaxed);
-                last_progress_count = prev + 1;
-                cur_thread_completed++;
-            }
-            if (dummy_got > 0) {
-                made_progress = true;
-            }
-#if SIMPLER_DFX
-            // Emit Dummy outer over the whole dummy_drain pass. Span starts at
-            // dummy_outer_t0 (captured after pop_batch) and ends at "now".
-            // tasks_processed = dummy_got. Advancing _t0_phase here makes the
-            // following Dispatch / EarlyDispatch / second-Complete bars start
-            // at this end.
-            if (dummy_outer_t0 != 0) {
-                uint64_t dummy_outer_t1 = get_sys_cnt_aicpu();
-                int16_t phase_end_shared[L2SWIMLANE_NUM_QUEUE_SHAPES];
-                capture_phase_end_fresh(phase_end_shared);
-                l2_swimlane_aicpu_record_sched_phase(
-                    thread_idx, L2SwimlaneSchedPhaseKind::Dummy, dummy_outer_t0, dummy_outer_t1,
-                    l2_swimlane.sched_loop_count, static_cast<uint32_t>(dummy_got), /*pop_hit=*/0,
-                    /*pop_miss=*/0, phase_start_shared, phase_end_shared
-                );
-                for (int s = 0; s < L2SWIMLANE_NUM_QUEUE_SHAPES; s++)
-                    phase_start_shared[s] = phase_end_shared[s];
-                _t0_phase = dummy_outer_t1;
-                // We do NOT re-sync _t0/_t1 — the dummy span will be absorbed
-                // into the next CYCLE_COUNT_LAP accumulator. The phase-model
-                // anchor (_t0_phase) is the authoritative source for bar spans
-                // on the swimlane; the cycle accumulators are coarse aggregates.
-            }
-#endif
-        }
+        // Phase 3 (dependency-only dummy / predicate-failed retirement) runs on
+        // the resolution thread P, not here — see run_resolution_thread. The
+        // scheduler loop goes straight from completion detection to dispatch.
 
         // Phase 4: MIX-strict-priority dispatch with phase-split and
         // cross-thread idle gating. See dispatch_ready_tasks for the policy.
