@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Paged Attention Orchestration Function V2 - N_UNROLL=8, 4 Tasks Per Group
+ * Paged Attention Orchestration Function V2 - 4 Tasks Per Group
  *
  * Batches up to N_UNROLL blocks per group. Each group submits exactly 4 tasks:
  *   1. QK matmul:  qi @ K^T for n_blocks → sij_buf (q_tile, n_blocks * block_size)

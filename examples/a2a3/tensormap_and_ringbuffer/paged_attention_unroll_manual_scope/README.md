@@ -34,8 +34,7 @@ Softmax becomes a two-pass over a wider buffer, which is why that kernel is
 rewritten rather than adjusted.
 
 `N_UNROLL` is a `#define` at the top of the orchestration source, currently
-**64**. (The file's header comment still says `N_UNROLL=8`; the `#define` is
-what takes effect.)
+**64**.
 
 Dependencies are declared explicitly inside
 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`, using the primitive
