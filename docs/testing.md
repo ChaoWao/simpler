@@ -161,46 +161,40 @@ rule; C++ and AICPU use the same single-axis rule.
 At the default TIMING threshold, `[STRACE]`, warnings, and errors are visible;
 ordinary INFO and DEBUG messages are silent.
 
-### Configuration sources
+### Setting it
 
-- **Single source of truth**: the Python `simpler` logger
-  (`logging.getLogger("simpler")`).
-- The simpler module sets this logger to TIMING at import unless the user has
-  already called `setLevel`. Inheritance from the root logger is intentionally
-  not used so `import simpler` keeps timing markers visible despite Python's
-  default `WARNING`.
-- `TIMING` and `NUL` are registered with `logging.addLevelName` at import, so
-  name-based callers and `%(levelname)s` formatters accept and emit them.
-- **Snapshot at `Worker.init()`, not per-run**: when a `Worker` is initialised
-  it reads the current `simpler` logger level once and forwards it through
-  `ChipWorker.init(..., log_level)`. ChipWorker then calls
-  libsimpler_log's `simpler_log_init` (which writes the value into the
-  process-wide `HostLogger` singleton) BEFORE `host_runtime.so` is dlopen'd;
-  the platform SO's `simpler_init` maps `HostLogger.cann_level()` to CANN `dlog`
-  onboard, and AICPU receives the threshold through `InitArgs`.
-  **Subsequent `logger.setLevel(...)`
-  calls are not re-pushed to that worker** — recreate the worker if you need
-  to change levels mid-run.
-- L3 / L4 hierarchical workers fork chip subprocesses; the parent snapshots
-  the same threshold before `fork()` and passes it explicitly
-  to `_chip_process_loop` so each subprocess starts its own `ChipWorker.init`
-  with the correct value.
+```bash
+pytest --platform a2a3sim --log-level debug
+python test_xxx.py -p a2a3sim --log-level debug
+```
 
-### Onboard AICPU severity is CANN-owned
+The `simpler` Python logger (`logging.getLogger("simpler")`) is the single
+source of truth; `--log-level` sets it. Importing `simpler` puts it at TIMING
+unless you have already called `setLevel` — root-logger inheritance is
+deliberately not used, so `import simpler` keeps timing markers visible despite
+Python's default `WARNING`. `TIMING` and `NUL` are registered with
+`logging.addLevelName` at import, so name-based callers and `%(levelname)s`
+formatters accept them.
 
-The onboard AICPU library reads severity from CANN's `dlog` (CheckLogLevel),
-not from `KernelArgs.log_level`. Configure it via
-`ASCEND_GLOBAL_LOG_LEVEL=0..4` or `dlog_setlevel(-1, level, 0)`.
-`simpler_init` (called from `ChipWorker::init` in the platform SO) issues
-`dlog_setlevel(-1, HostLogger.cann_level(), 0)` automatically — unless
-`ASCEND_GLOBAL_LOG_LEVEL` is already set in the environment. The mapping is
-`debug→DEBUG`, `info→INFO`, `timing/warn→WARN`, `error→ERROR`, and
-`null→NUL`. Therefore the default TIMING threshold does not open CANN INFO.
+Two consequences for test authors:
 
-### Output destinations
+- **The threshold is snapshotted once, at `Worker.init()`.** Calling
+  `logger.setLevel(...)` afterwards does not reach a live worker — recreate the
+  worker to change levels mid-run.
+- **Onboard AICPU severity comes from CANN, not from this threshold.**
+  `simpler_init` maps the snapshot onto `dlog_setlevel` for you, but an
+  `ASCEND_GLOBAL_LOG_LEVEL` already in the environment wins. Since CANN has no
+  TIMING level, the default threshold does not open CANN's INFO stream. If you
+  set it yourself, set it **before `Worker.init()`** — the AICPU latches CANN's
+  answer during that call and never re-reads it.
 
-- All log output goes to **stderr** (host + sim AICPU). Onboard AICPU still
-  routes through CANN dlog and lands wherever CANN is configured to write.
+All output goes to **stderr** for host and sim AICPU; onboard AICPU lands
+wherever CANN is configured to write.
+
+For the mechanism behind all of the above — the `HostLogger` singleton, the
+`simpler_log_init` → `dlopen` ordering, the CANN mapping table, and how forked
+chip subprocesses inherit the threshold — see
+[logging.md § Configuration flow](logging.md#configuration-flow).
 
 ## CLI Design Principles
 
