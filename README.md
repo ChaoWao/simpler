@@ -121,6 +121,6 @@ This project is licensed under the **CANN Open Software License Agreement Versio
 
 - [src/a2a3/platform/](src/a2a3/platform/) - Platform implementations
 - [src/a2a3/runtime/](src/a2a3/runtime/) - Runtime implementations
-- [examples/a2a3/](examples/a2a3/) - Examples organized by runtime
+- [examples/](examples/README.md) - Runnable examples, indexed: `workers/` for the raw `Worker` API, `a2a3/` and `a5/` for `@scene_test` kernels
 - [simpler_setup/](simpler_setup/) - SceneTestCase framework, runtime builder, kernel compiler
 - [python/](python/) - Python bindings and user-facing runtime API
