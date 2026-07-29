@@ -609,22 +609,27 @@ struct PTO2TensorMap {
             if (task_entry_head_epochs[ring_id][task_slot] != current_epoch) {
                 continue;
             }
+            // A slot's task chain may also hold entries from a newer task that
+            // reused the slot (local_id + N * window) before this cleanup ran.
+            // Free only entries produced by the retiring local_id, unlinking
+            // each from the chain; entries from other tasks stay linked.
+            PTO2TaskId retired_task = PTO2TaskId::make(static_cast<uint8_t>(ring_id), static_cast<uint32_t>(local_id));
             PTO2TensorMapEntry *cur_entry = task_entry_heads[ring_id][task_slot];
-
             while (cur_entry != nullptr) {
-                PTO2TensorMapEntry *next_entry = cur_entry->next_in_task;  // Save before clearing
-                // Only remove if this entry belongs to the retiring task
-                // (slot may have been reused by a newer task)
-                debug_assert(
-                    cur_entry->producer_task_id ==
-                    PTO2TaskId::make(static_cast<uint8_t>(ring_id), static_cast<uint32_t>(local_id))
-                );
-                free_entry(*cur_entry);
+                PTO2TensorMapEntry *next_entry = cur_entry->next_in_task;  // free_entry clears it
+                if (cur_entry->producer_task_id == retired_task) {
+                    if (cur_entry->prev_in_task != nullptr) {
+                        cur_entry->prev_in_task->next_in_task = next_entry;
+                    } else {
+                        task_entry_heads[ring_id][task_slot] = next_entry;
+                    }
+                    if (next_entry != nullptr) {
+                        next_entry->prev_in_task = cur_entry->prev_in_task;
+                    }
+                    free_entry(*cur_entry);
+                }
                 cur_entry = next_entry;
             }
-
-            // Clear task's entry head (slot will be reused by local_id + task_window_sizes[ring_id])
-            task_entry_heads[ring_id][task_slot] = nullptr;
         }
     }
 
