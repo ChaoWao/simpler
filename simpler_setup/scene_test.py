@@ -51,7 +51,7 @@ def _pto_isa_compile_cache_token() -> str:
     return read_pto_isa_pin()
 
 
-def l3_compile_cache_key(qualname: str, name: str, platform: str, runtime: str) -> tuple:
+def l3_compile_cache_key(module: str, qualname: str, name: str, platform: str, runtime: str) -> tuple:
     """Session compile-cache key for an L3 orchestration entry.
 
     Every L3 compile path (scene-test ``test_run``, standalone worker, the
@@ -60,7 +60,7 @@ def l3_compile_cache_key(qualname: str, name: str, platform: str, runtime: str) 
     same kernels once per path. The pin token pins the key to the current
     pto-isa revision.
     """
-    return (qualname, name, platform, runtime, _pto_isa_compile_cache_token())
+    return (module, qualname, name, platform, runtime, _pto_isa_compile_cache_token())
 
 
 def clear_compile_cache() -> None:
@@ -1111,7 +1111,7 @@ class SceneTestCase:
     @classmethod
     def compile_chip_callable(cls, platform):
         """Compile CALLABLE -> ChipCallable (L2). Session-cached."""
-        cache_key = (cls.__qualname__, platform, cls._st_runtime, _pto_isa_compile_cache_token())
+        cache_key = (cls.__module__, cls.__qualname__, platform, cls._st_runtime, _pto_isa_compile_cache_token())
         return _compile_chip_callable_from_spec(cls.CALLABLE, platform, cls._st_runtime, cache_key)
 
     @classmethod
@@ -1121,7 +1121,7 @@ class SceneTestCase:
         for entry in cls.CALLABLE["callables"]:
             if "orchestration" in entry:
                 name = entry["name"]
-                cache_key = l3_compile_cache_key(cls.__qualname__, name, platform, cls._st_runtime)
+                cache_key = l3_compile_cache_key(cls.__module__, cls.__qualname__, name, platform, cls._st_runtime)
                 chip = _compile_chip_callable_from_spec(entry, platform, cls._st_runtime, cache_key)
                 compiled[name] = chip
                 compiled[f"{name}_sig"] = entry["orchestration"].get("signature", [])
@@ -2097,7 +2097,7 @@ def _create_standalone_worker(group, level, args, selected_by_cls):
                 cls_sub_handles[entry["name"]] = handle
             elif "orchestration" in entry:
                 name = entry["name"]
-                cache_key = l3_compile_cache_key(cls.__qualname__, name, args.platform, cls._st_runtime)
+                cache_key = l3_compile_cache_key(cls.__module__, cls.__qualname__, name, args.platform, cls._st_runtime)
                 chip = _compile_chip_callable_from_spec(entry, args.platform, cls._st_runtime, cache_key)
                 handle = worker.register(chip)
                 cls_chip_handles[name] = handle

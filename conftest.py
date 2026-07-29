@@ -1500,7 +1500,7 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
                 )
 
                 name = entry["name"]
-                cache_key = l3_compile_cache_key(cls.__qualname__, name, st_platform, runtime)
+                cache_key = l3_compile_cache_key(cls.__module__, cls.__qualname__, name, st_platform, runtime)
                 chip = _compile_chip_callable_from_spec(entry, st_platform, runtime, cache_key)
                 handle = w.register(chip)
                 chip_handles[name] = handle
