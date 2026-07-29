@@ -26,8 +26,8 @@ For the `Worker` API underneath the framework, see
 | ------- | --------------- |
 | [`benchmark_bgemm/`](benchmark_bgemm/) | Runtime-configurable tiled matmul `C = sum(k) A[k] @ B[k]`, shaped for measurement. Runs on sim. |
 | [`paged_attention/`](paged_attention/) | Online softmax with AIC/AIV subgraph splitting, bfloat16. The baseline the three variants below are compared against. |
-| [`paged_attention_manual_scope/`](paged_attention_manual_scope/) | The same computation with explicit scope control — see [`docs/manual-scope.md`](../../../docs/manual-scope.md). |
-| [`paged_attention_unroll_manual_scope/`](paged_attention_unroll_manual_scope/) | Manual scope plus loop unrolling. |
+| [`paged_attention_manual_scope/`](paged_attention_manual_scope/) | The same computation with explicit scope control — kernels byte-identical to the baseline's, only the orchestration differs. See [`docs/manual-scope.md`](../../../docs/manual-scope.md). |
+| [`paged_attention_unroll_manual_scope/`](paged_attention_unroll_manual_scope/) | A second implementation, not a patch on the baseline: KV blocks batched into groups of `N_UNROLL`, four tasks per group instead of per block, with the kernels rewritten to match. |
 | [`paged_attention_ringbuffer/`](paged_attention_ringbuffer/) | Deliberately undersized rings, driven per case through `config.runtime_env` (`ring_task_window` / `ring_heap` / `ring_dep_pool`) rather than process-global env. A stress test for rotation and reclamation. |
 | [`merge_pipeline_barrier/`](merge_pipeline_barrier/) | Three pipeline stages merged into **one** `block_num=8` SPMD task, ordered by an intra-task cross-core barrier instead of by three scheduled tasks. |
 | [`qwen3_14b_decode/`](qwen3_14b_decode/README.md) | The whole Qwen3-14B 40-layer decode stack as a single fused dispatch, using CANN fused attention. The largest example in the repo. |
