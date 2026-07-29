@@ -13,6 +13,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -36,6 +37,41 @@ namespace {
 volatile sig_atomic_t g_sigpipe_count = 0;
 
 void count_sigpipe(int) { ++g_sigpipe_count; }
+
+// Owns a helper server thread and the stop flag it polls, for the whole
+// lifetime of a test body.
+//
+// The stop flag lives here rather than on the test's stack because
+// start_stalling_server() captures it by reference: an unwind that destroyed
+// the flag while the thread still polled it would be a use-after-free. Joining
+// from the destructor covers the other unwind hazard — every socket test
+// constructs a RemoteL3SocketTransport after starting the server, and that
+// constructor throws on a connect or HELLO timeout, which a plain
+// `std::thread` local would meet while still joinable (std::terminate).
+//
+// Declare before the transport so the transport is destroyed first.
+class ScopedServerThread {
+public:
+    ScopedServerThread() = default;
+    ~ScopedServerThread() { stop_and_join(); }
+
+    ScopedServerThread(const ScopedServerThread &) = delete;
+    ScopedServerThread &operator=(const ScopedServerThread &) = delete;
+
+    std::thread &thread() { return thread_; }
+    std::atomic<bool> &stop_flag() { return stop_; }
+
+    // Idempotent: tests that need the server reaped mid-body call this, and the
+    // destructor then finds nothing joinable.
+    void stop_and_join() {
+        stop_.store(true, std::memory_order_release);
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    std::thread thread_;
+    std::atomic<bool> stop_{false};
+};
 
 class ScopedSigpipeCounter {
 public:
@@ -84,7 +120,33 @@ malloc_result(int32_t worker_id, uint64_t buffer_id, uint64_t generation, int32_
     return out;
 }
 
-uint16_t start_closing_server(std::thread &server_thread) {
+// Accept one connection, giving up once `stop` is set.
+//
+// A bare blocking accept() cannot be reaped: when a client never connects — the
+// case when a transport constructor throws before or during connect — the
+// thread parks in accept() forever and stop_and_join() would hang. Polling in
+// short slices bounds that. A connection already pending always wins over
+// `stop`, because poll() runs before the flag is read: ClosedPeerWrite... calls
+// stop_and_join() immediately after a successful connect and still needs that
+// connection accepted and RST.
+//
+// Returns the accepted fd, or -1 on stop / error / the hard cap.
+int accept_until_stop(int listener, std::atomic<bool> &stop) {
+    constexpr int POLL_SLICE_MS = 20;
+    constexpr int MAX_SLICES = 500;  // 10s cap, so a wedged test cannot hang the suite
+    for (int i = 0; i < MAX_SLICES; ++i) {
+        struct pollfd pfd{};
+        pfd.fd = listener;
+        pfd.events = POLLIN;
+        int ready = ::poll(&pfd, 1, POLL_SLICE_MS);
+        if (ready > 0) return ::accept(listener, nullptr, nullptr);
+        if (ready < 0 && errno != EINTR) return -1;
+        if (stop.load(std::memory_order_acquire)) return -1;
+    }
+    return -1;
+}
+
+uint16_t start_closing_server(std::thread &server_thread, std::atomic<bool> &stop) {
     int listener = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listener < 0) throw std::runtime_error(std::string("socket failed: ") + std::strerror(errno));
     int one = 1;
@@ -110,8 +172,8 @@ uint16_t start_closing_server(std::thread &server_thread) {
         ::close(listener);
         throw std::runtime_error(std::string("getsockname failed: ") + std::strerror(err));
     }
-    server_thread = std::thread([listener]() {
-        int fd = ::accept(listener, nullptr, nullptr);
+    server_thread = std::thread([listener, &stop]() {
+        int fd = accept_until_stop(listener, stop);
         if (fd >= 0) {
             struct linger rst{};
             rst.l_onoff = 1;
@@ -162,7 +224,7 @@ uint16_t start_stalling_server(std::thread &server_thread, std::atomic<bool> &st
     uint16_t port = 0;
     int listener = make_loopback_listener(port);
     server_thread = std::thread([listener, &stop]() {
-        int fd = ::accept(listener, nullptr, nullptr);
+        int fd = accept_until_stop(listener, stop);
         for (int i = 0; i < 500 && !stop.load(std::memory_order_acquire); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
@@ -174,11 +236,12 @@ uint16_t start_stalling_server(std::thread &server_thread, std::atomic<bool> &st
 
 // Accept one connection, wait delay_ms, then send a single COMPLETION frame with
 // the given sequence so a client's wait_for_reply(COMPLETION, seq) succeeds.
-uint16_t start_delayed_reply_server(std::thread &server_thread, int delay_ms, uint64_t sequence) {
+uint16_t
+start_delayed_reply_server(std::thread &server_thread, std::atomic<bool> &stop, int delay_ms, uint64_t sequence) {
     uint16_t port = 0;
     int listener = make_loopback_listener(port);
-    server_thread = std::thread([listener, delay_ms, sequence]() {
-        int fd = ::accept(listener, nullptr, nullptr);
+    server_thread = std::thread([listener, &stop, delay_ms, sequence]() {
+        int fd = accept_until_stop(listener, stop);
         if (fd >= 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
             remote_l3::FrameHeader header;
@@ -432,10 +495,10 @@ TEST(RemoteEndpoint, RemoteBufferControlsRejectOutOfRangeSlices) {
 }
 
 TEST(RemoteSocketTransport, ClosedPeerWriteDoesNotRaiseSigpipe) {
-    std::thread server_thread;
-    uint16_t port = start_closing_server(server_thread);
+    ScopedServerThread server;
+    uint16_t port = start_closing_server(server.thread(), server.stop_flag());
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, 1.0, 1.0);
-    server_thread.join();
+    server.stop_and_join();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     ScopedSigpipeCounter sigpipe_counter;
@@ -455,6 +518,31 @@ TEST(RemoteSocketTransport, ClosedPeerWriteDoesNotRaiseSigpipe) {
     transport.shutdown();
 }
 
+// Every socket test below starts a server thread and then constructs a
+// RemoteL3SocketTransport, whose constructor throws on a connect or HELLO
+// timeout — routine on a loaded box. With a bare `std::thread` local the unwind
+// destroyed it while still joinable, and std::terminate aborted the whole
+// binary mid-suite. Reaching the end of this test at all is the assertion: a
+// regression turns it into an abort, not a failure.
+//
+// The server here never sees a client, so it also pins that a thread parked in
+// accept() is still reapable — the join must not hang.
+TEST(RemoteSocketTransport, ServerThreadIsJoinedWhenTestBodyUnwinds) {
+    bool caught = false;
+    auto t0 = std::chrono::steady_clock::now();
+    try {
+        ScopedServerThread server;
+        (void)start_stalling_server(server.thread(), server.stop_flag());
+        throw std::runtime_error("stands in for a transport constructor timeout");
+    } catch (const std::runtime_error &) {
+        caught = true;
+    }
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    EXPECT_TRUE(caught);
+    EXPECT_LT(elapsed, 5.0) << "destructor join should not wait out the server's own cap";
+}
+
 TEST(RemoteSocketTransport, CtorRejectsNonPositiveTimeouts) {
     // Validation runs before connect_socket(), so no server is needed.
     EXPECT_THROW(RemoteL3SocketTransport("127.0.0.1", 1, "127.0.0.1", 1, 0.0, 5.0), std::invalid_argument);
@@ -468,9 +556,8 @@ TEST(RemoteSocketTransport, HelloReadBoundedByAttachTimeout) {
     // can only end by timing out. A small attach budget (0.2s) and a large
     // runtime budget (5.0s) tell the two apart: bounding the HELLO read by the
     // runtime timeout would take ~5s.
-    std::atomic<bool> stop{false};
-    std::thread server_thread;
-    uint16_t port = start_stalling_server(server_thread, stop);
+    ScopedServerThread server;
+    uint16_t port = start_stalling_server(server.thread(), server.stop_flag());
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 0.2, /*runtime*/ 5.0);
 
     auto t0 = std::chrono::steady_clock::now();
@@ -478,9 +565,8 @@ TEST(RemoteSocketTransport, HelloReadBoundedByAttachTimeout) {
     double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     EXPECT_LT(elapsed, 1.0);
 
-    stop.store(true, std::memory_order_release);
     transport.shutdown();
-    server_thread.join();
+    server.stop_and_join();
 }
 
 TEST(RemoteSocketTransport, RuntimeReadSurvivesElapsedAttachDeadline) {
@@ -488,8 +574,8 @@ TEST(RemoteSocketTransport, RuntimeReadSurvivesElapsedAttachDeadline) {
     // read that (wrongly) reused the attach deadline would throw immediately; a
     // fresh runtime budget (2.0s) receives it. This proves the value split, not
     // just the path.
-    std::thread server_thread;
-    uint16_t port = start_delayed_reply_server(server_thread, /*delay_ms=*/500, /*sequence=*/1);
+    ScopedServerThread server;
+    uint16_t port = start_delayed_reply_server(server.thread(), server.stop_flag(), /*delay_ms=*/500, /*sequence=*/1);
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 0.3, /*runtime*/ 2.0);
 
     std::vector<uint8_t> probe(16, 0x11);
@@ -500,16 +586,15 @@ TEST(RemoteSocketTransport, RuntimeReadSurvivesElapsedAttachDeadline) {
     });
 
     transport.shutdown();
-    server_thread.join();
+    server.stop_and_join();
 }
 
 TEST(RemoteSocketTransport, RuntimeWriteToStalledReaderTimesOut) {
     // The peer accepts but never reads; a large frame overruns the socket buffers
     // so a single blocking send() would hang past the runtime deadline. The fd is
     // persistently O_NONBLOCK, so the write re-polls under the deadline and throws.
-    std::atomic<bool> stop{false};
-    std::thread server_thread;
-    uint16_t port = start_stalling_server(server_thread, stop);
+    ScopedServerThread server;
+    uint16_t port = start_stalling_server(server.thread(), server.stop_flag());
     RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 0.5);
 
     std::vector<uint8_t> big(16 * 1024 * 1024, 0x7E);
@@ -518,9 +603,8 @@ TEST(RemoteSocketTransport, RuntimeWriteToStalledReaderTimesOut) {
     double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     EXPECT_LT(elapsed, 3.0);
 
-    stop.store(true, std::memory_order_release);
     transport.shutdown();
-    server_thread.join();
+    server.stop_and_join();
 }
 
 TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsEndpointFailure) {
