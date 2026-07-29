@@ -37,9 +37,8 @@ jobs:
       - name: Build site
         env:
           DOCS_REF: ${{ github.event_name == 'push' && 'main' || github.sha }}
-        # --strict fails on a dead intra-docs link, a page missing from nav, or a
-        # bad anchor. See docs/_hooks/griffe_filter.py for the one warning class
-        # that is deliberately not counted.
+        # --strict fails on a dead intra-docs link, a page missing from nav, or
+        # a bad anchor. No warning class is exempt.
         run: mkdocs build --strict --site-dir _site
 
       - name: Upload artifact
