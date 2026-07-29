@@ -102,6 +102,13 @@ struct AicpuExecutor {
     std::atomic<bool> classify_ready_{false};
     std::atomic<int32_t> classify_arrived_{0};
 
+    // Set by any run() invocation that cannot participate in the boot barriers
+    // (an out-of-range thread_idx). Every boot wait polls it so a missing
+    // participant cannot leave the rest spinning, and dispatch is skipped when it
+    // is set — a run missing a core-owning thread can never complete. One-shot per
+    // run, reset in deinit().
+    std::atomic<bool> boot_abort_{false};
+
     int32_t aicpu_thread_num_{0};
 
     // ===== Task queue state (managed by scheduler ready queues) =====
@@ -217,14 +224,27 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
 int32_t AicpuExecutor::run(Runtime *runtime) {
     int32_t affinity_exec_idx = platform_aicpu_affinity_thread_idx();
     int32_t thread_idx = (affinity_exec_idx >= 0) ? affinity_exec_idx : (thread_idx_++);
-    if (thread_idx < 0 || thread_idx >= aicpu_thread_num_ || thread_idx >= MAX_AICPU_THREADS) {
-        LOG_ERROR(
-            "Thread index %d out of bounds (active=%d max=%d exec_idx=%d)", thread_idx, aicpu_thread_num_,
-            MAX_AICPU_THREADS, affinity_exec_idx
-        );
-        return -1;
-    }
     int32_t run_rc = 0;
+
+    // An out-of-range thread_idx — a broken affinity mapping, or run() invoked
+    // more than aicpu_thread_num_ times — cannot own the core slice or the
+    // per-index boot work, so it skips boot / classify / dispatch / shutdown. It
+    // is still one of the aicpu_thread_num_ run() invocations the finish barrier
+    // counts, and the boot barriers expect every participant to arrive. Publish
+    // boot_abort_ so peers stop spinning on classify_arrived_ / runtime_init_ready_
+    // and skip dispatch — a run missing a core-owning thread can never reach
+    // is_completed() — then fall through to the shared finish barrier so finished_
+    // still publishes and the host sees the failure instead of hanging into the
+    // op-execute timeout (507018).
+    const bool valid_idx = thread_idx >= 0 && thread_idx < aicpu_thread_num_ && thread_idx < MAX_AICPU_THREADS;
+    if (!valid_idx) {
+        LOG_ERROR(
+            "Thread index %d out of bounds (active=%d max=%d exec_idx=%d) — aborting boot", thread_idx,
+            aicpu_thread_num_, MAX_AICPU_THREADS, affinity_exec_idx
+        );
+        boot_abort_.store(true, std::memory_order_release);
+        run_rc = -1;
+    }
 
     // Boot: the last AICPU thread (aicpu_thread_num_ - 1) performs the one-time
     // host-orch attach. host_build_graph's orchestrator already ran on the host,
@@ -311,26 +331,29 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // leader publish runtime_init_ready_, so no thread dispatches against a
     // half-seeded graph. This replaces the O(total_tasks) serial classify the
     // leader used to run alone while the others idle-waited.
-    while (!classify_ready_.load(std::memory_order_acquire)) {
+    while (!classify_ready_.load(std::memory_order_acquire) && !boot_abort_.load(std::memory_order_acquire)) {
         SPIN_WAIT_HINT();
     }
-    if (!sched_ctx_.is_completed() && rt != nullptr) {
+    if (!boot_abort_.load(std::memory_order_acquire) && !sched_ctx_.is_completed() && rt != nullptr) {
         sched_ctx_.classify_partition(thread_idx, aicpu_thread_num_);
     }
     classify_arrived_.fetch_add(1, std::memory_order_acq_rel);
     if (thread_idx == aicpu_thread_num_ - 1) {
-        while (classify_arrived_.load(std::memory_order_acquire) < aicpu_thread_num_) {
+        while (classify_arrived_.load(std::memory_order_acquire) < aicpu_thread_num_ &&
+               !boot_abort_.load(std::memory_order_acquire)) {
             SPIN_WAIT_HINT();
         }
         runtime_init_ready_.store(true, std::memory_order_release);
     } else {
-        while (!runtime_init_ready_.load(std::memory_order_acquire)) {
+        while (!runtime_init_ready_.load(std::memory_order_acquire) && !boot_abort_.load(std::memory_order_acquire)) {
             SPIN_WAIT_HINT();
         }
     }
 
-    // Every AICPU thread schedules its assigned cores.
-    if (!sched_ctx_.is_completed()) {
+    // Every AICPU thread schedules its assigned cores. Skipped under boot_abort_:
+    // a run missing a core-owning thread can never reach is_completed(), so the
+    // survivors would spin the dispatch loop forever instead of failing fast.
+    if (!boot_abort_.load(std::memory_order_acquire) && !sched_ctx_.is_completed()) {
         if (rt == nullptr) {
             LOG_ERROR("Thread %d: rt is null after orchestrator error, skipping dispatch", thread_idx);
         } else {
@@ -350,13 +373,15 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     }
 
     // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
-    // platform_deinit_aicore_regs is idempotent.
-    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
-    if (shutdown_rc != 0 && run_rc == 0) {
-        run_rc = shutdown_rc;
+    // platform_deinit_aicore_regs is idempotent. Skipped for an out-of-range
+    // thread_idx, which owns no core slice keyed by the index to close.
+    if (valid_idx) {
+        int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
+        if (shutdown_rc != 0 && run_rc == 0) {
+            run_rc = shutdown_rc;
+        }
+        LOG_INFO_V0("Thread %d: Completed", thread_idx);
     }
-
-    LOG_INFO_V0("Thread %d: Completed", thread_idx);
 
     // Check if this is the last thread to finish
     int32_t prev_finished = finished_count_.fetch_add(1, std::memory_order_acq_rel);
@@ -370,6 +395,12 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             runtime_destroy(rt, runtime_arena_);
             rt = nullptr;
         }
+    }
+
+    // A boot abort fails the whole op: every thread reports the error so the host
+    // does not read a partial success from the threads that skipped dispatch.
+    if (boot_abort_.load(std::memory_order_acquire) && run_rc == 0) {
+        run_rc = -1;
     }
 
     return run_rc;
@@ -401,6 +432,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     hs_thread_seq_.store(0, std::memory_order_release);
     classify_ready_.store(false, std::memory_order_release);
     classify_arrived_.store(0, std::memory_order_release);
+    boot_abort_.store(false, std::memory_order_release);
     thread_idx_.store(0, std::memory_order_release);
     finished_.store(false, std::memory_order_release);
 
