@@ -210,13 +210,15 @@ def run(platform: str, device_ids: list[int]) -> int:
                 window_size=WINDOW_SIZE,
                 buffers=_scratch_buffers(),
             ) as handle:
+                args_list = []
                 for worker_idx in DOMAINS[domain_name]:
                     domain = handle[worker_idx]
                     args = TaskArgs()
                     args.add_tensor(make_tensor_arg(host_inputs[worker_idx]), TensorArgType.INPUT)
                     args.add_tensor(make_tensor_arg(outputs[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING)
                     _add_domain_scratch(args, domain)
-                    orch.submit_next_level(allreduce_handle, args, cfg, worker=worker_idx)
+                    args_list.append(args)
+                orch.submit_next_level_group(allreduce_handle, args_list, cfg, workers=DOMAINS[domain_name])
 
         return _orch_fn
 

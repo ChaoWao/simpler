@@ -40,6 +40,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include "types.h"
 
@@ -103,7 +104,7 @@ private:
     void poison_task(TaskSlot slot, const std::string &root_message);
     void try_consume(TaskSlot slot);
     void dispatch_ready();
-    void dispatch_next_level_group();
-    void dispatch_next_level_singles();
+    std::unordered_set<int32_t> dispatch_next_level_group();
+    void dispatch_next_level_singles(const std::unordered_set<int32_t> &reserved_worker_ids);
     void dispatch_sub_ready();
 };

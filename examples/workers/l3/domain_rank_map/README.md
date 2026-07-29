@@ -23,7 +23,9 @@ tail = workers [1, 2]        # chip 2 is in both
 After the inspection pass, each domain runs its own small allreduce — in its
 **own `worker.run()`**, so chip 2 never juggles two collectives at once. That
 separation is deliberate; see `dual_domain_overlap` for the case where both
-domains are live across the same DAG.
+domains are live across the same DAG. The ranks within each allreduce are one
+`submit_next_level_group`, so every peer that participates in the device
+barrier is dispatched as a complete set.
 
 ## Run
 

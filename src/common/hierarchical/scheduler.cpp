@@ -11,7 +11,6 @@
 
 #include "scheduler.h"
 
-#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -350,8 +349,8 @@ void Scheduler::try_consume(TaskSlot slot) {
 // sched_thread_ with no surrounding handler, any throw is fatal to the whole
 // worker tree (std::terminate), not a per-task failure.
 void Scheduler::dispatch_ready() {
-    dispatch_next_level_group();
-    dispatch_next_level_singles();
+    const std::unordered_set<int32_t> reserved_worker_ids = dispatch_next_level_group();
+    dispatch_next_level_singles(reserved_worker_ids);
     dispatch_sub_ready();
 }
 
@@ -392,7 +391,7 @@ void Scheduler::dispatch_sub_ready() {
     }
 }
 
-void Scheduler::dispatch_next_level_group() {
+std::unordered_set<int32_t> Scheduler::dispatch_next_level_group() {
     TaskSlot slot;
     while (cfg_.ready_next_level_queues->try_front_group(slot)) {
         TaskSlotState &s = *cfg_.ring->slot_state(slot);
@@ -408,18 +407,22 @@ void Scheduler::dispatch_next_level_group() {
         const int32_t group_size = s.group_size();
         std::vector<WorkerThread *> workers;
         workers.reserve(static_cast<size_t>(group_size));
+        std::unordered_set<int32_t> target_worker_ids;
+        target_worker_ids.reserve(static_cast<size_t>(group_size));
+        bool all_workers_idle = true;
         for (int32_t i = 0; i < group_size; ++i) {
             const int32_t worker_id = s.target_worker_id(i);
             WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
             if (worker == nullptr) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: invalid target worker");
             }
-            if (std::find(workers.begin(), workers.end(), worker) != workers.end()) {
+            if (!target_worker_ids.insert(worker_id).second) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: duplicate target worker");
             }
-            if (!worker->idle()) return;
+            if (!worker->idle()) all_workers_idle = false;
             workers.push_back(worker);
         }
+        if (!all_workers_idle) return target_worker_ids;
 
         TaskSlot popped;
         if (!cfg_.ready_next_level_queues->try_pop_group(popped) || popped != slot) {
@@ -432,10 +435,13 @@ void Scheduler::dispatch_next_level_group() {
             workers[static_cast<size_t>(i)]->dispatch(WorkerDispatch{slot, i});
         }
     }
+    return {};
 }
 
-void Scheduler::dispatch_next_level_singles() {
+void Scheduler::dispatch_next_level_singles(const std::unordered_set<int32_t> &reserved_worker_ids) {
     for (int32_t worker_id : cfg_.ready_next_level_queues->worker_ids()) {
+        if (reserved_worker_ids.find(worker_id) != reserved_worker_ids.end()) continue;
+
         WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
         if (worker == nullptr) {
             throw std::runtime_error(

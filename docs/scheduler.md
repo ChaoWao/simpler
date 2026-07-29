@@ -54,8 +54,8 @@ while (true) {
         on_task_complete(item);
     }
 
-    dispatch_next_level_group();
-    dispatch_next_level_singles();
+    reserved_workers = dispatch_next_level_group();
+    dispatch_next_level_singles(reserved_workers);
     dispatch_sub_ready();
 
     if (stop_requested && all workers are idle) {
@@ -86,8 +86,8 @@ if target worker is idle and its FIFO is non-empty:
 ```
 
 There is no idle-worker search, rebinding, work stealing, or scan into another
-worker's queue. FIFO is independent per worker, so a busy worker A does not
-block READY work for worker B.
+worker's queue. Outside a group-head reservation, each worker FIFO progresses
+independently, so a busy worker A does not block READY work for worker B.
 
 ### Group tasks
 
@@ -103,13 +103,15 @@ if every target is idle:
     dispatch member i to target_worker_ids[i]
 else:
     leave the group at the FIFO head
+    reserve every target against single-task dispatch
 ```
 
-The check is all-or-nothing: a blocked group reserves no partial worker set.
-The Scheduler does not scan later groups. It continues to single-task queues,
-so the runtime adds no fairness, aging, priority, or reservation policy beyond
-trying a launchable group before singles in each iteration. Users are
-responsible for choosing worker sets that make acceptable progress.
+Dispatch remains all-or-nothing: no group member launches until the complete
+target set is idle. A blocked FIFO head reserves every target against new
+single-task dispatch while existing work drains. Singles on other workers
+continue normally, and later groups do not reserve workers because the
+Scheduler does not scan past the FIFO head. The reservation is released when
+the group launches.
 
 ## 4. SUB dispatch
 
@@ -184,6 +186,9 @@ The scheduling invariants are:
 5. Only the Scheduler calls `WorkerThread::dispatch`.
 6. Only one successful PENDING-to-READY transition enqueues a consumer.
 7. A group produces one aggregate DAG completion regardless of member count.
+8. A NEXT_LEVEL single does not wait for a not-yet-dispatched peer at the same
+   scheduler level; work that requires concurrent placement is submitted as a
+   group.
 
 ## 8. Related documents
 

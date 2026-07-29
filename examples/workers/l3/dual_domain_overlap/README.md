@@ -20,7 +20,7 @@ through both and then computes on the results.
 | ------- | --- |
 | **Per-domain identity** | Chip 1 is rank 1 in `left` and rank 0 in `right`. The `workers` list order defines the dense rank, so the same chip legitimately holds two different ranks at once. |
 | **Domains allocated inside the orch function** | `with orch.allocate_domain(name=..., workers=..., window_size=..., buffers=[CommBufferSpec(...)])` — created and released within one orchestration, not configured on the `Worker`. |
-| **`submit_next_level_group`** | The affine stage submits one `TaskArgs` per member in a single call, with `workers=worker_indices`, instead of a loop of `submit_next_level`. |
+| **`submit_next_level_group`** | Both the peer-waiting allreduce and the affine stage submit one `TaskArgs` per member in a single call with `workers=worker_indices`. |
 | **Compute that depends only on its own domain's result** | Each affine task reads `reduce_out[domain][chip]`. The dependency is implicit — same `buffer.addr` as the reduce output — so `left`'s affine work can never consume `right`'s reduction. |
 
 ## Run
