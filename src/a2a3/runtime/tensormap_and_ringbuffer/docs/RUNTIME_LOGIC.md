@@ -555,7 +555,7 @@ Each scheduler thread runs a tight loop with two main phases:
 
 **Phase 2 — Dispatch** (full model in §8.6):
 
-- Drain each source (normal ready ▸ speculative early) in occupancy order — `sync_start`
+- Service each source (normal ready ▸ speculative early) in occupancy order — `sync_start`
   Tier-0 ▸ MIX ▸ AIC/AIV, idle ▸ pending — popping from the matching shape-based ready queue
   (lock-free MPMC Vyukov queue, one per resource shape)
 - Build `PTO2DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
@@ -644,45 +644,53 @@ pending slot, promoted on completion). This order lives in one shared skeleton,
 | EARLY (speculative) | `early_dispatch_queues[MIX\|AIC\|AIV]` | `early_sync_start_queue` (single) |
 
 A task routes to the sync lane iff `task_attrs.requires_sync_start()`. In each source the
-sync lane is drained as a strict **Tier-0** before the regular lane (`sync_start > MIX > C/V`),
+sync lane is serviced as a strict **Tier-0** before the regular lane (`sync_start > MIX > C/V`),
 and early dispatch runs only once *both* normal lanes are empty (normal ▸ early).
 
 **Asymmetry (deliberate):** the normal sync lane is per-shape (3 queues) because a ready sync
 cohort can dispatch *inline* when it fits, reusing the per-shape `dispatch_shape`; the early
-sync lane is a single, shape-agnostic queue because an early cohort is *always* gated → always
-takes the drain path, whose rendezvous counts cores (not blocks) and is shape-agnostic. Both
-feed the same drain.
+sync lane is a single, shape-agnostic queue because its per-task owner must make one
+all-or-nothing decision. The owner stages locally when its tracker can hold the complete
+cohort and falls back to the global drain only when local capacity is short. Both paths use
+the same gated, core-counting rendezvous.
 
-#### sync_start drain + rendezvous
+#### sync_start local fast path, drain fallback, and rendezvous
 
-A sync_start cohort of `block_num` cores must occupy all its cores before any of them run.
-When it cannot fit inline, `enter_drain_mode` arms a stop-the-world drain:
+A sync_start cohort of `block_num` logical blocks must occupy all of its required core slots
+before any core runs. The early Tier-0 owner first asks its own `CoreTracker` for complete
+idle+pending capacity. AIC/AIV capacity is counted in cores; MIX capacity is counted in
+logical clusters even though each block may stage multiple cores.
 
-1. **Single ownership** — a CAS on `sync_start_pending` (0 → −1) makes drains mutually
-   exclusive; only one cohort drains at a time, regardless of source.
-2. **All-or-nothing** — scheduler thread 0 coordinates the generation-tagged ack tree and
-   checks `count_global_available >= block_num` *before* staging. If short, it advances the
-   attempt and retries after completions free cores. A cohort is fully staged or not at all —
-   never partial.
-3. **Parallel stage** — after thread 0 broadcasts the completed root token, each scheduler
-   thread CAS-claims a block range and stages its own cores with a non-zero `src_payload`
-   gate: idle cores → running slots, busy cores → pending slots.
-4. **Rendezvous launch** — `running_slot_count` counts staged running-slot cores; when it
-   reaches `popcount(staged_core_mask)` **and** the producer has released,
-   `maybe_rendezvous_ring` rings every gated core's doorbell together — the cohort starts as one.
+1. **Local Case A** — if no global drain is already published and one owner tracker has at
+   least `block_num` slots, that scheduler force-gates and stages the entire cohort
+   synchronously. It does not modify `sync_start_pending`, the drain generation, or ack
+   tokens. Once staging starts it cannot cancel or partially fall back.
+2. **Global Case B** — otherwise `enter_drain_mode` uses a CAS on `sync_start_pending`
+   (0 → −1) to select one global drain. Scheduler thread 0 coordinates the
+   generation-tagged ack tree and checks global capacity before releasing parallel staging.
+   If short, it advances the attempt and retries after completions free cores.
+3. **Parallel fallback stage** — after thread 0 broadcasts the completed root token, each
+   scheduler CAS-claims a block range and stages only its own cores. The generation-tagged
+   barrier also serializes a global coordinator with any local staging that raced drain
+   publication: the local scheduler cannot ack until its tracker mutations are complete.
+4. **Rendezvous launch** — both paths publish every `staged_core_mask` word before storing
+   the final `running_slot_count` seed. `maybe_rendezvous_ring` reads the seed first and then
+   the mask; when the counts match **and** the producer has released, one launch-latch winner
+   rings every gated core's doorbell together.
 
-Single ownership + all-or-nothing make the drain deadlock-free across multiple cohorts: at most
-one drains, and it fully stages or waits, so two cohorts can never each half-occupy the cluster
-set (see the completion path's `pending_gated` classification for why a promoted-but-still-gated
-block is not mistaken for a normal task).
+Per-task ownership plus all-or-nothing admission prevents two cohorts from each partially
+occupying the available cluster set. The global drain remains single-owner; independent local
+cohorts may proceed on disjoint scheduler-owned trackers. See the completion path's
+`pending_gated` classification for why a promoted-but-still-gated block is not mistaken for a
+normal task.
 
 #### Early-candidate gate: producer must publish every block (deadlock avoidance)
 
 Producer-side `propagate_dispatch_fanin` no-ops until the producer is **fully published**:
-`published_block_count == logical_block_num`. Normal dispatch, regular early staging, and the
-sync drain increment this counter only after the claimed range's payloads and MMIO dispatch
-tokens are visible. A staged producer also waits for release and completion of its owned
-doorbell pass before exposing fanout.
+`published_block_count == logical_block_num`. Normal dispatch, regular early staging, and
+both local and global sync staging increment this counter only after the claimed range's
+payloads and MMIO dispatch tokens are visible. A staged producer also waits for release and
+completion of its owned doorbell pass before exposing fanout.
 
 This is load-bearing: a flagged SPMD producer with more blocks than cores (for example, a
 50-block AIC projection on 24 AIC cores) dispatches in waves. If its first wave triggered a

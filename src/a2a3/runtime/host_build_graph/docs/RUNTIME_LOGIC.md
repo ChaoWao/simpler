@@ -592,6 +592,15 @@ is seeded by the device **boot classify** (`on_orchestration_done`), which scans
 the submitted tasks once and either pushes the fanin-free ones to the ready
 queue or registers each remaining task on its first unmet producer.
 
+**Early staging status.** Early producer propagation is currently disabled in
+HBG: `propagate_dispatch_fanin` is a stub, so the polling path does not populate
+`early_dispatch_queues` or `early_sync_start_queue`. The scheduler retains the
+early-staging machinery as a dormant mirror of the TMR runtime for a future
+consumer-pull publication path. If that path populates the queues, a
+`sync_start` cohort that fits one scheduler's idle and pending slots stages
+locally; larger cohorts use the generation-tagged global drain. This is not an
+active end-to-end HBG fast path today.
+
 **Phase 2 — Dispatch**:
 
 - For each idle core: pop a task from the matching shape-based ready queue (lock-free MPMC Vyukov queue, one per resource shape)

@@ -651,22 +651,39 @@ dispatch runs only once normal `ready_queues[]` are empty **and** the local
 every *direct* producer is flagged `allow_early_resolve` (slot-state hint from Arg, or
 unconditional true for hidden alloc creators). There is no auto-chain inheritance.
 
-#### sync_start drain + rendezvous
+#### sync_start local stage, drain fallback, and rendezvous
 
-A sync_start cohort of `block_num` cores must occupy all its cores before any of them run.
-When it cannot fit inline, `enter_drain_mode` arms a stop-the-world drain:
+A sync_start cohort of `block_num` blocks must occupy all its cores before any of them run.
+An early Tier-0 pop first claims the cohort's task-local staging owner, then chooses one of
+two all-or-nothing cases:
 
-1. **Single ownership** — a CAS on `sync_start_pending` makes drains mutually exclusive.
-2. **All-or-nothing** — scheduler thread 0 coordinates the generation-tagged ack tree and
-   checks global available capacity ≥ `block_num` before staging; if short it advances the
-   attempt and retries after completions free cores.
-3. **Parallel stage** — after thread 0 broadcasts the completed root token, each scheduler
-   thread CAS-claims a block range and stages its own cores with a non-zero `src_payload`
-   gate (`drain_stage_cores`): idle → running, busy → pending (`pending_gated` when still
-   waiting for the doorbell).
-4. **Rendezvous launch** — `running_slot_count` counts staged running-slot cores; when it
-   reaches `popcount(staged_core_mask)` **and** the producer has released,
-   `maybe_rendezvous_ring` rings every gated core's doorbell together — the cohort starts as one.
+1. **Case A — single-owner local stage** — when the popping scheduler's own
+   `CoreTracker` has at least `block_num` compatible idle + pending slots and no global
+   drain is already published, it force-gates and stages the complete cohort locally.
+   AIC/AIV capacity is the number of idle plus pending-capable cores; MIX capacity is the
+   number of active-mask-compatible split-placement clusters. This path never writes
+   `sync_start_pending`, `drain_attempt`, or the drain ack tokens.
+2. **Case B — global drain fallback** — otherwise `enter_drain_mode` CAS-claims
+   `sync_start_pending`. Scheduler thread 0 coordinates the generation-tagged ack tree,
+   checks global capacity, and retries after completions when capacity is short. Once
+   released, every scheduler thread CAS-claims block ranges and stages only its own cores.
+3. **Shared staging** — `stage_sync_start_cores` publishes every claimed block with a
+   non-zero `src_payload` gate: idle cores → running slots, busy cores → pending slots
+   (`pending_gated` while waiting for the doorbell). It returns both logical blocks staged
+   and running-slot cores, because one MIX block may use multiple cores.
+4. **Rendezvous launch** — after the complete `staged_core_mask` is published,
+   `running_slot_count` is seeded with the staged running-slot cores. The rendezvous reads
+   that seed before the full mask; when it equals `popcount(staged_core_mask)` **and** the
+   producer has released, `maybe_rendezvous_ring` rings every gated core's doorbell
+   together — the cohort starts as one.
+
+If a global drain is published concurrently after Case A's zero check, its ack barrier
+waits until the local scheduler returns to the loop; the coordinator then observes the
+locally occupied tracker slots before making its global capacity decision.
+
+At scheduler-phase profiling level, local speculative staging is emitted as
+`EarlyDispatch` rather than being folded into the normal `Dispatch` bar. This lets the
+single-owner regression prove that the cohort was staged by Case A.
 
 Doorbell ownership is exclusive (`claim_all_staged_doorbell_bits` /
 `claim_late_staged_doorbell_bits`); launch is latched via `early_dispatch_launch_state`.

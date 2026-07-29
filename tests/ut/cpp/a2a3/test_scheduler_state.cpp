@@ -524,3 +524,60 @@ TEST(CoreTrackerTest, MixRunningClusterHelpersRejectOccupiedUsedPendingSlot) {
 
     EXPECT_EQ(tracker.count_mix_running_clusters(used_mask), 0);
 }
+
+TEST(CoreTrackerTest, CountAvailableBlocksAivIncludesFreePendingSlots) {
+    CoreTracker tracker;
+    tracker.init(2);
+    tracker.set_cluster(0, 0, 1, 2);
+    tracker.set_cluster(1, 3, 4, 5);
+
+    tracker.change_core_state(1);
+    tracker.change_core_state(4);
+
+    constexpr uint8_t aiv_mask = PTO2_SUBTASK_MASK_AIV0;
+    constexpr int32_t exact_fit = 4;
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::AIV, aiv_mask, false), 2);
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::AIV, aiv_mask, true), exact_fit);
+
+    tracker.set_pending_occupied(4);
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::AIV, aiv_mask, true), exact_fit - 1);
+}
+
+TEST(CoreTrackerTest, CountAvailableBlocksMixCountsLogicalClusters) {
+    CoreTracker tracker;
+    tracker.init(2);
+    tracker.set_cluster(0, 0, 1, 2);
+    tracker.set_cluster(1, 3, 4, 5);
+
+    tracker.change_core_state(4);
+
+    constexpr uint8_t used_mask = PTO2_SUBTASK_MASK_AIC | PTO2_SUBTASK_MASK_AIV0 | PTO2_SUBTASK_MASK_AIV1;
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, false), 1);
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, true), 2);
+}
+
+TEST(CoreTrackerTest, CountAvailableBlocksMixRejectsOccupiedUsedPendingSlot) {
+    CoreTracker tracker;
+    tracker.init(1);
+    tracker.set_cluster(0, 0, 1, 2);
+
+    constexpr uint8_t used_mask = PTO2_SUBTASK_MASK_AIC | PTO2_SUBTASK_MASK_AIV0;
+    tracker.change_core_state(1);
+    tracker.set_pending_occupied(1);
+
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, false), 0);
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, true), 0);
+}
+
+TEST(CoreTrackerTest, CountAvailableBlocksMixIgnoresUnavailableUnusedCore) {
+    CoreTracker tracker;
+    tracker.init(1);
+    tracker.set_cluster(0, 0, 1, 2);
+
+    constexpr uint8_t used_mask = PTO2_SUBTASK_MASK_AIC | PTO2_SUBTASK_MASK_AIV0;
+    tracker.change_core_state(2);
+    tracker.set_pending_occupied(2);
+
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, false), 1);
+    EXPECT_EQ(tracker.count_available_blocks(PTO2ResourceShape::MIX, used_mask, true), 1);
+}

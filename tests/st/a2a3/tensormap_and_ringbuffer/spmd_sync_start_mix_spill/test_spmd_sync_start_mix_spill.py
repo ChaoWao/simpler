@@ -11,7 +11,7 @@
 (and spins), leaving every AIC core idle. The require_sync_start MIX consumer then pre-stages
 with EVERY cluster mixed — AIC on an idle running slot, both AIVs on the producer's busy cores'
 gated pending slots. Exercises the rendezvous seed/mask counting on the MIX per-core split path
-(drain_stage_cores to_pending=true, mix_cluster_idle_core_count=1/cluster + Case 3.3 promote for
+(stage_sync_start_cores to_pending=true, mix_cluster_idle_core_count=1/cluster + Case 3.3 promote for
 every pending AIV). A counting mismatch stalls the rendezvous -> gated cores never launch ->
 allocator deadlock.
 

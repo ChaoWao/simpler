@@ -689,6 +689,9 @@ struct PTO2SchedulerState {
     };
     EarlyDispatchDoorbell early_dispatch_doorbell_table[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS * 64]{};
     PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
+    // Shape-agnostic sync_start candidates require an all-or-nothing owner
+    // decision. The owner stages locally when one tracker can hold the complete
+    // cohort and falls back to the generation-tagged global drain otherwise.
     PTO2ReadyQueue early_sync_start_queue;
 
     static inline void ring_one_doorbell(uint64_t reg_addr, uint32_t token) {
@@ -798,12 +801,17 @@ struct PTO2SchedulerState {
     }
 
     inline bool maybe_rendezvous_ring(PTO2TaskSlotState &slot_state) {
+        // Staging publishes the complete mask before seeding running_slot_count.
+        // Read the seed first: observing the final seq_cst seed then orders every
+        // mask read after all of the stager's mask updates. Reading the mask first
+        // could pair a partial mask with the later final seed and ring too early.
+        int32_t running_cores = slot_state.payload->running_slot_count.load(std::memory_order_seq_cst);
         int32_t staged_cores = 0;
         for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_cores +=
                 __builtin_popcountll(slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst));
         if (staged_cores == 0) return false;
-        if (slot_state.payload->running_slot_count.load(std::memory_order_seq_cst) != staged_cores) return false;
+        if (running_cores != staged_cores) return false;
         if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_DISPATCHED)
             return false;
         if (!try_claim_early_dispatch_launch(*slot_state.payload)) return false;
@@ -815,7 +823,7 @@ struct PTO2SchedulerState {
         return true;
     }
 
-    inline bool retry_sync_start_rendezvous_after_drain(PTO2TaskSlotState &slot_state) {
+    inline bool retry_sync_start_rendezvous_after_staging(PTO2TaskSlotState &slot_state) {
         if (!maybe_rendezvous_ring(slot_state)) return false;
         propagate_dispatch_fanin(slot_state);
         return true;

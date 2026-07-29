@@ -749,16 +749,17 @@ struct PTO2SchedulerState {
     PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
 
     // sync_start early-dispatch candidates park here instead of early_dispatch_queues[]:
-    // they need an atomic all-or-nothing stage via the drain barrier, not
-    // early_dispatch_shape's per-thread partial range-claim. Shape-agnostic (the
-    // rendezvous counts cores, not blocks), so a single queue serves all shapes; drained
-    // as the highest occupancy tier at the top of try_early_dispatch.
+    // they need an atomic all-or-nothing owner stage, not early_dispatch_shape's
+    // per-thread partial range-claim. Shape-agnostic (the rendezvous counts cores,
+    // not blocks), so a single queue serves all shapes. The owner stages locally
+    // when its tracker fits and falls back to the global drain otherwise.
     //
     // Deliberately single, vs the normal source's per-shape ready_sync_queues[]: a READY
     // sync cohort (producer done) can dispatch inline when it fits, so it reuses the
-    // per-shape dispatch_shape; an EARLY sync cohort always carries a non-zero
-    // src_payload gate and therefore always drains. The shape-agnostic rendezvous
-    // makes one queue sufficient. Same drain, two sources.
+    // per-shape dispatch_shape. An EARLY sync cohort always carries a non-zero
+    // src_payload gate; it stages directly when one owner tracker can hold the whole
+    // cohort and falls back to the global drain otherwise. The shape-agnostic
+    // rendezvous makes one queue sufficient.
     PTO2ReadyQueue early_sync_start_queue;
 
     static inline void ring_one_doorbell(uint64_t reg_addr, uint32_t token) {
@@ -809,8 +810,8 @@ struct PTO2SchedulerState {
     }
 
     // Ring one sync_start cohort from its stable staged_core_mask. The caller owns
-    // the NONE->RINGING launch latch and invokes this exactly once after drain
-    // staging completes, while the corresponding per-core table entries are live.
+    // the NONE->RINGING launch latch and invokes this exactly once after local or
+    // global staging completes, while the corresponding per-core table entries are live.
     inline void ring_all_staged_doorbells(PTO2TaskSlotState &slot_state) {
         for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
             uint64_t bits = slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst);
@@ -879,12 +880,17 @@ struct PTO2SchedulerState {
     // wins the launch latch and rings exactly once. Returns true only to that winner,
     // which may then expose the cohort to its fanout.
     inline bool maybe_rendezvous_ring(PTO2TaskSlotState &slot_state) {
+        // running_slot_count is the publication seed: every staged_core_mask OR
+        // happens-before its final store. Read the seed first, then the mask, so
+        // observing the final count cannot be paired with a partially published
+        // mask when producer release races staging.
+        int32_t running_cores = slot_state.payload->running_slot_count.load(std::memory_order_seq_cst);
         int32_t staged_cores = 0;
         for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
             staged_cores +=
                 __builtin_popcountll(slot_state.payload->staged_core_mask[w].load(std::memory_order_seq_cst));
         if (staged_cores == 0) return false;
-        if (slot_state.payload->running_slot_count.load(std::memory_order_seq_cst) != staged_cores) return false;
+        if (running_cores != staged_cores) return false;
         if (slot_state.payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_DISPATCHED)
             return false;
         if (!try_claim_early_dispatch_launch(*slot_state.payload)) return false;
@@ -896,7 +902,7 @@ struct PTO2SchedulerState {
         return true;
     }
 
-    inline bool retry_sync_start_rendezvous_after_drain(PTO2TaskSlotState &slot_state) {
+    inline bool retry_sync_start_rendezvous_after_staging(PTO2TaskSlotState &slot_state) {
         if (!maybe_rendezvous_ring(slot_state)) return false;
         propagate_dispatch_fanin(slot_state);
         return true;
@@ -921,8 +927,8 @@ struct PTO2SchedulerState {
         }
 
         uint64_t task_id = static_cast<uint64_t>(consumer.task->task_id.raw);
-        // A sync-start cohort uses one shape-agnostic queue so only the
-        // all-or-nothing drain path can claim and stage it.
+        // A sync-start cohort uses one shape-agnostic queue so one owner can
+        // choose an all-or-nothing local stage or the global-drain fallback.
         if (consumer.task_attrs.requires_sync_start()) {
             early_sync_start_queue.push_tagged(&consumer, task_id);
         } else {
@@ -931,14 +937,14 @@ struct PTO2SchedulerState {
     }
 
     // Event-driven candidate detection (the dual of fanin_refcount/ready). Called after a
-    // FLAGGED producer `p` publishes blocks (normal dispatch, early-dispatch release, or the
-    // sync_start drain), but no-ops until every logical block is launch-visible. Only then
+    // FLAGGED producer `p` publishes blocks (normal dispatch, early-dispatch release, or
+    // sync_start staging), but no-ops until every logical block is launch-visible. Only then
     // does it walk p's fanout and bump each consumer's
     // dispatch_fanin. A consumer whose dispatch_fanin reaches fanin_actual_count (= every
     // producer is flagged-and-fully-dispatched, or was already complete when the consumer was
     // wired) is an early-dispatch candidate: CAS NONE->STAGING (exactly-once) and push to
     // early_dispatch_queues[shape] (or early_sync_start_queue for a require_sync_start cohort)
-    // for the drain to pre-stage. The full-publication gate is load-bearing: a consumer that
+    // for its owner to pre-stage. The full-publication gate is load-bearing: a consumer that
     // pre-occupies cores off a producer whose later blocks are not yet launch-visible would gate the
     // very cores those blocks need, starving the producer so it never completes and the
     // rendezvous never rings — a resource deadlock. published_block_count advances after

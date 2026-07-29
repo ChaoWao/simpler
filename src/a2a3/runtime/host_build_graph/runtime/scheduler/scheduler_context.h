@@ -497,11 +497,18 @@ private:
 
     bool enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num);
     int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending = false);
-    // One thread's share of the drain: CAS-claim block indices and stage them onto THIS
-    // thread's own cores (parallel with peers), returning the number of running-slot cores
-    // staged (the rendezvous seed contribution).
-    int32_t drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated);
-    // out_stage_wall_cycles (profiling only): cycles this thread spent in drain_stage_cores
+    struct SyncStartStageResult {
+        int32_t staged_blocks{0};
+        int32_t running_cores{0};
+    };
+    // CAS-claim sync_start block indices and stage them onto THIS thread's own
+    // cores. The global drain invokes this in parallel on every scheduler;
+    // the local fast path invokes it once after proving this tracker has enough
+    // capacity. record_drain_phases keeps local work attributed to EarlyDispatch.
+    SyncStartStageResult stage_sync_start_cores(
+        PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated, bool record_drain_phases
+    );
+    // out_stage_wall_cycles (profiling only): cycles this thread spent in stage_sync_start_cores
     // (prepare + publish), set ONLY on threads that actually staged. Lets the caller isolate
     // the pure stage wall from the ack-barrier + finalize spans in the Drain bar.
     void handle_drain_mode(int32_t thread_idx, uint64_t *out_stage_wall_cycles = nullptr);

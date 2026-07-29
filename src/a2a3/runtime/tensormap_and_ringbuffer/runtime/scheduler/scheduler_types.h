@@ -443,6 +443,23 @@ public:
         return get_mix_running_cluster_offset_states(core_mask).count();
     }
 
+    // Number of whole logical blocks this tracker can accept for sync_start
+    // staging. AIC/AIV count cores; MIX counts clusters because one logical MIX
+    // block may occupy multiple cores in the same cluster. Gated early staging
+    // includes pending slots, while ready staging is restricted to idle slots.
+    int32_t count_available_blocks(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending) const {
+        if (shape == PTO2ResourceShape::MIX) {
+            return include_pending ? count_mix_split_clusters(core_mask) : count_mix_running_clusters(core_mask);
+        }
+        if (shape == PTO2ResourceShape::DUMMY) return 0;
+
+        int32_t available = get_idle_core_offset_states(shape).count();
+        if (include_pending) {
+            available += get_pending_core_offset_states(shape).count();
+        }
+        return available;
+    }
+
     BitStates get_pending_core_offset_states(PTO2ResourceShape shape) const {
         if (shape == PTO2ResourceShape::MIX) {
             // Shape-level query kept conservative for legacy callers/tests.

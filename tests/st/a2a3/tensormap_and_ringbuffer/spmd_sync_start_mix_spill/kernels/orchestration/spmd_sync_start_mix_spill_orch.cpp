@@ -17,7 +17,7 @@
  * (and spins), leaving the 24 AIC cores idle. When the require_sync_start MIX
  * consumer pre-stages as an early-dispatch candidate, EVERY one of its 24 clusters
  * is mixed — the AIC lands on an idle running slot, both AIVs on the producer's busy
- * cores' gated pending slots (drain_stage_cores takes the to_pending=true split path,
+ * cores' gated pending slots (stage_sync_start_cores takes the to_pending=true split path,
  * mix_cluster_idle_core_count = 1 per cluster). The rendezvous seed then counts only
  * the 24 running AICs while staged_core_mask counts all 72 cores; the 48 pending AIVs
  * must promote to close the gap. If the seed/mask counting diverges on this MIX

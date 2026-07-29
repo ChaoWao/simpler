@@ -527,9 +527,9 @@ enum class L2SwimlaneSchedPhaseKind : uint32_t {
                         // One bar per dispatch-loop iteration that enters the drain,
                         // so retries show as multiple bars. Otherwise this time is a
                         // swimlane blind spot (the loop `continue`s past all records).
-    DrainPrepare = 9,   // inner: this thread's drain_stage_cores prepare pass
+    DrainPrepare = 9,   // inner: this thread's global sync_start staging prepare pass
                         // (cluster scan + build_payload). tasks_processed = subtasks.
-    DrainPublish = 10,  // inner: this thread's drain_stage_cores publish pass
+    DrainPublish = 10,  // inner: this thread's global sync_start staging publish pass
                         // (MMIO write_reg per subtask). tasks_processed = subtasks.
     // Outer (sched lane): async-wait completion polling, split out of Complete
     // so async-engine (SDMA/RoCE/URMA/CCU) wait time is attributed to its own

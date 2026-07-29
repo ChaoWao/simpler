@@ -376,7 +376,13 @@ private:
 
     bool enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t block_num);
     int32_t count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending = false);
-    int32_t drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated);
+    struct SyncStartStageResult {
+        int32_t staged_blocks{0};
+        int32_t running_cores{0};
+    };
+    SyncStartStageResult stage_sync_start_cores(
+        PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated, bool record_drain_phases
+    );
     void handle_drain_mode(int32_t thread_idx, uint64_t *out_stage_wall_cycles = nullptr);
 
     // =========================================================================
