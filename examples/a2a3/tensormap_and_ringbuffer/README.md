@@ -18,13 +18,13 @@ For the `Worker` API underneath the framework, see
 | Example | What it teaches |
 | ------- | --------------- |
 | [`vector_example/`](vector_example/) | The smallest complete kernel: `f = (a+b+1)*(a+b+2) + (a+b)`. Runs on sim. |
-| [`scalar_data/`](scalar_data/) | Orchestration-level data manipulation — `GetTensorData` / `SetTensorData` round-trips, `add_inout`, and automatic WAW / WAR waits including on external tensors. |
+| [`scalar_data/`](scalar_data/) | Orchestration-level data manipulation — `get_tensor_data` / `set_tensor_data` round-trips, runtime-created outputs with initial values, and automatic WAW / WAR waits. Also the reference for the one case where they **don't** fire: `add_input` on an external tensor registers no TensorMap entry, so a later `set_tensor_data` races the reader. |
 
 ## Compute
 
 | Example | What it teaches |
 | ------- | --------------- |
-| [`benchmark_bgemm/`](benchmark_bgemm/) | Runtime-configurable tiled matmul `C = sum(k) A[k] @ B[k]`, shaped for measurement. Runs on sim. |
+| [`benchmark_bgemm/`](benchmark_bgemm/) | Runtime-configurable tiled matmul `C = sum(k) A[k] @ B[k]`, laid out as single-axis moves over task count, tile size, work per task, and accumulation depth. Runs on sim. Four of its six cases are `"manual": True` and need `--manual include`. |
 | [`paged_attention/`](paged_attention/) | Online softmax with AIC/AIV subgraph splitting, bfloat16. The baseline the three variants below are compared against. |
 | [`paged_attention_manual_scope/`](paged_attention_manual_scope/) | The same computation with explicit scope control — kernels byte-identical to the baseline's, only the orchestration differs. See [`docs/manual-scope.md`](../../../docs/manual-scope.md). |
 | [`paged_attention_unroll_manual_scope/`](paged_attention_unroll_manual_scope/) | A second implementation, not a patch on the baseline: KV blocks batched into groups of `N_UNROLL`, four tasks per group instead of per block, with the kernels rewritten to match. |
