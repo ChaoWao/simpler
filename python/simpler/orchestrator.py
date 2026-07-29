@@ -491,7 +491,7 @@ class Orchestrator:
             return int(self._o.malloc(wid, sz))
         with self._worker._child_prov_lock:
             ptr = int(self._o.malloc(wid, sz))
-            self._worker._child_prov_record_malloc(wid, ptr)
+            self._worker._child_prov_record_malloc(wid, ptr, sz)
             return ptr
 
     def free(self, worker_id: int, ptr: int) -> None:
@@ -519,7 +519,7 @@ class Orchestrator:
             self._o.copy_to(wid, d, int(src), int(size))
             return
         with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live(wid, d, api="copy_to")
+            self._worker._child_prov_require_live_range(wid, d, int(size), api="copy_to")
             self._o.copy_to(wid, d, int(src), int(size))
 
     def copy_from(self, worker_id: int, dst: int, src: int, size: int) -> None:
@@ -529,7 +529,7 @@ class Orchestrator:
             self._o.copy_from(wid, int(dst), s, int(size))
             return
         with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live(wid, s, api="copy_from")
+            self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
             self._o.copy_from(wid, int(dst), s, int(size))
 
     def alloc(self, shape: Sequence[int], dtype: DataType) -> Tensor:
