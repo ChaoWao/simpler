@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""L2 deferred completion + two-chip comm smoke test for a2a3sim."""
+"""L2 deferred completion + two-chip comm smoke test for a2a3, onboard and sim."""
 
 from __future__ import annotations
 
@@ -172,7 +172,7 @@ def run(
         worker.close()
 
 
-@pytest.mark.platforms(["a2a3sim"])
+@pytest.mark.platforms(["a2a3", "a2a3sim"])
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(2)
 def test_deferred_notify_demo(st_device_ids, st_platform) -> None:
