@@ -1363,6 +1363,35 @@ class ChipWorker:
             setattr(config, k, v)
         self._impl._run_with_pipeline_lease(int(callable_id), args, config, int(slot_id), int(generation))
 
+    def _prepare_native_run_with_pipeline_lease(self, callable_id, args, slot_id, generation, config=None, **kwargs):
+        """Prepare one native run without crossing its device launch fence.
+
+        Private B3a seam for the hierarchical endpoint. The returned token is
+        bound to both the pipeline lease generation and a unique prepare epoch;
+        it must be passed back to launch/poll/wait/finalize on this ChipWorker.
+        Keep every tensor backing buffer referenced by ``args`` alive until
+        finalize returns.
+        """
+        if config is None:
+            config = CallConfig()
+        for k, v in kwargs.items():
+            setattr(config, k, v)
+        return self._impl._prepare_native_run_with_pipeline_lease(
+            int(callable_id), args, config, int(slot_id), int(generation)
+        )
+
+    def _launch_native_run(self, run):
+        self._impl._launch_native_run(run)
+
+    def _poll_native_run(self, run):
+        return bool(self._impl._poll_native_run(run))
+
+    def _wait_native_run(self, run):
+        self._impl._wait_native_run(run)
+
+    def _finalize_native_run(self, run):
+        self._impl._finalize_native_run(run)
+
     def _unregister_slot(self, callable_id):
         self._impl.unregister_callable(int(callable_id))
 
@@ -1391,7 +1420,7 @@ class ChipWorker:
 
     @property
     def runtime_buffer_addrs(self):
-        """Address of each host Runtime staging buffer, in slot order."""
+        """Address of each opaque host native-run storage buffer, in slot order."""
         return list(self._impl.runtime_buffer_addrs)
 
     def arena_bank_gm_heap_base(self, bank_id):

@@ -30,8 +30,9 @@
  *   tid    thread id   (multi-threaded orch stays attributable)
  *   inv    process-wide simpler_run() invocation id (atomic-allocated, so
  *          (pid, inv) is unique even across concurrent calls) — grouping key
- *          ONLY (gathers one call's spans together); not a token index. Set
- *          once per call via StraceScope::next_inv().
+ *          ONLY (gathers one call's spans together); not a token index. A
+ *          lexical call sets it via StraceScope::next_inv(); a phased call
+ *          allocates once and binds that id in each phase.
  *   hid    content-derived callable hash (ELF Build-ID 64); stable across slot
  *          reuse / processes / runs. Parser buckets by hid; the most-frequent
  *          bucket is decode, a once-seen bucket is prefill, etc.
@@ -122,7 +123,9 @@ public:
 
     ~StraceScope() {
         const auto t1 = std::chrono::steady_clock::now();
-        const long long ts = static_cast<long long>(t0_.time_since_epoch().count());
+        const long long ts = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t0_.time_since_epoch()).count()
+        );
         const long long dur =
             static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0_).count());
         // depth printed is the scope's own level (post-decrement so the
@@ -138,8 +141,8 @@ public:
     StraceScope(const StraceScope &) = delete;
     StraceScope &operator=(const StraceScope &) = delete;
 
-    /** Begin a new invocation: allocate a process-wide unique id and make it the
-     *  active id for this thread. Call once at simpler_run entry.
+    /** Begin a lexical invocation: allocate a process-wide unique id and make
+     *  it the active id for this thread. Call once at simpler_run entry.
      *
      *  The id generator is a process-wide atomic, not the per-thread counter, so
      *  `(pid, inv)` uniquely identifies one invocation even when several threads
@@ -147,9 +150,12 @@ public:
      *  would start at 1 and the parser would merge their spans. The resolved id
      *  is stored in the per-thread slot (`inv()`) so nested scopes / emit_span_at
      *  on this thread read the right value. */
-    static unsigned next_inv() {
+    static unsigned allocate_inv() {
         static std::atomic<unsigned> global_inv{0};
-        const unsigned id = global_inv.fetch_add(1, std::memory_order_acq_rel) + 1;
+        return global_inv.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+    static unsigned next_inv() {
+        const unsigned id = allocate_inv();
         inv() = id;
         return id;
     }
@@ -170,6 +176,39 @@ private:
 };
 
 /**
+ * Temporarily bind one invocation to the current thread at a known parent
+ * depth. The previous state is restored on exit, so phased callers do not
+ * leave invocation identity or synthetic nesting active between API calls.
+ */
+class StraceContextScope {
+public:
+    StraceContextScope(unsigned inv, uint64_t hid, int base_depth) :
+        state_(strace_state()),
+        saved_(*state_) {
+        state_->inv = inv;
+        state_->hid = hid;
+        state_->depth = base_depth;
+    }
+
+    ~StraceContextScope() { *state_ = saved_; }
+
+    StraceContextScope(const StraceContextScope &) = delete;
+    StraceContextScope &operator=(const StraceContextScope &) = delete;
+
+private:
+    ThreadState *state_;
+    ThreadState saved_;
+};
+
+/** Current steady-clock timestamp in the marker grammar's nanosecond unit. */
+inline long long strace_now_ns() {
+    return static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count()
+    );
+}
+
+/**
  * Emit a marker for a span whose duration was measured elsewhere (e.g. a device
  * phase: AICPU cycles → ns). Shares the current thread's inv/hid grouping so the
  * parser nests it under the host call tree. `ts_ns` is a device-domain start (ns
@@ -188,6 +227,11 @@ emit_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, con
     );
 }
 
+/** Emit an explicitly timed host-domain span in the active invocation. */
+inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_ns, int depth) {
+    emit_span_at(name, ts_ns, dur_ns, depth, "");
+}
+
 }  // namespace simpler::strace
 
 // Concatenation helpers so each scope gets a unique variable name per line.
@@ -200,8 +244,18 @@ emit_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, con
 #define STRACE_A(name, attrs) ::simpler::strace::StraceScope STRACE_CAT(_strace_, __LINE__)(name, attrs)
 /** Begin a new invocation group (call once per simpler_run); returns inv id. */
 #define STRACE_NEW_INV() ::simpler::strace::StraceScope::next_inv()
+/** Allocate an invocation id without changing the current thread's context. */
+#define STRACE_ALLOC_INV() ::simpler::strace::StraceScope::allocate_inv()
 /** Set the callable hash for subsequent spans on this thread. */
 #define STRACE_SET_HID(h) ::simpler::strace::StraceScope::set_hid(h)
+/** Bind an existing invocation + its synthetic parent depth for this scope. */
+#define STRACE_CONTEXT(inv, hid, depth) \
+    ::simpler::strace::StraceContextScope STRACE_CAT(_strace_context_, __LINE__)((inv), (hid), (depth))
+/** Read the current host monotonic clock in nanoseconds. */
+#define STRACE_NOW_NS() ::simpler::strace::strace_now_ns()
+/** Emit a host-domain span measured across disjoint API calls. */
+#define STRACE_HOST_SPAN_AT(name, ts_ns, dur_ns, depth) \
+    ::simpler::strace::emit_host_span_at((name), (ts_ns), (dur_ns), (depth))
 /** Emit a device-domain span (device-clock start `ts_ns` + measured `dur_ns`). */
 #define STRACE_DEV_SPAN_AT(name, ts_ns, dur_ns, depth) \
     ::simpler::strace::emit_span_at((name), (ts_ns), (dur_ns), (depth))
@@ -211,7 +265,11 @@ emit_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, con
 #define STRACE(name) ((void)0)
 #define STRACE_A(name, attrs) ((void)0)
 #define STRACE_NEW_INV() ((void)0)
+#define STRACE_ALLOC_INV() 0U
 #define STRACE_SET_HID(h) ((void)0)
+#define STRACE_CONTEXT(inv, hid, depth) ((void)0)
+#define STRACE_NOW_NS() 0LL
+#define STRACE_HOST_SPAN_AT(name, ts_ns, dur_ns, depth) ((void)0)
 #define STRACE_DEV_SPAN_AT(name, ts_ns, dur_ns, depth) ((void)0)
 
 #endif  // SIMPLER_HOST_STRACE

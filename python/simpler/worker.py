@@ -89,10 +89,11 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
+    _l3_host_mapped_region_ack_cleanup_error,
     _l3_host_mapped_region_close,
     _l3_host_mapped_region_import_onboard,
     _l3_host_mapped_region_import_sim,
-    _l3_host_mapped_region_take_cleanup_error,
+    _l3_host_mapped_region_peek_cleanup_error,
     _mailbox_load_i32,
     _mailbox_store_i32,
     read_args_from_blob,
@@ -764,12 +765,16 @@ class _ThreadFanout:
                     self._record_error(exc)
 
     def _drain(self, cursor: _ThreadFanoutDrainCursor) -> None:
-        try:
-            while not cursor.exhausted:
+        # Every launched candidate may still reference caller-owned state, so
+        # this boundary cannot abandon the cursor after an interruption. Keep
+        # retrying on a constant stack until ownership is fully drained.
+        while True:
+            try:
+                if cursor.exhausted:
+                    return
                 cursor.advance()
-        except BaseException as exc:  # noqa: BLE001
-            self._record_error(exc)
-            self._drain(cursor)
+            except BaseException as exc:  # noqa: BLE001
+                self._record_error(exc)
 
     def run(self) -> None:
         cursor = _ThreadFanoutDrainCursor(
@@ -2768,15 +2773,22 @@ class _AbandonedRunKeepaliveCursor:
         self.first_error: BaseException | None = None
 
     def drain(self, pending_error: BaseException | None = None) -> None:
-        try:
-            if pending_error is not None and self.first_error is None:
-                self.first_error = pending_error
-            while self._handles:
+        if pending_error is not None and self.first_error is None:
+            self.first_error = pending_error
+        # These references become safe to drop only after native teardown and
+        # no later close attempt re-enters this terminal phase. Retry on a
+        # constant stack so repeated interruptions neither leak stack frames
+        # nor report cleanup complete early.
+        while True:
+            try:
+                if not self._handles:
+                    return
                 handle = self._handles[-1]
                 handle._keepalive = None
                 self._handles.pop()
-        except BaseException as exc:  # noqa: BLE001
-            self.drain(exc)
+            except BaseException as exc:  # noqa: BLE001
+                if self.first_error is None:
+                    self.first_error = exc
 
 
 class RunHandle:
@@ -3311,6 +3323,16 @@ class Worker:
         # work would build on it. Sticky — there is no recovery short of close.
         # Guarded by _hierarchical_start_cv.
         self._ordered_cleanup_error: BaseException | None = None
+        # Sticky copy of this Worker's native return-boundary mapping cleanup
+        # diagnostic. Native storage is acknowledged only after this field and
+        # the admission poison above have been published.
+        self._l3_host_mapped_cleanup_error: RuntimeError | None = None
+        # (snapshot awaiting acknowledgement, retained distinct detail
+        # fragments). This is an ordered diagnostic set, not a resource-count
+        # ledger: an identical repeated failure adds no actionable information.
+        # Keep it immutable so one attribute assignment publishes both pieces
+        # atomically with respect to asynchronous Python exceptions.
+        self._l3_host_mapped_cleanup_state: tuple[str | None, tuple[str, ...]] = (None, ())
         # submit graph construction is serialized by _submit_mu. Resource
         # creation helpers use this pointer to bind new objects to the handle
         # being built; the pointer is cleared before submit() returns.
@@ -4609,6 +4631,7 @@ class Worker:
         host-buffer / remote-memory)."""
         tid = threading.get_ident()
         with self._hierarchical_start_cv:
+            self._consume_l3_host_mapped_cleanup_error_locked(api)
             if self._lifecycle is not _Lifecycle.READY:
                 raise RuntimeError(f"Worker.{api}: requires an initialized (READY) worker") from self._startup_error
             if self._ordered_cleanup_error is not None:
@@ -6322,20 +6345,61 @@ class Worker:
                 f"L3-L2 payload Tensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
             )
 
+    def _consume_l3_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
+        """Publish and then acknowledge this Worker's native cleanup debt.
+
+        Must hold ``_hierarchical_start_cv``. The native read is intentionally
+        non-destructive: an asynchronous exception before both sticky Python
+        fields are assigned leaves the diagnostic available for the next
+        boundary. Acknowledgement may be interrupted only after admission is
+        already poisoned.
+        """
+        cleanup_error = _l3_host_mapped_region_peek_cleanup_error(self._owner_id)
+        pending_snapshot, details = self._l3_host_mapped_cleanup_state
+        if not cleanup_error:
+            if pending_snapshot is not None:
+                self._l3_host_mapped_cleanup_state = (None, details)
+            return self._l3_host_mapped_cleanup_error
+
+        if cleanup_error != pending_snapshot:
+            detail = cleanup_error
+            if pending_snapshot is not None and cleanup_error.startswith(f"{pending_snapshot}; "):
+                # Native acknowledgement removes an observed prefix. If a
+                # finalizer appends another diagnostic before that ack, retain
+                # only the newly appended suffix in Python's stable copy.
+                detail = cleanup_error[len(pending_snapshot) + 2 :]
+            if detail and detail not in details:
+                details = (*details, detail)
+            self._l3_host_mapped_cleanup_state = (cleanup_error, details)
+
+        leaked = self._l3_host_mapped_cleanup_error
+        if leaked is None:
+            leaked = RuntimeError(
+                f"Worker.{api}: a native L3 Host mapping owned by this Worker finalized without explicit close "
+                "and could not be reclaimed; no further work is admitted"
+            )
+            self._l3_host_mapped_cleanup_error = leaked
+        leaked.__cause__ = RuntimeError("; ".join(details))
+        if self._ordered_cleanup_error is None:
+            self._ordered_cleanup_error = leaked
+
+        _l3_host_mapped_region_ack_cleanup_error(self._owner_id, cleanup_error)
+        self._l3_host_mapped_cleanup_state = (None, details)
+        return self._l3_host_mapped_cleanup_error
+
+    def _consume_l3_host_mapped_cleanup_error(self, api: str) -> RuntimeError | None:
+        with self._hierarchical_start_cv:
+            return self._consume_l3_host_mapped_cleanup_error_locked(api)
+
     def _create_l3_l2_region(self, worker_id: int, payload_bytes: int, counter_bytes: int):  # noqa: PLR0912
         if payload_bytes <= 0:
             raise ValueError("create_l3_l2_region: payload_bytes must be positive")
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
             raise ValueError("create_l3_l2_region: counter_bytes must be positive and a multiple of 4")
         self._validate_l3_l2_worker_id(int(worker_id))
-        prior_native_cleanup_error = _l3_host_mapped_region_take_cleanup_error()
-        if prior_native_cleanup_error:
-            raise self._record_unreclaimable(
-                "create_l3_l2_region: a native L3 Host mapping finalized without explicit close on this "
-                "thread and could not be reclaimed; its owning Worker is no longer identifiable, so this "
-                "Worker is conservatively stopped and no further work is admitted",
-                RuntimeError(prior_native_cleanup_error),
-            )
+        prior_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("create_l3_l2_region")
+        if prior_native_cleanup_error is not None:
+            raise prior_native_cleanup_error
         resources = self._building_run_resources
         req_shm = SharedMemory(create=True, size=_REGION_CREATE_REQUEST_BYTES)
         reply_shm = SharedMemory(create=True, size=_REGION_CREATE_REPLY_BYTES)
@@ -6375,12 +6439,15 @@ class Worker:
             )
             counter_offset, total_bytes = validate_region_create_reply(reply, expected_access_profile)
             if platform.endswith("sim"):
-                native_mapping_handle = _l3_host_mapped_region_import_sim(reply.backing_shm, int(reply.mapping_bytes))
+                native_mapping_handle = _l3_host_mapped_region_import_sim(
+                    reply.backing_shm, int(reply.mapping_bytes), self._owner_id
+                )
             else:
                 native_mapping_handle = _l3_host_mapped_region_import_onboard(
                     int(reply.device_id),
                     int(reply.shareable_handle),
                     int(reply.mapping_bytes),
+                    self._owner_id,
                 )
             l3_host_mapping = L3HostRegionMapping(
                 worker_id=int(worker_id),
@@ -6425,17 +6492,6 @@ class Worker:
                     _l3_host_mapped_region_close(int(native_mapping_handle))
                 except BaseException as mapping_exc:  # noqa: BLE001
                     mapping_cleanup_error = mapping_exc
-            deferred_native_cleanup_error = _l3_host_mapped_region_take_cleanup_error()
-            if deferred_native_cleanup_error:
-                deferred_exc = RuntimeError(deferred_native_cleanup_error)
-                if mapping_cleanup_error is not None:
-                    combined_exc = RuntimeError(
-                        f"{mapping_cleanup_error}; deferred native cleanup also failed: {deferred_native_cleanup_error}"
-                    )
-                    combined_exc.__cause__ = mapping_cleanup_error
-                    mapping_cleanup_error = combined_exc
-                else:
-                    mapping_cleanup_error = deferred_exc
             if not region_id:
                 # The failure may have landed after the child created its
                 # region. The reply shm is parent-owned and zero-filled and the
@@ -6472,6 +6528,17 @@ class Worker:
                         f"{int(worker_id)}; it is leaked and no further work is admitted",
                         release_exc,
                     )
+            deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("create_l3_l2_region rollback")
+            if deferred_native_cleanup_error is not None:
+                deferred_exc = deferred_native_cleanup_error.__cause__ or deferred_native_cleanup_error
+                if mapping_cleanup_error is not None:
+                    combined_exc = RuntimeError(
+                        f"{mapping_cleanup_error}; deferred native cleanup also failed: {deferred_exc}"
+                    )
+                    combined_exc.__cause__ = mapping_cleanup_error
+                    mapping_cleanup_error = combined_exc
+                else:
+                    mapping_cleanup_error = deferred_exc
             if mapping_cleanup_error is not None:
                 raise self._record_unreclaimable(
                     f"create_l3_l2_region: rollback could not close the L3 Host mapping for region "
@@ -8126,6 +8193,7 @@ class Worker:
         # cannot strand a joiner — the joiner's bounded re-check recovers a
         # skipped notify. A pre-publication interruption becomes that immutable
         # outcome's error; an interruption after publication cannot retract it.
+        deferred_native_cleanup_error: RuntimeError | None = None
         attempt: _CloseAttempt | None = None
         result: BaseException | None = None
         teardown_tree = False
@@ -8167,8 +8235,11 @@ class Worker:
                 # intact — may be retried by this call.
                 prior = self._close_completion
                 if prior is not None and prior.done and (self._teardown_attempted or prior.error is None):
+                    deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
                     if prior.error is not None:
                         raise prior.error
+                    if deferred_native_cleanup_error is not None:
+                        raise deferred_native_cleanup_error
                     return
                 # A device-bound native object must be finalized on the init-owner
                 # thread — always, even after that thread has exited (affinity
@@ -8179,6 +8250,7 @@ class Worker:
                         "Worker.close(): a worker with a live native tree must be closed on the thread that "
                         "init()'d it (native teardown is thread-bound)"
                     )
+                deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
                 # Claim: publish CLOSED (permanent admission fence) and install a
                 # fresh teardown attempt.
                 self._lifecycle = _Lifecycle.CLOSED
@@ -8243,7 +8315,9 @@ class Worker:
                         # Fence drain makes this close terminal even when the
                         # run error is the only remaining outcome and no native
                         # resource needs teardown.
-                        self._teardown_attempted = teardown_tree or result is not None
+                        self._teardown_attempted = (
+                            teardown_tree or result is not None or deferred_native_cleanup_error is not None
+                        )
             if teardown_tree:
                 self._teardown_ready_tree()
                 teardown_completed = True
@@ -8255,6 +8329,9 @@ class Worker:
                 had_live = True  # conservative default if a read below is interrupted
                 detached_registry: tuple[dict, dict, dict] | None = None
                 try:
+                    deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("close")
+                    if result is None and deferred_native_cleanup_error is not None:
+                        result = deferred_native_cleanup_error
                     # A successful tree teardown is the reclamation boundary
                     # for abandoned run ownership. Drain it before the residual
                     # inventory: that diagnostic probe is interruptible and an

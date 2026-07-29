@@ -31,18 +31,17 @@
  *   end_task()              — closes the task, after its last dependency step
  *
  * Control surface, called from the device runner (same host_runtime.so):
- *   set_enabled() / active() / emit()
+ *   set_enabled() / active() / take_capture() / adopt_capture() / emit()
  *
  * The runtime translation unit links weak no-op fallbacks (pto_orchestrator.cpp)
  * so the AICPU build, which has no host graph, resolves without this .cpp.
  *
- * The graph is per-thread state. A runner is bound to the thread that issues
- * its run (both c_api_shared.cpp files key it off a `pthread_key_t`), and every
- * call above lands on that same thread — enable and emit from the runner's
- * `simpler_run`, capture from the orchestration the bind runs inline. Two
- * runners on two threads therefore build two independent graphs instead of
- * racing one, which is the same per-runner isolation the device-orch shape gets
- * from `DeviceRunner::dep_gen_collector_` being a member.
+ * The graph is per-thread state while it is being built. After bind, prepare
+ * moves the completed graph into run-owned storage; launch adopts that snapshot
+ * into the executor's thread-local state before DeviceRunner::run emits it.
+ * This keeps capture lock-free while allowing serialized lifecycle calls to
+ * use different host threads and preventing two prepared contexts on one
+ * thread from overwriting one another.
  *
  * Per-task producer dedup mirrors PTO2FaninBuilder, which keys on (ring, slot);
  * this keys on producer task id. The two agree only because host_build_graph is
@@ -124,6 +123,15 @@ void dep_gen_host_graph_set_enabled(bool enable);
  * `false` for runtimes that capture on the device instead.
  */
 bool dep_gen_host_graph_active();
+
+/** Move the current thread's capture into an opaque, caller-owned snapshot. */
+void *dep_gen_host_graph_take_capture();
+
+/** Adopt and consume a snapshot on the current execution thread. */
+void dep_gen_host_graph_adopt_capture(void *capture) noexcept;
+
+/** Destroy a snapshot that will not be launched. */
+void dep_gen_host_graph_destroy_capture(void *capture) noexcept;
 
 /**
  * Write the captured graph to `deps_json_path`. Returns 0 on success, non-zero

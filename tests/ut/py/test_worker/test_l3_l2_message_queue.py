@@ -128,7 +128,7 @@ class _FakeClient:
         self.fail_next_cmd: Optional[str] = None
         self.original_helpers: list[tuple[object, str, object]] = []
 
-    def import_region(self, _token: str, mapping_bytes: int) -> int:
+    def import_region(self, _token: str, mapping_bytes: int, _owner_token: str) -> int:
         self.payload = bytearray(int(mapping_bytes))
         self.counters = {}
         self.counter_mapping_offset = int(mapping_bytes) - L3L2_QUEUE_COUNTER_BYTES

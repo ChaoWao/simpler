@@ -292,9 +292,12 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
   _ChipWorker.init(host_path, aicpu_path, aicore_path, device_id)   # C++
     dlopen(host_runtime.so, RTLD_LOCAL)
     dlsym: create_device_context, destroy_device_context, simpler_init,
-           get_runtime_size, register_callable, simpler_run, unregister_callable,
-           finalize_device
+           get_runtime_size, get_runtime_alignment, simpler_register_callable,
+           simpler_prepare_run, simpler_launch_run, simpler_poll_run,
+           simpler_wait_run, simpler_finalize_run, simpler_run,
+           simpler_unregister_callable, finalize_device
     create_device_context() → DeviceContextHandle
+    allocate zeroed, aligned, stable native-run storage per pipeline slot
     simpler_init(ctx, device_id, aicpu*, aicpu_size, aicore*, aicore_size)
       DeviceRunner::attach_current_thread(device_id)
         pto_cpu_sim_bind_device(device_id)
@@ -303,16 +306,20 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
 
 ChipWorker.run(handle, args, config)                   # public wrapper path
   simpler_run(ctx, buf, internal callable entry, args, config)
-    new (buf) Runtime()
-    DeviceRunner::bind_callable_to_runtime(r, cid, api, args, rings)  # replay + per-run bind
-    DeviceRunner::run(r, config)                        # applies config; width already resolved pre-bind
-      clear_cpu_sim_shared_storage()
-      ensure_binaries_loaded()               dlopen aicpu/aicore SOs once
-      launch AICPU + AICore threads
-      join all threads
-      unload_executor_binaries()             dlclose aicpu/aicore SOs
-    validate_runtime_impl(r)                 copy results, remove kernels
-    r->~Runtime()
+    simpler_prepare_run(...)
+      new (buf) NativeRunState()             owns Runtime + executor state
+      DeviceRunner::bind_callable_to_runtime(r, cid, api, args, rings)
+    simpler_launch_run(...)
+      executor thread: DeviceRunner::run(r, config)
+        clear_cpu_sim_shared_storage()
+        ensure_binaries_loaded()             dlopen aicpu/aicore SOs once
+        launch AICPU + AICore threads
+        join all threads
+        unload_executor_binaries()           dlclose aicpu/aicore SOs
+    simpler_wait_run(...)
+    simpler_finalize_run(...)
+      validate_runtime_impl(r)               copy results, remove kernels
+      state->~NativeRunState()               destroys Runtime
 
 ChipWorker.finalize()
   finalize_device(ctx)
@@ -351,20 +358,23 @@ device_worker_main(device_id)
 
     for each callable:
         ChipWorker.register_callable(callable)   # returns opaque handle
-          register_callable(ctx, internal callable entry, callable)
+          simpler_register_callable(ctx, internal callable entry, callable)
             upload child kernels, copy orch SO to device buffer
         for each launch with that handle:
           ChipWorker.run(handle, args, config)
             simpler_run(ctx, buf, internal callable entry, args, config)
-              new (buf) Runtime()
-              bind_callable_to_runtime()       replay + rtMalloc, rtMemcpy to device
-              DeviceRunner::run()
-                ensure_binaries_loaded()       already done by init
-                launch_aicore_kernel()         cached rtRegisterAllKernel handle
-                                               + rtKernelLaunchWithHandleV2
-                launch_aicpu_kernel(Run)       rtsLaunchCpuKernel, cached rtFuncHandle
-                aclrtSynchronizeStreamWithTimeout()   wait on both streams
-              validate_runtime_impl()          rtMemcpy results back to host
+              simpler_prepare_run(...)
+                new (buf) NativeRunState()     owns Runtime + executor state
+                bind_callable_to_runtime()     replay + rtMalloc, rtMemcpy to device
+              simpler_launch_run(...)
+                executor thread: DeviceRunner::run()
+                  ensure_binaries_loaded()     already done by init
+                  launch_aicore_kernel()       cached rtRegisterAllKernel handle
+                                                 + rtKernelLaunchWithHandleV2
+                  launch_aicpu_kernel(Run)     rtsLaunchCpuKernel, cached rtFuncHandle
+                  aclrtSynchronizeStreamWithTimeout() wait on both streams
+              simpler_wait_run(...)
+              simpler_finalize_run(...)        rtMemcpy results back; destroy state
 
     ChipWorker.finalize()
       finalize_device(ctx)                     rtDeviceReset()

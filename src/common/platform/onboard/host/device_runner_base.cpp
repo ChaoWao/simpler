@@ -46,6 +46,7 @@
 #include "host/acl_error_log.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
+#include "native_run_launch_signal.h"
 #include "platform_comm/comm.h"
 #include "pto_runtime_c_api.h"
 #include "task_args.h"
@@ -1012,7 +1013,13 @@ int DeviceRunnerBase::launch_aicpu_kernel(
     // exported symbol (simpler_aicpu_exec). LaunchBuiltInOp dispatches via
     // rtsLaunchCpuKernel on the cached rtFuncHandle resolved by
     // LoadAicpuOp::Init at first-time bootstrap.
-    return load_aicpu_op_.LaunchBuiltInOp(stream, k_args, sizeof(KernelArgs), aicpu_num, kernel_name);
+    int rc = load_aicpu_op_.LaunchBuiltInOp(stream, k_args, sizeof(KernelArgs), aicpu_num, kernel_name);
+    if (rc == 0) {
+        // Both onboard arches enqueue AICore before this Run launch. A
+        // successful return is therefore the common post-enqueue boundary.
+        publish_task_accepted();
+    }
+    return rc;
 }
 
 int DeviceRunnerBase::launch_aicpu_payload(
@@ -1487,8 +1494,38 @@ int DeviceRunnerBase::set_task_accepted_state(volatile int32_t *state, int32_t a
     return 0;
 }
 
+bool DeviceRunnerBase::try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal) {
+    if (owner == nullptr || launch_signal == nullptr) return false;
+    const void *expected = nullptr;
+    if (!active_native_run_.compare_exchange_strong(
+            expected, owner, std::memory_order_acq_rel, std::memory_order_acquire
+        )) {
+        return false;
+    }
+    native_launch_signal_ = launch_signal;
+    return true;
+}
+
+void DeviceRunnerBase::release_native_run(const void *owner) {
+    if (active_native_run_.load(std::memory_order_acquire) != owner) return;
+    native_launch_signal_ = nullptr;
+    const void *expected = owner;
+    (void)active_native_run_.compare_exchange_strong(
+        expected, nullptr, std::memory_order_release, std::memory_order_relaxed
+    );
+}
+
+bool DeviceRunnerBase::native_run_active() const {
+    return active_native_run_.load(std::memory_order_acquire) != nullptr;
+}
+
+bool DeviceRunnerBase::native_run_owned_by(const void *owner) const {
+    return owner != nullptr && active_native_run_.load(std::memory_order_acquire) == owner;
+}
+
 void DeviceRunnerBase::publish_task_accepted() const {
     if (task_accepted_state_ != nullptr) {
         __atomic_store_n(task_accepted_state_, task_accepted_value_, __ATOMIC_RELEASE);
     }
+    if (native_launch_signal_ != nullptr) native_launch_signal_->notify();
 }
