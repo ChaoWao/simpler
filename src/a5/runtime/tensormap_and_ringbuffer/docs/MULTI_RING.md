@@ -185,7 +185,9 @@ advance_ring_pointers(ring_id):  // protected by per-ring advance_lock
     sync_to_sm()  // release-store last_task_alive
 ```
 
-Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving heap_tail writes within the same ring.
+Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving heap_tail writes within the same ring. A scheduler thread that changes a ring head to `CONSUMED` but fails to acquire that ring's `advance_lock` records a coalesced request in `advance_pending_mask`. Scheduler no-progress iterations retry pending rings under the same lock; a busy lock leaves the bit set, and a successful retry clears the bit before rescanning.
+
+For ring-heap stall triage, a `CONSUMED` head whose ring bit remains set means the deferred request has not yet been cleared by a retry that acquired `advance_lock`. If the bit clears and `last_task_alive` is still pinned, the stall is not caused by this deferred advance path.
 
 ### 5.2 Cross-Ring Dependencies
 

@@ -1383,54 +1383,65 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 );
             }
 #endif
-            idle_iterations++;
-
-            if (idle_iterations % FATAL_ERROR_CHECK_INTERVAL == 0) {
-                LoopAction action = check_idle_fatal_error(thread_idx, header, runtime);
-                if (action == LoopAction::BREAK_LOOP) break;
-            }
-
-            if (idle_iterations % STALL_LOG_INTERVAL == 0) {
-                log_stall_diagnostics(thread_idx, total_tasks_, idle_iterations, last_progress_count);
-            }
-            // Wall-clock budget gate, with two fatal-latch branches:
-            //
-            // 1. Self owns a RUNNING task — first-hand evidence the
-            //    dispatch is stuck. Latch.
-            // 2. No thread anywhere owns a RUNNING task AND tasks remain
-            //    unfinished — the system is in a pre-dispatch / WAIT-only
-            //    deadlock (e.g. dependency cycle). Ownerless idle threads
-            //    are the only observers; let this one latch on the global
-            //    evidence (`completed_tasks_ < total_tasks_` and
-            //    `no_thread_owns_running_task()`).
-            //
-            // Otherwise: a sibling thread owns a RUNNING task but hasn't
-            // hit its own budget yet (typical distributed startup-skew
-            // case) — refresh last_progress_ts and keep spinning. The
-            // STALL diagnostic above still fires periodically so
-            // observability is preserved.
-            if (get_sys_cnt_aicpu() - last_progress_ts > scheduler_timeout_cycles) {
-                bool self_owns = self_owns_running_task(thread_idx);
-                bool global_stuck = !self_owns && total_tasks_ > 0 &&
-                                    completed_tasks_.load(std::memory_order_relaxed) < total_tasks_ &&
-                                    no_thread_owns_running_task();
-                if (self_owns || global_stuck) {
-                    // Latch the error + emergency_shutdown, then break to the
-                    // shared end-of-loop cleanup so the diagnostic buffers get
-                    // flushed to the host. An early return here would strand the
-                    // stuck task's already-dumped inputs and every completed
-                    // task's in/out records in the unflushed per-thread dump
-                    // buffer — exactly the state we need to triage the hang.
-                    timeout_rc = handle_timeout_exit(
-                        thread_idx, header, runtime, idle_iterations, last_progress_count
-#if SIMPLER_DFX
-                        ,
-                        l2_swimlane.sched_start_ts
-#endif
-                    );
-                    break;
-                }
+            // Deferred consumed-head advances retry from the no-progress path.
+            // During a ring-heap stall, a CONSUMED head with its pending bit
+            // still set means no retry has acquired advance_lock and cleared
+            // the request yet. If the bit clears and the watermark remains
+            // pinned, the stall is outside this deferred-advance path.
+            bool advanced_reclaim = sched_->drain_pending_ring_advances();
+            if (advanced_reclaim) {
+                idle_iterations = 0;
                 last_progress_ts = get_sys_cnt_aicpu();
+            } else {
+                idle_iterations++;
+
+                if (idle_iterations % FATAL_ERROR_CHECK_INTERVAL == 0) {
+                    LoopAction action = check_idle_fatal_error(thread_idx, header, runtime);
+                    if (action == LoopAction::BREAK_LOOP) break;
+                }
+
+                if (idle_iterations % STALL_LOG_INTERVAL == 0) {
+                    log_stall_diagnostics(thread_idx, total_tasks_, idle_iterations, last_progress_count);
+                }
+                // Wall-clock budget gate, with two fatal-latch branches:
+                //
+                // 1. Self owns a RUNNING task — first-hand evidence the
+                //    dispatch is stuck. Latch.
+                // 2. No thread anywhere owns a RUNNING task AND tasks remain
+                //    unfinished — the system is in a pre-dispatch / WAIT-only
+                //    deadlock (e.g. dependency cycle). Ownerless idle threads
+                //    are the only observers; let this one latch on the global
+                //    evidence (`completed_tasks_ < total_tasks_` and
+                //    `no_thread_owns_running_task()`).
+                //
+                // Otherwise: a sibling thread owns a RUNNING task but hasn't
+                // hit its own budget yet (typical distributed startup-skew
+                // case) — refresh last_progress_ts and keep spinning. The
+                // STALL diagnostic above still fires periodically so
+                // observability is preserved.
+                if (get_sys_cnt_aicpu() - last_progress_ts > scheduler_timeout_cycles) {
+                    bool self_owns = self_owns_running_task(thread_idx);
+                    bool global_stuck = !self_owns && total_tasks_ > 0 &&
+                                        completed_tasks_.load(std::memory_order_relaxed) < total_tasks_ &&
+                                        no_thread_owns_running_task();
+                    if (self_owns || global_stuck) {
+                        // Latch the error + emergency_shutdown, then break to the
+                        // shared end-of-loop cleanup so the diagnostic buffers get
+                        // flushed to the host. An early return here would strand the
+                        // stuck task's already-dumped inputs and every completed
+                        // task's in/out records in the unflushed per-thread dump
+                        // buffer — exactly the state we need to triage the hang.
+                        timeout_rc = handle_timeout_exit(
+                            thread_idx, header, runtime, idle_iterations, last_progress_count
+#if SIMPLER_DFX
+                            ,
+                            l2_swimlane.sched_start_ts
+#endif
+                        );
+                        break;
+                    }
+                    last_progress_ts = get_sys_cnt_aicpu();
+                }
             }
             SPIN_WAIT_HINT();
 #if SIMPLER_DFX
