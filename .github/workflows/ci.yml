@@ -164,14 +164,18 @@ jobs:
   st-sim-a2a3:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.a2a3_changed == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 30
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10']
+        include:
+          - runner: '["self-hosted", "cpu"]'
+            python-version: '3.10'
+          - runner: '["macos-latest"]'
+            python-version: '3.10'
 
     steps:
       - name: Checkout repository
@@ -258,14 +262,18 @@ jobs:
   st-sim-a5:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.a5_changed == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 30
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10']
+        include:
+          - runner: '["self-hosted", "cpu"]'
+            python-version: '3.10'
+          - runner: '["macos-latest"]'
+            python-version: '3.10'
 
     steps:
       - name: Checkout repository
