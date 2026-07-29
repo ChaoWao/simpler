@@ -160,6 +160,13 @@ public:
     // step belongs to the orchestrator lifecycle, not the scheduler.
     void on_orchestration_done(Runtime *runtime, PTO2Runtime *rt, int32_t thread_idx, int32_t total_tasks);
 
+    // Seed the ready queues + wake lists for the whole graph at boot. Called by
+    // every AICPU thread on a disjoint slice of the submitted-task range, after
+    // on_orchestration_done and before runtime_init_ready_ (the caller barriers
+    // all threads between the two). Concurrency-safe: push_ready_routed and
+    // register_wake are the same lock-free primitives used during the run.
+    void classify_partition(int32_t thread_idx, int32_t nthreads);
+
     // Bind the PTO2Runtime scheduler pointer.
     void bind_runtime(PTO2Runtime *rt);
 
