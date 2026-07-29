@@ -86,3 +86,73 @@ have caused it.
 This is the converse of the `running-onboard.md` anti-pattern (don't read
 "ci passed" as proof a fix worked): equally, don't wave away "ci failed"
 as someone else's problem.
+
+## 6. Never force-take a branch another worktree holds
+
+This repo is worked through many `git worktree` checkouts at once, several of
+them driven by concurrent agent sessions; the count changes by the hour, so
+check rather than assume. A branch ref is **shared by all of them**; `HEAD`, the
+index, and the working tree are per worktree. So `git checkout -B <name>` does
+not just move "your" branch: if any other worktree has `<name>` checked out, you
+have taken it out from under that worktree — and because its `HEAD` is a symref
+to that shared ref, it follows the move while its index and files do not.
+
+**Only ever create a new branch, or reset a branch you exclusively own.**
+
+```bash
+git fetch upstream
+git checkout --detach upstream/main            # a clean base that owns no branch
+git checkout -b <task-branch> upstream/main    # new branch — -b fails loudly on a name clash
+```
+
+Between tasks, park the worktree on a **detached HEAD**, not on a shared
+branch. Reading merged content needs no checkout at all:
+
+```bash
+git show upstream/main:path/to/file
+git log upstream/main --oneline -1
+git diff upstream/main -- path
+```
+
+Keep `upstream/main` and `main` distinct in your head. The first is a
+remote-tracking ref that `fetch` maintains and that costs nothing to read; the
+second is a local branch some worktree owns.
+
+### Why `-B` is the trap
+
+Git already refuses the obvious forms — both are rejected when another worktree
+holds the branch:
+
+```text
+git checkout main            → fatal: 'main' is already checked out at '...'
+git branch -f main <ref>     → fatal: cannot force update the branch 'main' checked out at '...'
+```
+
+**`git checkout -B main <ref>` is not refused** (observed on git 2.39.1). It
+creates the dual-checkout state those two guards exist to prevent, and from
+then on every further force-move is legal, because moving a branch *your own*
+worktree has checked out is an ordinary reset. The guard never fires again.
+
+### What it does to the other worktree
+
+That worktree's HEAD is a symref to the branch, so it silently follows the ref
+to the new commit — while its **index and files stay at the old one**. Since
+"staged" is by definition the HEAD-to-index diff, `git status` there reports the
+**net tree difference between the two commits, in reverse**, as staged
+modifications: a file you added shows up as a staged *deletion*. Changes that
+later commits undid cancel out and never appear, so the list is the net delta,
+not one entry per intervening commit.
+
+It is not cosmetic. While that index still matches the old tree, a `git commit`
+there would land a commit reverting the whole net difference, and it would look
+entirely routine to whoever ran it.
+
+### Self-check
+
+```bash
+git worktree list        # each branch name must appear at most once
+```
+
+Any branch listed against two worktrees is already the broken state; move your
+own worktree off it with `git checkout --detach HEAD` before doing anything
+else, and leave the other worktree's copy alone.
