@@ -126,7 +126,7 @@ int DepGenCollector::init(
     // free_queue contents) to device.
     profiling_copy_to_device(shm_dev_local, shm_host_local, shm_size);
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "DepGen collector initialized: %d threads, SHM=0x%lx (records held in memory until replay)", num_threads,
         reinterpret_cast<unsigned long>(shm_dev_local)
     );
@@ -235,7 +235,7 @@ bool DepGenCollector::reconcile_counters() {
         );
         clean = false;
     } else {
-        LOG_INFO_V0(
+        LOG_INFO(
             "dep_gen reconcile: counts match (collected=%lu, dropped=%lu, device_total=%lu, overflow=%lu)",
             static_cast<unsigned long>(total_collected_), static_cast<unsigned long>(dropped_device),
             static_cast<unsigned long>(total_device), static_cast<unsigned long>(overflow_device)
@@ -314,5 +314,5 @@ void DepGenCollector::finalize(DepGenUnregisterCallback unregister_cb, const Dep
     shm_size_ = 0;
     total_collected_ = 0;
     clear_memory_context();
-    LOG_INFO_V0("DepGen collector finalized");
+    LOG_INFO("DepGen collector finalized");
 }

@@ -214,7 +214,7 @@ makespan** = the "kernel run time" layer.
 For layers ②③④ — the host↔device and bind/validate spans — parse the
 `[STRACE]` host-trace markers with `strace_timing.py` (landed in
 [simpler #1177](https://github.com/hw-native-sys/simpler/pull/1177)). The
-markers are emitted at `LOG_INFO_V9` under `SIMPLER_DFX` (no new flag),
+markers are emitted at `LOG_TIMING` under `SIMPLER_DFX` (no new flag),
 so the same log captured above carries them:
 
 ```bash
@@ -368,9 +368,9 @@ strings "$BD/$SO" | grep -m1 '<your-new-log-string>'   # confirm it baked in
 
 (`.venv/lib64` is a symlink to `lib`, so the `find` covers both.) AICPU device
 logs land in `ASCEND_PROCESS_LOG_PATH/.../device-*/device-*.log` — set that var
-per run (see `running-onboard`) and note AICPU `LOG_INFO_V*` uses **inverted**
-verbosity: `v=9` is must-see (default threshold 5), `v=0` is filtered — use
-`LOG_INFO_V9` for a diagnostic you need to read back.
+per run (see `running-onboard`). Use `--log-level info` to capture `LOG_INFO`
+diagnostics, or `--log-level debug` when the more detailed `LOG_DEBUG` stream is
+also needed.
 
 ## Anti-patterns
 

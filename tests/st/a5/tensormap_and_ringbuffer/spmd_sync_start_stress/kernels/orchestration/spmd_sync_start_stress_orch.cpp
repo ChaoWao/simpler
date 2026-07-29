@@ -119,7 +119,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         cl += normal_aiv_bn;
     }
 
-    LOG_INFO_V9("[spmd_sync_start_stress] Submitted %d tasks over %d rounds", 9 * ROUNDS, ROUNDS);
+    LOG_INFO("[spmd_sync_start_stress] Submitted %d tasks over %d rounds", 9 * ROUNDS, ROUNDS);
 }
 
 }  // extern "C"

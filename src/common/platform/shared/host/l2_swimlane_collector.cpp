@@ -99,7 +99,7 @@ int L2SwimlaneCollector::initialize(
         return -1;
     }
 
-    LOG_INFO_V0("Initializing performance profiling");
+    LOG_INFO("Initializing performance profiling");
 
     if (num_aicore <= 0 || num_aicore > PLATFORM_MAX_CORES) {
         LOG_ERROR("Invalid number of AICores: %d (max=%d)", num_aicore, PLATFORM_MAX_CORES);
@@ -442,7 +442,7 @@ int L2SwimlaneCollector::initialize(
     // make is_initialized() report true and finalize() double-free.
     reset_collector_shards();
 
-    LOG_INFO_V0("Performance profiling initialized (dynamic buffer mode)");
+    LOG_INFO("Performance profiling initialized (dynamic buffer mode)");
     guard.commit();
     // Publish device-buffer members + memory context only after the rollback
     // guard is disarmed: on a failed init they stay nullptr / shm_host_ stays
@@ -772,7 +772,7 @@ void L2SwimlaneCollector::reconcile_counters() {
                 static_cast<unsigned long>(total_device), static_cast<long>(total_device) - static_cast<long>(accounted)
             );
         } else {
-            LOG_INFO_V0(
+            LOG_INFO(
                 "L2Swimlane reconcile: %s counts match (collected=%lu, dropped=%lu, device_total=%lu)", kind,
                 static_cast<unsigned long>(collected), static_cast<unsigned long>(dropped_device),
                 static_cast<unsigned long>(total_device)
@@ -840,7 +840,7 @@ void L2SwimlaneCollector::read_phase_header_metadata() {
     int num_sched = static_cast<int>(header->num_sched_phase_threads);
     int num_orch = static_cast<int>(header->num_orch_phase_threads);
     if (num_sched == 0 && num_orch == 0) {
-        LOG_INFO_V0("No phase profiling data found (sched/orch phase thread counts both 0; phase init never ran)");
+        LOG_INFO("No phase profiling data found (sched/orch phase thread counts both 0; phase init never ran)");
         return;
     }
     if (num_sched > PLATFORM_MAX_AICPU_THREADS || num_orch > PLATFORM_MAX_AICPU_THREADS) {
@@ -858,18 +858,16 @@ void L2SwimlaneCollector::read_phase_header_metadata() {
     // [1, PLATFORM_MAX_AICPU_THREADS] before initialize()), so the subtraction
     // can't go negative. This is a log-only display value, never an index.
     const int orch_thread = aicpu_thread_num_ - 1;
-    LOG_INFO_V0(
-        "Collecting phase metadata: scheduler threads 0-%d, orchestrator thread %d", num_sched - 1, orch_thread
-    );
+    LOG_INFO("Collecting phase metadata: scheduler threads 0-%d, orchestrator thread %d", num_sched - 1, orch_thread);
 
     for (size_t t = 0; t < collected_sched_phase_records_.size(); t++) {
         if (!collected_sched_phase_records_[t].empty()) {
-            LOG_INFO_V0("  Sched thread %zu: %zu records", t, collected_sched_phase_records_[t].size());
+            LOG_INFO("  Sched thread %zu: %zu records", t, collected_sched_phase_records_[t].size());
         }
     }
     for (size_t t = 0; t < collected_orch_phase_records_.size(); t++) {
         if (!collected_orch_phase_records_[t].empty()) {
-            LOG_INFO_V0("  Orch thread %d: %zu records", orch_thread, collected_orch_phase_records_[t].size());
+            LOG_INFO("  Orch thread %d: %zu records", orch_thread, collected_orch_phase_records_[t].size());
         }
     }
 
@@ -881,10 +879,10 @@ void L2SwimlaneCollector::read_phase_header_metadata() {
     int num_phase_cores = static_cast<int>(header->num_phase_cores);
     if (num_phase_cores > 0 && num_phase_cores <= PLATFORM_MAX_CORES) {
         core_to_thread_.assign(header->core_to_thread, header->core_to_thread + num_phase_cores);
-        LOG_INFO_V0("  Core-to-thread mapping: %d cores", num_phase_cores);
+        LOG_INFO("  Core-to-thread mapping: %d cores", num_phase_cores);
     }
 
-    LOG_INFO_V0("Phase metadata collection complete: has_phase_data=%s", has_phase_data_ ? "yes" : "no");
+    LOG_INFO("Phase metadata collection complete: has_phase_data=%s", has_phase_data_ ? "yes" : "no");
 }
 
 void L2SwimlaneCollector::set_core_types(const CoreType *types, int n) {
@@ -996,7 +994,7 @@ int L2SwimlaneCollector::export_swimlane_json() {
         }
         if (!first) outfile << "\n  ";
         outfile << "]";
-        LOG_INFO_V0("  aicore_tasks: %zu records", total);
+        LOG_INFO("  aicore_tasks: %zu records", total);
     }
     {
         outfile << ",\n  \"aicpu_tasks\": [";
@@ -1013,7 +1011,7 @@ int L2SwimlaneCollector::export_swimlane_json() {
         }
         if (!first) outfile << "\n  ";
         outfile << "]";
-        LOG_INFO_V0("  aicpu_tasks: %zu records", total);
+        LOG_INFO("  aicpu_tasks: %zu records", total);
     }
 
     // Phase records keep their per-thread sub-array shape so the python
@@ -1126,8 +1124,8 @@ int L2SwimlaneCollector::export_swimlane_json() {
         return -1;
     }
 
-    LOG_INFO_V0("=== JSON Export Complete ===");
-    LOG_INFO_V0("File: %s", filepath.c_str());
+    LOG_INFO("=== JSON Export Complete ===");
+    LOG_INFO("File: %s", filepath.c_str());
 
     return 0;
 }

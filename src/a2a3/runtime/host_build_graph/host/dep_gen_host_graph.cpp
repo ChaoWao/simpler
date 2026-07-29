@@ -517,7 +517,7 @@ extern "C" int dep_gen_host_graph_emit(const char *deps_json_path) {
     if (!write_deps_json(deps_json_path, s.tasks, s.tensors, s.edges)) {
         return -2;
     }
-    LOG_INFO_V0(
+    LOG_INFO(
         "dep_gen host graph: wrote deps.json to %s (tasks=%zu, tensors=%zu, edges=%zu)", deps_json_path, s.tasks.size(),
         s.tensors.size(), s.edges.size()
     );

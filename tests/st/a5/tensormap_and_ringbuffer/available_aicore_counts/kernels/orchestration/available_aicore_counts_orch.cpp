@@ -58,7 +58,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
     const int32_t cluster_count = rt_available_cluster_count();
     const int32_t aiv_count = rt_available_aiv_count();
-    LOG_INFO_V0("[available_aicore_counts] clusters=%d aiv=%d", cluster_count, aiv_count);
+    LOG_INFO("[available_aicore_counts] clusters=%d aiv=%d", cluster_count, aiv_count);
 
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_SPMD_MIX_AIC;

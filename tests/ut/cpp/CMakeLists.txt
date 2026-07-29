@@ -713,6 +713,28 @@ target_link_libraries(test_host_log_off PRIVATE
 )
 add_test(NAME test_host_log_off COMMAND test_host_log_off)
 
+# Onboard uses CANN for DEBUG/INFO/WARN/ERROR but keeps TIMING on simpler's
+# finer threshold. The dlog stub makes the CANN levels available without SDK
+# headers or hardware.
+set(COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
+add_executable(test_onboard_device_log_level
+    common/test_onboard_device_log_level.cpp
+    ${COMMON_PLATFORM_DIR}/onboard/aicpu/device_log.cpp
+)
+target_include_directories(test_onboard_device_log_level PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/stubs
+    ${COMMON_PLATFORM_DIR}/include
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_onboard_device_log_level PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_onboard_device_log_level COMMAND test_onboard_device_log_level)
+set_tests_properties(test_onboard_device_log_level PROPERTIES LABELS "no_hardware")
+
 # a2a3 host-side AICPU affinity selection (compute_allowed_cpus). Pure logic —
 # no CANN headers, no hardware: compile the probe .cpp alongside the test. The
 # test provides its own no-op logger stubs, so no logger sources are linked.

@@ -208,7 +208,7 @@ int PmuCollector::init(
         device_id
     );
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "PMU collector initialized: %d cores, %d threads, SHM=0x%lx, CSV=%s (opened on first record)", num_cores,
         num_threads, reinterpret_cast<unsigned long>(shm_dev_), csv_path_.c_str()
     );
@@ -495,7 +495,7 @@ void PmuCollector::reconcile_counters() {
             static_cast<long>(total_device) - static_cast<long>(total_collected_ + dropped_device)
         );
     } else {
-        LOG_INFO_V0(
+        LOG_INFO(
             "PMU reconcile: record counts match (collected=%lu, dropped=%lu, device_total=%lu)",
             static_cast<unsigned long>(total_collected_), static_cast<unsigned long>(dropped_device),
             static_cast<unsigned long>(total_device)

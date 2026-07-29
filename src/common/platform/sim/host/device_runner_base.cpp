@@ -285,7 +285,7 @@ int SimDeviceRunnerBase::prepare_launch_shape(Runtime &runtime, const CallConfig
     // A run always takes the whole simulated device; orchestration sizes its
     // cohorts from rt_available_cluster_count() rather than a per-call width.
     const int block_dim = SIM_AUTO_BLOCKDIM;
-    LOG_INFO_V0("block_dim resolved to %d", block_dim);
+    LOG_INFO("block_dim resolved to %d", block_dim);
 
     int num_aicore = block_dim * cores_per_blockdim_;
     if (num_aicore > RUNTIME_MAX_WORKER) {
@@ -389,7 +389,7 @@ int SimDeviceRunnerBase::commit_device_register(int32_t cid) {
     const bool inserted = aicpu_seen_callable_ids_.insert(cid).second;
     if (inserted) {
         ++aicpu_dlopen_total_;
-        LOG_INFO_V0("AICPU callable load committed cid=%d (count=%zu)", cid, aicpu_dlopen_total_);
+        LOG_INFO("AICPU callable load committed cid=%d (count=%zu)", cid, aicpu_dlopen_total_);
     }
     return 0;
 }
@@ -471,7 +471,7 @@ int SimDeviceRunnerBase::record_device_orch_callable(
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
-    LOG_INFO_V0(
+    LOG_INFO(
         "record_device_orch_callable: cid=%d orch_hash=0x%lx chip_hash=0x%lx %zu bytes", callable_id, hash,
         chip_buffer_hash, orch_so_size
     );
@@ -509,7 +509,7 @@ int SimDeviceRunnerBase::record_host_orch_callable(
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
     ++host_dlopen_total_;
-    LOG_INFO_V0("record_host_orch_callable: cid=%d (host dlopen #%zu)", callable_id, host_dlopen_total_);
+    LOG_INFO("record_host_orch_callable: cid=%d (host dlopen #%zu)", callable_id, host_dlopen_total_);
     return 0;
 }
 

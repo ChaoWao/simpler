@@ -12,14 +12,9 @@
  * @file host_log.h
  * @brief Unified Host Logging System
  *
- * Two orthogonal axes:
- *   - Severity: DEBUG/INFO/WARN/ERROR/NUL (matches CANN dlog 1:1)
- *   - INFO verbosity: integer 0..9 (only meaningful when severity == INFO)
- *
- * Configuration is pushed in from Python via nanobind binding
- * `set_host_log_config(severity, info_v)`; this module never reads env vars.
- * The Python-facing integer level layout (V0=15..V9=24, INFO=20=V5, etc.)
- * lives in the Python module — C++ only stores the two axes separately.
+ * One threshold controls DEBUG/INFO/TIMING/WARN/ERROR/NUL. The integer values
+ * match Python logging levels. CANN has no TIMING level, so onboard setup maps
+ * both TIMING and WARN thresholds to CANN WARN.
  */
 
 #ifndef PLATFORM_HOST_LOG_H_
@@ -29,54 +24,32 @@
 #include <cstdio>
 #include <mutex>
 
-namespace simpler::log {
-
-// Severity (matches CANN dlog enum 1:1)
-enum class LogLevel : int {
-    DEBUG = 0,
-    INFO = 1,
-    WARN = 2,
-    ERROR = 3,
-    NUL = 4,
-};
-
-// Defaults — single source of truth shared with Python via nanobind binding.
-// The full integer level layout (DEBUG=10, V0..V9=15..24, WARN=30, etc.)
-// is Python-side; C++ only stores severity + verbosity as separate axes.
-constexpr int kDefaultInfoV = 5;       // V5
-constexpr int kDefaultThreshold = 20;  // V5 = Python INFO
-
-}  // namespace simpler::log
+#include "common/log_level.h"
 
 class HostLogger {
 public:
     static HostLogger &get_instance();
 
-    // Severity-only entry (DEBUG/WARN/ERROR). NOTE: caller must NOT pass INFO here;
-    // INFO goes through log_info_v with a verbosity tier.
     void log(simpler::log::LogLevel level, const char *func, const char *fmt, ...);
-
-    // INFO with verbosity tier (v ∈ [0, 9]).
-    void log_info_v(int v, const char *func, const char *fmt, ...);
 
     // va_list-taking primitives — used by unified_log_* adapters to forward
     // a caller's variadic args without an intermediate vsnprintf-to-buffer
     // round-trip. Caller is responsible for `va_start` / `va_end`.
     void vlog(simpler::log::LogLevel level, const char *func, const char *fmt, va_list args);
-    void vlog_info_v(int v, const char *func, const char *fmt, va_list args);
 
     void set_level(simpler::log::LogLevel level);
-    void set_info_v(int v);
 
-    // Raw getters. host_runtime.so reads these via the RTLD_GLOBAL singleton
-    // when populating InitArgs.log_level / log_info_v at device init — that
-    // way the log configuration only lives in this one place (libsimpler_log.so)
-    // and never has to be pushed across the host_runtime.so C ABI separately.
-    int level() const;  // returns the underlying LogLevel as int (0..4)
-    int info_v() const;
+    // host_runtime.so reads this through the RTLD_GLOBAL singleton when
+    // populating InitArgs.log_level at device init.
+    int level() const;
+    int cann_level() const;
 
-    bool is_severity_enabled(simpler::log::LogLevel level) const;
-    bool is_info_v_enabled(int v) const;
+    // Configure CANN before the device context is opened unless the user has
+    // already selected ASCEND_GLOBAL_LOG_LEVEL. The callback shape matches
+    // dlog_setlevel and keeps this policy independently testable.
+    void configure_cann_log_level(int (*set_level)(int module_id, int level, int enable_event)) const;
+
+    bool is_enabled(simpler::log::LogLevel level) const;
 
 private:
     HostLogger();
@@ -91,7 +64,6 @@ private:
     void emit(const char *level_tag, const char *func, const char *fmt, va_list args);
 
     simpler::log::LogLevel current_level_;
-    int current_info_v_;
     std::mutex mutex_;
 };
 

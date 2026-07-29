@@ -1073,7 +1073,6 @@ class ChipWorker:
         # must not depend on.
         bins: Any,
         log_level: int | None = None,
-        log_info_v: int | None = None,
         prewarm_config: CallConfig | None = None,
         enable_sdma: bool = False,
     ):
@@ -1098,31 +1097,27 @@ class ChipWorker:
                 simpler_log_path / sim_context_path / dispatcher_path).
                 ``dispatcher_path`` is required for onboard platforms and
                 ignored on sim (set to None).
-            log_level: Severity floor (0=DEBUG..4=NUL). Defaults to a snapshot
-                of the simpler logger via `_log.get_current_config()`.
-            log_info_v: INFO verbosity threshold (0..9). Same default.
+            log_level: Threshold (10=DEBUG, 20=INFO, 25=TIMING, 30=WARN,
+                40=ERROR, 60=NUL). Defaults to a snapshot of the simpler
+                logger via `_log.get_current_config()`.
 
         For tests that need to drive the binding directly with arbitrary path
         strings (e.g. to assert dlopen failure on `/nonexistent/foo.so`), call
         `_ChipWorker.init(...)` from `_task_interface` instead of going
         through this wrapper.
         """
-        if log_level is None or log_info_v is None:
+        if log_level is None:
             from . import _log  # noqa: PLC0415
 
-            sev, info_v = _log.get_current_config()
-            if log_level is None:
-                log_level = sev
-            if log_info_v is None:
-                log_info_v = info_v
+            log_level = _log.get_current_config()
 
         # 1. libsimpler_log.so — RTLD_GLOBAL singleton, before host_runtime.so.
         if not bins.simpler_log_path:
             raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
         log_handle = _preload_global(str(bins.simpler_log_path))
-        log_handle.simpler_log_init.argtypes = [ctypes.c_int, ctypes.c_int]
+        log_handle.simpler_log_init.argtypes = [ctypes.c_int]
         log_handle.simpler_log_init.restype = ctypes.c_int
-        rc = log_handle.simpler_log_init(int(log_level), int(log_info_v))
+        rc = log_handle.simpler_log_init(int(log_level))
         if rc != 0:
             raise RuntimeError(f"simpler_log_init failed with code {rc}")
 

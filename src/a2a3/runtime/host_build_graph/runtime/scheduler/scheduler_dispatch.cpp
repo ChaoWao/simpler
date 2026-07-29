@@ -872,7 +872,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
         LOG_ERROR("PTO2 resolution: header is null");
         return -1;
     }
-    LOG_INFO_V0("Thread %d: resolution (P) thread starting, serving %d schedulers", thread_idx, active_sched_threads_);
+    LOG_INFO("Thread %d: resolution (P) thread starting, serving %d schedulers", thread_idx, active_sched_threads_);
 
 #if SIMPLER_DFX
     auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
@@ -971,7 +971,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
             last_progress_ts = get_sys_cnt_aicpu();
             if (total_tasks_ > 0 && new_total >= total_tasks_) {
                 completed_.store(true, std::memory_order_release);
-                LOG_INFO_V0("Thread %d: P resolved all tasks %d/%d", thread_idx, new_total, total_tasks_);
+                LOG_INFO("Thread %d: P resolved all tasks %d/%d", thread_idx, new_total, total_tasks_);
                 break;
             }
             continue;  // fast re-drain while work keeps arriving
@@ -1047,7 +1047,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 
     Handshake *hank = static_cast<Handshake *>(runtime->workers);
 
-    LOG_INFO_V0("Thread %d: PTO2 dispatch starting with %d cores", thread_idx, core_trackers_[thread_idx].core_num());
+    LOG_INFO("Thread %d: PTO2 dispatch starting with %d cores", thread_idx, core_trackers_[thread_idx].core_num());
     int32_t cur_thread_completed = 0;
     // Non-zero once a scheduler-hang timeout latches; returned in place of the
     // completed count so the caller still sees the negative error rc while the
@@ -1200,7 +1200,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             if (thread_idx == 0 && task_count > 0) {
                 if (new_total <= PROGRESS_VERBOSE_THRESHOLD ||
                     new_total / PROGRESS_LOG_INTERVAL != prev / PROGRESS_LOG_INTERVAL || new_total >= task_count) {
-                    LOG_INFO_V9(
+                    LOG_INFO(
                         "PTO2 progress: completed=%d total=%d (%.1f%%)", new_total, task_count,
                         100.0 * new_total / task_count
                     );

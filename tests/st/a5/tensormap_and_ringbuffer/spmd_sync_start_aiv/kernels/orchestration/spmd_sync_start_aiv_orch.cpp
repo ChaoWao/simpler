@@ -85,7 +85,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         base_cl += block_nums[i] * 1;
     }
 
-    LOG_INFO_V9("[spmd_sync_start_aiv] Submitted 4 tasks over %d units", aiv_cores);
+    LOG_INFO("[spmd_sync_start_aiv] Submitted 4 tasks over %d units", aiv_cores);
 }
 
 }  // extern "C"

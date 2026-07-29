@@ -83,7 +83,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     p3.add_output(f);
     rt_submit_aiv_task(FUNC_ADD_EXP, p3);
 
-    LOG_INFO_V9("[matmul_orch] Submitted 4-task diamond");
+    LOG_INFO("[matmul_orch] Submitted 4-task diamond");
 }
 
 }  // extern "C"

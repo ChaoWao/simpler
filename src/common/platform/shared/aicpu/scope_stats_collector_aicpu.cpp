@@ -260,7 +260,7 @@ void scope_stats_aicpu_flush_buffers() {
     uint32_t seq = s_scope_stats_state->current_buf_seq;
     int rc = enqueue_ready_buffer(buf_ptr, seq);
     if (rc == 0) {
-        LOG_INFO_V0("scope_stats: flushed buffer with %u records", buf->count);
+        LOG_INFO("scope_stats: flushed buffer with %u records", buf->count);
     } else {
         LOG_ERROR("scope_stats: flush failed (ready_queue full), %u records dropped", buf->count);
         s_scope_stats_state->dropped_record_count += buf->count;

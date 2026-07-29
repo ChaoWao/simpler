@@ -13,8 +13,8 @@
  * @brief Unified logging - Host implementation.
  *
  * Adapter that forwards the unified C ABI to HostLogger via va_list, avoiding
- * an intermediate vsnprintf-to-buffer round-trip. HostLogger::vlog{,_info_v}
- * is the single authority for level gating; this adapter does not re-check.
+ * an intermediate vsnprintf-to-buffer round-trip. HostLogger::vlog is the
+ * single authority for level gating; this adapter does not re-check.
  */
 
 #include "common/unified_log.h"
@@ -38,16 +38,23 @@ void unified_log_warn(const char *func, const char *fmt, ...) {
     va_end(args);
 }
 
+void unified_log_timing(const char *func, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    HostLogger::get_instance().vlog(LogLevel::TIMING, func, fmt, args);
+    va_end(args);
+}
+
+void unified_log_info(const char *func, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    HostLogger::get_instance().vlog(LogLevel::INFO, func, fmt, args);
+    va_end(args);
+}
+
 void unified_log_debug(const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     HostLogger::get_instance().vlog(LogLevel::DEBUG, func, fmt, args);
-    va_end(args);
-}
-
-void unified_log_info_v(const char *func, int v, const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    HostLogger::get_instance().vlog_info_v(v, func, fmt, args);
     va_end(args);
 }

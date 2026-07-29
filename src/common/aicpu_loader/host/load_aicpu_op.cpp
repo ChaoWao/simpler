@@ -113,7 +113,7 @@ int LoadAicpuOp::BootstrapDispatcher(
     {
         std::lock_guard<std::mutex> lk(BootstrappedFpsMutex());
         if (BootstrappedFps().count({inner_fp_, device_id_}) > 0) {
-            LOG_INFO_V2(
+            LOG_INFO(
                 "BootstrapDispatcher: inner SO fp=%016lx dev=%d already bootstrapped, skipping", inner_fp_, device_id_
             );
             return 0;
@@ -210,7 +210,7 @@ int LoadAicpuOp::BootstrapDispatcher(
         LOG_ERROR("BootstrapDispatcher: aclrtSynchronizeStream failed: %d", rc);
         return rc;
     }
-    LOG_INFO_V0(
+    LOG_INFO(
         "BootstrapDispatcher: bundled dispatcher (%zu B) + inner SO (%zu B) uploaded; inner SO at %s", dispatcher_len,
         inner_len, inner_so_basename_.c_str()
     );
@@ -346,7 +346,7 @@ int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
     load_config.options = &option;
     load_config.numOpt = 1;
 
-    LOG_INFO_V2("LoadAicpuOp::Init: JSON=%s inner_basename=%s", json_file_path_.c_str(), inner_so_basename_.c_str());
+    LOG_INFO("LoadAicpuOp::Init: JSON=%s inner_basename=%s", json_file_path_.c_str(), inner_so_basename_.c_str());
 
     rtError_t rc = rtsBinaryLoadFromFile(json_file_path_.c_str(), &load_config, &binary_handle_);
     if (rc != RT_ERROR_NONE) {
@@ -354,7 +354,7 @@ int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
         // binary_handle_ stays null; json_guard removes the JSON file.
         return rc;
     }
-    LOG_INFO_V2("LoadAicpuOp: Loaded inner SO via JSON, handle=%p", binary_handle_);
+    LOG_INFO("LoadAicpuOp: Loaded inner SO via JSON, handle=%p", binary_handle_);
 
     // Resolve every registered symbol. The set is exactly what this runtime
     // declares it exports (base + runtime-reported extras), so each one must
@@ -371,9 +371,7 @@ int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
             return rc;
         }
         func_handles_[name] = func_handle;
-        LOG_INFO_V2(
-            "LoadAicpuOp: resolved handle for %s (opType=%s): %p", name.c_str(), lookup_name.c_str(), func_handle
-        );
+        LOG_INFO("LoadAicpuOp: resolved handle for %s (opType=%s): %p", name.c_str(), lookup_name.c_str(), func_handle);
     }
 
     binary_guard.release();

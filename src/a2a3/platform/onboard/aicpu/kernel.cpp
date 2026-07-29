@@ -144,7 +144,6 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
 
     InitArgs *init_args = reinterpret_cast<InitArgs *>(arg);
     set_log_level(static_cast<int>(init_args->log_level));
-    set_log_info_v(static_cast<int>(init_args->log_info_v));
     set_orch_device_id(static_cast<int>(init_args->device_id));
     set_scheduler_timeout_ms(static_cast<int>(init_args->scheduler_timeout_ms));
     for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {

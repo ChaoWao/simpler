@@ -1711,7 +1711,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     #
     # Per-event AicpuPhaseRecord[] is the single source of truth for
     # orchestrator timing. There is no separate aggregate summary — the
-    # device-side LOG_INFO_V9 "orch_start=… orch_end=… orch_cost=…" log
+    # device-side LOG_INFO "orch_start=… orch_end=… orch_cost=…" log
     # line covers the run-window envelope for debugging without swimlane.
     if orchestrator_phases:
         # Process metadata

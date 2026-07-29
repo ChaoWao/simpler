@@ -80,7 +80,7 @@ deployment can profile the two domains separately:
   stores) — only whether the host re-emits the readback as markers.
 * **Host** (`simpler_run` / `bind` / `runner_run` / `validate` spans): no new
   knob — they ride the compile-time `SIMPLER_HOST_STRACE` macro and the log level
-  (`LOG_INFO_V9`), so raising the log threshold drops them.
+  (`LOG_TIMING`), so raising the log threshold drops them.
 
 `RunWall` is the whole on-NPU wall (the former `RunTiming.device_wall`); it is
 emitted as the `simpler_run.runner_run.device_wall` marker, not returned.

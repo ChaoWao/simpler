@@ -9,9 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-// HostLogger filtering: severity floor + INFO verbosity threshold.
-// Drives the singleton via direct setters (no env vars; Python pushes via
-// nanobind in production), captures stderr, and asserts on the buffered output.
+// HostLogger filtering: one Python-compatible threshold.
+// Drives the singleton via a direct setter, captures stderr, and asserts on
+// the buffered output.
 
 #include <cstdio>
 #include <cstdlib>
@@ -31,7 +31,24 @@ struct CapturedStdio {
     std::string err;
 };
 
-CapturedStdio run_with_config(LogLevel level, int info_v, void (*fn)()) {
+struct CannLogLevelCall {
+    int count;
+    int module_id;
+    int level;
+    int enable_event;
+};
+
+CannLogLevelCall g_cann_log_level_call{};
+
+int capture_cann_log_level(int module_id, int level, int enable_event) {
+    g_cann_log_level_call.count++;
+    g_cann_log_level_call.module_id = module_id;
+    g_cann_log_level_call.level = level;
+    g_cann_log_level_call.enable_event = enable_event;
+    return 0;
+}
+
+CapturedStdio run_with_config(LogLevel level, void (*fn)()) {
     fflush(stdout);
     fflush(stderr);
     FILE *out_tmp = tmpfile();
@@ -42,7 +59,6 @@ CapturedStdio run_with_config(LogLevel level, int info_v, void (*fn)()) {
     dup2(fileno(err_tmp), fileno(stderr));
 
     HostLogger::get_instance().set_level(level);
-    HostLogger::get_instance().set_info_v(info_v);
 
     fn();
 
@@ -70,46 +86,82 @@ CapturedStdio run_with_config(LogLevel level, int info_v, void (*fn)()) {
 }  // namespace
 
 TEST(HostLogTest, NulLevelMutesAllSeverities) {
-    auto captured = run_with_config(LogLevel::NUL, 0, [] {
+    auto captured = run_with_config(LogLevel::NUL, [] {
         HostLogger::get_instance().log(LogLevel::ERROR, "fn", "err-msg");
         HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-msg");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-msg");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "info-msg");
         HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "dbg-msg");
-        HostLogger::get_instance().log_info_v(9, "fn", "v9-msg");
-        HostLogger::get_instance().log_info_v(0, "fn", "v0-msg");
     });
     EXPECT_EQ(captured.out, "");
     EXPECT_EQ(captured.err, "");
 }
 
 TEST(HostLogTest, ErrorLevelEmitsErrorOnly) {
-    auto captured = run_with_config(LogLevel::ERROR, 5, [] {
+    auto captured = run_with_config(LogLevel::ERROR, [] {
         HostLogger::get_instance().log(LogLevel::ERROR, "fn", "err-msg");
         HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-msg");
-        HostLogger::get_instance().log_info_v(9, "fn", "v9-msg");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-msg");
     });
     EXPECT_EQ(captured.out, "");
     EXPECT_NE(captured.err.find("err-msg"), std::string::npos);
     EXPECT_EQ(captured.err.find("warn-msg"), std::string::npos);
-    EXPECT_EQ(captured.err.find("v9-msg"), std::string::npos);
+    EXPECT_EQ(captured.err.find("timing-msg"), std::string::npos);
 }
 
-TEST(HostLogTest, InfoVerbosityCutsBelowThreshold) {
-    // Threshold V5: V0..V4 silenced, V5..V9 printed.
-    auto captured = run_with_config(LogLevel::INFO, 5, [] {
-        HostLogger::get_instance().log_info_v(0, "fn", "v0-msg");
-        HostLogger::get_instance().log_info_v(4, "fn", "v4-msg");
-        HostLogger::get_instance().log_info_v(5, "fn", "v5-msg");
-        HostLogger::get_instance().log_info_v(9, "fn", "v9-msg");
+TEST(HostLogTest, TimingLevelKeepsTimingAndHigher) {
+    auto captured = run_with_config(LogLevel::TIMING, [] {
+        HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "debug-msg");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "info-msg");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-msg");
+        HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-msg");
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "error-msg");
     });
     EXPECT_EQ(captured.out, "");
-    EXPECT_EQ(captured.err.find("v0-msg"), std::string::npos);
-    EXPECT_EQ(captured.err.find("v4-msg"), std::string::npos);
-    EXPECT_NE(captured.err.find("v5-msg"), std::string::npos);
-    EXPECT_NE(captured.err.find("v9-msg"), std::string::npos);
+    EXPECT_EQ(captured.err.find("debug-msg"), std::string::npos);
+    EXPECT_EQ(captured.err.find("info-msg"), std::string::npos);
+    EXPECT_NE(captured.err.find("timing-msg"), std::string::npos);
+    EXPECT_NE(captured.err.find("warn-msg"), std::string::npos);
+    EXPECT_NE(captured.err.find("error-msg"), std::string::npos);
+}
+
+TEST(HostLogTest, CannLevelMappingSuppressesInfoAtDefault) {
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::DEBUG), 0);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::INFO), 1);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::TIMING), 2);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::WARN), 2);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::ERROR), 3);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::NUL), 4);
+}
+
+TEST(HostLogTest, CannConfigurationUsesGlobalModuleAndRespectsExternalOverride) {
+    const char *old_env = std::getenv("ASCEND_GLOBAL_LOG_LEVEL");
+    const bool had_old_env = old_env != nullptr;
+    const std::string old_value = had_old_env ? old_env : "";
+
+    unsetenv("ASCEND_GLOBAL_LOG_LEVEL");
+    HostLogger::get_instance().set_level(LogLevel::TIMING);
+    g_cann_log_level_call = {};
+    HostLogger::get_instance().configure_cann_log_level(capture_cann_log_level);
+    EXPECT_EQ(g_cann_log_level_call.count, 1);
+    EXPECT_EQ(g_cann_log_level_call.module_id, -1);
+    EXPECT_EQ(g_cann_log_level_call.level, 2);
+    EXPECT_EQ(g_cann_log_level_call.enable_event, 0);
+
+    setenv("ASCEND_GLOBAL_LOG_LEVEL", "1", 1);
+    g_cann_log_level_call = {};
+    HostLogger::get_instance().configure_cann_log_level(capture_cann_log_level);
+    EXPECT_EQ(g_cann_log_level_call.count, 0);
+
+    if (had_old_env) {
+        setenv("ASCEND_GLOBAL_LOG_LEVEL", old_value.c_str(), 1);
+    } else {
+        unsetenv("ASCEND_GLOBAL_LOG_LEVEL");
+    }
 }
 
 TEST(HostLogTest, EmitPrefixHasTimestampAndTid) {
-    auto captured = run_with_config(LogLevel::INFO, 5, [] {
+    auto captured = run_with_config(LogLevel::INFO, [] {
         HostLogger::get_instance().log(LogLevel::ERROR, "fn", "marker");
     });
     // Expected shape: "[YYYY-MM-DD HH:MM:SS.uuuuuu][T0x...][ERROR] fn: marker\n"
@@ -132,17 +184,17 @@ TEST(HostLogTest, EmitPrefixHasTimestampAndTid) {
 }
 
 TEST(HostLogTest, AllOutputGoesToStderr) {
-    auto captured = run_with_config(LogLevel::DEBUG, 0, [] {
-        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "e");
-        HostLogger::get_instance().log(LogLevel::WARN, "fn", "w");
-        HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "d");
-        HostLogger::get_instance().log_info_v(0, "fn", "i0");
-        HostLogger::get_instance().log_info_v(9, "fn", "i9");
+    auto captured = run_with_config(LogLevel::DEBUG, [] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "error-output-marker");
+        HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-output-marker");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-output-marker");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "info-output-marker");
+        HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "debug-output-marker");
     });
     EXPECT_EQ(captured.out, "");
-    EXPECT_NE(captured.err.find("e"), std::string::npos);
-    EXPECT_NE(captured.err.find("w"), std::string::npos);
-    EXPECT_NE(captured.err.find("d"), std::string::npos);
-    EXPECT_NE(captured.err.find("i0"), std::string::npos);
-    EXPECT_NE(captured.err.find("i9"), std::string::npos);
+    EXPECT_NE(captured.err.find("error-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("warn-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("timing-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("info-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("debug-output-marker"), std::string::npos);
 }

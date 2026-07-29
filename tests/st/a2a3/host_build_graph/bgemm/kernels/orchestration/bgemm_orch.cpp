@@ -96,7 +96,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         }
     }
 
-    LOG_INFO_V9("[bgemm_orch] Submitted tiled C = A @ B");
+    LOG_INFO("[bgemm_orch] Submitted tiled C = A @ B");
 }
 
 }  // extern "C"

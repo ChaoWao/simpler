@@ -12,17 +12,13 @@
  * @file device_log.cpp (onboard)
  * @brief Onboard AICPU log implementation backed by CANN dlog.
  *
- * Severity is owned by CANN: init_log_switch() snapshots CheckLogLevel() and
- * set_log_level() is therefore a no-op on this backend (the host's pushed
- * value would be overwritten by CANN at the next init anyway, and CANN is the
- * only authoritative source on the AICPU).
- *
- * Verbosity (V0..V9) is simpler-managed: g_log_info_v is set by
- * set_log_info_v(), latched once per device from InitArgs.log_info_v by
- * simpler_aicpu_init (not re-pushed per run).
+ * CANN owns DEBUG, INFO, WARN, and ERROR through CheckLogLevel(). TIMING uses
+ * CANN WARN for emission but keeps the finer host-provided threshold because
+ * CANN has no intermediate level.
  */
 
 #include "aicpu/device_log.h"
+#include "common/log_level.h"
 #include "dlog_pub.h"
 
 #include <cstdarg>
@@ -30,10 +26,9 @@
 
 bool g_is_log_enable_debug = false;
 bool g_is_log_enable_info = false;
+bool g_is_log_enable_timing = false;
 bool g_is_log_enable_warn = false;
 bool g_is_log_enable_error = false;
-
-int g_log_info_v = 5;
 
 void init_log_switch() {
     g_is_log_enable_debug = CheckLogLevel(AICPU, DLOG_DEBUG);
@@ -42,18 +37,9 @@ void init_log_switch() {
     g_is_log_enable_error = CheckLogLevel(AICPU, DLOG_ERROR);
 }
 
-extern "C" void set_log_level(int /*level*/) {
-    // No-op on onboard: CANN dlog is the only authoritative severity source.
-    // Severity flags are populated by init_log_switch() via CheckLogLevel.
+extern "C" void set_log_level(int level) {
+    g_is_log_enable_timing = level <= static_cast<int>(simpler::log::LogLevel::TIMING);
 }
-
-extern "C" void set_log_info_v(int v) {
-    if (v < 0) v = 0;
-    if (v > 9) v = 9;
-    g_log_info_v = v;
-}
-
-extern "C" int get_log_info_v() { return g_log_info_v; }
 
 // =============================================================================
 // Low-level dev_log_* / dev_vlog_* (onboard: route through CANN dlog)
@@ -69,6 +55,18 @@ void dev_vlog_debug(const char *func, const char *fmt, va_list args) {
     dlog_debug(AICPU, "%lu %s\n\"%s\"", GET_TID(), func, buffer);
 }
 
+void dev_vlog_info(const char *func, const char *fmt, va_list args) {
+    char buffer[2048];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    dlog_info(AICPU, "%lu %s\n\"%s\"", GET_TID(), func, buffer);
+}
+
+void dev_vlog_timing(const char *func, const char *fmt, va_list args) {
+    char buffer[2048];
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    dlog_warn(AICPU, "%lu %s [TIMING]\n\"%s\"", GET_TID(), func, buffer);
+}
+
 void dev_vlog_warn(const char *func, const char *fmt, va_list args) {
     char buffer[2048];
     vsnprintf(buffer, sizeof(buffer), fmt, args);
@@ -79,12 +77,4 @@ void dev_vlog_error(const char *func, const char *fmt, va_list args) {
     char buffer[2048];
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     dlog_error(AICPU, "%lu %s\n\"%s\"", GET_TID(), func, buffer);
-}
-
-void dev_vlog_info_v(int v, const char *func, const char *fmt, va_list args) {
-    char buffer[2048];
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
-    // Tag the verbosity tier in-message so it's grep-able alongside CANN's
-    // own [INFO] prefix.
-    dlog_info(AICPU, "%lu %s [V%d]\n\"%s\"", GET_TID(), func, v, buffer);
 }

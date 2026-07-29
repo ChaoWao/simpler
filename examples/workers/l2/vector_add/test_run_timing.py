@@ -26,8 +26,11 @@ Markers go to stderr via the unified host logger, captured here with ``capfd``.
 import re
 
 import pytest
+from simpler._log import get_current_config
 from simpler.task_interface import CallConfig, ChipStorageTaskArgs, DataType, Tensor
 from simpler.worker import Worker
+
+from simpler_setup.log_config import configure_logging
 
 from .main import N_COLS, N_ELEMS, N_ROWS, NBYTES, build_chip_callable
 
@@ -107,7 +110,7 @@ def test_simpler_run_emits_strace_markers(st_platform, st_device_ids, capfd):
     assert host_durs, (
         "no `[STRACE] ... name=simpler_run` marker found on stderr; "
         "simpler_run stopped emitting host-trace markers (SIMPLER_HOST_STRACE off, "
-        "or the host logger V9 tier was suppressed)."
+        "or the host logger TIMING level was suppressed)."
     )
     assert max(host_durs) > 0, f"simpler_run marker dur must be > 0 ns, got {host_durs}"
 
@@ -118,3 +121,18 @@ def test_simpler_run_emits_strace_markers(st_platform, st_device_ids, capfd):
         "or marker emission regressed on the default SIMPLER_HOST_STRACE build."
     )
     assert max(dev_durs) > 0, f"device_wall marker dur must be > 0 ns, got {dev_durs}"
+
+
+@pytest.mark.platforms(["a2a3sim", "a5sim"])
+@pytest.mark.runtime("tensormap_and_ringbuffer")
+@pytest.mark.device_count(1)
+def test_sim_forwards_info_level_to_aicpu(st_platform, st_device_ids, capfd):
+    previous_level = get_current_config()
+    configure_logging("info")
+    try:
+        _drive_one_run(st_platform, int(st_device_ids[0]))
+    finally:
+        configure_logging(previous_level)
+
+    err = capfd.readouterr().err
+    assert "AicpuExecutor: Initializing" in err, "AICPU sim SO did not receive the host INFO threshold"

@@ -44,7 +44,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     args.add_output(ci);
     rt_submit_aic_task(FUNC_AIC_HANG, args);
 
-    LOG_INFO_V9("[aicore_op_timeout] dispatched hanging AIC task");
+    LOG_INFO("[aicore_op_timeout] dispatched hanging AIC task");
 }
 
 }  // extern "C"

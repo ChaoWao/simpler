@@ -173,7 +173,7 @@ _OFF_CONFIG = 16
 # enable_pmu, enable_dep_gen, enable_scope_stats) + uint64 ring sizing
 # overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT: ring_task_window,
 # ring_heap, ring_dep_pool) + 1024-byte NUL-terminated output_prefix. Log config
-# travels separately via ChipWorker.init(log_level, log_info_v) — not on per-task wire.
+# travels separately via ChipWorker.init(log_level) — not on per-task wire.
 _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
 _CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # Args region starts after CONFIG, rounded up to 8 bytes so the first
@@ -1708,8 +1708,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
     identity_refs: dict[bytes, int],
-    log_level: int = 1,
-    log_info_v: int = 5,
+    log_level: int = 25,
     platform: str = "",
     runtime: str = "",
     prewarm_config=None,
@@ -1717,9 +1716,9 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
 ) -> None:
     """Runs in forked child process. Loads host_runtime.so in own address space.
 
-    `log_level` / `log_info_v` are the parent's snapshot of the simpler logger
-    (computed via `_log.get_current_config()`); the child cannot read the
-    parent's logger after fork, so the values are passed explicitly.
+    `log_level` is the parent's snapshot of the simpler logger (computed via
+    `_log.get_current_config()`); the child cannot read the parent's logger
+    after fork, so the value is passed explicitly.
 
     The main loop is delegated to ``_run_chip_main_loop`` — see its docstring
     for the TASK_READY / CONTROL_REQUEST / SHUTDOWN state machine.
@@ -1732,7 +1731,6 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
             device_id,
             bins,
             log_level=log_level,
-            log_info_v=log_info_v,
             prewarm_config=prewarm_config,
             enable_sdma=enable_sdma,
         )
@@ -4539,7 +4537,7 @@ class Worker:
         # Fork ChipWorker processes (L3 with device_ids).  Always use the plain
         # task-loop variant; the base communicator is established lazily on first
         # ``orch.allocate_domain`` via CTRL_COMM_INIT.
-        chip_log_level, chip_log_info_v = _simpler_log.get_current_config()
+        chip_log_level = _simpler_log.get_current_config()
         if device_ids:
             for idx, dev_id in enumerate(device_ids):
                 pid = os.fork()
@@ -4567,7 +4565,6 @@ class Worker:
                                 target_namespace="LOCAL_CHIP",
                             ),
                             log_level=chip_log_level,
-                            log_info_v=chip_log_info_v,
                             platform=str(self._config["platform"]),
                             runtime=str(self._config["runtime"]),
                             prewarm_config=self._prewarm_config,

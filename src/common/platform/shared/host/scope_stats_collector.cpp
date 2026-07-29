@@ -140,7 +140,7 @@ int ScopeStatsCollector::init(
         shm_dev_local, shm_host_local, shm_size, device_id
     );
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "ScopeStats collector initialized: %d threads, SHM=0x%lx", num_threads,
         reinterpret_cast<unsigned long>(shm_dev_)
     );
@@ -237,7 +237,7 @@ bool ScopeStatsCollector::reconcile_counters() {
         );
         clean = false;
     } else {
-        LOG_INFO_V0(
+        LOG_INFO(
             "scope_stats reconcile: counts match (collected=%lu, dropped=%lu, device_total=%lu)",
             static_cast<unsigned long>(total_collected_), static_cast<unsigned long>(dropped_device),
             static_cast<unsigned long>(total_device)
@@ -320,7 +320,7 @@ int ScopeStatsCollector::write_jsonl(const std::string &output_dir) {
     std::fwrite(out.data(), 1, out.size(), fp);
     std::fclose(fp);
 
-    LOG_INFO_V1(
+    LOG_INFO(
         "scope_stats: wrote %lu records (dropped=%u) to %s", static_cast<unsigned long>(records_.size()),
         state->dropped_record_count, path.c_str()
     );
@@ -388,5 +388,5 @@ void ScopeStatsCollector::finalize(ScopeStatsUnregisterCallback unregister_cb, c
     initialized_ = false;
     total_collected_ = 0;
     clear_memory_context();
-    LOG_INFO_V0("ScopeStats collector finalized");
+    LOG_INFO("ScopeStats collector finalized");
 }

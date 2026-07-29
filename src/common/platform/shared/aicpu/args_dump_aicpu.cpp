@@ -546,7 +546,7 @@ void dump_args_init(int num_dump_threads) {
     // FULL_JSON_ONLY → every task, metadata only (no payload copied into arena).
     g_dump_args_level = static_cast<DumpArgsLevel>(s_dump_header->dump_args_level);
 
-    LOG_INFO_V0("Initializing args dump for %d threads", num_dump_threads);
+    LOG_INFO("Initializing args dump for %d threads", num_dump_threads);
 
     // Pop initial metadata buffer from free_queue for each thread
     for (int t = 0; t < num_dump_threads; t++) {
@@ -713,7 +713,7 @@ void dump_args_flush(int thread_idx) {
 
     s_buffers_flushed[thread_idx]++;
     uint32_t dropped = s_dump_states[thread_idx] ? s_dump_states[thread_idx]->dropped_record_count : 0;
-    LOG_INFO_V0(
+    LOG_INFO(
         "Thread %d: dump_args_flush (records=%u, buf_switches=%u, flushes=%u, dropped=%u)", thread_idx,
         s_records_written[thread_idx], s_buffers_switched[thread_idx], s_buffers_flushed[thread_idx], dropped
     );

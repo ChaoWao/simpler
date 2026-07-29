@@ -58,7 +58,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     const Tensor &ext_f = orch_args.tensor(2).ref();
 
     uint32_t SIZE = orch_args.tensor(0).ref().shapes[0];
-    LOG_INFO_V0("===============SIZE=%u", SIZE);
+    LOG_INFO("===============SIZE=%u", SIZE);
 
     uint32_t inter_shapes[1] = {SIZE};
     TensorCreateInfo inter_ci(inter_shapes, 1, DataType::FLOAT32);

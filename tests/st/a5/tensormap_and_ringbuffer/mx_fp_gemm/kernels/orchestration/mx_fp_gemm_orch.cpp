@@ -39,7 +39,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     const Tensor &ext_c = orch_args.tensor(4).ref();
     const uint64_t mode = orch_args.scalar(0);
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "[mx_fp_gemm_orch] TMATMUL_MX mode=%llu A=%s As=%s B=%s Bs=%s C=%s", static_cast<unsigned long long>(mode),
         get_dtype_name(ext_a.dtype), get_dtype_name(ext_as.dtype), get_dtype_name(ext_b.dtype),
         get_dtype_name(ext_bs.dtype), get_dtype_name(ext_c.dtype)

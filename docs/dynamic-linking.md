@@ -97,6 +97,12 @@ because not all symbols may be referenced. Communicates with the runtime
 through a function pointer table (`PTO2RuntimeOps`), not direct symbol
 linkage.
 
+`PTO2RuntimeOps` is a binary ABI without size or version negotiation.
+Orchestration SOs and their runtime must therefore be built from the same
+simpler revision. Changing the table's field count, order, or signatures
+invalidates previously built orchestration SOs; cached or prebuilt artifacts
+must be rebuilt before they are loaded by the updated runtime.
+
 **File path collision**: all runtimes write the orch SO to
 `/var/tmp/libdevice_orch_<PID>.so`. Safe in serial execution (each task
 dlcloses before the next writes), but would conflict in parallel in-process
@@ -281,7 +287,7 @@ AICore receives only a device copy of that same `KernelArgs` payload.
 ```text
 ChipWorker.init(device_id, bins)                       # Python wrapper
   ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)          # once per process
-  simpler_log_init(log_level, log_info_v)              seeds HostLogger before host_runtime
+  simpler_log_init(log_level)                          seeds HostLogger before host_runtime
   ctypes.CDLL(libcpu_sim_context.so, RTLD_GLOBAL)      # sim only, once per process
   _ChipWorker.init(host_path, aicpu_path, aicore_path, device_id)   # C++
     dlopen(host_runtime.so, RTLD_LOCAL)
@@ -321,7 +327,7 @@ device_worker_main(device_id)
   for each runtime_group:
     ChipWorker.init(device_id, bins)                    # Python wrapper
       ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)       # once per process
-      simpler_log_init(log_level, log_info_v)
+      simpler_log_init(log_level)
       _ChipWorker.init(host_path, aicpu_path, aicore_path,
                        dispatcher_path, device_id)       # C++
         dlopen(host_runtime.so, RTLD_LOCAL)
@@ -329,7 +335,7 @@ device_worker_main(device_id)
         simpler_init(ctx, device_id,
                      aicpu*, aicpu_size, aicore*, aicore_size,
                      dispatcher*, dispatcher_size)
-          dlog_setlevel(HostLogger.level())               sync CANN dlog before context open
+          dlog_setlevel(HostLogger.cann_level())          sync CANN dlog before context open
           DeviceRunner::attach_current_thread(device_id)  rtSetDevice()
           DeviceRunner::set_executors(aicpu, aicore)
           DeviceRunner::set_dispatcher_binary(dispatcher)

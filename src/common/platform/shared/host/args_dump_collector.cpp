@@ -172,7 +172,7 @@ int ArgsDumpCollector::initialize(
         state->arena_write_offset = 0;
         state->dropped_record_count = 0;
 
-        LOG_INFO_V0(
+        LOG_INFO(
             "Thread %d: dump arena allocated (dev=%p, host=%p, size=%lu MB)", t, ai.dev_ptr, ai.host_ptr,
             arena_size / (1024 * 1024)
         );
@@ -216,7 +216,7 @@ int ArgsDumpCollector::initialize(
         shm_dev_local, shm_host_local, shm_size, device_id
     );
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "Args dump initialized: %d threads, arena=%lu MB/thread, %d buffers/thread", num_dump_threads,
         arena_size / (1024 * 1024), PLATFORM_DUMP_BUFFERS_PER_THREAD
     );
@@ -409,7 +409,7 @@ void ArgsDumpCollector::on_buffer_collected(const DumpReadyBufferInfo &info, int
     if (now_ms - last_ms >= 5000 &&
         last_progress_ms_.compare_exchange_strong(last_ms, now_ms, std::memory_order_relaxed)) {
         auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - run_start_time_).count();
-        LOG_INFO_V0(
+        LOG_INFO(
             "Collecting: %lu args, %.1f GB written (%lds)",
             static_cast<unsigned long>(total_metadata_collected_.load(std::memory_order_relaxed)),
             bytes_written_.load() / 1e9, elapsed_s
@@ -622,7 +622,7 @@ int ArgsDumpCollector::export_dump_files() {
             auto elapsed_s =
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - run_start_time_)
                     .count();
-            LOG_INFO_V0(
+            LOG_INFO(
                 "Writing to disk: %.1f GB written, %zu args remaining (%lds)", bytes_written_.load() / 1e9,
                 write_queue_.size(), elapsed_s
             );
@@ -636,7 +636,7 @@ int ArgsDumpCollector::export_dump_files() {
         auto elapsed_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - run_start_time_)
                 .count();
-        LOG_INFO_V0(
+        LOG_INFO(
             "Collected %lu args, wrote %.1f GB to disk (%.1fs)",
             static_cast<unsigned long>(total_metadata_collected_.load(std::memory_order_relaxed)),
             bytes_written_.load() / 1e9, elapsed_ms / 1000.0
@@ -662,7 +662,7 @@ int ArgsDumpCollector::export_dump_files() {
         return static_cast<uint8_t>(a.role) < static_cast<uint8_t>(b.role);
     });
 
-    LOG_INFO_V0("Writing JSON manifest for %zu args...", collected_.size());
+    LOG_INFO("Writing JSON manifest for %zu args...", collected_.size());
 
     uint32_t num_before_dispatch = 0;
     uint32_t num_after_completion = 0;
@@ -755,7 +755,7 @@ int ArgsDumpCollector::export_dump_files() {
 
     auto export_end = std::chrono::steady_clock::now();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(export_end - export_start).count();
-    LOG_INFO_V0("Wrote JSON manifest (%zu args) to %s (%ldms)", collected_.size(), run_dir_.c_str(), total_ms);
+    LOG_INFO("Wrote JSON manifest (%zu args) to %s (%ldms)", collected_.size(), run_dir_.c_str(), total_ms);
 
     uint32_t truncated = total_truncated_count_.load(std::memory_order_relaxed);
     uint32_t dropped = total_dropped_record_count_.load(std::memory_order_relaxed);

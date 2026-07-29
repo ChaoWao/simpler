@@ -6,12 +6,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Tests for simpler_setup.log_config + simpler._log integer-threshold logic."""
+"""Tests for simpler's single-axis log-level configuration."""
 
 import logging
 
 import pytest
-from simpler._log import _split_threshold
+from simpler._log import TIMING, _normalize_threshold
 
 from simpler_setup.log_config import (
     DEFAULT_LOG_LEVEL,
@@ -21,17 +21,17 @@ from simpler_setup.log_config import (
 )
 
 
-def test_default_level_is_v5():
-    assert DEFAULT_LOG_LEVEL == "v5"
-    assert parse_level("v5") == 20  # = logging.INFO
+def test_default_level_is_timing():
+    assert DEFAULT_LOG_LEVEL == "timing"
+    assert TIMING == 25
+    assert parse_level("timing") == TIMING
     assert parse_level("info") == 20
 
 
-def test_choices_cover_severity_and_v_tiers():
-    for name in ("debug", "info", "warn", "error", "null"):
-        assert name in LOG_LEVEL_CHOICES
+def test_choices_are_single_axis():
+    assert LOG_LEVEL_CHOICES == ["debug", "info", "timing", "warn", "error", "null"]
     for v in range(10):
-        assert f"v{v}" in LOG_LEVEL_CHOICES
+        assert f"v{v}" not in LOG_LEVEL_CHOICES
 
 
 def test_null_mutes_severity():
@@ -40,25 +40,28 @@ def test_null_mutes_severity():
     assert sim.getEffectiveLevel() >= 60
 
 
-def test_v0_lets_everything_through():
-    configure_logging("v0")
+def test_timing_hides_info_but_keeps_timing():
+    configure_logging("timing")
     sim = logging.getLogger("simpler")
-    # V0 = 15, so DEBUG-tagged records are still suppressed by Python (DEBUG=10),
-    # but every V tier and INFO/WARN/ERROR pass.
-    assert sim.getEffectiveLevel() == 15
+    assert not sim.isEnabledFor(logging.INFO)
+    assert sim.isEnabledFor(TIMING)
 
 
 @pytest.mark.parametrize(
     "threshold, expected",
     [
-        (10, (0, 0)),  # DEBUG → severity DEBUG
-        (15, (1, 0)),  # V0    → severity INFO, info_v=0
-        (20, (1, 5)),  # V5    → severity INFO, info_v=5 (default)
-        (24, (1, 9)),  # V9    → severity INFO, info_v=9
-        (30, (2, 0)),  # WARN  → severity WARN
-        (40, (3, 0)),  # ERROR → severity ERROR
-        (60, (4, 0)),  # NUL   → severity NUL
+        (10, 10),
+        (11, 20),
+        (20, 20),
+        (21, 25),
+        (25, 25),
+        (26, 30),
+        (30, 30),
+        (31, 40),
+        (40, 40),
+        (41, 60),
+        (60, 60),
     ],
 )
-def test_split_threshold(threshold, expected):
-    assert _split_threshold(threshold) == expected
+def test_normalize_threshold(threshold, expected):
+    assert _normalize_threshold(threshold) == expected

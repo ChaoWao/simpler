@@ -25,20 +25,11 @@ missing or stale, including for callers that only want the logging helpers.
 import importlib
 from typing import Any
 
-# Importing _log auto-configures the simpler logger to V5 if unset.
+# Importing _log auto-configures the simpler logger to TIMING if unset.
 from ._log import (
     DEFAULT_THRESHOLD,
     NUL,
-    V0,
-    V1,
-    V2,
-    V3,
-    V4,
-    V5,
-    V6,
-    V7,
-    V8,
-    V9,
+    TIMING,
     get_current_config,
     get_logger,
 )
@@ -47,16 +38,7 @@ __all__ = [
     "DEFAULT_THRESHOLD",
     "Worker",
     "NUL",
-    "V0",
-    "V1",
-    "V2",
-    "V3",
-    "V4",
-    "V5",
-    "V6",
-    "V7",
-    "V8",
-    "V9",
+    "TIMING",
     "get_current_config",
     "get_logger",
     "task_interface",

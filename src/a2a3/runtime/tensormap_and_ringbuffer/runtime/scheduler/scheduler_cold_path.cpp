@@ -85,7 +85,7 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     task_count = total_tasks_;
     if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
         completed_.store(true, std::memory_order_release);
-        LOG_INFO_V0(
+        LOG_INFO(
             "Thread %d: PTO2 completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed),
             task_count
         );
@@ -277,7 +277,7 @@ void SchedulerContext::log_stall_diagnostics(
                 if (is_running) {
                     cnt_running++;
                     if (cnt_running > STALL_DUMP_READY_MAX) continue;
-                    LOG_INFO_V9(
+                    LOG_INFO(
                         "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
                         " state=RUNNING fanin_refcount=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d] "
                         "running_on=[owner_thread=%d cores=[%s]]",
@@ -288,7 +288,7 @@ void SchedulerContext::log_stall_diagnostics(
                 if (rc >= fi) {
                     cnt_ready++;
                     if (cnt_ready > STALL_DUMP_READY_MAX) continue;
-                    LOG_INFO_V9(
+                    LOG_INFO(
                         "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
                         " state=READY   fanin_refcount=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d]",
                         thread_idx, idle_iterations, r, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1
@@ -297,7 +297,7 @@ void SchedulerContext::log_stall_diagnostics(
                 }
                 cnt_waiting++;
                 if (cnt_waiting > STALL_DUMP_WAIT_MAX) continue;
-                LOG_INFO_V9(
+                LOG_INFO(
                     "[STALL thread=%d idle_iterations=%d] TASK ring=%d task_id=%" PRId64
                     " state=WAIT    fanin_refcount=%d/%d kernels=[aic:%d aiv0:%d aiv1:%d] missing_deps=%d",
                     thread_idx, idle_iterations, r, task_id, rc, fi, kid_aic, kid_aiv0, kid_aiv1, fi - rc
@@ -306,7 +306,7 @@ void SchedulerContext::log_stall_diagnostics(
         }
         int32_t effective_total = task_count > 0 ? task_count : submitted_in_ring;
         int32_t c = completed_tasks_.load(std::memory_order_relaxed);
-        LOG_INFO_V9(
+        LOG_INFO(
             "[STALL thread=%d idle_iterations=%d] SUMMARY completed=%d/%d last_progress_iteration=%d "
             "scan_ready=%d scan_waiting=%d scan_running=%d",
             thread_idx, idle_iterations, c, effective_total, last_progress_count, cnt_ready, cnt_waiting, cnt_running
@@ -338,7 +338,7 @@ void SchedulerContext::log_stall_diagnostics(
             aiv1_buf, sizeof(aiv1_buf), aiv1_id, aiv1_idle, &core_exec_states_[aiv1_id],
             core_exec_states_[aiv1_id].reg_addr
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "[STALL thread=%d idle_iterations=%d] CLUSTER cluster_id=%d aic=%s aiv0=%s aiv1=%s", thread_idx,
             idle_iterations, cluster_id, aic_buf, aiv0_buf, aiv1_buf
         );
@@ -480,7 +480,7 @@ int32_t SchedulerContext::handle_timeout_exit(
         AicpuPhase::SchedWindow, static_cast<uint64_t>(sched_start_ts), static_cast<uint64_t>(sched_timeout_ts)
     );
 #if SIMPLER_SCHED_PROFILING
-    LOG_INFO_V9(
+    LOG_INFO(
         "Thread %d: sched_start=%" PRIu64 " sched_end(timeout)=%" PRIu64 " sched_cost=%.3fus", thread_idx,
         static_cast<uint64_t>(sched_start_ts), static_cast<uint64_t>(sched_timeout_ts),
         cycles_to_us(sched_timeout_ts - sched_start_ts)
@@ -501,7 +501,7 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
         AicpuPhase::SchedWindow, static_cast<uint64_t>(l2_swimlane.sched_start_ts), static_cast<uint64_t>(sched_end_ts)
     );
 #if SIMPLER_SCHED_PROFILING
-    LOG_INFO_V9(
+    LOG_INFO(
         "Thread %d: sched_start=%" PRIu64 " sched_end=%" PRIu64 " sched_cost=%.3fus", thread_idx,
         static_cast<uint64_t>(l2_swimlane.sched_start_ts), static_cast<uint64_t>(sched_end_ts),
         cycles_to_us(sched_end_ts - l2_swimlane.sched_start_ts)
@@ -524,7 +524,7 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
                                       l2_swimlane.sched_dispatch_setup_cycle) :
                                      0;
 
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d: === Scheduler Phase Breakdown: total=%.3fus, %d tasks ===", thread_idx,
             cycles_to_us(sched_total), cur_thread_completed
         );
@@ -532,7 +532,7 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
         // fanout / fanin per-thread aggregates live in
         // sched_overhead_analysis.compute_dag_stats_from_deps (deps.json edges
         // × core_to_thread).
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:   complete       : %.3fus (%.1f%%)", thread_idx, cycles_to_us(l2_swimlane.sched_complete_cycle),
             l2_swimlane.sched_complete_cycle * 100.0 / sched_total
         );
@@ -544,80 +544,80 @@ void SchedulerContext::log_l2_swimlane_summary(int32_t thread_idx, [[maybe_unuse
         double complete_hit_rate = l2_swimlane.complete_probe_count > 0 ?
                                        l2_swimlane.complete_hit_count * 100.0 / l2_swimlane.complete_probe_count :
                                        0.0;
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     poll         : %.3fus (%.1f%%)  hit=%" PRIu64 ", miss=%" PRIu64 ", hit_rate=%.1f%%",
             thread_idx, cycles_to_us(complete_poll), complete_poll * 100.0 / c_parent,
             static_cast<uint64_t>(l2_swimlane.complete_hit_count), static_cast<uint64_t>(complete_miss_count),
             complete_hit_rate
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     otc_lock     : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%" PRIu64 "", thread_idx,
             cycles_to_us(sp.lock_cycle), sp.lock_cycle * 100.0 / c_parent,
             cycles_to_us(sp.lock_cycle - sp.lock_wait_cycle), cycles_to_us(sp.lock_wait_cycle),
             static_cast<uint64_t>(sp.lock_atomic_count)
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     otc_fanout   : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%" PRIu64 "", thread_idx,
             cycles_to_us(sp.fanout_cycle), sp.fanout_cycle * 100.0 / c_parent,
             cycles_to_us(sp.fanout_cycle - sp.push_wait_cycle), cycles_to_us(sp.push_wait_cycle),
             static_cast<uint64_t>(sp.fanout_atomic_count)
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     otc_fanin    : %.3fus (%.1f%%)  atomics=%" PRIu64 "", thread_idx,
             cycles_to_us(sp.fanin_cycle), sp.fanin_cycle * 100.0 / c_parent,
             static_cast<uint64_t>(sp.fanin_atomic_count)
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     otc_self     : %.3fus (%.1f%%)  atomics=%" PRIu64 "", thread_idx,
             cycles_to_us(sp.self_consumed_cycle), sp.self_consumed_cycle * 100.0 / c_parent,
             static_cast<uint64_t>(sp.self_atomic_count)
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     perf         : %.3fus (%.1f%%)", thread_idx,
             cycles_to_us(l2_swimlane.sched_complete_perf_cycle),
             l2_swimlane.sched_complete_perf_cycle * 100.0 / c_parent
         );
 
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:   async_poll     : %.3fus (%.1f%%)", thread_idx, cycles_to_us(l2_swimlane.sched_async_cycle),
             l2_swimlane.sched_async_cycle * 100.0 / sched_total
         );
 
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:   dispatch       : %.3fus (%.1f%%)", thread_idx, cycles_to_us(l2_swimlane.sched_dispatch_cycle),
             l2_swimlane.sched_dispatch_cycle * 100.0 / sched_total
         );
 
         uint64_t d_parent = l2_swimlane.sched_dispatch_cycle > 0 ? l2_swimlane.sched_dispatch_cycle : 1;
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     poll         : %.3fus (%.1f%%)", thread_idx, cycles_to_us(dispatch_poll),
             dispatch_poll * 100.0 / d_parent
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     pop          : %.3fus (%.1f%%)  work=%.3fus wait=%.3fus  atomics=%" PRIu64 "", thread_idx,
             cycles_to_us(l2_swimlane.sched_dispatch_pop_cycle), l2_swimlane.sched_dispatch_pop_cycle * 100.0 / d_parent,
             cycles_to_us(l2_swimlane.sched_dispatch_pop_cycle - sp.pop_wait_cycle), cycles_to_us(sp.pop_wait_cycle),
             static_cast<uint64_t>(sp.pop_atomic_count)
         );
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:     setup        : %.3fus (%.1f%%)", thread_idx,
             cycles_to_us(l2_swimlane.sched_dispatch_setup_cycle),
             l2_swimlane.sched_dispatch_setup_cycle * 100.0 / d_parent
         );
 
-        LOG_INFO_V9(
+        LOG_INFO(
             "Thread %d:   idle           : %.3fus (%.1f%%)", thread_idx, cycles_to_us(l2_swimlane.sched_idle_cycle),
             l2_swimlane.sched_idle_cycle * 100.0 / sched_total
         );
 
         if (cur_thread_completed > 0) {
-            LOG_INFO_V9(
+            LOG_INFO(
                 "Thread %d:   avg/complete   : %.3fus", thread_idx,
                 cycles_to_us(l2_swimlane.sched_complete_cycle) / cur_thread_completed
             );
         }
     }
-    LOG_INFO_V9(
+    LOG_INFO(
         "Thread %d: Scheduler summary: total_time=%.3fus, loops=%" PRIu64 ", tasks_scheduled=%d", thread_idx,
         cycles_to_us(sched_total), static_cast<uint64_t>(l2_swimlane.sched_loop_count), cur_thread_completed
     );
@@ -641,7 +641,7 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
     }
 #endif
 
-    LOG_INFO_V0("Thread %d: Shutting down %d cores", thread_idx, core_num);
+    LOG_INFO("Thread %d: Shutting down %d cores", thread_idx, core_num);
     int32_t rc = 0;
     for (int32_t i = 0; i < core_num; i++) {
         int32_t core_id = cores[i];
@@ -999,7 +999,7 @@ bool SchedulerContext::assign_cores_to_threads() {
         return false;
     }
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "Assigning cores (round-robin): %d clusters across %d sched threads (%d AIC, %d AIV)", cluster_count,
         active_sched_threads_, aic_count_, aiv_count_
     );
@@ -1037,7 +1037,7 @@ bool SchedulerContext::assign_cores_to_threads() {
         );
     }
 
-    LOG_INFO_V0(
+    LOG_INFO(
         "Config: threads=%d, cores=%d, cores_per_thread=%d", aicpu_thread_num_, cores_total_num_, thread_cores_num
     );
     return true;
@@ -1162,7 +1162,7 @@ int32_t SchedulerContext::pre_handshake_init(
         total_tasks_ = 0;
     }
 
-    LOG_INFO_V0("Handshaking with %d cores", cores_total_num_);
+    LOG_INFO("Handshaking with %d cores", cores_total_num_);
     return 0;
 }
 
@@ -1192,7 +1192,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     memcpy(aiv_worker_ids_, local_aiv, static_cast<size_t>(lv) * sizeof(int32_t));
     aic_count_ = la;
     aiv_count_ = lv;
-    LOG_INFO_V0("Core discovery complete: %d AIC, %d AIV", aic_count_, aiv_count_);
+    LOG_INFO("Core discovery complete: %d AIC, %d AIV", aic_count_, aiv_count_);
 
     if (!assign_cores_to_threads()) {
         return -1;

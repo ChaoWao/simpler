@@ -16,7 +16,7 @@ children share.
 `[STRACE]` rides on the compile-time `SIMPLER_HOST_STRACE` macro (default on, in
 `src/common/task_interface/profiling_config.h` — separate from the
 `SIMPLER_DFX` gate on the device Orch/Sched markers) and is emitted at
-`LOG_INFO_V9` (the must-see INFO tier) — **no new env var or flag**. In a
+`LOG_TIMING` (the default threshold) — **no new env var or flag**. In a
 `SIMPLER_HOST_STRACE`-off build the RAII macros compile to nothing.
 
 ## Marker grammar

@@ -1351,9 +1351,9 @@ NB_MODULE(_task_interface, m) {
         });
 
     // Log default constant — single source. Mirrored in
-    // src/common/log/host_log.h::simpler::log::kDefaultThreshold; if you change
+    // src/common/log/include/common/log_level.h::simpler::log::kDefaultThreshold; if you change
     // one, change the other.
-    m.attr("DEFAULT_LOG_THRESHOLD") = 20;  // V5 = Python INFO
+    m.attr("DEFAULT_LOG_THRESHOLD") = 25;  // TIMING
 
     // Per-stage run timing (host wall, on-NPU device wall + AICPU phase
     // breakdown) is no longer returned from run(); the platform emits it as

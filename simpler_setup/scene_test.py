@@ -1599,7 +1599,7 @@ class SceneTestCase:
             "--log-level",
             choices=LOG_LEVEL_CHOICES,
             default=DEFAULT_LOG_LEVEL,
-            help=f"Simpler logger level (debug/V0..V9/info/warn/error/null; default {DEFAULT_LOG_LEVEL})",
+            help=f"Simpler logger level (debug/info/timing/warn/error/null; default {DEFAULT_LOG_LEVEL})",
         )
         args = parser.parse_args()
         configure_logging(args.log_level)

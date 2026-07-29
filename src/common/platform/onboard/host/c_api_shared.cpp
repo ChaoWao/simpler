@@ -319,9 +319,7 @@ int simpler_init(
     // seeded here by libsimpler_log.so's simpler_log_init() (runs earlier in
     // ChipWorker::init). Skipped when ASCEND_GLOBAL_LOG_LEVEL is externally
     // configured — CANN keeps that.
-    if (std::getenv("ASCEND_GLOBAL_LOG_LEVEL") == NULL) {
-        dlog_setlevel(-1, HostLogger::get_instance().level(), /*enableEvent*/ 0);
-    }
+    HostLogger::get_instance().configure_cann_log_level(dlog_setlevel);
 
     int rc;
     try {

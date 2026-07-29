@@ -200,7 +200,7 @@ wait_for_rootinfo(const std::string &path, HcclRootInfo *root_info, uint64_t *ru
             return true;
         }
         if (i > 0 && i % (kLogEverySec * 10) == 0) {
-            LOG_INFO_V0("[comm] wait_for_rootinfo: still waiting (%ds elapsed) path=%s", i / 10, path.c_str());
+            LOG_INFO("[comm] wait_for_rootinfo: still waiting (%ds elapsed) path=%s", i / 10, path.c_str());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -1297,7 +1297,7 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
     const FabricAttempt fabric_result = alloc_windows_via_fabric(h, effective_win_size);
     if (fabric_result == FabricAttempt::kError) return -1;
     if (fabric_result == FabricAttempt::kUnsupported) {
-        LOG_INFO_V0("[comm rank %d] Fabric V2 unsupported; using VMM IPC windows", h->rank);
+        LOG_INFO("[comm rank %d] Fabric V2 unsupported; using VMM IPC windows", h->rank);
         if (alloc_windows_via_ipc(h, effective_win_size) != 0) return -1;
     }
 
@@ -1461,7 +1461,7 @@ extern "C" int comm_alloc_domain_windows(
         domain_alloc_via_fabric(h, allocation_id, rank_ids, rank_count, domain_rank, window_size, alloc.get());
     if (fabric_result == FabricAttempt::kError) return -1;
     if (fabric_result == FabricAttempt::kUnsupported) {
-        LOG_INFO_V0("[comm rank %d] Fabric V2 unsupported; using VMM IPC domain windows", h->rank);
+        LOG_INFO("[comm rank %d] Fabric V2 unsupported; using VMM IPC domain windows", h->rank);
         const int rc =
             domain_alloc_via_ipc(h, allocation_id, rank_ids, rank_count, domain_rank, window_size, alloc.get());
         if (rc != 0) return rc;

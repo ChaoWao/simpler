@@ -66,7 +66,7 @@ def _parse_log(text: str) -> dict[str, float | None]:
 
 
 def _run_scenario(*, device_id: int, platform: str, prewarm: bool) -> None:
-    logging.getLogger("simpler").setLevel(_log.V9)
+    logging.getLogger("simpler").setLevel(_log.TIMING)
 
     case = next(c for c in TestDummyTask.CASES if c["name"] == _CASE_NAME)
     callable_obj = TestDummyTask.compile_chip_callable(platform)

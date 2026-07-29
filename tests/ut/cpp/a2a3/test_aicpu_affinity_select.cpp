@@ -32,13 +32,15 @@
 
 // Minimal logger stubs so aicpu_topology_probe.cpp links without pulling in
 // HostLogger. compute_allowed_cpus only emits LOG_WARN; the probe path (not
-// exercised here) also uses LOG_INFO_V0. The unified_log symbols have C
+// exercised here) also uses LOG_INFO. The unified_log symbols have C
 // linkage (see common/unified_log.h), so match it. No-ops — these tests
 // assert on return values, not log text.
 extern "C" {
 void unified_log_error(const char *, const char *, ...) {}
 void unified_log_warn(const char *, const char *, ...) {}
-void unified_log_info_v(const char *, int, const char *, ...) {}
+void unified_log_timing(const char *, const char *, ...) {}
+void unified_log_info(const char *, const char *, ...) {}
+void unified_log_debug(const char *, const char *, ...) {}
 }
 
 using pto::a2a3::AicpuLogicalCpu;

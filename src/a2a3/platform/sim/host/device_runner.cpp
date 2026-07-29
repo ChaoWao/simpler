@@ -37,6 +37,7 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "cpu_sim_context.h"
+#include "host_log.h"
 #include "host/raii_scope_guard.h"
 #include "host/runtime_timeout_config.h"
 #include "runtime.h"
@@ -145,12 +146,15 @@ int DeviceRunner::ensure_binaries_loaded() {
         if (!load_sym("set_platform_scope_stats_base", reinterpret_cast<void **>(&set_platform_scope_stats_base_func_)))
             return -1;
 
-        // Log config travels via the RTLD_GLOBAL HostLogger singleton in
-        // libsimpler_log.so — already seeded by simpler_log_init() before the
-        // AICPU sim SO was dlopen'd, so no per-SO setter forwarding is needed.
+        // The AICPU sim SO owns its level flags because it is RTLD_LOCAL.
+        // Forward the process-wide HostLogger threshold explicitly.
+        using SetLogLevelFunc = void (*)(int);
+        SetLogLevelFunc set_log_level_func = nullptr;
+        if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return -1;
+        set_log_level_func(HostLogger::get_instance().level());
 
         aicpu_so_loaded_ = true;
-        LOG_INFO_V0("DeviceRunner(sim): Loaded aicpu_execute from %s", aicpu_so_path_.c_str());
+        LOG_INFO("DeviceRunner(sim): Loaded aicpu_execute from %s", aicpu_so_path_.c_str());
     }
 
     // AICore kernel .so: reload every run — kernel binary varies per case and
@@ -187,7 +191,7 @@ int DeviceRunner::ensure_binaries_loaded() {
             LOG_ERROR("dlsym failed for aicore_execute_wrapper: %s", dlerror());
             return -1;
         }
-        LOG_INFO_V0("DeviceRunner(sim): Loaded aicore_execute_wrapper from %s", aicore_so_path_.c_str());
+        LOG_INFO("DeviceRunner(sim): Loaded aicore_execute_wrapper from %s", aicore_so_path_.c_str());
 
         // Pass core identity setter function pointers to the AICore SO so it can
         // set per-thread subblock_id and cluster_id for pto-isa's TPUSH/TPOP hooks.
@@ -465,7 +469,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     }
 
     constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
-    LOG_INFO_V0("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
+    LOG_INFO("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
     std::vector<std::thread> aicpu_threads;
     aicpu_threads.reserve(over_launch);
     std::atomic<int> aicpu_rc{0};
@@ -512,7 +516,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }));
     }
 
-    LOG_INFO_V0("Launching %d AICore thread(s)", num_aicore);
+    LOG_INFO("Launching %d AICore thread(s)", num_aicore);
     std::vector<std::thread> aicore_threads;
     for (int i = 0; i < num_aicore; i++) {
         CoreType core_type = runtime.get_workers()[i].core_type;
@@ -531,7 +535,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     for (auto &t : aicore_threads) {
         t.join();
     }
-    LOG_INFO_V0("All threads completed");
+    LOG_INFO("All threads completed");
 
     // Snapshot the device_wall buffer into device_wall_ns_.
     device_wall_ns_ = 0;
