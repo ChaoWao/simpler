@@ -53,11 +53,55 @@
 
 // Block notification interval (in spin counts)
 #define PTO2_BLOCK_NOTIFY_INTERVAL 10000
+// Productive-loop publication is a liveness escape, not the normal pressure
+// path. Require sustained no-progress before bypassing K-batched publication.
+#define PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 100)  // 10 ms
 // Heap/task deadlock is detected structurally when the reclaim head is the
 // oldest task owned by an open scope on the blocked ring. This wall-clock value
 // is the backstop for all other cases; it is an ABSOLUTE TIME (not a spin
 // count), so it is stable across chips/contention.
 #define PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES (PLATFORM_PROF_SYS_CNT_FREQ / 2)  // 500 ms
+
+constexpr uint32_t ring_mask_bit(int32_t ring_id) {
+    static_assert(PTO2_MAX_RING_DEPTH <= 32, "ring masks use one uint32_t bit per ring");
+    return 1u << static_cast<uint32_t>(ring_id);
+}
+
+inline bool
+reclaim_head_matches_open_task(int32_t head_task_id, uint8_t ring_id, const PTO2TaskSlotState *oldest_open_task) {
+    return oldest_open_task != nullptr && oldest_open_task->task != nullptr &&
+           oldest_open_task->task->task_id == PTO2TaskId::make(ring_id, static_cast<uint32_t>(head_task_id));
+}
+
+class ReclaimPublicationRequest {
+public:
+    ReclaimPublicationRequest(std::atomic<uint32_t> *request_mask, std::atomic<uint32_t> *ack_mask, uint8_t ring_id) :
+        request_mask_(request_mask),
+        ack_mask_(ack_mask),
+        bit_(ring_mask_bit(ring_id)) {}
+
+    bool enabled() const { return request_mask_ != nullptr && ack_mask_ != nullptr; }
+
+    void request() {
+        if (!enabled() || outstanding_) return;
+        ack_mask_->fetch_and(~bit_, std::memory_order_acq_rel);
+        request_mask_->fetch_or(bit_, std::memory_order_release);
+        outstanding_ = true;
+    }
+
+    bool poll_acknowledged() {
+        if (!enabled()) return true;
+        if (!outstanding_ || (ack_mask_->load(std::memory_order_acquire) & bit_) == 0) return false;
+        outstanding_ = false;
+        return true;
+    }
+
+private:
+    std::atomic<uint32_t> *request_mask_;
+    std::atomic<uint32_t> *ack_mask_;
+    uint32_t bit_;
+    bool outstanding_{false};
+};
 
 // =============================================================================
 // Task Allocator (unified task slot + heap buffer allocation)
@@ -109,6 +153,19 @@ public:
         heap_tail_ = 0;
         last_alive_seen_ = 0;
         heap_rebase_anchor_task_id_ = -1;
+        reclaim_request_mask_ = nullptr;
+        reclaim_ack_mask_ = nullptr;
+    }
+
+    void set_reclaim_publication_request(std::atomic<uint32_t> *request_mask, std::atomic<uint32_t> *ack_mask) {
+        reclaim_request_mask_ = request_mask;
+        reclaim_ack_mask_ = ack_mask;
+    }
+
+    bool reclaim_publication_is_wired_to(
+        const std::atomic<uint32_t> *request_mask, const std::atomic<uint32_t> *ack_mask, uint8_t expected_ring_id
+    ) const {
+        return reclaim_request_mask_ == request_mask && reclaim_ack_mask_ == ack_mask && ring_id_ == expected_ring_id;
     }
 
     /**
@@ -133,6 +190,8 @@ public:
         bool blocked_on_heap = false;
         uint64_t block_cycle0 = 0;  // wall-clock anchor for the deadlock backstop
         bool block_timing = false;  // false until the first no-reclaim-progress spin
+        ReclaimPublicationRequest publication_request(reclaim_request_mask_, reclaim_ack_mask_, ring_id_);
+        bool watermark_synchronized = !publication_request.enabled();
 #if SIMPLER_ORCH_PROFILING
         uint64_t wait_start = 0;
         bool waiting = false;
@@ -164,11 +223,20 @@ public:
 #endif
             last_alive = last_alive_ptr_->load(std::memory_order_acquire);
             update_heap_tail(last_alive);
+            if (!watermark_synchronized && publication_request.poll_acknowledged()) {
+                last_alive = last_alive_ptr_->load(std::memory_order_acquire);
+                update_heap_tail(last_alive);
+                watermark_synchronized = true;
+            }
             if (last_alive > prev_last_alive) {
                 // Reclaim advanced -> productive backpressure, not a deadlock.
                 spin_count = 0;
                 prev_last_alive = last_alive;
                 block_timing = false;
+                // Any later shared progress can again trail scheduler-local
+                // reclamation by K - 1, so a prior exact acknowledgment no
+                // longer proves that the current watermark is exact.
+                watermark_synchronized = !publication_request.enabled();
             } else if ((spin_count & 1023) == 0) {
                 // A fatal latched elsewhere breaks this otherwise-unbounded spin; the
                 // caller maps the failed alloc to orch_mark_fatal. Polled on the
@@ -181,21 +249,24 @@ public:
                 // get_sys_cnt_aicpu() is a cheap cntvct_el0 read, while this
                 // block polls the fatal flag and compares the reclaim head with
                 // the oldest task pinned by an open scope on this ring.
-                // (1) Structural, immediate: no open scope can end while this
-                // orchestrator is blocked here, so that head cannot become
-                // CONSUMED.
-                if (head_is_oldest_open_task(last_alive, oldest_open_task)) {
+                uint64_t now = get_sys_cnt_aicpu();
+                if (!block_timing) {
+                    block_cycle0 = now;
+                    block_timing = true;
+                } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+                    publication_request.request();
+                }
+                // (1) Structural, after publication acknowledgment: no open
+                // scope can end while this orchestrator is blocked here, so
+                // the synchronized head cannot become CONSUMED.
+                if (watermark_synchronized && head_is_oldest_open_task(last_alive, oldest_open_task)) {
                     report_deadlock(output_size, blocked_on_heap, /*scope_gated=*/true);
                     return {-1, -1, nullptr, nullptr};
                 }
                 // (2) Wall-clock backstop for the residual case the local head
                 // test can't prove (e.g. a closed sibling whose consumer is
                 // deferred). Absolute time, not a spin count.
-                uint64_t now = get_sys_cnt_aicpu();
-                if (!block_timing) {
-                    block_cycle0 = now;
-                    block_timing = true;
-                } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+                if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                     report_deadlock(output_size, blocked_on_heap, /*scope_gated=*/false);
                     return {-1, -1, nullptr, nullptr};
                 }
@@ -207,6 +278,7 @@ public:
                         heap_size_, heap_available(), heap_top_, blocked_on_heap ? "heap" : "task", spin_count
                     );
                 }
+                watermark_synchronized = !publication_request.enabled();
             }
             SPIN_WAIT_HINT();
         }
@@ -278,6 +350,8 @@ private:
 
     // --- Shared ---
     std::atomic<int32_t> *error_code_ptr_ = nullptr;
+    std::atomic<uint32_t> *reclaim_request_mask_ = nullptr;
+    std::atomic<uint32_t> *reclaim_ack_mask_ = nullptr;
 
     // =========================================================================
     // Internal helpers
@@ -406,8 +480,7 @@ private:
 #endif
 
     bool head_is_oldest_open_task(int32_t head_task_id, const PTO2TaskSlotState *oldest_open_task) const {
-        return oldest_open_task != nullptr && slot_states_ != nullptr &&
-               oldest_open_task == &slot_states_[head_task_id & window_mask_];
+        return slot_states_ != nullptr && reclaim_head_matches_open_task(head_task_id, ring_id_, oldest_open_task);
     }
 
     /**
@@ -511,6 +584,9 @@ struct PTO2FaninPool {
     int32_t reclaim_task_cursor{0};  // Last task id scanned for reclaim on this pool
 
     std::atomic<int32_t> *error_code_ptr = nullptr;
+    std::atomic<uint32_t> *reclaim_request_mask = nullptr;
+    std::atomic<uint32_t> *reclaim_ack_mask = nullptr;
+    uint8_t ring_id = 0;
 
     void init(PTO2FaninSpillEntry *in_base, int32_t in_capacity, std::atomic<int32_t> *in_error_code_ptr) {
         base = in_base;
@@ -521,6 +597,23 @@ struct PTO2FaninPool {
         reclaim_task_cursor = 0;
         base[0].clear();
         error_code_ptr = in_error_code_ptr;
+        reclaim_request_mask = nullptr;
+        reclaim_ack_mask = nullptr;
+        ring_id = 0;
+    }
+
+    void set_reclaim_publication_request(
+        std::atomic<uint32_t> *request_mask, std::atomic<uint32_t> *ack_mask, uint8_t in_ring_id
+    ) {
+        reclaim_request_mask = request_mask;
+        reclaim_ack_mask = ack_mask;
+        ring_id = in_ring_id;
+    }
+
+    bool reclaim_publication_is_wired_to(
+        const std::atomic<uint32_t> *request_mask, const std::atomic<uint32_t> *ack_mask, uint8_t expected_ring_id
+    ) const {
+        return reclaim_request_mask == request_mask && reclaim_ack_mask == ack_mask && ring_id == expected_ring_id;
     }
 
     void reset_for_reuse(std::atomic<int32_t> *in_error_code_ptr) {
@@ -679,6 +772,9 @@ struct PTO2DepListPool {
 
     // Error code pointer for fatal error reporting (→ sm_header->orch_error_code)
     std::atomic<int32_t> *error_code_ptr = nullptr;
+    std::atomic<uint32_t> *reclaim_request_mask = nullptr;
+    std::atomic<uint32_t> *reclaim_ack_mask = nullptr;
+    uint8_t ring_id = 0;
 
     /**
      *
@@ -699,6 +795,23 @@ struct PTO2DepListPool {
         base[0].next = nullptr;
 
         error_code_ptr = in_error_code_ptr;
+        reclaim_request_mask = nullptr;
+        reclaim_ack_mask = nullptr;
+        ring_id = 0;
+    }
+
+    void set_reclaim_publication_request(
+        std::atomic<uint32_t> *request_mask, std::atomic<uint32_t> *ack_mask, uint8_t in_ring_id
+    ) {
+        reclaim_request_mask = request_mask;
+        reclaim_ack_mask = ack_mask;
+        ring_id = in_ring_id;
+    }
+
+    bool reclaim_publication_is_wired_to(
+        const std::atomic<uint32_t> *request_mask, const std::atomic<uint32_t> *ack_mask, uint8_t expected_ring_id
+    ) const {
+        return reclaim_request_mask == request_mask && reclaim_ack_mask == ack_mask && ring_id == expected_ring_id;
     }
 
     void reset_for_reuse(std::atomic<int32_t> *in_error_code_ptr) {
@@ -724,8 +837,9 @@ struct PTO2DepListPool {
      * Ensure dep pool for a specific ring has at least `needed` entries available.
      * Spin-waits for reclamation under pressure. The dep pool shares
      * last_task_alive with the heap and task rings, so it detects a wedged
-     * reclaim watermark the same way PTO2TaskAllocator::alloc does: a structural
-     * head-of-line check plus a wall-clock backstop, each emitting report_deadlock.
+     * reclaim watermark the same way PTO2TaskAllocator::alloc does: request an
+     * exact publication, then use a structural head-of-line check plus a
+     * wall-clock backstop, each emitting report_deadlock.
      */
     bool ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed, PTO2TaskSlotState *oldest_open_task = nullptr);
 

@@ -255,6 +255,9 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
     PTO2Runtime *rt =
         runtime_init_data_from_layout(runtime_arena, layout, PTO2_MODE_EXECUTE, sm, sm_size, gm.data(), heaps);
     ASSERT_NE(rt, nullptr);
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        EXPECT_FALSE(rt->scheduler.ring_sched_states[r].publication_batching_enabled);
+    }
     runtime_wire_arena_pointers(runtime_arena, layout, rt);
 
     EXPECT_EQ(rt->gm_heap_size, total_heap);
@@ -266,6 +269,50 @@ TEST(RuntimeArenaLayout, PerRingConfigInitializesRuntimeComponents) {
         EXPECT_EQ(rt->orchestrator.rings[r].task_allocator.heap_capacity(), heaps[r]);
         EXPECT_EQ(rt->orchestrator.rings[r].fanin_pool.capacity, dep_caps[r]);
         EXPECT_EQ(rt->scheduler.ring_sched_states[r].dep_pool.capacity, dep_caps[r]);
+        EXPECT_TRUE(rt->scheduler.ring_sched_states[r].publication_batching_enabled);
+    }
+
+    rt->sm_handle->sm_base = sm;
+    ASSERT_TRUE(runtime_reset_for_reuse(runtime_arena, layout, rt));
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        EXPECT_TRUE(rt->scheduler.ring_sched_states[r].publication_batching_enabled);
+    }
+}
+
+TEST(RuntimeArenaLayout, RewiresReclaimPublicationPointersAfterRelocation) {
+    uint64_t ws[PTO2_MAX_RING_DEPTH] = {16, 32, 64, 128};
+    uint64_t heaps[PTO2_MAX_RING_DEPTH] = {10 * 1024, 20 * 1024, 30 * 1024, 40 * 1024};
+    int32_t dep_caps[PTO2_MAX_RING_DEPTH] = {4, 8, 16, 32};
+    const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(ws);
+
+    DeviceArena source_arena;
+    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(source_arena, ws, heaps, dep_caps);
+    ASSERT_NE(source_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
+
+    std::vector<char> sm(static_cast<size_t>(sm_size));
+    std::vector<char> gm(100 * 1024);
+    PTO2Runtime *source_rt =
+        runtime_init_data_from_layout(source_arena, layout, PTO2_MODE_EXECUTE, sm.data(), sm_size, gm.data(), heaps);
+    ASSERT_NE(source_rt, nullptr);
+    runtime_wire_arena_pointers(source_arena, layout, source_rt);
+
+    DeviceArena relocated_arena;
+    PTO2RuntimeArenaLayout relocated_layout = runtime_reserve_layout(relocated_arena, ws, heaps, dep_caps);
+    ASSERT_EQ(relocated_layout.offsets.off_runtime, layout.offsets.off_runtime);
+    ASSERT_EQ(relocated_arena.total_size(), source_arena.total_size());
+    ASSERT_NE(relocated_arena.commit(DeviceArena::kDefaultBaseAlign), nullptr);
+    std::memcpy(relocated_arena.base(), source_arena.base(), source_arena.total_size());
+
+    auto *relocated_rt = static_cast<PTO2Runtime *>(relocated_arena.region_ptr(layout.offsets.off_runtime));
+    runtime_wire_arena_pointers(relocated_arena, layout, relocated_rt);
+
+    ASSERT_NE(&relocated_rt->scheduler, &source_rt->scheduler);
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        auto &dep_pool = relocated_rt->scheduler.ring_sched_states[r].dep_pool;
+        EXPECT_EQ(dep_pool.reclaim_request_mask, &relocated_rt->scheduler.publication_request_mask);
+        EXPECT_EQ(dep_pool.reclaim_ack_mask, &relocated_rt->scheduler.publication_ack_mask);
+        EXPECT_EQ(dep_pool.ring_id, r);
+        EXPECT_TRUE(relocated_rt->scheduler.ring_sched_states[r].publication_batching_enabled);
     }
 }
 

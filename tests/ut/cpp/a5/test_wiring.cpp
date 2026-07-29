@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -61,6 +62,7 @@ protected:
         ASSERT_TRUE(sched.init_data_from_layout(layout, sched_arena, sm_handle->header));
         sched.wire_arena_pointers(layout, sched_arena);
         orch.set_scheduler(&sched);
+        sched.set_publication_batching_enabled(true);
     }
 
     void TearDown() override {
@@ -110,7 +112,38 @@ protected:
         }
         ASSERT_TRUE(ok);
     }
+
+    // Service reclaim-publication requests until the blocked waiter sets
+    // `done`. The waiter thread can start arbitrarily late when ctest runs
+    // several large binaries in parallel, so the servicing loop must keep
+    // draining until the waiter finishes: a request latched after a
+    // fixed-window sample would never be serviced, and the waiter would
+    // burn its 500 ms wall-clock backstop into a false deadlock.
+    bool service_reclaim_publication_until_done(const std::atomic<bool> &done) {
+        bool saw_request = false;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+            if (sched.publication_request_mask.load(std::memory_order_acquire) != 0) {
+                saw_request = true;
+                EXPECT_TRUE(sched.drain_publication_requests());
+            }
+            std::this_thread::yield();
+        }
+        return saw_request;
+    }
 };
+
+TEST(ReclaimHeadMatchTest, ComparesExactRingAndLocalTaskId) {
+    PTO2TaskDescriptor descriptor{};
+    PTO2TaskSlotState slot{};
+    slot.task = &descriptor;
+    descriptor.task_id = PTO2TaskId::make(0, 16);
+
+    EXPECT_FALSE(reclaim_head_matches_open_task(0, 0, &slot));
+    EXPECT_TRUE(reclaim_head_matches_open_task(16, 0, &slot));
+    EXPECT_FALSE(reclaim_head_matches_open_task(16, 1, &slot));
+    EXPECT_FALSE(reclaim_head_matches_open_task(16, 0, nullptr));
+}
 
 // =============================================================================
 // Orch-side publish: no fanin (independent task)
@@ -583,6 +616,220 @@ TEST_F(WiringTest, AdvanceRingPointersScansConsumed) {
 
     // Verify SM was synced
     EXPECT_EQ(ring->fc.last_task_alive.load(), 3);
+}
+
+TEST_F(WiringTest, AdvanceRingPointersBatchesSharedMemoryPublication) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    ring->fc.current_task_index.store(18, std::memory_order_release);
+    for (int i = 0; i < 17; i++) {
+        ring->get_slot_state_by_task_id(i).task_state.store(PTO2_TASK_CONSUMED);
+    }
+
+    rss.advance_ring_pointers();
+    EXPECT_EQ(rss.last_task_alive, 17);
+    EXPECT_EQ(ring->fc.last_task_alive.load(), 17);
+
+    ring->fc.last_task_alive.store(0);
+    rss.last_task_alive = 0;
+    rss.last_published_to_sm = 0;
+    for (int advances : {1, 15, 16, 17}) {
+        for (int i = 0; i < advances; i++) {
+            ring->get_slot_state_by_task_id(i).task_state.store(PTO2_TASK_CONSUMED);
+        }
+        ring->get_slot_state_by_task_id(advances).task_state.store(PTO2_TASK_COMPLETED);
+        rss.advance_ring_pointers();
+        EXPECT_EQ(ring->fc.last_task_alive.load(), advances >= 16 ? advances : 0);
+
+        ring->fc.last_task_alive.store(0);
+        rss.last_task_alive = 0;
+        rss.last_published_to_sm = 0;
+    }
+}
+
+TEST_F(WiringTest, AdvanceRingPointersPublishesDrainedTail) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    for (int advances : {1, 15, 16, 17}) {
+        ring->fc.current_task_index.store(advances, std::memory_order_release);
+        for (int i = 0; i < advances; i++) {
+            ring->get_slot_state_by_task_id(i).task_state.store(PTO2_TASK_CONSUMED);
+        }
+
+        rss.advance_ring_pointers();
+        EXPECT_EQ(rss.last_task_alive, advances);
+        EXPECT_EQ(ring->fc.last_task_alive.load(), advances);
+
+        ring->fc.last_task_alive.store(0);
+        rss.last_task_alive = 0;
+        rss.last_published_to_sm = 0;
+    }
+}
+
+TEST_F(WiringTest, TaskAllocatorPressurePublishesWithheldProgress) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    alignas(64) char heap[64] = {};
+    ring->fc.current_task_index.store(3, std::memory_order_release);
+    ring->get_task_by_task_id(0).packed_buffer_end = heap;
+    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_PENDING);
+    rss.advance_ring_pointers();
+
+    ASSERT_EQ(rss.last_task_alive, 1);
+    ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
+
+    PTO2TaskAllocator allocator;
+    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    allocator.init(
+        ring->task_descriptors, 4, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
+        orch_err, ring->slot_states, 3, 0
+    );
+    allocator.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask);
+
+    PTO2TaskAllocResult result{-1, -1, nullptr, nullptr};
+    std::atomic<bool> alloc_done{false};
+    std::thread blocked_allocator([&] {
+        result = allocator.alloc(0, &ring->get_slot_state_by_task_id(0));
+        alloc_done.store(true, std::memory_order_release);
+    });
+
+    EXPECT_TRUE(service_reclaim_publication_until_done(alloc_done));
+    blocked_allocator.join();
+
+    EXPECT_FALSE(result.failed());
+    EXPECT_EQ(result.task_id, 3);
+    EXPECT_EQ(ring->fc.last_task_alive.load(), 1);
+}
+
+TEST_F(WiringTest, HeapPressurePublishesWithheldProgress) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    alignas(64) char heap[64] = {};
+    PTO2TaskAllocator allocator;
+    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    allocator.init(
+        ring->task_descriptors, 8, &ring->fc.current_task_index, &ring->fc.last_task_alive, heap, sizeof(heap),
+        orch_err, ring->slot_states, 0, 0
+    );
+    allocator.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask);
+
+    auto full_heap = allocator.alloc(sizeof(heap));
+    ASSERT_FALSE(full_heap.failed());
+    ring->get_task_by_task_id(full_heap.task_id).packed_buffer_end = full_heap.packed_end;
+    auto live_tail = allocator.alloc(0);
+    ASSERT_FALSE(live_tail.failed());
+    ring->get_task_by_task_id(live_tail.task_id).packed_buffer_end = live_tail.packed_end;
+
+    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_PENDING);
+    rss.advance_ring_pointers();
+
+    ASSERT_EQ(rss.last_task_alive, 1);
+    ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
+
+    PTO2TaskAllocResult result{-1, -1, nullptr, nullptr};
+    std::atomic<bool> alloc_done{false};
+    std::thread blocked_allocator([&] {
+        result = allocator.alloc(8);
+        alloc_done.store(true, std::memory_order_release);
+    });
+
+    EXPECT_TRUE(service_reclaim_publication_until_done(alloc_done));
+    blocked_allocator.join();
+
+    EXPECT_FALSE(result.failed());
+    EXPECT_EQ(result.task_id, 2);
+    EXPECT_EQ(result.packed_base, heap);
+    EXPECT_EQ(ring->fc.last_task_alive.load(), 1);
+}
+
+TEST_F(WiringTest, DependencyPoolPressurePublishesWithheldProgress) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    ring->fc.current_task_index.store(129, std::memory_order_release);
+    ring->fc.last_task_alive.store(113, std::memory_order_release);
+    ring->get_slot_state_by_task_id(127).dep_pool_mark = 5;
+    ring->get_slot_state_by_task_id(128).task_state.store(PTO2_TASK_PENDING);
+    rss.last_task_alive = 128;
+    rss.last_published_to_sm = 113;
+    rss.dep_pool.capacity = 8;
+    rss.dep_pool.top = 9;
+    rss.dep_pool.tail = 1;
+    rss.dep_pool.last_reclaimed = 64;
+
+    bool has_space = false;
+    std::atomic<bool> ensure_done{false};
+    std::thread blocked_allocator([&] {
+        has_space = rss.dep_pool.ensure_space(*ring, 1);
+        ensure_done.store(true, std::memory_order_release);
+    });
+
+    EXPECT_TRUE(service_reclaim_publication_until_done(ensure_done));
+    blocked_allocator.join();
+
+    EXPECT_TRUE(has_space);
+    EXPECT_EQ(rss.dep_pool.tail, 5);
+    EXPECT_EQ(ring->fc.last_task_alive.load(), 128);
+}
+
+TEST_F(WiringTest, FaninPoolPressurePublishesWithheldProgress) {
+    auto &rss = sched.ring_sched_states[0];
+    auto *ring = rss.ring;
+
+    ring->fc.current_task_index.store(2, std::memory_order_release);
+    ring->get_slot_state_by_task_id(0).task_state.store(PTO2_TASK_CONSUMED);
+    ring->get_slot_state_by_task_id(1).task_state.store(PTO2_TASK_PENDING);
+    rss.advance_ring_pointers();
+    ASSERT_EQ(rss.last_task_alive, 1);
+    ASSERT_EQ(ring->fc.last_task_alive.load(), 0);
+
+    PTO2FaninSpillEntry entries[4]{};
+    PTO2FaninPool pool{};
+    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    pool.init(entries, 4, orch_err);
+    pool.set_reclaim_publication_request(&sched.publication_request_mask, &sched.publication_ack_mask, 0);
+    for (int i = 0; i < 4; i++) {
+        ASSERT_NE(pool.alloc(), nullptr);
+    }
+
+    auto &payload = ring->get_payload_by_task_id(0);
+    payload.fanin_actual_count = PTO2_FANIN_INLINE_CAP + 1;
+    payload.fanin_spill_start = 1;
+    payload.fanin_spill_pool = &pool;
+
+    bool has_space = false;
+    std::atomic<bool> ensure_done{false};
+    std::thread blocked_allocator([&] {
+        has_space = pool.ensure_space(*ring, 1);
+        ensure_done.store(true, std::memory_order_release);
+    });
+
+    EXPECT_TRUE(service_reclaim_publication_until_done(ensure_done));
+    blocked_allocator.join();
+
+    EXPECT_TRUE(has_space);
+    EXPECT_EQ(pool.tail, 2);
+    EXPECT_EQ(ring->fc.last_task_alive.load(), 1);
+}
+
+TEST_F(WiringTest, RingReuseResetsPublicationShadow) {
+    auto &rss = sched.ring_sched_states[0];
+    rss.last_task_alive = 17;
+    rss.last_published_to_sm = 16;
+
+    auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_handle->sm_base);
+    rss.reset_for_reuse(sm_handle->sm_base, 0, orch_err);
+
+    EXPECT_EQ(rss.last_task_alive, 0);
+    EXPECT_EQ(rss.last_published_to_sm, 0);
+    EXPECT_FALSE(rss.publication_batching_enabled);
+    EXPECT_EQ(rss.ring, pto2_sm_layout::ring_header_addr(sm_handle->sm_base, 0));
 }
 
 TEST_F(WiringTest, AdvanceRingPointersStopsAtNonConsumed) {

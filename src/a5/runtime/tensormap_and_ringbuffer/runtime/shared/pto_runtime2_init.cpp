@@ -90,6 +90,8 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     // arithmetic, no SM load.
     ring = pto2_sm_layout::ring_header_addr(sm_dev_base, ring_id);
     last_task_alive = 0;
+    last_published_to_sm = 0;
+    publication_batching_enabled = false;
     advance_lock.store(0, std::memory_order_relaxed);
 #if SIMPLER_DFX
     dep_pool_snapshot_tail.store(1, std::memory_order_relaxed);
@@ -109,6 +111,8 @@ void PTO2SchedulerState::RingSchedState::reset_for_reuse(
 ) {
     ring = pto2_sm_layout::ring_header_addr(sm_dev_base, ring_id);
     last_task_alive = 0;
+    last_published_to_sm = 0;
+    publication_batching_enabled = false;
     advance_lock.store(0, std::memory_order_relaxed);
     dep_pool.reset_for_reuse(orch_err);
 #if SIMPLER_DFX
@@ -117,7 +121,10 @@ void PTO2SchedulerState::RingSchedState::reset_for_reuse(
 #endif
 }
 
-void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
+void PTO2SchedulerState::RingSchedState::destroy() {
+    publication_batching_enabled = false;
+    ring = nullptr;
+}
 
 PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity) {
     int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH];
@@ -161,6 +168,8 @@ bool PTO2SchedulerState::init_data_from_layout(
     PTO2SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
+    sched->publication_request_mask.store(0, std::memory_order_relaxed);
+    sched->publication_ack_mask.store(0, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -211,6 +220,9 @@ bool PTO2SchedulerState::init_data_from_layout(
         auto *dep_entries = static_cast<PTO2DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
         memset(dep_entries, 0, static_cast<size_t>(layout.dep_pool_capacities[r]) * sizeof(PTO2DepListEntry));
         sched->ring_sched_states[r].dep_pool.init(dep_entries, layout.dep_pool_capacities[r], orch_err);
+        sched->ring_sched_states[r].dep_pool.set_reclaim_publication_request(
+            &sched->publication_request_mask, &sched->publication_ack_mask, static_cast<uint8_t>(r)
+        );
     }
 
     return true;
@@ -220,6 +232,8 @@ void PTO2SchedulerState::reset_for_reuse(const PTO2SchedulerLayout &layout, void
     PTO2SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
     sched->advance_pending_mask.store(0, std::memory_order_relaxed);
+    sched->publication_request_mask.store(0, std::memory_order_relaxed);
+    sched->publication_ack_mask.store(0, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -262,8 +276,11 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
     }
     ready_queue_wire_arena_pointers(&sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots);
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        sched->ring_sched_states[r].dep_pool.base =
-            static_cast<PTO2DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
+        auto &dep_pool = sched->ring_sched_states[r].dep_pool;
+        dep_pool.base = static_cast<PTO2DepListEntry *>(arena.region_ptr(layout.off_dep_pool_entries[r]));
+        dep_pool.set_reclaim_publication_request(
+            &sched->publication_request_mask, &sched->publication_ack_mask, static_cast<uint8_t>(r)
+        );
     }
 }
 
@@ -456,6 +473,11 @@ bool PTO2OrchestratorState::reset_for_reuse(
             task_descs_dev, static_cast<int32_t>(task_window_sizes[r]), cur_idx_dev, last_alive_dev, ring_heap_base,
             heap_sizes[r], orch_err, slot_states_dev, 0, static_cast<uint8_t>(r)
         );
+        if (orch->scheduler != nullptr) {
+            orch->rings[r].task_allocator.set_reclaim_publication_request(
+                &orch->scheduler->publication_request_mask, &orch->scheduler->publication_ack_mask
+            );
+        }
         heap_offset += heap_sizes[r];
         orch->rings[r].fanin_pool.reset_for_reuse(orch_err);
     }
@@ -487,7 +509,7 @@ void PTO2OrchestratorState::wire_arena_pointers(
     orch->tensor_map.wire_arena_pointers(layout.tensor_map, arena);
     orch->scope_tasks = static_cast<PTO2TaskSlotState **>(arena.region_ptr(layout.off_scope_tasks));
     orch->scope_begins = static_cast<int32_t *>(arena.region_ptr(layout.off_scope_begins));
-    orch->scheduler = scheduler_arg;
+    orch->set_scheduler(scheduler_arg);
 }
 
 void PTO2OrchestratorState::destroy() {
@@ -501,7 +523,18 @@ void PTO2OrchestratorState::destroy() {
     orch->scope_begins = nullptr;
 }
 
-void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler) { this->scheduler = scheduler; }
+void PTO2OrchestratorState::set_scheduler(PTO2SchedulerState *scheduler_arg) {
+    scheduler = scheduler_arg;
+    if (scheduler == nullptr) return;
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        rings[r].task_allocator.set_reclaim_publication_request(
+            &scheduler->publication_request_mask, &scheduler->publication_ack_mask
+        );
+        rings[r].fanin_pool.set_reclaim_publication_request(
+            &scheduler->publication_request_mask, &scheduler->publication_ack_mask, static_cast<uint8_t>(r)
+        );
+    }
+}
 
 // =============================================================================
 // Top-level runtime arena
@@ -593,11 +626,37 @@ PTO2Runtime *runtime_init_data_from_layout(
     return rt;
 }
 
+static bool reclaim_publication_wiring_is_complete(const PTO2Runtime *rt) {
+    if (rt == nullptr || rt->orchestrator.scheduler != &rt->scheduler) return false;
+
+    const auto *request_mask = &rt->scheduler.publication_request_mask;
+    const auto *ack_mask = &rt->scheduler.publication_ack_mask;
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        uint8_t ring_id = static_cast<uint8_t>(r);
+        if (!rt->orchestrator.rings[r].task_allocator.reclaim_publication_is_wired_to(
+                request_mask, ack_mask, ring_id
+            ) ||
+            !rt->orchestrator.rings[r].fanin_pool.reclaim_publication_is_wired_to(request_mask, ack_mask, ring_id) ||
+            !rt->scheduler.ring_sched_states[r].dep_pool.reclaim_publication_is_wired_to(
+                request_mask, ack_mask, ring_id
+            )) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void enable_publication_batching_if_safe(PTO2Runtime *rt) {
+    rt->scheduler.set_publication_batching_enabled(reclaim_publication_wiring_is_complete(rt));
+}
+
 void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
+    rt->scheduler.set_publication_batching_enabled(false);
     rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.offsets.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.offsets.off_mailbox));
     rt->orchestrator.wire_arena_pointers(layout.offsets.orch, arena, &rt->scheduler);
     rt->scheduler.wire_arena_pointers(layout.offsets.sched, arena);
+    enable_publication_batching_if_safe(rt);
 }
 
 bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
@@ -605,6 +664,8 @@ bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &l
     if (rt == nullptr) {
         return false;
     }
+
+    rt->scheduler.set_publication_batching_enabled(false);
 
     rt->pending_scope_mode = PTO2ScopeMode::AUTO;
     rt->total_cycles = 0;
@@ -623,6 +684,7 @@ bool runtime_reset_for_reuse(DeviceArena &arena, const PTO2RuntimeArenaLayout &l
         return false;
     }
     rt->scheduler.reset_for_reuse(layout.offsets.sched, rt->sm_handle->sm_base);
+    enable_publication_batching_if_safe(rt);
     return true;
 }
 

@@ -60,7 +60,15 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
     int32_t prev_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
     uint64_t block_cycle0 = 0;  // wall-clock anchor for the deadlock backstop
     bool block_timing = false;  // false until the first no-reclaim-progress spin
+    ReclaimPublicationRequest publication_request(reclaim_request_mask, reclaim_ack_mask, ring_id);
+    bool watermark_synchronized = !publication_request.enabled();
     while (available() < needed) {
+        if (!watermark_synchronized && publication_request.poll_acknowledged()) {
+            prev_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
+            reclaim(ring, prev_last_alive);
+            watermark_synchronized = true;
+            if (available() >= needed) return true;
+        }
         reclaim(ring, prev_last_alive);
         if (available() >= needed) return true;
 
@@ -71,6 +79,7 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
             spin_count = 0;
             prev_last_alive = cur_last_alive;
             block_timing = false;
+            watermark_synchronized = !publication_request.enabled();
         } else if ((spin_count & 1023) == 0) {
             // A fatal latched elsewhere breaks this otherwise-unbounded spin; the
             // caller maps the failed ensure_space to orch_mark_fatal. Cold path.
@@ -85,7 +94,10 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+                publication_request.request();
+            }
+            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
                 LOG_ERROR("========================================");
                 LOG_ERROR("FATAL: Fanin Spill Pool Deadlock Detected!");
@@ -115,6 +127,7 @@ bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t neede
                 latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
                 return false;
             }
+            watermark_synchronized = !publication_request.enabled();
         }
         SPIN_WAIT_HINT();
     }
@@ -185,7 +198,15 @@ bool PTO2DepListPool::ensure_space(
     int32_t prev_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
     uint64_t block_cycle0 = 0;  // wall-clock anchor for the deadlock backstop
     bool block_timing = false;  // false until the first no-reclaim-progress spin
+    ReclaimPublicationRequest publication_request(reclaim_request_mask, reclaim_ack_mask, ring_id);
+    bool watermark_synchronized = !publication_request.enabled();
     while (available() < needed) {
+        if (!watermark_synchronized && publication_request.poll_acknowledged()) {
+            prev_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
+            reclaim(ring, prev_last_alive);
+            watermark_synchronized = true;
+            if (available() >= needed) return true;
+        }
         reclaim(ring, prev_last_alive);
         if (available() >= needed) return true;
 
@@ -196,18 +217,28 @@ bool PTO2DepListPool::ensure_space(
             spin_count = 0;
             prev_last_alive = cur_last_alive;
             block_timing = false;
+            // Natural K-batched progress invalidates an older exact-publication
+            // acknowledgment before structural head classification.
+            watermark_synchronized = !publication_request.enabled();
         } else if ((spin_count & 1023) == 0) {
             // A fatal latched elsewhere breaks this otherwise-unbounded spin; the
             // caller maps the failed ensure_space to orch_mark_fatal. Cold path.
             if (error_code_ptr != nullptr && error_code_ptr->load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
                 return false;
             }
-            // (1) Structural, immediate: no open scope can end while this
-            // orchestrator is blocked here, so its oldest task on this ring
-            // cannot become CONSUMED.
-            bool head_is_oldest_open_task = oldest_open_task != nullptr && ring.slot_states != nullptr &&
-                                            oldest_open_task == &ring.get_slot_state_by_task_id(cur_last_alive);
-            if (head_is_oldest_open_task) {
+            // (1) Structural, after publication acknowledgment: no open scope
+            // can end while this orchestrator is blocked here, so the
+            // synchronized oldest task on this ring cannot become CONSUMED.
+            uint64_t now = get_sys_cnt_aicpu();
+            if (!block_timing) {
+                block_cycle0 = now;
+                block_timing = true;
+            } else if (!watermark_synchronized && now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+                publication_request.request();
+            }
+            bool head_is_oldest_open_task = ring.slot_states != nullptr &&
+                                            reclaim_head_matches_open_task(cur_last_alive, ring_id, oldest_open_task);
+            if (watermark_synchronized && head_is_oldest_open_task) {
                 report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/true);
                 latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
                 return false;
@@ -215,15 +246,12 @@ bool PTO2DepListPool::ensure_space(
             // (2) Wall-clock backstop for the residual case the head test cannot
             // prove. Absolute time (get_sys_cnt_aicpu is an MMIO read), sampled
             // once per 1024 spins.
-            uint64_t now = get_sys_cnt_aicpu();
-            if (!block_timing) {
-                block_cycle0 = now;
-                block_timing = true;
-            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/false);
                 latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
                 return false;
             }
+            watermark_synchronized = !publication_request.enabled();
         }
         SPIN_WAIT_HINT();
     }
