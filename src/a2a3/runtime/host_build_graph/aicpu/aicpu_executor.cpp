@@ -94,6 +94,14 @@ struct AicpuExecutor {
     std::atomic<int32_t> hs_arrived_{0};
     std::atomic<int32_t> hs_thread_seq_{0};
 
+    // Parallel-boot-classify coordination (see AicpuExecutor::run). classify_ready_
+    // is published by the boot leader once its leader-only orchestration setup is
+    // visible; classify_arrived_ is the barrier counting threads that finished
+    // their slice of the initial classify. Both are one-shot per run and reset in
+    // deinit().
+    std::atomic<bool> classify_ready_{false};
+    std::atomic<int32_t> classify_arrived_{0};
+
     int32_t aicpu_thread_num_{0};
 
     // ===== Task queue state (managed by scheduler ready queues) =====
@@ -291,16 +299,38 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             LOG_INFO_V0("Thread %d: host-orch boot complete (%d tasks)", thread_idx, runtime->host_total_tasks);
         }
 
-        runtime_init_ready_.store(true, std::memory_order_release);
+        // Publish "leader setup done" (SM attached, task count latched, queues
+        // allocated). Every thread then classifies its slice below before any of
+        // them may dispatch — the leader holds runtime_init_ready_ until then.
+        classify_ready_.store(true, std::memory_order_release);
     }
 
-    // Every AICPU thread schedules its assigned cores; the boot thread above
-    // falls through to here after publishing runtime_init_ready_.
-    if (!sched_ctx_.is_completed()) {
-        // Wait for the boot thread to attach the SM header and publish the task count.
+    // Parallel initial classify. Every AICPU thread waits for the leader's
+    // orchestration setup, seeds its disjoint slice of the whole graph's ready
+    // set + wake lists, then barriers. Only once all slices are done does the
+    // leader publish runtime_init_ready_, so no thread dispatches against a
+    // half-seeded graph. This replaces the O(total_tasks) serial classify the
+    // leader used to run alone while the others idle-waited.
+    while (!classify_ready_.load(std::memory_order_acquire)) {
+        SPIN_WAIT_HINT();
+    }
+    if (!sched_ctx_.is_completed() && rt != nullptr) {
+        sched_ctx_.classify_partition(thread_idx, aicpu_thread_num_);
+    }
+    classify_arrived_.fetch_add(1, std::memory_order_acq_rel);
+    if (thread_idx == aicpu_thread_num_ - 1) {
+        while (classify_arrived_.load(std::memory_order_acquire) < aicpu_thread_num_) {
+            SPIN_WAIT_HINT();
+        }
+        runtime_init_ready_.store(true, std::memory_order_release);
+    } else {
         while (!runtime_init_ready_.load(std::memory_order_acquire)) {
             SPIN_WAIT_HINT();
         }
+    }
+
+    // Every AICPU thread schedules its assigned cores.
+    if (!sched_ctx_.is_completed()) {
         if (rt == nullptr) {
             LOG_ERROR("Thread %d: rt is null after orchestrator error, skipping dispatch", thread_idx);
         } else {
@@ -369,6 +399,8 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     hs_setup_done_.store(false, std::memory_order_release);
     hs_arrived_.store(0, std::memory_order_release);
     hs_thread_seq_.store(0, std::memory_order_release);
+    classify_ready_.store(false, std::memory_order_release);
+    classify_arrived_.store(0, std::memory_order_release);
     thread_idx_.store(0, std::memory_order_release);
     finished_.store(false, std::memory_order_release);
 

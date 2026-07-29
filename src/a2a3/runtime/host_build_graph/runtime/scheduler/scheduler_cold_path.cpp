@@ -1098,33 +1098,11 @@ void SchedulerContext::on_orchestration_done(
         }
     }
 
-    // Polling initial classify (device boot): the host built the whole graph and
-    // no producer has executed yet — every completion_flags byte is 0 except the
-    // hidden-alloc tasks the host completed inline (pre-set to 1). Classify each
-    // submitted task exactly once: route roots (all fanin met) to the ready queues
-    // and register the rest on their first unmet producer's wake list. This
-    // replaces the host-side wiring drain the wiring model deferred to a device
-    // queue. Runs on the boot leader BEFORE the caller publishes
-    // runtime_init_ready_ (release), so it is race-free against the scheduler
-    // threads (they acquire that store before dispatching) and nothing completes
-    // during the scan.
-    if (orch_err == PTO2_ERROR_NONE && sched_->ring_sched_state.ring != nullptr) {
-        PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
-        const int32_t submitted = ring.fc.current_task_index.load(std::memory_order_acquire);
-        for (int32_t id = 0; id < submitted; id++) {
-            if (ring.is_completion_flag_set(id)) {
-                continue;  // completed on the host (hidden alloc); nothing to dispatch
-            }
-            PTO2TaskSlotState &s = ring.get_slot_state_by_task_id(id);
-            int32_t state = sched_->classify_fanin_state(&s);
-            if (state < 0) {
-                sched_->push_ready_routed(&s);
-            } else {
-                int32_t prod_local = s.payload->fanin_local_ids[state];
-                sched_->register_wake(&ring.get_slot_state_by_task_id(prod_local), &s);
-            }
-        }
-    }
+    // The polling initial classify (seed the ready queues + wake lists for the
+    // whole graph) runs AFTER this, partitioned across all AICPU threads in
+    // classify_partition() — see AicpuExecutor::run. It is kept out of this
+    // leader-only setup so the O(total_tasks) scan is not serial on one thread
+    // while the others idle-wait for runtime_init_ready_.
 
 #if SIMPLER_DFX
     // Write the core-to-thread mapping so the profiling data reflects the
@@ -1138,4 +1116,44 @@ void SchedulerContext::on_orchestration_done(
         }
     }
 #endif
+}
+
+// Polling initial classify (device boot), partitioned across all AICPU threads.
+// The host built the whole graph and no producer has executed yet — every
+// completion_flags byte is 0 except the hidden-alloc tasks the host completed
+// inline (pre-set to 1). Each thread classifies its contiguous slice of the
+// submitted-task range exactly once: route roots (all fanin met) to the ready
+// queues and register the rest on their first unmet producer's wake list.
+//
+// This is the same work the wiring model deferred to a device queue, now run
+// N-way parallel. push_ready_routed (MPMC ready queues) and register_wake
+// (lock-free wake-list CAS) are the same concurrency-safe primitives the
+// scheduler threads use during the run, and at boot no producer has completed
+// (wake_list heads are nullptr, never SENTINEL), so registration never
+// re-classifies. The caller barriers all threads here BEFORE any of them
+// publishes runtime_init_ready_, so the whole ready-set / wake-list graph is
+// fully seeded before the first dispatch.
+void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) {
+    if (completed_.load(std::memory_order_acquire) || sched_->ring_sched_state.ring == nullptr) {
+        return;
+    }
+    PTO2SharedMemoryRingHeader &ring = *sched_->ring_sched_state.ring;
+    const int32_t submitted = ring.fc.current_task_index.load(std::memory_order_acquire);
+    // Disjoint contiguous slices covering [0, submitted): thread t owns
+    // [submitted*t/nthreads, submitted*(t+1)/nthreads). int64 math avoids overflow.
+    const int32_t lo = static_cast<int32_t>((static_cast<int64_t>(submitted) * thread_idx) / nthreads);
+    const int32_t hi = static_cast<int32_t>((static_cast<int64_t>(submitted) * (thread_idx + 1)) / nthreads);
+    for (int32_t id = lo; id < hi; id++) {
+        if (ring.is_completion_flag_set(id)) {
+            continue;  // completed on the host (hidden alloc); nothing to dispatch
+        }
+        PTO2TaskSlotState &s = ring.get_slot_state_by_task_id(id);
+        int32_t state = sched_->classify_fanin_state(&s);
+        if (state < 0) {
+            sched_->push_ready_routed(&s);
+        } else {
+            int32_t prod_local = s.payload->fanin_local_ids[state];
+            sched_->register_wake(&ring.get_slot_state_by_task_id(prod_local), &s);
+        }
+    }
 }
