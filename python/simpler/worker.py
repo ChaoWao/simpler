@@ -450,22 +450,28 @@ _IdentitySnapshotEntry = tuple[bytes, Any, int, str, str]
 
 
 class _ChildProvEntry:
-    """Provenance record for one exact ``(worker_id, device_ptr)`` child pointer.
+    """Provenance record for one exact ``(worker_id, device_ptr)`` allocation base.
 
     Typed rather than a bare presence bit because the same ``(worker_id, ptr)``
     can carry more than one role at once: a ``malloc`` base and a CommDomain
     window / carved buffer pointer can legally alias the same device address.
     The key is live while ``malloc_owned or domain_allocation_ids``; only an
     exact ``malloc`` base is ``free``-able, while a domain pointer is revoked by
-    its domain's release. Interior pointers are never recorded, so a pointer
-    that merely lands inside a live allocation has no entry and is rejected.
+    its domain's release.
+
+    ``ptr`` is the allocation's base; each role also carries the allocation's
+    byte extent so a copy landing at ``base + offset`` can be validated against
+    ``[base, base + extent)``. ``malloc_size`` is the ``malloc`` extent (0 when
+    not malloc-owned); ``domain_allocation_ids`` maps each owning CommDomain
+    allocation id to the extent of the window / buffer recorded at this base.
     """
 
-    __slots__ = ("malloc_owned", "domain_allocation_ids")
+    __slots__ = ("malloc_owned", "malloc_size", "domain_allocation_ids")
 
     def __init__(self) -> None:
         self.malloc_owned: bool = False
-        self.domain_allocation_ids: set[int] = set()
+        self.malloc_size: int = 0
+        self.domain_allocation_ids: dict[int, int] = {}
 
     def is_live(self) -> bool:
         """True iff this entry still carries a role. A role-less entry is dead —
@@ -473,6 +479,15 @@ class _ChildProvEntry:
         entry momentarily left empty (e.g. an interrupted revoke) never
         re-authorizes a freed pointer."""
         return self.malloc_owned or bool(self.domain_allocation_ids)
+
+    def live_extent(self) -> int:
+        """Byte extent of the largest live role recorded at this base. A copy
+        range is admitted iff it fits within ``[base, base + live_extent())``,
+        so aliased roles of differing sizes admit up to the widest of them."""
+        extent = self.malloc_size if self.malloc_owned else 0
+        if self.domain_allocation_ids:
+            extent = max(extent, *self.domain_allocation_ids.values())
+        return extent
 
 
 @dataclass
@@ -5338,11 +5353,14 @@ class Worker:
         # one of them is validated against its owning chip. Revoked by
         # _release_domain_now just before the backend free (a commit barrier),
         # not by the deferred marker — so the deferred window stays dispatchable.
+        buf_nbytes = {b.name: int(b.nbytes) for b in buffers}
         with self._child_prov_lock:
             for chip_idx, ctx in contexts.items():
-                self._child_prov_record_domain(chip_idx, int(ctx.local_window_base), allocation_id)
-                for buf_ptr in ctx.buffer_ptrs.values():
-                    self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id)
+                self._child_prov_record_domain(
+                    chip_idx, int(ctx.local_window_base), allocation_id, int(ctx.actual_window_size)
+                )
+                for buf_name, buf_ptr in ctx.buffer_ptrs.items():
+                    self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id, buf_nbytes[buf_name])
         return handle
 
     def _release_domain_handle(self, handle: CommDomainHandle, resources: _RunResources) -> None:
@@ -5605,17 +5623,20 @@ class Worker:
     # successful native alloc; revoke before the native free.
     # ------------------------------------------------------------------
 
-    def _child_prov_record_malloc(self, worker_id: int, ptr: int) -> None:
-        """Mark ``(worker_id, ptr)`` as a live malloc base (after a successful malloc)."""
+    def _child_prov_record_malloc(self, worker_id: int, ptr: int, size: int) -> None:
+        """Mark ``(worker_id, ptr)`` as a live malloc base spanning ``size`` bytes
+        (after a successful malloc)."""
         entry = self._child_alloc_prov.get((worker_id, ptr))
         if entry is None:
             # Fully initialise the role BEFORE inserting, so the dict never holds
             # a role-less (dead) entry even if an async unwind lands here.
             entry = _ChildProvEntry()
             entry.malloc_owned = True
+            entry.malloc_size = size
             self._child_alloc_prov[(worker_id, ptr)] = entry
         else:
             entry.malloc_owned = True
+            entry.malloc_size = size
 
     def _child_prov_require_malloc_base(self, worker_id: int, ptr: int, *, api: str) -> None:
         """Require ``(worker_id, ptr)`` to be an exact live malloc base (freeable).
@@ -5644,22 +5665,46 @@ class Worker:
         else:
             del self._child_alloc_prov[key]  # last role — delete directly, no empty state
 
-    def _child_prov_require_live(self, worker_id: int, ptr: int, *, api: str) -> None:
-        """Require ``(worker_id, ptr)`` to be a live child pointer (malloc or domain)."""
-        entry = self._child_alloc_prov.get((worker_id, ptr))
-        if entry is None or not entry.is_live():
-            raise ValueError(
-                f"Worker.{api}: device pointer 0x{ptr:x} is not a live allocation on worker "
-                f"{worker_id} (wrong worker, freed/stale, or an interior pointer)"
-            )
+    def _child_prov_require_live_range(self, worker_id: int, ptr: int, nbytes: int, *, api: str) -> None:
+        """Require ``[ptr, ptr + nbytes)`` to lie wholly within one live allocation
+        (malloc or domain) on ``worker_id``.
 
-    def _child_prov_record_domain(self, worker_id: int, ptr: int, allocation_id: int) -> None:
-        """Record a CommDomain window / buffer pointer at exact ``(worker_id, ptr)``."""
+        Accepts an interior range of a live allocation — ``base + offset`` up to
+        the allocation's extent — so a partial update of a persistent buffer is
+        valid. Still rejects a wrong-worker pointer, a freed/stale pointer, and a
+        range that overruns its allocation. Python ints are unbounded, so the
+        ``ptr + nbytes`` bound is exact with no wraparound.
+
+        A copy to the exact base is the common case and resolves in O(1); only an
+        interior address falls back to scanning the worker's live allocations.
+        """
+        if nbytes < 0:
+            raise ValueError(f"Worker.{api}: nbytes must be non-negative, got {nbytes}")
+        exact = self._child_alloc_prov.get((worker_id, ptr))
+        if exact is not None and exact.is_live() and nbytes <= exact.live_extent():
+            return
+        end = ptr + nbytes
+        for (wid, base), entry in self._child_alloc_prov.items():
+            if wid != worker_id or base >= ptr or not entry.is_live():
+                continue
+            if end <= base + entry.live_extent():
+                return
+        raise ValueError(
+            f"Worker.{api}: device range [0x{ptr:x}, 0x{ptr:x}+{nbytes}) is not contained in a live "
+            f"allocation on worker {worker_id} (wrong worker, freed/stale, or out of allocation range)"
+        )
+
+    def _child_prov_record_domain(self, worker_id: int, ptr: int, allocation_id: int, extent: int) -> None:
+        """Record a CommDomain window / buffer pointer at exact ``(worker_id, ptr)``,
+        spanning ``extent`` bytes from that base. A carved buffer at offset 0
+        aliases its window's base under the same allocation id; keep the widest
+        extent so recording the smaller buffer never narrows the window's range."""
         entry = self._child_alloc_prov.get((worker_id, ptr))
         if entry is None:
             entry = _ChildProvEntry()
             self._child_alloc_prov[(worker_id, ptr)] = entry
-        entry.domain_allocation_ids.add(allocation_id)
+        prior = entry.domain_allocation_ids.get(allocation_id, 0)
+        entry.domain_allocation_ids[allocation_id] = max(prior, extent)
 
     def _child_prov_drop_domain(self, allocation_id: int) -> None:
         """Drop every pointer recorded by a CommDomain allocation (at the start of
@@ -5669,7 +5714,7 @@ class Worker:
             if allocation_id not in entry.domain_allocation_ids:
                 continue
             if entry.malloc_owned or len(entry.domain_allocation_ids) > 1:
-                entry.domain_allocation_ids.discard(allocation_id)  # other roles remain
+                del entry.domain_allocation_ids[allocation_id]  # other roles remain
             else:
                 del self._child_alloc_prov[key]  # last role — delete directly, no empty state
 
@@ -5738,7 +5783,7 @@ class Worker:
                 # provenance is keyed on the canonical worker 0.
                 with self._child_prov_lock:
                     ptr = self._chip_worker.malloc(size)
-                    self._child_prov_record_malloc(0, int(ptr))
+                    self._child_prov_record_malloc(0, int(ptr), int(size))
                     return ptr
             self._check_chip_worker_id(worker_id)
             assert self._orch is not None
@@ -5767,7 +5812,7 @@ class Worker:
             if self.level == 2:
                 assert self._chip_worker is not None
                 with self._child_prov_lock:
-                    self._child_prov_require_live(0, int(dst), api="copy_to")
+                    self._child_prov_require_live_range(0, int(dst), int(size), api="copy_to")
                     self._chip_worker.copy_to(dst, src, size)
                 return
             self._check_chip_worker_id(worker_id)
@@ -5780,7 +5825,7 @@ class Worker:
             if self.level == 2:
                 assert self._chip_worker is not None
                 with self._child_prov_lock:
-                    self._child_prov_require_live(0, int(src), api="copy_from")
+                    self._child_prov_require_live_range(0, int(src), int(size), api="copy_from")
                     self._chip_worker.copy_from(dst, src, size)
                 return
             self._check_chip_worker_id(worker_id)

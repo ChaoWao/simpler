@@ -62,8 +62,8 @@ else raises. Remote-worker and remote-memory calls require `level >= 4`.
 | ------ | ----- |
 | `malloc(size, worker_id=0) -> int` | Returns a device pointer as an integer |
 | `free(ptr, worker_id=0)` | |
-| `copy_to(dst, src, size, worker_id=0)` | H2D; `dst` is a device pointer, `src` a host address |
-| `copy_from(dst, src, size, worker_id=0)` | D2H; `dst` is the host address |
+| `copy_to(dst, src, size, worker_id=0)` | H2D; `dst` is a device pointer, `src` a host address. `dst` may be a `base + offset` interior address as long as `[dst, dst + size)` lies within one live allocation (partial update of a persistent buffer) |
+| `copy_from(dst, src, size, worker_id=0)` | D2H; `dst` is the host address. `src` may be an interior address whose `[src, src + size)` lies within one live device allocation |
 | `create_host_buffer(nbytes) -> HostBuffer` / `free_host_buffer(handle)` | Host-side buffer the device can reach |
 | `remote_malloc` / `remote_free` / `remote_copy_to` / `remote_copy_from` / `remote_export` / `remote_import` / `remote_release_import` | L4 only |
 

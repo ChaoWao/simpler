@@ -8,13 +8,15 @@
 # -----------------------------------------------------------------------------------------------------------
 """G2 — device-address guard ②: kind4 (child_memory) pointer provenance.
 
-Device-free tests that pin the guard's contract: a child device pointer is
-tracked by its exact ``(worker_id, ptr)`` provenance so it is never freed,
-copied, or dispatched to the wrong next-level worker, and a stale (freed)
-pointer is rejected before reuse. Covers every real entry — ``Worker.malloc``
-(L2), ``orch.malloc/copy/free`` (L3, the path that bypasses ``Worker.malloc``),
-``submit_next_level`` / ``submit_next_level_group`` dispatch, and CommDomain
-window pointers — plus the explicit boundary that strict ABA is NOT covered.
+Device-free tests that pin the guard's contract: a child device allocation is
+tracked by its ``(worker_id, base)`` provenance and byte extent. ``free`` and
+kind4 dispatch require the exact base; ``copy_to`` / ``copy_from`` accept any
+range wholly within a live allocation (a ``base + offset`` partial update), but
+still reject a wrong-worker, stale, or out-of-range address. Covers every real
+entry — ``Worker.malloc`` (L2), ``orch.malloc/copy/free`` (L3, the path that
+bypasses ``Worker.malloc``), ``submit_next_level`` /
+``submit_next_level_group`` dispatch, and CommDomain window pointers — plus the
+explicit boundary that strict ABA is NOT covered.
 """
 
 from __future__ import annotations
@@ -40,9 +42,9 @@ def _child_args(ptr: int, *, n: int = 16) -> TaskArgs:
     return args
 
 
-def _record_malloc(w: Worker, worker_id: int, ptr: int) -> None:
+def _record_malloc(w: Worker, worker_id: int, ptr: int, size: int = 64) -> None:
     with w._child_prov_lock:
-        w._child_prov_record_malloc(worker_id, ptr)
+        w._child_prov_record_malloc(worker_id, ptr, size)
 
 
 # ----------------------------------------------------------------------------
@@ -54,12 +56,12 @@ class TestProvenanceTable:
     def test_malloc_base_is_live_then_freed(self):
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_malloc(0, 0x1000)
-            w._child_prov_require_live(0, 0x1000, api="copy_to")  # no raise
+            w._child_prov_record_malloc(0, 0x1000, 64)
+            w._child_prov_require_live_range(0, 0x1000, 64, api="copy_to")  # no raise
             w._child_prov_require_malloc_base(0, 0x1000, api="free")  # no raise
             w._child_prov_clear_malloc(0, 0x1000)
-            with pytest.raises(ValueError, match="not a live allocation"):
-                w._child_prov_require_live(0, 0x1000, api="copy_to")
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x1000, 64, api="copy_to")
 
     def test_free_of_unknown_pointer_rejected(self):
         w = _l3()
@@ -69,43 +71,57 @@ class TestProvenanceTable:
     def test_double_free_stale_before_reuse_rejected(self):
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_malloc(0, 0x1000)
+            w._child_prov_record_malloc(0, 0x1000, 64)
             w._child_prov_clear_malloc(0, 0x1000)
             with pytest.raises(ValueError, match="already-freed/stale"):
                 w._child_prov_require_malloc_base(0, 0x1000, api="free")
 
-    def test_interior_pointer_is_not_a_live_entry(self):
+    def test_interior_range_is_accepted_edges_rejected(self):
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_malloc(0, 0x1000)
-            # A pointer physically inside the allocation has no exact entry.
-            with pytest.raises(ValueError, match="interior"):
-                w._child_prov_require_live(0, 0x1008, api="copy_to")
+            w._child_prov_record_malloc(0, 0x1000, 64)
+            # A range wholly inside the allocation is a valid partial update.
+            w._child_prov_require_live_range(0, 0x1020, 16, api="copy_to")
+            w._child_prov_require_live_range(0, 0x1000, 64, api="copy_to")  # exact fill
+            # One byte past the end overruns the allocation.
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x103F, 2, api="copy_to")
+            # A base below the allocation is out of range too.
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x0FFF, 4, api="copy_to")
+
+    def test_free_still_requires_exact_base_not_interior(self):
+        # copy accepts interior ranges, but free must still hit the exact base.
+        w = _l3()
+        with w._child_prov_lock:
+            w._child_prov_record_malloc(0, 0x1000, 64)
+            with pytest.raises(ValueError, match="not a live malloc base"):
+                w._child_prov_require_malloc_base(0, 0x1020, api="free")
 
     def test_same_numeric_va_on_two_workers_is_independent(self):
         # A raw device VA is not globally unique; the composite key keeps two
         # chips' identical numeric addresses independent.
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_malloc(0, 0x4000)
-            w._child_prov_record_malloc(1, 0x4000)
+            w._child_prov_record_malloc(0, 0x4000, 64)
+            w._child_prov_record_malloc(1, 0x4000, 64)
             w._child_prov_clear_malloc(0, 0x4000)
-            with pytest.raises(ValueError, match="not a live allocation"):
-                w._child_prov_require_live(0, 0x4000, api="copy_to")
-            w._child_prov_require_live(1, 0x4000, api="copy_to")  # survives
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x4000, 64, api="copy_to")
+            w._child_prov_require_live_range(1, 0x4000, 64, api="copy_to")  # survives
 
     def test_domain_pointer_is_not_freeable_but_is_dispatchable(self):
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_domain(0, 0x8000, allocation_id=7)
+            w._child_prov_record_domain(0, 0x8000, allocation_id=7, extent=64)
             # usable for copy / dispatch
-            w._child_prov_require_live(0, 0x8000, api="copy_to")
+            w._child_prov_require_live_range(0, 0x8000, 64, api="copy_to")
             # but not free-able — domains are revoked by release, not free()
             with pytest.raises(ValueError, match="CommDomain buffer"):
                 w._child_prov_require_malloc_base(0, 0x8000, api="free")
             w._child_prov_drop_domain(7)
-            with pytest.raises(ValueError, match="not a live allocation"):
-                w._child_prov_require_live(0, 0x8000, api="copy_to")
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x8000, 64, api="copy_to")
 
     def test_malloc_and_domain_alias_same_pointer(self):
         # A malloc base and a domain buffer can alias the same (worker, ptr).
@@ -113,13 +129,13 @@ class TestProvenanceTable:
         # the domain removes it.
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_malloc(0, 0x9000)
-            w._child_prov_record_domain(0, 0x9000, allocation_id=3)
+            w._child_prov_record_malloc(0, 0x9000, 64)
+            w._child_prov_record_domain(0, 0x9000, allocation_id=3, extent=64)
             w._child_prov_clear_malloc(0, 0x9000)
-            w._child_prov_require_live(0, 0x9000, api="copy_to")  # still live via domain
+            w._child_prov_require_live_range(0, 0x9000, 64, api="copy_to")  # still live via domain
             w._child_prov_drop_domain(3)
-            with pytest.raises(ValueError, match="not a live allocation"):
-                w._child_prov_require_live(0, 0x9000, api="copy_to")
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x9000, 64, api="copy_to")
 
     def test_empty_entry_is_not_live_fail_closed(self):
         # A role-less entry (e.g. one left by an interrupted revoke) must never be
@@ -128,8 +144,8 @@ class TestProvenanceTable:
         w = _l3()
         w._child_alloc_prov[(0, 0x1000)] = _ChildProvEntry()  # both roles empty
         with w._child_prov_lock:
-            with pytest.raises(ValueError, match="not a live allocation"):
-                w._child_prov_require_live(0, 0x1000, api="copy_to")
+            with pytest.raises(ValueError, match="not contained in a live allocation"):
+                w._child_prov_require_live_range(0, 0x1000, 64, api="copy_to")
             with pytest.raises(ValueError, match="not a live malloc base"):
                 w._child_prov_require_malloc_base(0, 0x1000, api="free")
             with pytest.raises(ValueError, match="not a live allocation on target worker 0"):
@@ -141,10 +157,10 @@ class TestProvenanceTable:
         # live one without the fail-closed guard).
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_domain(0, 0x5000, allocation_id=1)
+            w._child_prov_record_domain(0, 0x5000, allocation_id=1, extent=64)
             w._child_prov_drop_domain(1)
             assert (0, 0x5000) not in w._child_alloc_prov
-            w._child_prov_record_malloc(0, 0x6000)
+            w._child_prov_record_malloc(0, 0x6000, 64)
             w._child_prov_clear_malloc(0, 0x6000)
             assert (0, 0x6000) not in w._child_alloc_prov
 
@@ -155,10 +171,10 @@ class TestProvenanceTable:
         # handles; this guard only catches stale-BEFORE-reuse.
         w = _l3()
         with w._child_prov_lock:
-            w._child_prov_record_malloc(0, 0x1000)
+            w._child_prov_record_malloc(0, 0x1000, 64)
             w._child_prov_clear_malloc(0, 0x1000)
-            w._child_prov_record_malloc(0, 0x1000)  # device handed back the same VA
-            w._child_prov_require_live(0, 0x1000, api="copy_to")  # NOT rejected — by design
+            w._child_prov_record_malloc(0, 0x1000, 64)  # device handed back the same VA
+            w._child_prov_require_live_range(0, 0x1000, 64, api="copy_to")  # NOT rejected — by design
 
 
 # ----------------------------------------------------------------------------
@@ -213,19 +229,55 @@ class TestOrchestratorMemoryOps:
         fake = MagicMock()
         fake.malloc.return_value = 0x2000
         o = Orchestrator(fake, w)
-        with pytest.raises(ValueError, match="not a live allocation"):
+        with pytest.raises(ValueError, match="not contained in a live allocation"):
             o.copy_to(0, 0x2000, 0xABCD, 64)
         fake.copy_to.assert_not_called()
         o.malloc(0, 64)
         o.copy_to(0, 0x2000, 0xABCD, 64)
         fake.copy_to.assert_called_once()
 
+    def test_copy_to_interior_range_within_allocation_passes(self):
+        # A partial update wholly inside a live allocation is valid (issue #1537).
+        w = _l3()
+        fake = MagicMock()
+        fake.malloc.return_value = 0x2000
+        o = Orchestrator(fake, w)
+        o.malloc(0, 64)
+        o.copy_to(0, 0x2020, 0xABCD, 16)  # base + 32, 16 bytes — inside [0x2000, 0x2040)
+        fake.copy_to.assert_called_once_with(0, 0x2020, 0xABCD, 16)
+
+    def test_copy_to_range_overrunning_allocation_rejected(self):
+        w = _l3()
+        fake = MagicMock()
+        fake.malloc.return_value = 0x2000
+        o = Orchestrator(fake, w)
+        o.malloc(0, 64)
+        with pytest.raises(ValueError, match="not contained in a live allocation"):
+            o.copy_to(0, 0x203F, 0xABCD, 2)  # last byte at 0x2040 == base + size
+        fake.copy_to.assert_not_called()
+
+    def test_copy_to_domain_window_chunk_not_narrowed_by_aliasing_buffer(self):
+        # A carved buffer at offset 0 aliases the window base under the same
+        # allocation id; recording its smaller extent must not shrink the
+        # window's copy range (a large chunk into the window must still pass).
+        w = _l3()
+        fake = MagicMock()
+        o = Orchestrator(fake, w)
+        with w._child_prov_lock:
+            w._child_prov_record_domain(0, 0x4000, allocation_id=7, extent=2 << 20)
+            w._child_prov_record_domain(0, 0x4000, allocation_id=7, extent=4)  # buffer #0 aliases the base
+        o.copy_to(0, 0x4000, 0xABCD, 1 << 20)  # 1 MiB into a 2 MiB window
+        fake.copy_to.assert_called_once_with(0, 0x4000, 0xABCD, 1 << 20)
+        with pytest.raises(ValueError, match="not contained in a live allocation"):
+            o.copy_to(0, 0x4000, 0xABCD, (2 << 20) + 1)  # one byte past the window
+        assert fake.copy_to.call_count == 1
+
     def test_copy_from_requires_live_device_src(self):
         w = _l3()
         fake = MagicMock()
         fake.malloc.return_value = 0x3000
         o = Orchestrator(fake, w)
-        with pytest.raises(ValueError, match="not a live allocation"):
+        with pytest.raises(ValueError, match="not contained in a live allocation"):
             o.copy_from(0, 0xABCD, 0x3000, 64)
         fake.copy_from.assert_not_called()
 
@@ -349,7 +401,7 @@ class TestSubmitDispatchGuard:
         w = _l3()
         w._chip_shms = [object(), object()]
         with w._child_prov_lock:
-            w._child_prov_record_domain(0, 0x5000, allocation_id=42)
+            w._child_prov_record_domain(0, 0x5000, allocation_id=42, extent=64)
         fake = MagicMock()
         o = Orchestrator(fake, w)
         o.submit_next_level(object(), _child_args(0x5000), None, worker=0)
@@ -406,12 +458,26 @@ class TestL2WorkerPath:
 
     def test_l2_copy_to_requires_live_dst(self):
         w, chip = self._l2()
-        with pytest.raises(ValueError, match="not a live allocation"):
+        with pytest.raises(ValueError, match="not contained in a live allocation"):
             w.copy_to(0x2000, 0xABCD, 64)
         chip.copy_to.assert_not_called()
         w.malloc(64)
         w.copy_to(0x2000, 0xABCD, 64)
         chip.copy_to.assert_called_once()
+
+    def test_l2_copy_to_interior_range_passes(self):
+        # base + offset partial update on the single chip (issue #1537).
+        w, chip = self._l2()
+        w.malloc(64)  # chip.malloc returns 0x2000
+        w.copy_to(0x2020, 0xABCD, 16)
+        chip.copy_to.assert_called_once_with(0x2020, 0xABCD, 16)
+
+    def test_l2_free_of_interior_pointer_rejected(self):
+        w, chip = self._l2()
+        w.malloc(64)
+        with pytest.raises(ValueError, match="not a live malloc base"):
+            w.free(0x2020)
+        chip.free.assert_not_called()
 
 
 # ----------------------------------------------------------------------------
@@ -518,8 +584,8 @@ class TestDomainReleaseOrdering:
         w = _l3()
         w._worker = MagicMock()  # non-None so _release_domain_now proceeds
         with w._child_prov_lock:
-            w._child_prov_record_domain(0, 0x5000, allocation_id=9)
-            w._child_prov_record_domain(1, 0x6000, allocation_id=9)
+            w._child_prov_record_domain(0, 0x5000, allocation_id=9, extent=64)
+            w._child_prov_record_domain(1, 0x6000, allocation_id=9, extent=64)
         handle = SimpleNamespace(name="d", workers=(0, 1), allocation_id=9)
         return w, handle
 
