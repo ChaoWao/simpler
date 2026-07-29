@@ -82,6 +82,13 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
     return &contract;
 }
 
+extern "C" int concurrent_native_prepare_supported_impl(void) {
+    // HBG can materialize a complete graph into the lease-selected unpublished
+    // arena bank. The common C API keeps collector-bearing configurations on
+    // the sequential path until their state is per-epoch.
+    return 1;
+}
+
 // RuntimeEnv (call_config.h) is the cross-runtime ABI for per-ring config and
 // carries RUNTIME_ENV_RING_COUNT slots, shared with tensormap_and_ringbuffer.
 // host_build_graph is single-ring (PTO2_MAX_RING_DEPTH == 1) and reads only the

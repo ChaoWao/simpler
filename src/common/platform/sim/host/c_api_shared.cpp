@@ -774,6 +774,21 @@ int simpler_run(
     return finalize_rc != 0 ? finalize_rc : rc;
 }
 
+int supports_concurrent_native_prepare_ctx(DeviceContextHandle) { return 0; }
+
+int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value) {
+    if (ctx == NULL) return -1;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(ctx)->set_task_accepted_state(state, accepted_value);
+    } catch (...) {
+        return -1;
+    }
+}
+
+int set_native_run_identity_ctx(DeviceContextHandle ctx, uint64_t, uint64_t, uint64_t, uint64_t) {
+    return ctx == NULL ? -1 : 0;
+}
+
 int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
     if (ctx == NULL) return -1;
     SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);

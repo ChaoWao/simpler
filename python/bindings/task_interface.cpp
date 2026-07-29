@@ -1691,7 +1691,9 @@ NB_MODULE(_task_interface, m) {
     nb::class_<ChipWorkerNativeRun>(m, "_ChipWorkerNativeRun")
         .def_ro("slot_id", &ChipWorkerNativeRun::slot_id)
         .def_ro("generation", &ChipWorkerNativeRun::generation)
-        .def_ro("run_epoch", &ChipWorkerNativeRun::run_epoch);
+        .def_ro("run_epoch", &ChipWorkerNativeRun::run_epoch)
+        .def_ro("run_id", &ChipWorkerNativeRun::run_id)
+        .def_ro("dispatch_id", &ChipWorkerNativeRun::dispatch_id);
 
     // --- ChipWorker ---
     nb::class_<ChipWorker>(m, "_ChipWorker")
@@ -1810,12 +1812,15 @@ NB_MODULE(_task_interface, m) {
         .def(
             "_prepare_native_run_from_blob",
             [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
-               const CallConfig &config, uint32_t slot_id, uint64_t generation) {
+               const CallConfig &config, uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id) {
                 TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
-                return self.prepare_native_run(callable_id, view, config, PipelineSlotLease{slot_id, 0, generation});
+                return self.prepare_native_run(
+                    callable_id, view, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id
+                );
             },
             nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
-            nb::arg("slot_id"), nb::arg("generation"), nb::call_guard<nb::gil_scoped_release>(),
+            nb::arg("slot_id"), nb::arg("generation"), nb::arg("run_id") = 0, nb::arg("dispatch_id") = 0,
+            nb::call_guard<nb::gil_scoped_release>(),
             "Prepare a generation-bound native run from a raw mailbox TaskArgs blob."
         )
         .def(
@@ -1886,6 +1891,10 @@ NB_MODULE(_task_interface, m) {
         .def_prop_ro("initialized", &ChipWorker::initialized)
         .def_prop_ro("pipeline_depth", &ChipWorker::pipeline_depth)
         .def_prop_ro("runtime_slot_count", &ChipWorker::runtime_slot_count)
+        .def_prop_ro(
+            "supports_concurrent_native_prepare", &ChipWorker::supports_concurrent_native_prepare,
+            "Whether non-diagnostic native preparation may overlap one active run in another slot."
+        )
         .def_prop_ro(
             "runtime_buffer_addrs", &ChipWorker::runtime_buffer_addrs,
             "Host Runtime staging buffer address of every copy the runtime's "

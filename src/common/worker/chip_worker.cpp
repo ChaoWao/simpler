@@ -43,14 +43,6 @@ T load_symbol(void *handle, const char *name) {
     return reinterpret_cast<T>(sym);
 }
 
-template <typename T>
-T load_optional_symbol(void *handle, const char *name) {
-    dlerror();
-    void *sym = dlsym(handle, name);
-    if (dlerror() != nullptr) return nullptr;
-    return reinterpret_cast<T>(sym);
-}
-
 uint64_t next_native_run_epoch() {
     static std::atomic<uint64_t> epoch{0};
     uint64_t current = epoch.load(std::memory_order_relaxed);
@@ -60,6 +52,12 @@ uint64_t next_native_run_epoch() {
         }
     }
     throw std::overflow_error("native-run epoch space is exhausted");
+}
+
+std::string format_native_run_identity(const ChipWorkerNativeRun &run) {
+    return "(run_id=" + std::to_string(run.run_id) + " slot=" + std::to_string(run.slot_id) +
+           " generation=" + std::to_string(run.generation) + " dispatch_id=" + std::to_string(run.dispatch_id) +
+           " run_epoch=" + std::to_string(run.run_epoch) + ")";
 }
 
 std::vector<uint8_t> read_binary_file(const std::string &path) {
@@ -163,14 +161,16 @@ void ChipWorker::init(
         poll_run_fn_ = load_symbol<SimplerNativeRunFn>(handle, "simpler_poll_run");
         wait_run_fn_ = load_symbol<SimplerNativeRunFn>(handle, "simpler_wait_run");
         finalize_run_fn_ = load_symbol<SimplerNativeRunFn>(handle, "simpler_finalize_run");
+        supports_concurrent_native_prepare_fn_ =
+            load_symbol<SupportsConcurrentNativePrepareFn>(handle, "supports_concurrent_native_prepare_ctx");
         select_pipeline_slot_fn_ = load_symbol<SelectPipelineSlotFn>(handle, "select_pipeline_slot_ctx");
         select_arena_bank_fn_ = load_symbol<SelectArenaBankFn>(handle, "select_arena_bank_ctx");
+        set_native_run_identity_fn_ = load_symbol<SetNativeRunIdentityFn>(handle, "set_native_run_identity_ctx");
         get_arena_bank_gm_heap_base_fn_ =
-            load_optional_symbol<GetArenaBankGmHeapBaseFn>(handle, "get_arena_bank_gm_heap_base_ctx");
-        get_retained_temp_addr_fn_ = load_optional_symbol<GetRetainedTempAddrFn>(handle, "get_retained_temp_addr_ctx");
-        set_task_accepted_state_fn_ =
-            load_optional_symbol<SetTaskAcceptedStateFn>(handle, "set_task_accepted_state_ctx");
-        get_pipeline_contract_fn = load_optional_symbol<GetPipelineContractFn>(handle, "get_pipeline_contract");
+            load_symbol<GetArenaBankGmHeapBaseFn>(handle, "get_arena_bank_gm_heap_base_ctx");
+        get_retained_temp_addr_fn_ = load_symbol<GetRetainedTempAddrFn>(handle, "get_retained_temp_addr_ctx");
+        set_task_accepted_state_fn_ = load_symbol<SetTaskAcceptedStateFn>(handle, "set_task_accepted_state_ctx");
+        get_pipeline_contract_fn = load_symbol<GetPipelineContractFn>(handle, "get_pipeline_contract");
         unregister_callable_fn_ = load_symbol<SimplerUnregisterCallableFn>(handle, "simpler_unregister_callable");
         get_aicpu_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_aicpu_dlopen_count");
         get_host_dlopen_count_fn_ = load_symbol<GetAicpuDlopenCountFn>(handle, "get_host_dlopen_count");
@@ -202,15 +202,12 @@ void ChipWorker::init(
         throw;
     }
 
-    PipelineContract resolved_contract{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
-    if (get_pipeline_contract_fn != nullptr) {
-        const PipelineContract *contract = get_pipeline_contract_fn();
-        if (!is_valid_pipeline_contract(contract) || !has_serviceable_arena_topology(*contract)) {
-            dlclose(handle);
-            throw std::runtime_error("host runtime returned a PipelineContract this build cannot accept");
-        }
-        resolved_contract = *contract;
+    const PipelineContract *contract = get_pipeline_contract_fn();
+    if (!is_valid_pipeline_contract(contract) || !has_serviceable_arena_topology(*contract)) {
+        dlclose(handle);
+        throw std::runtime_error("host runtime returned a PipelineContract this build cannot accept");
     }
+    const PipelineContract resolved_contract = *contract;
 
     lib_handle_ = handle;
 
@@ -301,8 +298,10 @@ void ChipWorker::init(
         poll_run_fn_ = nullptr;
         wait_run_fn_ = nullptr;
         finalize_run_fn_ = nullptr;
+        supports_concurrent_native_prepare_fn_ = nullptr;
         select_pipeline_slot_fn_ = nullptr;
         select_arena_bank_fn_ = nullptr;
+        set_native_run_identity_fn_ = nullptr;
         get_arena_bank_gm_heap_base_fn_ = nullptr;
         get_retained_temp_addr_fn_ = nullptr;
         set_task_accepted_state_fn_ = nullptr;
@@ -353,8 +352,10 @@ void ChipWorker::init(
         poll_run_fn_ = nullptr;
         wait_run_fn_ = nullptr;
         finalize_run_fn_ = nullptr;
+        supports_concurrent_native_prepare_fn_ = nullptr;
         select_pipeline_slot_fn_ = nullptr;
         select_arena_bank_fn_ = nullptr;
+        set_native_run_identity_fn_ = nullptr;
         get_arena_bank_gm_heap_base_fn_ = nullptr;
         get_retained_temp_addr_fn_ = nullptr;
         set_task_accepted_state_fn_ = nullptr;
@@ -436,8 +437,10 @@ void ChipWorker::finalize() {
     poll_run_fn_ = nullptr;
     wait_run_fn_ = nullptr;
     finalize_run_fn_ = nullptr;
+    supports_concurrent_native_prepare_fn_ = nullptr;
     select_pipeline_slot_fn_ = nullptr;
     select_arena_bank_fn_ = nullptr;
+    set_native_run_identity_fn_ = nullptr;
     get_arena_bank_gm_heap_base_fn_ = nullptr;
     get_retained_temp_addr_fn_ = nullptr;
     set_task_accepted_state_fn_ = nullptr;
@@ -533,12 +536,12 @@ std::vector<uint64_t> ChipWorker::runtime_buffer_addrs() const {
 }
 
 uint64_t ChipWorker::arena_bank_gm_heap_base(uint32_t bank_id) const {
-    if (!initialized_ || get_arena_bank_gm_heap_base_fn_ == nullptr) return 0;
+    if (!initialized_) return 0;
     return get_arena_bank_gm_heap_base_fn_(device_ctx_, bank_id);
 }
 
 uint64_t ChipWorker::retained_temp_addr(uint32_t slot_id) const {
-    if (!initialized_ || get_retained_temp_addr_fn_ == nullptr) return 0;
+    if (!initialized_) return 0;
     return get_retained_temp_addr_fn_(device_ctx_, slot_id);
 }
 
@@ -573,15 +576,18 @@ void ChipWorker::run_on_slot(
     }
 
     (void)select_slot_resources(slot_id);
+    if (set_native_run_identity_fn_(device_ctx_, 0, 0, 0, 0) != 0) {
+        throw std::runtime_error("set_native_run_identity_ctx failed");
+    }
     void *rt = runtime_bufs_[slot_id].data();
-    if (accepted_state != nullptr && set_task_accepted_state_fn_ != nullptr) {
+    if (accepted_state != nullptr) {
         int bind_rc = set_task_accepted_state_fn_(device_ctx_, accepted_state, accepted_value);
         if (bind_rc != 0) {
             throw std::runtime_error("set_task_accepted_state_ctx failed with code " + std::to_string(bind_rc));
         }
     }
     auto clear_accepted_state = [&]() {
-        if (accepted_state != nullptr && set_task_accepted_state_fn_ != nullptr) {
+        if (accepted_state != nullptr) {
             (void)set_task_accepted_state_fn_(device_ctx_, nullptr, 0);
         }
     };
@@ -602,27 +608,31 @@ void ChipWorker::run_on_slot(
 }
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease
+    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease, uint64_t run_id,
+    uint64_t dispatch_id
 ) {
     ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    return prepare_native_run(callable_id, &chip_storage, config, lease);
+    return prepare_native_run(callable_id, &chip_storage, config, lease, run_id, dispatch_id);
 }
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run(
-    int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease
+    int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+    uint64_t run_id, uint64_t dispatch_id
 ) {
     if (lease.reserved != 0 || lease.generation == 0 || lease.slot_id >= pipeline_contract_.pipeline_depth) {
         throw std::runtime_error("native-run pipeline lease is outside the runtime PipelineContract");
     }
-    if (!pipeline_generations_.admit(lease)) {
-        throw std::runtime_error("native-run pipeline lease generation is stale");
-    }
-    return prepare_native_run_on_slot(callable_id, args, config, lease.slot_id, lease.generation);
+    return prepare_native_run_on_slot(callable_id, args, config, lease.slot_id, lease.generation, run_id, dispatch_id);
+}
+
+bool ChipWorker::supports_concurrent_native_prepare() const {
+    return initialized_ && pipeline_contract_.pipeline_depth > 1 &&
+           supports_concurrent_native_prepare_fn_(device_ctx_) > 0;
 }
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
     int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-    uint64_t generation
+    uint64_t generation, uint64_t run_id, uint64_t dispatch_id
 ) {
     config.validate();
     if (!initialized_) {
@@ -634,119 +644,231 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
     if (slot_id >= runtime_bufs_.size()) {
         throw std::runtime_error("prepare_native_run slot is outside the runtime PipelineContract");
     }
-    NativeRunSlotState &state = native_run_states_[slot_id];
-    if (state.phase != NativeRunPhase::EMPTY) {
-        throw std::runtime_error("prepare_native_run slot already owns an unfinished native run");
-    }
-    for (const NativeRunSlotState &candidate : native_run_states_) {
-        if (candidate.phase != NativeRunPhase::EMPTY) {
+    const uint64_t run_epoch = next_native_run_epoch();
+    const ChipWorkerNativeRun run_identity{slot_id, generation, run_epoch, run_id, dispatch_id};
+    const bool allow_prepared_successor = supports_concurrent_native_prepare() && !config.diagnostics_any();
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[slot_id];
+        if (state.phase != NativeRunPhase::EMPTY) {
             throw std::runtime_error(
-                "prepare_native_run cannot select another slot while an unfinished native run owns the runner"
+                "prepare_native_run slot already owns an unfinished native run " +
+                format_native_run_identity(run_identity)
             );
         }
+        size_t occupied = 0;
+        for (const NativeRunSlotState &candidate : native_run_states_) {
+            if (candidate.phase == NativeRunPhase::EMPTY) continue;
+            ++occupied;
+            if (!allow_prepared_successor || !candidate.permits_prepared_successor ||
+                (candidate.phase != NativeRunPhase::LAUNCHED && candidate.phase != NativeRunPhase::REAPED)) {
+                throw std::runtime_error(
+                    "prepare_native_run requires an active predecessor before staging a successor " +
+                    format_native_run_identity(run_identity)
+                );
+            }
+        }
+        if (occupied != 0 && occupied != 1) {
+            throw std::runtime_error(
+                "prepare_native_run already owns a prepared successor " + format_native_run_identity(run_identity)
+            );
+        }
+        if (!pipeline_generations_.admit(PipelineSlotLease{slot_id, 0, generation})) {
+            throw std::runtime_error(
+                "native-run pipeline lease generation is stale " + format_native_run_identity(run_identity)
+            );
+        }
+        state.lease_generation = generation;
+        state.run_epoch = run_epoch;
+        state.phase = NativeRunPhase::PREPARING;
+        state.wait_rc = 0;
+        state.permits_prepared_successor = allow_prepared_successor;
     }
 
-    (void)select_slot_resources(slot_id);
-    const uint64_t run_epoch = next_native_run_epoch();
-    int rc = prepare_run_fn_(device_ctx_, runtime_bufs_[slot_id].data(), callable_id, args, &config);
+    int rc = -1;
+    try {
+        (void)select_slot_resources(slot_id);
+        int identity_rc = set_native_run_identity_fn_(device_ctx_, run_id, generation, dispatch_id, run_epoch);
+        if (identity_rc != 0) {
+            throw std::runtime_error("set_native_run_identity_ctx failed with code " + std::to_string(identity_rc));
+        }
+        rc = prepare_run_fn_(device_ctx_, runtime_bufs_[slot_id].data(), callable_id, args, &config);
+    } catch (...) {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[slot_id];
+        if (state.run_epoch == run_epoch && state.phase == NativeRunPhase::PREPARING) {
+            state = NativeRunSlotState{};
+        }
+        throw;
+    }
     if (rc != 0) {
-        throw std::runtime_error("prepare_native_run failed with code " + std::to_string(rc));
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[slot_id];
+        if (state.run_epoch == run_epoch && state.phase == NativeRunPhase::PREPARING) {
+            state = NativeRunSlotState{};
+        }
+        throw std::runtime_error(
+            "prepare_native_run failed with code " + std::to_string(rc) + " " + format_native_run_identity(run_identity)
+        );
     }
-    state.lease_generation = generation;
-    state.run_epoch = run_epoch;
-    state.phase = NativeRunPhase::PREPARED;
-    state.wait_rc = 0;
-    return ChipWorkerNativeRun{slot_id, generation, run_epoch};
-}
 
-ChipWorker::NativeRunSlotState &
-ChipWorker::require_native_run(const ChipWorkerNativeRun &run, NativeRunPhase first, NativeRunPhase second) {
-    if (run.slot_id >= runtime_bufs_.size()) {
-        throw std::runtime_error("native-run token slot is outside the runtime PipelineContract");
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[slot_id];
+        if (state.lease_generation != generation || state.run_epoch != run_epoch ||
+            state.phase != NativeRunPhase::PREPARING) {
+            (void)finalize_run_fn_(device_ctx_, runtime_bufs_[slot_id].data());
+            state = NativeRunSlotState{};
+            throw std::runtime_error("native-run identity changed while prepare was in progress");
+        }
+        state.phase = NativeRunPhase::PREPARED;
     }
-    NativeRunSlotState &state = native_run_states_[run.slot_id];
-    if (state.lease_generation != run.generation || state.run_epoch != run.run_epoch ||
-        (state.phase != first && state.phase != second)) {
-        throw std::runtime_error("native-run token is stale or used in the wrong phase");
-    }
-    return state;
+    return run_identity;
 }
 
 void ChipWorker::launch_native_run(
     const ChipWorkerNativeRun &run, volatile int32_t *accepted_state, int32_t accepted_value
 ) {
-    NativeRunSlotState &state = require_native_run(run, NativeRunPhase::PREPARED, NativeRunPhase::PREPARED);
-    if (accepted_state != nullptr && set_task_accepted_state_fn_ != nullptr) {
-        int bind_rc = set_task_accepted_state_fn_(device_ctx_, accepted_state, accepted_value);
-        if (bind_rc != 0) {
-            throw std::runtime_error("set_task_accepted_state_ctx failed with code " + std::to_string(bind_rc));
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        if (run.slot_id >= runtime_bufs_.size()) {
+            throw std::runtime_error("native-run token slot is outside the runtime PipelineContract");
         }
+        NativeRunSlotState &state = native_run_states_[run.slot_id];
+        if (state.lease_generation != run.generation || state.run_epoch != run.run_epoch ||
+            state.phase != NativeRunPhase::PREPARED) {
+            throw std::runtime_error("native-run token is stale or used in the wrong phase");
+        }
+        state.phase = NativeRunPhase::LAUNCHING;
     }
+
     auto clear_accepted_state = [&]() {
-        if (accepted_state != nullptr && set_task_accepted_state_fn_ != nullptr) {
+        if (accepted_state != nullptr) {
             (void)set_task_accepted_state_fn_(device_ctx_, nullptr, 0);
         }
     };
 
     int rc = -1;
     try {
+        if (accepted_state != nullptr) {
+            int bind_rc = set_task_accepted_state_fn_(device_ctx_, accepted_state, accepted_value);
+            if (bind_rc != 0) {
+                throw std::runtime_error("set_task_accepted_state_ctx failed with code " + std::to_string(bind_rc));
+            }
+        }
         rc = launch_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
     } catch (...) {
         clear_accepted_state();
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[run.slot_id];
+        if (state.lease_generation == run.generation && state.run_epoch == run.run_epoch &&
+            state.phase == NativeRunPhase::LAUNCHING) {
+            state.phase = NativeRunPhase::PREPARED;
+        }
         throw;
     }
     clear_accepted_state();
     if (rc != 0) {
-        state.phase = NativeRunPhase::REAPED;
-        state.wait_rc = rc;
-        throw std::runtime_error("launch_native_run failed with code " + std::to_string(rc));
+        int poll_rc = poll_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[run.slot_id];
+        state.phase = poll_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE ? NativeRunPhase::REAPED : NativeRunPhase::PREPARED;
+        state.wait_rc = poll_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE ? rc : 0;
+        throw std::runtime_error(
+            "launch_native_run failed with code " + std::to_string(rc) + " " + format_native_run_identity(run)
+        );
     }
+    std::lock_guard<std::mutex> lk(native_run_mu_);
+    NativeRunSlotState &state = native_run_states_[run.slot_id];
     state.phase = NativeRunPhase::LAUNCHED;
 }
 
 bool ChipWorker::poll_native_run(const ChipWorkerNativeRun &run) {
-    NativeRunSlotState &state = require_native_run(run, NativeRunPhase::LAUNCHED, NativeRunPhase::REAPED);
-    if (state.phase == NativeRunPhase::REAPED) {
-        return true;
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        if (run.slot_id >= runtime_bufs_.size()) {
+            throw std::runtime_error("native-run token slot is outside the runtime PipelineContract");
+        }
+        const NativeRunSlotState &state = native_run_states_[run.slot_id];
+        if (state.lease_generation != run.generation || state.run_epoch != run.run_epoch ||
+            (state.phase != NativeRunPhase::LAUNCHED && state.phase != NativeRunPhase::REAPED)) {
+            throw std::runtime_error("native-run token is stale or used in the wrong phase");
+        }
+        if (state.phase == NativeRunPhase::REAPED) return true;
     }
     int rc = poll_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
     if (rc == SIMPLER_NATIVE_RUN_POLL_NOT_READY) {
         return false;
     }
     if (rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE) {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        NativeRunSlotState &state = native_run_states_[run.slot_id];
         state.phase = NativeRunPhase::REAPED;
         return true;
     }
-    throw std::runtime_error("poll_native_run failed with code " + std::to_string(rc));
+    throw std::runtime_error(
+        "poll_native_run failed with code " + std::to_string(rc) + " " + format_native_run_identity(run)
+    );
 }
 
 void ChipWorker::wait_native_run(const ChipWorkerNativeRun &run) {
-    NativeRunSlotState &state = require_native_run(run, NativeRunPhase::LAUNCHED, NativeRunPhase::REAPED);
-    if (state.phase == NativeRunPhase::REAPED) {
-        return;
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        if (run.slot_id >= runtime_bufs_.size()) {
+            throw std::runtime_error("native-run token slot is outside the runtime PipelineContract");
+        }
+        const NativeRunSlotState &state = native_run_states_[run.slot_id];
+        if (state.lease_generation != run.generation || state.run_epoch != run.run_epoch ||
+            (state.phase != NativeRunPhase::LAUNCHED && state.phase != NativeRunPhase::REAPED)) {
+            throw std::runtime_error("native-run token is stale or used in the wrong phase");
+        }
+        if (state.phase == NativeRunPhase::REAPED) return;
     }
-    state.wait_rc = wait_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
+    int wait_rc = wait_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
+    std::lock_guard<std::mutex> lk(native_run_mu_);
+    NativeRunSlotState &state = native_run_states_[run.slot_id];
+    state.wait_rc = wait_rc;
     state.phase = NativeRunPhase::REAPED;
 }
 
 void ChipWorker::finalize_native_run(const ChipWorkerNativeRun &run) {
-    if (run.slot_id >= runtime_bufs_.size()) {
-        throw std::runtime_error("native-run token slot is outside the runtime PipelineContract");
+    NativeRunPhase phase;
+    int wait_rc;
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        if (run.slot_id >= runtime_bufs_.size()) {
+            throw std::runtime_error("native-run token slot is outside the runtime PipelineContract");
+        }
+        NativeRunSlotState &state = native_run_states_[run.slot_id];
+        if (state.lease_generation != run.generation || state.run_epoch != run.run_epoch ||
+            (state.phase != NativeRunPhase::PREPARED && state.phase != NativeRunPhase::LAUNCHED &&
+             state.phase != NativeRunPhase::REAPED)) {
+            throw std::runtime_error("native-run token is stale or already finalized");
+        }
+        phase = state.phase;
+        wait_rc = state.wait_rc;
+        state.phase = NativeRunPhase::FINALIZING;
     }
-    NativeRunSlotState &state = native_run_states_[run.slot_id];
-    if (state.lease_generation != run.generation || state.run_epoch != run.run_epoch ||
-        state.phase == NativeRunPhase::EMPTY) {
-        throw std::runtime_error("native-run token is stale or already finalized");
+
+    try {
+        if (phase == NativeRunPhase::LAUNCHED) {
+            wait_rc = wait_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
+        }
+    } catch (...) {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        native_run_states_[run.slot_id].phase = phase;
+        throw;
     }
-    if (state.phase == NativeRunPhase::LAUNCHED) {
-        wait_native_run(run);
-    }
-    int wait_rc = state.wait_rc;
     int finalize_rc = finalize_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
-    state = NativeRunSlotState{};
+    {
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        native_run_states_[run.slot_id] = NativeRunSlotState{};
+    }
     int rc = finalize_rc != 0 ? finalize_rc : wait_rc;
     if (rc != 0) {
-        throw std::runtime_error("finalize_native_run failed with code " + std::to_string(rc));
+        throw std::runtime_error(
+            "finalize_native_run failed with code " + std::to_string(rc) + " " + format_native_run_identity(run)
+        );
     }
 }
 
@@ -755,15 +877,24 @@ void ChipWorker::cleanup_native_runs_noexcept() noexcept {
         return;
     }
     for (size_t slot_id = 0; slot_id < runtime_bufs_.size(); ++slot_id) {
-        NativeRunSlotState &state = native_run_states_[slot_id];
-        if (state.phase == NativeRunPhase::EMPTY) {
-            continue;
+        NativeRunPhase phase;
+        {
+            std::lock_guard<std::mutex> lk(native_run_mu_);
+            NativeRunSlotState &state = native_run_states_[slot_id];
+            phase = state.phase;
+            if (phase == NativeRunPhase::EMPTY) continue;
+            if (phase == NativeRunPhase::PREPARING || phase == NativeRunPhase::LAUNCHING ||
+                phase == NativeRunPhase::FINALIZING) {
+                continue;
+            }
+            state.phase = NativeRunPhase::FINALIZING;
         }
-        if (state.phase == NativeRunPhase::LAUNCHED && wait_run_fn_ != nullptr) {
+        if (phase == NativeRunPhase::LAUNCHED && wait_run_fn_ != nullptr) {
             (void)wait_run_fn_(device_ctx_, runtime_bufs_[slot_id].data());
         }
         (void)finalize_run_fn_(device_ctx_, runtime_bufs_[slot_id].data());
-        state = NativeRunSlotState{};
+        std::lock_guard<std::mutex> lk(native_run_mu_);
+        native_run_states_[slot_id] = NativeRunSlotState{};
     }
 }
 

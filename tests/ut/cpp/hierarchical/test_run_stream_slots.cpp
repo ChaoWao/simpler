@@ -131,6 +131,32 @@ TEST(RunStreamSlots, AStrandedSlotDoesNotBlockItsPeer) {
     EXPECT_EQ(slots.retire_aicore(1), 0);
 }
 
+TEST(RunStreamSlots, SuccessorProvisionAndAbandonDoNotTouchTheActiveSlot) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    void *active_aicore = slots.aicore(0);
+
+    // Native prepare provisions the successor before the predecessor retires.
+    ASSERT_EQ(slots.acquire(1), 0);
+    EXPECT_TRUE(slots.ready(0));
+    EXPECT_TRUE(slots.ready(1));
+    EXPECT_NE(slots.aicore(1), active_aicore);
+    EXPECT_EQ(slots.created_count(), 2u);
+
+    // Abandoning the unpublished successor retires only its fresh AICore
+    // stream. Its slot-persistent AICPU stream remains reusable.
+    ASSERT_EQ(slots.retire_aicore(1), 0);
+    EXPECT_TRUE(slots.ready(0));
+    EXPECT_EQ(slots.aicore(0), active_aicore);
+    EXPECT_EQ(slots.aicore(1), nullptr);
+    EXPECT_NE(slots.aicpu(1), nullptr);
+
+    EXPECT_EQ(slots.retire_aicore(0), 0);
+    EXPECT_EQ(slots.destroy_all(), 0);
+}
+
 // destroy_all reports the first failure and keeps only what it could not free,
 // so a second teardown attempt is still meaningful.
 TEST(RunStreamSlots, DestroyAllReportsFailureAndRetriesWhatSurvived) {

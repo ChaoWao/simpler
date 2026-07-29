@@ -15,6 +15,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,6 +34,9 @@ struct ChipWorkerNativeRun {
     uint64_t generation{0};
     // Process-unique identity for exactly one prepare attempt.
     uint64_t run_epoch{0};
+    // Optional L3 mailbox identity. Direct L2 callers leave these as zero.
+    uint64_t run_id{0};
+    uint64_t dispatch_id{0};
 };
 
 class ChipWorker {
@@ -114,17 +118,20 @@ public:
      * the token, and the caller must still finalize it. The blocking composition
      * performs that cleanup internally on every exit.
      *
-     * The current backend keeps execution-only state on DeviceRunner, so it
-     * admits one prepared/active native run at a time. The
-     * slot/lease-generation/process-unique-run-epoch token prevents a delayed
-     * phase call from touching reused storage, including another run under the
-     * same pipeline lease or on another ChipWorker.
+     * Onboard HBG may prepare one distinct-slot successor while another run
+     * owns the execution claim. Diagnostics and backends without the explicit
+     * capability remain depth-one. The slot/lease-generation/process-unique-
+     * run-epoch token prevents a delayed phase call from touching reused
+     * storage, including another run under the same pipeline lease or on
+     * another ChipWorker.
      */
     ChipWorkerNativeRun prepare_native_run(
-        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease
+        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+        uint64_t run_id = 0, uint64_t dispatch_id = 0
     );
     ChipWorkerNativeRun prepare_native_run(
-        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease
+        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
+        uint64_t run_id = 0, uint64_t dispatch_id = 0
     );
     void launch_native_run(
         const ChipWorkerNativeRun &run, volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
@@ -207,6 +214,7 @@ public:
     bool initialized() const { return initialized_; }
     unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
     size_t runtime_slot_count() const { return runtime_bufs_.size(); }
+    bool supports_concurrent_native_prepare() const;
 
     /// Opaque host native-run storage address for every slot the contract
     /// asked for. Two slots hold distinct storage; tests read this to prove
@@ -242,9 +250,11 @@ private:
     using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
     using SimplerPrepareRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
     using SimplerNativeRunFn = int (*)(void *, void *);
+    using SupportsConcurrentNativePrepareFn = int (*)(void *);
     using SetTaskAcceptedStateFn = int (*)(void *, volatile int32_t *, int32_t);
     using SelectPipelineSlotFn = int (*)(void *, uint32_t);
     using SelectArenaBankFn = int (*)(void *, uint32_t);
+    using SetNativeRunIdentityFn = int (*)(void *, uint64_t, uint64_t, uint64_t, uint64_t);
     using GetArenaBankGmHeapBaseFn = uint64_t (*)(void *, uint32_t);
     using GetRetainedTempAddrFn = uint64_t (*)(void *, uint32_t);
     using GetPipelineContractFn = const PipelineContract *(*)();
@@ -301,9 +311,11 @@ private:
     SimplerNativeRunFn poll_run_fn_ = nullptr;
     SimplerNativeRunFn wait_run_fn_ = nullptr;
     SimplerNativeRunFn finalize_run_fn_ = nullptr;
+    SupportsConcurrentNativePrepareFn supports_concurrent_native_prepare_fn_ = nullptr;
     SetTaskAcceptedStateFn set_task_accepted_state_fn_ = nullptr;
     SelectPipelineSlotFn select_pipeline_slot_fn_ = nullptr;
     SelectArenaBankFn select_arena_bank_fn_ = nullptr;
+    SetNativeRunIdentityFn set_native_run_identity_fn_ = nullptr;
     GetArenaBankGmHeapBaseFn get_arena_bank_gm_heap_base_fn_ = nullptr;
     GetRetainedTempAddrFn get_retained_temp_addr_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;
@@ -339,18 +351,18 @@ private:
     );
     uint32_t select_slot_resources(uint32_t slot_id);
 
-    enum class NativeRunPhase : uint8_t { EMPTY, PREPARED, LAUNCHED, REAPED };
+    enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHING, LAUNCHED, REAPED, FINALIZING };
     struct NativeRunSlotState {
         uint64_t lease_generation{0};
         uint64_t run_epoch{0};
         NativeRunPhase phase{NativeRunPhase::EMPTY};
         int wait_rc{0};
+        bool permits_prepared_successor{false};
     };
     ChipWorkerNativeRun prepare_native_run_on_slot(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-        uint64_t generation
+        uint64_t generation, uint64_t run_id, uint64_t dispatch_id
     );
-    NativeRunSlotState &require_native_run(const ChipWorkerNativeRun &run, NativeRunPhase first, NativeRunPhase second);
     void cleanup_native_runs_noexcept() noexcept;
 
     class RuntimeStorage {
@@ -375,6 +387,7 @@ private:
     // prepare/finalize even if the owning vector itself is moved.
     std::vector<RuntimeStorage> runtime_bufs_;
     std::array<NativeRunSlotState, PTO_PIPELINE_MAX_DEPTH> native_run_states_{};
+    mutable std::mutex native_run_mu_;
     PipelineSlotGenerationFilter pipeline_generations_;
     PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     // device_id_ is set once in init() and never modified afterward. All

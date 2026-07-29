@@ -9,13 +9,14 @@
 # -----------------------------------------------------------------------------------------------------------
 """Onboard validation for bounded whole-run FIFO admission.
 
-The first run completes real NPU work but remains active behind a SubTask
-fence.  The second run builds its graph into the other pipeline slot and must
-not dispatch until the first run becomes terminal.  A third submission must
-block before its graph callback while both slots are admitted.
+The second run builds and backend-prepares in the other pipeline slot while the
+first run executes a bounded delayed NPU chain, but cannot launch until the first run's
+SubTask fence releases. A third submission blocks before its graph callback
+while both slots are admitted.
 """
 
 import atexit
+import ctypes
 import tempfile
 import threading
 import time
@@ -26,11 +27,22 @@ from pathlib import Path
 import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
+from simpler.worker import (
+    _FRAME_STAGED,
+    _OFF_ACCEPTED,
+    _OFF_STATE,
+    _TASK_LAUNCHED,
+    MAILBOX_FRAME_SIZE,
+    _mailbox_load_i32,
+)
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 from simpler_setup.scene_test import _build_l3_task_args
 
 _VECTOR_KERNELS = "../vector_example/kernels"
+_PIPELINED_VECTOR_ORCH = "kernels/orchestration/pipelined_vector_orch.cpp"
+_CHAIN_LENGTH = 512
+_DEVICE_SPIN_ITERS = 200_000_000
 _SIZE = 128 * 128
 
 
@@ -75,6 +87,36 @@ def _wait_for_release(_args):
         raise RuntimeError("whole-run FIFO test timed out waiting for the release fence")
 
 
+def _wait_for_backend_prepared_successor(worker, timeout: float) -> None:
+    shm_buf = worker._chip_shms[0].buf  # noqa: SLF001 -- white-box backend-prepare observation
+    assert shm_buf is not None
+    mailbox_addr = ctypes.addressof(ctypes.c_char.from_buffer(shm_buf))
+    state_addrs = [mailbox_addr + (1 + index) * MAILBOX_FRAME_SIZE + _OFF_STATE for index in range(2)]
+    accepted_addrs = [mailbox_addr + (1 + index) * MAILBOX_FRAME_SIZE + _OFF_ACCEPTED for index in range(2)]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        states = [_mailbox_load_i32(addr) for addr in state_addrs]
+        for index, state in enumerate(states):
+            if state == _FRAME_STAGED and states[1 - index] == _TASK_LAUNCHED:
+                assert _mailbox_load_i32(accepted_addrs[index]) == 0
+                return
+        time.sleep(0.001)
+    raise AssertionError("the successor did not finish backend preparation while its predecessor was launched")
+
+
+def _wait_for_active_device_run(worker, timeout: float) -> None:
+    shm_buf = worker._chip_shms[0].buf  # noqa: SLF001 -- white-box device-launch observation
+    assert shm_buf is not None
+    mailbox_addr = ctypes.addressof(ctypes.c_char.from_buffer(shm_buf))
+    state_addrs = [mailbox_addr + (1 + index) * MAILBOX_FRAME_SIZE + _OFF_STATE for index in range(2)]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(_mailbox_load_i32(addr) == _TASK_LAUNCHED for addr in state_addrs):
+            return
+        time.sleep(0.001)
+    raise AssertionError("the predecessor did not reach its device launch fence")
+
+
 @scene_test(level=3, runtime="host_build_graph")
 class TestWorkerAsyncWholeRunFifo(SceneTestCase):
     """A prepared run may build ahead but cannot dispatch ahead."""
@@ -84,14 +126,14 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             {
                 "name": "vector",
                 "orchestration": {
-                    "source": f"{_VECTOR_KERNELS}/orchestration/example_orch.cpp",
+                    "source": _PIPELINED_VECTOR_ORCH,
                     "function_name": "aicpu_orchestration_entry",
                     "signature": [D.IN, D.IN, D.OUT],
                 },
                 "incores": [
                     {
                         "func_id": 0,
-                        "source": f"{_VECTOR_KERNELS}/aiv/kernel_add.cpp",
+                        "source": "kernels/aiv/delayed_add.cpp",
                         "core_type": "aiv",
                         "signature": [D.IN, D.IN, D.OUT],
                     },
@@ -100,12 +142,6 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                         "source": f"{_VECTOR_KERNELS}/aiv/kernel_add_scalar.cpp",
                         "core_type": "aiv",
                         "signature": [D.IN, D.OUT],
-                    },
-                    {
-                        "func_id": 2,
-                        "source": f"{_VECTOR_KERNELS}/aiv/kernel_mul.cpp",
-                        "core_type": "aiv",
-                        "signature": [D.IN, D.IN, D.OUT],
                     },
                 ],
             },
@@ -203,7 +239,12 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             sub_handle = type(self)._st_sub_handles["wait_for_release"]
 
             def first_graph(orch, _args, _cfg):
-                builder = TaskArgsBuilder(Tensor("a", first_a), Tensor("b", first_b), Tensor("f", first_out))
+                builder = TaskArgsBuilder(
+                    Tensor("a", first_a),
+                    Tensor("b", first_b),
+                    Tensor("f", first_out),
+                    Scalar("spin_iters", 0),
+                )
                 chip_args, _ = _build_l3_task_args(builder, vector_signature)
                 orch.submit_next_level(vector_handle, chip_args, self._build_config(self.CASES[0]["config"]), worker=0)
                 orch.submit_sub(sub_handle)
@@ -220,9 +261,13 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                 control_returned.set()
                 orch.free(0, ptr)
 
-            submitter = threading.Thread(
-                target=lambda: result.setdefault("handle", st_worker.submit(second_graph)), daemon=True
-            )
+            def submit_second():
+                try:
+                    result["handle"] = st_worker.submit(second_graph)
+                except BaseException as error:  # noqa: BLE001 -- re-raised on the test thread
+                    result["error"] = error
+
+            submitter = threading.Thread(target=submit_second, daemon=True)
             submitter.start()
 
             assert entered_callback.wait(10.0), "the prepared run's graph callback never entered"
@@ -232,9 +277,11 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
 
             _SUB_RELEASE.set()
             first.wait(30.0)
-            assert control_returned.wait(30.0), "device control stayed blocked after the active run became terminal"
             submitter.join(30.0)
             assert not submitter.is_alive()
+            if "error" in result:
+                raise result["error"]
+            assert control_returned.is_set(), "device control stayed blocked after the active run became terminal"
             result["handle"].wait(30.0)
         finally:
             _SUB_RELEASE.set()
@@ -291,9 +338,13 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             def second_graph(_orch, _args, _cfg):
                 entered_callback.set()
 
-            submitter = threading.Thread(
-                target=lambda: result.setdefault("handle", st_worker.submit(second_graph)), daemon=True
-            )
+            def submit_second():
+                try:
+                    result["handle"] = st_worker.submit(second_graph)
+                except BaseException as error:  # noqa: BLE001 -- re-raised on the test thread
+                    result["error"] = error
+
+            submitter = threading.Thread(target=submit_second, daemon=True)
             submitter.start()
 
             assert not entered_callback.wait(2.0), (
@@ -302,9 +353,11 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
 
             _SUB_RELEASE.set()
             first.wait(30.0)
-            assert entered_callback.wait(30.0), "the successor stayed blocked after its predecessor's cleanup ran"
             submitter.join(30.0)
             assert not submitter.is_alive()
+            if "error" in result:
+                raise result["error"]
+            assert entered_callback.is_set(), "the successor stayed blocked after its predecessor's cleanup ran"
             result["handle"].wait(30.0)
         finally:
             _SUB_RELEASE.set()
@@ -334,29 +387,31 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                 buffers.append(buffer)
                 tensors.append(tensor)
             first_a, first_b, first_out, second_a, second_b, second_out = tensors
-
             vector_handle = type(self)._st_chip_handles["vector"]
             vector_signature = type(self)._st_chip_handles["vector_sig"]
             sub_handle = type(self)._st_sub_handles["wait_for_release"]
 
-            def submit_vector(orch, a, b, out, *, hold_open=False):
-                builder = TaskArgsBuilder(Tensor("a", a), Tensor("b", b), Tensor("f", out))
+            def submit_vector(orch, a, b, out, *, spin_iters=0, hold_open=False):
+                builder = TaskArgsBuilder(
+                    Tensor("a", a), Tensor("b", b), Tensor("f", out), Scalar("spin_iters", spin_iters)
+                )
                 chip_args, _ = _build_l3_task_args(builder, vector_signature)
                 orch.submit_next_level(vector_handle, chip_args, self._build_config(self.CASES[0]["config"]), worker=0)
                 if hold_open:
                     orch.submit_sub(sub_handle)
 
             first = st_worker.submit(
-                lambda orch, _args, _cfg: submit_vector(orch, first_a, first_b, first_out, hold_open=True)
+                lambda orch, _args, _cfg: submit_vector(
+                    orch, first_a, first_b, first_out, spin_iters=_DEVICE_SPIN_ITERS, hold_open=True
+                )
             )
+            first_expected = first_a + first_b + _CHAIN_LENGTH
+            # Run-level acceptance also includes the intentionally blocked SUB
+            # task, whose compatibility endpoint acknowledges only on return.
+            # Observe the chip frame directly so that fence cannot postpone the
+            # successor submission until its 30-second timeout.
+            _wait_for_active_device_run(st_worker, 10.0)
             assert _SUB_ENTERED.wait(10.0), "the first run's SubTask did not start"
-
-            first_expected = (first_a + first_b + 1) * (first_a + first_b + 2)
-            deadline = time.monotonic() + 10.0
-            while not torch.allclose(first_out, first_expected) and time.monotonic() < deadline:
-                time.sleep(0.001)
-            assert torch.allclose(first_out, first_expected), "the first run's NPU task did not complete"
-
             second_graph_done = threading.Event()
 
             def second_graph(orch, _args, _cfg):
@@ -365,6 +420,10 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
 
             second = st_worker.submit(second_graph)
             assert second_graph_done.is_set(), "the second run did not build ahead"
+            _wait_for_backend_prepared_successor(st_worker, 10.0)
+            assert torch.count_nonzero(first_out).item() == 0, (
+                "successor backend preparation did not finish during predecessor device execution"
+            )
             assert torch.count_nonzero(second_out).item() == 0, (
                 "the prepared run dispatched before the active run ended"
             )
@@ -372,9 +431,13 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             def third_graph(_orch, _args, _cfg):
                 third_callback.set()
 
-            submitter = threading.Thread(
-                target=lambda: third_result.setdefault("handle", st_worker.submit(third_graph)), daemon=True
-            )
+            def submit_third():
+                try:
+                    third_result["handle"] = st_worker.submit(third_graph)
+                except BaseException as error:  # noqa: BLE001 -- re-raised on the test thread
+                    third_result["error"] = error
+
+            submitter = threading.Thread(target=submit_third, daemon=True)
             submitter.start()
             assert not third_callback.wait(0.1), "the third graph callback entered before admission capacity was free"
 
@@ -389,13 +452,15 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
 
             _SUB_RELEASE.set()
             first.wait(10.0)
-            assert third_callback.wait(10.0), "the third submission did not enter after the first run freed its slot"
-            second.wait(10.0)
-            second_expected = (second_a + second_b + 1) * (second_a + second_b + 2)
-            assert torch.allclose(second_out, second_expected), "the prepared run did not execute correctly on the NPU"
-
             submitter.join(10.0)
             assert not submitter.is_alive()
+            if "error" in third_result:
+                raise third_result["error"]
+            assert third_callback.is_set(), "the third submission did not enter after the first run freed its slot"
+            second.wait(10.0)
+            second_expected = second_a + second_b + _CHAIN_LENGTH
+            assert torch.allclose(first_out, first_expected), "the first run did not execute correctly on the NPU"
+            assert torch.allclose(second_out, second_expected), "the prepared run did not execute correctly on the NPU"
             third_result["handle"].wait(10.0)
         finally:
             _SUB_RELEASE.set()

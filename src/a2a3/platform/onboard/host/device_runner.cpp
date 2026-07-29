@@ -233,8 +233,29 @@ void DeviceRunner::destroy_native_run_thread_state(void *snapshot) noexcept {
     dep_gen_host_graph_destroy_capture(snapshot);
 }
 
+int DeviceRunner::provision_native_run_resources(uint32_t pipeline_slot) {
+    return ensure_run_stream_set(pipeline_slot);
+}
+
+int DeviceRunner::abandon_native_run_resources(uint32_t pipeline_slot) {
+    return retire_run_aicore_stream(pipeline_slot);
+}
+
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     const unsigned selected_pipeline_slot = pipeline_slot();
+    // The AICore stream is created during native prepare so its provisioning
+    // can overlap the predecessor's execution. Once run() is entered, every
+    // exit owns retirement; the success path reports destroy failure, while
+    // early-error paths keep the original error and leave a failed-destroy
+    // handle in the slot so it cannot be reused.
+    bool aicore_stream_retired = false;
+    auto aicore_stream_retire = RAIIScopeGuard([this, selected_pipeline_slot, &aicore_stream_retired]() {
+        if (!aicore_stream_retired) (void)retire_run_aicore_stream(selected_pipeline_slot);
+    });
+    if (!run_stream_slots_.ready(selected_pipeline_slot)) {
+        LOG_ERROR("run stream set %u was not provisioned during native prepare", selected_pipeline_slot);
+        return -1;
+    }
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
@@ -266,24 +287,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         LOG_ERROR("ensure_device_initialized failed: %d", rc);
         return rc;
     }
-
-    rc = ensure_run_stream_set(selected_pipeline_slot);
-    if (rc != 0) {
-        LOG_ERROR("ensure_run_stream_set(%u) failed: %d", selected_pipeline_slot, rc);
-        return rc;
-    }
-    // The AICore stream is this run's alone: creation is the only operation
-    // this platform offers that is known to leave a core free of a previous
-    // image's cached instructions, and there is no evidence that selecting an
-    // already-existing stream does anything to the instruction cache. Retiring
-    // it on every exit path is what keeps that guarantee from depending on
-    // which image the next run happens to publish.
-    // On an early return the guard retires it; the success path below retires
-    // it explicitly so a failed destroy is reported instead of discarded.
-    bool aicore_stream_retired = false;
-    auto aicore_stream_retire = RAIIScopeGuard([this, selected_pipeline_slot, &aicore_stream_retired]() {
-        if (!aicore_stream_retired) (void)retire_run_aicore_stream(selected_pipeline_slot);
-    });
 
     ensure_device_wall_buffer();
 
@@ -507,7 +510,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     // The run owns its AICore stream, so a destroy this run cannot complete is
     // this run's failure: reporting success would leave the caller believing a
-    // slot is reusable that ensure_run_stream_set will now refuse.
+    // slot is reusable that the next prepare will now refuse.
     aicore_stream_retired = true;
     rc = retire_run_aicore_stream(selected_pipeline_slot);
     if (rc != 0) return rc;

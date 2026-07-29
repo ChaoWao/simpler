@@ -416,10 +416,10 @@ void Scheduler::try_consume(TaskSlot slot) {
 
 // The NEXT_LEVEL worker-id set is fixed by Worker::init() (NextLevelReadyQueues
 // is reset once, before scheduling starts) and every queued/targeted worker id
-// is validated in Orchestrator::submit_impl. The `throw`s in the dispatch
-// helpers below are therefore unreachable invariant checks; because they run on
-// sched_thread_ with no surrounding handler, any throw is fatal to the whole
-// worker tree (std::terminate), not a per-task failure.
+// is validated in Orchestrator::submit_impl. WorkerThread resolves expected
+// lane/capacity/stopping rejections through exactly one complete_unpublished
+// call, under the same non-throwing completion-callback contract as ordinary
+// endpoint completion.
 void Scheduler::dispatch_ready() {
     dispatch_round_count_.fetch_add(1, std::memory_order_relaxed);
     std::optional<RunId> run_snapshot;
@@ -448,18 +448,14 @@ bool claim_for_dispatch(TaskSlotState &s) {
 }
 
 void Scheduler::dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared) {
-    try {
-        if (prepared) {
-            worker->dispatch_prepared(dispatch);
-        } else {
-            worker->dispatch(dispatch);
-        }
-    } catch (const std::exception &e) {
-        worker->complete_unpublished(
-            dispatch, std::string("Scheduler failed to publish a claimed dispatch: ") + e.what()
-        );
-    } catch (...) {
-        worker->complete_unpublished(dispatch, "Scheduler failed to publish a claimed dispatch");
+    // WorkerThread owns publication failure through its one terminal callback.
+    // Retrying here after that callback starts can duplicate a partially
+    // published completion. The callback contract is the same non-throwing
+    // contract used by ordinary endpoint completions.
+    if (prepared) {
+        worker->dispatch_prepared(dispatch);
+    } else {
+        worker->dispatch(dispatch);
     }
 }
 
@@ -480,6 +476,13 @@ void Scheduler::dispatch_preparable_next_level_singles() {
         if (state.state.load(std::memory_order_acquire) != TaskState::READY) continue;
         if (state.run_id != run_id || state.worker_type != WorkerType::NEXT_LEVEL || state.is_group() ||
             state.target_worker_id(0) != worker_id) {
+            cfg_.enqueue_ready_cb(slot);
+            continue;
+        }
+        // Diagnostic setup mutates runner-global state, so it starts only
+        // after this run reaches the active FIFO lane. Ordinary tasks may use
+        // the prepared lane because their backend preparation is run-local.
+        if (state.config.diagnostics_any()) {
             cfg_.enqueue_ready_cb(slot);
             continue;
         }

@@ -298,59 +298,104 @@ void WorkerThread::dispatch(WorkerDispatch d) {
     d.prepare_only = false;
     bool expected = false;
     if (!active_inflight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        throw std::logic_error("WorkerThread::dispatch: active lane is occupied");
+        complete_unpublished(d, "WorkerThread::dispatch: active lane is occupied");
+        return;
     }
+    EnqueueDispatchResult result;
     try {
-        enqueue_dispatch(d);
+        result = enqueue_dispatch(d);
+    } catch (const std::exception &e) {
+        // Restore admission before formatting or publishing the failure: both
+        // operations may allocate, and neither may strand the active lane.
+        active_inflight_.store(false, std::memory_order_release);
+        complete_unpublished(d, std::string("WorkerThread::dispatch: enqueue failed: ") + e.what());
+        return;
     } catch (...) {
         active_inflight_.store(false, std::memory_order_release);
-        throw;
+        complete_unpublished(d, "WorkerThread::dispatch: enqueue failed");
+        return;
+    }
+    if (result == EnqueueDispatchResult::QUEUED) return;
+    active_inflight_.store(false, std::memory_order_release);
+    if (result == EnqueueDispatchResult::STOPPING) {
+        complete_unpublished(d, "WorkerThread::dispatch: worker is stopping");
+    } else {
+        complete_unpublished(d, "WorkerThread::dispatch: endpoint capacity exceeded");
     }
 }
 
 void WorkerThread::dispatch_prepared(WorkerDispatch d) {
+    d.prepare_only = true;
     if (!caps().supports_frame_staging) {
-        throw std::logic_error("WorkerThread::dispatch_prepared: endpoint does not support frame staging");
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: endpoint does not support frame staging");
+        return;
     }
-    if (ring_ == nullptr) throw std::logic_error("WorkerThread::dispatch_prepared: null ring");
+    if (ring_ == nullptr) {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: null ring");
+        return;
+    }
     TaskSlotState *slot = ring_->slot_state(d.task_slot);
     if (slot == nullptr || slot->run_id == INVALID_RUN_ID) {
-        throw std::logic_error("WorkerThread::dispatch_prepared: dispatch has no run identity");
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: dispatch has no run identity");
+        return;
     }
+    bool staged_lane_occupied = false;
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
         if (staged_run_id_.load(std::memory_order_relaxed) != INVALID_RUN_ID) {
-            throw std::logic_error("WorkerThread::dispatch_prepared: worker already owns a staged run");
+            staged_lane_occupied = true;
+        } else {
+            staged_run_id_.store(slot->run_id, std::memory_order_relaxed);
+            staged_dispatch_id_ = 0;
         }
-        staged_run_id_.store(slot->run_id, std::memory_order_relaxed);
-        staged_dispatch_id_ = 0;
     }
-    d.prepare_only = true;
-    try {
-        enqueue_dispatch(d, slot->run_id);
-    } catch (...) {
+    if (staged_lane_occupied) {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: worker already owns a staged run");
+        return;
+    }
+    auto release_staged_lane = [&] {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
         if (staged_run_id_.load(std::memory_order_relaxed) == slot->run_id) {
             staged_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
             staged_dispatch_id_ = 0;
         }
-        throw;
+    };
+    EnqueueDispatchResult result;
+    try {
+        result = enqueue_dispatch(d, slot->run_id);
+    } catch (const std::exception &e) {
+        release_staged_lane();
+        complete_unpublished(d, std::string("WorkerThread::dispatch_prepared: enqueue failed: ") + e.what());
+        return;
+    } catch (...) {
+        release_staged_lane();
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: enqueue failed");
+        return;
+    }
+    if (result == EnqueueDispatchResult::QUEUED) return;
+    release_staged_lane();
+    if (result == EnqueueDispatchResult::STOPPING) {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: worker is stopping");
+    } else if (result == EnqueueDispatchResult::CAPACITY_EXCEEDED) {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: endpoint capacity exceeded");
+    } else {
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: staged lane identity changed before enqueue");
     }
 }
 
-void WorkerThread::enqueue_dispatch(WorkerDispatch d, RunId staged_run_id) {
+WorkerThread::EnqueueDispatchResult WorkerThread::enqueue_dispatch(WorkerDispatch d, RunId staged_run_id) {
     std::lock_guard<std::mutex> lk(mu_);
     if (shutdown_.load(std::memory_order_acquire)) {
-        throw std::logic_error("WorkerThread::dispatch: worker is stopping");
+        return EnqueueDispatchResult::STOPPING;
     }
     if (inflight_.load(std::memory_order_acquire) >= endpoint_->caps().max_inflight_tasks) {
-        throw std::logic_error("WorkerThread::dispatch: endpoint capacity exceeded");
+        return EnqueueDispatchResult::CAPACITY_EXCEEDED;
     }
     d.dispatch_id = next_dispatch_id_;
     if (staged_run_id != INVALID_RUN_ID) {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
         if (staged_run_id_.load(std::memory_order_relaxed) != staged_run_id || staged_dispatch_id_ != 0) {
-            throw std::logic_error("WorkerThread::dispatch_prepared: staged lane identity changed before enqueue");
+            return EnqueueDispatchResult::STAGED_IDENTITY_CHANGED;
         }
         staged_dispatch_id_ = d.dispatch_id;
     }
@@ -369,6 +414,7 @@ void WorkerThread::enqueue_dispatch(WorkerDispatch d, RunId staged_run_id) {
     ++next_dispatch_id_;
     inflight_.fetch_add(1, std::memory_order_release);
     cv_.notify_one();
+    return EnqueueDispatchResult::QUEUED;
 }
 
 bool WorkerThread::activate_prepared(RunId run_id) {
@@ -589,7 +635,12 @@ void WorkerThread::loop() {
 
 void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progress) {
     const WorkerDispatch &dispatch = progress.dispatch;
-    if (progress.kind == WorkerProgressKind::FRAME_STAGED) return;
+    if (progress.kind == WorkerProgressKind::FRAME_STAGED) {
+        // The endpoint already owns the prepared frame. This cursor-only event
+        // keeps the progress poll moving; acceptance, completion, and inflight
+        // ownership intentionally remain unchanged until activation/terminal.
+        return;
+    }
 
     if (progress.kind == WorkerProgressKind::ACCEPTED) {
         if (!accepted_dispatch_ids_.insert(dispatch.dispatch_id).second) return;
@@ -1226,10 +1277,14 @@ static void write_control_digest(char *mbox, const uint8_t *digest) {
 }
 
 // Issue a control sub-command and block until the child publishes
-// CONTROL_DONE. Caller must hold `mailbox_mu_`. On a non-zero error code
-// from the child, throws and leaves the mailbox in IDLE before unwinding
-// (so the next claim starts from a clean state). The `op_name` is used
-// only for the exception message.
+// CONTROL_DONE. Caller must hold `mailbox_mu_`. Registry controls may remain
+// in CONTROL_REQUEST while the child owns an active native run or a live frame
+// references the callable digest. The default infinite timeout waits for that
+// deferral subject to child-liveness checks; an explicit timeout includes the
+// deferred interval, and expiry poisons the endpoint. On a non-zero error code
+// from the child, throws and leaves the mailbox in IDLE before unwinding (so
+// the next claim starts from a clean state). The `op_name` is used only for the
+// exception message.
 void LocalMailboxEndpoint::run_control_command(const char *op_name, double timeout_s) {
     if (mailbox_control_timed_out_) {
         throw std::runtime_error(std::string(op_name) + " failed: mailbox has an unresolved timed-out control command");

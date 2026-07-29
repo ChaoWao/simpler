@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "orchestration_api.h"
 #include "prepare_callable_common.h"
@@ -298,6 +299,11 @@ int upload_tensor_allocation_storage(Runtime *runtime, const HostApi *api, const
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+const PipelineContract *get_pipeline_contract(void) {
+    static const PipelineContract contract = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
+    return &contract;
+}
 
 /**
  * Stage the per-callable resources for the host_build_graph variant: upload

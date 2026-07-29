@@ -31,13 +31,17 @@
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
  *                   get_run_stream_set_create_count,
  *                   simpler_provision_dma_workspace
+ *   - pipeline:     get_pipeline_contract, select_pipeline_slot_ctx,
+ *                   select_arena_bank_ctx,
+ *                   supports_concurrent_native_prepare_ctx,
+ *                   set_native_run_identity_ctx,
+ *                   get_arena_bank_gm_heap_base_ctx,
+ *                   get_retained_temp_addr_ctx,
+ *                   set_task_accepted_state_ctx
  *   - ACL/stream:   ensure_acl_ready_ctx, create_comm_stream_ctx,
  *                   destroy_comm_stream_ctx
  *   - comm:         comm_init, comm_alloc_windows, comm_get_local_window_base,
  *                   comm_get_window_size, comm_barrier, comm_destroy
- *
- * Optional metadata:
- *   - pipeline:     get_pipeline_contract
  *
  * Native-run storage: caller allocates at least get_runtime_size() bytes with
  * get_runtime_alignment() alignment, zero-initializes it before first use, and
@@ -163,7 +167,7 @@ typedef struct PipelineSlotLease {
  * Public API (resolved by ChipWorker via dlsym)
  * =========================================================================== */
 
-/** Return this runtime's immutable pipeline resource declaration. Optional. */
+/** Return this runtime's immutable pipeline resource declaration. */
 const PipelineContract *get_pipeline_contract(void);
 
 /**
@@ -334,6 +338,12 @@ int simpler_prepare_run(
 );
 
 /**
+ * Return nonzero when non-diagnostic preparation may overlap the execution
+ * claim held by a run in another pipeline slot.
+ */
+int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx);
+
+/**
  * Launch a prepared run. Returns only after the platform has published its
  * real kernel-launch marker, or after execution terminates before that marker.
  */
@@ -361,6 +371,11 @@ int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id);
 /** Select the HOST_PER_RUN arena bank used by the next synchronous run. */
 int select_arena_bank_ctx(DeviceContextHandle ctx, uint32_t bank_id);
 
+/** Attach optional L3 identity metadata to the current thread's next native prepare. */
+int set_native_run_identity_ctx(
+    DeviceContextHandle ctx, uint64_t run_id, uint64_t generation, uint64_t dispatch_id, uint64_t run_epoch
+);
+
 /**
  * Committed GM heap base of one arena bank, or 0 when that bank has never been
  * committed or the platform keeps a single shared arena set. Reports which
@@ -377,8 +392,7 @@ uint64_t get_retained_temp_addr_ctx(DeviceContextHandle ctx, uint32_t slot_id);
 
 /**
  * Bind an optional host state word that the runner publishes after both device
- * kernels have been enqueued. Onboard runtimes may export this symbol; callers
- * must fall back to completion when it is absent.
+ * kernels have been enqueued. Passing NULL clears the binding.
  */
 int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value);
 

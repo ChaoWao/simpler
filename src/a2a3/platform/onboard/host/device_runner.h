@@ -24,6 +24,7 @@
 
 #include <runtime/rt.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -115,7 +116,9 @@ public:
      * and read off DeviceRunner state / HostLogger here — no per-run args.
      */
     int run(Runtime &runtime, const CallConfig &config) override;
-    bool can_accept_run() const override { return !device_unusable_; }
+    bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
+    int provision_native_run_resources(uint32_t pipeline_slot) override;
+    int abandon_native_run_resources(uint32_t pipeline_slot) override;
 
     // Map/unmap a device buffer into host address space via
     // halHostRegister(DEV_SVM_MAP_HOST) / halHostUnregister. The returned host
@@ -227,7 +230,9 @@ private:
     // this path so the next Worker re-inits clean in the same process (see
     // force_reset_device()). This flag fails run() fast and drives that
     // recovery. See run() and recover_device_or_mark_unusable().
-    bool device_unusable_{false};
+    // The prepared-run admission thread reads this while the sole device
+    // executor may poison the runner after a failed launch.
+    std::atomic<bool> device_unusable_{false};
 
     struct RunStreamSet {
         rtStream_t aicpu{nullptr};

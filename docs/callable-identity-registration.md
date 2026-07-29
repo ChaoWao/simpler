@@ -525,7 +525,11 @@ The callable digest remains part of the immutable payload, while the trailer
 lets both sides reject a stale activation, acceptance, or completion from an
 older use of the same pipeline frame. `FRAME_STAGED` confirms that this exact
 payload has been validated and retained; it does not resolve to a different
-callable identity and does not mean a native run has been prepared.
+callable identity and does not by itself prove that a native run is prepared.
+An eligible HBG successor normally prepares before this publication when its
+predecessor is already active. A successor staged before any active claim
+publishes validation-only and may later gain a native token without another
+mailbox state transition.
 
 The target child loop owns the final execution resolve:
 
@@ -698,8 +702,11 @@ Local mailbox task frames are hashid-based:
 - Chip and sub child loops resolve `hashid -> local_slot` immediately before
   execution.
 - A two-frame chip loop retains the resolved slot and immutable payload at
-  `FRAME_STAGED`; runtime-native prepare waits for activation and native-run
-  availability.
+  `FRAME_STAGED`; an eligible non-diagnostic HBG successor prepares a native
+  token in the lease-selected inactive bank once its predecessor owns the
+  active claim. A successor staged before that claim may gain the token without
+  another state transition. HBG tasks adjacent to diagnostics and all TMR
+  tasks wait for activation and native-run availability.
 - Protocol/run/lease-generation/dispatch identity guards task-frame reuse, and
   a separate sticky word records only real native launch acceptance.
 - `ChipWorker.run(local_slot)` remains private to the child process.
