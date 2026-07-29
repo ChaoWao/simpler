@@ -16,15 +16,15 @@ For the `Worker` API underneath the framework, see
 | Example | What it teaches |
 | ------- | --------------- |
 | [`vector_example/`](vector_example/) | The smallest complete kernel: `f = (a+b+1)*(a+b+2) + (a+b)`. Runs on sim. |
-| [`bgemm/`](bgemm/) | Batched tiled matmul `C = A @ B` — a fixed 4×4×4 grid of 64×64 tiles over 2 batches, with AIC doing the matmul and AIV the accumulation. The clearest two-core-type example here. Runs on sim. |
+| [`bgemm/`](bgemm/) | Batched tiled matmul `C = A @ B` over a fixed 4×4×4 grid of 64×64 tiles. **One source in `kernels/mix/`, compiled twice** — cube half `TPUSH`es the intermediate into `VEC_FIFO`, vector half `TPOP`s it, so the matmul product never round-trips through GM. Runs on sim. |
 
 ## Paged attention
 
 | Example | What it teaches |
 | ------- | --------------- |
 | [`paged_attention/`](paged_attention/) | Online softmax with mixed AIC/AIV execution, bfloat16, at production scale. Onboard only. |
-| [`paged_attention_manual_scope/`](paged_attention_manual_scope/) | The same computation with explicit scope control — see [`docs/manual-scope.md`](../../../docs/manual-scope.md). Also runs on sim. |
-| [`paged_attention_unroll_manual_scope/`](paged_attention_unroll_manual_scope/) | Manual scope plus loop unrolling. Onboard only. |
+| [`paged_attention_manual_scope/`](paged_attention_manual_scope/) | The same computation with explicit scope control — all four kernels byte-identical to the baseline's, only the orchestration differs (52 lines of 288). See [`docs/manual-scope.md`](../../../docs/manual-scope.md). Also runs on sim. |
+| [`paged_attention_unroll_manual_scope/`](paged_attention_unroll_manual_scope/) | A second implementation, not a patch on the baseline: KV blocks batched into groups of `N_UNROLL`, four tasks per group instead of per block, with the kernels rewritten to match. Onboard only. |
 
 ## Asynchronous completion and cross-card transfer
 
@@ -33,8 +33,8 @@ rather than on task end. All need two dies.
 
 | Example | Mechanism |
 | ------- | --------- |
-| [`sdma_async_completion_demo/`](sdma_async_completion_demo/) | `TGET_ASYNC` from a peer's window slot over SDMA, completion registered via `defer_pto_async_event`. |
-| [`urma_deferred_completion_demo/`](urma_deferred_completion_demo/) | The same protocol over **URMA** instead — the a5-only counterpart, and the reason this pair is worth reading side by side. Carries an extra `skipif` guard beyond the platform marker. |
+| [`sdma_async_completion_demo/`](sdma_async_completion_demo/) | `TGET_ASYNC` from a peer's window slot over SDMA, completion registered via `defer_pto_async_event`. Needs `SIMPLER_ENABLE_PTO_SDMA_WORKSPACE=ON` at build **and** run time; skipped otherwise. |
+| [`urma_deferred_completion_demo/`](urma_deferred_completion_demo/) | The same protocol over **URMA** — `kernel_consumer.cpp` is byte-identical to the SDMA demo's, so the transport is the only variable. The two overlays are **mutually exclusive in one build**, so comparing them means rebuilding. |
 | [`async_notify_demo/`](async_notify_demo/) | Notification counters alongside deferred completion. |
 | [`deferred_notify_demo/`](deferred_notify_demo/) | The same shape on the simulator. |
 
