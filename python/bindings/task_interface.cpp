@@ -1434,9 +1434,28 @@ NB_MODULE(_task_interface, m) {
             "Returns None; timing is emitted as `[STRACE]` log markers."
         )
         .def(
+            "_run_with_pipeline_lease",
+            [](ChipWorker &self, int32_t callable_id, TaskArgs &args, const CallConfig &config, uint32_t slot_id,
+               uint64_t generation) {
+                self.run_with_lease(callable_id, make_view(args), config, PipelineSlotLease{slot_id, 0, generation});
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
+            "Internal generation-safe pipeline-slot launch used by hierarchical admission."
+        )
+        .def(
+            "_run_with_pipeline_lease",
+            [](ChipWorker &self, int32_t callable_id, ChipStorageTaskArgs &args, const CallConfig &config,
+               uint32_t slot_id, uint64_t generation) {
+                self.run_with_lease(callable_id, &args, config, PipelineSlotLease{slot_id, 0, generation});
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
+            "Internal generation-safe pipeline-slot launch for pre-encoded task args."
+        )
+        .def(
             "run_from_blob",
             [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
-               const CallConfig &config, uint64_t accepted_state_addr, int32_t accepted_value) {
+               const CallConfig &config, uint64_t accepted_state_addr, int32_t accepted_value, uint32_t pipeline_slot,
+               uint64_t pipeline_generation) {
                 // The mailbox region is the on-wire format `write_blob` produced;
                 // `read_blob` is the matching reader that returns a zero-copy
                 // TaskArgsView into the caller-owned bytes. Forwards to the
@@ -1444,12 +1463,21 @@ NB_MODULE(_task_interface, m) {
                 // loops never re-implement the tensor/scalar layout in Python
                 // (where it has historically dropped fields like child_memory).
                 TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
-                self.run(
-                    callable_id, view, config, reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value
-                );
+                if (pipeline_generation == 0) {
+                    self.run(
+                        callable_id, view, config, reinterpret_cast<volatile int32_t *>(accepted_state_addr),
+                        accepted_value
+                    );
+                } else {
+                    self.run_with_lease(
+                        callable_id, view, config, PipelineSlotLease{pipeline_slot, 0, pipeline_generation},
+                        reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value
+                    );
+                }
             },
             nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
-            nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0,
+            nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0, nb::arg("pipeline_slot") = 0,
+            nb::arg("pipeline_generation") = 0,
             "Launch a callable_id from a raw mailbox-blob pointer + capacity "
             "(used by chip-child mailbox loops to avoid Python-side re-deserialisation "
             "of the per-task tensor/scalar layout). The blob must be in the format "
@@ -1467,6 +1495,23 @@ NB_MODULE(_task_interface, m) {
         )
         .def_prop_ro("device_id", &ChipWorker::device_id)
         .def_prop_ro("initialized", &ChipWorker::initialized)
+        .def_prop_ro("pipeline_depth", &ChipWorker::pipeline_depth)
+        .def_prop_ro("runtime_slot_count", &ChipWorker::runtime_slot_count)
+        .def_prop_ro(
+            "runtime_buffer_addrs", &ChipWorker::runtime_buffer_addrs,
+            "Host Runtime staging buffer address of every copy the runtime's "
+            "PipelineContract asked for, in slot order."
+        )
+        .def(
+            "retained_temp_addr", &ChipWorker::retained_temp_addr, nb::arg("slot_id"),
+            "Retained temporary-buffer address held for one pipeline slot, or 0 "
+            "while that slot holds none."
+        )
+        .def(
+            "arena_bank_gm_heap_base", &ChipWorker::arena_bank_gm_heap_base, nb::arg("bank_id"),
+            "Committed GM heap base of one arena bank on the bound runner, or 0 "
+            "when that bank has never been committed."
+        )
         .def_prop_ro(
             "aicpu_dlopen_count", &ChipWorker::aicpu_dlopen_count,
             "Number of distinct callable entries the AICPU has dlopened for on the "
@@ -1482,11 +1527,10 @@ NB_MODULE(_task_interface, m) {
         )
         .def_prop_ro(
             "run_stream_set_create_count", &ChipWorker::run_stream_set_create_count,
-            "Number of run stream sets the bound runner has created. A set "
-            "belongs to a pipeline slot and is reused for every run on that "
-            "slot, so a worker that has served any number of runs reports 1; "
-            "platforms whose runs use the persistent bootstrap pair report 0. "
-            "Tests assert this to verify repeated runs do not rebuild the set."
+            "Number of AICore run streams the bound runner has created. The AICPU "
+            "stream belongs to a pipeline slot for the worker's lifetime, while each "
+            "run creates and retires its own AICore stream, so this advances once per "
+            "run; platforms whose runs use the persistent bootstrap pair report 0."
         )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))

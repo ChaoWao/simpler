@@ -368,6 +368,19 @@ add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
 add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)
 
+# Run-stream slot state machine: fresh AICore stream per run, and the handle a
+# failed destroy must keep. Header-only with injected create/destroy, so it
+# needs no runtime objects and no device.
+add_executable(test_run_stream_slots hierarchical/test_run_stream_slots.cpp)
+target_include_directories(test_run_stream_slots PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_run_stream_slots PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_run_stream_slots COMMAND test_run_stream_slots)
+set_tests_properties(test_run_stream_slots PROPERTIES LABELS "no_hardware")
+
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
 # ---------------------------------------------------------------------------

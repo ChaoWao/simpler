@@ -1320,6 +1320,13 @@ class ChipWorker:
         # Returns None; per-stage timing is emitted as `[STRACE]` log markers.
         self._impl.run(int(callable_id), args, config)
 
+    def _run_slot_with_pipeline_lease(self, callable_id, args, slot_id, generation, config=None, **kwargs):
+        if config is None:
+            config = CallConfig()
+        for k, v in kwargs.items():
+            setattr(config, k, v)
+        self._impl._run_with_pipeline_lease(int(callable_id), args, config, int(slot_id), int(generation))
+
     def _unregister_slot(self, callable_id):
         self._impl.unregister_callable(int(callable_id))
 
@@ -1335,8 +1342,29 @@ class ChipWorker:
 
     @property
     def run_stream_set_create_count(self):
-        """Number of run stream generations the bound runner has created."""
+        """Number of AICore run streams the bound runner has created."""
         return self._impl.run_stream_set_create_count
+
+    @property
+    def pipeline_depth(self):
+        return self._impl.pipeline_depth
+
+    @property
+    def runtime_slot_count(self):
+        return self._impl.runtime_slot_count
+
+    @property
+    def runtime_buffer_addrs(self):
+        """Address of each host Runtime staging buffer, in slot order."""
+        return list(self._impl.runtime_buffer_addrs)
+
+    def arena_bank_gm_heap_base(self, bank_id):
+        """Committed GM heap base of one arena bank, or 0 when uncommitted."""
+        return int(self._impl.arena_bank_gm_heap_base(int(bank_id)))
+
+    def retained_temp_addr(self, slot_id):
+        """Retained temporary-buffer address for one slot, or 0 when unheld."""
+        return int(self._impl.retained_temp_addr(int(slot_id)))
 
     def malloc(self, size):
         """Allocate memory. Returns a pointer (uint64)."""

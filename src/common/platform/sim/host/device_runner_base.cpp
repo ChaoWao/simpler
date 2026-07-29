@@ -82,7 +82,31 @@ bool create_temp_so_file(const std::string &path_template, const uint8_t *data, 
 // SimDeviceRunnerBase Implementation
 // =============================================================================
 
+int SimDeviceRunnerBase::select_pipeline_slot(uint32_t slot_id) {
+    if (slot_id >= PTO_PIPELINE_MAX_DEPTH) return -1;
+    pipeline_slot_ = slot_id;
+    return 0;
+}
+
+int SimDeviceRunnerBase::select_arena_bank(uint32_t bank_id) {
+    if (bank_id >= PTO_PIPELINE_MAX_DEPTH) return -1;
+    arena_bank_ = bank_id;
+    return 0;
+}
+
+uint64_t SimDeviceRunnerBase::arena_bank_gm_heap_base(uint32_t bank_id) const {
+    if (bank_id >= arena_banks_.size()) return 0;
+    const ArenaBank &bank = *arena_banks_[bank_id];
+    return bank.gm_heap.is_committed() ? reinterpret_cast<uint64_t>(bank.gm_heap.base()) : 0;
+}
+
+uint64_t SimDeviceRunnerBase::retained_temp_addr(uint32_t slot_id) const {
+    if (slot_id >= retained_temp_addrs_.size()) return 0;
+    return reinterpret_cast<uint64_t>(retained_temp_addrs_[slot_id]);
+}
+
 int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) {
+    ArenaBank &bank = arena_bank();
     // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
@@ -120,16 +144,16 @@ int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_si
     // all on any failure" semantic (PR #922). Pooled pointers from a prior
     // successful call stay valid; a failed resize attempt does not leave a
     // partial layout behind.
-    bool ok = commit_region(gm_heap_arena_, cached_gm_heap_size_, gm_heap_size) == 0;
-    ok = ok && commit_region(gm_sm_arena_, cached_gm_sm_size_, gm_sm_size) == 0;
-    ok = ok && commit_region(runtime_arena_pool_, cached_runtime_arena_size_, runtime_arena_size) == 0;
+    bool ok = commit_region(bank.gm_heap, bank.cached_gm_heap_size, gm_heap_size) == 0;
+    ok = ok && commit_region(bank.gm_sm, bank.cached_gm_sm_size, gm_sm_size) == 0;
+    ok = ok && commit_region(bank.runtime_pool, bank.cached_runtime_arena_size, runtime_arena_size) == 0;
     if (!ok) {
-        gm_heap_arena_.release();
-        gm_sm_arena_.release();
-        runtime_arena_pool_.release();
-        cached_gm_heap_size_ = 0;
-        cached_gm_sm_size_ = 0;
-        cached_runtime_arena_size_ = 0;
+        bank.gm_heap.release();
+        bank.gm_sm.release();
+        bank.runtime_pool.release();
+        bank.cached_gm_heap_size = 0;
+        bank.cached_gm_sm_size = 0;
+        bank.cached_runtime_arena_size = 0;
         prebuilt_runtime_arena_cache_valid_ = false;
         prebuilt_runtime_arena_cache_key_.clear();
         prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
@@ -153,6 +177,9 @@ bool SimDeviceRunnerBase::lookup_prebuilt_runtime_arena_cache(
     uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
     void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
 ) const {
+    // The cache holds one entry and its bases point into bank 0, so any other
+    // bank must rebuild rather than be handed a region it does not own.
+    if (arena_bank_ != 0) return false;
     if (!prebuilt_runtime_arena_cache_valid_ || prebuilt_runtime_arena_cache_hash_ != hash ||
         prebuilt_runtime_arena_cache_key_.size() != key_size || key_data == nullptr || gm_heap_base == nullptr ||
         sm_base == nullptr || runtime_arena_base == nullptr || runtime_off == nullptr || image_data == nullptr ||
@@ -175,6 +202,8 @@ void SimDeviceRunnerBase::mark_prebuilt_runtime_arena_cached(
     uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base, void *runtime_arena_base,
     size_t runtime_off, const void *image_data, size_t image_size
 ) {
+    // Single-entry cache owned by bank 0; see lookup_prebuilt_runtime_arena_cache.
+    if (arena_bank_ != 0) return;
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_hash_ = hash;
     prebuilt_runtime_arena_cache_key_.assign(
@@ -191,18 +220,21 @@ void SimDeviceRunnerBase::mark_prebuilt_runtime_arena_cached(
 }
 
 void *SimDeviceRunnerBase::acquire_pooled_gm_heap() {
-    if (!gm_heap_arena_.is_committed()) return nullptr;
-    return gm_heap_arena_.base();
+    DeviceArena &arena = arena_bank().gm_heap;
+    if (!arena.is_committed()) return nullptr;
+    return arena.base();
 }
 
 void *SimDeviceRunnerBase::acquire_pooled_gm_sm() {
-    if (!gm_sm_arena_.is_committed()) return nullptr;
-    return gm_sm_arena_.base();
+    DeviceArena &arena = arena_bank().gm_sm;
+    if (!arena.is_committed()) return nullptr;
+    return arena.base();
 }
 
 void *SimDeviceRunnerBase::acquire_pooled_runtime_arena() {
-    if (!runtime_arena_pool_.is_committed()) return nullptr;
-    return runtime_arena_pool_.base();
+    DeviceArena &arena = arena_bank().runtime_pool;
+    if (!arena.is_committed()) return nullptr;
+    return arena.base();
 }
 
 std::thread SimDeviceRunnerBase::create_thread(std::function<void()> fn) {
@@ -301,20 +333,21 @@ int SimDeviceRunnerBase::device_memset(void *dev_ptr, int value, size_t bytes) {
 }
 
 void SimDeviceRunnerBase::get_retained_temp_buffer(void **addr, size_t *size) {
-    if (addr != nullptr) *addr = retained_temp_addr_;
-    if (size != nullptr) *size = retained_temp_size_;
+    if (addr != nullptr) *addr = retained_temp_addrs_[pipeline_slot_];
+    if (size != nullptr) *size = retained_temp_sizes_[pipeline_slot_];
 }
 
 void SimDeviceRunnerBase::set_retained_temp_buffer(void *addr, size_t size) {
-    retained_temp_addr_ = addr;
-    retained_temp_size_ = size;
+    retained_temp_addrs_[pipeline_slot_] = addr;
+    retained_temp_sizes_[pipeline_slot_] = size;
 }
 
 void SimDeviceRunnerBase::clear_temporary_buffer() {
-    if (retained_temp_addr_ != nullptr) {
-        mem_alloc_.free(retained_temp_addr_);
-        retained_temp_addr_ = nullptr;
-        retained_temp_size_ = 0;
+    for (size_t slot = 0; slot < retained_temp_addrs_.size(); ++slot) {
+        if (retained_temp_addrs_[slot] == nullptr) continue;
+        mem_alloc_.free(retained_temp_addrs_[slot]);
+        retained_temp_addrs_[slot] = nullptr;
+        retained_temp_sizes_[slot] = 0;
     }
 }
 

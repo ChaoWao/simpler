@@ -257,10 +257,57 @@ void ChipWorker::run(int32_t local_slot, TaskArgsView view, const CallConfig &co
 
 One memcpy of a few KB per task; negligible.
 
+#### Pipeline resource leases
+
+A2/A3 host runtimes declare `pipeline_depth = 2` as resource capacity. The
+contract determines the concrete copy count rather than permitting concurrent
+device execution by itself:
+
+| Resource class | Copies | Selection |
+| -------------- | -----: | --------- |
+| `HOST_PER_RUN` | `pipeline_depth` | lease `slot_id` |
+| `DEVICE_SCRATCH` | 1 | slot 0 |
+| `EXEC_HANDLE` | `pipeline_depth` | lease `slot_id`, plus any hardware-generation key |
+
+A run-owned lease is `{slot_id, generation}`. `PipelineSlotPool` mints it and
+is the authority on ownership: releasing the current lease is idempotent, while
+releasing it after the slot has been re-leased is rejected.
+
+`ChipWorker` is downstream of that pool and cannot re-derive ownership — it
+never sees an acquire or a release. It keeps a per-slot high-water mark and
+rejects any generation below it, which stops a *superseded* lease from
+selecting resources the slot's newer owner holds. That is strictly weaker than
+an ownership check: a lease that was released but whose successor has not yet
+reached `ChipWorker` still passes, because nothing has raised the mark. Closing
+that window needs the admission layer to gate dispatch on `pool.owns(lease)`
+before handing work down, which is whole-run admission's job, not this
+layer's.
+
+AICore streams are outside that lease. The instruction cache belongs to the
+cores, every slot publishes its image to the same GM code address, and the
+platform offers no cache invalidation for code replaced there. Creating a
+stream is the only operation known to leave a core free of the previous image's
+instructions; selecting an already-existing one is not. So each run creates its
+own AICore stream and retires it on every exit path, and no record of which
+image a stream last ran is load-bearing. The AICPU stream carries no such state
+and stays with its slot.
+
+This is dormant capacity at this layer. The ordinary synchronous entry point
+continues to use slot 0, and the chip child's mailbox loop passes no lease, so
+every production run is unleased. This contract does not enable a second
+mailbox frame, a second device execution, or cross-run publication overlap.
+Carrying a lease across the mailbox, and deciding when slot 1 may be leased at
+all, belong to whole-run admission.
+
+Simulation implements the same depth, so the contract means the same thing on
+both platforms: its runner owns one arena bank and one retained temporary
+buffer per slot, and its single-entry prebuilt-arena cache stays owned by
+bank 0 exactly as onboard's does.
+
 #### TRB temporary buffer
 
 `tensormap_and_ringbuffer` stages ordinary non-child tensor arguments through a
-runner-scoped retained temporary buffer instead of a per-run `device_malloc()` /
+retained temporary buffer owned per pipeline slot, instead of a per-run `device_malloc()` /
 `device_free()` pair. This is always on for TRB — an internal allocation
 optimization with no user-facing switch. It is not serialized in task mailboxes
 and does not change `TaskArgs`, `CallConfig`, child-memory tensors, or public

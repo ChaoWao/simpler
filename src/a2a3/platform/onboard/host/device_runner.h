@@ -38,6 +38,7 @@
 #include "callable.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
+#include "host/run_stream_slots.h"
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"
 #include "common/l2_swimlane_profiling.h"
@@ -191,7 +192,7 @@ public:
     // `aicpu_dlopen_count`, and `host_dlopen_count` are inherited from
     // `DeviceRunnerBase`.
 
-    size_t run_stream_set_create_count() const override { return run_stream_sets_created_; }
+    size_t run_stream_set_create_count() const override { return run_stream_slots_.created_count(); }
 
 private:
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
@@ -228,18 +229,33 @@ private:
     struct RunStreamSet {
         rtStream_t aicpu{nullptr};
         rtStream_t aicore{nullptr};
-        uint64_t aicore_image_hash{0};
-        bool has_aicore_image{false};
     };
+
     // One slot per in-flight run the pipeline contract can declare.
     static constexpr unsigned kRunStreamSetCount = PTO_PIPELINE_MAX_DEPTH;
 
-    // AICPU streams belong to slots. AICore streams additionally belong to the
-    // loaded code image because the platform has no explicit instruction-cache
-    // invalidation operation for code replaced in GM.
-    RunStreamSet run_stream_sets_[kRunStreamSetCount]{};
-    size_t run_stream_sets_created_{0};
-    int ensure_run_stream_set(unsigned slot, uint64_t aicore_image_hash);
+    // AICPU streams belong to slots for the worker's lifetime. AICore streams
+    // belong to a single run: the platform offers no instruction-cache
+    // invalidation for code replaced at a reused GM address, and creating the
+    // stream is the only operation known to leave a core free of the previous
+    // image's instructions. Selecting an existing stream is not.
+    // Stream lifetimes live in RunStreamSlots so the slot state machine —
+    // fresh AICore stream per run, handle kept when a destroy fails — is
+    // testable without a device.
+    RunStreamSlots run_stream_slots_{
+        [](void **out) {
+            return rtStreamCreate(reinterpret_cast<rtStream_t *>(out), 0);
+        },
+        [](void *stream) {
+            return rtStreamDestroy(static_cast<rtStream_t>(stream));
+        }
+    };
+    int ensure_run_stream_set(unsigned slot);
+    // Destroys this run's AICore stream. Returns the driver's error and KEEPS
+    // the handle when the destroy fails: the stream may still hold the previous
+    // image's instructions, so the slot must refuse the next run until finalize
+    // reclaims it.
+    int retire_run_aicore_stream(unsigned slot);
     int destroy_run_stream_sets();
 
     // The kernel submission boundary is separate from the stream wait and the

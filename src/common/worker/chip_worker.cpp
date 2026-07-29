@@ -117,6 +117,11 @@ void ChipWorker::init(
         simpler_init_fn_ = load_symbol<SimplerInitFn>(handle, "simpler_init");
         register_callable_fn_ = load_symbol<SimplerRegisterCallableFn>(handle, "simpler_register_callable");
         run_fn_ = load_symbol<SimplerRunFn>(handle, "simpler_run");
+        select_pipeline_slot_fn_ = load_symbol<SelectPipelineSlotFn>(handle, "select_pipeline_slot_ctx");
+        select_arena_bank_fn_ = load_symbol<SelectArenaBankFn>(handle, "select_arena_bank_ctx");
+        get_arena_bank_gm_heap_base_fn_ =
+            load_optional_symbol<GetArenaBankGmHeapBaseFn>(handle, "get_arena_bank_gm_heap_base_ctx");
+        get_retained_temp_addr_fn_ = load_optional_symbol<GetRetainedTempAddrFn>(handle, "get_retained_temp_addr_ctx");
         set_task_accepted_state_fn_ =
             load_optional_symbol<SetTaskAcceptedStateFn>(handle, "set_task_accepted_state_ctx");
         get_pipeline_contract_fn = load_optional_symbol<GetPipelineContractFn>(handle, "get_pipeline_contract");
@@ -154,7 +159,7 @@ void ChipWorker::init(
     PipelineContract resolved_contract{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     if (get_pipeline_contract_fn != nullptr) {
         const PipelineContract *contract = get_pipeline_contract_fn();
-        if (!is_valid_depth1_pipeline_contract(contract)) {
+        if (!is_valid_pipeline_contract(contract) || !has_serviceable_arena_topology(*contract)) {
             dlclose(handle);
             throw std::runtime_error("host runtime returned a PipelineContract this build cannot accept");
         }
@@ -170,7 +175,25 @@ void ChipWorker::init(
         throw std::runtime_error("create_device_context returned null");
     }
 
-    runtime_buf_.resize(get_runtime_size_fn_());
+    try {
+        // One host Runtime per slot, always. This buffer is not the
+        // RUNTIME_IMAGE resource: the contract classifies the device-resident
+        // image, while this holds the host-side Runtime object a run
+        // constructs in place — its tensor leases, launch arguments, and
+        // validate/finalize state. That is per-run whatever the device image
+        // sharing is, so a runtime whose image is DEVICE_SCRATCH still needs
+        // its own buffer per slot or preparing N+1 overwrites live state of N.
+        std::vector<std::vector<uint8_t>> runtime_bufs(
+            resolved_contract.pipeline_depth, std::vector<uint8_t>(get_runtime_size_fn_())
+        );
+        runtime_bufs_.swap(runtime_bufs);
+    } catch (...) {
+        destroy_device_context_fn_(device_ctx_);
+        device_ctx_ = nullptr;
+        dlclose(handle);
+        lib_handle_ = nullptr;
+        throw;
+    }
 
     // One-shot platform-side init: attach the calling thread to `device_id`
     // (rtSetDevice on onboard, sim bind+acquire on sim), transfer ownership
@@ -218,6 +241,10 @@ void ChipWorker::init(
         simpler_init_fn_ = nullptr;
         register_callable_fn_ = nullptr;
         run_fn_ = nullptr;
+        select_pipeline_slot_fn_ = nullptr;
+        select_arena_bank_fn_ = nullptr;
+        get_arena_bank_gm_heap_base_fn_ = nullptr;
+        get_retained_temp_addr_fn_ = nullptr;
         set_task_accepted_state_fn_ = nullptr;
         unregister_callable_fn_ = nullptr;
         get_aicpu_dlopen_count_fn_ = nullptr;
@@ -236,7 +263,7 @@ void ChipWorker::init(
         comm_release_domain_windows_fn_ = nullptr;
         comm_barrier_fn_ = nullptr;
         comm_destroy_fn_ = nullptr;
-        runtime_buf_.clear();
+        runtime_bufs_.clear();
         throw;
     }
     if (init_rc != 0) {
@@ -259,6 +286,10 @@ void ChipWorker::init(
         simpler_init_fn_ = nullptr;
         register_callable_fn_ = nullptr;
         run_fn_ = nullptr;
+        select_pipeline_slot_fn_ = nullptr;
+        select_arena_bank_fn_ = nullptr;
+        get_arena_bank_gm_heap_base_fn_ = nullptr;
+        get_retained_temp_addr_fn_ = nullptr;
         set_task_accepted_state_fn_ = nullptr;
         unregister_callable_fn_ = nullptr;
         get_aicpu_dlopen_count_fn_ = nullptr;
@@ -278,7 +309,7 @@ void ChipWorker::init(
         comm_release_domain_windows_fn_ = nullptr;
         comm_barrier_fn_ = nullptr;
         comm_destroy_fn_ = nullptr;
-        runtime_buf_.clear();
+        runtime_bufs_.clear();
         throw std::runtime_error("simpler_init failed with code " + std::to_string(init_rc));
     }
 
@@ -330,6 +361,10 @@ void ChipWorker::finalize() {
     get_runtime_size_fn_ = nullptr;
     register_callable_fn_ = nullptr;
     run_fn_ = nullptr;
+    select_pipeline_slot_fn_ = nullptr;
+    select_arena_bank_fn_ = nullptr;
+    get_arena_bank_gm_heap_base_fn_ = nullptr;
+    get_retained_temp_addr_fn_ = nullptr;
     set_task_accepted_state_fn_ = nullptr;
     unregister_callable_fn_ = nullptr;
     get_aicpu_dlopen_count_fn_ = nullptr;
@@ -349,7 +384,8 @@ void ChipWorker::finalize() {
     comm_release_domain_windows_fn_ = nullptr;
     comm_barrier_fn_ = nullptr;
     comm_destroy_fn_ = nullptr;
-    runtime_buf_.clear();
+    runtime_bufs_.clear();
+    pipeline_generations_.reset();
     pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     initialized_ = false;
     device_id_ = -1;
@@ -389,12 +425,80 @@ void ChipWorker::run(
     int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, volatile int32_t *accepted_state,
     int32_t accepted_value
 ) {
+    run_on_slot(callable_id, args, config, UNLEASED_SLOT, accepted_state, accepted_value);
+}
+
+uint32_t ChipWorker::select_slot_resources(uint32_t slot_id) {
+    // init() rejected any contract whose three arena kinds disagree, so
+    // whichever of them the runtime declares yields the same bank.
+    const PipelineSlotLease selector{slot_id, 0, 0};
+    uint32_t arena_bank = 0;
+    for (uint32_t kind : {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_GM_SM, PTO_PIPELINE_RUNTIME_IMAGE}) {
+        const PipelineResource *resource = find_pipeline_resource(pipeline_contract_, kind);
+        if (resource == nullptr) continue;
+        arena_bank = pipeline_resource_slot(pipeline_contract_, *resource, selector);
+        break;
+    }
+    if (select_pipeline_slot_fn_(device_ctx_, slot_id) != 0) {
+        throw std::runtime_error("select_pipeline_slot_ctx failed");
+    }
+    if (select_arena_bank_fn_(device_ctx_, arena_bank) != 0) {
+        throw std::runtime_error("select_arena_bank_ctx failed");
+    }
+    return arena_bank;
+}
+
+std::vector<uint64_t> ChipWorker::runtime_buffer_addrs() const {
+    std::vector<uint64_t> addrs;
+    addrs.reserve(runtime_bufs_.size());
+    for (const auto &buf : runtime_bufs_) {
+        addrs.push_back(reinterpret_cast<uint64_t>(buf.data()));
+    }
+    return addrs;
+}
+
+uint64_t ChipWorker::arena_bank_gm_heap_base(uint32_t bank_id) const {
+    if (!initialized_ || get_arena_bank_gm_heap_base_fn_ == nullptr) return 0;
+    return get_arena_bank_gm_heap_base_fn_(device_ctx_, bank_id);
+}
+
+uint64_t ChipWorker::retained_temp_addr(uint32_t slot_id) const {
+    if (!initialized_ || get_retained_temp_addr_fn_ == nullptr) return 0;
+    return get_retained_temp_addr_fn_(device_ctx_, slot_id);
+}
+
+void ChipWorker::run_with_lease(
+    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
+    volatile int32_t *accepted_state, int32_t accepted_value
+) {
+    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
+    run_with_lease(callable_id, &chip_storage, config, lease, accepted_state, accepted_value);
+}
+
+void ChipWorker::run_with_lease(
+    int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+    volatile int32_t *accepted_state, int32_t accepted_value
+) {
+    if (lease.reserved != 0 || lease.generation == 0 || lease.slot_id >= pipeline_contract_.pipeline_depth) {
+        throw std::runtime_error("run pipeline lease is outside the runtime PipelineContract");
+    }
+    if (!pipeline_generations_.admit(lease)) {
+        throw std::runtime_error("run pipeline lease generation is stale");
+    }
+    run_on_slot(callable_id, args, config, lease.slot_id, accepted_state, accepted_value);
+}
+
+void ChipWorker::run_on_slot(
+    int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
+    volatile int32_t *accepted_state, int32_t accepted_value
+) {
     config.validate();
     if (!initialized_) {
         throw std::runtime_error("ChipWorker not initialized; call init() first");
     }
 
-    void *rt = runtime_buf_.data();
+    (void)select_slot_resources(slot_id);
+    void *rt = runtime_bufs_[slot_id].data();
     if (accepted_state != nullptr && set_task_accepted_state_fn_ != nullptr) {
         int bind_rc = set_task_accepted_state_fn_(device_ctx_, accepted_state, accepted_value);
         if (bind_rc != 0) {
