@@ -64,7 +64,7 @@ pytest examples/a2a3/tensormap_and_ringbuffer/scalar_data --platform a2a3 --devi
 
 Onboard only. Wrap in `task-submit` on a shared box.
 
-Each step also logs its observed-vs-expected value with `LOG_INFO_V0`, so a
+Each step also logs its observed-vs-expected value with `LOG_INFO`, so a
 failure tells you which step diverged before you look at `check`.
 
 ## See also
