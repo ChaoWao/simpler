@@ -1,0 +1,79 @@
+# a2a3 — `tensormap_and_ringbuffer` examples
+
+Kernels written against the `@scene_test` framework for the a2a3 architecture
+and the `tensormap_and_ringbuffer` runtime.
+
+**Read [`docs/INCORE_ORCHESTRATION_GUIDE.md`](docs/INCORE_ORCHESTRATION_GUIDE.md)
+first.** It explains the one thing every example here has in common: the
+orchestration function runs *on the AICPU* and builds the task graph on device,
+dependencies are discovered by TensorMap from tensor overlap rather than
+declared, and task memory comes from ring buffers. Nothing below makes much
+sense without it.
+
+For the `Worker` API underneath the framework, see
+[`examples/workers/`](../../workers/README.md).
+
+## Start here
+
+| Example | What it teaches |
+| ------- | --------------- |
+| [`vector_example/`](vector_example/) | The smallest complete kernel: `f = (a+b+1)*(a+b+2) + (a+b)`. Runs on sim. |
+| [`scalar_data/`](scalar_data/) | Orchestration-level data manipulation — `GetTensorData` / `SetTensorData` round-trips, `add_inout`, and automatic WAW / WAR waits including on external tensors. |
+
+## Compute
+
+| Example | What it teaches |
+| ------- | --------------- |
+| [`benchmark_bgemm/`](benchmark_bgemm/) | Runtime-configurable tiled matmul `C = sum(k) A[k] @ B[k]`, shaped for measurement. Runs on sim. |
+| [`paged_attention/`](paged_attention/) | Online softmax with AIC/AIV subgraph splitting, bfloat16. The baseline the three variants below are compared against. |
+| [`paged_attention_manual_scope/`](paged_attention_manual_scope/) | The same computation with explicit scope control — see [`docs/manual-scope.md`](../../../docs/manual-scope.md). |
+| [`paged_attention_unroll_manual_scope/`](paged_attention_unroll_manual_scope/) | Manual scope plus loop unrolling. |
+| [`paged_attention_ringbuffer/`](paged_attention_ringbuffer/) | Deliberately undersized rings, driven per case through `config.runtime_env` (`ring_task_window` / `ring_heap` / `ring_dep_pool`) rather than process-global env. A stress test for rotation and reclamation. |
+| [`merge_pipeline_barrier/`](merge_pipeline_barrier/) | Three pipeline stages merged into **one** `block_num=8` SPMD task, ordered by an intra-task cross-core barrier instead of by three scheduled tasks. |
+| [`qwen3_14b_decode/`](qwen3_14b_decode/README.md) | The whole Qwen3-14B 40-layer decode stack as a single fused dispatch, using CANN fused attention. The largest example in the repo. |
+
+## Asynchronous completion and cross-card transfer
+
+Each of these registers an async event and lets the consumer wait on deferred
+completion rather than on task end. All but `deferred_notify_demo`, which runs
+the simulator path, are **onboard-only**; every one except `prefetch_async_demo`
+needs two dies.
+
+| Example | Mechanism | Devices |
+| ------- | --------- | ------- |
+| [`prefetch_async_demo/`](prefetch_async_demo/) | `TPREFETCH_ASYNC` over the runtime-injected SDMA workspace, provisioned once by `Worker(enable_sdma=True)` and injected into every kernel's `GlobalContext`. | 1 |
+| [`sdma_async_completion_demo/`](sdma_async_completion_demo/) | `TGET_ASYNC` from a peer's window slot, completion registered via `defer_pto_async_event`. | 2 |
+| [`async_notify_demo/`](async_notify_demo/) | Notification counters alongside deferred completion. | 2 |
+| [`deferred_notify_demo/`](deferred_notify_demo/) | The same shape on the simulator. | 2 |
+
+## Running
+
+```bash
+# Everything that runs on the simulator
+pytest examples/a2a3/tensormap_and_ringbuffer --platform a2a3sim
+
+# One example, on hardware
+pytest examples/a2a3/tensormap_and_ringbuffer/paged_attention --platform a2a3 --device 0
+```
+
+Most examples here are marked `platforms=["a2a3"]` — onboard only — because
+they exercise real AIC/AIV timing or cross-card transfer. `vector_example` and
+`benchmark_bgemm` are marked for `a2a3sim` as well, and `deferred_notify_demo`
+always runs the simulator path.
+
+Wrap hardware runs in `task-submit` on a shared box; see
+[`.claude/rules/running-onboard.md`](../../../.claude/rules/running-onboard.md).
+
+## Relationship to `examples/a5/`
+
+Seven examples exist under both architectures with the same name:
+`vector_example`, `paged_attention`, `paged_attention_manual_scope`,
+`paged_attention_unroll_manual_scope`, `async_notify_demo`,
+`deferred_notify_demo`, `sdma_async_completion_demo`. They are ports of each
+other and differ mainly in tile shapes and platform strings — `vector_example`
+differs by two lines. When you change one, check whether its sibling needs the
+same change.
+
+Only here: `benchmark_bgemm` (a5 has `bgemm` instead),
+`merge_pipeline_barrier`, `paged_attention_ringbuffer`, `prefetch_async_demo`,
+`qwen3_14b_decode`, `scalar_data`.
