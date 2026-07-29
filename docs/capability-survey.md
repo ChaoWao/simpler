@@ -217,7 +217,7 @@ values yield `PTO2_ERROR_ASYNC_COMPLETION_INVALID`.
 
 | Engine | a2a3 | a5 | Status |
 | ------ | ---- | -- | ------ |
-| COUNTER (default) | registered | registered | **Shipped** — CI-run on both arches (`ci.yml:883`, `async_notify_demo` / `deferred_notify_demo`, no `skipif`) |
+| COUNTER (default) | registered | registered | **Shipped** — `async_notify_demo` runs onboard on both arches (`ci.yml:607`, `:884`); `deferred_notify_demo` runs in sim on both (`ci.yml:216`, `:310`). Routed by `@pytest.mark.platforms`, no `skipif` |
 | SDMA | build macro forced ON; runtime opt-in | `option(... OFF)` | a2a3 **Shipped** (dedicated CI step, `ci.yml:628-643`); a5 not built |
 | URMA | absent | full implementation | **Gated** — see below |
 | ROCE, CCU | enum only | enum only | **Name only** |

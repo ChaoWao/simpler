@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 
+import pytest
 import torch
 from simpler.task_interface import (
     ArgDirection,
@@ -159,8 +160,11 @@ def run(
         worker.close()
 
 
-def test_async_notify_demo() -> None:
-    assert run("a2a3", [0, 1]) == 0
+@pytest.mark.platforms(["a2a3"])
+@pytest.mark.runtime("tensormap_and_ringbuffer")
+@pytest.mark.device_count(2)
+def test_async_notify_demo(st_device_ids, st_platform) -> None:
+    assert run(st_platform, [int(d) for d in st_device_ids]) == 0
 
 
 def main() -> int:
