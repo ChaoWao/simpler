@@ -405,6 +405,28 @@ TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
     EXPECT_EQ(tmap.next_entry_idx, 1) << "Should reuse freed entry, not allocate new";
 }
 
+// A later task that reuses a slot (local_id + WINDOW_SIZE) before cleanup has
+// run on the earlier task chains its entries under the same task_entry_head.
+// cleanup_retired retiring only the earlier task must free that earlier task's
+// entries alone and leave the still-live (later) task's entries intact.
+TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
+    Tensor t = make_test_tensor(0x1000, 256);
+    // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
+    tmap.insert(t, PTO2TaskId::make(0, 0));
+    tmap.insert(t, PTO2TaskId::make(0, WINDOW_SIZE));
+    ASSERT_EQ(tmap.valid_count(), 2);
+
+    // Retire only task 0.
+    tmap.cleanup_retired(0, 0, 1);
+
+    // Only task 0's entry is freed; task WINDOW_SIZE's entry survives.
+    EXPECT_EQ(tmap.valid_count(), 1);
+    TestLookupResult result;
+    run_lookup(tmap, t, result);
+    ASSERT_EQ(result.count, 1);
+    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, WINDOW_SIZE));
+}
+
 // =============================================================================
 // Multi-ring isolation
 // =============================================================================

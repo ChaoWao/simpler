@@ -653,6 +653,12 @@ add_a2a3_test(test_task_timing_slots a2a3/test_task_timing_slots.cpp)
 # PTO2 runtime-linked tests
 add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_task_allocator.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
+# PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
+# in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
+target_sources(test_hbg_tensormap PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/shared/pto_tensormap.cpp
+)
 add_a2a3_runtime_test(test_dep_list_pool    a2a3/test_dep_list_pool.cpp)
 add_a2a3_runtime_test(test_scheduler_state  a2a3/test_scheduler_state.cpp)
 add_a2a3_runtime_test(test_task_state       a2a3/test_task_state.cpp)
