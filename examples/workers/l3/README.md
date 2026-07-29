@@ -58,14 +58,36 @@ Two things to know before reading the example:
 
 ## What each example demonstrates
 
+Roughly in reading order — each row assumes the ones above it. Every directory
+has its own README with the run commands and what the golden check proves.
+
+### Start here
+
 | Directory | New concept |
 | --------- | ----------- |
-| [`multi_chip_dispatch/`](multi_chip_dispatch/) | Two chips + one SubWorker. An orchestration fn dispatches a `ChipCallable` to each chip, then submits a Python callable to collect/verify results. |
+| [`multi_chip_dispatch/`](multi_chip_dispatch/) | Two chips + one SubWorker. An orchestration fn dispatches a `ChipCallable` to each chip, then submits a Python callable to collect/verify results. The smallest correct L3 program. |
 | [`child_memory/`](child_memory/) | `orch.malloc` + `Tensor(child_memory=True)` to load a weight once and reuse it across multiple kernel invocations on the same chip. |
-| [`ffn_tp_parallel/`](ffn_tp_parallel/) | Local compute followed by one-domain cross-rank reduction through a domain scratch window. |
-| [`ep_dispatch_combine/`](ep_dispatch_combine/) | MoE-style dispatch/combine over a one-domain communication window. |
-| [`domain_rank_map/`](domain_rank_map/) | Small two-domain example showing domain-local ranks, missing-domain `KeyError`, separate window slices, and real per-domain allreduce. |
-| [`dual_domain_overlap/`](dual_domain_overlap/) | Two overlapping communication domains where worker 1 participates in both, each allocated inside the orchestration via `orch.allocate_domain` and indexed by domain-local rank. |
+| [`per_task_runtime_env/`](per_task_runtime_env/) | One L3 launch where each L2 task binds its own ring sizes through `CallConfig.runtime_env`. |
+
+### Communication domains and collectives
+
+| Directory | New concept |
+| --------- | ----------- |
+| [`allreduce/`](allreduce/) | The minimal collective: allocate a domain, submit one task per rank, golden-check the sum. |
+| [`ffn_tp_parallel/`](ffn_tp_parallel/) | Two dependent stages per rank — AIC matmul then AIV cross-rank reduce — with the producer/consumer edge inferred from a shared buffer address rather than declared. |
+| [`domain_rank_map/`](domain_rank_map/) | What `orch.allocate_domain` actually hands each chip: dense per-domain ranks, `KeyError` for non-members, distinct buffers for overlapping domains. |
+| [`dual_domain_overlap/`](dual_domain_overlap/) | Two overlapping domains where worker 1 holds a different rank in each, plus `submit_next_level_group`. |
+| [`ep_dispatch_combine/`](ep_dispatch_combine/) | Production-shape MoE dispatch/combine: three chained AIV kernels, a five-phase routing protocol, and a hand-laid-out window. The largest example here. |
+
+### Driving a task that is already running
+
+Both submit one long-lived L2 task and then exchange data with it in flight —
+a serving loop rather than a batch DAG. Each needs `aicpu_thread_num = 2`.
+
+| Directory | New concept |
+| --------- | ----------- |
+| [`l3_l2_message_queue/`](l3_l2_message_queue/) | Request/response streaming over the L3-L2 queue: input and output arenas, `peek`/`read_into`/`release`, cooperative `request_stop`. Responses are not paired one-to-one with requests. |
+| [`l3_l2_orch_comm_stream/`](l3_l2_orch_comm_stream/) | The raw form underneath: a shared payload region plus counters, driven by `notify` / `test` / `wait` on a monotonic sequence. |
 
 **Collective algorithm tests** (allreduce, allgather, reduce_scatter, broadcast, all_to_all) have moved to `tests/st/worker/collectives/`. See the scene tests there for the full algorithm corpus including multi-mode allreduce (onephase, twophase, ring, bidirectional_ring, ibing).
 
