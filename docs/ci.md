@@ -3,6 +3,7 @@
 ## Overview
 
 The CI pipeline maps test categories (st, ut-py, ut-cpp) × hardware tiers to GitHub Actions jobs. See [testing.md](testing.md) for full test organization and hardware classification.
+<!-- CI trigger note: this comment is intentional and has no runtime effect. -->
 
 Design principles:
 
