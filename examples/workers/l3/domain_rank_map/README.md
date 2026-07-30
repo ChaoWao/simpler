@@ -21,11 +21,12 @@ tail = workers [1, 2]        # chip 2 is in both
 | **Two lifetime styles** | The inspection pass allocates both domains and releases them in a `finally` via `handle.release()`; the reduce pass uses `with orch.allocate_domain(...) as handle`. |
 
 After the inspection pass, each domain runs its own small allreduce — in its
-**own `worker.run()`**, so chip 2 never juggles two collectives at once. That
-separation is deliberate; see `dual_domain_overlap` for the case where both
-domains are live across the same DAG. The ranks within each allreduce are one
-`submit_next_level_group`, so every peer that participates in the device
-barrier is dispatched as a complete set.
+**own `worker.run()`**, so chip 2 never juggles two collectives at once. Both
+domains are live simultaneously only during the inspection pass, which runs no
+collective; `dual_domain_overlap` drives real work through two overlapping
+domains and likewise gives each its own run. The ranks within each allreduce
+are one `submit_next_level_group`, so every peer that participates in the
+device barrier is dispatched as a complete set.
 
 ## Run
 

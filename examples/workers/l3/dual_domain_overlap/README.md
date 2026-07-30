@@ -7,9 +7,14 @@ left  = workers [0, 1]
 right = workers [1, 2]        # chip 1 is in both
 ```
 
-Chip 1 receives **two independent `ChipDomainContext` objects**, one per
-domain, each with its own rank, its own scratch pointer, and its own peers.
-Nothing about being in one domain constrains its role in the other.
+Chip 1 receives **an independent `ChipDomainContext` per domain**, each with
+its own rank, its own scratch pointer, and its own peers. Nothing about being
+in one domain constrains its role in the other.
+
+The overlap is in **membership, not in time**: each context is created in its
+own domain's run, the two are never live at the same time, and the two
+domains' collectives never run concurrently. See
+[Execution shape](#execution-shape).
 
 Where `domain_rank_map` inspects the handles, this example runs real work
 through both and then computes on the results.
@@ -18,10 +23,36 @@ through both and then computes on the results.
 
 | Concept | How |
 | ------- | --- |
-| **Per-domain identity** | Chip 1 is rank 1 in `left` and rank 0 in `right`. The `workers` list order defines the dense rank, so the same chip legitimately holds two different ranks at once. |
+| **Per-domain identity** | Chip 1 is rank 1 in `left` and rank 0 in `right`. The `workers` list order defines the dense rank, so the same chip legitimately holds a different rank in each domain. |
 | **Domains allocated inside the orch function** | `with orch.allocate_domain(name=..., workers=..., window_size=..., buffers=[CommBufferSpec(...)])` — created and released within one orchestration, not configured on the `Worker`. |
 | **`submit_next_level_group`** | Both the peer-waiting allreduce and the affine stage submit one `TaskArgs` per member in a single call with `workers=worker_indices`. |
-| **Compute that depends only on its own domain's result** | Each affine task reads `reduce_out[domain][chip]`. The dependency is implicit — same `buffer.addr` as the reduce output — so `left`'s affine work can never consume `right`'s reduction. |
+| **Per-domain outputs on a shared chip** | `reduce_out` and `affine_out` are keyed by `(domain, chip)`, so chip 1 owns a separate buffer in each domain and writes a different value to each. `left`'s affine reads `reduce_out["left"][chip]`, so it cannot see `right`'s reduction. |
+
+Ordering between the reduce and affine stages comes from the run boundary,
+not from a producer/consumer edge — see [Execution shape](#execution-shape).
+For an example where TensorMap's implicit same-`buffer.addr` dependency is
+what orders two stages, see [`../ffn_tp_parallel/`](../ffn_tp_parallel/).
+
+## Execution shape
+
+Three synchronous `worker.run` calls — `run()` is `submit(...).wait()`, so
+each one finishes before the next is submitted:
+
+```text
+run 1   allocate domain "left"   →  allreduce group over workers [0, 1]
+run 2   allocate domain "right"  →  allreduce group over workers [1, 2]
+run 3   affine group over [0, 1]  +  affine group over [1, 2]
+```
+
+Each run is its own DAG. A domain allocated inside a run stays live for that
+whole run: `release()` on `with` exit is a non-blocking mark, and the backend
+release happens after the run's completion wait, so tasks already submitted
+with that `device_ctx` still see live memory.
+
+The allreduce is one `submit_next_level_group` per domain because its Phase-2
+device barrier makes every rank wait for its peers — a rank dispatched
+without them cannot finish. The affine stage is grouped for symmetry; its
+kernel does no cross-rank communication.
 
 ## Run
 
