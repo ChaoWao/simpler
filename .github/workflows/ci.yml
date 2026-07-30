@@ -209,10 +209,21 @@ jobs:
             brew install graphviz
           fi
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} (GitHub-hosted)
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted)
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        run: |
+          python3 -m venv --system-site-packages .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install '.[test]'
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Cache pip packages
         uses: actions/cache@v5
@@ -223,6 +234,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
@@ -319,10 +331,21 @@ jobs:
             brew install graphviz
           fi
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} (GitHub-hosted)
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted)
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        run: |
+          python3 -m venv --system-site-packages .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install '.[test]'
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Cache pip packages
         uses: actions/cache@v5
@@ -333,6 +356,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
