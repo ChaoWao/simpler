@@ -112,8 +112,8 @@ int SchedulerContext::pop_ready_tasks_batch(
 }
 
 void SchedulerContext::build_payload(
-    PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
-    const AsyncCtx &async_ctx, int32_t block_idx, bool force_gate
+    PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot, int32_t block_idx,
+    bool force_gate
 ) {
     int32_t slot_idx = static_cast<int32_t>(subslot);
     uint64_t callable_addr = get_function_bin_addr(slot_state.task->kernel_id[slot_idx]);
@@ -136,9 +136,7 @@ void SchedulerContext::build_payload(
     }
     dispatch_payload.local_context.s_block_idx = block_idx;
     dispatch_payload.local_context.s_block_num = slot_state.logical_block_num;
-    dispatch_payload.local_context.async_ctx = async_ctx;
-    dispatch_payload.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dispatch_payload.local_context);
-    dispatch_payload.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dispatch_payload.global_context);
+    dispatch_payload.local_context.async_ctx.task_token = slot_state.task->task_id;
 }
 
 SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
@@ -161,15 +159,7 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
 
     uint32_t buf_idx = reg_task_id & 1u;
     PTO2DispatchPayload &payload = payload_per_core_[core_id][buf_idx];
-    // a5 clears the deferred slab per dispatch (unlike a2a3's init-once path):
-    // AsyncCtx::make wires the slab into the payload, and a stale count from a
-    // prior deferred completion on this (core, buf) would be observed as a live
-    // wait entry.
-    DeferredCompletionSlab *deferred_slab = &deferred_slab_per_core_[core_id][buf_idx];
-    deferred_slab->count = 0;
-    deferred_slab->error_code = PTO2_ERROR_NONE;
-    AsyncCtx async_ctx = AsyncCtx::make(slot_state.task->task_id, deferred_slab);
-    build_payload(payload, slot_state, subslot, async_ctx, block_idx, force_gate);
+    build_payload(payload, slot_state, subslot, block_idx, force_gate);
 
     if (to_pending) {
         core_exec_state.pending_subslot = subslot;
