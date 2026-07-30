@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 _WORKSPACE_TRUTHY = {"1", "ON", "TRUE", "YES"}
 
+# Keep this in sync with the CI bootstrap docs for self-hosted sim runners.
+
 
 def _sdma_workspace_enabled() -> bool:
     """Whether the a5 PTO SDMA workspace overlay is opted in.
