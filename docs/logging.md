@@ -250,6 +250,43 @@ The Python-side level snapshot is **one-shot** at `Worker.init()`. Calling
 `logger.setLevel(...)` afterwards has no effect on a live `ChipWorker` —
 recreate the worker if mid-run reconfiguration is needed.
 
+### Forked chip subprocesses
+
+L3 / L4 hierarchical workers fork chip subprocesses. The parent snapshots the
+same threshold **before** `fork()` and passes it explicitly to
+`_chip_process_loop`, so each subprocess runs its own `ChipWorker.init` with
+that value rather than re-reading a logger the child may not have configured.
+
+### Onboard AICPU severity is CANN-owned
+
+The onboard AICPU library reads severity from CANN's `dlog` (`CheckLogLevel`),
+**not** from `KernelArgs.log_level` — the one place where the single-threshold
+model does not reach directly. `simpler_init` bridges the gap: it issues
+`dlog_setlevel(-1, HostLogger.cann_level(), 0)` **unless
+`ASCEND_GLOBAL_LOG_LEVEL` is already set in the environment**, which therefore
+wins over the Python logger.
+
+| Simpler threshold | CANN level |
+| ----------------- | ---------- |
+| `debug` | DEBUG |
+| `info` | INFO |
+| `timing` | WARN |
+| `warn` | WARN |
+| `error` | ERROR |
+| `null` | NUL |
+
+CANN has no TIMING level, so TIMING and WARN both map to CANN WARN. The
+consequence is the one worth remembering: **the default TIMING threshold does
+not open CANN's INFO stream.**
+
+To configure onboard severity directly, set `ASCEND_GLOBAL_LOG_LEVEL=0..4` or
+call `dlog_setlevel(-1, level, 0)` — **before `Worker.init()`**. The AICPU
+reads CANN once, in `init_log_switch()` at the top of its init kernel, and
+latches the answer into `g_is_log_enable_*`; every later `LOG_*` tests those
+flags and never asks CANN again. Since that init kernel runs inside
+`Worker.init()`, anything set afterwards leaves device-side severity where it
+already was.
+
 ## Build orchestration
 
 `libsimpler_log.so` is built **once per `pip install`** (not per
