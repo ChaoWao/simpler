@@ -240,10 +240,11 @@ jobs:
 
       - name: Run pytest scene tests (a2a3sim)
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest examples tests/st --platform a2a3sim --device 0-15 -v \
+          "$PYTHON" -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
       # DFX per-feature smokes — the default pytest above passes no --enable-*
@@ -252,10 +253,11 @@ jobs:
       # CI step rather than buried in a combined run.
       - name: dep_gen smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
@@ -266,37 +268,41 @@ jobs:
       # children take xdist args that `-p no:xdist` has disabled.
       - name: dep_gen smoke (host_build_graph)
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+          "$PYTHON" -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: l2_swimlane smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-l2-swimlane --enable-dep-gen
 
       - name: PMU smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-pmu 2
 
       - name: args_dump smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --dump-args
 
@@ -379,10 +385,11 @@ jobs:
 
       - name: Run pytest scene tests (a5sim)
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest examples tests/st --platform a5sim --device 0-15 -v \
+          "$PYTHON" -m pytest examples tests/st --platform a5sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
       # DFX per-feature smokes — the default pytest above passes no --enable-*
@@ -391,37 +398,41 @@ jobs:
       # CI step rather than buried in a combined run. Mirrors st-sim-a2a3.
       - name: dep_gen smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: l2_swimlane smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-l2-swimlane --enable-dep-gen
 
       - name: PMU smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-pmu 2
 
       - name: args_dump smoke
         run: |
+          PYTHON=python
           if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
-            source .venv/bin/activate
+            PYTHON=.venv/bin/python
           fi
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --dump-args
 
