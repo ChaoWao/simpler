@@ -17,6 +17,7 @@ Per rank:
 | Concept | How |
 | ------- | --- |
 | **Implicit producer/consumer edge** | `host_partial[i]` is `OUTPUT_EXISTING` on the stage-1 submit and `INPUT` on the stage-2 submit. Both carry the same `buffer.addr`, so TensorMap links the two tasks itself — there is no barrier, no event, and no ordering call in the orch function. |
+| **Collective group dispatch** | Stage 2 is one `submit_next_level_group`, so it becomes READY after every rank's stage-1 output exists and dispatches all mutually waiting ranks together. |
 | **Mixed core types in one DAG** | Stage 1 compiles with `core_type="aic"` and its orchestration calls `rt_submit_aic_task`; stage 2 uses `core_type="aiv"` and `rt_submit_aiv_task`. One `Worker`, one `run()`. |
 | **`func_id`, not core id** | The integer in `children=[(0, core_callable)]` is the `func_id` the orchestration passes to `rt_submit_*_task(func_id, params)` — here `0` for the matmul and `1` for the reduce. It selects *which child kernel*, not which core type. |
 | **Cross-rank exchange through a domain buffer** | The stage-2 kernel reduces over a `scratch` buffer in the communication window: a mailbox of `nranks * M * N` floats followed by a signal tail of `nranks` int32 slots. |

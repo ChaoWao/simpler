@@ -9,8 +9,8 @@ Walks through the full flow:
 3. **`worker.init()`** — fork chip children; lazy base-communication init
 4. **`orch.allocate_domain(...)`** — allocate a communication domain with a
    `CommBufferSpec` scratch window
-5. **`orch.submit_next_level(chip_handle, chip_args, cfg, worker=i)`** —
-   submit the allreduce task for each rank
+5. **`orch.submit_next_level_group(chip_handle, args_list, cfg, workers=...)`** —
+   submit every mutually waiting allreduce rank as one group
 6. **`worker.run(orch_fn, ...)`** — execute the DAG and golden-check against
    the known expected sum
 

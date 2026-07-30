@@ -548,6 +548,7 @@ def run(
                     )
                 ],
             ) as handle:
+                args_list = []
                 for i in range(nranks):
                     domain = handle[i]
                     print(
@@ -577,7 +578,8 @@ def run(
                     )
                     chip_args.add_scalar(domain.domain_size)
                     chip_args.add_scalar(domain.device_ctx)
-                    orch.submit_next_level(chip_handle, chip_args, cfg, worker=i)
+                    args_list.append(chip_args)
+                orch.submit_next_level_group(chip_handle, args_list, cfg, workers=list(range(nranks)))
 
         print("[ep_dispatch] running 2-chip dispatch DAG...")
         worker.run(orch_fn, args=None, config=CallConfig())

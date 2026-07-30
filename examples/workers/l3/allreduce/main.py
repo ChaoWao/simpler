@@ -151,6 +151,7 @@ def run(device_ids: list[int], platform: str = "a2a3") -> int:
                 window_size=window_size,
                 buffers=[CommBufferSpec(name="scratch", dtype="float32", count=float_elems, nbytes=scratch_nbytes)],
             ) as handle:
+                args_list = []
                 for i in range(nranks):
                     domain = handle[i]
                     chip_args = TaskArgs()
@@ -167,7 +168,8 @@ def run(device_ids: list[int], platform: str = "a2a3") -> int:
                     )
                     chip_args.add_scalar(domain.domain_size)
                     chip_args.add_scalar(domain.device_ctx)
-                    orch.submit_next_level(chip_handle, chip_args, cfg, worker=i)
+                    args_list.append(chip_args)
+                orch.submit_next_level_group(chip_handle, args_list, cfg, workers=list(range(nranks)))
 
         print(f"[allreduce] running {nranks}-chip allreduce DAG...")
         worker.run(orch_fn, args=None, config=CallConfig())

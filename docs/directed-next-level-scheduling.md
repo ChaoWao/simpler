@@ -44,14 +44,15 @@ routing operation.
 
 Each Scheduler iteration:
 
-- launches the group FIFO head only when every one of its target workers is
-  idle — all members or none, with no partial reservation;
-- dispatches the head of each idle worker's single FIFO;
+- checks the group FIFO head and either launches every member together or
+  reserves all of its target workers until the complete set is idle;
+- dispatches the head of each idle, unreserved worker's single FIFO;
 - dispatches READY SUB work through the existing free-selection path.
 
-Only the group FIFO head is examined, and a launchable group is tried before
-conflicting singles. The runtime adds no fairness, aging, priority, or
-reservation policy; callers choose worker sets that make acceptable progress.
+Only the group FIFO head reserves workers. A reservation blocks new singles on
+the group's targets while their running work drains; singles on other workers
+continue normally. The reservation is released when the complete group
+launches. Later groups remain behind the FIFO head and do not reserve workers.
 
 ## Invariants
 
@@ -62,13 +63,15 @@ reservation policy; callers choose worker sets that make acceptable progress.
   terminal state.
 - The NEXT_LEVEL worker set is fixed after `init()`; a worker lookup that fails
   after submit-time validation is an invariant violation, not a fallback.
+- A NEXT_LEVEL single does not wait for a not-yet-dispatched peer at the same
+  scheduler level. Work that requires concurrent placement uses the group API.
 - No queue or scheduler mutex is held while an endpoint executes.
 
 ## Non-goals
 
 - No SUB worker selection.
 - No priorities, work stealing, rebinding, queue scanning, aging, quotas,
-  preemption, starvation prevention, or partial group reservation.
+  preemption, or fairness beyond the group-head reservation.
 - No compatibility flags, environment variables, or macros.
 
 ## Related documents

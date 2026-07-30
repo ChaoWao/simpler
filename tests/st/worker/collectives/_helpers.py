@@ -87,7 +87,7 @@ def _allreduce_scratch_params(mode: str, nranks: int) -> tuple[int, int, int]:
 
 
 def allreduce_orch_fn(orch, callables, task_args, config):
-    """L3 orch: allocate domain, submit per-rank allreduce tasks.
+    """L3 orch: allocate a domain and submit all allreduce ranks as one group.
 
     Reads nranks and mode_id from task_args scalars. Selects the
     ChipCallable by mode name (e.g. ``allreduce_onephase``).
@@ -120,6 +120,7 @@ def allreduce_orch_fn(orch, callables, task_args, config):
         window_size=window_size,
         buffers=[CommBufferSpec(name="scratch", dtype="float32", count=float_elems, nbytes=scratch_nbytes)],
     ) as handle:
+        args_list = []
         for i in range(nranks):
             domain = handle[i]
             chip_args = TaskArgs()
@@ -136,7 +137,8 @@ def allreduce_orch_fn(orch, callables, task_args, config):
             )
             chip_args.add_scalar(domain.domain_size)
             chip_args.add_scalar(domain.device_ctx)
-            orch.submit_next_level(chip, chip_args, config, worker=i)
+            args_list.append(chip_args)
+        orch.submit_next_level_group(chip, args_list, config, workers=list(range(nranks)))
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +171,7 @@ def generic_collective_orch_fn(
     """Generic L3 orch for single-mode collectives (allgather, reduce_scatter, broadcast, all_to_all).
 
     Reads nranks from ``task_args.nranks`` (Scalar). Allocates a comm domain
-    and submits the ChipCallable named ``chip_name`` for each rank.
+    and submits the ChipCallable named ``chip_name`` as one all-rank group.
 
     Each rank's input/output tensors are named ``in_<i>`` / ``out_<i>``.
     Optional ``extra_scalars`` are appended after ``domain_size`` and
@@ -187,6 +189,7 @@ def generic_collective_orch_fn(
         window_size=window_size,
         buffers=[CommBufferSpec(name="scratch", dtype="float32", count=float_elems, nbytes=scratch_nbytes)],
     ) as handle:
+        args_list = []
         for i in range(nranks):
             domain = handle[i]
             chip_args = TaskArgs()
@@ -205,7 +208,8 @@ def generic_collective_orch_fn(
             for s in extras:
                 chip_args.add_scalar(s)
             chip_args.add_scalar(domain.device_ctx)
-            orch.submit_next_level(chip, chip_args, config, worker=i)
+            args_list.append(chip_args)
+        orch.submit_next_level_group(chip, args_list, config, workers=list(range(nranks)))
 
 
 # ---------------------------------------------------------------------------

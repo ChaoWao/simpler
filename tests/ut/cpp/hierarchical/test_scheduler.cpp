@@ -627,7 +627,7 @@ TEST_F(SchedulerFixture, FailedProducerPoisonsDependentTask) {
 }
 
 // ===========================================================================
-// Group task tests -- fixture with 2 MockMailboxWorkers
+// Group task tests -- fixture with 3 MockMailboxWorkers
 // ===========================================================================
 
 struct GroupSchedulerFixture : public ::testing::Test {
@@ -639,6 +639,7 @@ struct GroupSchedulerFixture : public ::testing::Test {
     Orchestrator orch;
     MockMailboxWorker worker_a;
     MockMailboxWorker worker_b;
+    MockMailboxWorker worker_c;
     WorkerManager manager;
     Scheduler sched;
     CallConfig cfg;
@@ -654,8 +655,10 @@ struct GroupSchedulerFixture : public ::testing::Test {
 
         worker_a.start();
         worker_b.start();
+        worker_c.start();
         manager.add_next_level(worker_a.mailbox_ptr());
         manager.add_next_level(worker_b.mailbox_ptr());
+        manager.add_next_level(worker_c.mailbox_ptr());
         manager.start(
             &allocator,
             [this](WorkerCompletion completion) {
@@ -774,44 +777,134 @@ TEST_F(GroupSchedulerFixture, GroupCompletesOnlyWhenAllDone) {
     wait_consumed(slot);
 }
 
-TEST_F(GroupSchedulerFixture, BlockedGroupDoesNotDispatchPartiallyOrReserveIdleWorker) {
-    auto running = orch.submit_next_level(C(70), single_tensor_args(0xF0, TensorArgType::OUTPUT), cfg, 0);
+TEST_F(GroupSchedulerFixture, BlockedGroupReservesTargetsThatBecomeIdleOneAtATime) {
+    auto running_a = orch.submit_next_level(C(70), single_tensor_args(0xF0, TensorArgType::OUTPUT), cfg, 0);
+    auto running_b = orch.submit_next_level(C(71), single_tensor_args(0xF1, TensorArgType::OUTPUT), cfg, 1);
     worker_a.wait_running();
-    ASSERT_TRUE(worker_a.is_running.load());
-
-    TaskArgs group_a = single_tensor_args(0xF1, TensorArgType::OUTPUT);
-    TaskArgs group_b = single_tensor_args(0xF2, TensorArgType::OUTPUT);
-    auto group = orch.submit_next_level_group(C(71), {group_a, group_b}, cfg, {0, 1});
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    EXPECT_EQ(S(group.task_slot).state.load(), TaskState::READY);
-    EXPECT_FALSE(worker_b.is_running.load());
-    EXPECT_EQ(worker_b.dispatched_count(), 0);
-
-    auto independent = orch.submit_next_level(C(72), single_tensor_args(0xF3, TensorArgType::OUTPUT), cfg, 1);
     worker_b.wait_running();
+    ASSERT_TRUE(worker_a.is_running.load());
     ASSERT_TRUE(worker_b.is_running.load());
-    EXPECT_EQ(worker_b.dispatched[0].callable_hash0, 72u);
+
+    TaskArgs group_a = single_tensor_args(0xF2, TensorArgType::OUTPUT);
+    TaskArgs group_b = single_tensor_args(0xF3, TensorArgType::OUTPUT);
+    auto group = orch.submit_next_level_group(C(72), {group_a, group_b}, cfg, {1, 0});
+    auto single_a = orch.submit_next_level(C(73), single_tensor_args(0xF4, TensorArgType::OUTPUT), cfg, 0);
+    auto single_b = orch.submit_next_level(C(74), single_tensor_args(0xF5, TensorArgType::OUTPUT), cfg, 1);
+    auto unrelated = orch.submit_next_level(C(75), single_tensor_args(0xF6, TensorArgType::OUTPUT), cfg, 2);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_c.dispatched_count() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_c.dispatched_count(), 1);
+    EXPECT_EQ(worker_c.dispatched[0].callable_hash0, 75u);
+    worker_c.complete();
+
+    worker_a.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    while (worker_a.dispatched_count() == 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(worker_a.dispatched_count(), 1) << "blocked group must neither dispatch partially nor yield to singles";
     EXPECT_EQ(S(group.task_slot).state.load(), TaskState::READY);
 
     worker_b.complete();
-    wait_consumed(independent.task_slot);
-    worker_a.complete();
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while ((!worker_a.is_running.load() || !worker_b.is_running.load()) &&
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) &&
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    ASSERT_TRUE(worker_a.is_running.load());
-    ASSERT_TRUE(worker_b.is_running.load());
-    EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 71u);
-    EXPECT_EQ(worker_b.dispatched[1].callable_hash0, 71u);
+    ASSERT_GE(worker_a.dispatched_count(), 2);
+    ASSERT_GE(worker_b.dispatched_count(), 2);
+    EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 72u);
+    EXPECT_EQ(worker_b.dispatched[1].callable_hash0, 72u);
 
     worker_a.complete();
     worker_b.complete();
-    wait_consumed(running.task_slot);
+
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 3 || worker_b.dispatched_count() < 3) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GE(worker_a.dispatched_count(), 3);
+    ASSERT_GE(worker_b.dispatched_count(), 3);
+    EXPECT_EQ(worker_a.dispatched[2].callable_hash0, 73u);
+    EXPECT_EQ(worker_b.dispatched[2].callable_hash0, 74u);
+    worker_a.complete();
+    worker_b.complete();
+
+    wait_consumed(running_a.task_slot);
+    wait_consumed(running_b.task_slot);
     wait_consumed(group.task_slot);
+    wait_consumed(single_a.task_slot);
+    wait_consumed(single_b.task_slot);
+    wait_consumed(unrelated.task_slot);
+}
+
+TEST_F(GroupSchedulerFixture, ConsecutiveGroupsReserveOnlyBlockedHeadTargets) {
+    SubmitResult first_group;
+    SubmitResult second_group;
+    SubmitResult single_a;
+    SubmitResult single_c;
+    {
+        std::lock_guard<std::mutex> scheduler_pause(sched.loop_mutex());
+        first_group = orch.submit_next_level_group(
+            C(80), {single_tensor_args(0x100, TensorArgType::OUTPUT), single_tensor_args(0x101, TensorArgType::OUTPUT)},
+            cfg, {0, 1}
+        );
+        second_group = orch.submit_next_level_group(
+            C(81), {single_tensor_args(0x102, TensorArgType::OUTPUT), single_tensor_args(0x103, TensorArgType::OUTPUT)},
+            cfg, {1, 2}
+        );
+        single_a = orch.submit_next_level(C(82), single_tensor_args(0x104, TensorArgType::OUTPUT), cfg, 0);
+        single_c = orch.submit_next_level(C(83), single_tensor_args(0x105, TensorArgType::OUTPUT), cfg, 2);
+    }
+
+    worker_a.wait_running();
+    worker_b.wait_running();
+    ASSERT_EQ(worker_a.dispatched_count(), 1);
+    ASSERT_EQ(worker_b.dispatched_count(), 1);
+    EXPECT_EQ(worker_a.dispatched[0].callable_hash0, 80u);
+    EXPECT_EQ(worker_b.dispatched[0].callable_hash0, 80u);
+    EXPECT_EQ(worker_c.dispatched_count(), 0);
+
+    worker_a.complete();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_a.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_a.dispatched_count(), 2);
+    EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 82u);
+    EXPECT_EQ(worker_c.dispatched_count(), 0);
+    EXPECT_EQ(S(second_group.task_slot).state.load(), TaskState::READY);
+
+    worker_a.complete();
+    worker_b.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_b.dispatched_count() < 2 || worker_c.dispatched_count() < 1) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_b.dispatched_count(), 2);
+    ASSERT_EQ(worker_c.dispatched_count(), 1);
+    EXPECT_EQ(worker_b.dispatched[1].callable_hash0, 81u);
+    EXPECT_EQ(worker_c.dispatched[0].callable_hash0, 81u);
+
+    worker_b.complete();
+    worker_c.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_c.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_c.dispatched_count(), 2);
+    EXPECT_EQ(worker_c.dispatched[1].callable_hash0, 83u);
+    worker_c.complete();
+
+    wait_consumed(first_group.task_slot);
+    wait_consumed(second_group.task_slot);
+    wait_consumed(single_a.task_slot);
+    wait_consumed(single_c.task_slot);
 }
 
 TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {

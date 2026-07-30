@@ -208,6 +208,7 @@ def run(platform: str, device_ids: list[int]) -> int:
                     window_size=WINDOW_SIZE,
                     buffers=_scratch_buffers(),
                 ) as handle:
+                    args_list = []
                     for worker_idx in worker_indices:
                         domain = handle[worker_idx]
                         print(
@@ -221,7 +222,8 @@ def run(platform: str, device_ids: list[int]) -> int:
                             make_tensor_arg(reduce_out[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING
                         )
                         _add_domain_scratch(args, domain)
-                        orch.submit_next_level(allreduce_handle, args, cfg, worker=worker_idx)
+                        args_list.append(args)
+                    orch.submit_next_level_group(allreduce_handle, args_list, cfg, workers=worker_indices)
 
             return _orch_fn
 

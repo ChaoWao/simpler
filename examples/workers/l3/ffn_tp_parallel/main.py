@@ -201,6 +201,7 @@ def run(
                 window_size=window_size,
                 buffers=[CommBufferSpec(name="scratch", dtype="float32", count=scratch_count, nbytes=scratch_nbytes)],
             ) as handle:
+                allreduce_args = []
                 for i in range(nranks):
                     domain = handle[i]
                     print(
@@ -233,7 +234,8 @@ def run(
                     )
                     a2.add_scalar(domain.domain_size)
                     a2.add_scalar(domain.device_ctx)
-                    orch.submit_next_level(allreduce_handle, a2, cfg, worker=i)
+                    allreduce_args.append(a2)
+                orch.submit_next_level_group(allreduce_handle, allreduce_args, cfg, workers=list(range(nranks)))
 
         print("[ffn_tp_parallel] running 2-chip 2-stage DAG...")
         worker.run(orch_fn, args=None, config=CallConfig())

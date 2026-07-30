@@ -56,6 +56,7 @@ scatters into `routed_y_buf` without clearing it first.
 | Concept | How |
 | ------- | --- |
 | **Three children under one `ChipCallable`** | `children=[(0, dispatch), (1, local_expert), (2, combine)]` — the integers are `func_id`s, matching the `rt_submit_aiv_task(0/1/2, …)` calls in the orchestration. Each child declares only the args it consumes; the orchestration signature is the union. |
+| **Collective group dispatch** | The complete per-rank callable is submitted as one NEXT_LEVEL group because its dispatch and combine phases wait on peer ranks. |
 | **Ordering without dependencies** | The three tasks run back-to-back because `rt_submit_aiv_task` dispatches in submission order, not because any tensor edge forces it. |
 | **Chaining through host-backed tensors** | `recv_x_out` / `recv_w_out` / `recv_count_out` are `OUTPUT_EXISTING` for dispatch and inputs to `local_expert`; `recv_y` likewise feeds `combine`. |
 | **A hand-laid-out window** | `SCRATCH_NBYTES` sums every region — counts table, two signal areas, three receive windows, the combine push destination, a third signal — and must match the `kOff*` offsets in the kernels. |
