@@ -22,11 +22,11 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     ArgDirection,
     ChipCallable,
     ChipStorageTaskArgs,
+    ChipTensor,
     CoreCallable,
     DataType,
     TaskArgs,
     TaskState,
-    Tensor,
     TensorArgType,
     arg_direction_name,
     get_dtype_name,
@@ -35,7 +35,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 from simpler.buffer_handle import (
     AccessMode,
     BackendKind,
-    BufferRef,
+    Tensor,
     create_host_shared_buffer,
     mint_owner_instance_id,
     wrap_device_malloc,
@@ -53,22 +53,22 @@ _REF_BID = itertools.count(1)
 
 
 def _dev_ref(addr, shapes, dtype, tag=None):
-    """A DEVICE_MALLOC ``BufferRef`` at ``addr`` for wire-``TaskArgs`` container tests.
+    """A DEVICE_MALLOC ``Tensor`` at ``addr`` for wire-``TaskArgs`` container tests.
 
     Each call mints a fresh identity, so refs added to one TaskArgs stay distinct. The backend body
-    carries ``addr`` (u64 LE), the container-test counterpart of the old ``Tensor.make(addr, ...)``.
+    carries ``addr`` (u64 LE), the container-test counterpart of the old ``ChipTensor.make(addr, ...)``.
     """
     nbytes = get_element_size(dtype)
     for s in shapes:
         nbytes *= int(s)
-    return wrap_device_malloc(addr, nbytes, mint_owner_instance_id(), next(_REF_BID), "L2").ref(
+    return wrap_device_malloc(addr, nbytes, mint_owner_instance_id(), next(_REF_BID), "L2").tensor(
         tuple(shapes), int(dtype.value)
     )
 
 
 def _ref_addr(packed_ref) -> int:
     """The device pointer carried in a DEVICE_MALLOC ref's backend body."""
-    return int.from_bytes(BufferRef.unpack(packed_ref).handle.body[:8], "little")
+    return int.from_bytes(Tensor.unpack(packed_ref).handle.body[:8], "little")
 
 
 # ============================================================================
@@ -205,7 +205,7 @@ class TestTorchInterop:
 
         t = torch.zeros(4, 8, dtype=torch.float32)
         arg = make_tensor_arg(t)
-        assert isinstance(arg, Tensor)
+        assert isinstance(arg, ChipTensor)
         assert arg.data == t.data_ptr()
         assert arg.shapes == (4, 8)
         assert arg.dtype == DataType.FLOAT32
@@ -265,60 +265,60 @@ class TestScalarToUint64:
 
 
 # ============================================================================
-# Tensor
+# ChipTensor
 # ============================================================================
 
 
 class TestTensor:
     def test_default_constructor(self):
-        arg = Tensor()
+        arg = ChipTensor()
         assert arg is not None
 
     def test_max_dims_constant(self):
         assert MAX_TENSOR_DIMS == 5
 
     def test_make(self):
-        arg = Tensor.make(0xDEAD, (4, 8), DataType.FLOAT32)
+        arg = ChipTensor.make(0xDEAD, (4, 8), DataType.FLOAT32)
         assert arg.data == 0xDEAD
         assert arg.shapes == (4, 8)
         assert arg.ndims == 2
         assert arg.dtype == DataType.FLOAT32
 
     def test_nbytes(self):
-        arg = Tensor.make(0, (10, 20), DataType.FLOAT32)
+        arg = ChipTensor.make(0, (10, 20), DataType.FLOAT32)
         assert arg.nbytes() == 10 * 20 * 4
 
     def test_nbytes_int8(self):
-        arg = Tensor.make(0, (256,), DataType.INT8)
+        arg = ChipTensor.make(0, (256,), DataType.INT8)
         assert arg.nbytes() == 256
 
     def test_shapes_setter(self):
-        arg = Tensor()
+        arg = ChipTensor()
         arg.shapes = (3, 5, 7)
         assert arg.ndims == 3
         assert arg.shapes == (3, 5, 7)
 
     def test_max_dims(self):
-        arg = Tensor.make(0, (1, 2, 3, 4, 5), DataType.INT32)
+        arg = ChipTensor.make(0, (1, 2, 3, 4, 5), DataType.INT32)
         assert arg.ndims == 5
 
     def test_exceed_max_dims(self):
         with pytest.raises((ValueError, RuntimeError)):
-            Tensor.make(0, (1, 2, 3, 4, 5, 6), DataType.INT32)
+            ChipTensor.make(0, (1, 2, 3, 4, 5, 6), DataType.INT32)
 
     def test_dtype_readwrite(self):
-        arg = Tensor.make(0, (1,), DataType.FLOAT32)
+        arg = ChipTensor.make(0, (1,), DataType.FLOAT32)
         arg.dtype = DataType.INT64
         assert arg.dtype == DataType.INT64
 
     def test_data_readwrite(self):
-        arg = Tensor.make(0x1000, (1,), DataType.FLOAT32)
+        arg = ChipTensor.make(0x1000, (1,), DataType.FLOAT32)
         assert arg.data == 0x1000
         arg.data = 0x2000
         assert arg.data == 0x2000
 
     def test_repr(self):
-        arg = Tensor.make(0x1000, (4, 8), DataType.FLOAT16)
+        arg = ChipTensor.make(0x1000, (4, 8), DataType.FLOAT16)
         r = repr(arg)
         assert "Tensor" in r
         assert "4" in r
@@ -340,7 +340,7 @@ class TestChipStorageTaskArgs:
 
     def test_add_tensor(self):
         args = ChipStorageTaskArgs()
-        t = Tensor.make(0xBEEF, (4, 8), DataType.FLOAT32)
+        t = ChipTensor.make(0xBEEF, (4, 8), DataType.FLOAT32)
         args.add_tensor(t)
         assert args.tensor_count() == 1
         assert args.scalar_count() == 0
@@ -355,8 +355,8 @@ class TestChipStorageTaskArgs:
 
     def test_mixed(self):
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(0x1, (2,), DataType.INT32))
-        args.add_tensor(Tensor.make(0x2, (3,), DataType.FLOAT16))
+        args.add_tensor(ChipTensor.make(0x1, (2,), DataType.INT32))
+        args.add_tensor(ChipTensor.make(0x2, (3,), DataType.FLOAT16))
         args.add_scalar(99)
         args.add_scalar(100)
         assert args.tensor_count() == 2
@@ -367,12 +367,12 @@ class TestChipStorageTaskArgs:
         args = ChipStorageTaskArgs()
         args.add_scalar(42)
         with pytest.raises(RuntimeError):
-            args.add_tensor(Tensor.make(0x1, (2,), DataType.INT32))
+            args.add_tensor(ChipTensor.make(0x1, (2,), DataType.INT32))
 
     def test_tensor_access(self):
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(0xA, (4,), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(0xB, (8,), DataType.INT32))
+        args.add_tensor(ChipTensor.make(0xA, (4,), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(0xB, (8,), DataType.INT32))
         assert args.tensor(0).data == 0xA
         assert args.tensor(1).data == 0xB
         assert args.tensor(0).shapes == (4,)
@@ -397,7 +397,7 @@ class TestChipStorageTaskArgs:
 
     def test_clear(self):
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(0, (1,), DataType.INT8))
+        args.add_tensor(ChipTensor.make(0, (1,), DataType.INT8))
         args.add_scalar(42)
         args.clear()
         assert len(args) == 0
@@ -434,24 +434,24 @@ class TestTaskArgs:
         assert args.tensor_count() == 0
         assert args.scalar_count() == 0
 
-    def test_add_ref_default_tag(self):
+    def test_add_tensor_default_tag(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32))
+        args.add_tensor(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32))
         assert args.tensor_count() == 1
         assert args.tag(0) == TensorArgType.INPUT
 
-    def test_add_ref_with_tag(self):
+    def test_add_tensor_with_tag(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32), TensorArgType.OUTPUT)
         assert args.tag(0) == TensorArgType.OUTPUT
 
     def test_multiple_refs_with_tags(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
-        args.add_ref(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
-        args.add_ref(_dev_ref(0x3, (4,), DataType.INT8), TensorArgType.INOUT)
-        args.add_ref(_dev_ref(0x4, (5,), DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
-        args.add_ref(_dev_ref(0x5, (6,), DataType.INT32), TensorArgType.NO_DEP)
+        args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
+        args.add_tensor(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0x3, (4,), DataType.INT8), TensorArgType.INOUT)
+        args.add_tensor(_dev_ref(0x4, (5,), DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
+        args.add_tensor(_dev_ref(0x5, (6,), DataType.INT32), TensorArgType.NO_DEP)
         assert args.tensor_count() == 5
         assert args.tag(0) == TensorArgType.INPUT
         assert args.tag(1) == TensorArgType.OUTPUT
@@ -461,7 +461,7 @@ class TestTaskArgs:
 
     def test_set_tag(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0x1, (2,), DataType.INT32))
+        args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32))
         assert args.tag(0) == TensorArgType.INPUT
         args.set_tag(0, TensorArgType.INOUT)
         assert args.tag(0) == TensorArgType.INOUT
@@ -475,8 +475,8 @@ class TestTaskArgs:
 
     def test_mixed_with_tags(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
-        args.add_ref(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
+        args.add_tensor(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
         args.add_scalar(99)
         args.add_scalar(100)
         assert args.tensor_count() == 2
@@ -491,16 +491,16 @@ class TestTaskArgs:
         args = TaskArgs()
         args.add_scalar(42)
         with pytest.raises(RuntimeError):
-            args.add_ref(_dev_ref(0x1, (2,), DataType.INT32))
+            args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32))
 
     def test_ref_access(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0xA, (4,), DataType.FLOAT32))
-        args.add_ref(_dev_ref(0xB, (8,), DataType.INT32))
+        args.add_tensor(_dev_ref(0xA, (4,), DataType.FLOAT32))
+        args.add_tensor(_dev_ref(0xB, (8,), DataType.INT32))
         assert _ref_addr(args.ref(0)) == 0xA
         assert _ref_addr(args.ref(1)) == 0xB
-        assert BufferRef.unpack(args.ref(0)).shapes == (4,)
-        assert BufferRef.unpack(args.ref(1)).shapes == (8,)
+        assert Tensor.unpack(args.ref(0)).shapes == (4,)
+        assert Tensor.unpack(args.ref(1)).shapes == (8,)
 
     def test_scalar_access(self):
         args = TaskArgs()
@@ -531,7 +531,7 @@ class TestTaskArgs:
 
     def test_clear(self):
         args = TaskArgs()
-        args.add_ref(_dev_ref(0, (1,), DataType.INT8), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0, (1,), DataType.INT8), TensorArgType.OUTPUT)
         args.add_scalar(42)
         args.clear()
         assert len(args) == 0
@@ -542,7 +542,7 @@ class TestTaskArgs:
         """TaskArgs is vector-backed — no per-class capacity limit on refs."""
         args = TaskArgs()
         for i in range(20):
-            args.add_ref(_dev_ref(i + 1, (1,), DataType.INT8))
+            args.add_tensor(_dev_ref(i + 1, (1,), DataType.INT8))
         assert args.tensor_count() == 20
 
     def test_no_capacity_limit_scalars(self):
@@ -570,12 +570,12 @@ class TestRemoteTaskArgsSidecar:
         ref = RemoteTensorRef(handle=handle, offset=8, shape=(4,), dtype=DataType.UINT8)
 
         args = TaskArgs()
-        args.add_ref(ref, TensorArgType.OUTPUT)
+        args.add_tensor(ref, TensorArgType.OUTPUT)
         args.add_scalar(9)
 
         assert args.tensor_count() == 1
         # An arg destined for a remote worker carries a REMOTE_SIDECAR placeholder ref (no local backing).
-        assert BufferRef.unpack(args.ref(0)).handle.backend_kind == BackendKind.REMOTE_SIDECAR
+        assert Tensor.unpack(args.ref(0)).handle.backend_kind == BackendKind.REMOTE_SIDECAR
         assert args.tag(0) == TensorArgType.OUTPUT
         assert args.scalar(0) == 9
 
@@ -607,7 +607,7 @@ class TestRemoteTaskArgsSidecar:
                 nbytes=64,
             )
             args = TaskArgs()
-            args.add_ref(RemoteTensorRef(handle=handle, shape=(4,), dtype=DataType.UINT8))
+            args.add_tensor(RemoteTensorRef(handle=handle, shape=(4,), dtype=DataType.UINT8))
             assert args in task_interface_module._REMOTE_TASK_ARGS_STORAGE  # noqa: SLF001
             assert _remote_sidecar_for(args) is not None
             return weakref.ref(args)
@@ -655,7 +655,7 @@ class TestRemoteTaskArgsSidecar:
 
     def test_host_inline_ref_uses_inline_payload_arena(self):
         args = TaskArgs()
-        args.add_ref(
+        args.add_tensor(
             RemoteTensorRef.host_inline(b"abcd", shape=(4,), dtype=DataType.UINT8),
             TensorArgType.INPUT,
         )
@@ -755,7 +755,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         )
         from simpler.remote_l3_session import _materialize_task_args
 
-        tensor = Tensor.make(0, (4,), DataType.UINT8)
+        tensor = ChipTensor.make(0, (4,), DataType.UINT8)
         desc = RemoteTensorDesc(
             address_space=WireRemoteAddressSpace.HOST_INLINE,
             owner_worker_id=0,
@@ -790,7 +790,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
 
         backing = ctypes.create_string_buffer(b"01234567", 8)
         entry = _RemoteBufferEntry(backing, 8, 1, WireRemoteAddressSpace.REMOTE_DEVICE)
-        tensor = Tensor.make(0, (4,), DataType.UINT8)
+        tensor = ChipTensor.make(0, (4,), DataType.UINT8)
         desc = RemoteTensorDesc(
             address_space=WireRemoteAddressSpace.REMOTE_DEVICE,
             owner_worker_id=2,
@@ -993,45 +993,45 @@ class TestChipCallable:
 
 
 # ============================================================================
-# Tensor.child_memory
+# ChipTensor.child_memory
 # ============================================================================
 
 
 class TestChildMemory:
     def test_default_is_false(self):
-        t = Tensor()
+        t = ChipTensor()
         assert t.child_memory is False
 
     def test_make_default_is_false(self):
-        t = Tensor.make(0x1000, (4,), DataType.FLOAT32)
+        t = ChipTensor.make(0x1000, (4,), DataType.FLOAT32)
         assert t.child_memory is False
 
     def test_make_child_memory_true(self):
-        t = Tensor.make(0xDEAD, (8,), DataType.FLOAT16, child_memory=True)
+        t = ChipTensor.make(0xDEAD, (8,), DataType.FLOAT16, child_memory=True)
         assert t.child_memory is True
         assert t.data == 0xDEAD
         assert t.shapes == (8,)
         assert t.dtype == DataType.FLOAT16
 
     def test_set_child_memory(self):
-        t = Tensor.make(0x1000, (4,), DataType.FLOAT32)
+        t = ChipTensor.make(0x1000, (4,), DataType.FLOAT32)
         assert t.child_memory is False
         t.child_memory = True
         assert t.child_memory is True
 
     def test_repr_shows_child_memory_when_set(self):
-        t = Tensor.make(0x1000, (4,), DataType.FLOAT32, child_memory=True)
+        t = ChipTensor.make(0x1000, (4,), DataType.FLOAT32, child_memory=True)
         r = repr(t)
         assert "child_memory=True" in r
 
     def test_repr_hides_child_memory_when_default(self):
-        t = Tensor.make(0x1000, (4,), DataType.FLOAT32)
+        t = ChipTensor.make(0x1000, (4,), DataType.FLOAT32)
         r = repr(t)
         assert "child_memory" not in r
 
     def test_chip_storage_preserves_child_memory(self):
         args = ChipStorageTaskArgs()
-        t = Tensor.make(0x2000, (16,), DataType.INT32, child_memory=True)
+        t = ChipTensor.make(0x2000, (16,), DataType.INT32, child_memory=True)
         args.add_tensor(t)
         out = args.tensor(0)
         assert out.child_memory is True
@@ -1039,27 +1039,27 @@ class TestChildMemory:
 
 
 class TestAddRefAccessSubset:
-    # §3 access: add_ref rejects an arg whose TensorArgType needs access the handle does not grant.
-    def test_add_ref_rejects_write_arg_on_read_only_backing(self):
+    # §3 access: add_tensor rejects an arg whose TensorArgType needs access the handle does not grant.
+    def test_add_tensor_rejects_write_arg_on_read_only_backing(self):
         oid = mint_owner_instance_id()
         h = wrap_fork_inherited(0x1000, 64, owner_instance_id=oid, buffer_id=1, access=AccessMode.READ)
-        ref = h.ref((16,), DataType.FLOAT32.value)  # READ-only backing
+        ref = h.tensor((16,), DataType.FLOAT32)  # READ-only backing
         args = TaskArgs()
         with pytest.raises(ValueError, match="access"):
-            args.add_ref(ref.pack(), TensorArgType.OUTPUT_EXISTING)
+            args.add_tensor(ref.pack(), TensorArgType.OUTPUT_EXISTING)
         with pytest.raises(ValueError, match="access"):
-            args.add_ref(ref.pack(), TensorArgType.INOUT)
-        args.add_ref(ref.pack(), TensorArgType.INPUT)  # READ⊆READ ok
+            args.add_tensor(ref.pack(), TensorArgType.INOUT)
+        args.add_tensor(ref.pack(), TensorArgType.INPUT)  # READ⊆READ ok
 
-    def test_add_ref_accepts_matching_access(self):
+    def test_add_tensor_accepts_matching_access(self):
         oid = mint_owner_instance_id()
         h = create_host_shared_buffer(64, oid, buffer_id=1)  # READWRITE
-        ref = h.ref((16,), DataType.FLOAT32.value)
+        ref = h.tensor((16,), DataType.FLOAT32)
         try:
             args = TaskArgs()
-            args.add_ref(ref.pack(), TensorArgType.INPUT)  # READ⊆RW
-            args.add_ref(ref.pack(), TensorArgType.OUTPUT_EXISTING)  # WRITE⊆RW
-            args.add_ref(ref.pack(), TensorArgType.INOUT)  # RW⊆RW
+            args.add_tensor(ref.pack(), TensorArgType.INPUT)  # READ⊆RW
+            args.add_tensor(ref.pack(), TensorArgType.OUTPUT_EXISTING)  # WRITE⊆RW
+            args.add_tensor(ref.pack(), TensorArgType.INOUT)  # RW⊆RW
             assert args.tensor_count() == 3
         finally:
             h.close()

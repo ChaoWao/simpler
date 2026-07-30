@@ -61,8 +61,8 @@ def _sync_args(ptr: int, tag: TensorArgType) -> TaskArgs:
     needs to yield a unique canonical identity (here the handle buffer_id).
     """
     args = TaskArgs()
-    ref = wrap_fork_inherited(ptr, 1, _OID, buffer_id=ptr).ref(shapes=(1,), dtype=_U8)
-    args.add_ref(ref, tag)
+    ref = wrap_fork_inherited(ptr, 1, _OID, buffer_id=ptr).tensor(shapes=(1,), dtype=_U8)
+    args.add_tensor(ref, tag)
     return args
 
 

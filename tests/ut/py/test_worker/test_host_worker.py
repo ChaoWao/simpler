@@ -2281,13 +2281,13 @@ class TestOrchAlloc:
 
         def orch(o, args, cfg):
             inter = o.alloc((64,), DataType.FLOAT32)
-            ref = inter.ref((64,), DataType.FLOAT32)
+            ref = inter.tensor((64,), DataType.FLOAT32)
             captured.append((inter.base, ref.ndims, ref.shapes[0]))
 
             # Tag as OUTPUT in some submit so the synthetic alloc slot has a
             # downstream consumer (otherwise scope_end consumes alone — still fine).
             sub_args = TaskArgs()
-            sub_args.add_ref(ref, TensorArgType.INPUT)
+            sub_args.add_tensor(ref, TensorArgType.INPUT)
             o.submit_sub(handle, sub_args)
 
         hw.run(orch)
@@ -2319,13 +2319,13 @@ class TestOrchAlloc:
                 # do TensorMap.lookup. Plain OUTPUT / OUTPUT_EXISTING are
                 # pure inserts and would leave no dep on the alloc slot.
                 p_args = TaskArgs()
-                p_args.add_ref(inter.ref((128,), DataType.FLOAT32), TensorArgType.INOUT)
+                p_args.add_tensor(inter.tensor((128,), DataType.FLOAT32), TensorArgType.INOUT)
                 o.submit_sub(producer_handle, p_args)
 
                 # Consumer tags inter as INPUT — dep inference keys on the ref's
                 # canonical identity (shared with the producer), dep wired automatically.
                 c_args = TaskArgs()
-                c_args.add_ref(inter.ref((128,), DataType.FLOAT32), TensorArgType.INPUT)
+                c_args.add_tensor(inter.tensor((128,), DataType.FLOAT32), TensorArgType.INPUT)
                 o.submit_sub(consumer_handle, c_args)
 
             hw.run(orch)
@@ -2366,7 +2366,7 @@ class TestOrchAlloc:
             def orch(o, args, cfg):
                 inter = o.alloc((64,), DataType.FLOAT32)
                 args = TaskArgs()
-                args.add_ref(inter.ref((64,), DataType.FLOAT32), TensorArgType.INPUT)
+                args.add_tensor(inter.tensor((64,), DataType.FLOAT32), TensorArgType.INPUT)
                 o.submit_sub(handle, args)
 
             for _ in range(8):
@@ -2405,11 +2405,11 @@ class TestSubCallableArgs:
 
             # Use a synthetic non-zero pointer — the sub callable only checks metadata (shapes),
             # never dereferences the buffer, so a FORK_SHM ref over a fake VA is enough.
-            cref = wrap_fork_inherited(0xCAFE0000, 16, mint_owner_instance_id(), 1, "L3").ref((4,), DataType.FLOAT32)
+            cref = wrap_fork_inherited(0xCAFE0000, 16, mint_owner_instance_id(), 1, "L3").tensor((4,), DataType.FLOAT32)
 
             def orch(o, args, cfg):
                 sub_args = TaskArgs()
-                sub_args.add_ref(cref, TensorArgType.INPUT)
+                sub_args.add_tensor(cref, TensorArgType.INPUT)
                 o.submit_sub(handle, sub_args)
 
             hw.run(orch)

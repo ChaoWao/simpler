@@ -38,7 +38,7 @@ def run_dag(orch, callables, task_args, config):
 
     # SubTask: tag the chip output as INPUT — Orchestrator wires the dep via TensorMap.
     sub_args = TaskArgs()
-    sub_args.add_ref(_rehosted_ref(task_args, "f"), TensorArgType.INPUT)
+    sub_args.add_tensor(_rehosted_ref(task_args, "f"), TensorArgType.INPUT)
     orch.submit_sub(callables.verify, sub_args)
 
 

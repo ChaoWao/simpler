@@ -23,7 +23,7 @@ from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArg
 from simpler_setup import Tensor as STensor
 from simpler_setup.scene_test import TaskArgsBuilder, _rehosted_ref_for
 
-_F32 = DataType.FLOAT32.value
+_F32 = DataType.FLOAT32
 
 # ---------------------------------------------------------------------------
 # Allreduce constants (must match kernel COUNT)
@@ -124,11 +124,11 @@ def allreduce_orch_fn(orch, callables, task_args, config):
         for i in range(nranks):
             domain = handle[i]
             chip_args = TaskArgs()
-            chip_args.add_ref(_rehosted_ref_for(task_args, getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
-            chip_args.add_ref(
+            chip_args.add_tensor(_rehosted_ref_for(task_args, getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
+            chip_args.add_tensor(
                 _rehosted_ref_for(task_args, getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING
             )
-            chip_args.add_ref(domain.buffers["scratch"].ref((float_elems,), _F32), TensorArgType.INOUT)
+            chip_args.add_tensor(domain.buffers["scratch"].tensor((float_elems,), _F32), TensorArgType.INOUT)
             chip_args.add_scalar(domain.domain_size)
             chip_args.add_scalar(domain.device_ctx)
             orch.submit_next_level(chip, chip_args, config, worker=i)
@@ -185,11 +185,11 @@ def generic_collective_orch_fn(
         for i in range(nranks):
             domain = handle[i]
             chip_args = TaskArgs()
-            chip_args.add_ref(_rehosted_ref_for(task_args, getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
-            chip_args.add_ref(
+            chip_args.add_tensor(_rehosted_ref_for(task_args, getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
+            chip_args.add_tensor(
                 _rehosted_ref_for(task_args, getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING
             )
-            chip_args.add_ref(domain.buffers["scratch"].ref((float_elems,), _F32), TensorArgType.INOUT)
+            chip_args.add_tensor(domain.buffers["scratch"].tensor((float_elems,), _F32), TensorArgType.INOUT)
             chip_args.add_scalar(domain.domain_size)
             for s in extras:
                 chip_args.add_scalar(s)

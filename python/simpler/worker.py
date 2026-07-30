@@ -101,9 +101,9 @@ from .buffer_handle import (
     BackendKind,
     BufferHandle,
     BufferHandleDescriptor,
-    BufferRef,
     CanonicalIdentity,
     ImportRegistry,
+    Tensor,
     create_host_shared_buffer,
     host_ptr_nbytes,
     mint_owner_instance_id,
@@ -263,6 +263,11 @@ _CTRL_MALLOC = 0
 _CTRL_FREE = 1
 _CTRL_COPY_TO = 2
 _CTRL_COPY_FROM = 3
+# Staged host<->device copy: the payload rides in a POSIX shm the child maps by name, because a
+# parent VA is only valid in the child when the allocation predates the fork — a precondition the
+# caller of copy_to/copy_from cannot be asked to guarantee.
+_CTRL_COPY_TO_STAGED = 14
+_CTRL_COPY_FROM_STAGED = 15
 # Pre-warm a chip child by callable digest. The child resolves the digest to
 # its own target-local slot and prepares that slot so the first run() does not
 # pay the H2D upload cost. Sent from the parent right after startup.
@@ -481,6 +486,49 @@ class _ChildProvEntry:
         if self.domain_allocation_ids:
             extent = max(extent, *self.domain_allocation_ids.values())
         return extent
+
+
+def _run_staged_copy(cw, buf: memoryview, sub_cmd: int) -> None:
+    """Child side of a staged host<->device copy: map the named shm, then move bytes to/from it.
+
+    The parent never sends its own address; the shm name is the only thing that crosses the fork.
+    """
+    dev_ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
+    nbytes = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
+    staging = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
+    try:
+        sbuf = staging.buf
+        assert sbuf is not None
+        base = ctypes.addressof(ctypes.c_char.from_buffer(sbuf))
+        if sub_cmd == _CTRL_COPY_TO_STAGED:
+            cw.copy_to(dev_ptr, base, nbytes)
+        else:
+            cw.copy_from(base, dev_ptr, nbytes)
+        del sbuf
+    finally:
+        staging.close()
+
+
+@contextlib.contextmanager
+def _staged_host_payload(nbytes: int):
+    """A POSIX shm the forked child can map by name, plus its address in this process.
+
+    A host address is only meaningful in the child when its allocation predates the fork, so a
+    control-plane copy stages its bytes here instead of sending the caller's pointer. Named shm is
+    the same mechanism the dispatch path already uses for a post-fork ``create_buffer``.
+    """
+    shm = SharedMemory(create=True, size=max(int(nbytes), 1))
+    try:
+        buf = shm.buf
+        assert buf is not None
+        base = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+        try:
+            yield shm, base
+        finally:
+            del buf
+    finally:
+        shm.close()
+        shm.unlink()
 
 
 def _read_ctrl_staged_shm_name(buf: memoryview) -> str:
@@ -875,20 +923,20 @@ def _format_exc(prefix: str, exc: BaseException) -> str:
     return f"{prefix}: {type(exc).__name__}: {exc}"
 
 
-def _reexport_args_from_mailbox(buf, worker: Worker) -> list[BufferRef]:
-    """Re-export the mailbox BufferRef args for an orchestrator (nested L4→L3) child.
+def _reexport_args_from_mailbox(buf, worker: Worker) -> list[Tensor]:
+    """Re-export the mailbox tensor args for an orchestrator (nested L4→L3) child.
 
     Each received ref's backing is re-exported (per-backing, no map, canonical identity preserved), and
     a new ref carrying the original view (byte_offset / shapes / strides / dtype) is built over it. The
-    inner orch fn forwards these to L2 with no map cost (no BufferRef pass-through); dependency
+    inner orch fn forwards these to L2 with no map cost (no descriptor pass-through); dependency
     inference keys on the invariant identity. The compute leaf downstream maps lazily.
     """
     args_ptr = _buffer_field_addr(buf, _OFF_TASK_ARGS_BLOB)
-    out: list[BufferRef] = []
+    out: list[Tensor] = []
     for ref_bytes in bufferref_blob_refs(args_ptr, _MAILBOX_ARGS_CAPACITY):
-        ref = BufferRef.unpack(ref_bytes)
+        ref = Tensor.unpack(ref_bytes)
         h_prime = worker._reexport(ref.handle)
-        out.append(h_prime.ref(shapes=ref.shapes, dtype=ref.dtype, strides=ref.strides, byte_offset=ref.byte_offset))
+        out.append(h_prime.tensor(shapes=ref.shapes, dtype=ref.dtype, strides=ref.strides, byte_offset=ref.byte_offset))
     return out
 
 
@@ -1388,9 +1436,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
                     f"(register via _CTRL_PREPARE first)"
                 )
-            # Materialize the BufferRef args into a Tensor blob the runtime reads: resolve
+            # Materialize the tensor args into a chip-POD blob the runtime reads: resolve
             # each ref's embedded handle to a local base (map-once, cached by canonical
-            # identity), then build the Tensor blob at those bases. Replaces the former
+            # identity), then build the chip blob at those bases. Replaces the former
             # parent-VA range rewrite — identities resolve exactly, not by numeric range.
             args_ptr = mailbox_addr + _OFF_TASK_ARGS_BLOB
             resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
@@ -1440,6 +1488,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
                 n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
                 cw.copy_from(dst, src, n)
+            elif sub_cmd in (_CTRL_COPY_TO_STAGED, _CTRL_COPY_FROM_STAGED):
+                _run_staged_copy(cw, buf, sub_cmd)
             elif sub_cmd == _CTRL_PREPARE:
                 digest = _read_control_digest(buf)
                 cid = identity_table.get(digest)
@@ -2257,7 +2307,7 @@ class Worker:
 
         # Owner-side BufferHandle state (P1-B): a per-incarnation opaque nonce, a monotonic buffer_id
         # (0 reserved), and the live handles this Worker owns. create_buffer allocates a handle whose
-        # self-describing descriptor rides embedded in every BufferRef built over it (no export
+        # self-describing descriptor rides embedded in every Tensor built over it (no export
         # handshake); consumers materialize it lazily on receipt.
         self._owner_instance_id: bytes = mint_owner_instance_id()
         self._buffer_id_counter: int = 1
@@ -2270,7 +2320,7 @@ class Worker:
         # make_ref_arg memo: a pre-fork host tensor's storage base -> its FORK_SHM handle, so every ref
         # over the same storage shares one canonical identity (dependencies key on it). Worker-scoped.
         self._fork_tensor_handles: dict[int, BufferHandle] = {}
-        # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own BufferRef
+        # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own tensor
         # args itself (no forked child, no mailbox), resolving each ref's descriptor to a local base
         # map-once — the chip-child path minus the mailbox hop. Lazily created on first L2 run.
         self._l2_import_registry: ImportRegistry | None = None
@@ -5566,7 +5616,7 @@ class Worker:
         """
         out: list[tuple[int, int]] = []
         for i in range(args.tensor_count()):
-            desc = BufferRef.unpack(args.ref(i)).handle
+            desc = Tensor.unpack(args.ref(i)).handle
             if desc.backend_kind in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
                 out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
@@ -5620,7 +5670,7 @@ class Worker:
     def malloc(self, size: int) -> BufferHandle:
         """Allocate device memory on this L2 worker's own chip; returns a DEVICE_MALLOC ``BufferHandle``.
 
-        Name a task arg with ``handle.ref(shapes, dtype)`` and release with ``worker.free(handle)``. L3+
+        Name a task arg with ``handle.tensor(shapes, dtype)`` and release with ``worker.free(handle)``. L3+
         allocates child device memory with ``alloc_child_tensor(worker_id, ...)`` instead — a Worker is
         the only allocator, the Orchestrator never allocates.
         """
@@ -5642,7 +5692,7 @@ class Worker:
         DEVICE_MALLOC ``BufferHandle`` (successor of ``orch.malloc`` + ``child_memory``).
 
         Called from within an orchestration fn (capture the Worker in the closure). The pointer is
-        private to ``worker_id``; name the arg with ``handle.ref(shapes, dtype)``, dispatch it only to
+        private to ``worker_id``; name the arg with ``handle.tensor(shapes, dtype)``, dispatch it only to
         that worker, and load host data with ``copy_to``. Not auto-freed at end-of-task.
         """
         nbytes = get_element_size(dtype)
@@ -5687,9 +5737,57 @@ class Worker:
                     assert self._worker is not None
                     self._worker.free(wid, ptr)
 
+    @staticmethod
+    def _check_copy_handle(handle: BufferHandle, nbytes: int, *, writing: bool, api: str) -> None:
+        """Require ``handle`` to be a device backing this copy may legally touch for ``nbytes``.
+
+        The transfer length comes from the *host* object, so without this check a host buffer larger
+        than the device backing writes past it, and a READ-only backing accepts a write.
+        """
+        if handle.address_space != AddressSpace.DEVICE:
+            raise ValueError(
+                f"Worker.{api}: expected a DEVICE handle, got {handle.address_space.name} "
+                f"({handle.backend_kind.name}); host-to-host copies do not go through this API"
+            )
+        if handle.backend_kind not in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+            raise ValueError(f"Worker.{api}: backend {handle.backend_kind.name} is not reachable from this process")
+        needed = AccessMode.WRITE if writing else AccessMode.READ
+        if handle.access not in (needed, AccessMode.READWRITE):
+            raise ValueError(
+                f"Worker.{api}: backing grants {handle.access.name} but this direction needs {needed.name}"
+            )
+        if nbytes > handle.nbytes:
+            raise ValueError(f"Worker.{api}: {nbytes} bytes exceeds the {handle.nbytes}-byte backing")
+
+    @staticmethod
+    def _host_side_of_copy(obj, *, writing: bool, api: str) -> tuple[str | None, int, int]:
+        """``(shm_name_or_None, address, nbytes)`` for the host end of a control-plane copy.
+
+        A named POSIX-shm ``BufferHandle`` is already reachable by the child, so its name travels
+        instead of a staged duplicate. The decision is by TYPE, never by matching an address against
+        a range of known backings — an address range says nothing reliable about who owns memory.
+        """
+        if not isinstance(obj, BufferHandle):
+            addr, nbytes = host_ptr_nbytes(obj)
+            return None, addr, nbytes
+        if obj.address_space != AddressSpace.HOST:
+            raise ValueError(f"Worker.{api}: the host side must be a HOST handle, got {obj.address_space.name}")
+        needed = AccessMode.WRITE if writing else AccessMode.READ
+        if obj.access not in (needed, AccessMode.READWRITE):
+            raise ValueError(
+                f"Worker.{api}: host backing grants {obj.access.name} but this direction needs {needed.name}"
+            )
+        name = obj.shm.name if (obj.backend_kind == BackendKind.POSIX_SHM and obj.shm is not None) else None
+        return name, int(obj.base), int(obj.nbytes)
+
     def copy_to(self, dst: BufferHandle, src) -> None:
-        """H2D: copy host ``src`` (a torch tensor or writable buffer) into device handle ``dst``."""
-        src_addr, nbytes = host_ptr_nbytes(src)
+        """H2D: copy host ``src`` into device handle ``dst``.
+
+        ``src`` is a torch tensor, a writable buffer, or a host ``BufferHandle``; a POSIX-shm handle
+        transfers without an intermediate copy.
+        """
+        src_name, src_addr, nbytes = self._host_side_of_copy(src, writing=False, api="copy_to")
+        self._check_copy_handle(dst, nbytes, writing=True, api="copy_to")
         wid, dptr = int(dst.owner_worker_id), int(dst.base)
         with self._operation_lease("copy_to"):
             if self.level != 2:
@@ -5697,15 +5795,26 @@ class Worker:
             with self._child_prov_lock:
                 self._child_prov_require_live_range(wid, dptr, nbytes, api="copy_to")
                 if self.level == 2:
+                    # No fork: the chip worker runs in this process, so the host address is valid.
                     assert self._chip_worker is not None
                     self._chip_worker.copy_to(dptr, src_addr, nbytes)
+                elif src_name is not None:
+                    assert self._worker is not None
+                    self._worker.copy_staged(wid, _CTRL_COPY_TO_STAGED, dptr, nbytes, src_name)
                 else:
                     assert self._worker is not None
-                    self._worker.copy_to(wid, dptr, src_addr, nbytes)
+                    with _staged_host_payload(nbytes) as (shm, base):
+                        ctypes.memmove(base, src_addr, nbytes)
+                        self._worker.copy_staged(wid, _CTRL_COPY_TO_STAGED, dptr, nbytes, shm.name)
 
     def copy_from(self, dst, src: BufferHandle) -> None:
-        """D2H: copy device handle ``src`` into host ``dst`` (a torch tensor or writable buffer)."""
-        dst_addr, nbytes = host_ptr_nbytes(dst)
+        """D2H: copy device handle ``src`` into host ``dst``.
+
+        ``dst`` is a torch tensor, a writable buffer, or a host ``BufferHandle``; a POSIX-shm handle
+        receives the bytes directly, without an intermediate copy.
+        """
+        dst_name, dst_addr, nbytes = self._host_side_of_copy(dst, writing=True, api="copy_from")
+        self._check_copy_handle(src, nbytes, writing=False, api="copy_from")
         wid, sptr = int(src.owner_worker_id), int(src.base)
         with self._operation_lease("copy_from"):
             if self.level != 2:
@@ -5713,11 +5822,17 @@ class Worker:
             with self._child_prov_lock:
                 self._child_prov_require_live_range(wid, sptr, nbytes, api="copy_from")
                 if self.level == 2:
+                    # No fork: the chip worker runs in this process, so the host address is valid.
                     assert self._chip_worker is not None
                     self._chip_worker.copy_from(dst_addr, sptr, nbytes)
+                elif dst_name is not None:
+                    assert self._worker is not None
+                    self._worker.copy_staged(wid, _CTRL_COPY_FROM_STAGED, sptr, nbytes, dst_name)
                 else:
                     assert self._worker is not None
-                    self._worker.copy_from(wid, dst_addr, sptr, nbytes)
+                    with _staged_host_payload(nbytes) as (shm, base):
+                        self._worker.copy_staged(wid, _CTRL_COPY_FROM_STAGED, sptr, nbytes, shm.name)
+                        ctypes.memmove(dst_addr, base, nbytes)
 
     # ------------------------------------------------------------------
     # Post-fork zero-copy host buffers
@@ -5727,7 +5842,7 @@ class Worker:
         """Allocate a shared ``BufferHandle`` owned by this Worker (P1-B).
 
         The backing is a POSIX shm; the handle carries a typed canonical identity and a self-describing
-        descriptor. No eager export handshake: the descriptor travels **embedded in every ``BufferRef``**
+        descriptor. No eager export handshake: the descriptor travels **embedded in every ``Tensor``**
         built over this handle, and a consumer materializes it lazily on first receipt (map-once, keyed
         by canonical identity). At L3+ that consumer is a forked child; at L2 (a leaf, no children) the
         Worker itself materializes the ref in-process on ``run``. Build a tensor over ``handle.shm.buf``
@@ -5739,12 +5854,12 @@ class Worker:
             return self._create_buffer_locked(int(nbytes))
 
     def alloc_shared_tensor(self, shapes: tuple[int, ...], dtype) -> BufferHandle:
-        """Allocate a runtime-managed intermediate buffer (the BufferRef form of ``orch.alloc``).
+        """Allocate a runtime-managed intermediate buffer (the ``Tensor`` form of ``orch.alloc``).
 
         Called inside an orchestration fn. The backing comes from the orchestrator's HeapRing
         (MAP_SHARED, visible to forked children) and is **auto-reclaimed** once every downstream consumer
         has completed and the scope ends — no manual free. Returns a ``FORK_SHM`` ``BufferHandle`` whose
-        canonical identity is registered in the tensormap so a ref over it (``handle.ref(shapes, dtype)``)
+        canonical identity is registered in the tensormap so a view of it (``handle.tensor(shapes, dtype)``)
         dependency-wires to this producer slot. Chip-A→chip-B intermediates: name it as an OUTPUT of the
         producing task and an INPUT of the consumer.
         """
@@ -5753,14 +5868,14 @@ class Worker:
         for s in shapes:
             nbytes *= int(s)
         oid, buffer_id, path = self._owner_instance_id, self._next_buffer_id(), f"L{self.level}"
-        identity = CanonicalIdentity(oid, buffer_id, path, 0)
+        identity = CanonicalIdentity(oid, buffer_id)
         va = int(self._orch._o.alloc(list(int(s) for s in shapes), dtype, identity.pack()))
         # Wrap the ring VA under the SAME identity: the child materializes to that VA (fork-inherited,
         # MAP_SHARED read-write) and infer_deps keys the ref to the slot registered above.
-        return wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, generation=0, access=AccessMode.READWRITE)
+        return wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, access=AccessMode.READWRITE)
 
     def make_ref_arg(self, tensor, shapes: tuple[int, ...], dtype: int, *, strides: tuple[int, ...] | None = None):
-        """Name a **pre-fork** host tensor as a ``BufferRef`` over a memoized ``FORK_SHM`` handle.
+        """Name a **pre-fork** host tensor as a ``Tensor`` over a memoized ``FORK_SHM`` handle.
 
         The torch (or buffer-protocol) tensor MUST be allocated before ``init()`` so its VA is
         fork-inherited by the children (the mainline "fork-inherited" contract). A ``share_memory_()``
@@ -5788,7 +5903,7 @@ class Worker:
                 access=AccessMode.READWRITE,
             )
             self._fork_tensor_handles[base] = handle
-        return handle.ref(shapes=tuple(shapes), dtype=dtype, strides=strides, byte_offset=byte_offset)
+        return handle.tensor(shapes=tuple(shapes), dtype=dtype, strides=strides, byte_offset=byte_offset)
 
     def _next_buffer_id(self) -> int:
         with self._registry_lock:
@@ -6021,23 +6136,23 @@ class Worker:
         return result
 
     def _run_l2_materialized(self, callable_id: int, args, cfg) -> None:
-        """Materialize an L2 leaf's BufferRef args to a Tensor blob in-process and run the kernel.
+        """Materialize an L2 leaf's tensor args to a chip-POD blob in-process and run the kernel.
 
-        The user builds args as ``TaskArgs`` (BufferRef) at every level; an L2 leaf is the consumer of
+        The user builds args as ``TaskArgs`` (``Tensor``) at every level; an L2 leaf is the consumer of
         its own args, so it does exactly what a chip child does — resolve each ref's embedded descriptor
-        to a local base (map-once, cached in ``_l2_import_registry``) and build the Tensor blob the
+        to a local base (map-once, cached in ``_l2_import_registry``) and build the chip blob the
         runtime reads — only without a mailbox, since the args are already in this process.
 
-        ``args`` is a BufferRef ``TaskArgs`` or ``None`` (no args). The chip-only POD
+        ``args`` is a ``TaskArgs`` or ``None`` (no args). The chip-only POD
         ``ChipStorageTaskArgs`` is not accepted here — submit it through ``ChipWorker._run_slot``.
         """
         if self._l2_import_registry is None:
             self._l2_import_registry = ImportRegistry()
         if args is None:
-            refs: list[BufferRef] = []
+            refs: list[Tensor] = []
             scalars: tuple[int, ...] = ()
         else:
-            refs = [BufferRef.unpack(args.ref(i)) for i in range(args.tensor_count())]
+            refs = [Tensor.unpack(args.ref(i)) for i in range(args.tensor_count())]
             scalars = tuple(args.scalar(i) for i in range(args.scalar_count()))
         blob = pack_bufferref_blob(refs, scalars)
         in_scratch = ctypes.create_string_buffer(blob, len(blob))

@@ -88,20 +88,20 @@ worker.copy_to(dev_b, host_b)
 `malloc` returns a device `BufferHandle`. `copy_to(dst_handle, src)` does
 host→device DMA (`src` is a torch tensor or any writable buffer).
 
-### 5. Build `TaskArgs` (BufferRefs), run
+### 5. Build `TaskArgs`, run
 
 ```python
 args = TaskArgs()
-args.add_ref(dev_a.ref(shapes=shape, dtype=DataType.FLOAT32.value),   TensorArgType.INPUT)
-args.add_ref(dev_b.ref(shapes=shape, dtype=DataType.FLOAT32.value),   TensorArgType.INPUT)
-args.add_ref(dev_out.ref(shapes=shape, dtype=DataType.FLOAT32.value), TensorArgType.OUTPUT_EXISTING)
+args.add_tensor(dev_a.tensor(shapes=shape, dtype=DataType.FLOAT32),   TensorArgType.INPUT)
+args.add_tensor(dev_b.tensor(shapes=shape, dtype=DataType.FLOAT32),   TensorArgType.INPUT)
+args.add_tensor(dev_out.tensor(shapes=shape, dtype=DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
 
 worker.run(chip_handle, args, CallConfig())  # chip_handle = worker.register(chip_callable) before init()
 ```
 
-Each `BufferRef` is a view over its handle; `.ref(shapes, dtype)` takes the
-`DataType` int value. The ref order must match `signature` order on the
-`ChipCallable`. `run()` blocks until the kernel completes.
+Each `Tensor` is a view over its handle. The argument order must match
+`signature` order on the `ChipCallable`. `run()` blocks until the kernel
+completes.
 
 ### 6. Pull result back, verify, free
 

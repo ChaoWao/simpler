@@ -144,9 +144,9 @@ def _drive(
         worker.copy_to(b_h, host_b)
 
         args = TaskArgs()
-        args.add_ref(a_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.INPUT)
-        args.add_ref(b_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.INPUT)
-        args.add_ref(out_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.OUTPUT_EXISTING)
+        args.add_tensor(a_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+        args.add_tensor(b_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+        args.add_tensor(out_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
 
         config = CallConfig()
         config.enable_l2_swimlane = False  # slots must work with swimlane OFF
@@ -340,7 +340,7 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
         args = TaskArgs()
         for n in "ABCDEFGHI":
             tag = TensorArgType.OUTPUT_EXISTING if n in _outputs else TensorArgType.INPUT
-            args.add_ref(bufs[n].ref(shapes=_shapes.get(n, (_TILE_ELEMS,)), dtype=DataType.FLOAT32.value), tag)
+            args.add_tensor(bufs[n].tensor(shapes=_shapes.get(n, (_TILE_ELEMS,)), dtype=DataType.FLOAT32), tag)
 
         config = CallConfig()
         config.enable_l2_swimlane = False

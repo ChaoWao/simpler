@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Sub-worker task args over the BufferRef wire (P1-B B3).
+"""Sub-worker task args over the Tensor wire (P1-B B3).
 
 A Python sub callable is a compute leaf: it receives its args as MappedArgs (each backing mapped into
 the sub child, map-once) and computes with torch.frombuffer(arg.buffer, ...). Writes land in the
@@ -21,8 +21,8 @@ import pytest
 import torch
 from simpler.buffer_handle import (
     BackendKind,
-    BufferRef,
     ImportRegistry,
+    Tensor,
     mint_owner_instance_id,
     pack_bufferref_blob,
     wrap_fork_inherited,
@@ -80,7 +80,7 @@ def test_create_buffer_at_l2_needs_no_child():
 
 
 def test_l2_run_materializes_bufferref_to_tensor_blob():
-    # An L2 leaf consumes its own BufferRef args: _run_l2_materialized resolves each ref to a local
+    # An L2 leaf consumes its own Tensor args: _run_l2_materialized resolves each ref to a local
     # base and hands the runtime a Tensor blob (write_blob format), exactly like a chip child, minus
     # the mailbox. Capture that blob via a fake ChipWorker and decode it to prove the materialization.
     captured = {}
@@ -101,7 +101,7 @@ def test_l2_run_materializes_bufferref_to_tensor_blob():
         assert shm is not None
         torch.frombuffer(shm.buf, dtype=torch.float32, count=4).fill_(7.0)
         ta = TaskArgs()
-        ta.add_ref(h.ref(shapes=(4,), dtype=_F32), TensorArgType.INPUT)
+        ta.add_tensor(h.tensor(shapes=(4,), dtype=_F32), TensorArgType.INPUT)
         w._run_l2_materialized(3, ta, CallConfig())
 
         assert captured["cid"] == 3
@@ -121,10 +121,10 @@ def test_l2_run_materializes_bufferref_to_tensor_blob():
 
 def test_mapped_args_from_blob_delivers_tensors_and_scalars():
     # A sub callable's args expose both the mapped tensors (args[i].buffer) and the blob's scalars
-    # (args.scalar_count() / args.scalar(i)) — a sub task built with add_ref + add_scalar reaches both.
+    # (args.scalar_count() / args.scalar(i)) — a sub task built with add_tensor + add_scalar reaches both.
     backing = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
     va = ctypes.addressof(backing)
-    ref = wrap_fork_inherited(va, 16, mint_owner_instance_id(), 1, "L3").ref((4,), _F32)
+    ref = wrap_fork_inherited(va, 16, mint_owner_instance_id(), 1, "L3").tensor((4,), _F32)
     blob = pack_bufferref_blob([ref], (17, 99))
     buf = ctypes.create_string_buffer(blob, len(blob))
     args = ImportRegistry().mapped_args_from_blob(ctypes.addressof(buf), len(blob))
@@ -139,8 +139,8 @@ def test_make_ref_arg_memoizes_handle_per_storage():
     # a view's byte_offset places it within that shared backing.
     w = Worker(level=3, num_sub_workers=0)  # no init needed: make_ref_arg only reads owner-side state
     t = torch.zeros(16, dtype=torch.float32)
-    r1 = BufferRef.unpack(w.make_ref_arg(t, shapes=(16,), dtype=_F32).pack())
-    r2 = BufferRef.unpack(w.make_ref_arg(t[4:12], shapes=(8,), dtype=_F32).pack())  # slice of same storage
+    r1 = Tensor.unpack(w.make_ref_arg(t, shapes=(16,), dtype=_F32).pack())
+    r2 = Tensor.unpack(w.make_ref_arg(t[4:12], shapes=(8,), dtype=_F32).pack())  # slice of same storage
     assert r1.handle.backend_kind == BackendKind.FORK_SHM
     assert r1.handle.identity.pack() == r2.handle.identity.pack()  # one memoized handle
     assert r1.byte_offset == 0
@@ -166,7 +166,7 @@ def test_make_ref_arg_share_memory_output_across_fork():
 
         def orch(o, _args, cfg):
             sa = TaskArgs()
-            sa.add_ref(hw.make_ref_arg(t, shapes=(4,), dtype=_F32), TensorArgType.INOUT)
+            sa.add_tensor(hw.make_ref_arg(t, shapes=(4,), dtype=_F32), TensorArgType.INOUT)
             o.submit_sub(handle, sa)
 
         hw.run(orch, args=None, config=CallConfig())
@@ -176,7 +176,7 @@ def test_make_ref_arg_share_memory_output_across_fork():
 
 
 def test_alloc_shared_tensor_managed_intermediate_deps_and_share():
-    # A runtime-managed HeapRing intermediate (alloc_shared_tensor) named as a BufferRef: sub-A writes
+    # A runtime-managed HeapRing intermediate (alloc_shared_tensor) named as a Tensor: sub-A writes
     # it (INOUT → depends on the alloc slot + becomes producer), sub-B reads it (INPUT → depends on the
     # producer) and copies it into a create_buffer output the parent reads. The dep wires via the ref's
     # canonical identity; the ring VA is MAP_SHARED so B sees A's write; the slot auto-reclaims at scope
@@ -204,11 +204,11 @@ def test_alloc_shared_tensor_managed_intermediate_deps_and_share():
         def orch(o, _args, cfg):
             inter = hw.alloc_shared_tensor((4,), DataType.FLOAT32)  # worker captured in the closure
             pa = TaskArgs()
-            pa.add_ref(inter.ref(shapes=(4,), dtype=_F32), TensorArgType.INOUT)
+            pa.add_tensor(inter.tensor(shapes=(4,), dtype=_F32), TensorArgType.INOUT)
             o.submit_sub(ph, pa)
             ca = TaskArgs()
-            ca.add_ref(inter.ref(shapes=(4,), dtype=_F32), TensorArgType.INPUT)
-            ca.add_ref(out_h.ref(shapes=(4,), dtype=_F32), TensorArgType.OUTPUT_EXISTING)
+            ca.add_tensor(inter.tensor(shapes=(4,), dtype=_F32), TensorArgType.INPUT)
+            ca.add_tensor(out_h.tensor(shapes=(4,), dtype=_F32), TensorArgType.OUTPUT_EXISTING)
             o.submit_sub(ch, ca)
 
         hw.run(orch, args=None, config=CallConfig())
@@ -236,7 +236,7 @@ def test_sub_worker_mapped_arg_readwrite():
 
         def orch(o, args, cfg):
             sa = TaskArgs()
-            sa.add_ref(buf_h.ref(shapes=(4,), dtype=_F32), TensorArgType.INOUT)
+            sa.add_tensor(buf_h.tensor(shapes=(4,), dtype=_F32), TensorArgType.INOUT)
             o.submit_sub(handle, sa)
 
         hw.run(orch, args=None, config=CallConfig())

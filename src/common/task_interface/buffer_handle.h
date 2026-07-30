@@ -11,58 +11,62 @@
 #pragma once
 
 /**
- * BufferHandle / BufferRef ABI — typed, versioned, opaque cross-layer buffer identity.
- *
- * Layout implements the frozen logical schema in
- * .docs/L3-new/worker-memory-model/bufferhandle-abi.md (that doc is authoritative for field set /
- * widths / enum values / endianness / evolution; exact byte offsets here are this P1 wire's choice).
+ * BufferHandle / BufferRef ABI — typed, opaque cross-layer buffer identity.
  *
  * Three types:
- *   - BufferHandleDescriptor : the owner's self-describing wire descriptor. Carries backing
- *                              properties + a versioned length-delimited backend body. abi_version
- *                              (u16) leads so a decoder rejects an unknown version before trusting the
- *                              rest. Embedded whole in every BufferRef built over the handle.
+ *   - CanonicalIdentity      : owner_instance_id + buffer_id + generation. The key both the owner
+ *                              registry and every consumer import cache use, invariant across every
+ *                              edge. Fixed-length with no length field, so hashing and comparison
+ *                              cannot read past it.
+ *   - BufferHandleDescriptor : the owner's self-describing wire descriptor — backing properties plus
+ *                              a length-delimited backend body. Embedded whole in every BufferRef
+ *                              built over the handle.
  *   - BufferRef              : the blob-carried wire element. Embeds the full BufferHandleDescriptor
  *                              plus a view (byte_offset, shape, strides, dtype) — self-describing, so
  *                              a consumer materializes it lazily on receipt with no prior handshake.
  *                              No materialized address.
- *   - CanonicalIdentity      : owner_instance_id + owner_worker_path + buffer_id + generation. The
- *                              key both the owner registry and every consumer import cache use.
+ *
+ * There is no wire version. Every endpoint of a run comes from one `pip install`, so a version field
+ * would guard a skew that cannot arise; the skew that CAN arise (a stale compiled extension against
+ * newer Python) is caught by SIMPLER_BUILD_COMMIT. The leading `magic` on the descriptor and on the
+ * blob envelope are discriminators against non-descriptor bytes, not versions.
  *
  * Endianness: all multi-byte integers little-endian. owner_instance_id is an opaque byte sequence
- * (bytewise-compared, no integer/endianness meaning). Unknown version / backend / descriptor_version
- * is rejected, never silently accepted.
+ * (bytewise-compared, no integer/endianness meaning). An unknown backend / address_space / access
+ * value is rejected, never silently accepted.
  */
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <type_traits>
 
 #include "data_type.h"
 
-// Wire version of the handle schema (u16). A decoder rejects an unknown abi_version rather than
-// misreading a future layout. 0 is reserved (illegal).
-inline constexpr uint16_t BUFFER_ABI_VERSION = 1;
+// Leading sentinel of a BufferHandleDescriptor, NOT a version. A descriptor decoder needs a cheap
+// leading discriminator because `TaskArgs.add_tensor` accepts raw bytes; the sentinel rejects most
+// non-descriptor input before any field is trusted. It does not by itself prove the bytes are a
+// descriptor — every other field is still validated. There is no multi-version wire: every endpoint
+// of a run is built from one `pip install`, and build skew is caught by SIMPLER_BUILD_COMMIT.
+inline constexpr uint16_t BUFFER_DESCRIPTOR_MAGIC = 0x5342;  // 'BS' little-endian
 
-// Version of a backend_descriptor body. Unknown descriptor_version is rejected like abi_version.
-inline constexpr uint8_t BUFFER_DESCRIPTOR_VERSION = 1;
+// Leading sentinel of the BufferRef blob ENVELOPE (the length-prefixed container in task_args.h),
+// distinct from the descriptor sentinel above. Same role, same reason: not a version, just a cheap
+// discriminator against a buffer that is not a blob. `read_bufferref_blob` rejects any other value.
+inline constexpr uint32_t BUFFERREF_BLOB_MAGIC = 0x424F4C42;  // "BLOB" in memory order
 
 // owner_instance_id is a fixed-width opaque nonce (compared bytewise; no integer/endianness meaning).
-inline constexpr uint32_t OWNER_INSTANCE_ID_BYTES = 16;
+// It is the SOLE source of cross-incarnation uniqueness, so it must be generated with a full-width
+// random draw — a structured value (timestamp/pid) collides between two Workers built in the same
+// process and second.
+inline constexpr uint32_t OWNER_INSTANCE_ID_BYTES = 8;
 
-// Bounded length-delimited limits (single constants; revisit before the final ABI freeze).
-// owner_worker_path is a UTF-8 tree path like "L4/L3[2]/L2[5]"; backend body is per-backend.
-inline constexpr uint32_t PATH_MAX_BYTES = 64;
-inline constexpr uint32_t DESC_MAX_BYTES = 96;
+// Backend body upper bound. Only POSIX_SHM uses more than 8 bytes (a shm name); every other backend
+// stores a single u64 address.
+inline constexpr uint32_t DESC_MAX_BYTES = 32;
 
 // AddressSpace (HOST/DEVICE) is shared with Tensor and lives in data_type.h.
-
-// Which workers may see a backing. Single-hop/multi-hop visibility is explicit, not by convention.
-enum class Visibility : uint8_t {
-    PRIVATE = 0,
-    SHARED = 1,
-};
 
 // The backing's granted permission. A per-arg TensorArgType requests read/write and is validated
 // against this at submit (requested must be a subset of granted).
@@ -85,39 +89,41 @@ enum class BackendKind : uint8_t {
 
 /**
  * Canonical allocation identity — globally unique across owner incarnations, unchanged across every
- * edge. `buffer_id` is unique only within one owner incarnation; `owner_instance_id` (a 16-byte
- * per-incarnation nonce) and `owner_worker_path` disambiguate it, and `generation` detects buffer_id
- * reuse (ABA). The key of both the owner registry and every consumer import registry.
+ * edge. `buffer_id` is unique only within one owner incarnation; `owner_instance_id` (a per-incarnation
+ * nonce) disambiguates it, and `generation` detects buffer_id slot reuse (ABA). The key of both the
+ * owner registry and every consumer import registry.
  *
- * `owner_worker_path` is a bounded length-delimited UTF-8 tree path ("L4/L3[2]/L2[5]"): `path_len`
- * valid bytes in `owner_worker_path[0, path_len)`; bytes beyond `path_len` and `_pad` are zero.
+ * FIXED-LENGTH BY DESIGN: no field here bounds a read. Hashing and comparison therefore cannot run
+ * off the end of the struct whatever bytes arrive on the wire — the property is structural, not
+ * something a validator has to enforce.
+ *
+ * `_pad` is excluded from comparison and hashing, so a decoded identity with dirty padding still
+ * matches the same backing (two views of one backing must never key differently).
+ *
+ * `generation` starts at 1; every reuse of a `buffer_id` slot increments it. 0 is reserved to mean
+ * uninitialized and is rejected on decode.
  */
 struct CanonicalIdentity {
     uint8_t owner_instance_id[OWNER_INSTANCE_ID_BYTES];
     uint64_t buffer_id;
     uint32_t generation;
-    uint16_t path_len;
-    uint8_t _pad[2];
-    char owner_worker_path[PATH_MAX_BYTES];
+    uint8_t _pad[12];
 };
 
 static_assert(std::is_trivially_copyable_v<CanonicalIdentity>);
-static_assert(sizeof(CanonicalIdentity) == 96, "CanonicalIdentity is wire ABI");
+static_assert(sizeof(CanonicalIdentity) == 32, "CanonicalIdentity is wire ABI");
 static_assert(offsetof(CanonicalIdentity, owner_instance_id) == 0);
-static_assert(offsetof(CanonicalIdentity, buffer_id) == 16);
-static_assert(offsetof(CanonicalIdentity, generation) == 24);
-static_assert(offsetof(CanonicalIdentity, path_len) == 28);
-static_assert(offsetof(CanonicalIdentity, owner_worker_path) == 32);
+static_assert(offsetof(CanonicalIdentity, buffer_id) == 8);
+static_assert(offsetof(CanonicalIdentity, generation) == 16);
 
 inline bool operator==(const CanonicalIdentity &a, const CanonicalIdentity &b) {
-    return a.buffer_id == b.buffer_id && a.generation == b.generation && a.path_len == b.path_len &&
-           std::memcmp(a.owner_instance_id, b.owner_instance_id, OWNER_INSTANCE_ID_BYTES) == 0 &&
-           std::memcmp(a.owner_worker_path, b.owner_worker_path, a.path_len) == 0;
+    return a.buffer_id == b.buffer_id && a.generation == b.generation &&
+           std::memcmp(a.owner_instance_id, b.owner_instance_id, OWNER_INSTANCE_ID_BYTES) == 0;
 }
 inline bool operator!=(const CanonicalIdentity &a, const CanonicalIdentity &b) { return !(a == b); }
 
-// Hash for use as an unordered_map key (consumer import registry). Folds the significant identity
-// bytes; unused path bytes past path_len are excluded so they never perturb the hash.
+// Hash for use as an unordered_map key (consumer import registry). Folds exactly the fields
+// `operator==` compares — `_pad` is excluded so padding can never perturb the bucket.
 struct CanonicalIdentityHash {
     size_t operator()(const CanonicalIdentity &k) const {
         auto mix = [](size_t h, uint64_t v) {
@@ -128,9 +134,6 @@ struct CanonicalIdentityHash {
             h = mix(h, k.owner_instance_id[i]);
         h = mix(h, k.buffer_id);
         h = mix(h, k.generation);
-        h = mix(h, k.path_len);
-        for (uint16_t i = 0; i < k.path_len; ++i)
-            h = mix(h, static_cast<uint8_t>(k.owner_worker_path[i]));
         return h;
     }
 };
@@ -138,40 +141,40 @@ struct CanonicalIdentityHash {
 /**
  * The owner's self-describing handle descriptor — embedded whole in every BufferRef built over the
  * handle. A consumer materializes it lazily on first receipt (no separate export handshake) and
- * caches `canonical identity -> local base` (map-once). `backend_kind` + `descriptor_version` +
- * `body[0, body_len)` carry the per-backend materialization (POSIX/fork shm name, VMM
- * shareable-handle, device VA, ...). Version-prefixed (`abi_version` u16 leads); unknown abi_version /
- * backend_kind / descriptor_version is rejected before trusting the rest. `address_space` /
- * `visibility` / `access` / `backend_kind` are raw u8 so an unknown value can be rejected without
- * invoking undefined enum behavior.
+ * caches `canonical identity -> local base` (map-once). `backend_kind` + `body[0, body_len)` carry
+ * the per-backend materialization (POSIX shm name, fork-inherited VA, device VA, ...).
+ * `magic` leads as a cheap discriminator; `address_space` / `access` / `backend_kind` are raw u8 so
+ * an unknown value can be rejected without invoking undefined enum behavior.
+ *
+ * `owner_worker_path_id` is a DIAGNOSTIC id only — it names the owning worker in logs and
+ * post-mortems and takes part in no routing, visibility or identity decision. Its side table lives in
+ * the owning process; an id a consumer cannot resolve prints as `<path#N>` and is never an error.
  */
 struct BufferHandleDescriptor {
-    uint16_t abi_version;
+    uint16_t magic;
     uint8_t address_space;
-    uint8_t visibility;
     uint8_t access;
     uint8_t backend_kind;
-    uint8_t descriptor_version;
-    uint8_t _pad0;
+    uint8_t _pad0[3];
     CanonicalIdentity identity;
     uint64_t nbytes;
+    uint32_t owner_worker_path_id;
     uint16_t body_len;
-    uint8_t _pad1[6];
+    uint8_t _pad1[2];
     char body[DESC_MAX_BYTES];
 };
 
 static_assert(std::is_trivially_copyable_v<BufferHandleDescriptor>);
-static_assert(sizeof(BufferHandleDescriptor) == 216, "BufferHandleDescriptor is wire ABI");
-static_assert(offsetof(BufferHandleDescriptor, abi_version) == 0);
+static_assert(sizeof(BufferHandleDescriptor) == 88, "BufferHandleDescriptor is wire ABI");
+static_assert(offsetof(BufferHandleDescriptor, magic) == 0);
 static_assert(offsetof(BufferHandleDescriptor, address_space) == 2);
-static_assert(offsetof(BufferHandleDescriptor, visibility) == 3);
-static_assert(offsetof(BufferHandleDescriptor, access) == 4);
-static_assert(offsetof(BufferHandleDescriptor, backend_kind) == 5);
-static_assert(offsetof(BufferHandleDescriptor, descriptor_version) == 6);
+static_assert(offsetof(BufferHandleDescriptor, access) == 3);
+static_assert(offsetof(BufferHandleDescriptor, backend_kind) == 4);
 static_assert(offsetof(BufferHandleDescriptor, identity) == 8);
-static_assert(offsetof(BufferHandleDescriptor, nbytes) == 104);
-static_assert(offsetof(BufferHandleDescriptor, body_len) == 112);
-static_assert(offsetof(BufferHandleDescriptor, body) == 120);
+static_assert(offsetof(BufferHandleDescriptor, nbytes) == 40);
+static_assert(offsetof(BufferHandleDescriptor, owner_worker_path_id) == 48);
+static_assert(offsetof(BufferHandleDescriptor, body_len) == 52);
+static_assert(offsetof(BufferHandleDescriptor, body) == 56);
 
 /**
  * The blob-carried, self-describing wire element: a full embedded handle descriptor plus a strided
@@ -197,11 +200,67 @@ struct BufferRef {
     uint8_t _pad[3];
 };
 
+/**
+ * Reject any BufferRef whose fields are not self-consistent, BEFORE any of them is trusted.
+ *
+ * This is the single implementation behind all three trust boundaries — the builder
+ * (`TaskArgs.add_tensor`, which accepts raw bytes), blob decode on receipt, and materialization —
+ * so the three can never drift apart. Throws `std::invalid_argument` naming the field.
+ *
+ * Every remaining length-like field is bounded here: `body_len` against `DESC_MAX_BYTES` and `ndims`
+ * against `MAX_TENSOR_DIMS`, mirroring what the fixed-length `CanonicalIdentity` gets structurally.
+ *
+ * `REMOTE_SIDECAR` is a legal wire value and passes: an arg bound for a remote worker rides the wire
+ * with no local backing, and it is *materialization* that refuses it in P1.
+ */
+inline void validate_buffer_ref(const BufferRef &r) {
+    auto reject = [](const char *what) {
+        throw std::invalid_argument(what);
+    };
+    const BufferHandleDescriptor &h = r.handle;
+
+    if (h.magic != BUFFER_DESCRIPTOR_MAGIC) reject("invalid Tensor: descriptor magic");
+    if (h.address_space > static_cast<uint8_t>(AddressSpace::DEVICE))
+        reject("invalid Tensor: address_space out of range");
+    if (h.access > static_cast<uint8_t>(AccessMode::READWRITE)) reject("invalid Tensor: access out of range");
+    if (h.backend_kind > static_cast<uint8_t>(BackendKind::DEVICE_MALLOC))
+        reject("invalid Tensor: backend_kind out of range");
+    if (h.body_len > DESC_MAX_BYTES) reject("invalid Tensor: body_len exceeds DESC_MAX_BYTES");
+    if (h.identity.generation == 0) reject("invalid Tensor: generation 0 is reserved (uninitialized)");
+
+    // address_space x backend_kind capability gate. REMOTE_SIDECAR is legal in either space.
+    const auto backend = static_cast<BackendKind>(h.backend_kind);
+    const bool device_space = h.address_space == static_cast<uint8_t>(AddressSpace::DEVICE);
+    if (backend != BackendKind::REMOTE_SIDECAR) {
+        const bool device_backend = backend == BackendKind::VMM_WINDOW || backend == BackendKind::DEVICE_MALLOC;
+        if (device_backend != device_space) reject("invalid Tensor: unsupported address_space x backend_kind");
+    }
+
+    if (r.ndims == 0 || r.ndims > static_cast<uint32_t>(MAX_TENSOR_DIMS)) reject("invalid Tensor: ndims out of range");
+    if (r.dtype >= DataType::DATA_TYPE_NUM) reject("invalid Tensor: unknown dtype");
+    const uint64_t elem = get_element_size(r.dtype);
+    if (elem == 0) reject("invalid Tensor: unknown dtype");
+    if (r.byte_offset % elem != 0) reject("invalid Tensor: byte_offset is not a multiple of the dtype size");
+
+    // Byte extent of the (possibly strided) view: the last addressable element, +1 element.
+    // Computed in u64 with per-dim bounds so a hostile shape/stride cannot wrap it.
+    uint64_t last_elem = 0;
+    for (uint32_t i = 0; i < r.ndims; ++i) {
+        if (r.shapes[i] == 0) reject("invalid Tensor: shape dimension is zero");
+        if (r.strides[i] == 0) reject("invalid Tensor: stride must be > 0 (broadcast and negative step unsupported)");
+        last_elem += static_cast<uint64_t>(r.shapes[i] - 1) * static_cast<uint64_t>(r.strides[i]);
+    }
+    const uint64_t extent_bytes = (last_elem + 1) * elem;
+    if (r.byte_offset > h.nbytes || extent_bytes > h.nbytes - r.byte_offset) {
+        reject("invalid Tensor: view extends past the backing (byte_offset + extent > nbytes)");
+    }
+}
+
 static_assert(std::is_trivially_copyable_v<BufferRef>, "BufferRef must be trivially copyable for blob memcpy");
-static_assert(sizeof(BufferRef) == 272, "BufferRef is wire ABI");
+static_assert(sizeof(BufferRef) == 144, "BufferRef is wire ABI");
 static_assert(offsetof(BufferRef, handle) == 0);
-static_assert(offsetof(BufferRef, byte_offset) == 216);
-static_assert(offsetof(BufferRef, ndims) == 224);
-static_assert(offsetof(BufferRef, shapes) == 228);
-static_assert(offsetof(BufferRef, strides) == 248);
-static_assert(offsetof(BufferRef, dtype) == 268);
+static_assert(offsetof(BufferRef, byte_offset) == 88);
+static_assert(offsetof(BufferRef, ndims) == 96);
+static_assert(offsetof(BufferRef, shapes) == 100);
+static_assert(offsetof(BufferRef, strides) == 120);
+static_assert(offsetof(BufferRef, dtype) == 140);

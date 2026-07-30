@@ -160,6 +160,11 @@ static constexpr uint64_t CTRL_RELEASE_DOMAIN = 8;
 static constexpr uint64_t CTRL_COMM_INIT = 9;
 static constexpr uint64_t CTRL_PY_REGISTER = 10;
 static constexpr uint64_t CTRL_PY_UNREGISTER = 11;
+// Staged host<->device copy. The payload rides in a POSIX shm named at MAILBOX_OFF_ARGS rather
+// than as a host address: a parent VA is only meaningful in the child when the allocation predates
+// the fork, which the caller of copy_to/copy_from cannot be required to guarantee.
+static constexpr uint64_t CTRL_COPY_TO_STAGED = 14;
+static constexpr uint64_t CTRL_COPY_FROM_STAGED = 15;
 static constexpr uint64_t CTRL_L3_L2_REGION_CREATE = 16;
 static constexpr uint64_t CTRL_L3_L2_REGION_RELEASE = 17;
 
@@ -217,6 +222,7 @@ public:
     virtual uint64_t control_malloc(size_t size);
     virtual void control_free(uint64_t ptr);
     virtual void control_copy_to(uint64_t dst, uint64_t src, size_t size);
+    virtual void control_copy_staged(uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size, const char *shm_name);
     virtual void control_copy_from(uint64_t dst, uint64_t src, size_t size);
     virtual void control_prepare(const uint8_t *digest);
     virtual void control_register(const char *shm_name, size_t blob_size, const uint8_t *digest);
@@ -274,6 +280,7 @@ public:
     uint64_t control_malloc(size_t size) override;
     void control_free(uint64_t ptr) override;
     void control_copy_to(uint64_t dst, uint64_t src, size_t size) override;
+    void control_copy_staged(uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size, const char *shm_name) override;
     void control_copy_from(uint64_t dst, uint64_t src, size_t size) override;
     void control_prepare(const uint8_t *digest) override;
     void control_register(const char *shm_name, size_t blob_size, const uint8_t *digest) override;
@@ -406,6 +413,7 @@ public:
     uint64_t control_malloc(size_t size);
     void control_free(uint64_t ptr);
     void control_copy_to(uint64_t dst, uint64_t src, size_t size);
+    void control_copy_staged(uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size, const char *shm_name);
     void control_copy_from(uint64_t dst, uint64_t src, size_t size);
 
     // Pre-warm a chip child by triggering simpler_register_callable for the digest's

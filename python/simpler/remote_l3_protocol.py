@@ -15,7 +15,7 @@ import socket
 import struct
 from dataclasses import dataclass
 
-from .task_interface import MAX_TENSOR_DIMS, CallConfig, DataType, Tensor
+from .task_interface import MAX_TENSOR_DIMS, CallConfig, ChipTensor, DataType
 
 # 2: CallConfig lost its block_dim field — a run always takes the whole
 # device, so the payload is one int32 shorter than v1's.
@@ -143,7 +143,7 @@ class RemoteTensorSidecar:
 
 @dataclass(frozen=True)
 class RemoteTaskArgsWire:
-    tensor_metadata: tuple[Tensor, ...]
+    tensor_metadata: tuple[ChipTensor, ...]
     remote_desc: tuple[RemoteTensorSidecar, ...]
     scalars: tuple[int, ...]
     inline_payload: bytes
@@ -428,7 +428,7 @@ def decode_call_config(reader: _Reader) -> CallConfig:
     return cfg
 
 
-def decode_tensor(reader: _Reader) -> Tensor:
+def decode_tensor(reader: _Reader) -> ChipTensor:
     data = reader.u64()
     if data != 0:
         raise ValueError("remote_wire: remote TASK tensor data must be zero")
@@ -442,8 +442,8 @@ def decode_tensor(reader: _Reader) -> Tensor:
         raise ValueError("remote_wire: tensor child_memory must be 0 or 1")
     for _ in range(7):
         if reader.u8() != 0:
-            raise ValueError("remote_wire: Tensor reserved bytes must be zero")
-    return Tensor.make(0, tuple(shapes[:ndims]), dtype, bool(child_memory))
+            raise ValueError("remote_wire: ChipTensor reserved bytes must be zero")
+    return ChipTensor.make(0, tuple(shapes[:ndims]), dtype, bool(child_memory))
 
 
 def decode_remote_tensor_desc(reader: _Reader) -> RemoteTensorDesc:

@@ -74,12 +74,12 @@ _LOCAL_REF_BID = itertools.count(1)
 
 
 def _local_ref(addr, shapes, dtype):
-    """A local host (non-remote, non-child-memory) ``BufferRef`` at ``addr`` — a bare arg carrying no
+    """A local host (non-remote, non-child-memory) ``Tensor`` at ``addr`` — a bare arg carrying no
     sidecar. FORK_SHM (host) so it is not treated as a child device pointer by the dispatch guard."""
     nbytes = get_element_size(dtype)
     for s in shapes:
         nbytes *= int(s)
-    return wrap_fork_inherited(addr, nbytes, mint_owner_instance_id(), next(_LOCAL_REF_BID), "L3").ref(
+    return wrap_fork_inherited(addr, nbytes, mint_owner_instance_id(), next(_LOCAL_REF_BID), "L3").tensor(
         tuple(shapes), int(dtype.value)
     )
 
@@ -793,7 +793,7 @@ def test_remote_callable_submit_passes_remote_sidecar_to_cpp_facade():
             nbytes=16,
         )
         args = TaskArgs()
-        args.add_ref(RemoteTensorRef(buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+        args.add_tensor(RemoteTensorRef(buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
         orch.submit_next_level(handle, args, worker=worker_id)
 
         call = fake.submit_next_level_args
@@ -806,7 +806,7 @@ def test_remote_callable_submit_passes_remote_sidecar_to_cpp_facade():
         assert sidecar.tensors[0].desc.owner_worker_id == worker_id
 
         bare = TaskArgs()
-        bare.add_ref(_local_ref(0x1234, (1,), DataType.UINT8), TensorArgType.INPUT)
+        bare.add_tensor(_local_ref(0x1234, (1,), DataType.UINT8), TensorArgType.INPUT)
         orch.submit_next_level(handle, bare, worker=worker_id)
 
         bare_sidecar = fake.submit_next_level_args[7]
@@ -828,7 +828,7 @@ def test_submit_sub_rejects_remote_tensor_ref_sidecar():
     fake = FakeCOrchestrator()
     orch = Orchestrator(fake)  # type: ignore[arg-type]
     args = TaskArgs()
-    args.add_ref(
+    args.add_tensor(
         RemoteTensorRef.host_inline(b"abcd", shape=(4,), dtype=DataType.UINT8),
         TensorArgType.INPUT,
     )
@@ -852,7 +852,7 @@ def test_submit_sub_group_rejects_remote_tensor_ref_sidecar():
     orch = Orchestrator(fake)  # type: ignore[arg-type]
     local_args = TaskArgs()
     remote_args = TaskArgs()
-    remote_args.add_ref(
+    remote_args.add_tensor(
         RemoteTensorRef.host_inline(b"abcd", shape=(4,), dtype=DataType.UINT8),
         TensorArgType.INPUT,
     )
@@ -929,7 +929,7 @@ def test_remote_callable_submit_rejects_tag_access_mismatch(tag, access_flags):
             access_flags=access_flags,
         )
         args = TaskArgs()
-        args.add_ref(RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8), tag)
+        args.add_tensor(RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8), tag)
 
         with pytest.raises(ValueError, match="remote tensor .* access"):
             orch.submit_next_level(handle, args, worker=worker_id)
@@ -970,7 +970,7 @@ def test_remote_callable_submit_accepts_readwrite_handle_for_all_tags(tag):
             access_flags=3,
         )
         args = TaskArgs()
-        args.add_ref(RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8), tag)
+        args.add_tensor(RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8), tag)
 
         orch.submit_next_level(handle, args, worker=worker_id)
 
@@ -1003,7 +1003,7 @@ def test_remote_callable_submit_intersects_remote_buffer_owner_worker():
             nbytes=16,
         )
         args = TaskArgs()
-        args.add_ref(RemoteTensorRef(buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+        args.add_tensor(RemoteTensorRef(buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
         orch.submit_next_level(handle, args, worker=worker_id1)
 
         assert fake.submit_next_level_args[6] == [worker_id1]
@@ -1035,7 +1035,7 @@ def test_remote_callable_submit_rejects_remote_buffer_outside_callable_workers()
             nbytes=16,
         )
         args = TaskArgs()
-        args.add_ref(RemoteTensorRef(buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+        args.add_tensor(RemoteTensorRef(buf, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
 
         with pytest.raises(ValueError, match="no eligible remote worker"):
             orch.submit_next_level(handle, args, worker=worker_id0)
@@ -1074,9 +1074,9 @@ def test_remote_callable_group_submit_intersects_each_member_worker_set():
             nbytes=16,
         )
         args0 = TaskArgs()
-        args0.add_ref(RemoteTensorRef(buf0, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+        args0.add_tensor(RemoteTensorRef(buf0, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
         args1 = TaskArgs()
-        args1.add_ref(RemoteTensorRef(buf1, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
+        args1.add_tensor(RemoteTensorRef(buf1, shape=(4,), dtype=DataType.UINT8), TensorArgType.INPUT)
         orch.submit_next_level_group(handle, [args0, args1], workers=[worker_id0, worker_id1])
 
         assert fake.submit_next_level_group_args[6] == [[worker_id0], [worker_id1]]
@@ -1342,7 +1342,7 @@ def test_remote_sim_buffer_copy_roundtrip():
 
         def parent_orch(orch, _args, cfg):
             task_args = TaskArgs()
-            task_args.add_ref(
+            task_args.add_tensor(
                 RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8),
                 TensorArgType.INOUT,
             )
@@ -1388,7 +1388,7 @@ def test_remote_sim_imported_buffer_runs_on_peer_worker():
 
         def parent_orch(orch, _args, cfg):
             task_args = TaskArgs()
-            task_args.add_ref(
+            task_args.add_tensor(
                 RemoteTensorRef(peer_buf, shape=(4,), dtype=DataType.UINT8),
                 TensorArgType.INOUT,
             )
@@ -1796,12 +1796,12 @@ def test_remote_sim_failed_dependency_skips_consumer():
 
         def parent_orch(orch, _args, cfg):
             producer_args = TaskArgs()
-            producer_args.add_ref(
+            producer_args.add_tensor(
                 RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8),
                 TensorArgType.OUTPUT,
             )
             consumer_args = TaskArgs()
-            consumer_args.add_ref(
+            consumer_args.add_tensor(
                 RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8),
                 TensorArgType.INPUT,
             )
@@ -1867,11 +1867,11 @@ def test_remote_sim_input_free_is_deferred_until_slot_refs_drop():
 
         def parent_orch(orch, _args, cfg):
             task_args = TaskArgs()
-            task_args.add_ref(
+            task_args.add_tensor(
                 RemoteTensorRef(remote_in, shape=(4,), dtype=DataType.UINT8),
                 TensorArgType.INPUT,
             )
-            task_args.add_ref(
+            task_args.add_tensor(
                 RemoteTensorRef(remote_out, shape=(1,), dtype=DataType.UINT8),
                 TensorArgType.OUTPUT,
             )
@@ -1909,11 +1909,11 @@ def test_remote_sim_host_inline_descriptor_roundtrip():
 
         def parent_orch(orch, _args, cfg):
             task_args = TaskArgs()
-            task_args.add_ref(
+            task_args.add_tensor(
                 RemoteTensorRef.host_inline(b"\x01\x02\x03\x04", shape=(4,), dtype=DataType.UINT8),
                 TensorArgType.INPUT,
             )
-            task_args.add_ref(
+            task_args.add_tensor(
                 RemoteTensorRef(remote_out, shape=(1,), dtype=DataType.UINT8),
                 TensorArgType.OUTPUT,
             )

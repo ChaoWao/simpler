@@ -91,7 +91,9 @@ inline uint64_t get_element_size(DataType dtype) {
         1,  // DataType::FP8E8M0 (A5 only)
         1,  // DataType::FP4E2M1 (A5 only)
     };
-    return data_type_size[static_cast<int>(dtype)];
+    // Bounds-checked: `dtype` is a raw u8 on the wire, so a decoder can hand this any value.
+    const auto index = static_cast<std::size_t>(dtype);
+    return index < data_type_size.size() ? data_type_size[index] : 0;
 }
 
 /**

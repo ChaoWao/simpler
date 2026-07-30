@@ -189,6 +189,12 @@ public:
         if (!wt) throw std::runtime_error("Worker::free: invalid worker_id");
         wt->control_free(ptr);
     }
+    void copy_staged(int worker_id, uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size, const char *shm_name) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::copy_staged: invalid worker_id");
+        wt->control_copy_staged(sub_cmd, dev_ptr, size, shm_name);
+    }
+
     void copy_to(int worker_id, uint64_t dst, uint64_t src, size_t size) {
         auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
         if (!wt) throw std::runtime_error("Worker::copy_to: invalid worker_id");

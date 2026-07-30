@@ -53,9 +53,9 @@ from simpler.worker import Worker  # noqa: E402
 from simpler_setup.elf_parser import extract_text_section  # noqa: E402
 from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.torch_interop import make_tensor_ref  # noqa: E402
+from simpler_setup.torch_interop import make_tensor  # noqa: E402
 
-_F32 = DataType.FLOAT32.value
+_F32 = DataType.FLOAT32
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -212,18 +212,18 @@ def run(
                     # Stage 1: AIC matmul. partial_local is OUTPUT_EXISTING here;
                     # the framework records its ref identity as a producer.
                     a1 = TaskArgs()
-                    a1.add_ref(make_tensor_ref(worker, host_x_shards[i]), TensorArgType.INPUT)
-                    a1.add_ref(make_tensor_ref(worker, host_w_shards[i]), TensorArgType.INPUT)
-                    a1.add_ref(make_tensor_ref(worker, host_partial[i]), TensorArgType.OUTPUT_EXISTING)
+                    a1.add_tensor(make_tensor(worker, host_x_shards[i]), TensorArgType.INPUT)
+                    a1.add_tensor(make_tensor(worker, host_w_shards[i]), TensorArgType.INPUT)
+                    a1.add_tensor(make_tensor(worker, host_partial[i]), TensorArgType.OUTPUT_EXISTING)
                     orch.submit_next_level(ffn_handle, a1, cfg, worker=i)
 
                     # Stage 2: AIV cross-rank sum. Tagging partial_local INPUT resolves to the same
                     # memoized ref identity as stage 1's output, so TensorMap auto-links this task as a
                     # consumer of stage 1, no explicit barrier needed.
                     a2 = TaskArgs()
-                    a2.add_ref(make_tensor_ref(worker, host_partial[i]), TensorArgType.INPUT)
-                    a2.add_ref(make_tensor_ref(worker, host_y[i]), TensorArgType.OUTPUT_EXISTING)
-                    a2.add_ref(domain.buffers["scratch"].ref((scratch_count,), _F32), TensorArgType.INOUT)
+                    a2.add_tensor(make_tensor(worker, host_partial[i]), TensorArgType.INPUT)
+                    a2.add_tensor(make_tensor(worker, host_y[i]), TensorArgType.OUTPUT_EXISTING)
+                    a2.add_tensor(domain.buffers["scratch"].tensor((scratch_count,), _F32), TensorArgType.INOUT)
                     a2.add_scalar(domain.domain_size)
                     a2.add_scalar(domain.device_ctx)
                     orch.submit_next_level(allreduce_handle, a2, cfg, worker=i)

@@ -8,8 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """L4 -> L3 -> sub re-export end-to-end (P1-B B3).
 
-An L4-owned create_buffer backing reaches L3 as a BufferRef; L3's orch forwards it re-exported to a
-handle H' that keeps L4's canonical identity (no BufferRef pass-through, no map on the forwarding hop),
+An L4-owned create_buffer backing reaches L3 as a Tensor; L3's orch forwards it re-exported to a
+handle H' that keeps L4's canonical identity (no Tensor pass-through, no map on the forwarding hop),
 to its sub; the sub (a compute leaf) maps H' and writes through it. The write lands in the shared
 backing L4 owns.
 No NPU device — L3 uses a SubWorker.
@@ -21,9 +21,8 @@ from simpler.buffer_handle import (
     AddressSpace,
     BackendKind,
     BufferHandleDescriptor,
-    BufferRef,
     CanonicalIdentity,
-    Visibility,
+    Tensor,
 )
 from simpler.task_interface import CallConfig, TaskArgs, TensorArgType
 from simpler.worker import Worker
@@ -40,9 +39,9 @@ def test_l4_l3_reexport_to_sub():
     l3_sub_handle = l3.register(l3_sub)
 
     def l3_orch(orch, args, config):
-        # args are re-exported BufferRefs owned by L3 (each level sees only its own handles).
+        # args are re-exported Tensors owned by L3 (each level sees only its own handles).
         sa = TaskArgs()
-        sa.add_ref(args[0], TensorArgType.INOUT)
+        sa.add_tensor(args[0], TensorArgType.INOUT)
         orch.submit_sub(l3_sub_handle, sa)
 
     w4 = Worker(level=4, num_sub_workers=1)
@@ -61,7 +60,7 @@ def test_l4_l3_reexport_to_sub():
 
         def l4_orch(orch, args, config):
             ta = TaskArgs()
-            ta.add_ref(buf_h.ref(shapes=(4,), dtype=_F32), TensorArgType.INOUT)
+            ta.add_tensor(buf_h.tensor(shapes=(4,), dtype=_F32), TensorArgType.INOUT)
             orch.submit_next_level(l3_orch_handle, ta, CallConfig(), worker=0)
 
         w4.run(l4_orch)
@@ -76,11 +75,10 @@ def test_reexport_preserves_canonical_identity():
     # forwarded upper-level backing keeps the SOURCE (owner_instance_id, owner_worker_path, buffer_id,
     # generation) — only the mapping is stripped (base=0, shm=None) on the forwarding hop. Dependency
     # inference keys on the identity, so an alias / retain-release must not split across L4→L3→L2.
-    src_identity = CanonicalIdentity(b"\x9f" * 16, 42, "L4", 1)
+    src_identity = CanonicalIdentity(b"\x9f" * 8, 42, 1)
     source = BufferHandleDescriptor(
         identity=src_identity,
         address_space=AddressSpace.HOST,
-        visibility=Visibility.SHARED,
         access=AccessMode.READWRITE,
         backend_kind=BackendKind.FORK_SHM,
         nbytes=1024,
@@ -92,5 +90,5 @@ def test_reexport_preserves_canonical_identity():
     assert h_prime.base == 0 and h_prime.shm is None  # no map on the forwarding hop
     assert h_prime.backend_kind == source.backend_kind and h_prime.body == source.body
     # A ref built over H' carries the same identity a downstream consumer keys deps on.
-    r = BufferRef.unpack(h_prime.ref((4,), _F32).pack())
+    r = Tensor.unpack(h_prime.tensor((4,), _F32).pack())
     assert r.handle.identity.pack() == src_identity.pack()

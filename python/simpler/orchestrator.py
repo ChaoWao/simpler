@@ -14,14 +14,14 @@ and passes the handle to the user's orch function::
 
     def my_orch(orch, args, cfg):
         # chip_handle/sub_handle come from Worker.register(...)
-        # build the args object yourself as BufferRefs; tags drive dependency inference
+        # build the args object yourself as Tensors; tags drive dependency inference
         a = TaskArgs()
-        a.add_ref(input_handle.ref(shape, dtype),  TensorArgType.INPUT)
-        a.add_ref(output_handle.ref(shape, dtype), TensorArgType.OUTPUT)
+        a.add_tensor(input_handle.tensor(shape, dtype),  TensorArgType.INPUT)
+        a.add_tensor(output_handle.tensor(shape, dtype), TensorArgType.OUTPUT)
         orch.submit_next_level(chip_handle, a, cfg, worker=0)  # handle from Worker.register(chip_callable)
 
         sub_args = TaskArgs()
-        sub_args.add_ref(output_handle.ref(shape, dtype), TensorArgType.INPUT)
+        sub_args.add_tensor(output_handle.tensor(shape, dtype), TensorArgType.INPUT)
         orch.submit_sub(sub_handle, sub_args)
 
     handle = w.submit(my_orch, my_args, my_config)
@@ -114,6 +114,26 @@ def _split_next_level_args(args: TaskArgs) -> tuple[TaskArgs, _RemoteTaskArgsSid
 def _reject_remote_sidecar_args(args: object, *, kind: str) -> None:
     if isinstance(args, TaskArgs) and _remote_sidecar_for(args) is not None:
         raise TypeError(f"RemoteTensorRef is only supported for RemoteCallable NEXT_LEVEL submits, not {kind}")
+
+
+def _reject_device_args(args: object, *, kind: str) -> None:
+    """Refuse a DEVICE-space tensor bound for a host endpoint.
+
+    A Python sub-worker maps its args into its own process and hands them to torch, so a device
+    address there is dereferenced as a host pointer. Rejecting at submit gives the caller an error
+    naming the argument instead of a segfault inside the child.
+    """
+    if not isinstance(args, TaskArgs):
+        return
+    from .buffer_handle import AddressSpace, Tensor  # noqa: PLC0415
+
+    for i in range(args.tensor_count()):
+        desc = Tensor.unpack(args.ref(i)).handle
+        if desc.address_space == AddressSpace.DEVICE:
+            raise ValueError(
+                f"{kind}: argument {i} is a DEVICE-space tensor ({desc.backend_kind.name}); a Python "
+                f"sub-worker runs on the host and can only take HOST-space tensors"
+            )
 
 
 def _remote_data_eligible_worker_ids(
@@ -341,6 +361,7 @@ class Orchestrator:
             expected_namespace="LOCAL_PYTHON",
         )
         _reject_remote_sidecar_args(args, kind="orch.submit_sub")
+        _reject_device_args(args, kind="orch.submit_sub")
         self._o.submit_sub(digest, kind, target_namespace, args)
 
     def submit_sub_group(self, callable_handle: Any, args_list: list):
@@ -353,6 +374,7 @@ class Orchestrator:
         )
         for args in args_list:
             _reject_remote_sidecar_args(args, kind="orch.submit_sub_group")
+            _reject_device_args(args, kind="orch.submit_sub_group")
         self._o.submit_sub_group(digest, kind, target_namespace, args_list)
 
     # ------------------------------------------------------------------
@@ -503,7 +525,7 @@ class Orchestrator:
 
         The backing is a MAP_SHARED slab (visible to forked child workers), auto-reclaimed once every
         downstream consumer has completed and the run's scope ends — no manual free. Name it in a task
-        arg with ``handle.ref(shape, dtype)``: the ref's canonical identity dependency-wires to this
+        arg with ``handle.tensor(shape, dtype)``: its canonical identity dependency-wires to this
         alloc's synthetic producer slot (tag it OUTPUT/INOUT on the producer, INPUT on the consumer).
 
         Use this for chip-A → chip-B intermediate buffers instead of pre-allocating with
@@ -521,12 +543,12 @@ class Orchestrator:
             self._worker._next_buffer_id(),
             f"L{self._worker.level}",
         )
-        identity = CanonicalIdentity(oid, buffer_id, path, 0)
+        identity = CanonicalIdentity(oid, buffer_id)
         # alloc keys the synthetic producer slot by the ref's canonical identity (not a raw VA), so a
-        # consumer named via handle.ref(...) dependency-wires to it. Same managed backing as
+        # consumer named via handle.tensor(...) dependency-wires to it. Same managed backing as
         # worker.alloc_shared_tensor; additionally registered as an L3-L2 orch-comm host buffer.
         va = int(self._o.alloc(list(shape_t), dtype, identity.pack()))
-        handle = wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, generation=0, access=AccessMode.READWRITE)
+        handle = wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, access=AccessMode.READWRITE)
         self._worker._register_l3_l2_orch_comm_host_buffer(handle)
         return handle
 

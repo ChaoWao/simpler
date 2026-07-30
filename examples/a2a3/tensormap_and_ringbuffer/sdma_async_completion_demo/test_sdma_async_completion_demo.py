@@ -39,7 +39,7 @@ from simpler.worker import Worker
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.pto_isa import ensure_pto_isa_root
-from simpler_setup.torch_interop import make_tensor_ref
+from simpler_setup.torch_interop import make_tensor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 N = 128 * 128
@@ -153,9 +153,9 @@ def run(
                 for rank in range(nranks):
                     domain = handle[rank]
                     args = TaskArgs()
-                    args.add_ref(domain.buffers["input_window"].ref((N,), DataType.FLOAT32.value), TensorArgType.INPUT)
-                    args.add_ref(make_tensor_ref(worker, out[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_ref(make_tensor_ref(worker, result[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(domain.buffers["input_window"].tensor((N,), DataType.FLOAT32), TensorArgType.INPUT)
+                    args.add_tensor(make_tensor(worker, out[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(make_tensor(worker, result[rank]), TensorArgType.OUTPUT_EXISTING)
                     args.add_scalar(domain.device_ctx)
                     orch.submit_next_level(chip_handle, args, cfg, worker=rank)
 

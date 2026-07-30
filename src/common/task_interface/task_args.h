@@ -43,7 +43,7 @@
 #include <vector>
 
 #include "arg_direction.h"
-#include "buffer_handle.h"  // BufferRef wire type + BUFFER_ABI_VERSION for the versioned BufferRef blob
+#include "buffer_handle.h"  // BufferRef wire type + BUFFERREF_BLOB_MAGIC for the blob envelope
 #include "tensor.h"         // unified Tensor (strided) + TensorArgType, carried by TaskArgs and on the wire
 
 // ============================================================================
@@ -312,17 +312,17 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
 // ============================================================================
 //
 // Byte layout:
-//   offset 0:         uint32   abi_version = BUFFER_ABI_VERSION
+//   offset 0:         uint32   magic = BUFFERREF_BLOB_MAGIC
 //   offset 4:         int32    ref_count = R
 //   offset 8:         int32    scalar_count = S
 //   offset 12:        uint32   reserved (= 0)
 //   offset 16:        BufferRef refs[R]           (sizeof(BufferRef) B each)
 //   offset 16 + R*sizeof(BufferRef):  uint64_t  scalars[S]
 //
-// The element is BufferRef (embedded handle descriptor + view, no materialized addr) and the envelope
-// carries abi_version so a decoder rejects an unknown layout rather than misreading it. The
-// reserved word 8-aligns refs[0] (whose first field is a u64) and gates a future layout bump: a
-// non-zero reserved is rejected.
+// The element is BufferRef (embedded handle descriptor + view, no materialized addr). `magic` is a
+// leading discriminator, not a version — a decoder rejects a buffer that is not a blob rather than
+// misreading it; every other field is still bounded by `capacity` below. The reserved word 8-aligns
+// refs[0] (whose first field is a u64) and is rejected when non-zero.
 
 inline constexpr size_t BUFFERREF_BLOB_HEADER_SIZE = 16;
 
@@ -332,9 +332,13 @@ struct BufferRefBlobView {
     const uint8_t *ref_bytes;  // R contiguous BufferRef; extract element i with ref(i)
     const uint64_t *scalars;
 
+    // Every consumer — L4->L3 re-export, L2 materialization, the Python sub-worker map — extracts
+    // its elements through here, so validating on extraction covers all three receive boundaries at
+    // one point. Throws std::invalid_argument on a malformed element.
     BufferRef ref(int32_t i) const {
         BufferRef r;
         std::memcpy(&r, ref_bytes + static_cast<size_t>(i) * sizeof(BufferRef), sizeof(BufferRef));
+        validate_buffer_ref(r);
         return r;
     }
 };
@@ -344,14 +348,13 @@ inline size_t bufferref_blob_size(int32_t ref_count, int32_t scalar_count) {
            static_cast<size_t>(scalar_count) * sizeof(uint64_t);
 }
 
-// Serialize refs + scalars into `dst` (caller ensures room for bufferref_blob_size). Writes the
-// current abi_version into the envelope.
+// Serialize refs + scalars into `dst` (caller ensures room for bufferref_blob_size).
 inline void write_bufferref_blob(
     uint8_t *dst, const BufferRef *refs, int32_t ref_count, const uint64_t *scalars, int32_t scalar_count
 ) {
-    uint32_t version = BUFFER_ABI_VERSION;
+    uint32_t magic = BUFFERREF_BLOB_MAGIC;
     uint32_t reserved = 0;
-    std::memcpy(dst + 0, &version, sizeof(version));
+    std::memcpy(dst + 0, &magic, sizeof(magic));
     std::memcpy(dst + 4, &ref_count, sizeof(ref_count));
     std::memcpy(dst + 8, &scalar_count, sizeof(scalar_count));
     std::memcpy(dst + 12, &reserved, sizeof(reserved));
@@ -367,7 +370,7 @@ inline void write_bufferref_blob(
 }
 
 // Zero-copy view into a blob written by write_bufferref_blob; valid while `src` stays mapped.
-// `capacity` bounds the read. Throws on an unknown abi_version, negative counts, or a header that
+// `capacity` bounds the read. Throws on a bad magic, negative counts, or a header that
 // would walk past `capacity` (shared-memory corruption or a writer-side bug).
 inline BufferRefBlobView read_bufferref_blob(const uint8_t *src, size_t capacity) {
     if (capacity < BUFFERREF_BLOB_HEADER_SIZE) {
@@ -376,12 +379,12 @@ inline BufferRefBlobView read_bufferref_blob(const uint8_t *src, size_t capacity
             std::to_string(BUFFERREF_BLOB_HEADER_SIZE)
         );
     }
-    uint32_t version;
-    std::memcpy(&version, src + 0, sizeof(version));
-    if (version != BUFFER_ABI_VERSION) {
+    uint32_t magic;
+    std::memcpy(&magic, src + 0, sizeof(magic));
+    if (magic != BUFFERREF_BLOB_MAGIC) {
         throw std::runtime_error(
-            "read_bufferref_blob: unknown abi_version " + std::to_string(version) + " (expected " +
-            std::to_string(BUFFER_ABI_VERSION) + ")"
+            "read_bufferref_blob: not a BufferRef blob — magic " + std::to_string(magic) + " (expected " +
+            std::to_string(BUFFERREF_BLOB_MAGIC) + ")"
         );
     }
     int32_t R;

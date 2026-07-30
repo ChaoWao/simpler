@@ -27,7 +27,14 @@ from unittest.mock import MagicMock
 import pytest
 import simpler.orchestrator as orch_mod
 from _task_interface import DataType, TensorArgType
-from simpler.buffer_handle import BufferHandle, mint_owner_instance_id, wrap_device_malloc, wrap_fork_inherited
+from simpler.buffer_handle import (
+    AccessMode,
+    BufferHandle,
+    create_host_shared_buffer,
+    mint_owner_instance_id,
+    wrap_device_malloc,
+    wrap_fork_inherited,
+)
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import TaskArgs
 from simpler.worker import Worker, _ChildProvEntry, _Lifecycle
@@ -63,7 +70,7 @@ def _child_args(ptr: int, *, n: int = 16) -> TaskArgs:
     # A DEVICE_MALLOC ref carries ``ptr`` in its backend body: the device-pointer provenance key.
     args = TaskArgs()
     dev = wrap_device_malloc(ptr, n * 4, _OID, buffer_id=ptr)
-    args.add_ref(dev.ref(shapes=(n,), dtype=_F32), TensorArgType.OUTPUT_EXISTING)
+    args.add_tensor(dev.tensor(shapes=(n,), dtype=_F32), TensorArgType.OUTPUT_EXISTING)
     return args
 
 
@@ -248,10 +255,10 @@ class TestChildDeviceMemoryOps:
         w, nw = _l3_ready(0x2000)
         with pytest.raises(ValueError, match="not contained in a live allocation"):
             w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
-        nw.copy_to.assert_not_called()
+        nw.copy_staged.assert_not_called()
         w.alloc_child_tensor(0, (64,), DataType.UINT8)
         w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
-        nw.copy_to.assert_called_once()
+        nw.copy_staged.assert_called_once()
 
     def test_copy_to_interior_range_within_allocation_passes(self):
         # A partial update wholly inside a live allocation is valid (issue #1537).
@@ -259,16 +266,17 @@ class TestChildDeviceMemoryOps:
         w.alloc_child_tensor(0, (64,), DataType.UINT8)
         src = bytearray(16)
         w.copy_to(_dev_handle(0x2020, wid=0), src)  # base + 32, 16 bytes — inside [0x2000, 0x2040)
-        nw.copy_to.assert_called_once()
-        assert nw.copy_to.call_args.args[:2] == (0, 0x2020)
-        assert nw.copy_to.call_args.args[3] == 16
+        nw.copy_staged.assert_called_once()
+        # copy_staged(worker_id, ctrl, device_ptr, nbytes, shm_name)
+        assert nw.copy_staged.call_args.args[2] == 0x2020
+        assert nw.copy_staged.call_args.args[3] == 16
 
     def test_copy_to_range_overrunning_allocation_rejected(self):
         w, nw = _l3_ready(0x2000)
         w.alloc_child_tensor(0, (64,), DataType.UINT8)
         with pytest.raises(ValueError, match="not contained in a live allocation"):
             w.copy_to(_dev_handle(0x203F, wid=0), bytearray(2))  # last byte at 0x2040 == base + size
-        nw.copy_to.assert_not_called()
+        nw.copy_staged.assert_not_called()
 
     def test_copy_to_domain_window_chunk_not_narrowed_by_aliasing_buffer(self):
         # A carved buffer at offset 0 aliases the window base under the same
@@ -278,18 +286,21 @@ class TestChildDeviceMemoryOps:
         with w._child_prov_lock:
             w._child_prov_record_domain(0, 0x4000, allocation_id=7, extent=2 << 20)
             w._child_prov_record_domain(0, 0x4000, allocation_id=7, extent=4)  # buffer #0 aliases the base
-        w.copy_to(_dev_handle(0x4000, wid=0), bytearray(1 << 20))  # 1 MiB into a 2 MiB window
-        nw.copy_to.assert_called_once()
-        assert nw.copy_to.call_args.args[3] == 1 << 20
+        # Minted one byte wider than the window so the handle's own length check never fires and
+        # the recorded provenance extent is the guard under test.
+        window = _dev_handle(0x4000, wid=0, nbytes=(2 << 20) + 1)
+        w.copy_to(window, bytearray(1 << 20))  # 1 MiB into a 2 MiB window
+        nw.copy_staged.assert_called_once()
+        assert nw.copy_staged.call_args.args[3] == 1 << 20
         with pytest.raises(ValueError, match="not contained in a live allocation"):
-            w.copy_to(_dev_handle(0x4000, wid=0), bytearray((2 << 20) + 1))  # one byte past the window
-        assert nw.copy_to.call_count == 1
+            w.copy_to(window, bytearray((2 << 20) + 1))  # one byte past the window
+        assert nw.copy_staged.call_count == 1
 
     def test_copy_from_requires_live_device_src(self):
         w, nw = _l3_ready(0x3000)
         with pytest.raises(ValueError, match="not contained in a live allocation"):
             w.copy_from(_HOSTSRC, _dev_handle(0x3000, wid=0))
-        nw.copy_from.assert_not_called()
+        nw.copy_staged.assert_not_called()
 
     def test_orch_delegates_to_worker(self):
         # orch.alloc_child_tensor / free are thin wrappers over the bound Worker.
@@ -352,7 +363,7 @@ class TestSubmitDispatchGuard:
         o = Orchestrator(fake, w)
         args = TaskArgs()
         host = wrap_fork_inherited(0x9000, 64, _OID, buffer_id=0x9000)
-        args.add_ref(host.ref(shapes=(16,), dtype=_F32), TensorArgType.INPUT)
+        args.add_tensor(host.tensor(shapes=(16,), dtype=_F32), TensorArgType.INPUT)
         o.submit_next_level(object(), args, None, worker=0)
         fake.submit_next_level.assert_called_once()
 
@@ -645,3 +656,94 @@ class TestDomainReleaseOrdering:
             w._release_domain_now(handle)  # type: ignore[arg-type]
         assert (0, 0x5000) not in w._child_alloc_prov
         assert (1, 0x6000) not in w._child_alloc_prov
+
+
+# ----------------------------------------------------------------------------
+# copy_to / copy_from handle validation
+#
+# The transfer length comes from the *host* object, so without these checks a host buffer larger
+# than the device backing writes past it, and a READ-only backing accepts a write.
+# ----------------------------------------------------------------------------
+
+
+class TestCopyHandleValidation:
+    def test_rejects_host_handle(self):
+        w, nw = _l3_ready(0x1000)
+        host = create_host_shared_buffer(64, _OID, buffer_id=1)
+        try:
+            with pytest.raises(ValueError, match="expected a DEVICE handle"):
+                w.copy_to(host, _HOSTSRC)
+            nw.copy_staged.assert_not_called()
+        finally:
+            host.close()
+
+    def test_rejects_transfer_larger_than_the_backing(self):
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (32,), DataType.UINT8)  # a 32-byte backing
+        with pytest.raises(ValueError, match="exceeds the 32-byte backing"):
+            w.copy_to(_dev_handle(0x2000, wid=0, nbytes=32), _HOSTSRC)  # _HOSTSRC is 64 B
+        nw.copy_staged.assert_not_called()
+
+    def test_rejects_write_to_a_read_only_backing(self):
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        ro = wrap_device_malloc(0x2000, 64, _OID, buffer_id=0x2000, owner_worker_id=0, access=AccessMode.READ)
+        with pytest.raises(ValueError, match="needs WRITE"):
+            w.copy_to(ro, _HOSTSRC)
+        nw.copy_staged.assert_not_called()
+        w.copy_from(_HOSTSRC, ro)  # reading it is fine
+        nw.copy_staged.assert_called_once()
+
+    def test_l3_copy_stages_instead_of_sending_a_host_address(self):
+        # A parent VA is only valid in the child when the allocation predates the fork, which the
+        # caller cannot be asked to guarantee — so an L3 copy must go through the staged command.
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
+        nw.copy_to.assert_not_called()
+        (wid, sub_cmd, dev_ptr, size, shm_name) = nw.copy_staged.call_args.args
+        assert (wid, dev_ptr, size) == (0, 0x2000, len(_HOSTSRC))
+        assert shm_name and not str(shm_name).isdigit()  # a shm name, not an address
+
+
+class TestCopyZeroCopyShmPath:
+    """A POSIX-shm host handle transfers by name — no intermediate staging copy."""
+
+    def test_shm_handle_src_passes_its_own_name(self):
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        host = create_host_shared_buffer(64, _OID, buffer_id=1)
+        host_shm = host.shm
+        assert host_shm is not None
+        try:
+            w.copy_to(_dev_handle(0x2000, wid=0), host)
+            (_wid, sub_cmd, dev_ptr, size, shm_name) = nw.copy_staged.call_args.args
+            assert shm_name == host_shm.name  # the caller's own shm, not a staged duplicate
+            assert (dev_ptr, size) == (0x2000, 64)
+            assert sub_cmd != 0
+        finally:
+            host.close()
+
+    def test_plain_buffer_src_still_stages(self):
+        w, nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        w.copy_to(_dev_handle(0x2000, wid=0), _HOSTSRC)
+        (_wid, _sub_cmd, _dev_ptr, _size, shm_name) = nw.copy_staged.call_args.args
+        assert shm_name  # a staging shm was created for it
+        assert not shm_name.startswith("__never__")
+
+    def test_rejects_a_device_handle_on_the_host_side(self):
+        w, _nw = _l3_ready(0x2000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        with pytest.raises(ValueError, match="host side must be a HOST handle"):
+            w.copy_to(_dev_handle(0x2000, wid=0), _dev_handle(0x2000, wid=0))
+
+    def test_rejects_writing_into_a_read_only_host_handle(self):
+        w, _nw = _l3_ready(0x3000)
+        w.alloc_child_tensor(0, (64,), DataType.UINT8)
+        ro = create_host_shared_buffer(64, _OID, buffer_id=2, access=AccessMode.READ)
+        try:
+            with pytest.raises(ValueError, match="host backing grants READ"):
+                w.copy_from(ro, _dev_handle(0x3000, wid=0))
+        finally:
+            ro.close()

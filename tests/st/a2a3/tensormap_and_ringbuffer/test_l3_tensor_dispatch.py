@@ -7,11 +7,11 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""L3->L2 chip dispatch over the BufferRef wire (P1-B B3, minimal end-to-end).
+"""L3->L2 chip dispatch over the Tensor wire (P1-B B3, minimal end-to-end).
 
-The L3 orch is a pure DAG builder over views: it names task args as BufferRefs built from handles
+The L3 orch is a pure DAG builder over views: it names task args as Tensors built from handles
 (create_buffer + handle.ref), never touching data. torch is used only OUTSIDE run() to fill inputs
-and read the output. The owner writes a BufferRef blob to the chip mailbox; the chip child
+and read the output. The owner writes a Tensor blob to the chip mailbox; the chip child
 materializes it back to Tensors (ImportRegistry -> materialize_bufferref_blob) and runs the kernel;
 the result lands in the shared output buffer with no per-run copy.
 """
@@ -37,17 +37,17 @@ def _golden(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def _one_task_orch(chip_handle, a_ref, b_ref, out_ref):
     def orch_fn(orch, _args, cfg):
         ta = TaskArgs()
-        ta.add_ref(a_ref, TensorArgType.INPUT)
-        ta.add_ref(b_ref, TensorArgType.INPUT)
-        ta.add_ref(out_ref, TensorArgType.OUTPUT_EXISTING)
+        ta.add_tensor(a_ref, TensorArgType.INPUT)
+        ta.add_tensor(b_ref, TensorArgType.INPUT)
+        ta.add_tensor(out_ref, TensorArgType.OUTPUT_EXISTING)
         orch.submit_next_level(chip_handle, ta, cfg, worker=0)
 
     return orch_fn
 
 
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
-class TestL3BufferRefDispatch(SceneTestCase):
-    """A single chip task dispatched over the BufferRef wire on one L3 worker."""
+class TestL3TensorDispatch(SceneTestCase):
+    """A single chip task dispatched over the Tensor wire on one L3 worker."""
 
     CALLABLE = {
         "callables": [
@@ -83,7 +83,7 @@ class TestL3BufferRefDispatch(SceneTestCase):
     }
 
     CASES = [
-        {"name": "bufferref_dispatch", "platforms": ["a2a3sim", "a2a3"]},
+        {"name": "tensor_dispatch", "platforms": ["a2a3sim", "a2a3"]},
     ]
 
     def test_run(self, st_worker):
@@ -104,13 +104,13 @@ class TestL3BufferRefDispatch(SceneTestCase):
             a.fill_(5.0)
             b.fill_(7.0)
             out.zero_()
-            # The orch names args purely as BufferRef views built from the handles.
-            a_ref = a_h.ref(shapes=(SIZE,), dtype=_F32)
-            b_ref = b_h.ref(shapes=(SIZE,), dtype=_F32)
-            out_ref = out_h.ref(shapes=(SIZE,), dtype=_F32)
+            # The orch names args purely as Tensor views built from the handles.
+            a_ref = a_h.tensor(shapes=(SIZE,), dtype=_F32)
+            b_ref = b_h.tensor(shapes=(SIZE,), dtype=_F32)
+            out_ref = out_h.tensor(shapes=(SIZE,), dtype=_F32)
             worker.run(_one_task_orch(chip_handle, a_ref, b_ref, out_ref), args=None, config=CallConfig())
             result = torch.allclose(out, _golden(a, b), rtol=self.RTOL, atol=self.ATOL)
         finally:
             # Drop views before the framework-driven close unlinks the shm.
             a = b = out = None
-        assert result, "BufferRef-dispatched chip task did not produce the golden result"
+        assert result, "Tensor-dispatched chip task did not produce the golden result"

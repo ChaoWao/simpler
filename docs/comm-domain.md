@@ -47,7 +47,7 @@ allocation: if `sum(b.nbytes) > window_size`, `allocate_domain` raises
 
 Kernels read peer windows through `device_ctx` (which holds every rank's
 window base, local + imported peer); `buffers[name]` is the local slice —
-name it in a task arg with `buffers[name].ref(shapes, dtype)`.
+name it in a task arg with `buffers[name].tensor(shapes, dtype)`.
 
 ---
 
@@ -157,10 +157,19 @@ orch.copy_to(handle[chip_idx].buffers["input"], tensor)
 
 `copy_to(dst_handle, src)` is **synchronous** (control-mailbox round-trip +
 synchronous `rtMemcpy` H2D): when it returns, the bytes are in that rank's
-window. `dst` is the window's `VMM_WINDOW` BufferHandle; `src` (a `torch` tensor
-or writable buffer) must be device-visible from the forked chip child — e.g. a
-tensor moved to shared memory with `.share_memory_()` **before** `Worker.init()`
-forks the chips.
+window. `dst` is the window's `VMM_WINDOW` BufferHandle; `src` is any `torch`
+tensor, writable buffer, or host `BufferHandle` in this process — the control
+plane stages its bytes through a POSIX shm the child maps, so the chip child
+never dereferences a parent address and `src` needs no `.share_memory_()` and no
+particular allocation order relative to `Worker.init()`. Passing a
+`create_buffer` handle directly skips the staging copy, since its shm is already
+one the child can map:
+
+```python
+staged = worker.create_buffer(nbytes)
+torch.frombuffer(staged.shm.buf, dtype=torch.float32, count=n).copy_(src_tensor)
+orch.copy_to(handle[rank].buffers["input_window"], staged)   # no intermediate copy
+```
 
 **Cross-rank ordering:** when a kernel reads a *peer's* staged window, stage
 **all** ranks' windows before submitting any kernel — `copy_to` is synchronous
@@ -181,19 +190,19 @@ with orch.allocate_domain(...) as handle:
 
 A host tensor named in a task arg is ultimately dereferenced from a forked local
 L3 child, not the parent, so its backing must reach that child. Under the
-BufferRef ABI an arg is a `BufferRef` carrying a self-describing descriptor; the
+BufferHandle ABI an arg is a `Tensor` carrying a self-describing descriptor; the
 child materializes it lazily on first receipt (map-once, keyed by canonical
 identity) — there is no eager broadcast and no host-pointer rewrite. Two sources
 are legal:
 
 | Source | How | Why it works |
 | ------ | --- | ------------ |
-| **fork-inherited** | `tensor.share_memory_()` **before `Worker.init()`**, named with `worker.make_ref_arg(t, shapes, dtype)` (FORK_SHM) | the child inherits the MAP_SHARED page at the fork; the ref resolves to that same VA |
-| **worker-allocated post-fork** | `worker.create_buffer(nbytes)` after the children exist, named with `handle.ref(shapes, dtype)` (POSIX_SHM) | the child maps the shm by identity on first receipt of the ref, **zero-copy** |
+| **fork-inherited** | `tensor.share_memory_()` **before `Worker.init()`**, named with `worker.make_ref_arg(t, shapes, dtype)` (FORK_SHM) | the child inherits the MAP_SHARED page at the fork; it resolves to that same VA |
+| **worker-allocated post-fork** | `worker.create_buffer(nbytes)` after the children exist, named with `handle.tensor(shapes, dtype)` (POSIX_SHM) | the child maps the shm by identity on first receipt, **zero-copy** |
 
 The local L3 children are forked eagerly in `Worker.init()`. A host tensor
 created after that — the natural dynamic-shape serving pattern — reaches the
-children by naming a `create_buffer` handle as a `BufferRef`:
+children by naming a `create_buffer` handle as a `Tensor`:
 
 ```python
 worker = Worker(level=3, ...); worker.register(chip); worker.init()   # forks the chips

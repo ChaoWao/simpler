@@ -10,7 +10,7 @@
 """Torch integration helpers.
 
 Canonical home for torch-aware helpers that convert ``torch.Tensor`` and
-``torch.dtype`` values into the runtime's ``Tensor`` / ``DataType``
+``torch.dtype`` values into the runtime's ``Tensor`` / ``ChipTensor`` / ``DataType``
 types. These helpers live in ``simpler_setup`` (not ``simpler``) so that the
 stable ``simpler`` runtime API can remain torch-free; torch integration is a
 setup-time/test-framework concern.
@@ -33,7 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from simpler.task_interface import DataType, Tensor
+    from simpler.task_interface import ChipTensor, DataType
 
 _TORCH_DTYPE_MAP = None
 
@@ -81,42 +81,42 @@ def torch_dtype_to_datatype(dt) -> DataType:
     return _TORCH_DTYPE_MAP[dt]  # pyright: ignore[reportOptionalSubscript]
 
 
-def make_tensor_arg(tensor) -> Tensor:
-    """Create a ``Tensor`` from a torch.Tensor.
+def make_tensor_arg(tensor) -> ChipTensor:
+    """Create a ``ChipTensor`` from a torch.Tensor.
 
     The result is always contiguous (row-major strides, ``start_offset == 0``) —
-    the unified ``Tensor`` can express strided views, but this construction path
+    the unified ``ChipTensor`` can express strided views, but this construction path
     is constrained to contiguous memory. The input torch tensor MUST therefore be
     contiguous; a non-contiguous tensor raises ``ValueError`` (call
     ``.contiguous()`` first). It must also be a CPU tensor: a device tensor's
     ``data_ptr()`` is a device pointer that requires ``child_memory=True``, which
     this helper does not set, so a non-CPU tensor raises ``ValueError``. Its
     ``data_ptr()``, shape, and dtype are read and stored in the returned
-    ``Tensor``.
+    ``ChipTensor``.
     """
-    from simpler.task_interface import Tensor
+    from simpler.task_interface import ChipTensor
 
     _ensure_torch_map()
     dt = _TORCH_DTYPE_MAP.get(tensor.dtype)  # pyright: ignore[reportOptionalMemberAccess]
     if dt is None:
-        raise ValueError(f"Unsupported tensor dtype for Tensor: {tensor.dtype}")
+        raise ValueError(f"Unsupported tensor dtype for ChipTensor: {tensor.dtype}")
     if tensor.device.type != "cpu":
         raise ValueError(
             f"make_tensor_arg requires a CPU tensor, got device={tensor.device}. "
             "A device pointer must be wrapped explicitly via "
-            "Tensor.make(..., child_memory=True)."
+            "ChipTensor.make(..., child_memory=True)."
         )
     if not tensor.is_contiguous():
         raise ValueError(
-            "make_tensor_arg requires a contiguous tensor (TaskArgs Tensors are constructed "
+            "make_tensor_arg requires a contiguous tensor (ChipTensors are constructed "
             "contiguous); call tensor.contiguous() before passing it."
         )
     shapes = tuple(int(s) for s in tensor.shape)
-    return Tensor.make(tensor.data_ptr(), shapes, dt)
+    return ChipTensor.make(tensor.data_ptr(), shapes, dt)
 
 
-def make_tensor_ref(worker, tensor):
-    """A ``BufferRef`` over a **pre-fork** host torch tensor — the ref counterpart of ``make_tensor_arg``.
+def make_tensor(worker, tensor):
+    """A ``Tensor`` task arg over a **pre-fork** host torch tensor.
 
     Names ``tensor`` as a memoized ``FORK_SHM`` handle on ``worker`` (``worker.make_ref_arg``), inferring
     shapes + dtype from the tensor. Use for standalone L3 examples whose host inputs/outputs are
@@ -126,10 +126,10 @@ def make_tensor_ref(worker, tensor):
     _ensure_torch_map()
     dt = _TORCH_DTYPE_MAP.get(tensor.dtype)  # pyright: ignore[reportOptionalMemberAccess]
     if dt is None:
-        raise ValueError(f"Unsupported tensor dtype for BufferRef: {tensor.dtype}")
+        raise ValueError(f"Unsupported tensor dtype: {tensor.dtype}")
     if tensor.device.type != "cpu":
-        raise ValueError(f"make_tensor_ref requires a CPU tensor, got device={tensor.device}.")
+        raise ValueError(f"make_tensor requires a CPU tensor, got device={tensor.device}.")
     if not tensor.is_contiguous():
-        raise ValueError("make_tensor_ref requires a contiguous tensor; call tensor.contiguous() first.")
+        raise ValueError("make_tensor requires a contiguous tensor; call tensor.contiguous() first.")
     shapes = tuple(int(s) for s in tensor.shape)
     return worker.make_ref_arg(tensor, shapes=shapes, dtype=int(dt.value))

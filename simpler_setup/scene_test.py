@@ -251,7 +251,7 @@ class _RehostedTaskArgs:
                     new_specs.append(spec)
             test_args._specs = new_specs
             # Expose the owning handles so the L3 arg builder can name each rehosted tensor as a
-            # BufferRef (handle.ref); the L2 chip builder keeps using the raw views.
+            # Tensor (handle.ref); the L2 chip builder keeps using the raw views.
             test_args._rehost_handles = self._handles
         except BaseException:
             self.release()
@@ -349,7 +349,7 @@ class CallableNamespace:
 
         def run_dag(w, callables, task_args, config):
             chip_args = TaskArgs()
-            chip_args.add_ref(_rehosted_ref(task_args, "a"), TensorArgType.INPUT)
+            chip_args.add_tensor(_rehosted_ref(task_args, "a"), TensorArgType.INPUT)
             callables.keep(chip_args)  # survive until drain finishes
             ...
     """
@@ -378,20 +378,20 @@ class CallableNamespace:
 
 
 def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker):
-    """Build BufferRef `TaskArgs` from `TaskArgsBuilder` for the L2 `Worker.run` path.
+    """Build Tensor `TaskArgs` from `TaskArgsBuilder` for the L2 `Worker.run` path.
 
-    An L2 leaf consumes its own args: `Worker.run(handle, args, cfg)` materializes each BufferRef to a
+    An L2 leaf consumes its own args: `Worker.run(handle, args, cfg)` materializes each Tensor to a
     local base in-process. Each tensor is named as a ref over ``worker.make_ref_arg`` (a host tensor;
     at L2 there is no fork, so any host tensor resolves in-process); the direction tag is inert at L2
     but set for parity with the L3 path.
 
     Returns:
-        args: TaskArgs (BufferRef)
+        args: TaskArgs (Tensor)
         output_names: list of tensor names that are OUTPUT or INOUT
     """
     from simpler.task_interface import ArgDirection, TaskArgs, TensorArgType, scalar_to_uint64  # noqa: PLC0415
 
-    from simpler_setup.torch_interop import make_tensor_ref  # noqa: PLC0415
+    from simpler_setup.torch_interop import make_tensor  # noqa: PLC0415
 
     dir2tag = {
         ArgDirection.IN: TensorArgType.INPUT,
@@ -410,7 +410,7 @@ def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker)
                     f"Update CALLABLE['orchestration']['signature'] to match generate_args()."
                 )
             direction = orch_signature[tensor_idx]
-            args.add_ref(make_tensor_ref(worker, spec.value), dir2tag.get(direction, TensorArgType.INPUT))
+            args.add_tensor(make_tensor(worker, spec.value), dir2tag.get(direction, TensorArgType.INPUT))
             if direction in (ArgDirection.OUT, ArgDirection.INOUT):
                 output_names.append(spec.name)
             tensor_idx += 1
@@ -425,7 +425,7 @@ def _build_chip_task_args(test_args: TaskArgsBuilder, orch_signature: list):
 
     Used by the direct chip API (`ChipWorker._run_slot(slot, chip_args, config)`, e.g. the
     prepared-callable tests): the chip worker expects the runtime.so ABI-shaped POD directly (no tags).
-    The `Worker.run` L2 path instead builds BufferRef args via `_build_l2_ref_args`.
+    The `Worker.run` L2 path instead builds Tensor args via `_build_l2_ref_args`.
 
     Returns:
         chip_args: ChipStorageTaskArgs (POD)
@@ -463,7 +463,7 @@ def _build_chip_task_args(test_args: TaskArgsBuilder, orch_signature: list):
 
 
 def _rehosted_ref_for(test_args: TaskArgsBuilder, tensor):
-    """A ``BufferRef`` over the rehosted ``tensor``'s owning handle, matched by its backing address.
+    """A ``Tensor`` over the rehosted ``tensor``'s owning handle, matched by its backing address.
 
     Like ``_rehosted_ref`` but keyed by the (rehosted) tensor object a hand-written orch already holds,
     rather than its name — the rehosted view's ``data_ptr`` is its create_buffer handle's base.
@@ -473,12 +473,12 @@ def _rehosted_ref_for(test_args: TaskArgsBuilder, tensor):
     base = int(tensor.data_ptr())
     for handle in getattr(test_args, "_rehost_handles", {}).values():
         if handle.base == base:
-            return handle.ref(shapes=tuple(tensor.shape), dtype=torch_dtype_to_datatype(tensor.dtype).value)
+            return handle.tensor(shapes=tuple(tensor.shape), dtype=torch_dtype_to_datatype(tensor.dtype).value)
     raise ValueError("tensor is not a rehosted arg (no create_buffer handle with a matching base)")
 
 
 def _l3_ref(test_args: TaskArgsBuilder, name: str, worker=None):
-    """A ``BufferRef`` naming the L3 tensor arg ``name``.
+    """A ``Tensor`` naming the L3 tensor arg ``name``.
 
     Two ways a scene test's host tensor becomes child-visible: the framework rehosts it into a
     create_buffer (POSIX shm) — use that handle; or a test pre-allocates a ``share_memory_()`` tensor
@@ -490,23 +490,23 @@ def _l3_ref(test_args: TaskArgsBuilder, name: str, worker=None):
     dtype = torch_dtype_to_datatype(t.dtype).value
     handle = getattr(test_args, "_rehost_handles", {}).get(name)
     if handle is not None:
-        return handle.ref(shapes=tuple(t.shape), dtype=dtype)
+        return handle.tensor(shapes=tuple(t.shape), dtype=dtype)
     if worker is not None:
         return worker.make_ref_arg(t, shapes=tuple(t.shape), dtype=dtype)
     raise ValueError(f"L3 tensor arg '{name}' has no rehosted handle; rehost the args or pass worker= for make_ref_arg")
 
 
 def _rehosted_ref(test_args: TaskArgsBuilder, name: str):
-    """A ``BufferRef`` over the rehosted tensor ``name`` (framework rehost only). For a hand-written
+    """A ``Tensor`` over the rehosted tensor ``name`` (framework rehost only). For a hand-written
     L3 orch naming one rehosted tensor as a task arg (e.g. the chip output as a sub-task INPUT)."""
     return _l3_ref(test_args, name, worker=None)
 
 
 def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list, worker=None):
-    """Build a tagged `TaskArgs` (BufferRefs) from a `TaskArgsBuilder` for the L3 path
+    """Build a tagged `TaskArgs` (Tensors) from a `TaskArgsBuilder` for the L3 path
     (`orch.submit_next_level`); the tags drive dependency inference.
 
-    Names each tensor as a BufferRef over its framework-rehosted create_buffer handle, or — for a test
+    Names each tensor as a Tensor over its framework-rehosted create_buffer handle, or — for a test
     that pre-allocates ``share_memory_()`` tensors before ``init()`` — via ``worker.make_ref_arg`` when
     ``worker`` is passed.
 
@@ -527,7 +527,7 @@ def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list, worker
         ArgDirection.INOUT: TensorArgType.INOUT,
     }
 
-    # Each rehosted tensor is named as a BufferRef over its owning create_buffer handle (the child
+    # Each rehosted tensor is named as a Tensor over its owning create_buffer handle (the child
     # maps it by canonical identity); tags drive dependency inference.
     chip_args = TaskArgs()
     output_names: list[str] = []
@@ -543,7 +543,7 @@ def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list, worker
                 )
             direction = orch_signature[tensor_idx]
             tag = _DIR_TO_TAG.get(direction, TensorArgType.INPUT)
-            chip_args.add_ref(_l3_ref(test_args, spec.name, worker), tag)
+            chip_args.add_tensor(_l3_ref(test_args, spec.name, worker), tag)
             if direction in (ArgDirection.OUT, ArgDirection.INOUT):
                 output_names.append(spec.name)
             tensor_idx += 1

@@ -48,7 +48,7 @@ def _fake_alloc_handle(orch, nbytes):
     """A FORK_SHM BufferHandle over a bare _FakeCOrch alloc — mirrors Orchestrator.alloc for the
     low-level tests that drive L3L2Queue with a fake C orch directly."""
     oid, bid = mint_owner_instance_id(), next(_DESC_BID)
-    identity = CanonicalIdentity(oid, bid, "L3", 0)
+    identity = CanonicalIdentity(oid, bid)
     va = int(orch.alloc([nbytes], DataType.UINT8, identity.pack()))
     return wrap_fork_inherited(va, nbytes, oid, bid, "L3", access=AccessMode.READWRITE)
 

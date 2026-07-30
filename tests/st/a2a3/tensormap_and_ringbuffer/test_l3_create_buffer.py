@@ -11,7 +11,7 @@
 
 ``Worker.create_buffer`` allocates a born-shared BufferHandle carrying a typed canonical identity.
 There is **no eager export handshake**: the handle's self-describing descriptor rides embedded in
-every BufferRef built over it, and a consumer materializes it lazily on first receipt. This test
+every Tensor built over it, and a consumer materializes it lazily on first receipt. This test
 covers the owner-side contract — a live L3 Worker allocates handles that carry a stable identity, a
 monotonic buffer_id, and usable born-shared backing, and releases them cleanly on close.
 
@@ -19,7 +19,8 @@ a2a3sim: create_buffer is pure host-side (POSIX shm), no platform branching. The
 exists only to give the L3 worker a chip child to fork (create_buffer requires one).
 """
 
-from simpler.buffer_handle import AddressSpace, BackendKind, Visibility
+from _task_interface import OWNER_INSTANCE_ID_BYTES
+from simpler.buffer_handle import AddressSpace, BackendKind
 from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, scene_test
@@ -65,8 +66,7 @@ class TestL3CreateBuffer(SceneTestCase):
         # Owner-side handle contract.
         assert h0.backend_kind == BackendKind.POSIX_SHM
         assert h0.address_space == AddressSpace.HOST
-        assert h0.visibility == Visibility.SHARED
-        assert len(h0.identity.owner_instance_id) == 16
+        assert len(h0.identity.owner_instance_id) == OWNER_INSTANCE_ID_BYTES
         assert h0.identity.owner_instance_id == h1.identity.owner_instance_id  # same incarnation
         assert h0.identity.buffer_id != h1.identity.buffer_id  # monotonic
         assert h0.identity.generation == 1

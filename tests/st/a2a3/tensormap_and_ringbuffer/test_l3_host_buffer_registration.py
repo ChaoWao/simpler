@@ -13,7 +13,7 @@ A host tensor created *after* the chip children are forked (lazily on the
 first ``Worker.run()``) is not visible to those children: the orch fn runs in
 the parent and carries a raw parent VA that is unmapped (or stale) in the child.
 ``Worker.create_buffer`` allocates a POSIX-shm backing and hands back a
-``BufferHandle``; naming it in a task arg with ``handle.ref(...)`` carries a
+``BufferHandle``; naming it in a task arg with ``handle.tensor(...)`` carries a
 self-describing descriptor that the forked chip child materializes lazily on
 first receipt (map-once), so a tensor built over ``handle.shm.buf`` round-trips
 with **no per-run copy** — the child reads and writes the same physical pages the
@@ -38,7 +38,7 @@ KERNELS_BASE = "../../../../examples/a2a3/tensormap_and_ringbuffer/vector_exampl
 
 SIZE = 128 * 128
 DTYPE = torch.float32
-_F32 = DataType.FLOAT32.value
+_F32 = DataType.FLOAT32
 
 
 def _golden(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -49,9 +49,9 @@ def _golden(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def _one_task_orch(chip_handle, ba, bb, bout):
     def orch_fn(orch, _args, cfg):
         ta = TaskArgs()
-        ta.add_ref(ba.ref((SIZE,), _F32), TensorArgType.INPUT)
-        ta.add_ref(bb.ref((SIZE,), _F32), TensorArgType.INPUT)
-        ta.add_ref(bout.ref((SIZE,), _F32), TensorArgType.OUTPUT_EXISTING)
+        ta.add_tensor(ba.tensor((SIZE,), _F32), TensorArgType.INPUT)
+        ta.add_tensor(bb.tensor((SIZE,), _F32), TensorArgType.INPUT)
+        ta.add_tensor(bout.tensor((SIZE,), _F32), TensorArgType.OUTPUT_EXISTING)
         orch.submit_next_level(chip_handle, ta, cfg, worker=0)
 
     return orch_fn
@@ -104,7 +104,7 @@ class TestPostForkHostBufferZeroCopy(SceneTestCase):
 
         ``Worker.init()`` is eager, so the chip child is already forked when the
         buffers are created; a post-init ``create_buffer`` reaches that child by
-        naming the handle as a ``BufferRef`` the child materializes lazily.
+        naming the handle as a ``Tensor`` the child materializes lazily.
         """
         worker = st_worker
         chip_handle = type(self)._st_chip_handles["vector"]

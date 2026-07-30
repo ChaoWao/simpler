@@ -9,14 +9,19 @@
 # ruff: noqa: PLW0603, PLC0415
 """Public Python API for task_interface nanobind bindings.
 
-Re-exports the canonical C++ types (DataType, Tensor, ChipStorageTaskArgs,
-TaskArgs, TensorArgType) plus ``scalar_to_uint64``. Torch-aware helpers
-(``make_tensor_arg``, ``torch_dtype_to_datatype``) live in
+Re-exports the canonical C++ types (DataType, ChipStorageTaskArgs, TaskArgs,
+TensorArgType) plus ``scalar_to_uint64``, and re-exports ``Tensor`` — the task
+argument users build — from ``simpler.buffer_handle``. Torch-aware helpers
+(``make_tensor``, ``torch_dtype_to_datatype``) live in
 ``simpler_setup.torch_interop`` — this module has no torch dependency.
 
+``ChipTensor`` is the chip-only POD the runtime ABI expects, paired with
+``ChipStorageTaskArgs`` on the direct ``ChipWorker`` path; it carries a
+materialized address and never crosses a process boundary.
+
 Usage:
-    from simpler.task_interface import DataType, Tensor, ChipStorageTaskArgs
-    from simpler_setup.torch_interop import make_tensor_arg
+    from simpler.task_interface import DataType, TaskArgs, Tensor, TensorArgType
+    from simpler_setup.torch_interop import make_tensor
 """
 
 from __future__ import annotations
@@ -49,12 +54,12 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     CallConfig,
     ChipCallable,
     ChipStorageTaskArgs,
+    ChipTensor,
     CoreCallable,
     DataType,
     RuntimeEnv,
     TaskArgs,
     TaskState,
-    Tensor,
     TensorArgType,
     WorkerType,
     _ChipWorker,
@@ -65,7 +70,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     read_args_from_blob,
 )
 
-from .buffer_handle import BufferHandle
+from .buffer_handle import BufferHandle, Tensor
 
 
 def _assert_bindings_match_source_tree() -> None:
@@ -138,6 +143,7 @@ __all__ = [
     "get_dtype_name",
     "MAX_TENSOR_DIMS",
     "Tensor",
+    "ChipTensor",
     "ChipStorageTaskArgs",
     "TensorArgType",
     "TaskArgs",
@@ -697,7 +703,7 @@ class _RemoteTaskArgsStorage:
     inline_payload: bytearray
 
 
-_TASK_ARGS_ADD_REF = TaskArgs.add_ref
+_TASK_ARGS_ADD_TENSOR = TaskArgs.add_tensor
 _TASK_ARGS_CLEAR = TaskArgs.clear
 _REMOTE_TASK_ARGS_STORAGE: weakref.WeakKeyDictionary[TaskArgs, _RemoteTaskArgsStorage] = weakref.WeakKeyDictionary()
 _REMOTE_TASK_ARGS_STORAGE_LOCK = threading.Lock()
@@ -740,21 +746,21 @@ def _storage_for_remote_task_args(args: TaskArgs) -> _RemoteTaskArgsStorage:
         return storage
 
 
-def _task_args_add_ref(self: TaskArgs, ref, tag: TensorArgType = TensorArgType.INPUT) -> None:
-    """Add a BufferRef task arg. ``ref`` is a ``simpler.buffer_handle.BufferRef`` (packable) or its
-    packed bytes. A RemoteTensorRef (arg destined for a remote worker) is rewritten to a
-    REMOTE_SIDECAR BufferRef (no local backing) with its remote descriptor tracked in the sidecar."""
-    if isinstance(ref, RemoteTensorRef):
-        from .buffer_handle import AddressSpace, remote_sidecar_ref
+def _task_args_add_tensor(self: TaskArgs, tensor, tag: TensorArgType = TensorArgType.INPUT) -> None:
+    """Add a task arg. ``tensor`` is a ``simpler.buffer_handle.Tensor`` (packable) or its packed
+    bytes. A RemoteTensorRef (arg destined for a remote worker) is rewritten to a REMOTE_SIDECAR
+    ``Tensor`` (no local backing) with its remote descriptor tracked in the sidecar."""
+    if isinstance(tensor, RemoteTensorRef):
+        from .buffer_handle import AddressSpace, remote_sidecar_tensor
 
         storage = _storage_for_remote_task_args(self)
-        handle = ref.handle
+        handle = tensor.handle
         inline = handle.address_space == RemoteAddressSpace.HOST_INLINE
-        nbytes = ref.nbytes
+        nbytes = tensor.nbytes
         assert nbytes is not None
-        placeholder = remote_sidecar_ref(
-            shapes=tuple(int(s) for s in ref.shape),
-            dtype=int(ref.dtype.value),
+        placeholder = remote_sidecar_tensor(
+            shapes=tuple(int(s) for s in tensor.shape),
+            dtype=int(tensor.dtype.value),
             nbytes=int(nbytes),
             owner_worker_id=0 if inline else int(handle.owner_worker_id),
             buffer_id=0 if inline else int(handle._buffer_id),
@@ -763,11 +769,11 @@ def _task_args_add_ref(self: TaskArgs, ref, tag: TensorArgType = TensorArgType.I
                 AddressSpace.DEVICE if handle.address_space == RemoteAddressSpace.REMOTE_DEVICE else AddressSpace.HOST
             ),
         )
-        _TASK_ARGS_ADD_REF(self, placeholder.pack(), tag)
-        storage.sidecars.append(_sidecar_from_ref(storage, ref))
+        _TASK_ARGS_ADD_TENSOR(self, placeholder.pack(), tag)
+        storage.sidecars.append(_sidecar_from_ref(storage, tensor))
         return
-    packed = ref.pack() if hasattr(ref, "pack") else ref
-    _TASK_ARGS_ADD_REF(self, packed, tag)
+    packed = tensor.pack() if hasattr(tensor, "pack") else tensor
+    _TASK_ARGS_ADD_TENSOR(self, packed, tag)
     with _REMOTE_TASK_ARGS_STORAGE_LOCK:
         storage = _REMOTE_TASK_ARGS_STORAGE.get(self)
         if storage is not None:
@@ -780,7 +786,7 @@ def _task_args_clear(self: TaskArgs) -> None:
         _REMOTE_TASK_ARGS_STORAGE.pop(self, None)
 
 
-TaskArgs.add_ref = _task_args_add_ref
+TaskArgs.add_tensor = _task_args_add_tensor
 TaskArgs.clear = _task_args_clear
 
 
@@ -925,7 +931,7 @@ class ChipDomainContext:
     local_window_base: int
     actual_window_size: int
     # Each named window slice as a device ``VMM_WINDOW`` BufferHandle owned by this chip. Name a task
-    # arg with ``buffers[name].ref(shapes, dtype)`` and dispatch it only to this chip (``domain_rank``).
+    # arg with ``buffers[name].tensor(shapes, dtype)`` and dispatch it only to this chip (``domain_rank``).
     buffers: dict[str, BufferHandle]
 
 

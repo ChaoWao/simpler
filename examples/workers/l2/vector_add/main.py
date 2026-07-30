@@ -144,17 +144,17 @@ def _run(worker: Worker, chip_handle: CallableHandle):
     worker.copy_to(a_h, host_a)
     worker.copy_to(b_h, host_b)
 
-    # --- 3. Build TaskArgs naming each buffer as a BufferRef view. Order must
+    # --- 3. Build TaskArgs naming each buffer as a Tensor view. Order must
     # match the ``signature`` list in the ChipCallable (IN, IN, OUT). ---
     args = TaskArgs()
-    args.add_ref(a_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.INPUT)
-    args.add_ref(b_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.INPUT)
-    args.add_ref(out_h.ref(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32.value), TensorArgType.OUTPUT_EXISTING)
+    args.add_tensor(a_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+    args.add_tensor(b_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+    args.add_tensor(out_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
 
     # --- 4. Run. CallConfig() defaults are fine for this kernel. ---
     config = CallConfig()
     print("[vector_add] running on device...")
-    # run() materializes the BufferRefs to device Tensors in-process, then dispatches. Returns None;
+    # run() materializes the Tensors to device Tensors in-process, then dispatches. Returns None;
     # per-stage timing is emitted as [STRACE] log markers (see docs/dfx/host-trace.md).
     worker.run(chip_handle, args, config)
 

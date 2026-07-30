@@ -122,12 +122,7 @@ def run(platform: str, device_id: int) -> int:
     """Core logic — callable from both CLI and pytest."""
     print(f"[child_memory] platform={platform} device={device_id}")
 
-    # --- 1. The H2D source weight. share_memory_() makes data_ptr() valid in the chip child, where
-    # orch.copy_to reads it. Inputs/outputs are handle-backed shared buffers (create_buffer, below).
-    torch.manual_seed(0)
-    host_w = torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()
-
-    # --- 2. Worker(level=3, ...) — single chip, no Python sub-workers. We
+    # --- 1. Worker(level=3, ...) — single chip, no Python sub-workers. We
     # still need level=3 (not level=2) because orch.malloc + a device (DEVICE_MALLOC)
     # task arg require the L3 Orchestrator to reach into the chip child via mailbox.
     worker = Worker(
@@ -145,7 +140,13 @@ def run(platform: str, device_id: int) -> int:
     print("[child_memory] init worker...")
     worker.init()
 
-    f32 = DataType.FLOAT32.value
+    # --- 2. The H2D source weight, allocated AFTER the fork and with no share_memory_(): a
+    # control-plane copy stages its bytes through a POSIX shm, so the chip child never dereferences
+    # a parent address and the caller owes no allocation-order precondition.
+    torch.manual_seed(0)
+    host_w = torch.full((SIZE,), 3.0, dtype=torch.float32)
+
+    f32 = DataType.FLOAT32
     a = f1 = f2 = None
     try:
         # Born-shared input/output buffers (post-fork, attached into the chip child). torch is used
@@ -177,9 +178,9 @@ def run(platform: str, device_id: int) -> int:
 
             for out_h in (f1_h, f2_h):
                 ta = TaskArgs()
-                ta.add_ref(a_h.ref(shapes=(SIZE,), dtype=f32), TensorArgType.INPUT)
-                ta.add_ref(w_h.ref(shapes=(SIZE,), dtype=f32), TensorArgType.INPUT)
-                ta.add_ref(out_h.ref(shapes=(SIZE,), dtype=f32), TensorArgType.OUTPUT_EXISTING)
+                ta.add_tensor(a_h.tensor(shapes=(SIZE,), dtype=f32), TensorArgType.INPUT)
+                ta.add_tensor(w_h.tensor(shapes=(SIZE,), dtype=f32), TensorArgType.INPUT)
+                ta.add_tensor(out_h.tensor(shapes=(SIZE,), dtype=f32), TensorArgType.OUTPUT_EXISTING)
                 orch.submit_next_level(chip_handle, ta, cfg, worker=0)
 
         print("[child_memory] running DAG (1 malloc + 1 copy_to + 2 kernel tasks)...")

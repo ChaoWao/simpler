@@ -690,7 +690,7 @@ class _FakeChipOk:
     """Stand-in for a ChipWorker whose init succeeds — no NPU touched."""
 
     class _Impl:
-        # The L2 in-process path materializes BufferRef args to a Tensor blob and dispatches
+        # The L2 in-process path materializes Tensor args to a Tensor blob and dispatches
         # through `_impl.run_from_blob`; stub it so no NPU is touched.
         def run_from_blob(self, *_a, **_k):
             pass

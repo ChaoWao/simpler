@@ -30,11 +30,11 @@ def verify(args):
 
 
 def _chip_args(task_args, in_a, in_b, out_f) -> TaskArgs:
-    """Build per-chip TaskArgs (BufferRefs) with INPUT/INPUT/OUTPUT_EXISTING tags."""
+    """Build per-chip TaskArgs (Tensors) with INPUT/INPUT/OUTPUT_EXISTING tags."""
     a = TaskArgs()
-    a.add_ref(_rehosted_ref_for(task_args, in_a), TensorArgType.INPUT)
-    a.add_ref(_rehosted_ref_for(task_args, in_b), TensorArgType.INPUT)
-    a.add_ref(_rehosted_ref_for(task_args, out_f), TensorArgType.OUTPUT_EXISTING)
+    a.add_tensor(_rehosted_ref_for(task_args, in_a), TensorArgType.INPUT)
+    a.add_tensor(_rehosted_ref_for(task_args, in_b), TensorArgType.INPUT)
+    a.add_tensor(_rehosted_ref_for(task_args, out_f), TensorArgType.OUTPUT_EXISTING)
     return a
 
 
@@ -48,8 +48,8 @@ def run_dag(orch, callables, task_args, config):
 
     # SubTask depends on both group outputs (f0, f1) — tag both as INPUT.
     sub_args = TaskArgs()
-    sub_args.add_ref(_rehosted_ref_for(task_args, task_args.f0), TensorArgType.INPUT)
-    sub_args.add_ref(_rehosted_ref_for(task_args, task_args.f1), TensorArgType.INPUT)
+    sub_args.add_tensor(_rehosted_ref_for(task_args, task_args.f0), TensorArgType.INPUT)
+    sub_args.add_tensor(_rehosted_ref_for(task_args, task_args.f1), TensorArgType.INPUT)
     orch.submit_sub(callables.verify, sub_args)
 
 

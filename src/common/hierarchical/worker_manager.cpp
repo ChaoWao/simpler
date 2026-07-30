@@ -84,6 +84,9 @@ namespace {
 uint64_t WorkerEndpoint::control_malloc(size_t) { throw_unsupported_control("control_malloc"); }
 void WorkerEndpoint::control_free(uint64_t) { throw_unsupported_control("control_free"); }
 void WorkerEndpoint::control_copy_to(uint64_t, uint64_t, size_t) { throw_unsupported_control("control_copy_to"); }
+void WorkerEndpoint::control_copy_staged(uint64_t, uint64_t, uint64_t, const char *) {
+    throw_unsupported_control("control_copy_staged");
+}
 void WorkerEndpoint::control_copy_from(uint64_t, uint64_t, size_t) { throw_unsupported_control("control_copy_from"); }
 void WorkerEndpoint::control_prepare(const uint8_t *) { throw_unsupported_control("control_prepare"); }
 void WorkerEndpoint::control_register(const char *, size_t, const uint8_t *) {
@@ -769,6 +772,23 @@ void LocalMailboxEndpoint::control_copy_to(uint64_t dst, uint64_t src, size_t si
     run_control_command("control_copy_to");
 }
 
+// The device pointer and length ride in the CTRL_OFF_ARG* words (inside the config region) and the
+// staging shm name at MAILBOX_OFF_ARGS; the two regions are disjoint, so one command carries both.
+void LocalMailboxEndpoint::control_copy_staged(
+    uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size, const char *shm_name
+) {
+    std::lock_guard<std::mutex> lk(mailbox_mu_);
+    write_control_args(mbox(), sub_cmd, dev_ptr, size);
+    const char *name = shm_name ? shm_name : "";
+    size_t name_len = std::strlen(name);
+    if (name_len + 1 > CTRL_SHM_NAME_BYTES) {
+        throw std::runtime_error(std::string("control_copy_staged: shm name too long: ") + name);
+    }
+    if (name_len > 0) std::memcpy(mbox() + MAILBOX_OFF_ARGS, name, name_len);
+    std::memset(mbox() + MAILBOX_OFF_ARGS + name_len, 0, CTRL_SHM_NAME_BYTES - name_len);
+    run_control_command("control_copy_staged");
+}
+
 void LocalMailboxEndpoint::control_copy_from(uint64_t dst, uint64_t src, size_t size) {
     std::lock_guard<std::mutex> lk(mailbox_mu_);
     write_control_args(mbox(), CTRL_COPY_FROM, dst, src, static_cast<uint64_t>(size));
@@ -948,6 +968,11 @@ void WorkerThread::control_free(uint64_t ptr) {
 void WorkerThread::control_copy_to(uint64_t dst, uint64_t src, size_t size) {
     if (!endpoint_) throw std::runtime_error("control_copy_to: null endpoint");
     endpoint_->control_copy_to(dst, src, size);
+}
+
+void WorkerThread::control_copy_staged(uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size, const char *shm_name) {
+    if (!endpoint_) throw std::runtime_error("control_copy_staged: null endpoint");
+    endpoint_->control_copy_staged(sub_cmd, dev_ptr, size, shm_name);
 }
 
 void WorkerThread::control_copy_from(uint64_t dst, uint64_t src, size_t size) {

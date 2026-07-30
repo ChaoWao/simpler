@@ -415,6 +415,15 @@ inline void bind_worker(nb::module_ &m) {
             nb::arg("worker_id"), nb::arg("ptr"), "Free device memory on next-level worker."
         )
         .def(
+            "copy_staged",
+            [](Worker &self, int worker_id, uint64_t sub_cmd, uint64_t dev_ptr, uint64_t size,
+               const std::string &shm_name) {
+                self.copy_staged(worker_id, sub_cmd, dev_ptr, size, shm_name.c_str());
+            },
+            nb::arg("worker_id"), nb::arg("sub_cmd"), nb::arg("dev_ptr"), nb::arg("size"), nb::arg("shm_name"),
+            "Host<->device copy whose payload rides in a POSIX shm the child maps by name."
+        )
+        .def(
             "copy_to",
             [](Worker &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
                 self.copy_to(worker_id, dst, src, size);

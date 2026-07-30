@@ -34,7 +34,7 @@ from simpler_setup.log_config import configure_logging
 
 from .main import N_COLS, N_ELEMS, N_ROWS, NBYTES, build_chip_callable
 
-_F32 = DataType.FLOAT32.value
+_F32 = DataType.FLOAT32
 _STRACE_RE = re.compile(r"\[STRACE\] .*\bname=(?P<name>\S+)\b.*\bdur=(?P<dur>\d+)")
 
 
@@ -73,9 +73,9 @@ def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = 
         worker.copy_to(dev_b, host_b)
 
         args = TaskArgs()
-        args.add_ref(dev_a.ref((N_ROWS, N_COLS), _F32), TensorArgType.INPUT)
-        args.add_ref(dev_b.ref((N_ROWS, N_COLS), _F32), TensorArgType.INPUT)
-        args.add_ref(dev_out.ref((N_ROWS, N_COLS), _F32), TensorArgType.OUTPUT_EXISTING)
+        args.add_tensor(dev_a.tensor((N_ROWS, N_COLS), _F32), TensorArgType.INPUT)
+        args.add_tensor(dev_b.tensor((N_ROWS, N_COLS), _F32), TensorArgType.INPUT)
+        args.add_tensor(dev_out.tensor((N_ROWS, N_COLS), _F32), TensorArgType.OUTPUT_EXISTING)
 
         config = CallConfig()
         config.enable_l2_swimlane = enable_l2_swimlane

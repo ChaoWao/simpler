@@ -9,13 +9,14 @@
 """Unit tests for simpler.buffer_handle: identity/descriptor pack-unpack + create/import round trip."""
 
 import ctypes
+from dataclasses import replace
 
 import pytest
 from _task_interface import (
     BUFFER_HANDLE_DESCRIPTOR_BYTES,
+    BUFFER_REF_BYTES,
     CANONICAL_IDENTITY_BYTES,
     OWNER_INSTANCE_ID_BYTES,
-    PATH_MAX_BYTES,
     DataType,
     materialize_bufferref_blob,
     read_args_from_blob,
@@ -25,11 +26,11 @@ from simpler.buffer_handle import (
     AddressSpace,
     BackendKind,
     BufferHandleDescriptor,
-    BufferRef,
     CanonicalIdentity,
     ImportRegistry,
-    Visibility,
+    Tensor,
     create_host_shared_buffer,
+    intern_worker_path,
     mint_owner_instance_id,
     pack_bufferref_blob,
     re_export,
@@ -40,40 +41,62 @@ from simpler.buffer_handle import (
 _OID = bytes(range(0xA0, 0xA0 + OWNER_INSTANCE_ID_BYTES))
 
 
-def _identity(oid=_OID, buffer_id=7, path="L4/L3[2]", generation=2):
-    return CanonicalIdentity(oid, buffer_id, path, generation)
+def _identity(oid=_OID, buffer_id=7, generation=2):
+    return CanonicalIdentity(oid, buffer_id, generation)
 
 
-def test_identity_roundtrip_various_paths():
-    for path in ["", "L4", "L4/L3[2]", "L4/L3[2]/L2[5]"]:
-        ident = _identity(path=path)
-        raw = ident.pack()
-        assert len(raw) == CANONICAL_IDENTITY_BYTES
-        assert CanonicalIdentity.unpack(raw) == ident
+def test_identity_roundtrip():
+    ident = _identity()
+    raw = ident.pack()
+    assert len(raw) == CANONICAL_IDENTITY_BYTES
+    assert CanonicalIdentity.unpack(raw) == ident
+
+
+def test_identity_is_fixed_length_no_length_field():
+    # The structural guarantee: nothing inside the identity bounds a read, so a hostile blob cannot
+    # steer a hash or a compare past the struct. Any CANONICAL_IDENTITY_BYTES decode either yields an
+    # identity or is rejected on a value check — never an out-of-bounds read.
+    for raw in (b"\xff" * CANONICAL_IDENTITY_BYTES, bytes(range(CANONICAL_IDENTITY_BYTES))):
+        try:
+            ident = CanonicalIdentity.unpack(raw)
+        except ValueError:
+            continue
+        assert len(ident.pack()) == CANONICAL_IDENTITY_BYTES
 
 
 def test_identity_rejects_bad_oid_width():
     with pytest.raises(ValueError):
-        CanonicalIdentity(b"\x00" * 8, 1, "L4", 0)  # 8 != OWNER_INSTANCE_ID_BYTES
+        CanonicalIdentity(b"\x00" * (OWNER_INSTANCE_ID_BYTES + 1), 1, 1)
 
 
-def test_identity_path_over_limit_rejected():
-    with pytest.raises(ValueError):
-        CanonicalIdentity(_OID, 1, "x" * (PATH_MAX_BYTES + 1), 0)
+def test_identity_rejects_reserved_generation_zero():
+    raw = bytearray(_identity().pack())
+    raw[16:20] = (0).to_bytes(4, "little")  # generation field
+    with pytest.raises(ValueError, match="generation 0"):
+        CanonicalIdentity.unpack(bytes(raw))
 
 
-def test_identity_distinguishes_generation_owner_path():
+def test_identity_padding_does_not_perturb_the_key():
+    # Two decodes of the same backing must key identically even if the wire padding differs, or the
+    # same buffer would land in two import-registry / dependency buckets.
+    clean = bytearray(_identity().pack())
+    dirty = bytearray(clean)
+    dirty[20:32] = b"\xa5" * 12  # _pad
+    assert CanonicalIdentity.unpack(bytes(clean)) == CanonicalIdentity.unpack(bytes(dirty))
+    assert hash(CanonicalIdentity.unpack(bytes(clean))) == hash(CanonicalIdentity.unpack(bytes(dirty)))
+
+
+def test_identity_distinguishes_generation_and_incarnation():
     a = _identity()
     assert a != _identity(generation=a.generation + 1)  # ABA
     assert a != _identity(oid=bytes(range(1, 1 + OWNER_INSTANCE_ID_BYTES)))  # different incarnation
-    assert a != _identity(path="L4/L3[3]")  # different path
+    assert a != _identity(buffer_id=a.buffer_id + 1)
 
 
 def test_descriptor_roundtrip_host_and_device():
     host = BufferHandleDescriptor(
         identity=_identity(),
         address_space=AddressSpace.HOST,
-        visibility=Visibility.SHARED,
         access=AccessMode.READWRITE,
         backend_kind=BackendKind.POSIX_SHM,
         nbytes=4096,
@@ -86,7 +109,6 @@ def test_descriptor_roundtrip_host_and_device():
     dev = BufferHandleDescriptor(
         identity=_identity(buffer_id=99),
         address_space=AddressSpace.DEVICE,
-        visibility=Visibility.PRIVATE,
         access=AccessMode.READ,
         backend_kind=BackendKind.VMM_WINDOW,
         nbytes=1 << 20,
@@ -95,20 +117,53 @@ def test_descriptor_roundtrip_host_and_device():
     assert BufferHandleDescriptor.unpack(dev.pack()) == dev
 
 
-def test_descriptor_rejects_unknown_version():
+def test_descriptor_rejects_bad_magic():
     raw = bytearray(
         BufferHandleDescriptor(
             identity=_identity(),
             address_space=AddressSpace.HOST,
-            visibility=Visibility.SHARED,
             access=AccessMode.READWRITE,
             backend_kind=BackendKind.POSIX_SHM,
             nbytes=8,
         ).pack()
     )
-    raw[0] = raw[0] + 1  # bump abi_version (u16 @ offset 0)
-    with pytest.raises(ValueError, match="abi_version"):
+    raw[0] = raw[0] + 1  # corrupt the leading sentinel (u16 @ offset 0)
+    with pytest.raises(ValueError, match="magic"):
         BufferHandleDescriptor.unpack(bytes(raw))
+
+
+def test_descriptor_rejects_body_len_past_the_array():
+    raw = bytearray(
+        BufferHandleDescriptor(
+            identity=_identity(),
+            address_space=AddressSpace.HOST,
+            access=AccessMode.READWRITE,
+            backend_kind=BackendKind.POSIX_SHM,
+            nbytes=8,
+            body=b"psm_x",
+        ).pack()
+    )
+    raw[52:54] = (0xFFFF).to_bytes(2, "little")  # body_len field
+    with pytest.raises(ValueError, match="body_len"):
+        BufferHandleDescriptor.unpack(bytes(raw))
+
+
+def test_worker_path_is_diagnostic_and_survives_an_unknown_id():
+    h = BufferHandleDescriptor(
+        identity=_identity(),
+        address_space=AddressSpace.HOST,
+        access=AccessMode.READWRITE,
+        backend_kind=BackendKind.POSIX_SHM,
+        nbytes=8,
+        owner_worker_path_id=intern_worker_path("L4/L3[2]"),
+    )
+    assert h.owner_worker_path == "L4/L3[2]"
+    assert BufferHandleDescriptor.unpack(h.pack()) == h
+    # An id minted in another process has no local text, and that is not an error.
+    foreign = replace(h, owner_worker_path_id=99_999)
+    assert foreign.owner_worker_path == "<path#99999>"
+    # The path takes no part in identity: two handles differing only by path are the same backing.
+    assert replace(h, owner_worker_path_id=0).identity == h.identity
 
 
 def test_descriptor_rejects_oversized_body():
@@ -116,7 +171,6 @@ def test_descriptor_rejects_oversized_body():
         BufferHandleDescriptor(
             identity=_identity(),
             address_space=AddressSpace.HOST,
-            visibility=Visibility.SHARED,
             access=AccessMode.READWRITE,
             backend_kind=BackendKind.POSIX_SHM,
             nbytes=8,
@@ -155,55 +209,29 @@ def test_resolve_unregistered_raises():
         reg.resolve(_identity())
 
 
-def test_bufferref_view_algebra():
+def test_tensor_full_view_is_contiguous():
     oid = mint_owner_instance_id()
     h = create_host_shared_buffer(nbytes=1024, owner_instance_id=oid, buffer_id=1)
     try:
-        # handle.ref(shape, dtype) is a contiguous full view (row-major strides).
-        v = h.ref(shapes=(4, 8), dtype=DataType.FLOAT32.value)
+        # handle.tensor(shape, dtype) is a contiguous full view: row-major strides, zero offset.
+        v = h.tensor(shapes=(4, 8), dtype=DataType.FLOAT32)
+        assert v.shapes == (4, 8)
         assert v.strides == (8, 1)
-        assert v.is_contiguous
-        assert v.numel() == 32
+        assert v.ndims == 2
         assert v.byte_offset == 0
-
-        # slice: inner-dim slice keeps the stride, shifts the byte_offset, breaks contiguity.
-        s = v.slice(1, 2, 6)
-        assert s.shapes == (4, 4)
-        assert s.strides == (8, 1)
-        assert s.byte_offset == 2 * 1 * 4
-        assert not s.is_contiguous
-        # slice with a step multiplies the stride.
-        s2 = v.slice(0, 0, 4, step=2)
-        assert s2.shapes == (2, 8)
-        assert s2.strides == (16, 1)
-
-        # transpose / permute: swap/reorder shapes+strides, unconstrained (strided ok).
-        t = v.transpose(0, 1)
-        assert t.shapes == (8, 4)
-        assert t.strides == (1, 8)
-        assert not t.is_contiguous
-        assert v.permute((1, 0)).strides == (1, 8)
-
-        # view: sub-region by per-dim offset, strides unchanged.
-        vv = v.view((2, 3), (1, 2))
-        assert vv.shapes == (2, 3)
-        assert vv.strides == (8, 1)
-        assert vv.byte_offset == (1 * 8 + 2 * 1) * 4
-
-        # reshape: contiguous only.
-        assert v.reshape((32,)).strides == (1,)
-        with pytest.raises(ValueError, match="contiguous"):
-            t.reshape((32,))
+        # An explicit stride is carried verbatim; a singleton dim is never normalized away.
+        strided = h.tensor(shapes=(4, 1), dtype=DataType.FLOAT32, strides=(8, 3))
+        assert strided.strides == (8, 3)
     finally:
         h.close()
 
 
-def test_bufferref_unpack_roundtrip():
+def test_tensor_unpack_roundtrip():
     oid = mint_owner_instance_id()
     h = create_host_shared_buffer(64, oid, buffer_id=1, owner_worker_path="L3")
     try:
-        ref = h.ref(shapes=(2, 4), dtype=DataType.FLOAT16.value, byte_offset=8)
-        assert BufferRef.unpack(ref.pack()) == ref
+        ref = h.tensor(shapes=(2, 4), dtype=DataType.FLOAT16, byte_offset=8)
+        assert Tensor.unpack(ref.pack()) == ref
     finally:
         h.close()
 
@@ -222,8 +250,8 @@ def test_re_export_preserves_identity_same_backing_no_map():
         assert hp.body == sdesc.body and hp.nbytes == 64  # same backing
         assert hp.shm is None and hp.base == 0  # no map (lazy — a compute leaf maps)
         # a ref built from H' carries the source identity + the same shm body, so L2 can materialize it
-        r = hp.ref(shapes=(16,), dtype=DataType.FLOAT32.value)
-        assert BufferRef.unpack(r.pack()).handle.identity.pack() == src.identity.pack()
+        r = hp.tensor(shapes=(16,), dtype=DataType.FLOAT32)
+        assert Tensor.unpack(r.pack()).handle.identity.pack() == src.identity.pack()
     finally:
         src.close()
 
@@ -255,7 +283,8 @@ def test_fork_inherited_zero_copy_materialize():
     assert handle.shm is None
     reg = ImportRegistry()
     try:
-        ref = handle.ref(shapes=(16,), strides=(1,), dtype=DataType.INT32.value, byte_offset=4)
+        # 15 int32 at byte 4 exactly fills the 64-byte backing; 16 would overrun it by one element.
+        ref = handle.tensor(shapes=(15,), strides=(1,), dtype=DataType.INT32, byte_offset=4)
         blob = pack_bufferref_blob([ref])
         src = ctypes.create_string_buffer(blob, len(blob))
         resolved = reg.materialize_blob(ctypes.addressof(src), len(blob))
@@ -273,7 +302,6 @@ def test_materialize_remote_sidecar_rejected():
     desc = BufferHandleDescriptor(
         identity=_identity(),
         address_space=AddressSpace.HOST,
-        visibility=Visibility.SHARED,
         access=AccessMode.READWRITE,
         backend_kind=BackendKind.REMOTE_SIDECAR,
         nbytes=8,
@@ -297,8 +325,8 @@ def test_materialize_bufferref_blob_to_tensors():
     try:
         # Self-describing: refs embed the full descriptor (built via BufferHandle.ref); the consumer
         # materializes lazily from the blob (no prior register), map-once by identity.
-        ref0 = h0.ref(shapes=(4,), strides=(1,), dtype=DataType.FLOAT32.value)
-        ref1 = h1.ref(shapes=(2, 4), strides=(4, 1), dtype=DataType.FLOAT16.value, byte_offset=8)
+        ref0 = h0.tensor(shapes=(4,), strides=(1,), dtype=DataType.FLOAT32)
+        ref1 = h1.tensor(shapes=(2, 4), strides=(4, 1), dtype=DataType.FLOAT16, byte_offset=8)
         assert ref0.handle == h0.to_descriptor()
         blob = pack_bufferref_blob([ref0, ref1], scalars=(42,))
         src = ctypes.create_string_buffer(blob, len(blob))
@@ -323,14 +351,16 @@ def test_materialize_bufferref_blob_to_tensors():
 
 
 def test_materialize_strided_views():
-    # transpose / inner-slice produce non-contiguous refs that materialize to strided Tensors
-    # (matching the mainline strided Tensor wire), not rejected.
+    # Explicitly-strided, offset views materialize to strided chip Tensors (matching the strided
+    # Tensor wire), not rejected — and no stride is normalized away in transit.
     oid = mint_owner_instance_id()
     h = create_host_shared_buffer(1024, oid, buffer_id=1)
     reg = ImportRegistry()
     try:
-        t = h.ref(shapes=(4, 8), dtype=DataType.FLOAT32.value).transpose(0, 1)  # (8,4) strides (1,8)
-        s = h.ref(shapes=(4, 8), dtype=DataType.FLOAT32.value).slice(1, 2, 6)  # (4,4) strides (8,1), off 8
+        # A transposed view of (4,8): shapes (8,4), strides (1,8).
+        t = h.tensor(shapes=(8, 4), dtype=DataType.FLOAT32, strides=(1, 8))
+        # An inner-dim sub-range of (4,8) starting at element 2: shapes (4,4), strides (8,1).
+        s = h.tensor(shapes=(4, 4), dtype=DataType.FLOAT32, strides=(8, 1), byte_offset=2 * 1 * 4)
         blob = pack_bufferref_blob([t, s])
         src = ctypes.create_string_buffer(blob, len(blob))
         resolved = reg.materialize_blob(ctypes.addressof(src), len(blob))
@@ -354,7 +384,7 @@ def test_materialize_rejects_unresolved_identity():
     oid = mint_owner_instance_id()
     handle = create_host_shared_buffer(nbytes=32, owner_instance_id=oid, buffer_id=9)
     try:
-        ref = BufferRef(handle.to_descriptor(), byte_offset=0, shapes=(8,), strides=(1,), dtype=DataType.INT32.value)
+        ref = Tensor(handle.to_descriptor(), byte_offset=0, shapes=(8,), strides=(1,), dtype=DataType.INT32)
         blob = pack_bufferref_blob([ref])
         src = ctypes.create_string_buffer(blob, len(blob))
         with pytest.raises(RuntimeError, match="identity"):
@@ -379,7 +409,6 @@ def test_descriptor_rejects_bad_capability_combo(space, backend):
         BufferHandleDescriptor(
             identity=_identity(),
             address_space=space,
-            visibility=Visibility.SHARED,
             access=AccessMode.READWRITE,
             backend_kind=backend,
             nbytes=64,
@@ -396,4 +425,75 @@ def test_descriptor_accepts_legal_combos():
         (AddressSpace.HOST, BackendKind.REMOTE_SIDECAR),
         (AddressSpace.DEVICE, BackendKind.REMOTE_SIDECAR),
     ]:
-        BufferHandleDescriptor(_identity(), space, Visibility.SHARED, AccessMode.READWRITE, backend, 64, b"")
+        BufferHandleDescriptor(_identity(), space, AccessMode.READWRITE, backend, 64, b"")
+
+
+# --- the shared validator: every trust boundary rejects a malformed element -----------------------
+#
+# `TaskArgs.add_tensor` (builder) and blob decode (receive) both run `validate_buffer_ref`, so a
+# hand-packed or corrupted element is refused before any of its fields is trusted.
+
+
+def _valid_packed_tensor() -> tuple[bytes, object]:
+    """A well-formed packed Tensor plus its owning handle (caller closes it)."""
+    h = create_host_shared_buffer(256, mint_owner_instance_id(), buffer_id=1)
+    return h.tensor(shapes=(8,), dtype=DataType.FLOAT32).pack(), h
+
+
+def _add_packed(packed: bytes) -> None:
+    from simpler.task_interface import TaskArgs, TensorArgType  # noqa: PLC0415
+
+    TaskArgs().add_tensor(packed, TensorArgType.INPUT)
+
+
+@pytest.mark.parametrize(
+    "offset,value,match",
+    [
+        (0, b"\x00\x00", "magic"),  # descriptor magic
+        (2, b"\x07", "address_space"),  # address_space out of range
+        (3, b"\x09", "access"),  # access out of range
+        (4, b"\x63", "backend_kind"),  # backend_kind out of range
+        (52, b"\xff\xff", "body_len"),  # body_len past the array
+        (24, b"\x00\x00\x00\x00", "generation"),  # identity.generation == 0 (reserved)
+        (96, b"\x63\x00\x00\x00", "ndims"),  # ndims out of range
+        (140, b"\x7f", "dtype"),  # unknown dtype
+        (120, b"\x00\x00\x00\x00", "stride"),  # strides[0] == 0
+        (88, b"\x03\x00\x00\x00\x00\x00\x00\x00", "byte_offset"),  # unaligned byte_offset
+    ],
+)
+def test_add_tensor_rejects_corrupted_field(offset, value, match):
+    packed, h = _valid_packed_tensor()
+    try:
+        _add_packed(packed)  # the untouched element is accepted
+        corrupted = bytearray(packed)
+        corrupted[offset : offset + len(value)] = value
+        with pytest.raises(ValueError, match=match):
+            _add_packed(bytes(corrupted))
+    finally:
+        h.close()
+
+
+def test_add_tensor_rejects_view_past_the_backing():
+    h = create_host_shared_buffer(64, mint_owner_instance_id(), buffer_id=1)
+    try:
+        _add_packed(h.tensor(shapes=(16,), dtype=DataType.FLOAT32).pack())  # exactly 64 B: fits
+        with pytest.raises(ValueError, match="past the backing"):
+            _add_packed(h.tensor(shapes=(17,), dtype=DataType.FLOAT32).pack())
+        with pytest.raises(ValueError, match="past the backing"):
+            _add_packed(h.tensor(shapes=(16,), dtype=DataType.FLOAT32, byte_offset=4).pack())
+    finally:
+        h.close()
+
+
+def test_add_tensor_rejects_arbitrary_bytes():
+    # The builder takes raw bytes, so anything of the right length reaches it. None of it may be
+    # accepted, and none of it may crash: every length-like field is bounded before it is used.
+    import os as _os  # noqa: PLC0415
+
+    for _ in range(256):
+        with pytest.raises(ValueError):
+            _add_packed(_os.urandom(BUFFER_REF_BYTES))
+    with pytest.raises(ValueError):
+        _add_packed(b"\x00" * BUFFER_REF_BYTES)
+    with pytest.raises(ValueError):
+        _add_packed(b"\xff" * BUFFER_REF_BYTES)

@@ -55,7 +55,7 @@ from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_F32 = DataType.FLOAT32.value
+_F32 = DataType.FLOAT32
 OVERLAP_DIR = os.path.join(HERE, "../dual_domain_overlap")
 COUNT = 256
 DTYPE_NBYTES = 4
@@ -116,7 +116,7 @@ def build_allreduce_callable(platform: str) -> ChipCallable:
 
 
 def _add_domain_scratch(args: TaskArgs, domain: ChipDomainContext) -> None:
-    args.add_ref(domain.buffers["scratch"].ref((COUNT,), _F32), TensorArgType.INOUT)
+    args.add_tensor(domain.buffers["scratch"].tensor((COUNT,), _F32), TensorArgType.INOUT)
     args.add_scalar(domain.domain_size)
     args.add_scalar(domain.device_ctx)
 
@@ -204,11 +204,11 @@ def run(platform: str, device_ids: list[int]) -> int:
                 for worker_idx in DOMAINS[domain_name]:
                     domain = handle[worker_idx]
                     args = TaskArgs()
-                    args.add_ref(
+                    args.add_tensor(
                         worker.make_ref_arg(host_inputs[worker_idx], shapes=(COUNT,), dtype=_F32),
                         TensorArgType.INPUT,
                     )
-                    args.add_ref(
+                    args.add_tensor(
                         worker.make_ref_arg(outputs[domain_name][worker_idx], shapes=(COUNT,), dtype=_F32),
                         TensorArgType.OUTPUT_EXISTING,
                     )
