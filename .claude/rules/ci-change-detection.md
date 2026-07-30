@@ -53,28 +53,74 @@ never sit behind a *more permissive* condition than a GitHub-hosted one. If you
 find yourself writing a looser `if:` for the more expensive job, the vocabulary
 is wrong (see §1) — fix that instead of widening the gate.
 
-## 4. Two axes, and why the arch axis already implies the other
+## 4. Three axes, layered — and the non-code one is subtracted first
 
-| Axis | Output | Used by |
+| Axis | Output | Answers |
 | ---- | ------ | ------- |
-| non-code | `non_code_only` | arch-agnostic jobs: `ut`, `packaging-matrix`, `ut-a2a3`, `ut-a5` |
-| architecture | `a2a3_changed` / `a5_changed` | arch-specific jobs: `st-sim-*`, `st-onboard-*`, `profiling-flags-smoke` |
+| non-code | `non_code_only` | can this diff change what the code does at all? |
+| architecture | `a2a3_changed` / `a5_changed` | which silicon can it reach? |
+| test category | `st_affected` / `ut_affected` | which suite can it break? |
 
-These are layered, not redundant. `a2a3_changed` and `a5_changed` are computed
-by subtracting `NON_CODE` *first*, so a non-code-only change already makes both
-false. An arch-gated job therefore needs no separate non-code check, and adding
-one would be noise. An arch-agnostic job cannot use the arch axis at all.
+They are layered, not redundant. **Every arch and category flag subtracts
+`NON_CODE` before deciding**, so a non-code-only change already makes all four
+false. An arch- or category-gated job therefore needs no separate non-code
+check, and adding one would be noise.
 
-Keep that asymmetry deliberate. If a new job is arch-specific, gate it on the
-arch axis; if not, on `non_code_only`. Mixing them per-job is how §1 gets
-violated again.
+A job composes the axes it is actually subject to:
+
+| Job family | Gate |
+| ---------- | ---- |
+| `st-sim-*`, `st-onboard-*` | `<arch>_changed && st_affected` |
+| `profiling-flags-smoke` | `(a2a3_changed \|\| a5_changed) && st_affected` |
+| `ut`, `ut-a2a3`, `ut-a5` | `non_code_only != true && ut_affected` |
+| `packaging-matrix` | `non_code_only != true` |
+
+The UT jobs stay off the arch axis on purpose — unit tests cover shared
+contracts, so the cost of a falsely-skipped regression outweighs the minutes.
+That is a decision about the *arch* axis only; the category axis is a different
+question, because a scene-test-only change genuinely cannot break a unit test.
+
+### Write every axis in the same shape
+
+The arch and category axes use one pattern: **a partition is unaffected only
+when every changed file belongs exclusively to a sibling partition.**
+
+```bash
+SIBLING='^(...)'                     # what this partition is NOT
+REMAINING=$(echo "$FILES" | grep -vE "$SIBLING" | grep -vE "$NON_CODE" || true)
+[ -n "$REMAINING" ] && flag=true || flag=false
+```
+
+Two properties come for free, and both are why a new axis must copy the shape
+rather than invent one:
+
+- **Fail-safe direction.** Any path the patterns do not recognise survives the
+  filters, so it lands in `REMAINING` and turns the flag *on*. New directories
+  over-run CI rather than silently skipping it.
+- **Shared infrastructure resolves correctly without being enumerated.** The
+  root `conftest.py`, `pyproject.toml`, `simpler_setup/` and `tests/lint/`
+  belong to no single partition, so they match no `SIBLING` and flip every flag
+  true — which is what they should do, since both suites load them.
 
 ## 5. Fail open once, at the top
 
-An empty file list means attribution is impossible — a PR with no files, or
-base/head SHAs that did not resolve. Every flag must then report "affected",
-and **that decision belongs in one guard before any pattern runs**, not inside
-each flag's branch.
+No usable file list means attribution is impossible — a PR with no files, or a
+`git diff` that failed on unresolved base/head SHAs. Every flag must then report
+"affected", and **that decision belongs in one guard before any pattern runs**,
+not inside each flag's branch.
+
+"No usable list" covers both cases, and the failure one is the easier to miss.
+`run:` is `bash -e`, so a non-zero `git diff` aborts the step before any guard —
+and a failed `detect-changes` leaves every downstream `needs:` unsatisfied, which
+**skips** the matrix instead of running it. That is fail-closed, the opposite of
+the intent. Let only the exit status decide and fold a failure into the empty
+case:
+
+```bash
+if ! FILES=$(git diff --name-only "$BASE"..."$HEAD"); then
+  FILES=""
+fi
+```
 
 Deciding it per-flag is how the axes drift apart. The emptiness test once lived
 only inside the `non_code_only` branch, so an empty diff left that flag `false`

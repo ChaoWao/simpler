@@ -107,7 +107,7 @@ jobs:
   # ---------- Unit tests (no hardware, Python + C++) ----------
   ut:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.non_code_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -163,7 +163,7 @@ jobs:
   # ---------- Simulation scene tests ----------
   st-sim-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a2a3_changed == 'true'
+    if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -257,7 +257,7 @@ jobs:
 
   st-sim-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a5_changed == 'true'
+    if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -375,7 +375,7 @@ jobs:
   # corresponding profiling block — no cross-contamination from cmake cache.
   profiling-flags-smoke:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true'
+    if: (needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true') && needs.detect-changes.outputs.st_affected == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -473,7 +473,7 @@ jobs:
   # ---------- Unit tests (a2a3 hardware, Python + C++) ----------
   ut-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.non_code_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
     runs-on: [self-hosted, a2a3]
     timeout-minutes: 30
     env:
@@ -559,7 +559,7 @@ jobs:
   # ---------- Scene tests (a2a3 hardware) ----------
   st-onboard-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a2a3_changed == 'true'
+    if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
     runs-on: [self-hosted, a2a3]
     timeout-minutes: 60
     env:
@@ -733,6 +733,8 @@ jobs:
       a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
       a5_changed: ${{ steps.check.outputs.a5_changed }}
       non_code_only: ${{ steps.check.outputs.non_code_only }}
+      st_affected: ${{ steps.check.outputs.st_affected }}
+      ut_affected: ${{ steps.check.outputs.ut_affected }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -741,9 +743,19 @@ jobs:
       - name: Check file changes
         id: check
         run: |
-          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
+          # `run:` is `bash -e`, so a failing `git diff` would abort the step
+          # before the guard below and take every output with it — and a
+          # `detect-changes` failure leaves downstream `needs:` unsatisfied, which
+          # SKIPS the matrix rather than running it. Let only the exit status
+          # decide, and turn a failure into an empty list so the fail-open guard
+          # handles both cases identically.
+          if ! FILES=$(git diff --name-only \
+                ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}); then
+            echo "git diff failed (unresolved base/head SHA?); treating as unattributable"
+            FILES=""
+          fi
 
-          # Fail open, in ONE place. An empty diff means attribution is
+          # Fail open, in ONE place. No usable file list means attribution is
           # impossible — a PR with no files, or base/head SHAs that did not
           # resolve — so nothing below can be trusted and every flag must say
           # "affected". Deciding this per-flag is how the axes drifted apart:
@@ -751,10 +763,12 @@ jobs:
           # only, which left it false (UT and packaging ran) while both arch
           # flags independently came out false too (scene tests skipped).
           if [ -z "$FILES" ]; then
-            echo "Empty diff: cannot attribute changes, running everything"
+            echo "No usable file list: cannot attribute changes, running everything"
             echo "non_code_only=false" >> "$GITHUB_OUTPUT"
             echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
             echo "a5_changed=true" >> "$GITHUB_OUTPUT"
+            echo "st_affected=true" >> "$GITHUB_OUTPUT"
+            echo "ut_affected=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -803,10 +817,38 @@ jobs:
             echo "All changes are a2a3-only or non-code; skipping a5"
           fi
 
+          # Test-category axis, same shape as the arch axis: a category is
+          # unaffected only when EVERY changed file belongs exclusively to the
+          # other one. Shared test infra (root conftest.py, pyproject.toml,
+          # simpler_setup/, tests/lint/) matches neither ST_ONLY nor UT_ONLY, so
+          # it correctly flips both. The two suites execute disjoint trees —
+          # `pytest examples tests/st` vs `pytest tests/ut` + the cpp ctest —
+          # and no unit test reads examples/ or tests/st/.
+          ST_ONLY='^(tests/st/|examples/)'
+          UT_ONLY='^tests/ut/'
+
+          # Scene tests are irrelevant only when every change is UT-exclusive.
+          ST_REMAINING=$(echo "$FILES" | grep -vE "$UT_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$ST_REMAINING" ]; then
+            echo "st_affected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "st_affected=false" >> "$GITHUB_OUTPUT"
+            echo "All changes are unit-test-only or non-code; skipping scene tests"
+          fi
+
+          # Unit tests are irrelevant only when every change is ST-exclusive.
+          UT_REMAINING=$(echo "$FILES" | grep -vE "$ST_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$UT_REMAINING" ]; then
+            echo "ut_affected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ut_affected=false" >> "$GITHUB_OUTPUT"
+            echo "All changes are scene-test/example-only or non-code; skipping unit tests"
+          fi
+
   # ---------- Unit tests (a5 hardware, Python + C++) ----------
   ut-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.non_code_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 30
     env:
@@ -876,7 +918,7 @@ jobs:
 
   st-onboard-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.a5_changed == 'true'
+    if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 60
     env:
