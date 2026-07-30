@@ -205,11 +205,11 @@ def run(platform: str, device_ids: list[int]) -> int:
                     domain = handle[worker_idx]
                     args = TaskArgs()
                     args.add_tensor(
-                        worker.make_ref_arg(host_inputs[worker_idx], shapes=(COUNT,), dtype=_F32),
+                        worker.make_tensor_arg(host_inputs[worker_idx], shapes=(COUNT,), dtype=_F32),
                         TensorArgType.INPUT,
                     )
                     args.add_tensor(
-                        worker.make_ref_arg(outputs[domain_name][worker_idx], shapes=(COUNT,), dtype=_F32),
+                        worker.make_tensor_arg(outputs[domain_name][worker_idx], shapes=(COUNT,), dtype=_F32),
                         TensorArgType.OUTPUT_EXISTING,
                     )
                     _add_domain_scratch(args, domain)

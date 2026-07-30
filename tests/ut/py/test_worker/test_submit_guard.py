@@ -111,8 +111,8 @@ def test_a_plain_tensor_cannot_be_named_as_an_output():
     plain = torch.zeros(16, dtype=torch.float32)
     shared = torch.zeros(16, dtype=torch.float32).share_memory_()
 
-    plain_t = w.make_ref_arg(plain, shapes=(16,), dtype=DataType.FLOAT32)
-    shared_t = w.make_ref_arg(shared, shapes=(16,), dtype=DataType.FLOAT32)
+    plain_t = w.make_tensor_arg(plain, shapes=(16,), dtype=DataType.FLOAT32)
+    shared_t = w.make_tensor_arg(shared, shapes=(16,), dtype=DataType.FLOAT32)
 
     ta = TaskArgs()
     with pytest.raises(ValueError, match="not granted by the buffer"):

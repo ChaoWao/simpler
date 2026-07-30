@@ -154,11 +154,11 @@ def run(device_ids: list[int], platform: str = "a2a3") -> int:
                     domain = handle[i]
                     chip_args = TaskArgs()
                     chip_args.add_tensor(
-                        worker.make_ref_arg(host_inputs[i], shapes=(ALLREDUCE_COUNT,), dtype=_F32),
+                        worker.make_tensor_arg(host_inputs[i], shapes=(ALLREDUCE_COUNT,), dtype=_F32),
                         TensorArgType.INPUT,
                     )
                     chip_args.add_tensor(
-                        worker.make_ref_arg(host_outputs[i], shapes=(ALLREDUCE_COUNT,), dtype=_F32),
+                        worker.make_tensor_arg(host_outputs[i], shapes=(ALLREDUCE_COUNT,), dtype=_F32),
                         TensorArgType.OUTPUT_EXISTING,
                     )
                     chip_args.add_tensor(domain.buffers["scratch"].tensor((float_elems,), _F32), TensorArgType.INOUT)

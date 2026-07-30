@@ -82,7 +82,11 @@ def torch_dtype_to_datatype(dt) -> DataType:
 
 
 def make_tensor_arg(tensor) -> ChipTensor:
-    """Create a ``ChipTensor`` from a torch.Tensor.
+    """Create a ``ChipTensor`` — the materialized chip POD — from a torch.Tensor.
+
+    Distinct from ``Worker.make_tensor_arg``, which names a wire ``Tensor`` (identity, no
+    address) for the ordinary dispatch path. This one carries a raw address and is only for
+    the direct ``ChipWorker`` API.
 
     The result is always contiguous (row-major strides, ``start_offset == 0``) —
     the unified ``ChipTensor`` can express strided views, but this construction path
@@ -118,7 +122,7 @@ def make_tensor_arg(tensor) -> ChipTensor:
 def make_tensor(worker, tensor):
     """A ``Tensor`` task arg over a **pre-fork** host torch tensor.
 
-    Names ``tensor`` as a memoized ``FORK_SHM`` handle on ``worker`` (``worker.make_ref_arg``), inferring
+    Names ``tensor`` as a memoized ``FORK_SHM`` handle on ``worker`` (``worker.make_tensor_arg``), inferring
     shapes + dtype from the tensor. Use for standalone L3 examples whose host inputs/outputs are
     ``share_memory_()`` tensors allocated before ``worker.init()`` (fork-inherited). A contiguous CPU
     tensor is required (as for ``make_tensor_arg``).
@@ -132,4 +136,4 @@ def make_tensor(worker, tensor):
     if not tensor.is_contiguous():
         raise ValueError("make_tensor requires a contiguous tensor; call tensor.contiguous() first.")
     shapes = tuple(int(s) for s in tensor.shape)
-    return worker.make_ref_arg(tensor, shapes=shapes, dtype=int(dt.value))
+    return worker.make_tensor_arg(tensor, shapes=shapes, dtype=int(dt.value))

@@ -2317,7 +2317,7 @@ class Worker:
         # so each level's orch sees only its own handles. No map here — H' relabels the backing;
         # a compute leaf maps lazily. Lifetime is worker-scoped for now.
         self._reexport_by_source: dict[bytes, BufferHandle] = {}
-        # make_ref_arg memo: a pre-fork host tensor's storage base -> its FORK_SHM handle, so every ref
+        # make_tensor_arg memo: a pre-fork host tensor's storage base -> its FORK_SHM handle, so every ref
         # over the same storage shares one canonical identity (dependencies key on it). Worker-scoped.
         self._fork_tensor_handles: dict[int, BufferHandle] = {}
         # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own tensor
@@ -5874,7 +5874,7 @@ class Worker:
         # MAP_SHARED read-write) and infer_deps keys the ref to the slot registered above.
         return wrap_fork_inherited(va, int(nbytes), oid, buffer_id, path, access=AccessMode.READWRITE)
 
-    def make_ref_arg(self, tensor, shapes: tuple[int, ...], dtype: int, *, strides: tuple[int, ...] | None = None):
+    def make_tensor_arg(self, tensor, shapes: tuple[int, ...], dtype: int, *, strides: tuple[int, ...] | None = None):
         """Name a **pre-fork** host tensor as a ``Tensor`` over a memoized ``FORK_SHM`` handle.
 
         The torch (or buffer-protocol) tensor MUST be allocated before ``init()`` so its VA is

@@ -381,7 +381,7 @@ def _build_l2_ref_args(test_args: TaskArgsBuilder, orch_signature: list, worker)
     """Build Tensor `TaskArgs` from `TaskArgsBuilder` for the L2 `Worker.run` path.
 
     An L2 leaf consumes its own args: `Worker.run(handle, args, cfg)` materializes each Tensor to a
-    local base in-process. Each tensor is named as a ref over ``worker.make_ref_arg`` (a host tensor;
+    local base in-process. Each tensor is named via ``worker.make_tensor_arg`` (a host tensor;
     at L2 there is no fork, so any host tensor resolves in-process); the direction tag is inert at L2
     but set for parity with the L3 path.
 
@@ -437,6 +437,8 @@ def _build_chip_task_args(test_args: TaskArgsBuilder, orch_signature: list):
         scalar_to_uint64,
     )
 
+    # Module-level make_tensor_arg builds the chip POD (ChipTensor, carries an address) for the
+    # direct ChipWorker path — distinct from Worker.make_tensor_arg, which names a wire Tensor.
     from simpler_setup.torch_interop import make_tensor_arg  # noqa: PLC0415
 
     chip_args = ChipStorageTaskArgs()
@@ -482,7 +484,7 @@ def _l3_ref(test_args: TaskArgsBuilder, name: str, worker=None):
 
     Two ways a scene test's host tensor becomes child-visible: the framework rehosts it into a
     create_buffer (POSIX shm) — use that handle; or a test pre-allocates a ``share_memory_()`` tensor
-    before ``init()`` (fork-inherited MAP_SHARED) — name it via ``worker.make_ref_arg`` (FORK_SHM).
+    before ``init()`` (fork-inherited MAP_SHARED) — name it via ``worker.make_tensor_arg`` (FORK_SHM).
     """
     from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
 
@@ -492,8 +494,11 @@ def _l3_ref(test_args: TaskArgsBuilder, name: str, worker=None):
     if handle is not None:
         return handle.tensor(shapes=tuple(t.shape), dtype=dtype)
     if worker is not None:
-        return worker.make_ref_arg(t, shapes=tuple(t.shape), dtype=dtype)
-    raise ValueError(f"L3 tensor arg '{name}' has no rehosted handle; rehost the args or pass worker= for make_ref_arg")
+        return worker.make_tensor_arg(t, shapes=tuple(t.shape), dtype=dtype)
+    raise ValueError(
+        f"L3 tensor arg '{name}' has no rehosted handle; rehost the args or pass worker= "
+        f"so it can be named via Worker.make_tensor_arg"
+    )
 
 
 def _rehosted_ref(test_args: TaskArgsBuilder, name: str):
@@ -507,7 +512,7 @@ def _build_l3_task_args(test_args: TaskArgsBuilder, orch_signature: list, worker
     (`orch.submit_next_level`); the tags drive dependency inference.
 
     Names each tensor as a Tensor over its framework-rehosted create_buffer handle, or — for a test
-    that pre-allocates ``share_memory_()`` tensors before ``init()`` — via ``worker.make_ref_arg`` when
+    that pre-allocates ``share_memory_()`` tensors before ``init()`` — via ``worker.make_tensor_arg`` when
     ``worker`` is passed.
 
     Returns:

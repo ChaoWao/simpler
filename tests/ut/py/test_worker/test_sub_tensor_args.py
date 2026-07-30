@@ -135,14 +135,14 @@ def test_mapped_args_from_blob_delivers_tensors_and_scalars():
     assert torch.frombuffer(args[0].buffer, dtype=torch.float32, count=4).tolist() == [1.0, 2.0, 3.0, 4.0]
 
 
-def test_make_ref_arg_memoizes_handle_per_storage():
+def test_make_tensor_arg_memoizes_handle_per_storage():
     # Every ref over the same torch storage shares one handle/identity (so deps key on it); a view's
     # byte_offset places it within that backing. A plain tensor is copy-on-write across the fork, so
     # the handle is FORK_COW and read-only — only share_memory_() earns a writable grant.
-    w = Worker(level=3, num_sub_workers=0)  # no init needed: make_ref_arg only reads owner-side state
+    w = Worker(level=3, num_sub_workers=0)  # no init needed: make_tensor_arg only reads owner-side state
     t = torch.zeros(16, dtype=torch.float32)
-    r1 = Tensor.unpack(w.make_ref_arg(t, shapes=(16,), dtype=_F32).pack())
-    r2 = Tensor.unpack(w.make_ref_arg(t[4:12], shapes=(8,), dtype=_F32).pack())  # slice of same storage
+    r1 = Tensor.unpack(w.make_tensor_arg(t, shapes=(16,), dtype=_F32).pack())
+    r2 = Tensor.unpack(w.make_tensor_arg(t[4:12], shapes=(8,), dtype=_F32).pack())  # slice of same storage
     assert r1.handle.backend_kind == BackendKind.FORK_COW
     assert r1.handle.identity.pack() == r2.handle.identity.pack()  # one memoized handle
     assert r1.byte_offset == 0
@@ -150,9 +150,9 @@ def test_make_ref_arg_memoizes_handle_per_storage():
     assert len(w._fork_tensor_handles) == 1
 
 
-def test_make_ref_arg_share_memory_output_across_fork():
+def test_make_tensor_arg_share_memory_output_across_fork():
     # A pre-fork share_memory_() tensor is MAP_SHARED: a forked child's writes land in the same
-    # physical pages the parent reads. make_ref_arg names it (FORK_SHM), the sub child writes through
+    # physical pages the parent reads. make_tensor_arg names it (FORK_SHM), the sub child writes through
     # the inherited VA, and the parent sees the result — the fork-inherited read-write path.
     t = torch.zeros(4, dtype=torch.float32).share_memory_()  # allocated + shared BEFORE init/fork
 
@@ -168,7 +168,7 @@ def test_make_ref_arg_share_memory_output_across_fork():
 
         def orch(o, _args, cfg):
             sa = TaskArgs()
-            sa.add_tensor(hw.make_ref_arg(t, shapes=(4,), dtype=_F32), TensorArgType.INOUT)
+            sa.add_tensor(hw.make_tensor_arg(t, shapes=(4,), dtype=_F32), TensorArgType.INOUT)
             o.submit_sub(handle, sa)
 
         hw.run(orch, args=None, config=CallConfig())
@@ -248,7 +248,7 @@ def test_sub_worker_mapped_arg_readwrite():
         hw.close()
 
 
-def test_make_ref_arg_remints_when_an_address_is_reused_at_a_different_size():
+def test_make_tensor_arg_remints_when_an_address_is_reused_at_a_different_size():
     """A recycled storage address is a different backing, so it must not inherit the old identity.
 
     The memo is keyed by address and the allocator reuses addresses. Without a size check, a later
@@ -265,6 +265,6 @@ def test_make_ref_arg_remints_when_an_address_is_reused_at_a_different_size():
         base, 32, w._owner_instance_id, buffer_id=999, access=AccessMode.READ
     )
 
-    ref = Tensor.unpack(w.make_ref_arg(t, shapes=(64,), dtype=_F32).pack())
+    ref = Tensor.unpack(w.make_tensor_arg(t, shapes=(64,), dtype=_F32).pack())
     assert ref.handle.nbytes == 256  # the live storage, not the stale 32
     assert ref.handle.identity.buffer_id != 999  # and a fresh identity, not the stale one
