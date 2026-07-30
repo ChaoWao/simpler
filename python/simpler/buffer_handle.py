@@ -65,11 +65,21 @@ class AccessMode(enum.IntEnum):
 
 
 class BackendKind(enum.IntEnum):
+    """How a consumer turns a descriptor into a local address.
+
+    ``FORK_SHM`` and ``FORK_COW`` resolve identically — the body is a base VA the child inherited
+    across the fork — but their write semantics are opposite, so they are separate tags rather than
+    one tag plus a hint. A child's write to a MAP_SHARED page reaches the owner; a write to a
+    copy-on-write page splits it into a private copy the owner never sees, silently. ``FORK_COW``
+    therefore grants READ only.
+    """
+
     FORK_SHM = 0
     POSIX_SHM = 1
     VMM_WINDOW = 2
     REMOTE_SIDECAR = 3
     DEVICE_MALLOC = 4
+    FORK_COW = 5
 
 
 # (address_space, backend_kind) capability gate (§4.1). Absent ⇒ rejected. The two REMOTE_SIDECAR rows
@@ -78,6 +88,7 @@ class BackendKind(enum.IntEnum):
 _CAPABILITY_OK: frozenset[tuple[int, int]] = frozenset(
     {
         (AddressSpace.HOST, BackendKind.FORK_SHM),
+        (AddressSpace.HOST, BackendKind.FORK_COW),
         (AddressSpace.HOST, BackendKind.POSIX_SHM),
         (AddressSpace.DEVICE, BackendKind.VMM_WINDOW),
         (AddressSpace.DEVICE, BackendKind.DEVICE_MALLOC),
@@ -179,6 +190,11 @@ class BufferHandleDescriptor:
             raise ValueError(
                 f"unsupported address_space×backend: "
                 f"{self.address_space.name}×{self.backend_kind.name} (§4.1 capability matrix)"
+            )
+        if self.backend_kind == BackendKind.FORK_COW and self.access != AccessMode.READ:
+            raise ValueError(
+                f"FORK_COW grants READ only, got {self.access.name} — a child's write to a "
+                f"copy-on-write page never reaches the owner"
             )
 
     @property
@@ -478,26 +494,27 @@ def wrap_fork_inherited(
     generation: int = 1,
     access: AccessMode = AccessMode.READ,
 ) -> BufferHandle:
-    """Wrap a pre-fork, fork-inherited host allocation as a zero-copy ``FORK_SHM`` ``BufferHandle``.
+    """Wrap a pre-fork, fork-inherited host allocation as a zero-copy ``BufferHandle``.
 
     Memory allocated before the children were forked is present in every child at the *same* virtual
     address; the backend body is that base VA (u64 LE) and the consumer materializes to the same VA
-    with no mapping and no copy. Read/write sharing depends on the underlying mmap:
+    with no mapping and no copy. The backend tag follows the mmap the caller actually has, which is
+    what ``access`` states:
 
-    * a plain allocation is ``MAP_PRIVATE`` — copy-on-write, so a child's first write splits the page
-      into a private copy the parent never sees. Read-only from the child (input); ``access`` defaults
-      to READ.
-    * a ``MAP_SHARED`` allocation (e.g. a ``torch.Tensor.share_memory_()``) is truly shared across the
-      fork — the child's writes land in the same physical pages the parent reads, so it is usable as an
-      OUTPUT the parent reads back. Pass ``access=READWRITE`` for that case.
+    * ``MAP_SHARED`` (e.g. a ``torch.Tensor.share_memory_()``) — a child's writes land in the pages
+      the parent reads, so it can serve as an OUTPUT. Pass ``access=READWRITE``; tagged FORK_SHM.
+    * plain ``MAP_PRIVATE`` — copy-on-write: a child's first write splits the page into a private
+      copy the parent never sees. Read-only, the default; tagged FORK_COW so the distinction is a
+      classification rather than something a reader has to infer from ``access``.
     """
     identity = CanonicalIdentity(owner_instance_id, buffer_id, generation)
+    backend = BackendKind.FORK_SHM if access != AccessMode.READ else BackendKind.FORK_COW
     return BufferHandle(
         identity=identity,
         owner_worker_path_id=intern_worker_path(owner_worker_path),
         address_space=AddressSpace.HOST,
         access=access,
-        backend_kind=BackendKind.FORK_SHM,
+        backend_kind=backend,
         nbytes=nbytes,
         body=int(data_ptr).to_bytes(8, "little"),
         shm=None,
@@ -674,7 +691,12 @@ class ImportRegistry:
         cached = self._by_identity.get(key)
         if cached is not None:
             return cached
-        if desc.backend_kind in (BackendKind.FORK_SHM, BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+        if desc.backend_kind in (
+            BackendKind.FORK_SHM,
+            BackendKind.FORK_COW,
+            BackendKind.DEVICE_MALLOC,
+            BackendKind.VMM_WINDOW,
+        ):
             # The body is the base pointer (u64 LE), already valid in this process — no mapping.
             # FORK_SHM: a COW-inherited host VA. DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on
             # the chip that allocated / carved it (the ref must only reach that chip — a topology

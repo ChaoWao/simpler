@@ -78,13 +78,20 @@ enum class AccessMode : uint8_t {
 
 // Materialization backend of a handle. The consumer resolves a BufferRef to a local address via the
 // import registry keyed by canonical identity; this tag selects how. REMOTE_SIDECAR is reserved for
-// P2 and rejected on decode in P1. Values are frozen; 5.. reserved (unknown tag => reject).
+// P2 and rejected on decode in P1. Values are frozen; 6.. reserved (unknown tag => reject).
+//
+// FORK_SHM and FORK_COW materialize identically — the body is a base VA the child already has,
+// inherited across the fork — but the kernel's write semantics are opposite, so they are separate
+// tags rather than one tag plus a hint. A child's write to a MAP_SHARED page lands in the physical
+// page the parent reads; a write to a copy-on-write page splits it into a private copy the parent
+// never sees, silently. FORK_COW therefore grants READ only, and that is enforced on decode.
 enum class BackendKind : uint8_t {
     FORK_SHM = 0,
     POSIX_SHM = 1,
     VMM_WINDOW = 2,
     REMOTE_SIDECAR = 3,
     DEVICE_MALLOC = 4,
+    FORK_COW = 5,
 };
 
 /**
@@ -200,6 +207,18 @@ struct BufferRef {
     uint8_t _pad[3];
 };
 
+// Byte extent of a (possibly strided) view: the last addressable element, plus one element. Summed
+// in u64 so a hostile shape/stride cannot wrap it. Callers that have not yet validated `r` must not
+// trust the result for anything but a bound.
+inline uint64_t buffer_ref_extent_bytes(const BufferRef &r) {
+    uint64_t last_elem = 0;
+    for (uint32_t i = 0; i < r.ndims && i < static_cast<uint32_t>(MAX_TENSOR_DIMS); ++i) {
+        if (r.shapes[i] == 0) continue;
+        last_elem += static_cast<uint64_t>(r.shapes[i] - 1) * static_cast<uint64_t>(r.strides[i]);
+    }
+    return (last_elem + 1) * get_element_size(r.dtype);
+}
+
 /**
  * Reject any BufferRef whose fields are not self-consistent, BEFORE any of them is trusted.
  *
@@ -223,7 +242,7 @@ inline void validate_buffer_ref(const BufferRef &r) {
     if (h.address_space > static_cast<uint8_t>(AddressSpace::DEVICE))
         reject("invalid Tensor: address_space out of range");
     if (h.access > static_cast<uint8_t>(AccessMode::READWRITE)) reject("invalid Tensor: access out of range");
-    if (h.backend_kind > static_cast<uint8_t>(BackendKind::DEVICE_MALLOC))
+    if (h.backend_kind > static_cast<uint8_t>(BackendKind::FORK_COW))
         reject("invalid Tensor: backend_kind out of range");
     if (h.body_len > DESC_MAX_BYTES) reject("invalid Tensor: body_len exceeds DESC_MAX_BYTES");
     if (h.identity.generation == 0) reject("invalid Tensor: generation 0 is reserved (uninitialized)");
@@ -242,18 +261,24 @@ inline void validate_buffer_ref(const BufferRef &r) {
     if (elem == 0) reject("invalid Tensor: unknown dtype");
     if (r.byte_offset % elem != 0) reject("invalid Tensor: byte_offset is not a multiple of the dtype size");
 
-    // Byte extent of the (possibly strided) view: the last addressable element, +1 element.
-    // Computed in u64 with per-dim bounds so a hostile shape/stride cannot wrap it.
-    uint64_t last_elem = 0;
     for (uint32_t i = 0; i < r.ndims; ++i) {
         if (r.shapes[i] == 0) reject("invalid Tensor: shape dimension is zero");
         if (r.strides[i] == 0) reject("invalid Tensor: stride must be > 0 (broadcast and negative step unsupported)");
-        last_elem += static_cast<uint64_t>(r.shapes[i] - 1) * static_cast<uint64_t>(r.strides[i]);
     }
-    const uint64_t extent_bytes = (last_elem + 1) * elem;
+    const uint64_t extent_bytes = buffer_ref_extent_bytes(r);
     if (r.byte_offset > h.nbytes || extent_bytes > h.nbytes - r.byte_offset) {
         reject("invalid Tensor: view extends past the backing (byte_offset + extent > nbytes)");
     }
+}
+
+// Do two views of the SAME backing touch a common byte? Compared as bounding ranges
+// [byte_offset, byte_offset + extent): a strided view's gaps are treated as occupied, so this is
+// conservative — it never misses a real overlap, and may report one for two interleaved views.
+inline bool buffer_refs_overlap(const BufferRef &a, const BufferRef &b) {
+    if (!(a.handle.identity == b.handle.identity)) return false;
+    const uint64_t a_end = a.byte_offset + buffer_ref_extent_bytes(a);
+    const uint64_t b_end = b.byte_offset + buffer_ref_extent_bytes(b);
+    return a.byte_offset < b_end && b.byte_offset < a_end;
 }
 
 static_assert(std::is_trivially_copyable_v<BufferRef>, "BufferRef must be trivially copyable for blob memcpy");

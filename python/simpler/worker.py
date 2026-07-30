@@ -5892,15 +5892,27 @@ class Worker:
         else:
             base, nbytes = host_ptr_nbytes(tensor)
             byte_offset = 0
+        # Memoized per storage base so every view of one storage shares an identity and their
+        # dependencies key together. The allocator reuses addresses, though, so a hit whose size no
+        # longer matches is a *different* storage that happens to sit where the last one did: it must
+        # get a fresh identity, or the two would fuse into one node in the dependency graph.
         handle = self._fork_tensor_handles.get(base)
+        if handle is not None and handle.nbytes != nbytes:
+            handle = None
         if handle is None:
+            # Copy-on-write only bites when a fork stands between the writer and this process. An
+            # L2 leaf consumes its own args in-process, so any host tensor is writable there; at L3+
+            # the consumer is a forked child, and only a MAP_SHARED allocation carries its writes
+            # back. Measuring this rather than assuming it is what stops a plain tensor from being
+            # accepted as an OUTPUT and then silently losing every write in the child.
+            shared = self.level == 2 or bool(getattr(tensor, "is_shared", lambda: False)())
             handle = wrap_fork_inherited(
                 base,
                 nbytes,
                 self._owner_instance_id,
                 self._next_buffer_id(),
                 f"L{self.level}",
-                access=AccessMode.READWRITE,
+                access=AccessMode.READWRITE if shared else AccessMode.READ,
             )
             self._fork_tensor_handles[base] = handle
         return handle.tensor(shapes=tuple(shapes), dtype=dtype, strides=strides, byte_offset=byte_offset)

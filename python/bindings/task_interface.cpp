@@ -556,33 +556,11 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
     cleanup_error += message;
 }
 
-// access⊆granted (§3 access): an arg's TensorArgType may only request access the handle grants.
-//   INPUT→READ, OUTPUT_EXISTING→WRITE, INOUT→READWRITE; READWRITE grants everything. NO_DEP / OUTPUT
-//   and any other tag are unconstrained. Catches e.g. a READ-only FORK_SHM COW buffer tagged
-//   OUTPUT_EXISTING (a forked child's writes would silently not reach the parent).
+// The same rule the submit point enforces, applied early so a mistake surfaces at the offending
+// add_tensor call rather than at submit. A tag can change afterwards, which is why submit re-checks.
 void check_access_subset(uint8_t granted, TensorArgType tag) {
-    auto granted_has = [&](AccessMode need) {
-        return granted == static_cast<uint8_t>(AccessMode::READWRITE) || granted == static_cast<uint8_t>(need);
-    };
-    bool ok = true;
-    switch (tag) {
-    case TensorArgType::INPUT:
-        ok = granted_has(AccessMode::READ);
-        break;
-    case TensorArgType::OUTPUT_EXISTING:
-        ok = granted_has(AccessMode::WRITE);
-        break;
-    case TensorArgType::INOUT:
-        ok = (granted == static_cast<uint8_t>(AccessMode::READWRITE));
-        break;
-    default:
-        ok = true;  // NO_DEP / OUTPUT / others: unconstrained
-        break;
-    }
-    if (!ok) {
-        throw std::invalid_argument(
-            "TaskArgs.add_ref: arg TensorArgType requires access not granted by the buffer (access⊆granted, §3)"
-        );
+    if (!access_permits(granted, tag)) {
+        throw std::invalid_argument("TaskArgs.add_tensor: arg TensorArgType requires access not granted by the buffer");
     }
 }
 

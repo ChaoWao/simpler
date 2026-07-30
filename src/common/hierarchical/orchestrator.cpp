@@ -430,6 +430,7 @@ SubmitResult Orchestrator::submit_impl(
     config.validate();
     validate_worker_eligibility(worker_type, args_list.size(), target_worker_ids, eligible_worker_ids);
     validate_remote_sidecars(args_list, remote_sidecars, eligible_worker_ids);
+    validate_submit_args(args_list);
 
     {
         std::lock_guard<std::mutex> lk(run->completion_mu);

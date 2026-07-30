@@ -223,9 +223,31 @@ gates, or keys on it.
 | Backend | Materializes to | Used for |
 | ------- | --------------- | -------- |
 | `POSIX_SHM` | a named shm mapped into the consumer | `create_buffer` / `alloc_shared_tensor` |
-| `FORK_SHM` | the same VA (copy-on-write inherited), no map | a pre-fork host buffer, zero-copy |
+| `FORK_SHM` | the same VA, no map | a pre-fork `MAP_SHARED` host buffer (e.g. `share_memory_()`), writable from the child |
+| `FORK_COW` | the same VA, no map | a pre-fork plain host buffer: copy-on-write, so **READ only** |
 | `DEVICE_MALLOC` | the device pointer, no map (chip-local) | `alloc_child_tensor` |
 | `REMOTE_SIDECAR` | (P2) resolved via the remote transport | an arg to a remote L3; the descriptor rides in the sidecar |
+
+## What a submit checks
+
+Naming an argument is not enough on its own — two things are verified where the
+values are final, at submit:
+
+- **`access ⊆ granted`.** A tag may only request what the backing grants: `INPUT`
+  needs READ, `OUTPUT_EXISTING` needs WRITE, `INOUT` needs READWRITE. This is
+  re-checked at submit rather than trusted from `add_tensor`, because a tag stays
+  mutable afterwards. It is what stops a plain (copy-on-write) tensor from being
+  named as an output and then silently losing every write in the child.
+- **No overlapping writes within one task.** Two arguments of one task that name
+  intersecting bytes of the same backing are rejected: they belong to one node,
+  so there is no order between them to express, and a device-staged copy of a
+  host backing does not even alias on the device for the L2 overlap map to
+  notice. Disjoint slices of one buffer stay legal — that is what `byte_offset`
+  is for.
+
+Group members are not compared against each other: a group is one node, and
+naming one buffer as every member's output is how it publishes a single
+completion token for a downstream task to depend on.
 
 ## Scope / status
 

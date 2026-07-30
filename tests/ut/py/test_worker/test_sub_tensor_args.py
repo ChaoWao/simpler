@@ -20,6 +20,7 @@ import ctypes
 import pytest
 import torch
 from simpler.buffer_handle import (
+    AccessMode,
     BackendKind,
     ImportRegistry,
     Tensor,
@@ -135,13 +136,14 @@ def test_mapped_args_from_blob_delivers_tensors_and_scalars():
 
 
 def test_make_ref_arg_memoizes_handle_per_storage():
-    # Every ref over the same torch storage shares one FORK_SHM handle/identity (so deps key on it);
-    # a view's byte_offset places it within that shared backing.
+    # Every ref over the same torch storage shares one handle/identity (so deps key on it); a view's
+    # byte_offset places it within that backing. A plain tensor is copy-on-write across the fork, so
+    # the handle is FORK_COW and read-only — only share_memory_() earns a writable grant.
     w = Worker(level=3, num_sub_workers=0)  # no init needed: make_ref_arg only reads owner-side state
     t = torch.zeros(16, dtype=torch.float32)
     r1 = Tensor.unpack(w.make_ref_arg(t, shapes=(16,), dtype=_F32).pack())
     r2 = Tensor.unpack(w.make_ref_arg(t[4:12], shapes=(8,), dtype=_F32).pack())  # slice of same storage
-    assert r1.handle.backend_kind == BackendKind.FORK_SHM
+    assert r1.handle.backend_kind == BackendKind.FORK_COW
     assert r1.handle.identity.pack() == r2.handle.identity.pack()  # one memoized handle
     assert r1.byte_offset == 0
     assert r2.byte_offset == 16  # t[4:12] starts 4 float32 = 16 B into the storage
@@ -244,3 +246,25 @@ def test_sub_worker_mapped_arg_readwrite():
     finally:
         t = None
         hw.close()
+
+
+def test_make_ref_arg_remints_when_an_address_is_reused_at_a_different_size():
+    """A recycled storage address is a different backing, so it must not inherit the old identity.
+
+    The memo is keyed by address and the allocator reuses addresses. Without a size check, a later
+    tensor landing where an earlier one died would borrow its handle: views sized for the new
+    storage would overrun the recorded nbytes, and two unrelated buffers would key to one node in
+    the dependency graph.
+    """
+    w = Worker(level=3, num_sub_workers=0)
+    t = torch.zeros(64, dtype=torch.float32)
+    base = int(t.untyped_storage().data_ptr())
+
+    # A handle left behind by a smaller, now-dead storage that occupied this same address.
+    w._fork_tensor_handles[base] = wrap_fork_inherited(
+        base, 32, w._owner_instance_id, buffer_id=999, access=AccessMode.READ
+    )
+
+    ref = Tensor.unpack(w.make_ref_arg(t, shapes=(64,), dtype=_F32).pack())
+    assert ref.handle.nbytes == 256  # the live storage, not the stale 32
+    assert ref.handle.identity.buffer_id != 999  # and a fresh identity, not the stale one

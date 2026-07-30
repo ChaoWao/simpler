@@ -308,6 +308,77 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
 }
 
 // ============================================================================
+// Submit-time argument validation
+// ============================================================================
+
+// access ⊆ granted: an arg's TensorArgType may only request what the backing grants.
+//   INPUT -> READ, OUTPUT_EXISTING -> WRITE, INOUT -> READWRITE; READWRITE grants everything.
+//   NO_DEP / OUTPUT are unconstrained.
+// Catches e.g. a READ-only copy-on-write backing tagged OUTPUT_EXISTING, whose writes in a forked
+// child would silently never reach the parent.
+inline bool access_permits(uint8_t granted, TensorArgType tag) {
+    auto granted_has = [&](AccessMode need) {
+        return granted == static_cast<uint8_t>(AccessMode::READWRITE) || granted == static_cast<uint8_t>(need);
+    };
+    switch (tag) {
+    case TensorArgType::INPUT:
+        return granted_has(AccessMode::READ);
+    case TensorArgType::OUTPUT_EXISTING:
+        return granted_has(AccessMode::WRITE);
+    case TensorArgType::INOUT:
+        return granted == static_cast<uint8_t>(AccessMode::READWRITE);
+    default:
+        return true;
+    }
+}
+
+// Does this tag declare a write? NO_DEP is excluded deliberately: it opts out of dependency
+// tracking altogether, so its ordering is the caller's to arrange.
+inline bool tag_writes(TensorArgType tag) {
+    return tag == TensorArgType::OUTPUT || tag == TensorArgType::OUTPUT_EXISTING || tag == TensorArgType::INOUT;
+}
+
+/**
+ * Validate one submit's whole argument set, at the point where the values are final.
+ *
+ * `access ⊆ granted` is re-checked here rather than trusted from add time because a tag is mutable
+ * after its element is added — the pair that governs the dispatch is the one present now.
+ *
+ * Overlapping writes WITHIN one TaskArgs are rejected because no later layer can catch them: the two
+ * args belong to one task node, so there is no order between them to express, and a device-staged
+ * copy of a host backing does not even alias on the device for the L2 overlap map to notice.
+ * Disjoint slices of one backing stay legal.
+ *
+ * Members of a group are NOT compared against each other. A group is one DAG node whose members
+ * deliberately share their tags — naming one buffer as every member's OUTPUT is how a group
+ * publishes a single completion token for a downstream task to depend on. Whether such a shared
+ * write carries data or only ordering is not visible here, so the caller owns it.
+ */
+inline void validate_submit_args(const std::vector<TaskArgs> &args_list) {
+    for (const TaskArgs &args : args_list) {
+        for (int32_t i = 0; i < args.tensor_count(); ++i) {
+            if (!access_permits(args.tensor(i).handle.access, args.tag(i))) {
+                throw std::invalid_argument(
+                    "submit: an argument's TensorArgType requests access the backing does not grant"
+                );
+            }
+        }
+    }
+    for (const TaskArgs &args : args_list) {
+        for (int32_t i = 0; i < args.tensor_count(); ++i) {
+            if (!tag_writes(args.tag(i))) continue;
+            for (int32_t j = i + 1; j < args.tensor_count(); ++j) {
+                if (!buffer_refs_overlap(args.tensor(i), args.tensor(j))) continue;
+                throw std::invalid_argument(
+                    "submit: two arguments of one task write overlapping bytes of the same buffer; "
+                    "give them disjoint ranges, or order them as separate tasks"
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
 // BufferRef wire blob — versioned, length-prefixed (P1-B).
 // ============================================================================
 //

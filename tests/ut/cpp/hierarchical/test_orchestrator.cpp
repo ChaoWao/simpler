@@ -80,6 +80,7 @@ struct OrchestratorFixture : public ::testing::Test {
         TaskArgs a;
         BufferRef r{};
         r.handle.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+        r.handle.access = static_cast<uint8_t>(AccessMode::READWRITE);  // the tags below include writes
         r.handle.nbytes = 1;  // has a local backing (not a placeholder) -> tracked by infer_deps
         r.handle.identity = identity_for(buffer_id);
         r.ndims = 1;
@@ -96,6 +97,7 @@ struct OrchestratorFixture : public ::testing::Test {
         TaskArgs a;
         BufferRef r{};
         r.handle.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+        r.handle.access = static_cast<uint8_t>(AccessMode::READWRITE);
         r.ndims = 1;
         r.shapes[0] = 1;
         r.strides[0] = 1;

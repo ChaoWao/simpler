@@ -272,14 +272,17 @@ def test_device_malloc_wrap_materialize():
 
 
 def test_fork_inherited_zero_copy_materialize():
-    # A pre-fork COW-inherited allocation: the FORK_SHM body is the base VA, materialized in place
-    # (no shm, no copy). In-process the VA is trivially valid.
+    # A pre-fork COW-inherited allocation: the body is the base VA, materialized in place (no shm,
+    # no copy). In-process the VA is trivially valid. A plain allocation is copy-on-write, so it is
+    # tagged FORK_COW and grants READ only; a MAP_SHARED one is FORK_SHM and may grant writes.
     backing = ctypes.create_string_buffer(64)
     addr = ctypes.addressof(backing)
     oid = mint_owner_instance_id()
     handle = wrap_fork_inherited(addr, 64, owner_instance_id=oid, buffer_id=5, owner_worker_path="L3")
-    assert handle.backend_kind == BackendKind.FORK_SHM
+    assert handle.backend_kind == BackendKind.FORK_COW
     assert handle.access == AccessMode.READ
+    shared = wrap_fork_inherited(addr, 64, oid, buffer_id=6, access=AccessMode.READWRITE)
+    assert shared.backend_kind == BackendKind.FORK_SHM
     assert handle.shm is None
     reg = ImportRegistry()
     try:
