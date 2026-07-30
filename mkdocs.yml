@@ -34,6 +34,13 @@ validation:
   nav:
     omitted_files: warn
     not_found: warn
+  links:
+    # Defaults to `info`, which --strict ignores, so a link to a heading that
+    # was renamed or never existed builds clean and 404s in the reader's
+    # browser. Note the two slug dialects differ: GitHub keeps the doubled
+    # hyphen a heading like "FAQ / Debug Guide" produces, MkDocs collapses it.
+    # Headings here avoid the punctuation that splits them.
+    anchors: warn
 
 # Deliberate omissions: these are accumulating logs and design sets, reached
 # through their own index pages rather than the sidebar. Listing every entry in

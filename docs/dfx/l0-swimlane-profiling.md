@@ -53,7 +53,7 @@ captured args — zero hand-written shapes or scalars.
   "fake-fast" zero-filled control tensor — without distorting the
   per-iteration pipeline structure. Repeatable; default uses the real
   dump values. See
-  [§7.2](#72---set-arg-floor-for-a-loop-count-without-distortion).
+  [§7.2](#72-arg-floor-for-a-loop-count-without-distortion).
 - **Source-line attribution (`--debug-line` / `-g`)** — compile the
   kernel with `-g` (skipping the link strip) so the trace carries
   `debug_line` and Insight maps each instruction back to its kernel
@@ -67,7 +67,7 @@ captured args — zero hand-written shapes or scalars.
   idiom (e.g. a manual `prod.record()`) compiles only for the device.
 - **Two trace outputs** — a native Insight `trace.json` and an
   auto-generated Perfetto-friendly variant (sub-laned + atomic flags;
-  see [§3.4](#34-viewing--insight-vs-perfetto)).
+  see [§3.4](#34-viewing-insight-vs-perfetto)).
 
 Drive it in one line (`--func-id` is the task's member set):
 
@@ -144,7 +144,7 @@ reading the kernel source — names are not in the dump (only kind / shape
 
 A scalar slot holds the value directly (`--set-arg 4=4`); a tensor slot
 holds a pointer, so `--set-arg` fills its buffer (`--set-arg 4=512`). See
-[§7.2](#72---set-arg-floor-for-a-loop-count-without-distortion).
+[§7.2](#72-arg-floor-for-a-loop-count-without-distortion).
 
 ### 3.3 Key flags
 
@@ -170,7 +170,7 @@ Per-arch build parameters are fixed in the tool's `ARCH_CONFIG`:
 | a2a3 | `dav_2201` | `dav-c220` | `__CCE_AICORE__ 220` / `PTO_NPU_ARCH_A2A3` |
 | a5 | `dav_3510` | `dav-c310` | `__CCE_AICORE__ 310` / `PTO_NPU_ARCH_A5` |
 
-### 3.4 Viewing — Insight vs Perfetto
+### 3.4 Viewing: Insight vs Perfetto
 
 The workspace lands at
 `outputs/l0_swimlane_<label>_<ts>/`, where
@@ -220,7 +220,7 @@ sub-cores cooperating as they do in production.
 **What loop count to shrink** for a fast camodel is a scalar `n_blocks`,
 a control *tensor* (`context_lens`), or nothing — the slot is shown in
 the step-3 table and `4` is the prefetch floor (see
-[§7.2](#72---set-arg-floor-for-a-loop-count-without-distortion)). For
+[§7.2](#72-arg-floor-for-a-loop-count-without-distortion)). For
 the `mixed_example` matmul/add/mul kernels the loop count derives from
 the tensor **shape** (`shapes[0]`), which the dump captures truthfully,
 so **no `--set-arg` is needed** — the real count (one 128×128 tile) is
@@ -269,7 +269,7 @@ arch-precheck (the case must declare the `--platform` you pass — §3.1).
 | Mix 3-way 1C2V | `mixed_example` | `--func-id 0,1,2` | MATMUL@AIC + ADD@AIV0 + MUL@AIV1 |
 | SPMD single-source | `spmd_multiblock_aiv` | `--func-id 0` | single AIV reading `get_block_idx` (pass `--spmd-block-num`; replay traces block 0) |
 | SPMD mix, 2 AIV share a source | `spmd_multiblock_mix` | `--func-id 0,1,2` | func 1 & 2 are distinct ids but **both `kernel_spmd_mix.cpp`** → the 2 AIV collapse to one (both lanes run it). Routes by `get_sub_block_id` (slot 49) → in replay both lanes read `sub_block_id=0`; AIV0/AIV1 differ only by write offset, so the pipeline stays representative. (The same-source collapse also covers the duplicate-func_id `[0,1,1]` shape an SPMD mix produces when `aiv0 = aiv1`.) |
-| Paged-attn, loop = scalar | `paged_attention_unroll` | `--func-id 0 --set-arg 4=4` | QK stage; `n_blocks` scalar (slot 4) → shrink to 4 ([§7.2](#72---set-arg-floor-for-a-loop-count-without-distortion)) |
+| Paged-attn, loop = scalar | `paged_attention_unroll` | `--func-id 0 --set-arg 4=4` | QK stage; `n_blocks` scalar (slot 4) → shrink to 4 ([§7.2](#72-arg-floor-for-a-loop-count-without-distortion)) |
 | Paged-attn, loop = control tensor | `batch_paged_attention` | `--func-id 1 --set-arg 1=512 --case CaseSmall1` | SF reads `context_lens` (**slot 1**) content (`aiv_softmax_prepare.cpp`); `--set-arg 1=512` fills it uniformly → shrinks the derived per-batch block count |
 
 Runnable commands (one per category):
@@ -500,7 +500,7 @@ fewer ticks. Much of the cost is fixed setup, so shrinking a loop count
 helps only modestly. **Prefer a2a3 for logic validation; run a5 only
 when you specifically need the a5 pipeline.**
 
-### 7.2 `--set-arg` floor for a loop count (without distortion)
+### 7.2 Arg floor for a loop count (without distortion)
 
 Double-buffered prefetch kernels guard the prefetch + `pipe_barrier`
 with `if (i+1 < n_blocks)`:
@@ -621,7 +621,7 @@ Trace each AIV kernel as its own single-kernel task instead (e.g.
 
 **Perfetto shows overlapping / missing slices.** Open
 `<label>_trace_perfetto.json`, not the raw Insight `trace.json`
-(see [§3.4](#34-viewing--insight-vs-perfetto)).
+(see [§3.4](#34-viewing-insight-vs-perfetto)).
 
 **`MMAD` / `FIX` count < `n_blocks`.** The export truncated the tail
 (§7.4). Re-run or change `n_blocks`.
