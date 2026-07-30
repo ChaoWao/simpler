@@ -164,14 +164,18 @@ jobs:
   st-sim-a2a3:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.a2a3_changed == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 30
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10']
+        include:
+          - runner: '["self-hosted", "cpu"]'
+            python-version: '3.10'
+          - runner: '["macos-latest"]'
+            python-version: '3.10'
 
     steps:
       - name: Checkout repository
@@ -179,24 +183,46 @@ jobs:
       - name: Set up C++ compiler
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install -y ninja-build
-            sudo apt-get install -y g++-15 || sudo apt-get install -y g++
-            if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
-            # graphviz: required by the dep_gen smoke (deps_viewer -> dot).
-            # Both a2a3 and a5 sim jobs run dep_gen, so install it in both.
-            sudo apt-get install -y graphviz
+            runner_spec='${{ matrix.runner }}'
+            if [[ "$runner_spec" == *self-hosted* ]]; then
+              command -v ninja
+              command -v g++
+              command -v dot
+              if ! command -v g++-15 >/dev/null 2>&1; then
+                mkdir -p "$RUNNER_TEMP/bin"
+                ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
+                echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+              fi
+            else
+              sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+              sudo apt-get update
+              sudo apt-get install -y ninja-build
+              sudo apt-get install -y g++-15 || sudo apt-get install -y g++
+              if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
+              # graphviz: required by the dep_gen smoke (deps_viewer -> dot).
+              # Both a2a3 and a5 sim jobs run dep_gen, so install it in both.
+              sudo apt-get install -y graphviz
+            fi
           else
             brew install ninja
             brew install gcc@15 || brew install gcc
             brew install graphviz
           fi
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} (GitHub-hosted)
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted)
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        run: |
+          python3 -m venv --system-site-packages .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install '.[test]'
 
       - name: Cache pip packages
         uses: actions/cache@v5
@@ -207,13 +233,18 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
 
       - name: Run pytest scene tests (a2a3sim)
         run: |
-          pytest examples tests/st --platform a2a3sim --device 0-15 -v \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
       # DFX per-feature smokes — the default pytest above passes no --enable-*
@@ -222,7 +253,11 @@ jobs:
       # CI step rather than buried in a combined run.
       - name: dep_gen smoke
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
@@ -233,39 +268,59 @@ jobs:
       # children take xdist args that `-p no:xdist` has disabled.
       - name: dep_gen smoke (host_build_graph)
         run: |
-          pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: l2_swimlane smoke
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-l2-swimlane --enable-dep-gen
 
       - name: PMU smoke
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-pmu 2
 
       - name: args_dump smoke
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --dump-args
 
   st-sim-a5:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.a5_changed == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 30
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ['3.10']
+        include:
+          - runner: '["self-hosted", "cpu"]'
+            python-version: '3.10'
+          - runner: '["macos-latest"]'
+            python-version: '3.10'
 
     steps:
       - name: Checkout repository
@@ -273,24 +328,46 @@ jobs:
       - name: Set up C++ compiler
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install -y ninja-build
-            sudo apt-get install -y g++-15 || sudo apt-get install -y g++
-            if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
-            # graphviz: required by the dep_gen smoke (deps_viewer -> dot).
-            # Both a2a3 and a5 sim jobs run dep_gen, so install it in both.
-            sudo apt-get install -y graphviz
+            runner_spec='${{ matrix.runner }}'
+            if [[ "$runner_spec" == *self-hosted* ]]; then
+              command -v ninja
+              command -v g++
+              command -v dot
+              if ! command -v g++-15 >/dev/null 2>&1; then
+                mkdir -p "$RUNNER_TEMP/bin"
+                ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
+                echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+              fi
+            else
+              sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+              sudo apt-get update
+              sudo apt-get install -y ninja-build
+              sudo apt-get install -y g++-15 || sudo apt-get install -y g++
+              if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
+              # graphviz: required by the dep_gen smoke (deps_viewer -> dot).
+              # Both a2a3 and a5 sim jobs run dep_gen, so install it in both.
+              sudo apt-get install -y graphviz
+            fi
           else
             brew install ninja
             brew install gcc@15 || brew install gcc
             brew install graphviz
           fi
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} (GitHub-hosted)
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Set up Python ${{ matrix.python-version }} (self-hosted)
+        if: ${{ contains(matrix.runner, 'self-hosted') }}
+        run: |
+          python3 -m venv --system-site-packages .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install '.[test]'
 
       - name: Cache pip packages
         uses: actions/cache@v5
@@ -301,13 +378,18 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        if: ${{ !contains(matrix.runner, 'self-hosted') }}
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
 
       - name: Run pytest scene tests (a5sim)
         run: |
-          pytest examples tests/st --platform a5sim --device 0-15 -v \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest examples tests/st --platform a5sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
       # DFX per-feature smokes — the default pytest above passes no --enable-*
@@ -316,25 +398,41 @@ jobs:
       # CI step rather than buried in a combined run. Mirrors st-sim-a2a3.
       - name: dep_gen smoke
         run: |
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: l2_swimlane smoke
         run: |
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-l2-swimlane --enable-dep-gen
 
       - name: PMU smoke
         run: |
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-pmu 2
 
       - name: args_dump smoke
         run: |
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+          PYTHON=python
+          if [[ '${{ matrix.runner }}' == *self-hosted* ]]; then
+            PYTHON=.venv/bin/python
+          fi
+          "$PYTHON" -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --dump-args
 

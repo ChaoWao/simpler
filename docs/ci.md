@@ -9,7 +9,7 @@ Design principles:
 1. **Merge by runner, not by language** — Python and C++ unit tests share setup cost and run as steps within a single job per runner tier (`ut`, `ut-a2a3`, `ut-a5`).
 2. **Runner matches hardware tier** — no-hardware tests run on `ubuntu-latest`; platform-specific tests run on self-hosted runners with the matching label (`a2a3`, `a5`).
 3. **`--platform` is the only filter** — pytest uses `--platform` + the `requires_hardware` marker; ctest uses label `-LE` exclusion. No `-m st`, no `-m "not requires_hardware"`.
-4. **sim = no hardware** — `a2a3sim`/`a5sim` jobs run on github-hosted runners alongside unit tests.
+4. **sim = no hardware** — `a2a3sim`/`a5sim` keep the macOS leg on GitHub-hosted runners, while the Linux leg can be routed to the local `cpu` self-hosted pool to escape the 4-vCPU ceiling.
 5. **Skip irrelevant platforms for scene tests** — `detect-changes` gates `st-sim-*` and `st-onboard-*` so pure-a5 PRs skip a2a3 scene-test runs and vice versa. **UT jobs (`ut`, `ut-a2a3`, `ut-a5`) are not gated by platform** — unit tests cover shared contracts and the cost of a falsely-skipped regression outweighs the savings.
 6. **Markdown-only PRs run pre-commit and nothing else** — `detect-changes` sets `docs_only` when *every* changed file ends in `.md`. That is the one case where skipping the UT jobs carries no risk: there is no code delta to regress, and markdownlint inside pre-commit is the only check that reads the files at all.
 
@@ -30,8 +30,8 @@ PullRequest
   ├── packaging-matrix       (ubuntu + macOS)        — [skipped iff docs_only]
   ├── ut                     (ubuntu + macOS)        — Python + C++ UT, no hardware [skipped iff docs_only]
   ├── detect-changes         (ubuntu-latest)         — outputs a{2a3,5}_changed + docs_only
-  ├── st-sim-a2a3            (ubuntu + macOS)        — gated by a2a3_changed
-  ├── st-sim-a5              (ubuntu + macOS)        — gated by a5_changed
+  ├── st-sim-a2a3            (cpu/Linux + macOS)      — gated by a2a3_changed
+  ├── st-sim-a5              (cpu/Linux + macOS)      — gated by a5_changed
   ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [skipped iff docs_only]
   ├── st-onboard-a2a3        (a2a3 self-hosted)      — gated by a2a3_changed
   ├── ut-a5                  (a5 self-hosted)        — Python + C++ UT, a5 hardware [skipped iff docs_only]
@@ -41,8 +41,8 @@ PullRequest
 | Job | Runner | What it runs |
 | --- | ------ | ------------ |
 | `ut` | `ubuntu-latest`, `macos-latest` | `pytest tests/ut` + `ctest -LE requires_hardware` |
-| `st-sim-a2a3` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a2a3sim` |
-| `st-sim-a5` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a5sim` |
+| `st-sim-a2a3` | `self-hosted [cpu]`, `macos-latest` | `pytest examples tests/st --platform a2a3sim` |
+| `st-sim-a5` | `self-hosted [cpu]`, `macos-latest` | `pytest examples tests/st --platform a5sim` |
 | `ut-a2a3` | a2a3 self-hosted | `pytest tests/ut --platform a2a3` + `ctest -L "^requires_hardware(_a2a3)?$" --resource-spec-file ...` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (host + cross-compiled device SO, link smoke only) |
 | `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st --platform a2a3 --device ...` |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + `ctest -L "^requires_hardware(_a5)?$"` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
@@ -101,16 +101,18 @@ profiling-vs-parallelism trade-off.
 
 ### Sim jobs on CPU-constrained runners
 
-Sim jobs (`st-sim-a2a3`, `st-sim-a5`) run on `ubuntu-latest`, whose standard
-GitHub-hosted runner currently has **4 vCPUs**. `--device 0-15` is still the
-right choice for the **pool size** (some L3 cases need several virtual ids), but
-the default `--max-parallel auto` caps the in-flight subprocess count to
-`min(nproc, len(--device))` — on a 4-core runner that becomes `4`. Note
-`os.cpu_count()` reports the host's logical CPUs and ignores any cgroup CPU
-quota, so this is the true core count, not a container limit.
+Sim jobs (`st-sim-a2a3`, `st-sim-a5`) are no-hardware jobs. The macOS leg still
+runs on GitHub-hosted runners, whose standard Linux equivalent is the
+4-vCPU `ubuntu-latest` box; the Linux leg is better pointed at a local `cpu`
+self-hosted runner if you want to escape that ceiling. `--device 0-15` is still
+the right choice for the **pool size** (some L3 cases need several virtual ids),
+but the default `--max-parallel auto` caps the in-flight subprocess count to
+`min(nproc, len(--device))` — so the runner's actual core count determines the
+parallelism budget. `os.cpu_count()` reports the host's logical CPUs and ignores
+any cgroup CPU quota, so this is the true core count, not a container limit.
 
 ```bash
-# Sim: --max-parallel auto resolves to 4 on a standard ubuntu-latest runner
+# Sim on a 4-vCPU runner: --max-parallel auto resolves to 4
 pytest examples tests/st --platform a2a3sim --device 0-15
 
 # Throttle further on a CPU-starved runner: 4 concurrent cases (each forking
@@ -127,7 +129,7 @@ not need `--max-parallel` manually.
 
 ### Scheduling constraints
 
-- Sim scene tests and no-hardware unit tests run on github-hosted runners (no hardware).
+- Sim scene tests and no-hardware unit tests run on no-hardware runners; the sim Linux leg is now pointed at the `cpu` self-hosted pool when available, while macOS stays GitHub-hosted.
 - `detect-changes` computes three flags (`a2a3_changed`, `a5_changed`, `docs_only`) from the PR diff. Each flag is `false` only when *every* changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in the `NON_CODE` set (`docs/`, `.docs/`, `.claude/`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere). Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or workflow files (`.github/`) — flips both flags to `true`.
 - **Gated jobs (scene tests only):** `st-sim-{a2a3,a5}`, `st-onboard-{a2a3,a5}` run iff their platform's flag is `true`.
 - **Platform-independent jobs (all UT + packaging):** `ut`, `ut-a2a3`, `ut-a5`, `packaging-matrix` ignore the platform flags — unit tests exercise shared contracts (nanobind bindings, RuntimeBuilder, ring buffers, etc.) and the risk of silently skipping a regression outweighs the CI minutes saved. The `tests/ut/cpp/{arch}/` entry in the gating regex only *attributes* an arch-specific C++ UT change to that platform (so it does not spuriously flip the other arch's scene-test flag); it does not gate the UT jobs themselves.
@@ -139,7 +141,7 @@ Three hardware tiers, applied to all test categories. See [testing.md](testing.m
 
 | Tier | CI Runner | Job examples |
 | ---- | --------- | ------------ |
-| No hardware | `ubuntu-latest` | `ut`, `st-sim-*` |
+| No hardware | `ubuntu-latest`, `self-hosted [cpu]` | `ut`, `st-sim-*` |
 | Platform-specific (a2a3) | `[self-hosted, a2a3]` | `ut-a2a3`, `st-onboard-a2a3` |
 | Platform-specific (a5) | `[self-hosted, a5]` | `ut-a5`, `st-onboard-a5` |
 
