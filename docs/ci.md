@@ -11,7 +11,7 @@ Design principles:
 3. **`--platform` is the only filter** — pytest uses `--platform` + the `requires_hardware` marker; ctest uses label `-LE` exclusion. No `-m st`, no `-m "not requires_hardware"`.
 4. **sim = no hardware** — `a2a3sim`/`a5sim` jobs run on github-hosted runners alongside unit tests.
 5. **Skip irrelevant platforms for scene tests** — `detect-changes` gates `st-sim-*` and `st-onboard-*` so pure-a5 PRs skip a2a3 scene-test runs and vice versa. **UT jobs (`ut`, `ut-a2a3`, `ut-a5`) are not gated by platform** — unit tests cover shared contracts and the cost of a falsely-skipped regression outweighs the savings.
-6. **Markdown-only PRs run pre-commit and nothing else** — `detect-changes` sets `docs_only` when *every* changed file ends in `.md`. That is the one case where skipping the UT jobs carries no risk: there is no code delta to regress, and markdownlint inside pre-commit is the only check that reads the files at all.
+6. **Non-code PRs run pre-commit and docs, and nothing else** — `detect-changes` sets `non_code_only` when *no* changed file falls outside the `NON_CODE` set. Skipping the UT jobs is riskless there because nothing in that set can change what the code does, and each member already has its own gate: markdownlint inside `pre-commit` reads the markdown, `docs.yml` (unconditional on every PR) builds the site with `--strict`, and `pre-commit` itself is ungated so a `.pre-commit-config.yaml` change is fully exercised by it.
 
 ## Full Job Matrix
 
@@ -27,14 +27,14 @@ The complete test-type × hardware-tier matrix. Empty cells have no tests yet; o
 ```text
 PullRequest
   ├── pre-commit             (ubuntu-latest)
-  ├── packaging-matrix       (ubuntu + macOS)        — [skipped iff docs_only]
-  ├── ut                     (ubuntu + macOS)        — Python + C++ UT, no hardware [skipped iff docs_only]
-  ├── detect-changes         (ubuntu-latest)         — outputs a{2a3,5}_changed + docs_only
+  ├── packaging-matrix       (ubuntu + macOS)        — [skipped iff non_code_only]
+  ├── ut                     (ubuntu + macOS)        — Python + C++ UT, no hardware [skipped iff non_code_only]
+  ├── detect-changes         (ubuntu-latest)         — outputs a{2a3,5}_changed + non_code_only
   ├── st-sim-a2a3            (ubuntu + macOS)        — gated by a2a3_changed
   ├── st-sim-a5              (ubuntu + macOS)        — gated by a5_changed
-  ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [skipped iff docs_only]
+  ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [skipped iff non_code_only]
   ├── st-onboard-a2a3        (a2a3 self-hosted)      — gated by a2a3_changed
-  ├── ut-a5                  (a5 self-hosted)        — Python + C++ UT, a5 hardware [skipped iff docs_only]
+  ├── ut-a5                  (a5 self-hosted)        — Python + C++ UT, a5 hardware [skipped iff non_code_only]
   └── st-onboard-a5          (a5 self-hosted)        — gated by a5_changed
 ```
 
@@ -128,10 +128,12 @@ not need `--max-parallel` manually.
 ### Scheduling constraints
 
 - Sim scene tests and no-hardware unit tests run on github-hosted runners (no hardware).
-- `detect-changes` computes three flags (`a2a3_changed`, `a5_changed`, `docs_only`) from the PR diff. Each flag is `false` only when *every* changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in the `NON_CODE` set (`docs/`, `.docs/`, `.claude/`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere). Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or workflow files (`.github/`) — flips both flags to `true`.
+- `detect-changes` computes three flags (`a2a3_changed`, `a5_changed`, `non_code_only`) from the PR diff, **all three derived from one `NON_CODE` set**: `docs/`, `.docs/`, `.claude/`, `mkdocs.yml`, `.github/workflows/docs.yml`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere. Membership follows a file's *effect*, not its path — `mkdocs.yml` and `docs.yml` are docs tooling that happens to live outside `docs/`. An arch flag is `false` only when every changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in `NON_CODE`. Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or **`.github/workflows/ci.yml` itself** — flips both flags to `true`. `ci.yml` is deliberately excluded from `NON_CODE`: a change to the gates must run everything, including whatever it just switched off.
 - **Gated jobs (scene tests only):** `st-sim-{a2a3,a5}`, `st-onboard-{a2a3,a5}` run iff their platform's flag is `true`.
 - **Platform-independent jobs (all UT + packaging):** `ut`, `ut-a2a3`, `ut-a5`, `packaging-matrix` ignore the platform flags — unit tests exercise shared contracts (nanobind bindings, RuntimeBuilder, ring buffers, etc.) and the risk of silently skipping a regression outweighs the CI minutes saved. The `tests/ut/cpp/{arch}/` entry in the gating regex only *attributes* an arch-specific C++ UT change to that platform (so it does not spuriously flip the other arch's scene-test flag); it does not gate the UT jobs themselves.
-- **`docs_only` is the one exception**, and it is narrower than the `NON_CODE` set on purpose. `NON_CODE` is about *platform attribution* and covers whole trees (`docs/`, `.claude/`, `.gitignore`, `.pre-commit-config.yaml`) — a change to `.pre-commit-config.yaml` or a `.claude/` script can still change what CI does, so it must not skip the UT jobs. `docs_only` is true only when every changed path ends in `.md`, which no test can execute. An empty diff leaves it `false`, so an unexpected result runs the full matrix rather than nothing.
+- **`non_code_only` is the same `NON_CODE` set, not a narrower one.** It is `true` when no changed file falls outside it. Nothing in the set can change what the code does, and no workflow consumes any of it beyond its own gate: `pre-commit` is ungated so it always exercises `.pre-commit-config.yaml`, `docs.yml` is unconditional on every PR so it always exercises `mkdocs.yml` / `docs/`, and **no workflow invokes anything under `.claude/`** (`grep -rn '\.claude' .github/workflows/` finds only comments). An **empty diff short-circuits the whole step**: attribution is impossible, so a single guard sets `non_code_only=false` and both arch flags `true` and returns, running the full matrix. That guard is deliberately one place — testing emptiness per flag is what previously left `non_code_only` false while both arch flags also came out false, running UT and packaging but skipping every scene test.
+
+  The arch flags subtract `NON_CODE` before deciding, so a non-code-only change already makes both `false`. An arch-gated job therefore needs no separate non-code check. See [`.claude/rules/ci-change-detection.md`](../.claude/rules/ci-change-detection.md) for the invariants these gates must keep.
 
 ## Hardware Classification
 

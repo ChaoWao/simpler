@@ -62,7 +62,7 @@ jobs:
   # See docs/python-packaging.md and tools/verify_packaging.sh.
   packaging-matrix:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -107,7 +107,7 @@ jobs:
   # ---------- Unit tests (no hardware, Python + C++) ----------
   ut:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -473,7 +473,7 @@ jobs:
   # ---------- Unit tests (a2a3 hardware, Python + C++) ----------
   ut-a2a3:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true'
     runs-on: [self-hosted, a2a3]
     timeout-minutes: 30
     env:
@@ -732,7 +732,7 @@ jobs:
     outputs:
       a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
       a5_changed: ${{ steps.check.outputs.a5_changed }}
-      docs_only: ${{ steps.check.outputs.docs_only }}
+      non_code_only: ${{ steps.check.outputs.non_code_only }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -743,17 +743,38 @@ jobs:
         run: |
           FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
 
-          NON_CODE='^(docs/|\.docs/|\.claude/|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
+          # Fail open, in ONE place. An empty diff means attribution is
+          # impossible — a PR with no files, or base/head SHAs that did not
+          # resolve — so nothing below can be trusted and every flag must say
+          # "affected". Deciding this per-flag is how the axes drifted apart:
+          # the emptiness test used to live inside the non_code_only branch
+          # only, which left it false (UT and packaging ran) while both arch
+          # flags independently came out false too (scene tests skipped).
+          if [ -z "$FILES" ]; then
+            echo "Empty diff: cannot attribute changes, running everything"
+            echo "non_code_only=false" >> "$GITHUB_OUTPUT"
+            echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
+            echo "a5_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          # Markdown-only: nothing here can change what the code does, and
-          # markdownlint (in pre-commit) is the only check that inspects it. An
-          # empty FILES leaves this false, so an unexpected diff runs everything.
-          NON_MD=$(echo "$FILES" | grep -v '\.md$' || true)
-          if [ -n "$FILES" ] && [ -z "$NON_MD" ]; then
-            echo "docs_only=true" >> "$GITHUB_OUTPUT"
-            echo "Only .md changed; pre-commit is the whole gate"
+          # ONE definition of "changing this cannot change what the code does".
+          # Every gate below derives from this set — see
+          # .claude/rules/ci-change-detection.md before editing it. Membership
+          # follows a file's effect, not its path: the docs toolchain counts
+          # even where it sits outside docs/ (mkdocs.yml, workflows/docs.yml),
+          # because docs.yml itself runs unconditionally on every PR and is the
+          # whole gate for it. ci.yml is deliberately absent — a change to the
+          # gates must run everything.
+          NON_CODE='^(docs/|\.docs/|\.claude/|mkdocs\.yml$|\.github/workflows/docs\.yml$|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
+
+          # Non-code-only: pre-commit and docs.yml are the whole gate.
+          CODE=$(echo "$FILES" | grep -vE "$NON_CODE" || true)
+          if [ -z "$CODE" ]; then
+            echo "non_code_only=true" >> "$GITHUB_OUTPUT"
+            echo "No file here can change what the code does; pre-commit + docs are the whole gate"
           else
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "non_code_only=false" >> "$GITHUB_OUTPUT"
           fi
 
           # a2a3: skip only when ALL changed files are a5-only or non-code
@@ -785,7 +806,7 @@ jobs:
   # ---------- Unit tests (a5 hardware, Python + C++) ----------
   ut-a5:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.docs_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true'
     runs-on: [self-hosted, a5]
     timeout-minutes: 30
     env:
