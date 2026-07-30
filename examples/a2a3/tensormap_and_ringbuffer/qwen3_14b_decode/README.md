@@ -167,12 +167,27 @@ harvest if you need a clean trace.
 Passes on device: output **and all 40 layers' KV caches** match the torch
 reference at `RTOL=5e-2 / ATOL=1e-1`.
 
-In CI it runs as its own `st-onboard-a2a3` step on a dedicated device, not in
-the general scene-test sweep: at ~5 min it would eat over half that sweep's 600 s
-session budget, and keeping the budget short there is what makes it a hang
-detector. See `.github/workflows/ci.yml`.
+## Cost
 
-Measured on an idle a2a3 die, one device: **~5 min wall** for the whole case,
-of which ~11 s is fixture generation and ~49 s the torch golden (both host-side,
-single-threaded torch over 40 layers × 16 batch × 8 KV heads); the rest is
-kernel compilation, the 38 GiB host→device upload, and the device run itself.
+It runs in the general `st-onboard-a2a3` scene-test sweep like any other case.
+Measured on this repo's a2a3 box, one device:
+
+| Phase | Wall |
+| ----- | ---- |
+| kernel compilation — 36 incores + 1 orchestration | **59 s** |
+| `generate_inputs` (the 38 GiB fixture) | **13 s** |
+| `compute_golden` (40 layers, torch, thread-capped) | **~43 s** |
+| host→device upload, device run, comparison | the remainder; the device itself is busy for tens of ms |
+| | **~115 s** |
+
+Two details behind those numbers. The 38 GiB is mostly replication —
+`torch.cat([w] * 40)` of one layer's weights — so only ~2 GB is actually
+generated; and the vendor FAI kernel is the compile outlier at 8.4 s for its AIV
+variant against ~1.2 s for an ordinary incore.
+
+The golden is thread-capped by the scene-test framework, and that matters more
+than its size: its 3584 small slice operations per layer took **6.35 s per layer
+at 320 torch threads against 1.05 s at 4**, so on a many-core host the untamed
+thread pool cost 5-8x the work it was doing. Before the cap this case held a
+device for **406 s** (ci run 30507320146, job 90761014912) and had to be kept out
+of the sweep with a `--ignore` and a step of its own.

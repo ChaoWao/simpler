@@ -25,8 +25,7 @@ and will report failures that CI never sees:
 
 | Quarantine | Excludes | Runs instead in |
 | ---------- | -------- | --------------- |
-| `SDMA_IGNORE` (`ci.yml:600`) | `sdma_async_completion_demo`, `prefetch_async_demo` | dedicated "SDMA pytest (a2a3)" step, `--device-num 2` (`ci.yml:628-643`) |
-| `HEAVY_IGNORE` (`ci.yml:605`) | `qwen3_14b_decode` | its own long-timeout step |
+| `SDMA_IGNORE` | `sdma_async_completion_demo`, `prefetch_async_demo` | dedicated "SDMA pytest (a2a3)" step, `--device-num 2` |
 
 The SDMA demos provision 48 device-only STARS streams, which makes an AICore
 fault take ~306 s to tear down instead of ~0.3 s — so they must not share a
@@ -69,9 +68,9 @@ ctest --test-dir tests/ut/cpp/build -L "^requires_hardware(_a2a3)?$" --output-on
 pytest examples tests/st --platform a2a3sim \
     --pto-session-timeout <timeout>
 
-# All hardware scene tests — mirror ci.yml: carry its --ignore sets, or the
-# quarantined tests fail here and nowhere else (extract both from ci.yml)
-pytest examples tests/st $SDMA_IGNORE $HEAVY_IGNORE --platform a2a3 --device <range> \
+# All hardware scene tests — mirror ci.yml: carry its --ignore set, or the
+# quarantined tests fail here and nowhere else (extract it from ci.yml)
+pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device <range> \
     --pto-session-timeout <timeout>
 
 # The quarantined tests, the way CI runs them — alone, on their own devices
