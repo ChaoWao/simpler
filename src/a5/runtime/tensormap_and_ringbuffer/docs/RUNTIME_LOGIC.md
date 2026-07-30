@@ -587,7 +587,9 @@ advance_ring_pointers(ring_id):  // protected by per-ring advance_lock
     sync_to_sm()  // release-store last_task_alive
 ```
 
-This is protected by a per-ring try-lock (`advance_lock`) in `RingSchedState`, ensuring only one scheduler thread advances a given ring's watermark at a time.
+This is protected by a per-ring try-lock (`advance_lock`) in `RingSchedState`, ensuring only one scheduler thread advances a given ring's watermark at a time. If a scheduler thread changes a ring head to `CONSUMED` but loses this try-lock, it sets the ring bit in `advance_pending_mask`. Scheduler no-progress iterations drain that mask: each pending ring retries the same in-order `advance_ring_pointers()` under `advance_lock`, leaves the bit set while the lock is still busy, and treats a successful watermark advance as scheduler progress.
+
+For ring-heap stall triage, a `CONSUMED` head whose ring bit is still set means no retry has acquired `advance_lock` and cleared the deferred request yet. If the bit clears and the published `last_task_alive` remains pinned, the stall is outside this deferred consumed-head advance path.
 
 ### 8.5 SchedulerContext
 

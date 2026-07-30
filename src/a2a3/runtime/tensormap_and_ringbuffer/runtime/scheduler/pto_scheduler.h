@@ -30,7 +30,6 @@
 #pragma once
 
 #include <atomic>
-
 #include "common/core_type.h"
 #include "common/memory_barrier.h"
 #include "utils/device_arena.h"
@@ -501,6 +500,8 @@ struct PTO2SchedulerState {
         }
     } ring_sched_states[PTO2_MAX_RING_DEPTH];
 
+    alignas(64) std::atomic<uint32_t> advance_pending_mask;
+
     // Ready queues remain global (scheduling is ring-agnostic)
     PTO2ReadyQueue ready_queues[PTO2_NUM_RESOURCE_SHAPES];
 
@@ -543,6 +544,45 @@ struct PTO2SchedulerState {
         }
     }
 
+    static uint32_t ring_advance_pending_bit(int32_t ring_id) {
+        static_assert(PTO2_MAX_RING_DEPTH <= 32, "advance_pending_mask uses one uint32_t bit per ring");
+        return 1u << static_cast<uint32_t>(ring_id);
+    }
+
+    // A failed consumed-head advance is a deferred reclaim publication request.
+    // The mask keeps one coalesced request per ring. Later successful advances
+    // may cover it before the scheduler no-progress path drains the final
+    // missed edge.
+    void mark_ring_advance_pending(int32_t ring_id) {
+        advance_pending_mask.fetch_or(ring_advance_pending_bit(ring_id), std::memory_order_release);
+    }
+
+    bool drain_pending_ring_advances() {
+        uint32_t pending = advance_pending_mask.load(std::memory_order_acquire);
+        if (pending == 0) return false;
+
+        bool advanced = false;
+        for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ring_id++) {
+            uint32_t bit = ring_advance_pending_bit(ring_id);
+            if ((pending & bit) == 0) continue;
+
+            auto &ring_sched = ring_sched_states[ring_id];
+            int32_t expected_lock = 0;
+            if (!ring_sched.advance_lock.compare_exchange_strong(
+                    expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
+                )) {
+                continue;
+            }
+
+            advance_pending_mask.fetch_and(~bit, std::memory_order_acq_rel);
+            int32_t before = ring_sched.last_task_alive;
+            ring_sched.advance_ring_pointers();
+            advanced = advanced || ring_sched.last_task_alive != before;
+            ring_sched.advance_lock.store(0, std::memory_order_release);
+        }
+        return advanced;
+    }
+
     bool try_claim_ready_once(PTO2TaskSlotState &slot_state) {
         uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
         for (;;) {
@@ -581,16 +621,15 @@ struct PTO2SchedulerState {
 #endif
 
         int32_t ring_id = slot_state.ring_id;
-        // advance_ring_pointers (and the reset_for_reuse it triggers) MUST run
-        // outside fanout_lock: reset_for_reuse stores fanout_lock=0 and would
-        // clobber a held lock. Safe here — the slot is CONSUMED and quiescent.
-        // Try-lock — if another thread is advancing this ring, it will scan our CONSUMED task
+        // Runs outside fanout_lock: reset_for_reuse stores fanout_lock=0.
         int32_t expected_lock = 0;
         if (ring_sched_states[ring_id].advance_lock.compare_exchange_strong(
                 expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
             )) {
             ring_sched_states[ring_id].advance_ring_pointers();
             ring_sched_states[ring_id].advance_lock.store(0, std::memory_order_release);
+        } else {
+            mark_ring_advance_pending(ring_id);
         }
     }
 
@@ -620,9 +659,7 @@ struct PTO2SchedulerState {
 #endif
 
         int32_t ring_id = slot_state.ring_id;
-        // advance_ring_pointers + reset_for_reuse run outside fanout_lock (reset
-        // stores fanout_lock=0). Safe — the slot is CONSUMED and quiescent.
-        // Try-lock — if another thread is advancing this ring, it will scan our CONSUMED task
+        // Runs outside fanout_lock: reset_for_reuse stores fanout_lock=0.
         int32_t expected_lock = 0;
         if (ring_sched_states[ring_id].advance_lock.compare_exchange_strong(
                 expected_lock, 1, std::memory_order_acquire, std::memory_order_relaxed
@@ -631,7 +668,8 @@ struct PTO2SchedulerState {
             ring_sched_states[ring_id].advance_lock.store(0, std::memory_order_release);
             atomic_count += 2;  // try-lock CAS + unlock store
         } else {
-            atomic_count += 1;  // failed try-lock CAS
+            mark_ring_advance_pending(ring_id);
+            atomic_count += 2;  // failed try-lock CAS + pending mark
         }
     }
 #endif
