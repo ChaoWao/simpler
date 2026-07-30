@@ -654,6 +654,15 @@ size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
     return 0;
 }
 
+size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(ctx)->committed_device_memory();
+    } catch (...) {
+        return 0;
+    }
+}
+
 int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
     // Simulation provides no async-DMA workspaces; a non-empty request fails
     // fast so an SDMA-enabled Worker cannot come up on sim.

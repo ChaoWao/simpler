@@ -1532,6 +1532,14 @@ NB_MODULE(_task_interface, m) {
             "run creates and retires its own AICore stream, so this advances once per "
             "run; platforms whose runs use the persistent bootstrap pair report 0."
         )
+        .def_prop_ro(
+            "committed_device_memory", &ChipWorker::committed_device_memory,
+            "Total device HBM (bytes) currently committed by this worker's "
+            "MemoryAllocator (user tensors + pooled arenas + runtime buffers). "
+            "Excludes HCCL/VMM comm windows. 0 when not "
+            "initialized. Lets downstream runtimes subtract simpler's own HBM "
+            "from their cache budget (it may be invisible to aclrtGetMemInfo)."
+        )
         .def("malloc", &ChipWorker::malloc, nb::arg("size"))
         .def("free", &ChipWorker::free, nb::arg("ptr"))
         .def("copy_to", &ChipWorker::copy_to, nb::arg("dst"), nb::arg("src"), nb::arg("size"))

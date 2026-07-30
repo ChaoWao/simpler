@@ -22,6 +22,7 @@
  *                   simpler_init, finalize_device
  *   - sizing:       get_runtime_size
  *   - device-mem:   device_malloc_ctx, device_free_ctx,
+ *                   committed_device_memory_ctx,
  *                   copy_to_device_ctx, copy_from_device_ctx
  *   - prepared run: simpler_register_callable, simpler_run, unregister_callable,
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
@@ -170,6 +171,13 @@ void *device_malloc_ctx(DeviceContextHandle ctx, size_t size);
 
 /** Free device memory previously allocated in the given device context. */
 void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr);
+
+/**
+ * Total device HBM (bytes) currently committed by this device context's
+ * MemoryAllocator (user tensors + pooled arenas + runtime buffers). Excludes
+ * HCCL/VMM comm windows. Returns 0 on NULL ctx.
+ */
+size_t committed_device_memory_ctx(DeviceContextHandle ctx);
 
 /** Copy host memory to a device pointer within the given device context. */
 int copy_to_device_ctx(DeviceContextHandle ctx, void *dev_ptr, const void *host_ptr, size_t size);

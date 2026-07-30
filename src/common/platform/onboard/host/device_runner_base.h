@@ -117,6 +117,8 @@ public:
 
     /** Allocate / free / copy on the per-Worker `MemoryAllocator` + CANN runtime. */
     void *allocate_tensor(std::size_t bytes);
+    /** Total device HBM (bytes) currently committed by this runner's MemoryAllocator. */
+    std::size_t committed_device_memory() const { return mem_alloc_.committed_bytes(); }
     void free_tensor(void *dev_ptr);
     int copy_to_device(void *dev_ptr, const void *host_ptr, std::size_t bytes);
     int copy_from_device(void *host_ptr, const void *dev_ptr, std::size_t bytes);

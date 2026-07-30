@@ -315,6 +315,15 @@ inline void bind_worker(nb::module_ &m) {
             nb::arg("worker_id"), nb::arg("size"), "Allocate memory on next-level worker."
         )
         .def(
+            "committed_device_memory",
+            [](Orchestrator &self, int worker_id) {
+                return self.committed_device_memory(worker_id);
+            },
+            nb::arg("worker_id"),
+            "Total device HBM (bytes) committed by next-level worker's MemoryAllocator "
+            "(tensors + pooled arenas + runtime buffers)."
+        )
+        .def(
             "free",
             [](Orchestrator &self, int worker_id, uint64_t ptr) {
                 self.free(worker_id, ptr);

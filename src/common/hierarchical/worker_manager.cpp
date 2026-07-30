@@ -82,6 +82,9 @@ namespace {
 }  // namespace
 
 uint64_t WorkerEndpoint::control_malloc(size_t) { throw_unsupported_control("control_malloc"); }
+uint64_t WorkerEndpoint::control_committed_device_memory() {
+    throw_unsupported_control("control_committed_device_memory");
+}
 void WorkerEndpoint::control_free(uint64_t) { throw_unsupported_control("control_free"); }
 void WorkerEndpoint::control_copy_to(uint64_t, uint64_t, size_t) { throw_unsupported_control("control_copy_to"); }
 void WorkerEndpoint::control_copy_from(uint64_t, uint64_t, size_t) { throw_unsupported_control("control_copy_from"); }
@@ -665,6 +668,13 @@ uint64_t LocalMailboxEndpoint::control_malloc(size_t size) {
     return read_control_result(mbox());
 }
 
+uint64_t LocalMailboxEndpoint::control_committed_device_memory() {
+    std::lock_guard<std::mutex> lk(mailbox_mu_);
+    write_control_args(mbox(), CTRL_COMMITTED_DEVICE_MEMORY);
+    run_control_command("control_committed_device_memory");
+    return read_control_result(mbox());
+}
+
 void LocalMailboxEndpoint::control_prepare(const uint8_t *digest) {
     std::lock_guard<std::mutex> lk(mailbox_mu_);
     write_control_args(mbox(), CTRL_PREPARE);
@@ -857,6 +867,11 @@ void LocalMailboxEndpoint::control_l3_l2_region_release(uint64_t region_id) {
 uint64_t WorkerThread::control_malloc(size_t size) {
     if (!endpoint_) throw std::runtime_error("control_malloc: null endpoint");
     return endpoint_->control_malloc(size);
+}
+
+uint64_t WorkerThread::control_committed_device_memory() {
+    if (!endpoint_) throw std::runtime_error("control_committed_device_memory: null endpoint");
+    return endpoint_->control_committed_device_memory();
 }
 
 void WorkerThread::control_prepare(const uint8_t *digest) {

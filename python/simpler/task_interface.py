@@ -1447,3 +1447,8 @@ class ChipWorker:
     def initialized(self):
         """Whether the underlying native worker has completed init."""
         return self._impl.initialized
+
+    @property
+    def committed_device_memory(self) -> int:
+        """Total device HBM (bytes) committed by this chip worker's MemoryAllocator."""
+        return int(self._impl.committed_device_memory)

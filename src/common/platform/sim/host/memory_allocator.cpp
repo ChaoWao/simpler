@@ -29,7 +29,8 @@ void *MemoryAllocator::alloc(size_t size) {
     }
 
     std::scoped_lock<std::mutex> lk(mu_);
-    ptr_set_.insert(ptr);
+    ptr_size_map_[ptr] = size;
+    committed_bytes_ += size;
     return ptr;
 }
 
@@ -39,21 +40,23 @@ int MemoryAllocator::free(void *ptr) {
     }
 
     std::scoped_lock<std::mutex> lk(mu_);
-    auto it = ptr_set_.find(ptr);
-    if (it == ptr_set_.end()) {
+    auto it = ptr_size_map_.find(ptr);
+    if (it == ptr_size_map_.end()) {
         return 0;
     }
 
+    committed_bytes_ -= it->second;
     std::free(ptr);
-    ptr_set_.erase(it);
+    ptr_size_map_.erase(it);
     return 0;
 }
 
 int MemoryAllocator::finalize() {
     std::scoped_lock<std::mutex> lk(mu_);
-    for (void *ptr : ptr_set_) {
-        std::free(ptr);
+    for (const auto &kv : ptr_size_map_) {
+        std::free(kv.first);
     }
-    ptr_set_.clear();
+    ptr_size_map_.clear();
+    committed_bytes_ = 0;
     return 0;
 }

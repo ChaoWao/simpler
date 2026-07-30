@@ -729,6 +729,15 @@ size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
     }
 }
 
+size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->committed_device_memory();
+    } catch (...) {
+        return 0;
+    }
+}
+
 int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
     if (ctx == NULL) return -1;
     try {
