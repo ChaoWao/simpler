@@ -7,14 +7,54 @@ permissions:
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: "Base SHA for manual runs; defaults to merge-base with origin/main."
+        required: false
+        type: string
+      head_sha:
+        description: "Head SHA for manual runs; defaults to the checked-out commit."
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  diff-refs:
+    runs-on: ubuntu-latest
+    outputs:
+      base_sha: ${{ steps.refs.outputs.base_sha }}
+      head_sha: ${{ steps.refs.outputs.head_sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve diff refs
+        id: refs
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha='${{ github.event.pull_request.base.sha }}'
+            head_sha='${{ github.event.pull_request.head.sha }}'
+          elif [[ -n "${{ github.event.inputs.base_sha }}" && -n "${{ github.event.inputs.head_sha }}" ]]; then
+            base_sha='${{ github.event.inputs.base_sha }}'
+            head_sha='${{ github.event.inputs.head_sha }}'
+          else
+            git fetch --no-tags origin main
+            base_sha=$(git merge-base origin/main HEAD)
+            head_sha='${{ github.sha }}'
+          fi
+
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
   # ---------- Pre-commit hooks (format, lint, clang-tidy) ----------
   pre-commit:
+    needs: [diff-refs]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -53,7 +93,7 @@ jobs:
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.0
         with:
-          extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.event.pull_request.head.sha }}
+          extra_args: --from-ref ${{ needs['diff-refs'].outputs.base_sha }} --to-ref ${{ needs['diff-refs'].outputs.head_sha }}
 
   # ---------- Packaging matrix: 5 install paths × 4 entry points, on macOS + Ubuntu ----------
   # Smoke-checks that every supported install path exposes the four user entry points.
@@ -826,6 +866,7 @@ jobs:
 
   # ---------- Detect platform-specific changes (runs on GitHub server) ----------
   detect-changes:
+    needs: [diff-refs]
     runs-on: ubuntu-latest
     outputs:
       a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
@@ -839,7 +880,7 @@ jobs:
       - name: Check file changes
         id: check
         run: |
-          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
+          FILES=$(git diff --name-only ${{ needs['diff-refs'].outputs.base_sha }}...${{ needs['diff-refs'].outputs.head_sha }})
 
           NON_CODE='^(docs/|\.docs/|\.claude/|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
 
