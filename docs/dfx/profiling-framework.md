@@ -85,7 +85,8 @@ parameterized on a small per-subsystem trait, and the device side to
               │  Pmu / L2Swimlane / DepGen /      │  Pure static trait (no state)
               │  Dump / Scope modules             │  ─ DataHeader / ReadyEntry / FreeQueue
               └────────────────────────────────┘  ─ kBufferKinds / kReadyQueueSize
-                                                  ─ kHostPoolQueueSize / kHostRecycledQueueSize
+                                                  ─ kHostReadyQueueSize / kHostPoolQueueSize
+                                                  ─ kHostRecycledQueueSize
                                                   ─ resolve_entry / for_each_instance
 
   AICPU device side:
@@ -218,6 +219,7 @@ the required members are:
 | `using DataHeader / ReadyEntry / ReadyBufferInfo / FreeQueue` | Layout types |
 | `kBufferKinds` | Number of buffer kinds inside each recycled shard |
 | `kReadyQueueSize`, `kSlotCount` | AICPU ready queue / free queue depth |
+| `kHostReadyQueueSize` | Optional mgmt-to-collector ready ring depth; defaults to `kReadyQueueSize` |
 | `kHostPoolQueueSize` | Optional host done ring depth |
 | `kHostRecycledQueueSize` | Optional per-kind, per-shard recycled ring depth; defaults to `kHostPoolQueueSize` |
 | `kSubsystemName` | Tag used in framework log lines |

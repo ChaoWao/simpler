@@ -153,12 +153,12 @@ struct ProfilerModuleMaxCollectorThreads<Module, std::void_t<decltype(Module::kM
 
 template <typename Module, typename = void>
 struct ProfilerModuleHostQueueCapacity {
-    static constexpr size_t value = 1024;
+    static constexpr size_t value = Module::kReadyQueueSize > 0 ? Module::kReadyQueueSize : 1;
 };
 
 template <typename Module>
-struct ProfilerModuleHostQueueCapacity<Module, std::void_t<decltype(Module::kReadyQueueSize)>> {
-    static constexpr size_t value = Module::kReadyQueueSize > 0 ? Module::kReadyQueueSize : 1;
+struct ProfilerModuleHostQueueCapacity<Module, std::void_t<decltype(Module::kHostReadyQueueSize)>> {
+    static constexpr size_t value = Module::kHostReadyQueueSize > 0 ? Module::kHostReadyQueueSize : 1;
 };
 
 template <typename Module, typename = void>

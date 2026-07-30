@@ -86,6 +86,7 @@ struct DepGenModule {
     static constexpr int kBufferKinds = 1;
     static constexpr uint32_t kReadyQueueSize = PLATFORM_DEP_GEN_READYQUEUE_SIZE;
     static constexpr uint32_t kHostPoolQueueSize = PLATFORM_MAX_AICPU_THREADS * PLATFORM_DEP_GEN_BUFFERS_PER_INSTANCE;
+    static constexpr uint32_t kHostReadyQueueSize = kHostPoolQueueSize;
     static constexpr uint32_t kSlotCount = PLATFORM_DEP_GEN_SLOT_COUNT;
     static constexpr const char *kSubsystemName = "DepGenModule";
     // The orchestrator is the sole device-side producer (dep_gen_collector_aicpu

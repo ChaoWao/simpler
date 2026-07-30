@@ -38,6 +38,9 @@
  *   // Constants
  *   static constexpr int      kBufferKinds;    // L2Swimlane=4, Dump=1, PMU=1.
  *   static constexpr uint32_t kReadyQueueSize; // Per-thread ready-queue depth.
+ *   // Optional: mgmt-to-collector host ready ring depth.
+ *   // Defaults to kReadyQueueSize.
+ *   static constexpr uint32_t kHostReadyQueueSize;
  *   // Optional: host-side done ring depth (defaults to 1024).
  *   static constexpr uint32_t kHostPoolQueueSize;
  *   // Optional: shard-local per-kind recycled ring depth.

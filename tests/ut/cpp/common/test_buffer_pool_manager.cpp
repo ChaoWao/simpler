@@ -53,6 +53,7 @@ struct SplitCapacityModule {
     static constexpr int kBufferKinds = 1;
     static constexpr int kMaxCollectorThreads = 1;
     static constexpr uint32_t kReadyQueueSize = 2;
+    static constexpr uint32_t kHostReadyQueueSize = 3;
     static constexpr uint32_t kHostPoolQueueSize = 5;
 };
 
@@ -386,13 +387,16 @@ TEST(BufferPoolManagerShardingTest, StartupRecyclePopCanUseAnyShard) {
     EXPECT_EQ(manager.pop_recycled_for_startup(/*kind=*/0), nullptr);
 }
 
-TEST(BufferPoolManagerShardingTest, PoolQueuesUseCapacityIndependentFromReadyQueue) {
+TEST(BufferPoolManagerShardingTest, HostQueuesUseIndependentCapacities) {
     using Manager = profiling_common::BufferPoolManager<SplitCapacityModule>;
 
+    EXPECT_EQ(Manager::kHostQueueCapacity, SplitCapacityModule::kHostReadyQueueSize);
+
     Manager manager;
-    EXPECT_TRUE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1000), 0}, 0));
-    EXPECT_TRUE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1001), 1}, 0));
-    EXPECT_FALSE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1002), 2}, 0));
+    for (uintptr_t i = 0; i < SplitCapacityModule::kHostReadyQueueSize; i++) {
+        EXPECT_TRUE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1000 + i), static_cast<uint32_t>(i)}, 0)) << i;
+    }
+    EXPECT_FALSE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1999), 99}, 0));
 
     for (uintptr_t i = 0; i < SplitCapacityModule::kHostPoolQueueSize; i++) {
         EXPECT_TRUE(manager.push_recycled(/*kind=*/0, ptr(0x2000 + i), 0)) << i;

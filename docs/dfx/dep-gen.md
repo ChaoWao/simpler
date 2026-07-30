@@ -48,9 +48,11 @@ inputs to each submit are captured and the graph is reconstructed afterwards.
 - **In-memory drain.** The host `DepGenCollector` (background mgmt
   thread, ProfilerBase machinery shared with PMU / L2 Perf / Tensor
   Dump) drains the ring into a `std::vector<DepGenRecord>` resident on
-  the runner. No `submit_trace.bin` lands on disk — the host already
-  has the records once the run ends, and going through the filesystem
-  would just be extra I/O.
+  the runner. Its host hand-off queue is sized independently from the
+  smaller device ready queue so a stop-time burst of flushed buffers can
+  drain without losing the tail. No `submit_trace.bin` lands on disk —
+  the host already has the records once the run ends, and going through
+  the filesystem would just be extra I/O.
 - **Host replay (dual-pass, self-checking).** After `reconcile_counters()`
   confirms a clean trace (no drops, no leftovers),
   `dep_gen_replay_emit_deps_json` runs every record back through *two*
