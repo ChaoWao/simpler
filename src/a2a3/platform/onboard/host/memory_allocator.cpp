@@ -34,7 +34,8 @@ void *MemoryAllocator::alloc(size_t size) {
     }
 
     std::scoped_lock<std::mutex> lk(mu_);
-    ptr_set_.insert(ptr);
+    ptr_size_map_[ptr] = size;
+    committed_bytes_ += size;
     return ptr;
 }
 
@@ -44,8 +45,8 @@ int MemoryAllocator::free(void *ptr) {
     }
 
     std::scoped_lock<std::mutex> lk(mu_);
-    auto it = ptr_set_.find(ptr);
-    if (it == ptr_set_.end()) {
+    auto it = ptr_size_map_.find(ptr);
+    if (it == ptr_size_map_.end()) {
         return 0;
     }
 
@@ -56,20 +57,22 @@ int MemoryAllocator::free(void *ptr) {
         return rc;
     }
 
-    ptr_set_.erase(it);
+    committed_bytes_ -= it->second;
+    ptr_size_map_.erase(it);
     return 0;
 }
 
 int MemoryAllocator::finalize() {
     std::scoped_lock<std::mutex> lk(mu_);
     int last_error = 0;
-    for (void *ptr : ptr_set_) {
-        int rc = rtFree(ptr);
+    for (const auto &kv : ptr_size_map_) {
+        int rc = rtFree(kv.first);
         if (rc != 0) {
             LOG_ERROR("rtFree failed during Finalize: %d", rc);
             last_error = rc;
         }
     }
-    ptr_set_.clear();
+    ptr_size_map_.clear();
+    committed_bytes_ = 0;
     return last_error;
 }

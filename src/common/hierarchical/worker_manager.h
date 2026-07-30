@@ -163,6 +163,9 @@ static constexpr uint64_t CTRL_PY_REGISTER = 10;
 static constexpr uint64_t CTRL_PY_UNREGISTER = 11;
 static constexpr uint64_t CTRL_L3_L2_REGION_CREATE = 16;
 static constexpr uint64_t CTRL_L3_L2_REGION_RELEASE = 17;
+// Query a chip child's MemoryAllocator-committed HBM (bytes). The child writes
+// the value to CTRL_OFF_RESULT; the parent sums across children for L3.
+static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
 
 // Control args reuse the task mailbox region (mutually exclusive with task dispatch):
 //   offset 16: uint64 arg0 (size for malloc/register; ptr for free; dst for copy)
@@ -216,6 +219,7 @@ public:
 
     virtual void shutdown_child() {}
     virtual uint64_t control_malloc(size_t size);
+    virtual uint64_t control_committed_device_memory();
     virtual void control_free(uint64_t ptr);
     virtual void control_copy_to(uint64_t dst, uint64_t src, size_t size);
     virtual void control_copy_from(uint64_t dst, uint64_t src, size_t size);
@@ -273,6 +277,7 @@ public:
 
     void shutdown_child() override;
     uint64_t control_malloc(size_t size) override;
+    uint64_t control_committed_device_memory() override;
     void control_free(uint64_t ptr) override;
     void control_copy_to(uint64_t dst, uint64_t src, size_t size) override;
     void control_copy_from(uint64_t dst, uint64_t src, size_t size) override;
@@ -405,6 +410,7 @@ public:
     // `mailbox_mu_` so a control request issued mid-dispatch waits for
     // TASK_DONE before claiming the mailbox.
     uint64_t control_malloc(size_t size);
+    uint64_t control_committed_device_memory();
     void control_free(uint64_t ptr);
     void control_copy_to(uint64_t dst, uint64_t src, size_t size);
     void control_copy_from(uint64_t dst, uint64_t src, size_t size);

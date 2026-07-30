@@ -31,7 +31,7 @@
 
 #include <cstddef>
 #include <mutex>
-#include <set>
+#include <unordered_map>
 
 /**
  * MemoryAllocator class for managing memory allocations
@@ -98,12 +98,27 @@ public:
      */
     size_t get_allocation_count() const {
         std::scoped_lock lk(mu_);
-        return ptr_set_.size();
+        return ptr_size_map_.size();
+    }
+
+    /**
+     * Get total bytes currently committed by this allocator
+     *
+     * Sums the requested sizes of all currently-tracked allocations. Used by
+     * downstream runtimes to account for device HBM this process has reserved
+     * (which may be invisible to aclrtGetMemInfo) when sizing their own caches.
+     *
+     * @return Sum of the requested sizes of all currently-tracked allocations
+     */
+    size_t committed_bytes() const {
+        std::scoped_lock lk(mu_);
+        return committed_bytes_;
     }
 
 private:
     mutable std::mutex mu_;
-    std::set<void *> ptr_set_;
+    std::unordered_map<void *, size_t> ptr_size_map_;
+    size_t committed_bytes_ = 0;
 };
 
 #endif  // SRC_COMMON_PLATFORM_INCLUDE_HOST_MEMORY_ALLOCATOR_H_

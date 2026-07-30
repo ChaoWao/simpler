@@ -429,6 +429,19 @@ target_include_directories(test_buffer_pool_manager PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/log
     ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
 )
+# MemoryAllocator byte-counter test: links the SIM impl (std::malloc/free,
+# no CANN) the same way test_buffer_pool_manager pulls unified_log.
+add_common_utils_test(test_memory_allocator common/test_memory_allocator.cpp)
+target_sources(test_memory_allocator PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/host/memory_allocator.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/host_log.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/unified_log_host.cpp
+)
+target_include_directories(test_memory_allocator PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+)
 add_common_utils_test(test_profiler_base common/test_profiler_base.cpp)
 target_sources(test_profiler_base PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/log/host_log.cpp

@@ -111,6 +111,7 @@ void ChipWorker::init(
         destroy_device_context_fn_ = load_symbol<DestroyDeviceContextFn>(handle, "destroy_device_context");
         device_malloc_ctx_fn_ = load_symbol<DeviceMallocCtxFn>(handle, "device_malloc_ctx");
         device_free_ctx_fn_ = load_symbol<DeviceFreeCtxFn>(handle, "device_free_ctx");
+        device_committed_memory_fn_ = load_symbol<GetCommittedDeviceMemoryFn>(handle, "committed_device_memory_ctx");
         copy_to_device_ctx_fn_ = load_symbol<CopyToDeviceCtxFn>(handle, "copy_to_device_ctx");
         copy_from_device_ctx_fn_ = load_symbol<CopyFromDeviceCtxFn>(handle, "copy_from_device_ctx");
         get_runtime_size_fn_ = load_symbol<GetRuntimeSizeFn>(handle, "get_runtime_size");
@@ -235,6 +236,7 @@ void ChipWorker::init(
         destroy_device_context_fn_ = nullptr;
         device_malloc_ctx_fn_ = nullptr;
         device_free_ctx_fn_ = nullptr;
+        device_committed_memory_fn_ = nullptr;
         copy_to_device_ctx_fn_ = nullptr;
         copy_from_device_ctx_fn_ = nullptr;
         get_runtime_size_fn_ = nullptr;
@@ -280,6 +282,7 @@ void ChipWorker::init(
         destroy_device_context_fn_ = nullptr;
         device_malloc_ctx_fn_ = nullptr;
         device_free_ctx_fn_ = nullptr;
+        device_committed_memory_fn_ = nullptr;
         copy_to_device_ctx_fn_ = nullptr;
         copy_from_device_ctx_fn_ = nullptr;
         get_runtime_size_fn_ = nullptr;
@@ -356,6 +359,7 @@ void ChipWorker::finalize() {
     destroy_device_context_fn_ = nullptr;
     device_malloc_ctx_fn_ = nullptr;
     device_free_ctx_fn_ = nullptr;
+    device_committed_memory_fn_ = nullptr;
     copy_to_device_ctx_fn_ = nullptr;
     copy_from_device_ctx_fn_ = nullptr;
     get_runtime_size_fn_ = nullptr;
@@ -541,6 +545,13 @@ size_t ChipWorker::aicpu_dlopen_count() const {
         return 0;
     }
     return get_aicpu_dlopen_count_fn_(device_ctx_);
+}
+
+size_t ChipWorker::committed_device_memory() const {
+    if (!initialized_) {
+        return 0;
+    }
+    return device_committed_memory_fn_(device_ctx_);
 }
 
 size_t ChipWorker::host_dlopen_count() const {

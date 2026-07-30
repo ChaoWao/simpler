@@ -88,6 +88,7 @@ public:
     // can be called from the orch thread while the target worker is
     // running a task (MemoryAllocator is mutex-protected).
     uint64_t malloc(int worker_id, size_t size);
+    uint64_t committed_device_memory(int worker_id);
     void free(int worker_id, uint64_t ptr);
     void copy_to(int worker_id, uint64_t dst, uint64_t src, size_t size);
     void copy_from(int worker_id, uint64_t dst, uint64_t src, size_t size);

@@ -312,6 +312,7 @@ _BLOB_TENSOR_STRIDE = 128
 _BLOB_HEADER_BYTES = 8
 _CTRL_L3_L2_REGION_CREATE = 16
 _CTRL_L3_L2_REGION_RELEASE = 17
+_CTRL_COMMITTED_DEVICE_MEMORY = 18
 
 # Layout of the CTRL_COMM_INIT request shm.
 _COMM_INIT_HEADER = struct.Struct("<II")  # rank (u32), nranks (u32)
@@ -1679,6 +1680,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_l3_l2_region_create(cw, buf, chip_platform, l3_l2_region_store)
             elif sub_cmd == _CTRL_L3_L2_REGION_RELEASE:
                 _handle_ctrl_l3_l2_region_release(buf, l3_l2_region_store)
+            elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
+                struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
             else:
                 raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
         except Exception as e:  # noqa: BLE001
@@ -5802,6 +5805,26 @@ class Worker:
             self._check_chip_worker_id(worker_id)
             assert self._orch is not None
             self._orch.free(worker_id, ptr)
+
+    def committed_device_memory(self, worker_id: int = 0) -> int:
+        """Total device HBM (bytes) committed by chip worker *worker_id*'s
+        ``MemoryAllocator`` (tensors + pooled arenas + runtime buffers; excludes
+        HCCL/VMM comm windows). Useful for downstream
+        runtimes to subtract simpler's own HBM from their cache budget.
+
+        Level 2 returns the in-process chip worker's committed bytes directly;
+        level 3 forwards a ``CTRL_COMMITTED_DEVICE_MEMORY`` query to the forked
+        chip child *worker_id* (sum across worker_ids for a multi-chip total).
+        """
+        with self._operation_lease("committed_device_memory"):
+            if self.level == 2:
+                assert self._chip_worker is not None
+                return int(self._chip_worker.committed_device_memory)
+            if not self._chip_shms:
+                raise NotImplementedError("committed_device_memory requires at least one forked chip worker")
+            self._check_chip_worker_id(worker_id)
+            assert self._orch is not None
+            return int(self._orch.committed_device_memory(worker_id))
 
     def copy_to(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
         """Copy *size* bytes from host *src* to chip worker *dst*."""

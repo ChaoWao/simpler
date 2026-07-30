@@ -119,6 +119,8 @@ public:
     int attach_current_thread(int device_id);
 
     void *allocate_tensor(size_t bytes);
+    /** Total device memory (bytes) currently committed by this runner's MemoryAllocator. */
+    size_t committed_device_memory() const { return mem_alloc_.committed_bytes(); }
     void free_tensor(void *dev_ptr);
     int copy_to_device(void *dev_ptr, const void *host_ptr, size_t bytes);
     int copy_from_device(void *host_ptr, const void *dev_ptr, size_t bytes);

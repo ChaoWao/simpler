@@ -494,6 +494,10 @@ class Orchestrator:
             self._worker._child_prov_record_malloc(wid, ptr, sz)
             return ptr
 
+    def committed_device_memory(self, worker_id: int) -> int:
+        """Total device HBM (bytes) committed by next-level worker *worker_id*'s ``MemoryAllocator``."""
+        return int(self._o.committed_device_memory(int(worker_id)))
+
     def free(self, worker_id: int, ptr: int) -> None:
         """Free memory on next-level worker *worker_id*."""
         wid, p = int(worker_id), int(ptr)

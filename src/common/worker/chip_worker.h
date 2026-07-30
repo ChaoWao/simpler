@@ -176,6 +176,7 @@ public:
     /// Retained temporary-buffer address the bound runner holds for one
     /// pipeline slot, or 0 while that slot holds none.
     uint64_t retained_temp_addr(uint32_t slot_id) const;
+    size_t committed_device_memory() const;
 
 private:
     using CreateDeviceContextFn = void *(*)();
@@ -185,6 +186,7 @@ private:
     using CopyToDeviceCtxFn = int (*)(void *, void *, const void *, size_t);
     using CopyFromDeviceCtxFn = int (*)(void *, void *, const void *, size_t);
     using GetRuntimeSizeFn = size_t (*)();
+    using GetCommittedDeviceMemoryFn = size_t (*)(void *);
     // From host_runtime.so. Single platform-side init that does (a) thread
     // attach + device-id record, (b) executor binary takeover, (c) onboard
     // CANN dlog sync. Reads the current log level off HostLogger itself.
@@ -242,6 +244,7 @@ private:
     CopyToDeviceCtxFn copy_to_device_ctx_fn_ = nullptr;
     CopyFromDeviceCtxFn copy_from_device_ctx_fn_ = nullptr;
     GetRuntimeSizeFn get_runtime_size_fn_ = nullptr;
+    GetCommittedDeviceMemoryFn device_committed_memory_fn_ = nullptr;
     SimplerInitFn simpler_init_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;
