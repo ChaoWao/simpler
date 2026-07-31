@@ -131,6 +131,11 @@ void SchedulerContext::complete_slot_task(
                     SPIN_WAIT_HINT();
                 }
             }
+            // Re-clear for the next reuse of this (core, buf) slot. Done here — on
+            // the hot cache line we just read — instead of on every dispatch, since
+            // only a deferred task (count > 0) ever dirties it. error_code needs no
+            // reset: a non-NONE code aborted the run above.
+            deferred_slab->count = 0;
         }
     }
 

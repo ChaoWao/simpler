@@ -21,9 +21,10 @@
  * initialized during scheduler cold start from core topology and the resident
  * per-device config, then remains stable for that scheduler instance.
  *
- * LocalContext (s_block_idx, s_block_num) and args[] are rebuilt by build_payload()
- * before each dispatch.  Both context struct pointers are written into the
- * args[] suffix on every dispatch (since args[] is rebuilt entirely each time).
+ * The scheduler prefills the AsyncCtx slab pointers and capacity, along with
+ * both context pointers in the args[] suffix, during cold initialization.
+ * build_payload() updates only the task-varying LocalContext fields and
+ * args[0..num_args) before each dispatch.
  *
  * AICore caches a pointer to its per-core slot at startup and reads from
  * it on each dispatch.  The struct is cache-line aligned to avoid false
@@ -86,15 +87,15 @@ struct alignas(64) PTO2DispatchPayload {
     // === Cache line 0 (64B): control block, the only line written per dispatch ===
     // function_bin_addr, local_context.{s_block_idx,s_block_num,async_ctx.task_token}
     // and src_payload are the per-dispatch writes; async_ctx's slab pointers +
-    // capacity are cold (prefilled once at init / rebuilt per a5 dispatch) but
-    // ride this hot line for free.
+    // capacity are cold (prefilled once at init) but ride this hot line for free.
     // Sized to exactly 64B so both dispatch paths write one control line: the
     // ready path (src_payload = 0) then also fills args[0..num_args); the gated
     // path (src_payload = &PTO2TaskPayload) leaves args[] to the idle AICore.
     uint64_t function_bin_addr; /**< Kernel entry address in GM (set by Scheduler). */
 
     /** Per-dispatch context: s_block_idx/s_block_num (hot) + async_ctx (task_token hot,
-     *  slab pointers + capacity). args[SPMD_LOCAL_CONTEXT_INDEX] points here. */
+     *  slab pointers + capacity prefilled once at init). args[SPMD_LOCAL_CONTEXT_INDEX]
+     *  points here. */
     LocalContext local_context;
 
     /** Early-dispatch gate AND source pointer, folded into one field. 0 = ready:
@@ -107,9 +108,9 @@ struct alignas(64) PTO2DispatchPayload {
 
     // === Cache lines 1..7: kernel argument vector ===
     /** [0..num_args) = GM tensor pointers + scalar values; [SPMD_LOCAL_CONTEXT_INDEX]
-     *  = &local_context, [SPMD_GLOBAL_CONTEXT_INDEX] = &global_context (both written
-     *  each dispatch on a5). On the gated path the AICPU leaves [0..num_args)
-     *  unwritten and the idle AICore fills them from src_payload during its gate wait. */
+     *  = &local_context, [SPMD_GLOBAL_CONTEXT_INDEX] = &global_context (both prefilled
+     *  once at init). On the gated path the AICPU leaves [0..num_args) unwritten and
+     *  the idle AICore fills them from src_payload during its gate wait. */
     uint64_t args[PTO2_DISPATCH_MAX_ARGS];
 
     /** Per-core global context: sub_block_id (AIV lane identity) plus optional

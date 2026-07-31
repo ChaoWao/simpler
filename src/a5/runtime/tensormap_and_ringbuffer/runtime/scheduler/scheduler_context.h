@@ -250,7 +250,7 @@ private:
 
     void build_payload(
         PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
-        const AsyncCtx &async_ctx, int32_t block_idx, bool force_gate = false
+        int32_t block_idx, bool force_gate = false
     );
 
     // Batched-dispatch primitives. prepare_* builds the payload and per-core

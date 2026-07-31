@@ -927,8 +927,6 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
 
     // Per-cluster GlobalContext sub_block_id (mirrors post_handshake_init) for
     // this thread's owned cores only — a thread only ever dispatches to its own.
-    // The per-dispatch AsyncCtx / deferred-slab fields are written by build_payload
-    // at dispatch time (see deinit()'s note), so there is no per-core prefill here.
     for (int32_t c = 0; c < tracker.get_cluster_count(); c++) {
         int32_t cluster_offset = c * 3;
         int32_t aiv0_id = tracker.get_core_id_by_offset(tracker.get_aiv0_core_offset(cluster_offset));
@@ -937,14 +935,28 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
         payload_per_core_[aiv0_id][1].global_context.sub_block_id = 0;
         payload_per_core_[aiv1_id][0].global_context.sub_block_id = 1;
         payload_per_core_[aiv1_id][1].global_context.sub_block_id = 1;
-        // dma_workspace is a device constant: prefill it once per owned core
-        // (all cores in the cluster, both buffers), never on the dispatch path.
+    }
+
+    // Per-dispatch AsyncCtx constant prefill + one-time slab clear for owned cores
+    // (mirrors post_handshake_init's all-core loop, restricted to this thread's).
+    for (int32_t c = 0; c < tracker.get_cluster_count(); c++) {
         for (int32_t sub = 0; sub < 3; sub++) {
-            int32_t core_id = tracker.get_core_id_by_offset(cluster_offset + sub);
+            int32_t core_id = tracker.get_core_id_by_offset(c * 3 + sub);
             for (int32_t buf = 0; buf < 2; buf++) {
+                PTO2DispatchPayload &dp = payload_per_core_[core_id][buf];
+                AsyncCtx &ac = dp.local_context.async_ctx;
+                volatile DeferredCompletionSlab *slab = &deferred_slab_per_core_[core_id][buf];
+                ac.completion_count = &slab->count;
+                ac.completion_error_code = &slab->error_code;
+                ac.completion_entries = &slab->entries[0];
+                ac.completion_capacity = MAX_COMPLETIONS_PER_TASK;
+                slab->count = 0;
+                slab->error_code = PTO2_ERROR_NONE;
                 for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
-                    payload_per_core_[core_id][buf].global_context.dma_workspace[k] = get_dma_workspace_addr(k);
+                    dp.global_context.dma_workspace[k] = get_dma_workspace_addr(k);
                 }
+                dp.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.local_context);
+                dp.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.global_context);
             }
         }
     }
@@ -1216,13 +1228,6 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // Device orchestration: the orchestrator thread flips this when the graph is built.
     orchestrator_done_.store(false, std::memory_order_release);
 
-    // prepare_subtask_to_core fully writes a per-core payload / deferred-slab slot
-    // before the AICore is told to read it: build_payload sets
-    // function_bin_addr/args/local_context/not_ready, and deferred_slab->count/
-    // error_code are reset inline on every dispatch. An AICore reads a slot only
-    // after a dispatch targets it (DATA_MAIN_BASE), so a prior round's bytes in an
-    // untouched slot are never observed.
-
     // Initialize per-core GlobalContext (sub_block_id) based on cluster position.
     // This is done once at startup and never modified afterwards.
     for (int32_t t = 0; t < sched_thread_num_; t++) {
@@ -1235,16 +1240,38 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
             payload_per_core_[aiv0_id][1].global_context.sub_block_id = 0;
             payload_per_core_[aiv1_id][0].global_context.sub_block_id = 1;
             payload_per_core_[aiv1_id][1].global_context.sub_block_id = 1;
-            // dma_workspace is a device constant: prefill it once per core here,
-            // never on the dispatch path.
-            for (int32_t sub = 0; sub < 3; sub++) {
-                int32_t core_id = tracker.get_core_id_by_offset(cluster_offset + sub);
-                for (int32_t buf = 0; buf < 2; buf++) {
-                    for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
-                        payload_per_core_[core_id][buf].global_context.dma_workspace[k] = get_dma_workspace_addr(k);
-                    }
-                }
+        }
+    }
+
+    // Prefill the per-dispatch AsyncCtx constant fields once. Of AsyncCtx's five
+    // fields, four are constant for a given (core, buf_idx): the three pointers
+    // target the fixed deferred_slab_per_core_[core][buf] members, and capacity is
+    // MAX_COMPLETIONS_PER_TASK. Only task_token varies per dispatch, so build_payload
+    // writes just that; these constants survive across dispatches because the
+    // payload buffer is never zeroed between them.
+    // The two context-pointer args are also per-(core, buf_idx) constants — they
+    // target this buffer's own local_context / global_context — so prefill them
+    // here too and drop them from the per-dispatch build_payload writes. This keeps
+    // the per-dispatch write footprint on the CL0 control block only (args[48]/[49]
+    // live on a later line).
+    for (int32_t core_id = 0; core_id < RUNTIME_MAX_WORKER; core_id++) {
+        for (int32_t buf = 0; buf < 2; buf++) {
+            PTO2DispatchPayload &dp = payload_per_core_[core_id][buf];
+            AsyncCtx &ac = dp.local_context.async_ctx;
+            volatile DeferredCompletionSlab *slab = &deferred_slab_per_core_[core_id][buf];
+            ac.completion_count = &slab->count;
+            ac.completion_error_code = &slab->error_code;
+            ac.completion_entries = &slab->entries[0];
+            ac.completion_capacity = MAX_COMPLETIONS_PER_TASK;
+            // Clear the slab once here; thereafter only the completion path re-clears
+            // count (and only when a deferred task dirtied it), never per dispatch.
+            slab->count = 0;
+            slab->error_code = PTO2_ERROR_NONE;
+            for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
+                dp.global_context.dma_workspace[k] = get_dma_workspace_addr(k);
             }
+            dp.args[PAYLOAD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.local_context);
+            dp.args[PAYLOAD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&dp.global_context);
         }
     }
 
@@ -1262,12 +1289,11 @@ void SchedulerContext::deinit() {
     }
 
     // No per-core memset of payload_per_core_ / deferred_slab_per_core_ here
-    // (~300 KB across all cores). Both are fully re-initialized at dispatch
-    // before they can be read: dispatch_task sets deferred_slab->count = 0 /
-    // error_code = NONE and build_payload() overwrites every payload field
-    // (function addr, args[], contexts, not_ready) on the exact [core][buf_idx]
-    // about to run. The consumer side cannot reach a stale slot either: the
-    // drain only services a core's running_reg_task_id, and the loop above
+    // (~300 KB across all cores). The next initialization rewires every owned
+    // core's context pointers and clears both slabs before dispatch begins.
+    // build_payload() overwrites the task-varying fields on the exact
+    // [core][buf_idx] about to run. The consumer side cannot reach a stale slot:
+    // the drain only services a core's running_reg_task_id, and the loop above
     // already reset every core_exec_states_[].running/pending_reg_task_id to
     // AICPU_TASK_INVALID — so no FIN for an undispatched slot is processed, and
     // the count-gated consumer never reads entries[] past the fresh count.
