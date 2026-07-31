@@ -60,6 +60,7 @@ is wrong (see §1) — fix that instead of widening the gate.
 | non-code | `non_code_only` | can this diff change what the code does at all? |
 | architecture | `a2a3_changed` / `a5_changed` | which silicon can it reach? |
 | test category | `st_affected` / `ut_affected` | which suite can it break? |
+| example corpus | `examples_only` | can it reach a job that builds the product and runs a fixed payload? |
 
 They are layered, not redundant. **Every arch and category flag subtracts
 `NON_CODE` before deciding**, so a non-code-only change already makes all four
@@ -71,9 +72,18 @@ A job composes the axes it is actually subject to:
 | Job family | Gate |
 | ---------- | ---- |
 | `st-sim-*`, `st-onboard-*` | `<arch>_changed && st_affected` |
-| `profiling-flags-smoke` | `(a2a3_changed \|\| a5_changed) && st_affected` |
+| `profiling-flags-smoke` | `(a2a3_changed \|\| a5_changed) && !examples_only` |
 | `ut`, `ut-a2a3`, `ut-a5` | `non_code_only != true && ut_affected` |
-| `packaging-matrix` | `non_code_only != true` |
+| `packaging-matrix` | `non_code_only != true && !examples_only` |
+
+`packaging-matrix` and `profiling-flags-smoke` build and install the product and
+then exercise it with a **fixed, tiny payload** — one entry-point script and one
+`vector_example` respectively. They are the only jobs that consume neither test
+suite as a corpus, which is why they take the example axis rather than the
+category one. Note what stays in: `tests/` still triggers packaging, because
+`tools/verify_packaging.sh` runs a `tests/st/` file as its entry-point smoke and
+`tests/` is in the sdist `include`. Only `examples/` is provably absent from
+both jobs.
 
 The UT jobs stay off the arch axis on purpose — unit tests cover shared
 contracts, so the cost of a falsely-skipped regression outweighs the minutes.
