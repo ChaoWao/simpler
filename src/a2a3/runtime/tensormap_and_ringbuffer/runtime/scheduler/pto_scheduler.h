@@ -680,10 +680,7 @@ struct PTO2SchedulerState {
     }
 
     // Scope-end release: sets bit31 (PTO2_FANOUT_SCOPE_BIT) instead of bumping a
-    // consumer ref. Called exactly once per task from on_scope_end. Keeping it a
-    // distinct add lets the deadlock detector tell "waiting only on scope_end"
-    // (head COMPLETED, refcount == fanout_count & ~SCOPE_BIT) apart from
-    // "waiting on a consumer".
+    // consumer ref. Called exactly once per task from on_scope_end.
     void release_producer_scope(PTO2TaskSlotState &slot_state) {
         slot_state.fanout_refcount.fetch_add(PTO2_FANOUT_SCOPE_BIT, std::memory_order_acq_rel);
         check_and_handle_consumed(slot_state);

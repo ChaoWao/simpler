@@ -317,7 +317,7 @@ inline PTO2TaskDescriptor *ring_task_descriptors_addr(
 }
 
 // Device address of ring `ring_id`'s slot_states array (used by the allocator's
-// deadlock detector to inspect the head task's state/fanout).
+// deadlock detector to identify the head task's slot).
 inline PTO2TaskSlotState *
 ring_slot_states_addr(void *sm_dev_base, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH], int ring_id) noexcept {
     return reinterpret_cast<PTO2TaskSlotState *>(

@@ -2,11 +2,20 @@
 
 ← [Device Error Codes](../device-error-codes.md)
 
-SCOPE_DEADLOCK, HEAP_RING_DEADLOCK and DEP_POOL_OVERFLOW all say the same thing —
-"some resource ran out" — without saying *which* resource or *which* scope. Do not
-guess at the ring sizes. Turn on `scope_stats`, which records the high-water mark of
-all four resources (task-window slots, heap bytes, dep-pool entries, tensormap
-entries) per `PTO2_SCOPE`:
+SCOPE_DEADLOCK, HEAP_RING_DEADLOCK and DEP_POOL_OVERFLOW all mean that an
+allocation could not obtain enough space. The adjacent device-log line determines
+how strong that diagnosis is:
+
+- `Provable head-of-line deadlock` is a structural proof: in TRB the reclaim head
+  is the oldest task owned by an open scope on that ring, and the blocked
+  orchestrator cannot end the scope that pins it.
+- `No reclaim progress for ~500 ms` or `cannot reclaim space after ~500 ms` is
+  the backstop. It proves that reclaim remained stalled, but not whether the root
+  cause is undersizing, a stuck consumer, or a stalled scheduler.
+
+Do not guess at the ring sizes from the error code alone. Turn on `scope_stats`,
+which records the high-water mark of all four resources (task-window slots, heap
+bytes, dep-pool entries, tensormap entries) per `PTO2_SCOPE`:
 
 ```python
 cfg = CallConfig()

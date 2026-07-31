@@ -425,6 +425,14 @@ void PTO2OrchestratorState::wire_fanin_task(PTO2TaskSlotState &slot_state, int32
     }
 }
 
+static PTO2TaskSlotState *oldest_open_task_on_current_ring(const PTO2OrchestratorState *orch) {
+    // Scope depth maps directly to a ring until the deepest ring, where all
+    // further nested scopes share that ring. Its shallowest open scope begin
+    // therefore marks the oldest task pinned by any open scope on this ring.
+    int32_t begin = orch->scope_begins[orch->current_ring_id()];
+    return begin < orch->scope_tasks_size ? orch->scope_tasks[begin] : nullptr;
+}
+
 static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, PTO2TaskSlotState &slot_state, int32_t wfanin) {
     PTO2SchedulerState *sched = orch->scheduler;
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
@@ -435,7 +443,7 @@ static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, PTO2TaskSlotS
     // heap/task-window allocator uses (all three share last_task_alive), latches
     // PTO2_ERROR_DEP_POOL_OVERFLOW, and emits the structured report. A false
     // return also covers a fatal already latched elsewhere.
-    if (!rss.dep_pool.ensure_space(*rss.ring, wfanin)) {
+    if (!rss.dep_pool.ensure_space(*rss.ring, wfanin, oldest_open_task_on_current_ring(orch))) {
         orch->fatal = true;
         return false;
     }
@@ -525,7 +533,7 @@ static bool prepare_task(
         return false;
     }
 
-    out->alloc_result = allocator.alloc(total_output_size);
+    out->alloc_result = allocator.alloc(total_output_size, oldest_open_task_on_current_ring(orch));
     if (out->alloc_result.failed()) {
         orch_mark_fatal(orch, PTO2_ERROR_HEAP_RING_DEADLOCK);
         return false;

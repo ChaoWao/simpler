@@ -108,7 +108,14 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     ASSERT_TRUE(first.task_id().is_valid());
 
     auto &ring = sm_handle->header->rings[1];
-    ring.fc.last_task_alive.store(1, std::memory_order_release);
+    auto &first_slot = ring.get_slot_state_by_task_id(static_cast<int32_t>(first.task_id().local()));
+    orch.end_scope();
+    first_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    sched.check_and_handle_consumed(first_slot);
+    ASSERT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 1);
+
+    orch.begin_scope();
+    ASSERT_EQ(orch.current_ring_id(), 1);
 
     L0TaskArgs wrap_args;
     add_runtime_output_arg(wrap_args, create_infos, 1);  // wraps, packed to 1024 bytes
@@ -122,11 +129,6 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     ASSERT_EQ(orch.rings[1].task_allocator.heap_used_bytes(), 3072ULL);
     ASSERT_EQ(orch.rings[1].task_allocator.heap_available(), 1024ULL);
 
-    auto &head = ring.get_slot_state_by_task_id(static_cast<int32_t>(wrapped.task_id().local()));
-    head.fanout_count = PTO2_FANOUT_SCOPE_BIT;
-    head.fanout_refcount.store(0, std::memory_order_release);
-    head.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
-
     L0TaskArgs blocked_args;
     add_runtime_output_arg(blocked_args, create_infos, 1);
     testing::internal::CaptureStderr();
@@ -137,10 +139,76 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     EXPECT_TRUE(orch.fatal);
     EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_HEAP_RING_DEADLOCK);
     EXPECT_NE(log.find("FATAL: Task Allocator Deadlock - Heap Exhausted! ring=1"), std::string::npos);
+    EXPECT_NE(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
     EXPECT_NE(log.find("Heap ring 1:"), std::string::npos);
     EXPECT_NE(log.find("used=3072"), std::string::npos);
     EXPECT_NE(log.find("available=1024"), std::string::npos);
     EXPECT_EQ(log.find("PTO2_RING_HEAP=<pow2>"), std::string::npos);
+}
+
+TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopesShareRing) {
+    std::vector<TensorCreateInfo> create_infos;
+    create_infos.reserve(2);
+
+    for (int32_t depth = 0; depth < PTO2_MAX_RING_DEPTH; ++depth) {
+        orch.begin_scope();
+    }
+    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+
+    L0TaskArgs parent_args;
+    add_runtime_output_arg(parent_args, create_infos, 1024);
+    TaskOutputTensors parent = orch.submit_dummy_task(parent_args);
+    ASSERT_TRUE(parent.task_id().is_valid());
+
+    orch.begin_scope();
+    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+
+    L0TaskArgs child_args;
+    add_runtime_output_arg(child_args, create_infos, 1);
+    testing::internal::CaptureStderr();
+    TaskOutputTensors child = orch.submit_dummy_task(child_args);
+    std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(child.task_id().is_valid());
+    EXPECT_TRUE(orch.fatal);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_NE(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
+}
+
+TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRing) {
+    std::vector<TensorCreateInfo> create_infos;
+    create_infos.reserve(3);
+
+    for (int32_t depth = 0; depth < PTO2_MAX_RING_DEPTH; ++depth) {
+        orch.begin_scope();
+    }
+    orch.begin_scope();
+    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+
+    L0TaskArgs child_args;
+    add_runtime_output_arg(child_args, create_infos, 768);
+    TaskOutputTensors child = orch.submit_dummy_task(child_args);
+    ASSERT_TRUE(child.task_id().is_valid());
+
+    orch.end_scope();
+    ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
+
+    L0TaskArgs parent_args;
+    add_runtime_output_arg(parent_args, create_infos, 256);
+    TaskOutputTensors parent = orch.submit_dummy_task(parent_args);
+    ASSERT_TRUE(parent.task_id().is_valid());
+
+    L0TaskArgs blocked_args;
+    add_runtime_output_arg(blocked_args, create_infos, 1);
+    testing::internal::CaptureStderr();
+    TaskOutputTensors blocked = orch.submit_dummy_task(blocked_args);
+    std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(blocked.task_id().is_valid());
+    EXPECT_TRUE(orch.fatal);
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_HEAP_RING_DEADLOCK);
+    EXPECT_NE(log.find("No reclaim progress for ~500 ms"), std::string::npos);
+    EXPECT_EQ(log.find("oldest task owned by an open scope on this ring"), std::string::npos);
 }
 
 // Regression for issue #1188: scope_tasks_cap must equal the real in-flight budget

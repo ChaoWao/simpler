@@ -172,16 +172,19 @@ for the signature that actually fired:**
 
 | device-log signature | mechanism | note |
 | -------------------- | --------- | ---- |
-| `FATAL: Task Allocator Deadlock` / `Provable head-of-line` | ring/heap or dep-pool **deadlock** (alloc can't reclaim) | AICPU detector: 500ms backstop (`PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES`) or immediate structural `head_blocked_on_scope_end`. Real capacity/scope deadlock. |
+| `FATAL: Task Allocator Deadlock` / `FATAL: Dependency Pool Deadlock` / `FATAL: Fanin Spill Pool Deadlock` | an allocator or pool could not reclaim enough space | This header identifies the blocked resource, not the root cause. Classify it using the structural/timeout line that follows. |
+| `Provable head-of-line deadlock` | **proven open-scope structural deadlock** | TRB only: the reclaim head is the oldest task owned by an open scope on that ring. The blocked orchestrator cannot end that scope, so the head cannot become consumed. |
+| `No reclaim progress for ~500 ms` / `cannot reclaim space after ~500 ms` | allocator/pool **reclaim timeout** | The 500ms backstop (`PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES`) exists in HBG and TRB. It proves prolonged lack of reclaim progress, not why progress stopped; check capacity, the dumped head, consumers and scheduler state. |
 | `Timeout (N cycles): producer/consumers ...` | **SPIN** wait on a specific producer/consumer | `pto_runtime2.cpp`. |
 | `HandleTaskTimeout` / `kill aicpu-sd` | **OS op-execute timeout** | STARS/tsdaemon, default 45s (`PLATFORM_OP_EXECUTE_TIMEOUT_US`). **A 45s kill ≠ deadlock** — the op was merely long or stalled. Raise this constant to measure true on-device duration. |
 | `log_stall_diagnostics` (cores idle + tasks `state=WAIT fanin 0/N` + `completed` frozen) | **forward-progress stall** | No dedicated detector — intermittent races (often contention-triggered) land here and are reaped only by the op-timeout above. |
 
-Decisive rule: **if a capacity/deadlock detector did NOT fire (counts of
-`Task Allocator Deadlock` / `Timeout (cycles)` are 0) and only
-`HandleTaskTimeout` did, it is NOT a proven deadlock or capacity bug** — it is a
-long/stalled op. A capacity exhaustion would trip its own detector; silence ⇒
-look for a race or just-too-slow, not "the ring is too small". For the
+Decisive rule: **if no allocator/pool fatal, producer/consumer
+`Timeout (N cycles)`, or scheduler timeout diagnostic fired and only
+`HandleTaskTimeout` did, it is NOT a proven deadlock or capacity bug** — it is
+a long/stalled op.
+A blocked allocator or pool would print its own fatal; silence means look for
+a race or just-too-slow, not "the ring is too small". For the
 host/device timing breakdown of a (completed) run, parse its `[STRACE]` markers
 with `python -m simpler_setup.tools.strace_timing <log> --rounds-table` (see
 `simpler_setup/tools/README.md`); for the per-thread `loops`/`tasks_scheduled`

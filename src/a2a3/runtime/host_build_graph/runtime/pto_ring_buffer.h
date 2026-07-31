@@ -179,15 +179,11 @@ public:
                 if (error_code_ptr_ != nullptr && error_code_ptr_->load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
                     return {-1, -1, nullptr, nullptr};
                 }
-                // Reclaim watermark is stuck. Run the deadlock checks only once
-                // per 1024 spins: get_sys_cnt_aicpu() is an MMIO read and
-                // head_blocked_on_scope_end() walks the head slot, neither of
-                // which needs to fire on every hot spin (1024 spins is far below
-                // the wall-clock timeout, so detection latency is unaffected).
-                // (1) Structural, immediate: if the head task is COMPLETED with
-                // every consumer released but its scope still open, only
-                // scope_end can free it and a blocked orchestrator can never
-                // call it -> provable deadlock now.
+                // Reclaim watermark is stuck. Run the cold checks only once per
+                // 1024 spins. The structural hook is intentionally inert for
+                // host_build_graph because tasks cannot complete during graph
+                // construction; this runtime therefore relies on the wall-clock
+                // backstop below.
                 if (head_blocked_on_scope_end(last_alive)) {
                     report_deadlock(output_size, blocked_on_heap, /*scope_gated=*/true);
                     return {-1, -1, nullptr, nullptr};
