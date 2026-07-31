@@ -41,6 +41,8 @@ constexpr int32_t kInfoCpuTopo = 59;
 constexpr unsigned int kDsmiSocInfoMainCmd = 14;       // DSMI_MAIN_CMD_SOC_INFO
 constexpr unsigned int kDsmiSocInfoSubCmdCpuTopo = 2;  // SUB_CMD_CPU_TOPO
 constexpr unsigned int kCpuTopoMaxLogical = 64;        // headroom for any a5 SKU
+constexpr char kVerifiedFallbackSoc[] = "Ascend950PR_9579";
+constexpr uint64_t kVerifiedFallbackOccupy = 0x3e;
 
 // Natural-alignment layout (no pack pragma). Mirrors
 // tools/cann-examples/query/query.cpp's struct; the HAL/DSMI driver
@@ -64,6 +66,7 @@ using HalGetDeviceInfoByBuffFn =
     int (*)(uint64_t deviceId, int32_t moduleType, int32_t infoType, void *buf, int32_t *size);
 using DsmiGetDeviceInfoFn =
     int (*)(uint32_t device_id, unsigned int main_cmd, unsigned int sub_cmd, void *buf, unsigned int *size);
+using AclrtGetSocNameFn = const char *(*)();
 
 HalGetDeviceInfoFn load_hal_get_device_info() {
     auto fn = reinterpret_cast<HalGetDeviceInfoFn>(dlsym(nullptr, "halGetDeviceInfo"));
@@ -94,6 +97,15 @@ DsmiGetDeviceInfoFn load_dsmi_get_device_info() {
     fn = reinterpret_cast<DsmiGetDeviceInfoFn>(dlsym(nullptr, "dsmi_get_device_info"));
     if (fn == nullptr) LOG_WARN("aicpu_topology_probe: dsmi_get_device_info not found after dlopen fallback");
     return fn;
+}
+
+const char *query_soc_name() {
+    auto fn = reinterpret_cast<AclrtGetSocNameFn>(dlsym(nullptr, "aclrtGetSocName"));
+    if (fn == nullptr) {
+        LOG_WARN("aicpu_topology_probe: aclrtGetSocName not found via dlsym");
+        return nullptr;
+    }
+    return fn();
 }
 
 bool query_occupy(uint32_t device_id, uint64_t &out_mask) {
@@ -144,7 +156,14 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
     if (!query_occupy(device_id, occupy)) return false;
 
     DsmiCpuTopo topo{};
-    if (!query_cpu_topo(device_id, topo)) return false;
+    if (!query_cpu_topo(device_id, topo)) {
+        const char *soc_name = query_soc_name();
+        LOG_WARN(
+            "aicpu_topology_probe: CPU_TOPO unavailable; checking OCCUPY fallback for soc=%s mask=0x%llx",
+            soc_name == nullptr ? "(unknown)" : soc_name, static_cast<unsigned long long>(occupy)
+        );
+        return derive_topology_from_occupy(soc_name, occupy, out_user_cpus);
+    }
 
     for (uint32_t i = 0; i < topo.total_nums; ++i) {
         const DsmiSingleCpu &c = topo.cpus[i];
@@ -169,6 +188,34 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
 }
 
 }  // namespace
+
+bool derive_topology_from_occupy(const char *soc_name, uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus) {
+    out_user_cpus.clear();
+#if defined(__aarch64__)
+    (void)soc_name;
+    (void)occupy;
+    return false;
+#elif defined(__x86_64__)
+    if (soc_name == nullptr || std::strcmp(soc_name, kVerifiedFallbackSoc) != 0 || occupy != kVerifiedFallbackOccupy) {
+        return false;
+    }
+#else
+    (void)soc_name;
+    (void)occupy;
+    return false;
+#endif
+    for (int32_t cpu_id = 0; cpu_id < static_cast<int32_t>(kCpuTopoMaxLogical); ++cpu_id) {
+        if (((occupy >> cpu_id) & 1ULL) == 0) continue;
+        AicpuLogicalCpu cpu{};
+        cpu.cpu_id = cpu_id;
+        cpu.phy_cpu_id = cpu_id;
+        cpu.hyperthread_id = 0;
+        cpu.cluster_id = cpu.phy_cpu_id / 2;
+        cpu.die_id = cpu.phy_cpu_id / 4;
+        out_user_cpus.push_back(cpu);
+    }
+    return !out_user_cpus.empty();
+}
 
 bool probe_aicpu_topology(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus) {
     {

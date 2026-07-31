@@ -773,6 +773,27 @@ target_link_libraries(test_a2a3_aicpu_affinity_select PRIVATE
 add_test(NAME test_a2a3_aicpu_affinity_select COMMAND test_a2a3_aicpu_affinity_select)
 set_tests_properties(test_a2a3_aicpu_affinity_select PROPERTIES LABELS "no_hardware")
 
+# a5 CPU_TOPO fallback and affinity selection. Pure logic; the fallback is
+# restricted to the verified x86 Ascend950PR_9579 standard-card signature.
+set(A5_ONBOARD_HOST_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/onboard/host)
+add_executable(test_a5_aicpu_topology_fallback
+    a5/test_aicpu_topology_fallback.cpp
+    ${A5_ONBOARD_HOST_DIR}/aicpu_topology_probe.cpp
+)
+target_include_directories(test_a5_aicpu_topology_fallback PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${A5_ONBOARD_HOST_DIR}
+    ${SIMPLER_LOG_DIR}/include
+)
+target_link_libraries(test_a5_aicpu_topology_fallback PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    ${CMAKE_DL_LIBS}
+    pthread
+)
+add_test(NAME test_a5_aicpu_topology_fallback COMMAND test_a5_aicpu_topology_fallback)
+set_tests_properties(test_a5_aicpu_topology_fallback PROPERTIES LABELS "no_hardware")
+
 # Hardware-gated tests.  Block is only entered when the project is configured
 # with -DSIMPLER_ENABLE_HARDWARE_TESTS=ON.  CI's no-hw `ut` job does not pass
 # this flag, so nothing here is compiled there — this is the structural
