@@ -29,112 +29,61 @@ runtime-owned per-device resource, so a single device is enough.
 
 from __future__ import annotations
 
-import argparse
-import os
-
 import pytest
 import torch
-from simpler.task_interface import (
-    ArgDirection,
-    CallConfig,
-    ChipCallable,
-    ChipStorageTaskArgs,
-    CoreCallable,
-)
-from simpler.worker import Worker
+from simpler.task_interface import ArgDirection as D
 
-from simpler_setup.elf_parser import extract_text_section
-from simpler_setup.kernel_compiler import KernelCompiler
-from simpler_setup.pto_isa import ensure_pto_isa_root
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-RUNTIME = "tensormap_and_ringbuffer"
 N = 128
 
 
-def build_chip_callable(platform: str) -> ChipCallable:
-    kc = KernelCompiler(platform=platform)
-    pto_isa_root = ensure_pto_isa_root()
-    include_dirs = kc.get_orchestration_include_dirs(RUNTIME)
-    extra_includes = list(include_dirs) + [str(kc.project_root / "src" / "common")]
+@pytest.mark.sdma
+@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+class TestPrefetchAsyncDemo(SceneTestCase):
+    """Prefetching a GM region then copying it leaves the data bit-exact."""
 
-    # in (IN), out (OUT) -- the SDMA workspace is injected, not an arg.
-    signature = [ArgDirection.IN, ArgDirection.OUT]
+    CALLABLE = {
+        "orchestration": {
+            "source": "kernels/orchestration/prefetch_async_orch.cpp",
+            "function_name": "prefetch_async_orchestration",
+            # in (IN), out (OUT) — the SDMA workspace is injected into every
+            # kernel's GlobalContext by the enable_sdma Worker, not threaded
+            # through as a user arg.
+            "signature": [D.IN, D.OUT],
+        },
+        "incores": [
+            {
+                "func_id": 0,
+                "source": "kernels/aiv/kernel_prefetch_copy.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.OUT],
+            },
+        ],
+    }
 
-    kernel = kc.compile_incore(
-        source_path=os.path.join(HERE, "kernels/aiv/kernel_prefetch_copy.cpp"),
-        core_type="aiv",
-        pto_isa_root=pto_isa_root,
-        extra_include_dirs=extra_includes,
-    )
-    if not platform.endswith("sim"):
-        kernel = extract_text_section(kernel)
-    children = [
-        (
-            0,
-            CoreCallable.build(
-                signature=signature,
-                binary=kernel,
-            ),
-        )
+    CASES = [
+        {
+            "name": "prefetch_copy",
+            "platforms": ["a2a3"],
+            "config": {},
+            "params": {},
+        },
     ]
 
-    orch = kc.compile_orchestration(
-        runtime_name=RUNTIME,
-        source_path=os.path.join(HERE, "kernels/orchestration/prefetch_async_orch.cpp"),
-        extra_include_dirs=[str(kc.project_root / "src" / "common")],
-    )
-    return ChipCallable.build(
-        signature=signature,
-        func_name="prefetch_async_orchestration",
-        binary=orch,
-        children=children,
-    )
-
-
-def run(platform: str = "a2a3", device_id: int = 0) -> int:
-    if platform.endswith("sim"):
-        raise ValueError("prefetch_async_demo requires onboard hardware")
-
-    src = torch.arange(N, dtype=torch.float32) / 8.0
-    out = torch.full((N,), -1.0, dtype=torch.float32)
-
-    chip_callable = build_chip_callable(platform)
-    worker = Worker(level=2, platform=platform, runtime=RUNTIME, device_id=device_id, enable_sdma=True)
-    worker.init()
-    try:
-        handle = worker.register(chip_callable)
-        args = ChipStorageTaskArgs()
-        args.add_tensor(make_tensor_arg(src))
-        args.add_tensor(make_tensor_arg(out))
-        worker.run(handle, args, CallConfig())
-    finally:
-        worker.close()
-
-    if not torch.equal(out, src):
-        bad = int((out != src).sum().item())
-        first = int((out != src).nonzero()[0].item())
-        print(
-            f"[ERROR] prefetch_async_demo mismatch count={bad}, first={first}, "
-            f"got={float(out[first])}, expect={float(src[first])}"
+    def generate_args(self, params):
+        return TaskArgsBuilder(
+            Tensor("src", torch.arange(N, dtype=torch.float32) / 8.0),
+            Tensor("out", torch.full((N,), -1.0, dtype=torch.float32)),
         )
-        return 1
-    print("[INFO] prefetch_async_demo: out matches src after injected SDMA prefetch + copy")
-    return 0
 
-
-@pytest.mark.platforms(["a2a3"])
-@pytest.mark.runtime("tensormap_and_ringbuffer")
-@pytest.mark.device_count(1)
-def test_prefetch_async_demo(st_platform, st_device_ids) -> None:
-    """Prefetching a GM region then copying it leaves the data bit-exact."""
-    assert run(platform=st_platform, device_id=int(st_device_ids[0])) == 0
+    def compute_golden(self, args, params):
+        # The prefetch is a pure cache hint that changes no value, so the copy
+        # must reproduce the source bit-for-bit. What the case really proves is
+        # that the injected workspace was real and the event wait completed
+        # rather than hanging.
+        args.out[:] = args.src
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--platform", default="a2a3")
-    parser.add_argument("--device", type=int, default=0)
-    cli = parser.parse_args()
-    raise SystemExit(run(platform=cli.platform, device_id=cli.device))
+    SceneTestCase.run_module(__name__)

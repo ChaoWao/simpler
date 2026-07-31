@@ -172,7 +172,7 @@ values**: op-execute 45 s, stream-sync 50 s, scheduler 10 s
 env-overridable with ordering validation
 (`resolve_onboard_timeout_config`, `device_runner_base.cpp:66-110`;
 [troubleshooting/local-timeout-defaults.md](troubleshooting/local-timeout-defaults.md)),
-and **CI runs at 2 s / 3 s / 4 s** (`.github/workflows/ci.yml:480-482`). Triage
+and **CI runs at 2 s / 3 s / 4 s** (the `SIMPLER_*_TIMEOUT_*` env block on each self-hosted job in `.github/workflows/ci.yml`). Triage
 a CI timeout against the CI values, not the header constants.
 
 Every failed launch runs a recovery path that is easy to miss:
@@ -217,8 +217,8 @@ values yield `PTO2_ERROR_ASYNC_COMPLETION_INVALID`.
 
 | Engine | a2a3 | a5 | Status |
 | ------ | ---- | -- | ------ |
-| COUNTER (default) | registered | registered | **Shipped** — `async_notify_demo` runs onboard on both arches (`ci.yml:607`, `:884`); `deferred_notify_demo` runs in sim on both (`ci.yml:216`, `:310`). Routed by `@pytest.mark.platforms`, no `skipif` |
-| SDMA | build macro forced ON; runtime opt-in | `option(... OFF)` | a2a3 **Shipped** (dedicated CI step, `ci.yml:628-643`); a5 not built |
+| COUNTER (default) | registered | registered | **Shipped** — `async_notify_demo` runs onboard on both arches and `deferred_notify_demo` runs in sim on both, through the `st-onboard-*` / `st-sim-*` jobs in `ci.yml`. Routed by `@pytest.mark.platforms`, no `skipif` |
+| SDMA | build macro forced ON; runtime opt-in | `option(... OFF)` | a2a3 **Shipped** (the "SDMA pytest (a2a3)" step in `ci.yml`); a5 not built |
 | URMA | absent | full implementation | **Gated** — see below |
 | ROCE, CCU | enum only | enum only | **Name only** |
 
@@ -227,7 +227,7 @@ compiled, but provisioning the 48 STARS streams requires
 `Worker(..., enable_sdma=True)`, default `False`
 (`python/simpler/worker.py:4178`, `:4396`;
 `python/bindings/task_interface.cpp:1367`). It is quarantined from the general
-CI sweep via `SDMA_IGNORE` (`ci.yml:600`) for a measured hazard: with 48
+CI sweep via `@pytest.mark.sdma` for a measured hazard: with 48
 device-only SDMA streams an AICore fault takes ~306 s to tear down versus ~0.3 s
 without, traced to a single 300,000 ms remote TRS event timeout
 ([investigations/2026-07-a2a3-sdma-fault-teardown.md](investigations/2026-07-a2a3-sdma-fault-teardown.md),

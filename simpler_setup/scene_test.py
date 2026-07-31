@@ -89,6 +89,15 @@ def clear_compile_cache() -> None:
 #
 # Results are unaffected: the same fixture golden-computed at 320 and at 8
 # threads is bit-identical across `out`, `k_cache` and `v_cache`.
+def _class_wants_sdma(cls) -> bool:
+    """True when the SceneTestCase carries ``@pytest.mark.sdma``.
+
+    Read from ``cls.pytestmark`` rather than a pytest item so the standalone
+    ``python test_x.py`` path sees the same declaration the pytest path does.
+    """
+    return any(getattr(m, "name", None) == "sdma" for m in getattr(cls, "pytestmark", ()))
+
+
 _GOLDEN_MAX_THREADS = 8
 
 
@@ -1133,7 +1142,13 @@ class SceneTestCase:
         """
         from simpler.worker import Worker  # noqa: PLC0415
 
-        w = Worker(level=2, device_id=device_id, platform=platform, runtime=cls._st_runtime)
+        w = Worker(
+            level=2,
+            device_id=device_id,
+            platform=platform,
+            runtime=cls._st_runtime,
+            enable_sdma=_class_wants_sdma(cls),
+        )
         w.init()
         return w
 
@@ -2065,6 +2080,7 @@ def _create_standalone_worker(group, level, args, selected_by_cls):
         num_sub_workers=max_subs,
         platform=args.platform,
         runtime=first_cls._st_runtime,
+        enable_sdma=any(_class_wants_sdma(c) for c in group),
     )
     # Prepare sub callables per-class to avoid name collisions.
     per_class_sub_handles: dict[type, dict] = {}

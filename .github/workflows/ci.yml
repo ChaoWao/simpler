@@ -597,12 +597,16 @@ jobs:
           # — which also runs the aicore_op_timeout fault-injection test — and run
           # them on their own dedicated device(s) in the SDMA step below, so an
           # SDMA fault's slow teardown can never mix with ordinary fault recovery.
-          SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          #
+          # Selected by marker, not by path. `pytest --ignore=<moved path>` exits
+          # 0 and says nothing, so a rename used to drop the quarantine silently
+          # and land these back beside the fault-injection test. `-m` travels
+          # with the test instead.
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            python -m pytest examples tests/st -m "not sdma" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
       # SDMA pytest — every SDMA test runs here on its own dedicated device(s),
@@ -615,7 +619,12 @@ jobs:
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
-          SDMA_TESTS="examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          # Selected by marker, so this step cannot drift from what the sweep
+          # deselects. Kept as a step of its own until #1425 is fixed: an
+          # AICore fault on a device that has provisioned SDMA still costs
+          # minutes, so these must not share a device with the fault-injection
+          # cases even though the in-session ordering already separates them.
+          SDMA_TESTS="examples tests/st -m sdma"
           if [ "$(uname -m)" = "x86_64" ]; then
             python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else

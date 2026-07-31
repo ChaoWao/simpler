@@ -409,6 +409,18 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "device_count(n): number of NPU devices needed")
     config.addinivalue_line(
         "markers",
+        "sdma: the test provisions the PTO-ISA async-SDMA workspace, so its "
+        "Worker is built with enable_sdma=True. Provisioning creates 48 "
+        "device-only STARS streams that sit in the device fault domain, which "
+        "makes a later AICore fault on that device cost minutes instead of "
+        "~0.3 s (#1425). Two consequences follow from the one marker: such a "
+        "test never shares an L2 Worker (the pool key carries the flag) and it "
+        "sorts after every ordinary test, so fault-injection cases run on a "
+        "device that has never provisioned. CI additionally runs them in a step "
+        "of their own via -m sdma until #1425 is fixed",
+    )
+    config.addinivalue_line(
+        "markers",
         "runtime(name): runtime this standalone test targets; used by runtime-isolation subprocess "
         "filtering so non-@scene_test tests only run under their matching runtime",
     )
@@ -566,7 +578,13 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     def sort_key(item):
         cls = getattr(item, "cls", None)
         level = getattr(cls, "_st_level", 0) if cls else 0
-        return (0 if level >= 3 else 1, item.nodeid)
+        # SDMA last, for the same class of reason L3 goes first: provisioning
+        # the workspace leaves 48 STARS streams in the device's fault domain,
+        # so every fault-injection case must have already run on a device that
+        # never provisioned (#1425). Keyed off the marker, not the class, since
+        # the fault-injection tests are plain functions with no _st_level.
+        sdma_last = 1 if item.get_closest_marker("sdma") else 0
+        return (sdma_last, 0 if level >= 3 else 1, item.nodeid)
 
     items.sort(key=sort_key)
 
@@ -1361,9 +1379,17 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
         # st_device_ids) that also draw from it; retaining the id would drain
         # the pool and break any non-st_worker test that runs afterward on the
         # same xdist worker.
-        for (rt, dev_id), existing in _l2_worker_pool.items():
-            if rt == runtime:
-                _register_l2_pool_recycle(request, _l2_worker_pool, (rt, dev_id), _l2_poisoned)
+        # The SDMA capability is part of the Worker's identity, not a per-run
+        # option: an enable_sdma Worker holds 48 STARS streams for its whole
+        # life, so it must never be handed to a test that did not ask for them,
+        # nor a plain Worker to one that did. It therefore takes a slot in the
+        # pool key and gates reuse. Ordering puts every sdma test after the
+        # rest, so the swap happens once, at the end.
+        wants_sdma = request.node.get_closest_marker("sdma") is not None
+
+        for (rt, dev_id, pooled_sdma), existing in _l2_worker_pool.items():
+            if rt == runtime and pooled_sdma == wants_sdma:
+                _register_l2_pool_recycle(request, _l2_worker_pool, (rt, dev_id, pooled_sdma), _l2_poisoned)
                 yield existing
                 return
 
@@ -1372,7 +1398,7 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
             pytest.fail(f"no devices available in --device pool (requested 1, pool has {len(device_pool._available)})")
         dev_id = ids[0]
         device_pool.release(ids)
-        key = (runtime, dev_id)
+        key = (runtime, dev_id, wants_sdma)
 
         # At most one runtime-specific Worker may own a device: finalization
         # resets resources that would invalidate every other Worker on it.
@@ -1387,7 +1413,7 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
 
         from simpler.worker import Worker  # noqa: PLC0415
 
-        w = Worker(level=2, device_id=dev_id, platform=st_platform, runtime=runtime)
+        w = Worker(level=2, device_id=dev_id, platform=st_platform, runtime=runtime, enable_sdma=wants_sdma)
         w._st_device_id = dev_id
         # First rebuild after a poison-and-heal lands here. On arches where the
         # device re-inits cleanly this just works; on a5 the op-timeout poison
@@ -1434,6 +1460,7 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
             num_sub_workers=max_subs,
             platform=st_platform,
             runtime=runtime,
+            enable_sdma=request.node.get_closest_marker("sdma") is not None,
         )
         w._st_device_id = ids[0]  # expose primary device to test_run for profiling snapshots
 
