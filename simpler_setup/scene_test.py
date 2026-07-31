@@ -78,6 +78,46 @@ def clear_compile_cache() -> None:
     gc.collect()
 
 
+# Goldens are torch reference implementations built from per-tile Python loops —
+# thousands of small slice, matmul and reduce calls per case. torch defaults its
+# intra-op pool to the core count, so on a many-core host every one of those
+# calls pays a fork/join across hundreds of threads to move a few KiB. Measured
+# on a 320-core box with qwen3_14b_decode's 40-layer golden (3584 slice ops per
+# layer): 6.35 s per layer at 320 threads against 1.05 s at 4 and 1.07 s at 8,
+# so the pool costs 5-8x more than the work. The curve is flat from 4 to 16 and
+# turns back up below 4, hence the cap below.
+#
+# Results are unaffected: the same fixture golden-computed at 320 and at 8
+# threads is bit-identical across `out`, `k_cache` and `v_cache`.
+_GOLDEN_MAX_THREADS = 8
+
+
+@contextmanager
+def _golden_thread_cap():
+    """Cap torch's intra-op threads for the duration of a golden computation.
+
+    Only ever lowers the limit — a caller who already asked for fewer keeps
+    theirs. Restores the previous value on the way out, including on exception,
+    so nothing else in the session inherits the cap.
+    """
+    try:
+        import torch  # noqa: PLC0415
+    except ImportError:
+        yield
+        return
+
+    previous = torch.get_num_threads()
+    target = min(_GOLDEN_MAX_THREADS, previous)
+    if target == previous:
+        yield
+        return
+    torch.set_num_threads(target)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous)
+
+
 # ---------------------------------------------------------------------------
 # Spec types
 # ---------------------------------------------------------------------------
@@ -1245,7 +1285,8 @@ class SceneTestCase:
         golden_args = None
         if not skip_golden:
             golden_args = test_args.clone()
-            self.compute_golden(golden_args, params)
+            with _golden_thread_cap():
+                self.compute_golden(golden_args, params)
 
         # Save initial output tensor values for reset between rounds
         initial_outputs = {}
@@ -1323,7 +1364,8 @@ class SceneTestCase:
         golden_args = None
         if not skip_golden:
             golden_args = test_args.clone()
-            self.compute_golden(golden_args, params)
+            with _golden_thread_cap():
+                self.compute_golden(golden_args, params)
 
         # Eager Worker.init() forked the chip/sub children before generate_args
         # ran, so move test_args' host tensors into born-shared buffers the
