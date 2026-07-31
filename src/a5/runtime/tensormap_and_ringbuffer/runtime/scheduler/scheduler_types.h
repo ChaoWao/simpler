@@ -443,6 +443,21 @@ public:
         return (~core_states_) & aiv_mask_ & ~pending_occupied_;
     }
 
+    // Number of logical sync_start blocks this tracker can place. AIC/AIV use
+    // one core per block; MIX uses one active-mask-compatible cluster per block.
+    // Gated early staging may use both idle running slots and free pending slots,
+    // while a ready cohort is restricted to idle running slots.
+    int32_t count_available_blocks(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending) const {
+        if (shape == PTO2ResourceShape::MIX) {
+            return include_pending ? count_mix_split_clusters(core_mask) : count_mix_running_clusters(core_mask);
+        }
+        if (shape != PTO2ResourceShape::AIC && shape != PTO2ResourceShape::AIV) return 0;
+
+        int32_t available = get_idle_core_offset_states(shape).count();
+        if (include_pending) available += get_pending_core_offset_states(shape).count();
+        return available;
+    }
+
     // --- Two-phase dispatch unified query ---
 
     enum class DispatchPhase : uint8_t { IDLE, PENDING };

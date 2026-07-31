@@ -701,7 +701,7 @@ TEST_F(WiringTest, SyncStartDoorbellPassHasOneOwner) {
     }
 }
 
-TEST_F(WiringTest, SyncStartDrainFinalizeRetriesProducerFirstRendezvous) {
+TEST_F(WiringTest, SyncStartStagingFinalizeRetriesProducerFirstRendezvous) {
     alignas(64) PTO2TaskSlotState sync_consumer, downstream;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     init_slot(downstream, PTO2_TASK_PENDING, 1, 1);
@@ -721,20 +721,51 @@ TEST_F(WiringTest, SyncStartDrainFinalizeRetriesProducerFirstRendezvous) {
     dep.slot_state = &downstream;
     sync_consumer.fanout_head = &dep;
 
-    // Producer release wins before drain publishes its running-slot seed. With no pending
-    // promotions, drain finalize is the only remaining rendezvous retry.
+    // Producer release wins before staging publishes its running-slot seed. With no pending
+    // promotions, staging finalize is the only remaining rendezvous retry.
     EXPECT_TRUE(sched.try_early_dispatch_release(sync_consumer));
     EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
     EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_NONE);
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 0);
 
     sync_consumer.payload->running_slot_count.store(2, std::memory_order_seq_cst);
-    EXPECT_TRUE(sched.retry_sync_start_rendezvous_after_drain(sync_consumer));
+    EXPECT_TRUE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
     EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE);
     EXPECT_TRUE(sync_consumer.has_dispatch_propagated());
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
 
-    EXPECT_FALSE(sched.retry_sync_start_rendezvous_after_drain(sync_consumer));
+    EXPECT_FALSE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
+    EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
+}
+
+TEST_F(WiringTest, SyncStartProducerReleaseCompletesStagerFirstRendezvous) {
+    alignas(64) PTO2TaskSlotState sync_consumer, downstream;
+    init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
+    init_slot(downstream, PTO2_TASK_PENDING, 1, 1);
+
+    sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);
+    sync_consumer.task_attrs.set_sync_start();
+    sync_consumer.task_attrs.set_early_resolve(true);
+    sync_consumer.logical_block_num = 2;
+    sync_consumer.next_block_idx.store(2, std::memory_order_relaxed);
+    sched.record_published_blocks(sync_consumer, sync_consumer.logical_block_num);
+    sync_consumer.payload->staged_core_mask[0].store(0b11, std::memory_order_relaxed);
+    sync_consumer.payload->running_slot_count.store(2, std::memory_order_relaxed);
+    sync_consumer.payload->early_dispatch_state.store(PTO2_EARLY_DISPATCH_STAGING, std::memory_order_relaxed);
+
+    downstream.payload->fanin_actual_count = 1;
+    PTO2DepListEntry dep{};
+    dep.slot_state = &downstream;
+    sync_consumer.fanout_head = &dep;
+
+    EXPECT_FALSE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
+    EXPECT_TRUE(sched.try_early_dispatch_release(sync_consumer));
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(sync_consumer.payload->early_dispatch_launch_state.load(), PTO2_EARLY_DISPATCH_LAUNCH_COMPLETE);
+    EXPECT_TRUE(sync_consumer.has_dispatch_propagated());
+    EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
+
+    EXPECT_FALSE(sched.retry_sync_start_rendezvous_after_staging(sync_consumer));
     EXPECT_EQ(downstream.payload->dispatch_fanin.load(), 1);
 }
 
@@ -807,7 +838,7 @@ TEST_F(WiringTest, ArmedEarlySyncDrainKeepsEveryStagerGatedAfterReady) {
     );
 }
 
-TEST_F(WiringTest, DrainFinishBetweenReleasePhasesRetainsOwner) {
+TEST_F(WiringTest, EarlySyncFinishBetweenReleasePhasesRetainsOwnerCompleteState) {
     alignas(64) PTO2TaskSlotState sync_consumer;
     init_slot(sync_consumer, PTO2_TASK_PENDING, 1, 1);
     sync_consumer.active_mask = ActiveMask(PTO2_SUBTASK_MASK_AIV0);

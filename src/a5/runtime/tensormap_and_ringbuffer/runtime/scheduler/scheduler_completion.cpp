@@ -437,26 +437,25 @@ bool SchedulerContext::enter_drain_mode(PTO2TaskSlotState *slot_state, int32_t b
 int32_t SchedulerContext::count_global_available(PTO2ResourceShape shape, uint8_t core_mask, bool include_pending) {
     int32_t total = 0;
     for (int32_t t = 0; t < active_sched_threads_; t++) {
-        if (shape == PTO2ResourceShape::MIX) {
-            total += include_pending ? core_trackers_[t].count_mix_split_clusters(core_mask) :
-                                       core_trackers_[t].count_mix_running_clusters(core_mask);
-        } else {
-            total += core_trackers_[t].get_idle_core_offset_states(shape).count();
-            if (include_pending) {
-                total += core_trackers_[t].get_pending_core_offset_states(shape).count();
-            }
-        }
+        total += core_trackers_[t].count_available_blocks(shape, core_mask, include_pending);
     }
     return total;
 }
 
-int32_t
-SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated) {
+// Stage one scheduler thread's share of a sync_start cohort. The global drain
+// calls this concurrently on every tracker; the Case-A fast path calls it once
+// after proving this tracker can hold the whole cohort. staged_blocks is logical
+// cohort progress, while running_cores seeds the core-count rendezvous (MIX may
+// contribute multiple running cores per logical block).
+SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
+    PTO2TaskSlotState *slot_state, int32_t block_num, int32_t thread_idx, bool gated,
+    [[maybe_unused]] bool record_drain_phases
+) {
     CoreTracker &tracker = core_trackers_[thread_idx];
     PTO2ResourceShape shape = slot_state->active_mask.to_shape();
     uint8_t core_mask = slot_state->active_mask.core_mask();
     bool mix_split = gated && shape == PTO2ResourceShape::MIX;
-    int32_t running_staged = 0;
+    SyncStartStageResult result;
 
     auto stage = [&](CoreTracker::BitStates valid, bool to_pending) {
         while (valid.has_value()) {
@@ -464,6 +463,7 @@ SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block
             int32_t start = 0;
             int32_t claim = slot_state->claim_block_range(block_num, avail, start);
             if (claim == 0) return;
+            result.staged_blocks += claim;
             PublishHandle handles[CoreTracker::MAX_CLUSTERS * 3];
             int handle_count = 0;
             int32_t claimed[CoreTracker::MAX_CLUSTERS * 3];
@@ -472,7 +472,7 @@ SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block
             for (int32_t b = 0; b < claim; b++) {
                 auto core_offset = claimed[b];
                 if (shape == PTO2ResourceShape::MIX) {
-                    running_staged += tracker.mix_cluster_idle_core_count(core_offset, core_mask);
+                    result.running_cores += tracker.mix_cluster_idle_core_count(core_offset, core_mask);
                 }
                 handle_count += prepare_block_for_dispatch(
                     thread_idx, core_offset, *slot_state, shape, to_pending, start + b, &handles[handle_count], gated
@@ -503,7 +503,7 @@ SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block
                 }
             }
             sched_->record_published_blocks(*slot_state, claim);
-            if (gated && shape != PTO2ResourceShape::MIX && !to_pending) running_staged += handle_count;
+            if (gated && shape != PTO2ResourceShape::MIX && !to_pending) result.running_cores += handle_count;
         }
     };
 
@@ -517,7 +517,7 @@ SchedulerContext::drain_stage_cores(PTO2TaskSlotState *slot_state, int32_t block
             stage(tracker.get_pending_core_offset_states(shape), /*to_pending=*/true);
         }
     }
-    return running_staged;
+    return result;
 }
 
 void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] uint64_t *out_stage_wall_cycles) {
@@ -580,11 +580,12 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
 #if SIMPLER_DFX
     if (drain_prof) drain_acked_ts = get_sys_cnt_aicpu();
 #endif
-    int32_t my_running = drain_stage_cores(slot_state, block_num, thread_idx, gated);
+    SyncStartStageResult staged =
+        stage_sync_start_cores(slot_state, block_num, thread_idx, gated, /*record_drain_phases=*/true);
 #if SIMPLER_DFX
     if (drain_prof && drain_acked_ts != 0) *out_stage_wall_cycles = get_sys_cnt_aicpu() - drain_acked_ts;
 #endif
-    drain_state_.drain_running_staged.fetch_add(my_running, std::memory_order_acq_rel);
+    drain_state_.drain_running_staged.fetch_add(staged.running_cores, std::memory_order_acq_rel);
     drain_state_.drain_stage_done_mask.fetch_or(1u << thread_idx, std::memory_order_release);
 
     if (!coordinator) {
@@ -613,7 +614,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     drain_state_.sync_start_pending.store(0, std::memory_order_release);
 
     if (gated) {
-        sched_->retry_sync_start_rendezvous_after_drain(*slot_state);
+        sched_->retry_sync_start_rendezvous_after_staging(*slot_state);
     } else {
         sched_->propagate_dispatch_fanin(*slot_state);
     }

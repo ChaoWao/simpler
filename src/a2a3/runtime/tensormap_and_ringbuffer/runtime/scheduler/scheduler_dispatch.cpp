@@ -260,7 +260,7 @@ int SchedulerContext::prepare_block_for_dispatch(
         int n = 0;
         // Per-core slot placement (#1308): an idle used core takes its running slot
         // (tracked by the completion poller), a busy used core takes its gated pending slot
-        // (promoted on completion). The sync_start drain relies on this — it passes
+        // (promoted on completion). Gated sync_start staging relies on this — it passes
         // to_pending=true so every busy core opts into a pending slot; the non-zero
         // src_payload gate keeps the whole cohort waiting for the rendezvous.
         if (cmask & PTO2_SUBTASK_MASK_AIC) {
@@ -786,9 +786,9 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
 
 // Early-dispatch drain (idle pass) — the EARLY source's analog of dispatch_ready_tasks.
 // Both sources share run_staging_order for the shape order (MIX strict priority, IDLE
-// before PENDING, cross-thread idle gating: MIX-IDLE ▶ c/v-IDLE ▶ MIX-PEND ▶ c/v-PEND) and
-// both drain their sync_start cohort FIRST as the highest occupancy tier (Tier 0), via the
-// same all-or-nothing drain barrier. This one owns its own gating and progress flags.
+// before PENDING, cross-thread idle gating: MIX-IDLE ▶ c/v-IDLE ▶ MIX-PEND ▶ c/v-PEND).
+// Each handles its sync_start cohort FIRST as Tier 0: an exact local fit stages on
+// one owner, while a capacity-short cohort falls back to the global drain.
 // Returns the number of blocks staged this pass (for the EarlyDispatch swimlane bar).
 int32_t SchedulerContext::try_early_dispatch(
     int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
@@ -808,16 +808,15 @@ int32_t SchedulerContext::try_early_dispatch(
         if (sched_->ready_sync_queues[s].size() > 0 || sched_->ready_queues[s].size() > 0) return 0;
     }
 
+    int32_t total_staged = 0;
+
     // ===== Tier 0: sync_start cohorts (highest occupancy tier, all-or-nothing) =====
     // sync_start candidates park in their own shape-agnostic queue. They cannot ride
-    // early_dispatch_shape's per-thread partial range-claim (a partial claim strands gated
-    // cohort blocks nobody rings, so the rendezvous never reaches block_num). Instead arm the
-    // drain barrier: it takes exclusive tracker access and only stages when global
-    // idle+pending >= block_num, guaranteeing all-or-nothing. Win => the dispatch loop runs
-    // the gated drain next iteration; lose (a drain is already armed, or capacity <
-    // block_num) => cancel the owner and re-push or transfer its final ready route. A
-    // non-STAGING pop was already released and is dropped. Staging happens inside the drain,
-    // so this arms at most one drain and adds no blocks to total_staged here.
+    // early_dispatch_shape's per-thread partial range-claim: a partial cohort would strand
+    // gated blocks nobody can ring. After claiming the per-task owner, first use the local
+    // tracker when it can hold the entire cohort; only the capacity-short case arms the
+    // stop-the-world drain. Both paths force-gate every block even if producer release races
+    // STAGING -> DISPATCHED. A non-STAGING pop was already released and is dropped.
     uint64_t sync_task_id_snapshot = 0;
     if (PTO2TaskSlotState *c = sched_->early_sync_start_queue.pop_tagged(&sync_task_id_snapshot)) {
         bool current_sync_task =
@@ -825,6 +824,25 @@ int32_t SchedulerContext::try_early_dispatch(
         if (current_sync_task && PTO2SchedulerState::try_claim_early_sync_drain(*c->payload)) {
             if (c->payload->early_dispatch_state.load(std::memory_order_seq_cst) != PTO2_EARLY_DISPATCH_STAGING) {
                 sched_->cancel_early_sync_drain(*c);
+            } else if (drain_state_.sync_start_pending.load(std::memory_order_acquire) == 0 &&
+                       tracker.count_available_blocks(
+                           c->active_mask.to_shape(), c->active_mask.core_mask(), /*include_pending=*/true
+                       ) >= c->logical_block_num) {
+                // From this point onward the operation is all-or-nothing. Only this
+                // scheduler mutates its tracker, and global drain coordinators must
+                // wait for this scheduler's generation-tagged ack before inspecting it.
+                PTO2SchedulerState::mark_early_sync_drain_armed(*c->payload);
+                always_assert(c->next_block_idx.load(std::memory_order_seq_cst) == 0);
+                SyncStartStageResult staged = stage_sync_start_cores(
+                    c, c->logical_block_num, thread_idx, /*gated=*/true, /*record_drain_phases=*/false
+                );
+                always_assert(staged.staged_blocks == c->logical_block_num);
+                c->payload->running_slot_count.store(
+                    static_cast<int16_t>(staged.running_cores), std::memory_order_seq_cst
+                );
+                sched_->retry_sync_start_rendezvous_after_staging(*c);
+                PTO2SchedulerState::finish_early_sync_drain(*c->payload);
+                total_staged += staged.staged_blocks;
             } else if (enter_drain_mode(c, c->logical_block_num)) {
                 PTO2SchedulerState::mark_early_sync_drain_armed(*c->payload);
             } else {
@@ -836,7 +854,6 @@ int32_t SchedulerContext::try_early_dispatch(
     // Regular early staging (NOT is_ready): same MIX/idle/pending order as normal dispatch,
     // via the shared skeleton. early_dispatch_shape stages a gated block range and never
     // enters drain, so the stage callback always reports "no stop".
-    int32_t total_staged = 0;
     run_staging_order(
         thread_idx, pmu_active,
         [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
@@ -1145,7 +1162,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             uint64_t drain_stage_wall = 0;  // set by handle_drain_mode ONLY if this thread staged
             handle_drain_mode(thread_idx, &drain_stage_wall);
             // Record a Drain bar only when this thread actually did drain work (reached
-            // drain_stage_cores). The many no-op entries — ack + availability-insufficient
+            // stage_sync_start_cores). The many no-op entries — ack + availability-insufficient
             // reset or follower bail before stage_go — never stage, so they
             // would otherwise clutter the lane with zero-work drain(0) bars.
             if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES && drain_stage_wall != 0) {

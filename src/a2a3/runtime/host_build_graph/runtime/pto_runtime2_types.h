@@ -274,8 +274,9 @@ struct PTO2TaskPayload {
     //
     // Bitmask of global core_ids this consumer is pre-staged (gated) on. Concurrent
     // stagers publish bits with atomic fetch_or. A regular consumer destructively
-    // splits them between release and late-stager owners; a sync_start drain keeps
-    // the completed mask stable for its single cohort launch owner.
+    // splits them between release and late-stager owners; a sync_start cohort keeps
+    // the completed mask stable for its single launch owner, whether staging is local
+    // or uses the global drain fallback.
     std::atomic<uint64_t> staged_core_mask[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS]{};
     // Early-dispatch CANDIDATE detection (event-driven, dual of fanin_refcount):
     // seeded at wiring with producers already complete, then a flagged producer
