@@ -63,18 +63,6 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_d
 // DeviceRunner Implementation
 // =============================================================================
 
-// rtMalloc / rtFree wrappers shared by all three profiling subsystems.
-// a5 onboard goes directly through CANN runtime — no per-allocation tracking,
-// so the framework's std::function alloc / free shapes match plain function
-// pointers here.
-static void *prof_alloc_cb(size_t size) {
-    void *ptr = nullptr;
-    int rc = rtMalloc(&ptr, size, RT_MEMORY_HBM, 0);
-    return (rc == 0) ? ptr : nullptr;
-}
-
-static int prof_free_cb(void *dev_ptr) { return rtFree(dev_ptr); }
-
 DeviceRunner::~DeviceRunner() { finalize(); }
 
 // `setup_static_arena`, `create_thread`, `attach_current_thread`,
@@ -758,28 +746,37 @@ void DeviceRunner::finalize_collectors() {
     // Worker reused across runs (e.g. a pytest session-scoped worker pool) would
     // otherwise re-enter init_l2_swimlane() with stale state still allocated.
     // Matches a2a3's finalize_collectors().
+    auto free_cb = [this](void *dev_ptr) -> int {
+        return mem_alloc_.free(dev_ptr);
+    };
     if (l2_swimlane_collector_.is_initialized()) {
-        l2_swimlane_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+        l2_swimlane_collector_.finalize(/*unregister_cb=*/nullptr, free_cb);
     }
     if (dump_collector_.is_initialized()) {
-        dump_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+        dump_collector_.finalize(/*unregister_cb=*/nullptr, free_cb);
     }
     if (pmu_collector_.is_initialized()) {
-        pmu_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+        pmu_collector_.finalize(/*unregister_cb=*/nullptr, free_cb);
     }
     if (dep_gen_collector_.is_initialized()) {
-        dep_gen_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+        dep_gen_collector_.finalize(/*unregister_cb=*/nullptr, free_cb);
     }
     if (scope_stats_collector_.is_initialized()) {
-        scope_stats_collector_.finalize(/*unregister_cb=*/nullptr, prof_free_cb);
+        scope_stats_collector_.finalize(/*unregister_cb=*/nullptr, free_cb);
         kernel_args_.args.scope_stats_data_base = 0;
     }
 }
 
 int DeviceRunner::init_l2_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
+    auto alloc_cb = [this](size_t size) -> void * {
+        return mem_alloc_.alloc(size);
+    };
+    auto free_cb = [this](void *dev_ptr) -> int {
+        return mem_alloc_.free(dev_ptr);
+    };
     int rc = l2_swimlane_collector_.initialize(
-        num_aicore, aicpu_thread_num, device_id, l2_swimlane_level_, prof_alloc_cb,
-        /*register_cb=*/nullptr, prof_free_cb, output_prefix_
+        num_aicore, aicpu_thread_num, device_id, l2_swimlane_level_, alloc_cb,
+        /*register_cb=*/nullptr, free_cb, output_prefix_
     );
     if (rc == 0) {
         kernel_args_.args.l2_swimlane_data_base =
@@ -793,9 +790,14 @@ int DeviceRunner::init_l2_swimlane(int num_aicore, int aicpu_thread_num, int dev
 int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
     int num_dump_threads = runtime.get_aicpu_thread_num();
 
+    auto alloc_cb = [this](size_t size) -> void * {
+        return mem_alloc_.alloc(size);
+    };
+    auto free_cb = [this](void *dev_ptr) -> int {
+        return mem_alloc_.free(dev_ptr);
+    };
     int rc = dump_collector_.initialize(
-        num_dump_threads, device_id, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, output_prefix_,
-        dump_args_level_
+        num_dump_threads, device_id, alloc_cb, /*register_cb=*/nullptr, free_cb, output_prefix_, dump_args_level_
     );
     if (rc != 0) {
         return rc;
@@ -808,8 +810,14 @@ int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
 int DeviceRunner::init_pmu(
     int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id
 ) {
+    auto alloc_cb = [this](size_t size) -> void * {
+        return mem_alloc_.alloc(size);
+    };
+    auto free_cb = [this](void *dev_ptr) -> int {
+        return mem_alloc_.free(dev_ptr);
+    };
     int rc = pmu_collector_.init(
-        num_cores, num_threads, csv_path, event_type, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, device_id
+        num_cores, num_threads, csv_path, event_type, alloc_cb, /*register_cb=*/nullptr, free_cb, device_id
     );
     if (rc == 0) {
         kernel_args_.args.pmu_data_base = reinterpret_cast<uint64_t>(pmu_collector_.get_pmu_shm_device_ptr());
@@ -823,7 +831,13 @@ int DeviceRunner::init_scope_stats(int num_threads, int device_id) {
     // a5: register_cb=nullptr, so the collector mallocs a host shadow per
     // device buffer + rtMemcpy's the zeroed shadow to device (see
     // ProfilerBase::alloc_paired_buffer). No halHostRegister on a5.
-    int rc = scope_stats_collector_.init(num_threads, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, device_id);
+    auto alloc_cb = [this](size_t size) -> void * {
+        return mem_alloc_.alloc(size);
+    };
+    auto free_cb = [this](void *dev_ptr) -> int {
+        return mem_alloc_.free(dev_ptr);
+    };
+    int rc = scope_stats_collector_.init(num_threads, alloc_cb, /*register_cb=*/nullptr, free_cb, device_id);
     if (rc != 0) {
         return rc;
     }
@@ -836,7 +850,13 @@ int DeviceRunner::init_dep_gen(int num_threads, int device_id) {
     // a5: register_cb=nullptr, so the collector mallocs a host shadow per
     // device buffer + rtMemcpy's the zeroed shadow to device. No
     // halHostRegister on a5 (matches PMU / L2 swimlane / dump collectors).
-    int rc = dep_gen_collector_.init(num_threads, prof_alloc_cb, /*register_cb=*/nullptr, prof_free_cb, device_id);
+    auto alloc_cb = [this](size_t size) -> void * {
+        return mem_alloc_.alloc(size);
+    };
+    auto free_cb = [this](void *dev_ptr) -> int {
+        return mem_alloc_.free(dev_ptr);
+    };
+    int rc = dep_gen_collector_.init(num_threads, alloc_cb, /*register_cb=*/nullptr, free_cb, device_id);
     if (rc != 0) {
         return rc;
     }
