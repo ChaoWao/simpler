@@ -13,9 +13,11 @@ description: Testing guide and pre-commit testing strategy for simpler. Use when
 
 ## Running Tests
 
-**Important**: Always read `.github/workflows/ci.yml` first to extract both the
-current `--pto-session-timeout` values **and the `--ignore` sets the onboard
-sweep carries**. PTO-ISA reproducibility comes from the repo-root `pto_isa.pin`.
+**Important**: Always read `.github/workflows/ci.yml` first for the current
+`--pto-session-timeout` values. Quarantines are **not** in the workflow — they
+are markers on the tests, so mirror the sweep with `-m "not sdma"` rather than
+copying a path list. PTO-ISA reproducibility comes from the repo-root
+`pto_isa.pin`.
 
 **CI does not run one flat sweep.** Some tests are quarantined out of the
 general onboard sweep and run in their own step on their own devices, because
@@ -25,7 +27,7 @@ and will report failures that CI never sees:
 
 | Quarantine | Excludes | Runs instead in |
 | ---------- | -------- | --------------- |
-| `SDMA_IGNORE` | `sdma_async_completion_demo`, `prefetch_async_demo` | dedicated "SDMA pytest (a2a3)" step, `--device-num 2` |
+| `@pytest.mark.sdma` | `sdma_async_completion_demo`, `prefetch_async_demo` | dedicated "SDMA pytest (a2a3)" step, `--device-num 2` |
 
 The SDMA demos provision 48 device-only STARS streams, which makes an AICore
 fault take ~306 s to tear down instead of ~0.3 s — so they must not share a
@@ -34,9 +36,10 @@ sweep with the `aicore_op_timeout` fault-injection test
 issue #1425).
 
 When an onboard test fails, **run it alone before calling it a regression**.
-Alone-passes plus sweep-fails is an isolation requirement, not a defect: grep
-`ci.yml` for an `--ignore` naming it. Do not "fix" such a test by reordering it
-earlier — that only moves the pollution onto whatever now runs after it.
+Alone-passes plus sweep-fails is an isolation requirement, not a defect: check
+the test for a quarantine marker such as `@pytest.mark.sdma`. Do not "fix" such
+a test by reordering it earlier — that only moves the pollution onto whatever
+now runs after it.
 
 ### Runtime rebuild decision
 
@@ -68,9 +71,9 @@ ctest --test-dir tests/ut/cpp/build -L "^requires_hardware(_a2a3)?$" --output-on
 pytest examples tests/st --platform a2a3sim \
     --pto-session-timeout <timeout>
 
-# All hardware scene tests — mirror ci.yml: carry its --ignore set, or the
-# quarantined tests fail here and nowhere else (extract it from ci.yml)
-pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device <range> \
+# All hardware scene tests — mirror ci.yml: deselect the quarantined marker, or
+# those tests fail here and nowhere else
+pytest examples tests/st -m "not sdma" --platform a2a3 --device <range> \
     --pto-session-timeout <timeout>
 
 # The quarantined tests, the way CI runs them — alone, on their own devices
