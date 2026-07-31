@@ -82,10 +82,12 @@ benefit — device bin-packing for L3, xdist fanout for L2, and a shared
 `ChipWorker` per `(runtime, device)`:
 
 ```bash
-# Recommended CI invocation
-pytest examples tests/st --platform a2a3 --device 4-7 -x
+# Recommended CI invocation — a2a3 deselects the SDMA marker, as the job does,
+# and runs it as a second pass afterwards
+pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7 -x
+pytest examples tests/st -m sdma --platform a2a3 --device 4-5 -x
 
-# Same for a5
+# Same for a5, which has no marker filter
 pytest examples tests/st --platform a5 --device 0-7 -x
 ```
 

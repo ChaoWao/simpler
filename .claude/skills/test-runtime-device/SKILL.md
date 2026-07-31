@@ -18,15 +18,30 @@ Detection / isolation procedures referenced below live in
    `--pto-session-timeout`.
 5. **Select a device range** (§C, range ≤4) — or, when wrapping in
    `task-submit`, let it pick via `--device auto --device-num <range size>`.
-6. **Run through `task-submit`** (§E). The underlying command:
+6. **Read the marker selector out of the same job** you took the timeout from.
+   `st-onboard-a2a3` is two pytest passes: the sweep deselects `-m "not sdma"`
+   and a later step runs `-m sdma`. `st-onboard-a5` has no marker filter. Both
+   quarantined tests are `tensormap_and_ringbuffer`, so the second pass is only
+   needed when `$ARGUMENTS` names that runtime.
+7. **Run through `task-submit`** (§E). The underlying command:
 
    ```bash
-   pytest examples tests/st --platform <platform> --runtime $ARGUMENTS \
+   pytest examples tests/st -m "not sdma" --platform <platform> --runtime $ARGUMENTS \
      --device <range-or-$TASK_DEVICE> \
      --pto-session-timeout <timeout> -v
    ```
 
+   Then, for `tensormap_and_ringbuffer` on a platform whose job carries the
+   filter, the quarantined pass afterwards — never concurrently, since the
+   split exists so that no fault-injection case meets a device that has already
+   provisioned SDMA ([`../testing/SKILL.md`](../testing/SKILL.md), issue #1425):
+
+   ```bash
+   pytest examples tests/st -m sdma --platform <platform> --runtime $ARGUMENTS \
+     --device <2 devs or $TASK_DEVICE> --pto-session-timeout <timeout> -v
+   ```
+
    Hardware parallelism is auto-driven by `--device` (one subprocess per
    device); no extra flag needed.
-7. Report the results summary (pass/fail counts per task).
-8. If any tests fail, show the relevant error output and which device failed.
+8. Report the results summary (pass/fail counts per task), across both passes.
+9. If any tests fail, show the relevant error output and which device failed.
