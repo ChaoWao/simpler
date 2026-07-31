@@ -20,14 +20,14 @@ copying a path list. PTO-ISA reproducibility comes from the repo-root
 `pto_isa.pin`.
 
 **CI does not run one flat sweep.** Some tests are quarantined out of the
-general onboard sweep and run in their own step on their own devices, because
-they are only correct in isolation. Reproducing CI means reproducing that
+general onboard sweep and run in a step of their own, after it, because they are
+only correct in isolation. Reproducing CI means reproducing that
 shape — a bare `pytest examples tests/st --platform a2a3` is *not* what CI runs
 and will report failures that CI never sees:
 
 | Quarantine | Excludes | Runs instead in |
 | ---------- | -------- | --------------- |
-| `@pytest.mark.sdma` | `sdma_async_completion_demo`, `prefetch_async_demo` | dedicated "SDMA pytest (a2a3)" step, `--device-num 2` |
+| `@pytest.mark.sdma` | `sdma_async_completion_demo`, `prefetch_async_demo` | the "SDMA pytest (a2a3)" step, which runs after the sweep |
 
 The SDMA demos provision 48 device-only STARS streams, which makes an AICore
 fault take ~306 s to tear down instead of ~0.3 s — so they must not share a
@@ -76,9 +76,10 @@ pytest examples tests/st --platform a2a3sim \
 pytest examples tests/st -m "not sdma" --platform a2a3 --device <range> \
     --pto-session-timeout <timeout>
 
-# The quarantined tests, the way CI runs them — alone, on their own devices
-pytest examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo \
-       examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo \
+# The quarantined tests, the way CI runs them — same corpus, selected by the
+# marker, run after the sweep rather than inside it. Never a path list: that is
+# what the marker replaced.
+pytest examples tests/st -m sdma \
     --platform a2a3 --device <2 devs> --pto-session-timeout <timeout>
 
 # Single runtime
