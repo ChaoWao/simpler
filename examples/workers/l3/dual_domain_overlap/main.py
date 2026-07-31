@@ -7,17 +7,26 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""L3 multi-communication-domain demo with overlapping domains.
+"""L3 demo: one chip belonging to two communication domains.
 
-Three chip workers form two communication domains:
+Three chip workers form two domains whose *membership* overlaps — the
+overlap is structural, not temporal, and the two domains' collectives never
+run concurrently:
 
   left   = workers [0, 1]
-  right  = workers [1, 2]
+  right  = workers [1, 2]        # chip 1 is in both
 
-Worker 1 participates in both domains and receives two independent domain
-contexts.  The L3 orchestration submits communication in both domains and
-then submits affine compute tasks that depend only on their own domain's
-reduced tensor.
+Chip 1 belongs to both domains — rank 1 in `left`, rank 0 in `right` — and
+receives an independent ChipDomainContext, with its own scratch pointer and
+device_ctx, in each domain's own reduction run. The two contexts are never
+live at the same time. `reduce_out` and `affine_out` are keyed by
+(domain, chip), so chip 1 writes a distinct result per domain — that pair of
+values is what the golden check makes sharp.
+
+Three synchronous `worker.run` calls, each its own DAG: one allreduce per
+domain, then a final run holding both affine groups. A domain allocated in
+a run stays live for exactly that run, and reduce precedes affine by the
+run boundary rather than by a dependency edge.
 
 Run:
     python examples/workers/l3/dual_domain_overlap/main.py -p a2a3sim -d 0-2
