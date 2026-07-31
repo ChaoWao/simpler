@@ -385,10 +385,9 @@ static_assert(
 // (rather than folding scope + consumers into one count) lets a consumer reach
 // fanout_refcount == (fanout_count & ~PTO2_FANOUT_SCOPE_BIT) while the scope bit
 // is still unset -- i.e. "all consumers done but scope still open" stays
-// distinguishable from "fully consumed". The heap/task deadlock detector keys
-// off exactly that complement: that condition with state==COMPLETED means the
-// head can only be released by scope_end, which a blocked orchestrator can
-// never reach -> provable deadlock.
+// distinguishable from "fully consumed". Structural allocation deadlock is
+// detected separately by checking whether the blocking ring head is the oldest
+// task pinned by any open scope on that ring.
 static constexpr uint32_t PTO2_FANOUT_SCOPE_BIT = 0x80000000u;
 
 enum PTO2TaskLifecycleFlag : uint8_t {

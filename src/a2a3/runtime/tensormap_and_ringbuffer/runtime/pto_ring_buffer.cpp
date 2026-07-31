@@ -142,8 +142,8 @@ void PTO2DepListPool::report_deadlock(
     LOG_ERROR("FATAL: Dependency Pool Deadlock Detected!");
     LOG_ERROR("========================================");
     if (scope_gated) {
-        LOG_ERROR("Head task %d COMPLETED, all consumers released, scope still open ->", last_alive);
-        LOG_ERROR("only scope_end can free it and the orchestrator is blocked here.");
+        LOG_ERROR("Head task %d is the oldest task owned by an open scope on this ring ->", last_alive);
+        LOG_ERROR("no open scope can end while the orchestrator is blocked here.");
         LOG_ERROR("Provable head-of-line deadlock.");
     } else {
         LOG_ERROR("DepListPool cannot reclaim space after ~500 ms (no progress).");
@@ -176,7 +176,9 @@ void PTO2DepListPool::report_deadlock(
     LOG_ERROR("========================================");
 }
 
-bool PTO2DepListPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed) {
+bool PTO2DepListPool::ensure_space(
+    PTO2SharedMemoryRingHeader &ring, int32_t needed, PTO2TaskSlotState *oldest_open_task
+) {
     if (available() >= needed) return true;
 
     int spin_count = 0;
@@ -200,19 +202,12 @@ bool PTO2DepListPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t nee
             if (error_code_ptr != nullptr && error_code_ptr->load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
                 return false;
             }
-            // (1) Structural, immediate: head task COMPLETED with every consumer
-            // released but its scope still open -> only scope_end frees it and a
-            // blocked orchestrator can never call it -> provable deadlock now.
-            // slot_states is null on a ring with no task-window backing.
-            bool head_scope_gated = false;
-            if (ring.slot_states != nullptr) {
-                PTO2TaskSlotState &head = ring.get_slot_state_by_task_id(cur_last_alive);
-                if (head.task_state.load(std::memory_order_acquire) == PTO2_TASK_COMPLETED) {
-                    uint32_t rc = head.fanout_refcount.load(std::memory_order_acquire);
-                    head_scope_gated = rc == (head.fanout_count & ~PTO2_FANOUT_SCOPE_BIT);
-                }
-            }
-            if (head_scope_gated) {
+            // (1) Structural, immediate: no open scope can end while this
+            // orchestrator is blocked here, so its oldest task on this ring
+            // cannot become CONSUMED.
+            bool head_is_oldest_open_task = oldest_open_task != nullptr && ring.slot_states != nullptr &&
+                                            oldest_open_task == &ring.get_slot_state_by_task_id(cur_last_alive);
+            if (head_is_oldest_open_task) {
                 report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/true);
                 latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
                 return false;
