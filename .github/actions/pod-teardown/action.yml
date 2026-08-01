@@ -17,6 +17,16 @@ runs:
         source "$POD_SSH_HELPER"
 
         pod_ssh "pkill -f 'python -m simpler.remote_l3_worker --host ${REMOTE_DAEMON_HOST}' || true"
+        # A run killed before Worker.close() (runner shutdown, job cancel)
+        # leaves mpirun and its simpler.mpi_l3_session ranks alive holding the
+        # fixed command/health ports, so the next run's rank bind fails. The
+        # runner is single-job, so any survivor on either machine is ours.
+        pkill -f 'simpler[.]mpi_l3_session'
+        pod_ssh "pkill -f 'simpler[.]mpi_l3_session' || true"
+        if [ -n "${POD_MPI_PYTHON:-}" ]; then
+          rm -f "$POD_MPI_PYTHON"
+          pod_ssh "rm -f '$POD_MPI_PYTHON'"
+        fi
         # rm -rf on a tree a surviving chip child is still writing fails with
         # ENOTEMPTY, so retry once after giving it a moment.
         pod_ssh "rm -rf '$REMOTE_WORKDIR' 2>/dev/null || { sleep 5; rm -rf '$REMOTE_WORKDIR'; }"

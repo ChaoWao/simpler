@@ -70,6 +70,15 @@ domain ranks. A remote node reads `comm_profile` and `global_device_ranks`
 from `RemoteWorkerSpec`; a local L3 reads the same fields from its `Worker`
 configuration. All participating nodes must use the same profile.
 
+An MPI-launched group registered with `add_mpirun_worker_group` uses the same
+member contract. Rank 0 writes the group manifest before launch, every MPI rank
+must publish READY before the L4 parent exposes the returned worker ids, and
+the `MpiL3GroupSpec.hosts` order defines node ranks. Global CommDomain members
+must include the complete returned group; their order still defines dense
+domain ranks. A full MPI group exchanges descriptors rank-side over an MPI
+collective, so the L4 import fanout is skipped; a partial group falls back to
+the L4 descriptor broker above.
+
 Global CommDomain capability follows the backend that the node actually
 loads: a platform ending in `sim` supports the `sim` profile, and a real
 `a2a3` platform supports `a3-fabric-v1`. Real A5 and any other
