@@ -17,6 +17,7 @@
 #include "host/memory_allocator.h"
 #include "common/unified_log.h"
 #include "common/platform_config.h"
+#include "common/acl_hal_device.h"
 #include "runtime/rt.h"
 #include "ascend_hal.h"  // CANN HAL API definitions
 #include <dlfcn.h>
@@ -39,6 +40,8 @@ static int get_aicore_reg_info(std::vector<int64_t> &regs, int64_t device_id) {
         return -1;
     }
 
+    const int64_t phys_device_id = pto::acl_to_hal_device_id(device_id);
+
     // Calculate layout parameters from platform config
     constexpr uint32_t SUB_CORE_PER_DIE = PLATFORM_AICORE_PER_DIE * PLATFORM_CORES_PER_BLOCKDIM;
     constexpr uint32_t AIV_BASE_OFFSET = PLATFORM_AICORE_PER_DIE;
@@ -59,7 +62,7 @@ static int get_aicore_reg_info(std::vector<int64_t> &regs, int64_t device_id) {
         uint64_t map_addr = 0;
         uint32_t len = REG_AICORE_MAP_SIZE;
 
-        auto ret = halFunc(static_cast<uint32_t>(device_id), &map_info, &map_addr, &len);
+        auto ret = halFunc(static_cast<uint32_t>(phys_device_id), &map_info, &map_addr, &len);
         if (ret != 0) {
             LOG_ERROR("halResMap failed for core %u (rc=%d)", core_idx, ret);
             return ret;

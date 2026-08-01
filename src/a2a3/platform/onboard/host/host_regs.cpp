@@ -17,6 +17,7 @@
 #include "host/memory_allocator.h"
 #include "common/unified_log.h"
 #include "common/platform_config.h"
+#include "common/acl_hal_device.h"
 #include "runtime/rt.h"
 #include "ascend_hal.h"  // CANN HAL API definitions (MODULE_TYPE_AICORE, INFO_TYPE_OCCUPY, etc.)
 #include <chrono>
@@ -78,8 +79,9 @@ static bool get_pg_mask(uint64_t &valid, int64_t device_id) {
  */
 static int
 get_aicore_reg_info(std::vector<int64_t> &aic, std::vector<int64_t> &aiv, const int &addr_type, int64_t device_id) {
+    const int64_t phys_device_id = pto::acl_to_hal_device_id(device_id);
     uint64_t valid = 0;
-    if (!get_pg_mask(valid, device_id)) {
+    if (!get_pg_mask(valid, phys_device_id)) {
         // If can't get mask, assume all cores valid
         valid = 0xFFFFFFFF;
         LOG_WARN("Using default valid mask 0xFFFFFFFF");
@@ -102,7 +104,7 @@ get_aicore_reg_info(std::vector<int64_t> &aic, std::vector<int64_t> &aiv, const 
 
     struct AddrMapInPara in_map_para;
     struct AddrMapOutPara out_map_para;
-    in_map_para.devid = device_id;
+    in_map_para.devid = phys_device_id;
     in_map_para.addr_type = addr_type;
 
     // Retry rc=13 (EACCES): concurrent chip_process bring-up across paired dies
@@ -123,8 +125,8 @@ get_aicore_reg_info(std::vector<int64_t> &aic, std::vector<int64_t> &aiv, const 
         if (ret != kHalMemCtlEacces) break;
         if (attempt == kHalMemCtlMaxRetries) break;
         LOG_WARN(
-            "halMemCtl rc=13 (EACCES) on devid=%lld attempt %d/%d, retrying after %d ms", (long long)device_id,
-            attempt + 1, kHalMemCtlMaxRetries, kHalMemCtlRetryDelayMs
+            "halMemCtl rc=13 (EACCES) on devid=%lld (acl=%lld) attempt %d/%d, retrying after %d ms",
+            (long long)phys_device_id, (long long)device_id, attempt + 1, kHalMemCtlMaxRetries, kHalMemCtlRetryDelayMs
         );
         std::this_thread::sleep_for(std::chrono::milliseconds(kHalMemCtlRetryDelayMs));
     }

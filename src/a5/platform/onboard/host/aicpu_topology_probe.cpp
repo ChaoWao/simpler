@@ -19,6 +19,7 @@
 #include <unordered_map>
 
 #include "common/unified_log.h"
+#include "common/acl_hal_device.h"
 
 namespace pto::a5 {
 
@@ -112,7 +113,7 @@ bool query_occupy(uint32_t device_id, uint64_t &out_mask) {
     auto fn = load_hal_get_device_info();
     if (fn == nullptr) return false;
     int64_t v = 0;
-    int rc = fn(static_cast<uint64_t>(device_id), kModuleAicpu, kInfoOccupy, &v);
+    int rc = fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), kModuleAicpu, kInfoOccupy, &v);
     if (rc != 0) {
         LOG_WARN("aicpu_topology_probe: halGetDeviceInfo(AICPU,OCCUPY) rc=%d", rc);
         return false;
@@ -125,13 +126,20 @@ bool query_cpu_topo(uint32_t device_id, DsmiCpuTopo &out) {
     std::memset(&out, 0, sizeof(out));
     if (auto fn = load_hal_get_device_info_by_buff(); fn != nullptr) {
         int32_t sz = static_cast<int32_t>(sizeof(out));
-        int rc = fn(static_cast<uint64_t>(device_id), kModuleSystem, kInfoCpuTopo, &out, &sz);
+        int rc =
+            fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), kModuleSystem, kInfoCpuTopo, &out, &sz);
         if (rc == 0 && out.total_nums > 0 && out.total_nums <= kCpuTopoMaxLogical) return true;
         LOG_WARN("aicpu_topology_probe: halGetDeviceInfoByBuff(CPU_TOPO) rc=%d total=%u", rc, out.total_nums);
     }
     if (auto fn = load_dsmi_get_device_info(); fn != nullptr) {
         unsigned int sz = static_cast<unsigned int>(sizeof(out));
-        int rc = fn(device_id, kDsmiSocInfoMainCmd, kDsmiSocInfoSubCmdCpuTopo, &out, &sz);
+        // DSMI is a driver-level API (bypasses ACL), so like the hal* calls it needs the
+        // driver-visible id. NOTE (unverified — no a5 hardware): this assumes
+        // dsmi_get_device_info indexes the same driver-visible id space as the HAL; if DSMI
+        // uses its own logic-id numbering this is wrong. Revisit once an a5 node is available.
+        int rc =
+            fn(static_cast<uint32_t>(pto::acl_to_hal_device_id(device_id)), kDsmiSocInfoMainCmd,
+               kDsmiSocInfoSubCmdCpuTopo, &out, &sz);
         if (rc == 0 && out.total_nums > 0 && out.total_nums <= kCpuTopoMaxLogical) return true;
         LOG_WARN("aicpu_topology_probe: dsmi_get_device_info(CPU_TOPO) rc=%d total=%u", rc, out.total_nums);
     }
