@@ -103,6 +103,7 @@ nav:
       - Task Flow: task-flow.md
       - Orchestrator: orchestrator.md
       - Scheduler: scheduler.md
+      - A5 AICPU core selection: design/a5-fg-pg-core-selection.en.md
       - Worker Manager: worker-manager.md
       - Hardware:
           - Chip architecture: hardware/chip-architecture.md
