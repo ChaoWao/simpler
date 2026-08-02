@@ -65,6 +65,8 @@ jobs:
       non_code_only: ${{ steps.check.outputs.non_code_only }}
       st_affected: ${{ steps.check.outputs.st_affected }}
       ut_affected: ${{ steps.check.outputs.ut_affected }}
+      examples_only: ${{ steps.check.outputs.examples_only }}
+      tests_only: ${{ steps.check.outputs.tests_only }}
     steps:
       - name: Checkout target PR head
         uses: actions/checkout@v5
@@ -89,6 +91,8 @@ jobs:
             echo "a5_changed=true" >> "$GITHUB_OUTPUT"
             echo "st_affected=true" >> "$GITHUB_OUTPUT"
             echo "ut_affected=true" >> "$GITHUB_OUTPUT"
+            echo "examples_only=false" >> "$GITHUB_OUTPUT"
+            echo "tests_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -132,6 +136,25 @@ jobs:
             echo "ut_affected=true" >> "$GITHUB_OUTPUT"
           else
             echo "ut_affected=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Corpus axis, mirroring ci.yml: a diff confined to examples/ or to
+          # tests/ cannot reach the product jobs, whose payload files live in
+          # those partitions but are exercised by the scene-test job instead.
+          EXAMPLES_ONLY='^examples/'
+          NON_EXAMPLE=$(echo "$FILES" | grep -vE "$EXAMPLES_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$NON_EXAMPLE" ]; then
+            echo "examples_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "examples_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          TESTS_ONLY='^(tests/)'
+          NON_TEST=$(echo "$FILES" | grep -vE "$TESTS_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$NON_TEST" ]; then
+            echo "tests_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_only=true" >> "$GITHUB_OUTPUT"
           fi
 
   # ---------- T1: no-hardware Linux, on the cpu runner ----------
@@ -228,7 +251,7 @@ jobs:
 
   packaging:
     needs: [detect-changes]
-    if: needs.detect-changes.outputs.non_code_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.examples_only != 'true' && needs.detect-changes.outputs.tests_only != 'true'
     runs-on: [self-hosted, cpu]
     timeout-minutes: 60
     steps:
@@ -261,7 +284,7 @@ jobs:
 
   profiling-flags-smoke:
     needs: [detect-changes]
-    if: (needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true') && needs.detect-changes.outputs.st_affected == 'true'
+    if: (needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true') && needs.detect-changes.outputs.examples_only != 'true' && needs.detect-changes.outputs.tests_only != 'true'
     runs-on: [self-hosted, cpu]
     timeout-minutes: 30
     steps:
