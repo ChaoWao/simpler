@@ -125,6 +125,7 @@ def test_session_timeout_surfaces_forked_child_traceback(tmp_path):
     # The "job" pytest invocation — a tiny test that forks and blocks both
     # parent and child. The child has a unique sentinel function in its
     # faulthandler traceback so we can grep for it deterministically.
+    ready_path = tmp_path / "grandchild-ready"
     target = tmp_path / "test_deadlock_target.py"
     target.write_text(
         textwrap.dedent("""
@@ -142,8 +143,11 @@ def test_session_timeout_surfaces_forked_child_traceback(tmp_path):
 
 
         def _grandchild_deadlock_sentinel():
-            # Block on sleep — sleep is signal-interruptible, so the SIGUSR1
-            # trampoline preempts it and faulthandler runs.
+            # Signal the driver that the sentinel is reached (the driver's
+            # watcher triggers the timeout dump only after this marker
+            # exists), then block on sleep — sleep is signal-interruptible,
+            # so the SIGUSR1 trampoline preempts it and faulthandler runs.
+            open(os.environ["DEADLOCK_READY"], "w").close()
             time.sleep(3600)
 
 
@@ -171,7 +175,11 @@ def test_session_timeout_surfaces_forked_child_traceback(tmp_path):
     driver = tmp_path / "driver.py"
     driver.write_text(
         textwrap.dedent(f"""
+        import os
+        import signal
         import sys
+        import threading
+        import time
         sys.path.insert(0, {str(_ROOT)!r})
         sys.path.insert(0, {str(_ROOT / "python")!r})
 
@@ -182,9 +190,12 @@ def test_session_timeout_surfaces_forked_child_traceback(tmp_path):
         rc = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(rc)
 
-        # 3 s is plenty: target test forks immediately and the grandchild
-        # sleeps; nothing finishes on its own.
-        rc._install_session_timeout(3)
+        # The timeout is a fail-safe bound only (matching the driver's
+        # subprocess timeout); the dump is triggered by the watcher once the
+        # grandchild provably reaches the sentinel, so a loaded runner's slow
+        # pytest startup cannot race it.
+        rc._install_session_timeout(60)
+        os.environ["DEADLOCK_READY"] = {str(ready_path)!r}
 
         # ``-s`` (capture=no) is critical: pytest's default fd-capture
         # dup2's the test's stderr onto its own capture pipe, so a
@@ -199,6 +210,14 @@ def test_session_timeout_surfaces_forked_child_traceback(tmp_path):
             ],
             device_count=1,
         )
+        def _fire_timeout_when_ready():
+            # Run the real conftest handler the moment the grandchild is at
+            # the sentinel, not on a timer racing the child's startup.
+            while not os.path.exists(os.environ["DEADLOCK_READY"]):
+                time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGALRM)
+
+        threading.Thread(target=_fire_timeout_when_ready, daemon=True).start()
         _ps.run_jobs([job], device_ids=[0])
     """).strip()
         + "\n"
