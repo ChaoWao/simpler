@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import operator
+import threading
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -140,6 +141,116 @@ def _remote_data_eligible_worker_ids(
     return final_worker_ids
 
 
+# Which graph callbacks the *current thread* is inside. Direct device control
+# has to be ordered against the run that issued it, and a process-wide "a run is
+# building" flag cannot say that: a public ``Worker.copy_*`` on another thread
+# would be charged to whichever run happens to be building and blocked behind
+# it.
+#
+# A run id alone cannot say it either, because it names nothing on its own —
+# run 1 exists on every Worker. An L4 callback drives its children's runs on its
+# own thread, so the frames nest and a control call has to find the one for the
+# Worker it is about to touch. Applying the innermost frame instead would order
+# a call on Worker B against Worker A's run, and skip B's own reservation
+# entirely.
+_CALLBACK_RUN = threading.local()
+
+
+class _CallbackFrame:
+    __slots__ = ("has_submitted_task", "run_id", "worker")
+
+    def __init__(self, worker: Any, run_id: int) -> None:
+        self.worker = worker
+        self.run_id = int(run_id)
+        self.has_submitted_task = False
+
+
+def _callback_frames() -> list[_CallbackFrame]:
+    frames = getattr(_CALLBACK_RUN, "frames", None)
+    if frames is None:
+        frames = []
+        _CALLBACK_RUN.frames = frames
+    return frames
+
+
+def _callback_frame_for(worker: Any) -> _CallbackFrame | None:
+    """The innermost open callback on this thread that belongs to *worker*."""
+    for frame in reversed(_callback_frames()):
+        if frame.worker is worker:
+            return frame
+    return None
+
+
+@contextlib.contextmanager
+def _callback_run(run_id: int, worker: Any = None):
+    """Mark this thread as executing *worker*'s *run_id* graph callback."""
+    frames = _callback_frames()
+    frames.append(_CallbackFrame(worker, run_id))
+    try:
+        yield
+    finally:
+        frames.pop()
+
+
+def _admit_task_submission(worker: Any = None) -> None:
+    """Gate one native task-submission attempt and record possible work in flight.
+
+    Direct device control after this point cannot be ordered against it: the
+    task reaches its child through the ready queue and the control through the
+    mailbox, and waiting for the run to hold the FIFO head says nothing about
+    which of the two arrives first. Two of them on different chips can each hold
+    one mailbox and wait for the other.
+
+    The sticky refusal is re-read here for the same reason control re-reads it:
+    an open callback that caught a failed rollback would otherwise keep
+    submitting on top of device state this worker can no longer reclaim.
+    """
+    if worker is not None:
+        worker._require_no_ordered_cleanup_failure("submit")
+    frame = _callback_frame_for(worker)
+    if frame is not None:
+        frame.has_submitted_task = True
+
+
+@contextlib.contextmanager
+def direct_control(worker: Any, native_orch: Any, api: str):
+    """Order one command that reaches a child outside any TaskSlot.
+
+    `malloc`, `copy_*`, domain and region creation, and every `remote_*`
+    buffer call travel the mailbox rather than the ready queue, so the
+    whole-run FIFO does not sequence them. Two cases, and the reservation is
+    held for the *whole* call in both — a check that only samples state leaves
+    the command itself outside the decision it just made.
+
+    A call issued inside a graph callback belongs to that run and waits for it
+    to hold the FIFO head. A call that belongs to no run is ordered only by
+    being alone: it takes the same serializer submission uses, so no run can be
+    admitted between the check and the command.
+    """
+    frame = _callback_frame_for(worker)
+    if frame is not None:
+        if frame.has_submitted_task:
+            raise RuntimeError(
+                f"{api}: direct device control cannot follow a task submission in the same run — the task "
+                "travels the ready queue and this travels the mailbox, so their order is not defined and two "
+                "such pairs can deadlock across chips. Issue all control before the run's first submit_*()"
+            )
+        # A run that is already known to have left device state behind is not a
+        # valid owner for more of it, even though it is still open: its callback
+        # may have caught the rollback failure and carried on.
+        if worker is not None:
+            worker._require_no_ordered_cleanup_failure(api)
+        if native_orch is not None:
+            native_orch.await_run_admission(frame.run_id)
+        yield
+        return
+    if worker is None:
+        yield
+        return
+    with worker._control_reservation(api):
+        yield
+
+
 class Orchestrator:
     """DAG builder. Valid only inside the orch function passed to Worker.run().
 
@@ -210,28 +321,22 @@ class Orchestrator:
             self._worker._stage_host_buffers_for_chip_submit(c_args)
         final_worker_ids = _remote_data_eligible_worker_ids(remote_sidecar, eligible_worker_ids)
         worker = self._worker
-        # Do the (fallible) kind4 provenance analysis BEFORE capturing remote slot
-        # refs, so an exception here can never leave captured refs neither
-        # released nor adopted (which would defer a remote free forever). Capture
-        # is the last step before the rollback try.
+        # Provenance validation precedes run ownership publication. Once a remote
+        # ref is published, only the run fence may release it because the native
+        # submit can commit before an exception reaches Python.
         child_ptrs = worker._child_ptrs_in_args(c_args) if worker is not None else []
         prov_guard: Any = contextlib.nullcontext()
         if child_ptrs and worker is not None:
             prov_guard = worker._child_prov_lock
-        captured_refs = worker._capture_remote_sidecar_refs(remote_sidecar) if worker is not None else []
-        try:
-            with prov_guard:
-                if child_ptrs and worker is not None:
-                    worker._child_prov_check_dispatch(child_ptrs, cpp_worker_id, api="submit_next_level")
-                self._o.submit_next_level(
-                    digest, kind, target_namespace, c_args, cfg, cpp_worker_id, final_worker_ids, remote_sidecar
-                )
-        except BaseException:
-            if self._worker is not None:
-                self._worker._release_remote_slot_refs(captured_refs)
-            raise
-        if self._worker is not None:
-            self._worker._adopt_remote_slot_refs(captured_refs)
+        with prov_guard:
+            if child_ptrs and worker is not None:
+                worker._child_prov_check_dispatch(child_ptrs, cpp_worker_id, api="submit_next_level")
+            if worker is not None:
+                worker._adopt_remote_sidecar_refs((remote_sidecar,))
+            _admit_task_submission(self._worker)
+            self._o.submit_next_level(
+                digest, kind, target_namespace, c_args, cfg, cpp_worker_id, final_worker_ids, remote_sidecar
+            )
 
     def submit_next_level_group(  # noqa: PLR0912 -- linear per-member sidecar + eligibility + kind4-provenance passes, one branch each
         self,
@@ -304,8 +409,7 @@ class Orchestrator:
         )
         # Per-member kind4 dispatch guard: each member's child_memory pointers
         # must be live on that member's exact submitted target.
-        # Run this (fallible) analysis BEFORE capturing remote slot refs, so an
-        # exception here can never strand captured refs outside the rollback try.
+        # Run this fallible analysis before publishing remote-ref ownership.
         worker = self._worker
         member_checks: list[tuple[list[tuple[int, int]], int]] = []
         if worker is not None:
@@ -317,24 +421,16 @@ class Orchestrator:
         prov_guard: Any = (
             worker._child_prov_lock if (worker is not None and member_checks) else contextlib.nullcontext()
         )
-        captured_refs: list[Any] = []
-        if self._worker is not None and remote_sidecars is not None:
-            for sidecar in remote_sidecars:
-                captured_refs.extend(self._worker._capture_remote_sidecar_refs(sidecar))
-        try:
-            with prov_guard:
-                for child_ptrs, target_worker_id in member_checks:
-                    assert worker is not None  # member_checks is only populated when worker is present
-                    worker._child_prov_check_dispatch(child_ptrs, target_worker_id, api="submit_next_level_group")
-                self._o.submit_next_level_group(
-                    digest, kind, target_namespace, c_args_list, cfg, worker_ids, worker_id_sets, remote_sidecars
-                )
-        except BaseException:
-            if self._worker is not None:
-                self._worker._release_remote_slot_refs(captured_refs)
-            raise
-        if self._worker is not None:
-            self._worker._adopt_remote_slot_refs(captured_refs)
+        with prov_guard:
+            for child_ptrs, target_worker_id in member_checks:
+                assert worker is not None  # member_checks is only populated when worker is present
+                worker._child_prov_check_dispatch(child_ptrs, target_worker_id, api="submit_next_level_group")
+            if worker is not None and remote_sidecars is not None:
+                worker._adopt_remote_sidecar_refs(remote_sidecars)
+            _admit_task_submission(self._worker)
+            self._o.submit_next_level_group(
+                digest, kind, target_namespace, c_args_list, cfg, worker_ids, worker_id_sets, remote_sidecars
+            )
 
     def submit_sub(self, callable_handle: Any, args: TaskArgs | None = None):
         """Submit a SUB task by registered callable handle.
@@ -350,6 +446,7 @@ class Orchestrator:
             expected_namespace="LOCAL_PYTHON",
         )
         _reject_remote_sidecar_args(args, kind="orch.submit_sub")
+        _admit_task_submission(self._worker)
         self._o.submit_sub(digest, kind, target_namespace, args)
 
     def submit_sub_group(self, callable_handle: Any, args_list: list):
@@ -362,6 +459,7 @@ class Orchestrator:
         )
         for args in args_list:
             _reject_remote_sidecar_args(args, kind="orch.submit_sub_group")
+        _admit_task_submission(self._worker)
         self._o.submit_sub_group(digest, kind, target_namespace, args_list)
 
     # ------------------------------------------------------------------
@@ -403,12 +501,16 @@ class Orchestrator:
         """
         if self._worker is None:
             raise RuntimeError("allocate_domain requires an Orchestrator bound to a Worker")
-        return self._worker._allocate_domain(
-            name=str(name),
-            workers=tuple(int(w) for w in workers),
-            window_size=int(window_size),
-            buffers=list(buffers),
-        )
+        # Collective domain setup drives CTRL_COMM_INIT / CTRL_ALLOC_DOMAIN on
+        # every member chip, so it is a device effect and must not overtake the
+        # active run's mailbox traffic.
+        with self._control_admission("allocate_domain"):
+            return self._worker._allocate_domain(
+                name=str(name),
+                workers=tuple(int(w) for w in workers),
+                window_size=int(window_size),
+                buffers=list(buffers),
+            )
 
     def release_domain(self, handle: CommDomainHandle) -> None:
         """Collective release.  Equivalent to ``handle.release()``."""
@@ -418,7 +520,8 @@ class Orchestrator:
         """Create an L3-L2 communication region on one NEXT_LEVEL chip worker."""
         if self._worker is None:
             raise RuntimeError("create_l3_l2_region requires an Orchestrator bound to a Worker")
-        return self._worker._create_l3_l2_region(int(worker_id), int(payload_bytes), int(counter_bytes))
+        with self._control_admission("create_l3_l2_region"):
+            return self._worker._create_l3_l2_region(int(worker_id), int(payload_bytes), int(counter_bytes))
 
     def create_l3_l2_queue(self, *, worker_id: int, depth: int, input_arena_bytes: int, output_arena_bytes: int):
         """Create an L3-L2 message queue backed by one L3-L2 communication region."""
@@ -426,13 +529,18 @@ class Orchestrator:
             raise RuntimeError("create_l3_l2_queue requires an Orchestrator bound to a Worker")
         from .l3_l2_message_queue import create_l3_l2_queue  # noqa: PLC0415
 
-        return create_l3_l2_queue(
-            self,
-            worker_id=int(worker_id),
-            depth=int(depth),
-            input_arena_bytes=int(input_arena_bytes),
-            output_arena_bytes=int(output_arena_bytes),
-        )
+        # Reserved across the whole build, not just the region creation it
+        # nests: the descriptor writes that follow are device effects too. The
+        # reservation is re-entrant, so the inner create_l3_l2_region joins this
+        # one rather than deadlocking on it.
+        with self._control_admission("create_l3_l2_queue"):
+            return create_l3_l2_queue(
+                self,
+                worker_id=int(worker_id),
+                depth=int(depth),
+                input_arena_bytes=int(input_arena_bytes),
+                output_arena_bytes=int(output_arena_bytes),
+            )
 
     # ------------------------------------------------------------------
     # Nested scope (Strict-1 per-scope rings)
@@ -478,6 +586,15 @@ class Orchestrator:
         finally:
             self._o.scope_end()
 
+    def _control_admission(self, api: str):
+        """Hold this call's ordering against runs for its whole duration.
+
+        Entered before any Worker lock: the wait can be long, and a callback
+        holding ``_child_prov_lock`` across it would block the very paths that
+        let the active run finish.
+        """
+        return direct_control(self._worker, self._o, f"Orchestrator.{api}")
+
     def malloc(self, worker_id: int, size: int) -> int:
         """Allocate memory on next-level worker *worker_id*. Returns a pointer.
 
@@ -486,24 +603,36 @@ class Orchestrator:
         returned pointer's ``(worker_id, ptr)`` provenance is recorded so a later
         free / copy / kind4 dispatch to the wrong worker is rejected.
         """
-        wid, sz = int(worker_id), int(size)
-        if self._worker is None:
-            return int(self._o.malloc(wid, sz))
-        with self._worker._child_prov_lock:
-            ptr = int(self._o.malloc(wid, sz))
-            self._worker._child_prov_record_malloc(wid, ptr, sz)
-            return ptr
+        with self._control_admission("malloc"):
+            wid, sz = int(worker_id), int(size)
+            if self._worker is None:
+                return int(self._o.malloc(wid, sz))
+            with self._worker._child_prov_lock:
+                ptr = int(self._o.malloc(wid, sz))
+                self._worker._child_prov_record_malloc(wid, ptr, sz)
+                return ptr
 
     def committed_device_memory(self, worker_id: int) -> int:
-        """Total device HBM (bytes) committed by next-level worker *worker_id*'s ``MemoryAllocator``."""
-        return int(self._o.committed_device_memory(int(worker_id)))
+        """Total device HBM (bytes) committed by next-level worker *worker_id*'s ``MemoryAllocator``.
+
+        A query, but one that travels the same chip mailbox as every other
+        command, so it takes the same ordering: read behind a run that is still
+        allocating and the number is a snapshot of neither side.
+        """
+        with self._control_admission("committed_device_memory"):
+            return int(self._o.committed_device_memory(int(worker_id)))
 
     def free(self, worker_id: int, ptr: int) -> None:
         """Free memory on next-level worker *worker_id*."""
-        wid, p = int(worker_id), int(ptr)
-        if self._worker is None:
-            self._o.free(wid, p)
-            return
+        with self._control_admission("free"):
+            wid, p = int(worker_id), int(ptr)
+            if self._worker is None:
+                self._o.free(wid, p)
+                return
+            self._free_locked(wid, p)
+
+    def _free_locked(self, wid: int, p: int) -> None:
+        assert self._worker is not None
         with self._worker._child_prov_lock:
             # Safety-first commit barrier: revoke provenance BEFORE the native
             # free. If the native free succeeds and an async unwind (e.g. a
@@ -518,23 +647,25 @@ class Orchestrator:
 
     def copy_to(self, worker_id: int, dst: int, src: int, size: int) -> None:
         """Copy *size* bytes from host *src* to worker *dst*."""
-        wid, d = int(worker_id), int(dst)
-        if self._worker is None:
-            self._o.copy_to(wid, d, int(src), int(size))
-            return
-        with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live_range(wid, d, int(size), api="copy_to")
-            self._o.copy_to(wid, d, int(src), int(size))
+        with self._control_admission("copy_to"):
+            wid, d = int(worker_id), int(dst)
+            if self._worker is None:
+                self._o.copy_to(wid, d, int(src), int(size))
+                return
+            with self._worker._child_prov_lock:
+                self._worker._child_prov_require_live_range(wid, d, int(size), api="copy_to")
+                self._o.copy_to(wid, d, int(src), int(size))
 
     def copy_from(self, worker_id: int, dst: int, src: int, size: int) -> None:
         """Copy *size* bytes from worker *src* to host *dst*."""
-        wid, s = int(worker_id), int(src)
-        if self._worker is None:
-            self._o.copy_from(wid, int(dst), s, int(size))
-            return
-        with self._worker._child_prov_lock:
-            self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
-            self._o.copy_from(wid, int(dst), s, int(size))
+        with self._control_admission("copy_from"):
+            wid, s = int(worker_id), int(src)
+            if self._worker is None:
+                self._o.copy_from(wid, int(dst), s, int(size))
+                return
+            with self._worker._child_prov_lock:
+                self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
+                self._o.copy_from(wid, int(dst), s, int(size))
 
     def alloc(self, shape: Sequence[int], dtype: DataType) -> Tensor:
         """Allocate a runtime-managed intermediate buffer.

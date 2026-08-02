@@ -122,6 +122,9 @@ void Worker::init() {
     cfg.enqueue_ready_cb = [this](TaskSlot slot) {
         orchestrator_.enqueue_ready(slot);
     };
+    cfg.active_run_cb = [this] {
+        return orchestrator_.dispatchable_run_id();
+    };
     cfg.on_consumed_cb = [this](TaskSlot slot) {
         orchestrator_.on_consumed(slot);
     };

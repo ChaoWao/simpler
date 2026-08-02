@@ -150,7 +150,7 @@ class L3HostRegionMapping:
     payload_bytes: int
     counter_offset: int
     counter_bytes: int
-    handle: int
+    handle: Any
     closed: bool = False
 
     def close(self) -> None:
@@ -337,7 +337,7 @@ class L3L2OrchRegion:
             size = pinned.nbytes if nbytes is None else int(nbytes)
             self._validate_payload_range(offset, size, pinned.nbytes)
             try:
-                _l3_host_mapped_payload_write(self._l3_host_mapping.handle, int(offset), pinned.addr, size)
+                _l3_host_mapped_payload_write(int(self._l3_host_mapping.handle), int(offset), pinned.addr, size)
             except Exception:
                 self._poison()
                 raise
@@ -348,7 +348,7 @@ class L3L2OrchRegion:
             size = pinned.nbytes if nbytes is None else int(nbytes)
             self._validate_payload_range(offset, size, pinned.nbytes)
             try:
-                _l3_host_mapped_payload_read(self._l3_host_mapping.handle, int(offset), pinned.addr, size)
+                _l3_host_mapped_payload_read(int(self._l3_host_mapping.handle), int(offset), pinned.addr, size)
             except Exception:
                 self._poison()
                 raise
@@ -402,7 +402,7 @@ class L3L2OrchRegion:
         l3_host_mapping = self._l3_host_mapping
         mapping_offset = int(l3_host_mapping.counter_offset) + int(offset)
         try:
-            _l3_host_mapped_counter_notify(l3_host_mapping.handle, mapping_offset, int(value), int(op))
+            _l3_host_mapped_counter_notify(int(l3_host_mapping.handle), mapping_offset, int(value), int(op))
         except Exception:
             self._poison()
             raise
@@ -412,7 +412,7 @@ class L3L2OrchRegion:
         mapping_offset = int(l3_host_mapping.counter_offset) + int(offset)
         try:
             matched, observed = _l3_host_mapped_counter_test(
-                l3_host_mapping.handle, mapping_offset, int(cmp_value), int(cmp)
+                int(l3_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp)
             )
         except Exception:
             self._poison()
@@ -424,7 +424,7 @@ class L3L2OrchRegion:
         mapping_offset = int(l3_host_mapping.counter_offset) + int(offset)
         try:
             status, error_kind, observed, _matched, message = _l3_host_mapped_counter_wait(
-                l3_host_mapping.handle, mapping_offset, int(cmp_value), int(cmp), int(timeout_ns)
+                int(l3_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp), int(timeout_ns)
             )
         except Exception:
             self._poison()

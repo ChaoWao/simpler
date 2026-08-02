@@ -220,9 +220,10 @@ class RemoteBufferHandle:
         "_ub_ldst_va",
         "_access_flags",
         "_released",
-        "_live_slot_refs",
-        "_live_import_refs",
+        "_slot_ref_tokens",
+        "_import_ref_tokens",
         "_owner_handle_ref",
+        "_owner_import_ref_token",
     )
 
     def __init__(  # noqa: PLR0913
@@ -242,6 +243,7 @@ class RemoteBufferHandle:
         access_flags: int = 3,
         released: bool = False,
         owner_handle_ref: RemoteBufferHandle | None = None,
+        owner_import_ref_token: object | None = None,
         _internal_token: object | None = None,
     ) -> None:
         address_space = RemoteAddressSpace(int(address_space))
@@ -261,9 +263,10 @@ class RemoteBufferHandle:
         self._ub_ldst_va = int(ub_ldst_va)
         self._access_flags = int(access_flags)
         self._released = bool(released)
-        self._live_slot_refs = 0
-        self._live_import_refs = 0
+        self._slot_ref_tokens: set[object] = set()
+        self._import_ref_tokens: set[object] = set()
         self._owner_handle_ref = owner_handle_ref
+        self._owner_import_ref_token = owner_import_ref_token
 
         if self._worker_id < 0:
             raise ValueError("RemoteBufferHandle.worker_id must be non-negative")
@@ -336,6 +339,7 @@ class RemoteBufferHandle:
         access_flags: int = 0,
         released: bool = False,
         owner_handle_ref: RemoteBufferHandle | None = None,
+        owner_import_ref_token: object | None = None,
     ) -> RemoteBufferHandle:
         return cls(
             worker_id=worker_id,
@@ -352,6 +356,7 @@ class RemoteBufferHandle:
             access_flags=access_flags,
             released=released,
             owner_handle_ref=owner_handle_ref,
+            owner_import_ref_token=owner_import_ref_token,
             _internal_token=_REMOTE_BUFFER_HANDLE_TOKEN,
         )
 
@@ -395,28 +400,48 @@ class RemoteBufferHandle:
         """Whether this came from ``remote_import`` rather than ``remote_malloc``."""
         return self._import_id != 0
 
+    @property
+    def _live_slot_refs(self) -> int:
+        return len(self._slot_ref_tokens)
+
+    @property
+    def _live_import_refs(self) -> int:
+        return len(self._import_ref_tokens)
+
     def _mark_released(self) -> None:
         self._released = True
 
-    def _acquire_slot_ref(self) -> None:
+    def _acquire_slot_ref(self, token: object | None = None) -> object:
         if self._released:
             raise RuntimeError("RemoteBufferHandle has already been released")
-        self._live_slot_refs += 1
+        if token is None:
+            token = object()
+        self._slot_ref_tokens.add(token)
+        return token
 
-    def _release_slot_ref(self) -> None:
-        if self._live_slot_refs <= 0:
+    def _release_slot_ref(self, token: object | None = None) -> None:
+        if token is not None:
+            self._slot_ref_tokens.discard(token)
+            return
+        if not self._slot_ref_tokens:
             raise RuntimeError("RemoteBufferHandle live slot refs underflow")
-        self._live_slot_refs -= 1
+        self._slot_ref_tokens.pop()
 
-    def _acquire_import_ref(self) -> None:
+    def _acquire_import_ref(self, token: object | None = None) -> object:
         if self._released:
             raise RuntimeError("RemoteBufferHandle has already been released")
-        self._live_import_refs += 1
+        if token is None:
+            token = object()
+        self._import_ref_tokens.add(token)
+        return token
 
-    def _release_import_ref(self) -> None:
-        if self._live_import_refs <= 0:
+    def _release_import_ref(self, token: object | None = None) -> None:
+        if token is not None:
+            self._import_ref_tokens.discard(token)
+            return
+        if not self._import_ref_tokens:
             raise RuntimeError("RemoteBufferHandle live import refs underflow")
-        self._live_import_refs -= 1
+        self._import_ref_tokens.pop()
 
     def __repr__(self) -> str:
         return (
@@ -932,7 +957,17 @@ class CommDomainHandle:
     ``released → freed`` transition is the runtime's job at end-of-run.
     """
 
-    __slots__ = ("name", "workers", "contexts", "allocation_id", "_release_fn", "_released", "_freed")
+    __slots__ = (
+        "name",
+        "workers",
+        "contexts",
+        "allocation_id",
+        "_domain_size",
+        "_domain_ranks",
+        "_release_fn",
+        "_released",
+        "_freed",
+    )
 
     def __init__(
         self,
@@ -942,12 +977,18 @@ class CommDomainHandle:
         contexts: dict[int, ChipDomainContext],
         allocation_id: int,
         _release_fn,
+        _domain_size: int | None = None,
+        _domain_ranks: dict[int, int] | None = None,
     ) -> None:
         self.name = name
         self.workers = tuple(workers)
         # Frozen dict-ish — we don't expose mutation
         self.contexts: dict[int, ChipDomainContext] = dict(contexts)
         self.allocation_id = int(allocation_id)
+        self._domain_size = len(self.workers) if _domain_size is None else int(_domain_size)
+        self._domain_ranks = (
+            {worker: rank for rank, worker in enumerate(self.workers)} if _domain_ranks is None else dict(_domain_ranks)
+        )
         self._release_fn = _release_fn
         self._released = False
         self._freed = False

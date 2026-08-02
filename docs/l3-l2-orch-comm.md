@@ -148,7 +148,25 @@ addresses.
 On onboard platforms, region create allocates one child-owned VMM GM range,
 exports it through a shareable handle, and returns the import metadata to the
 parent. The parent imports that region and closes the mapped VMM import before
-the child frees the physical allocation.
+the child frees the physical allocation. The native import remains
+provisionally owned until the Python region is published into its run. An
+interruption during import, wrapper construction, or run publication closes
+the parent mapping and rolls back the child region instead of leaving either
+resource untracked.
+
+Every native payload, counter, and wait operation holds a lease on that parent
+mapping for the complete GIL-released access. Closing first rejects new leases,
+then waits for all active leases and the physical unmap to finish before it
+returns; concurrent duplicate closes join that same completion. The Worker can
+therefore release the child allocation only after no parent operation can still
+touch it.
+
+If an unadopted native owner reports a cleanup failure while an import unwinds,
+the diagnostic stays on the importing thread until the Worker consumes it and
+poisons itself. It cannot be consumed by a Worker importing concurrently on a
+different thread. If the diagnostic survives to a later create on the same
+thread, its original Worker is no longer identifiable, so that Worker is
+conservatively stopped with an explicit attribution message.
 
 ## 4. Signal Counters
 

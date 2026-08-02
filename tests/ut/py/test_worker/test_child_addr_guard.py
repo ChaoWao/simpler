@@ -586,7 +586,13 @@ class TestDomainReleaseOrdering:
         with w._child_prov_lock:
             w._child_prov_record_domain(0, 0x5000, allocation_id=9, extent=64)
             w._child_prov_record_domain(1, 0x6000, allocation_id=9, extent=64)
-        handle = SimpleNamespace(name="d", workers=(0, 1), allocation_id=9)
+        handle = SimpleNamespace(
+            name="d",
+            workers=(0, 1),
+            allocation_id=9,
+            _domain_size=2,
+            _domain_ranks={0: 0, 1: 1},
+        )
         return w, handle
 
     def test_release_revokes_provenance_before_backend_free(self, monkeypatch):

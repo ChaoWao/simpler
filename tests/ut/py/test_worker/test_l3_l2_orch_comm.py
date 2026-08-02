@@ -8,7 +8,10 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import ctypes
+import gc
 import importlib
+import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
@@ -389,6 +392,102 @@ def test_onboard_direct_mapping_allows_granularity_aligned_mapping(monkeypatch):
         shm.unlink()
 
 
+@pytest.mark.parametrize("interrupted_publication", ["worker", "run"])
+def test_direct_region_create_rolls_back_partially_published_region(monkeypatch, interrupted_publication):
+    class _AppendThenInterrupt(list):
+        def append(self, item) -> None:
+            super().append(item)
+            raise KeyboardInterrupt(f"interrupted {interrupted_publication} publication")
+
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    resources = worker_module._RunResources()
+    worker._building_run_resources = resources
+    close_calls: list[int] = []
+    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size: 55)
+    monkeypatch.setattr(
+        l3_l2_orch_comm,
+        "_l3_host_mapped_region_close",
+        lambda handle: close_calls.append(int(handle)),
+    )
+    if interrupted_publication == "worker":
+        worker._live_l3_l2_regions = _AppendThenInterrupt()
+    else:
+        resources.l3_l2_regions = _AppendThenInterrupt()
+
+    try:
+        with pytest.raises(KeyboardInterrupt, match=f"interrupted {interrupted_publication} publication"):
+            worker._create_l3_l2_region(0, 64, 128)
+
+        assert worker._live_l3_l2_regions == []
+        assert resources.l3_l2_regions == []
+        assert resources.requires_ordered_cleanup is False
+        assert close_calls == [55]
+        assert fake_c_worker.release_calls == [(0, 1)]
+    finally:
+        worker._building_run_resources = None
+        worker._live_l3_l2_regions.clear()
+        resources.l3_l2_regions.clear()
+        worker._close_l3_l2_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
+def test_direct_region_create_mapping_rollback_failure_poisons_worker(monkeypatch):
+    class _AppendThenInterrupt(list):
+        def append(self, item) -> None:
+            super().append(item)
+            raise KeyboardInterrupt("interrupted publication")
+
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    worker._live_l3_l2_regions = _AppendThenInterrupt()
+    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size: 55)
+    monkeypatch.setattr(
+        l3_l2_orch_comm,
+        "_l3_host_mapped_region_close",
+        lambda _handle: (_ for _ in ()).throw(RuntimeError("mapping close failed")),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="rollback could not close the L3 Host mapping") as excinfo:
+            worker._create_l3_l2_region(0, 64, 128)
+
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert fake_c_worker.release_calls == [(0, 1)]
+        assert worker._live_l3_l2_regions == []
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+    finally:
+        worker._live_l3_l2_regions.clear()
+        worker._close_l3_l2_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
+def test_unadopted_native_mapping_cleanup_failure_poisons_worker(monkeypatch):
+    worker, shm, fake_c_worker = _make_started_sim_worker()
+    cleanup_errors = iter(("", "native owner cleanup failed"))
+    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_take_cleanup_error", lambda: next(cleanup_errors))
+    monkeypatch.setattr(
+        worker_module,
+        "_l3_host_mapped_region_import_sim",
+        lambda _token, _size: (_ for _ in ()).throw(KeyboardInterrupt("interrupted native adoption")),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="rollback could not close the L3 Host mapping") as excinfo:
+            worker._create_l3_l2_region(0, 64, 128)
+
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert "native owner cleanup failed" in str(excinfo.value.__cause__)
+        assert fake_c_worker.release_calls == [(0, 1)]
+        with pytest.raises(RuntimeError, match="no further work is admitted"):
+            worker._require_no_ordered_cleanup_failure("submit")
+    finally:
+        worker._close_l3_l2_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
 def test_onboard_region_create_handler_uses_named_export_fields(monkeypatch):
     req_shm = SharedMemory(create=True, size=l3_l2_orch_comm._REGION_CREATE_REQUEST_BYTES)
     reply_shm = SharedMemory(create=True, size=l3_l2_orch_comm._REGION_CREATE_REPLY_BYTES)
@@ -487,7 +586,8 @@ def test_l3_host_mapped_counter_wait_releases_gil_for_python_notifier():
     shm = SharedMemory(create=True, size=64)
     handle = 0
     try:
-        handle = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+        handle = int(owner)
 
         def notify() -> None:
             time.sleep(0.05)
@@ -512,7 +612,8 @@ def test_l3_host_mapped_sim_payload_and_counter_helpers_roundtrip():
     shm = SharedMemory(create=True, size=128)
     handle = 0
     try:
-        handle = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 128)
+        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 128)
+        handle = int(owner)
         src_t = ctypes.c_uint8 * 8
         src = src_t(*range(10, 18))
         dst = src_t()
@@ -547,11 +648,109 @@ def test_l3_host_mapped_region_close_makes_sim_handle_unusable():
     shm = SharedMemory(create=True, size=64)
     handle = 0
     try:
-        handle = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+        handle = int(owner)
         _task_interface_ext._l3_host_mapped_region_close(handle)
 
         with pytest.raises(RuntimeError, match="closed or unknown"):
             _task_interface_ext._l3_host_mapped_counter_test(handle, 0, 0, int(WaitCmp.EQ))
+    finally:
+        if handle:
+            _task_interface_ext._l3_host_mapped_region_close(handle)
+        shm.close()
+        shm.unlink()
+
+
+def test_l3_host_mapped_import_owner_closes_unadopted_mapping():
+    shm = SharedMemory(create=True, size=64)
+    raw_handle = 0
+    try:
+        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+        raw_handle = int(owner)
+        del owner
+        gc.collect()
+
+        with pytest.raises(RuntimeError, match="closed or unknown"):
+            _task_interface_ext._l3_host_mapped_counter_test(raw_handle, 0, 0, int(WaitCmp.EQ))
+    finally:
+        if raw_handle:
+            _task_interface_ext._l3_host_mapped_region_close(raw_handle)
+        shm.close()
+        shm.unlink()
+
+
+def test_sim_import_registry_failure_releases_pre_registry_mapping():
+    if not os.path.exists("/proc/self/maps"):
+        pytest.skip("requires Linux procfs resource accounting")
+
+    shm = SharedMemory(create=True, size=64)
+    shm_token = shm.name.lstrip("/")
+
+    def mapped_resource_counts() -> tuple[int, int]:
+        fd_count = 0
+        for fd_name in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd_name}")
+            except OSError:
+                continue
+            fd_count += shm_token in target
+        with open("/proc/self/maps", encoding="utf-8") as maps_file:
+            map_count = sum(shm_token in line for line in maps_file)
+        return fd_count, map_count
+
+    try:
+        baseline = mapped_resource_counts()
+        _task_interface_ext._l3_host_mapped_region_take_cleanup_error()
+        _task_interface_ext._l3_host_mapped_region_fail_next_registry_insert_for_test()
+
+        with pytest.raises(RuntimeError, match="injected mapped-region registry insertion failure"):
+            _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+
+        gc.collect()
+        assert mapped_resource_counts() == baseline
+        assert _task_interface_ext._l3_host_mapped_region_take_cleanup_error() == ""
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def test_l3_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
+    shm = SharedMemory(create=True, size=64)
+    handle = 0
+    try:
+        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64)
+        handle = int(owner)
+        close_entered = [threading.Event(), threading.Event()]
+        close_done = [threading.Event(), threading.Event()]
+
+        def wait_for_counter():
+            return _task_interface_ext._l3_host_mapped_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000)
+
+        def close_mapping(index: int) -> None:
+            close_entered[index].set()
+            _task_interface_ext._l3_host_mapped_region_close(handle)
+            close_done[index].set()
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            wait_future = executor.submit(wait_for_counter)
+            deadline = time.monotonic() + 1.0
+            while _task_interface_ext._l3_host_mapped_region_active_leases(handle) != 1:
+                assert time.monotonic() < deadline, "counter wait never acquired its mapped-region lease"
+                time.sleep(0.001)
+
+            close_futures = [executor.submit(close_mapping, index) for index in range(2)]
+            assert all(event.wait(1.0) for event in close_entered)
+            assert not any(event.wait(0.05) for event in close_done), (
+                "a concurrent close returned while a native operation still held the region"
+            )
+
+            cast(memoryview, shm.buf)[:4] = b"\x01\x00\x00\x00"
+            assert wait_future.result(timeout=1.0) == (0, 0, 1, True, "")
+            for close_future in close_futures:
+                close_future.result(timeout=1.0)
+
+        with pytest.raises(RuntimeError, match="closed or unknown"):
+            _task_interface_ext._l3_host_mapped_counter_test(handle, 0, 1, int(WaitCmp.EQ))
     finally:
         if handle:
             _task_interface_ext._l3_host_mapped_region_close(handle)

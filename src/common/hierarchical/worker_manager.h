@@ -92,7 +92,8 @@ static constexpr size_t MAILBOX_ERROR_MSG_SIZE = 256;
 // CallConfig is written/read as a single packed POD block (see call_config.h).
 // Both ends transfer it with one memcpy — no per-field offsets to keep in sync.
 //
-// MAILBOX_OFF_ARGS is derived: round up CallConfig's end to 8 bytes so the
+// The generation-safe run lease follows CallConfig. MAILBOX_OFF_ARGS is
+// derived by rounding up the lease's end so the
 // args blob's first Tensor field (buffer.addr, a uint64_t at OFF_ARGS+8) is
 // 8-byte aligned, avoiding SIGBUS on strict-alignment platforms (aarch64
 // atomics, some ARM cores). The control region (CTRL_OFF_ARG0..CTRL_OFF_RESULT) lives
@@ -102,12 +103,18 @@ static constexpr ptrdiff_t MAILBOX_OFF_STATE = 0;
 static constexpr ptrdiff_t MAILBOX_OFF_ERROR = 4;
 static constexpr ptrdiff_t MAILBOX_OFF_CALLABLE = 8;  // also: control sub-command (uint64)
 static constexpr ptrdiff_t MAILBOX_OFF_CONFIG = 16;
-static constexpr ptrdiff_t MAILBOX_OFF_ARGS =
+static constexpr ptrdiff_t MAILBOX_OFF_PIPELINE_LEASE =
     (MAILBOX_OFF_CONFIG + static_cast<ptrdiff_t>(sizeof(CallConfig)) + 7) & ~ptrdiff_t{7};
+static constexpr ptrdiff_t MAILBOX_OFF_ARGS =
+    (MAILBOX_OFF_PIPELINE_LEASE + static_cast<ptrdiff_t>(sizeof(PipelineSlotLease)) + 7) & ~ptrdiff_t{7};
 static_assert(MAILBOX_OFF_ARGS % 8 == 0, "MAILBOX_OFF_ARGS must be 8-aligned for Tensor.buffer.addr");
 static_assert(
     MAILBOX_OFF_CONFIG + static_cast<ptrdiff_t>(sizeof(CallConfig)) <= MAILBOX_OFF_ARGS,
     "CallConfig overflows reserved config region"
+);
+static_assert(
+    MAILBOX_OFF_PIPELINE_LEASE + static_cast<ptrdiff_t>(sizeof(PipelineSlotLease)) <= MAILBOX_OFF_ARGS,
+    "PipelineSlotLease overflows reserved lease region"
 );
 static constexpr ptrdiff_t MAILBOX_OFF_ERROR_MSG =
     static_cast<ptrdiff_t>(MAILBOX_SIZE) - static_cast<ptrdiff_t>(MAILBOX_ERROR_MSG_SIZE);

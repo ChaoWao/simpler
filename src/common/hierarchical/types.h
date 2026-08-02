@@ -32,16 +32,20 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
+#include "../worker/pto_runtime_c_api.h"
 
 // =============================================================================
 // TensorKey — compound key for TensorMap dependency tracking
@@ -123,30 +127,35 @@ static constexpr int32_t INVALID_SLOT = -1;
 using RunId = uint64_t;
 static constexpr RunId INVALID_RUN_ID = 0;
 
-// No transition assigns PREPARED while one run builds at a time: closing
-// submission moves BUILDING straight to EXECUTING, or to a terminal phase when
-// the run holds no tasks. Bounded prepared-run admission is what occupies it.
+// Admission reserves a generation-safe pipeline slot before graph construction.
+// Closing the graph publishes PREPARED; only the whole-run FIFO head may enter
+// EXECUTING and reach a device endpoint.
 enum class RunPhase : int32_t {
-    BUILDING = 0,
-    PREPARED = 1,
-    EXECUTING = 2,
-    COMPLETED = 3,
-    FAILED = 4,
+    RESERVED = 0,
+    BUILDING = 1,
+    PREPARED = 2,
+    EXECUTING = 3,
+    COMPLETED = 4,
+    FAILED = 5,
 };
 
 struct RunState {
-    explicit RunState(RunId run_id) :
-        id(run_id) {}
+    RunState(RunId run_id, PipelineSlotLease slot_lease) :
+        id(run_id),
+        lease(slot_lease) {}
 
     RunId id{INVALID_RUN_ID};
-    std::atomic<RunPhase> phase{RunPhase::BUILDING};
+    PipelineSlotLease lease{};
+    std::atomic<RunPhase> phase{RunPhase::RESERVED};
     std::atomic<int32_t> active_tasks{0};
     std::atomic<int32_t> pending_accepts{0};
     mutable std::mutex completion_mu;
     std::condition_variable completion_cv;
     std::exception_ptr first_error;
+    std::vector<int32_t> task_slots;
     bool submission_closed{false};
     bool submission_failed{false};
+    bool lease_released{false};
 };
 
 // =============================================================================
@@ -196,6 +205,14 @@ enum class TaskState : int32_t {
     COMPLETED = 4,  // worker finished, outputs may still be referenced
     FAILED = 5,     // worker failed or a producer poisoned this slot
     CONSUMED = 6,   // all references released, slot may be reused
+    // Submit owns the slot. It is already reachable from its producers' fanout
+    // lists — wiring has to happen under each producer's fanout_mu, so the slot
+    // cannot be kept private until it is finished — but fanin_count,
+    // fanout_total and the ref counters are not final yet. No other thread may
+    // advance a BUILDING slot: a producer that completes leaves its fanin
+    // release for submit to observe, and a producer that fails parks the slot
+    // at FAILED for submit to propagate. See claim_task_failure().
+    BUILDING = 7,
 };
 
 enum class EndpointOutcome : int32_t {
@@ -322,13 +339,27 @@ struct WorkerCompletion {
 struct TaskSlotState {
     std::atomic<TaskState> state{TaskState::FREE};
     RunId run_id{INVALID_RUN_ID};
+    PipelineSlotLease pipeline_lease{};
 
-    // --- Fanin (orch writes once; scheduler reads atomically) ---
-    int32_t fanin_count{0};
+    // --- Fanin ---
+    // `fanin_count` is written once by submit's publication and read by every
+    // completing producer. The two are concurrent — a producer can complete
+    // while the slot is still BUILDING — so both the write and every read live
+    // under `fanout_mu`, which also carries the state transition they decide
+    // on. See try_mark_ready() for why they cannot be separated.
+    std::atomic<int32_t> fanin_count{0};
     std::atomic<int32_t> fanin_released{0};  // incremented by each completing producer
 
-    // --- Fanout (protected by fanout_mu) ---
-    // orch adds consumers; scheduler traverses on completion
+    // Set when a BUILDING failure claim leaves propagation to submit, and by
+    // cancellation when it claims a PENDING or READY slot itself. Fallible
+    // preparation happens while it remains set, so cancellation can retry its
+    // own FAILED slot without allowing another active owner to take it over.
+    std::atomic<bool> failure_propagation_pending{false};
+
+    // --- Fanout, plus the slot's pre-dispatch state transitions ---
+    // orch adds consumers; scheduler traverses on completion. The same mutex
+    // covers every BUILDING/PENDING -> {READY, FAILED} transition and the
+    // fields each of those decisions reads.
     std::mutex fanout_mu;
     std::vector<TaskSlot> fanout_consumers;
     int32_t fanout_total{0};                  // 1 (scope ref) + fanout_consumers.size()
@@ -351,6 +382,11 @@ struct TaskSlotState {
     // --- Failure state ---
     // Root worker failures and downstream poison both land here. The
     // originating RunState owns first-error-wins reporting.
+    //
+    // Guarded by fanout_mu, the same lock that guards the fanout snapshot a
+    // failure propagates over: whoever claims the failure writes the message
+    // and reads the consumer list under one acquisition, so a consumer that
+    // sees FAILED while wiring itself in also sees the reason.
     std::string failure_message;
 
     // --- Task data (stored on parent heap, lives until slot CONSUMED) ---
@@ -416,6 +452,55 @@ struct TaskSlotState {
     void reset();
 };
 
+// The one claim every failure path uses to move a task to FAILED: a device
+// completion poisoning its consumers, a run cancellation, and a submit that
+// wires onto a producer that has already failed. Returns the state the slot
+// held when the claim was won, or std::nullopt when the slot was not claimable
+// — already terminal, or RUNNING and therefore owned by the device until its
+// own completion arrives.
+//
+// The claim and failure_message are published under fanout_mu, the lock a
+// propagation snapshots the consumer list under. That is what makes the
+// snapshot exact: a task wiring itself onto this producer either registers
+// before the claim and is poisoned by it, or observes FAILED — with its
+// message — and poisons itself.
+//
+// A claim won from BUILDING stops there. The submitting thread still owns that
+// slot's fanin/fanout bookkeeping, so it completes the propagation itself; a
+// caller that touched the reference counters would race with the wiring that is
+// still in flight. Claims from PENDING and READY are exclusively owned by the
+// claimant and may propagate immediately; they do not advertise takeover debt.
+std::optional<TaskState> claim_task_failure(TaskSlotState &s, const std::string &message);
+
+// Settle a fully prepared propagation debt and claim its reference releases.
+// Callers finish every fallible local snapshot first. Only BUILDING handoff and
+// cancellation-owned claims use debt, so no active propagation contender may
+// be preparing the same slot concurrently.
+bool commit_failure_propagation(TaskSlotState &s) noexcept;
+
+// Records every not-yet-terminal member of a group slot as SKIPPED. A no-op on
+// a single-task slot. Called by whoever owns a failure's propagation, so a
+// group that never dispatched still reports one terminal outcome per member.
+void mark_group_members_skipped(TaskSlotState &s, const std::string &message);
+
+// The single PENDING -> READY transition, taken by submit's publication and by
+// every completing producer. Returns true for the one caller that made it, who
+// then owns enqueuing the slot.
+//
+// "Every live producer has released" is not two independently readable facts.
+// `fanin_count` is published by submit and `fanin_released` is advanced by
+// producers, so a producer that reads a count submit has not published yet —
+// zero, which any release passes — and acts on the state afterwards would
+// launch a task whose remaining producers are still running. Comparing the
+// pair and changing the state under one acquisition is what ties the count a
+// caller judges to the state it changes.
+//
+// Neither side can lose the other's half: submit takes the same lock to
+// publish the count together with the transition out of BUILDING, so a
+// producer that arrives first is re-evaluated by submit, and one that arrives
+// after sees a published count.
+bool try_mark_ready(TaskSlotState &s);
+
 // =============================================================================
 // ReadyQueue — Orch pushes, Scheduler pops
 // =============================================================================
@@ -423,17 +508,24 @@ struct TaskSlotState {
 class ReadyQueue {
 public:
     void push(TaskSlot slot);
+    void push(RunId run_id, TaskSlot slot);
 
     // Non-blocking: returns false immediately if empty.
     bool try_pop(TaskSlot &out);
+    bool try_pop(RunId run_id, TaskSlot &out);
 
     bool empty() const;
+    bool empty(RunId run_id) const;
 
     // Non-blocking: copies the front without removing it.
     bool try_front(TaskSlot &out);
+    bool try_front(RunId run_id, TaskSlot &out);
+
+    void erase_run(RunId run_id);
 
 private:
-    std::queue<TaskSlot> q_;
+    std::unordered_map<RunId, std::queue<TaskSlot>> queues_;
+    std::deque<RunId> run_order_;
     mutable std::mutex mu_;
 };
 
@@ -443,11 +535,18 @@ class NextLevelReadyQueues {
 public:
     void reset(const std::vector<int32_t> &worker_ids);
     void push_single(int32_t worker_id, TaskSlot slot);
+    void push_single(int32_t worker_id, RunId run_id, TaskSlot slot);
     bool try_pop_single(int32_t worker_id, TaskSlot &out);
+    bool try_pop_single(int32_t worker_id, RunId run_id, TaskSlot &out);
     void push_group(TaskSlot slot);
+    void push_group(RunId run_id, TaskSlot slot);
     bool try_front_group(TaskSlot &out);
+    bool try_front_group(RunId run_id, TaskSlot &out);
     bool try_pop_group(TaskSlot &out);
+    bool try_pop_group(RunId run_id, TaskSlot &out);
     bool empty() const;
+    bool empty(RunId run_id) const;
+    void erase_run(RunId run_id);
     const std::vector<int32_t> &worker_ids() const { return worker_ids_; }
 
 private:
