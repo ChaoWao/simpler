@@ -122,13 +122,20 @@ simpler_init(ctx, device_id,                          // attach + binary takeove
              aicpu_binary, aicpu_size,
              aicore_binary, aicore_size);
 size_t size = get_runtime_size();
-register_callable(ctx, cid, callable);                 // one-time per callable
-simpler_run(ctx, runtime, cid, args, config);        // per-launch — no binaries; config
-                                                       // carries aicpu_thread_num,
-                                                       // diagnostics + ring overrides
-unregister_callable(ctx, cid);
+size_t alignment = get_runtime_alignment();
+void *runtime = allocate_zeroed_aligned(size, alignment); // stable until finalize
+simpler_register_callable(ctx, cid, callable);        // one-time per callable
+
+// Progressable form; simpler_run(...) composes these phases synchronously.
+simpler_prepare_run(ctx, runtime, cid, args, config); // bind, no device launch
+simpler_launch_run(ctx, runtime);                     // returns after launch fence
+simpler_wait_run(ctx, runtime);                       // or poll until complete
+simpler_finalize_run(ctx, runtime);                   // validate, copy back, destroy
+
+simpler_unregister_callable(ctx, cid);
 finalize_device(ctx);
 destroy_device_context(ctx);
+free(runtime);
 ```
 
 ### Layer 3: Python API (`python/bindings/task_interface.cpp` via nanobind)

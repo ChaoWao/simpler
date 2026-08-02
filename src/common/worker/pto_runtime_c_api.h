@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime C API — canonical header
+ * simpler host-runtime C API — canonical header
  *
  * Declares all C-linkage functions exported by the host runtime .so.
  * Both the ChipWorker (consumer, resolves public symbols via dlsym) and the
@@ -20,11 +20,14 @@
  * stubs rather than omitting symbols):
  *   - lifecycle:    create_device_context, destroy_device_context,
  *                   simpler_init, finalize_device
- *   - sizing:       get_runtime_size
+ *   - sizing:       get_runtime_size, get_runtime_alignment
  *   - device-mem:   device_malloc_ctx, device_free_ctx,
  *                   committed_device_memory_ctx,
  *                   copy_to_device_ctx, copy_from_device_ctx
- *   - prepared run: simpler_register_callable, simpler_run, unregister_callable,
+ *   - prepared run: simpler_register_callable, simpler_prepare_run,
+ *                   simpler_launch_run, simpler_poll_run, simpler_wait_run,
+ *                   simpler_finalize_run, simpler_run,
+ *                   simpler_unregister_callable,
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
  *                   get_run_stream_set_create_count,
  *                   simpler_provision_dma_workspace
@@ -36,8 +39,14 @@
  * Optional metadata:
  *   - pipeline:     get_pipeline_contract
  *
- * Memory management: caller allocates a buffer of get_runtime_size() bytes
- * and passes it to simpler_run(). Error codes: 0 = success, negative = error.
+ * Native-run storage: caller allocates at least get_runtime_size() bytes with
+ * get_runtime_alignment() alignment, zero-initializes it before first use, and
+ * keeps its address stable from prepare through finalize. After finalize the
+ * same storage may be reused without re-zeroing. The storage must not be moved,
+ * copied, or used for overlapping runs while it contains a prepared run. The
+ * caller must serialize phase functions for a given context/storage pair;
+ * poll/wait/finalize are not concurrent operations on the same run.
+ * Error codes: 0 = success, negative = error.
  */
 
 #ifndef SRC_COMMON_WORKER_PTO_RUNTIME_C_API_H_
@@ -63,6 +72,13 @@ typedef void *DeviceContextHandle;
 
 enum {
     PTO_RUNTIME_ERR_UNSUPPORTED = -2,
+};
+
+/** Return values from simpler_poll_run(). */
+enum {
+    SIMPLER_NATIVE_RUN_POLL_ERROR = -1,
+    SIMPLER_NATIVE_RUN_POLL_NOT_READY = 0,
+    SIMPLER_NATIVE_RUN_POLL_COMPLETE = 1,
 };
 
 enum {
@@ -159,12 +175,17 @@ DeviceContextHandle create_device_context(void);
 
 /**
  * Destroy a device context created by create_device_context().
- * Calls finalize internally, then frees the underlying object.
+ * The caller must finalize every prepared native run and call
+ * finalize_device() first. An active native run makes this operation log an
+ * error and leave the context alive; otherwise it frees the underlying object.
  */
 void destroy_device_context(DeviceContextHandle ctx);
 
-/** Return sizeof(Runtime) for caller buffer allocation. */
+/** Return the byte size of the opaque prepared-run storage. */
 size_t get_runtime_size(void);
+
+/** Return the required byte alignment of the opaque prepared-run storage. */
+size_t get_runtime_alignment(void);
 
 /** Allocate device memory in the given device context. */
 void *device_malloc_ctx(DeviceContextHandle ctx, size_t size);
@@ -226,7 +247,8 @@ int simpler_init(
 
 /**
  * Release all device resources held by the context.
- * Must be called before destroy_device_context() / dlclose().
+ * Must be called before destroy_device_context() / dlclose(). Returns an error
+ * without teardown while a prepared native run remains unfinalized.
  */
 int finalize_device(DeviceContextHandle ctx);
 
@@ -241,7 +263,9 @@ int finalize_device(DeviceContextHandle ctx);
  * MAX_REGISTERED_CALLABLE_IDS in the AICPU executor) and rejects ids outside
  * `[0, 64)`. Lifetime: caller must `unregister_callable` before
  * `finalize_device` to release the device-side orch SO buffer; kernels stay
- * resident until finalize regardless.
+ * resident until finalize regardless. Register and unregister mutate state
+ * referenced by a prepared run, so both are rejected from successful prepare
+ * until its matching finalize.
  * =========================================================================== */
 
 /**
@@ -256,6 +280,8 @@ int finalize_device(DeviceContextHandle ctx);
  *
  * `device_id` and the executor binaries are not threaded through this entry
  * — they were captured by `simpler_init` and live on the DeviceRunner.
+ * Callable-registry mutation is rejected while a native run is prepared or
+ * executing on this context.
  *
  * @return 0 on success, negative on error (NULL ctx, callable_id out of
  *         range, upload/copy failure, or AICPU prewarm failure).
@@ -285,14 +311,49 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
  * per-scope-depth-ring array of RUNTIME_ENV_RING_COUNT entries; 0 = unset,
  * precedence per ring: per-ring entry > PTO2_RING_* env var > compile-time
  * default). Ring overrides are consumed by tensormap_and_ringbuffer only; other
- * runtime variants accept and ignore them. Wire-compatible POD; the platform
- * reads it by pointer without copying.
+ * runtime variants accept and ignore them. Wire-compatible POD; prepare copies
+ * it into the native-run state before returning.
  *
  * @return 0 on success, negative on error (no prep state, NULL ctx/config, etc.).
  */
 int simpler_run(
     DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
 );
+
+/**
+ * Build and bind one run into caller-owned opaque storage without launching it.
+ * A successful prepare must be paired with simpler_finalize_run(), even when
+ * launch is abandoned or fails. The `args` container itself is consumed during
+ * prepare and need not remain alive afterward, but every tensor backing buffer
+ * referenced by it must remain valid through finalize (which may copy results
+ * back to those addresses). See the storage size/alignment/lifetime contract at
+ * the top of this header.
+ */
+int simpler_prepare_run(
+    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
+);
+
+/**
+ * Launch a prepared run. Returns only after the platform has published its
+ * real kernel-launch marker, or after execution terminates before that marker.
+ */
+int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime);
+
+/**
+ * Non-blocking completion query. Returns SIMPLER_NATIVE_RUN_POLL_NOT_READY,
+ * SIMPLER_NATIVE_RUN_POLL_COMPLETE, or a negative validation/phase error. Call
+ * only after simpler_launch_run() returns.
+ */
+int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime);
+
+/** Wait for device execution to terminate. Does not release prepared resources. */
+int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime);
+
+/**
+ * Wait if needed, validate/copy results, and release the opaque prepared run.
+ * Also safely aborts a run that was prepared but never launched.
+ */
+int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime);
 
 /** Select the per-run/exec-handle slot used by the next synchronous run. */
 int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id);
@@ -335,6 +396,7 @@ int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state
  * `launch_device_register` triggers `dlclose` + reload), or at process
  * exit. Long-running processes that register / unregister cids without ever
  * reusing them will hold the AICPU SO handle until shutdown.
+ * Rejected while a native run is prepared or executing on this context.
  *
  * @return 0 on success or if callable_id was not registered, negative on error.
  */

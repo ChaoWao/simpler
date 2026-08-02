@@ -4340,6 +4340,53 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             allow_rank_zero.set()
             runner.join(5.0)
 
+    def test_fanout_drain_uses_constant_stack_through_many_interruptions(self):
+        first_interrupt = KeyboardInterrupt("first phase interruption")
+        interruptions_remaining = 1_250
+
+        def interrupted_phase() -> None:
+            nonlocal interruptions_remaining
+            if interruptions_remaining <= 0:
+                return
+            interruptions_remaining -= 1
+            if interruptions_remaining == 1_249:
+                raise first_interrupt
+            raise KeyboardInterrupt(f"phase interruption {interruptions_remaining}")
+
+        cursor = worker_mod._ThreadFanoutDrainCursor(phases=(interrupted_phase,), after_phase=None)
+        fanout = worker_mod._ThreadFanout((), lambda _item: None, "test_constant_stack_", None, None)
+
+        fanout._drain(cursor)
+
+        assert cursor.exhausted
+        assert fanout._first_error is first_interrupt
+
+    def test_abandoned_keepalive_drain_uses_constant_stack_through_many_interruptions(self):
+        first_interrupt = KeyboardInterrupt("first keepalive interruption")
+
+        class InterruptingHandleList(list):
+            def __init__(self, *items):
+                super().__init__(items)
+                self.interruptions_remaining = 1_250
+
+            def __bool__(self):
+                if self.interruptions_remaining <= 0:
+                    return len(self) != 0
+                self.interruptions_remaining -= 1
+                if self.interruptions_remaining == 1_249:
+                    raise first_interrupt
+                raise KeyboardInterrupt(f"keepalive interruption {self.interruptions_remaining}")
+
+        retained = SimpleNamespace(_keepalive=object())
+        handles = InterruptingHandleList(retained)
+        cursor = worker_mod._AbandonedRunKeepaliveCursor(cast(Any, handles))
+
+        cursor.drain()
+
+        assert cursor.first_error is first_interrupt
+        assert retained._keepalive is None
+        assert not handles
+
     def test_domain_fanout_cancels_and_retries_an_ambiguously_launched_thread(self, monkeypatch):
         worker = self._worker()
         rank_zero_entered = threading.Event()

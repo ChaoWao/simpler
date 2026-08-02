@@ -473,6 +473,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }));
     }
 
+    // Both simulated kernel thread groups now exist. This is the sim's real
+    // launch boundary: publish before joining either group.
+    publish_task_accepted();
+
     for (auto &t : aicpu_threads) {
         t.join();
     }

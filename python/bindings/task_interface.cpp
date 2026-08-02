@@ -305,6 +305,9 @@ private:
 
 AclRuntimeApi &acl_api() {
     static std::once_flag once;
+    // Intentionally process-lifetime: late Python finalizers may still need
+    // the initialized ACL dispatch table after ordinary static destruction
+    // begins, so deleting it would reintroduce a destruction-order use-after-free.
     static AclRuntimeApi *api{nullptr};
     std::call_once(once, []() {
         auto candidate = std::make_unique<AclRuntimeApi>();
@@ -317,24 +320,59 @@ AclRuntimeApi &acl_api() {
 
 class L3HostMappedRegionCleanupErrors {
 public:
-    void record(const std::string &message) noexcept {
+    void record(const std::string &owner_token, const std::string &message) noexcept {
         try {
-            append_cleanup_error(error_, message);
+            std::lock_guard<std::mutex> lk(mu_);
+            append_cleanup_error(errors_[owner_token], message);
         } catch (...) {}
     }
 
-    std::string take() { return std::exchange(error_, {}); }
+    std::string take(const std::string &owner_token) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = errors_.find(owner_token);
+        if (it == errors_.end()) {
+            return {};
+        }
+        std::string error = std::move(it->second);
+        errors_.erase(it);
+        return error;
+    }
+
+    std::string peek(const std::string &owner_token) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = errors_.find(owner_token);
+        return it == errors_.end() ? std::string{} : it->second;
+    }
+
+    void acknowledge(const std::string &owner_token, const std::string &observed) {
+        if (observed.empty()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = errors_.find(owner_token);
+        if (it == errors_.end()) {
+            return;
+        }
+        if (it->second == observed) {
+            errors_.erase(it);
+            return;
+        }
+        if (it->second.size() > observed.size() + 2 && it->second.compare(0, observed.size(), observed) == 0 &&
+            it->second.compare(observed.size(), 2, "; ") == 0) {
+            it->second.erase(0, observed.size() + 2);
+        }
+    }
 
 private:
-    std::string error_;
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, std::string> errors_;
 };
 
 L3HostMappedRegionCleanupErrors &l3_host_mapped_region_cleanup_errors() {
-    // A return-boundary owner destroyed by Python while unwinding an import is
-    // finalized on the importing thread. Keep its diagnostic thread-local so
-    // concurrent Workers cannot consume and misattribute one another's error.
-    // Leak the tiny sink to remain usable during late Python finalization.
-    static thread_local auto *errors = new L3HostMappedRegionCleanupErrors();
+    // Return-boundary owners can be finalized after their importing call has
+    // unwound. The process-lifetime registry preserves Worker-keyed diagnostics
+    // until that same Worker reaches an admission or close boundary.
+    static auto *errors = new L3HostMappedRegionCleanupErrors();
     return *errors;
 }
 
@@ -349,13 +387,16 @@ public:
             std::string cleanup_error;
             close_collecting(cleanup_error);
             if (!cleanup_error.empty()) {
-                l3_host_mapped_region_cleanup_errors().record(cleanup_error);
+                l3_host_mapped_region_cleanup_errors().record(owner_token, cleanup_error);
             }
         } catch (...) {
-            l3_host_mapped_region_cleanup_errors().record("L3-L2 mapped-region cleanup failed with an unknown error");
+            l3_host_mapped_region_cleanup_errors().record(
+                owner_token, "L3-L2 mapped-region cleanup failed with an unknown error"
+            );
         }
     }
 
+    std::string owner_token;
     L3L2RegionAccessProfile profile{L3L2RegionAccessProfile::SIM_POSIX_SHM};
     int fd{-1};
     uint64_t device_addr{0};
@@ -590,6 +631,8 @@ public:
                 return;
             }
             state_ = State::CLOSING;
+            // A counter_wait lease may remain held for the rest of its timeout;
+            // the mapping stays valid until every such waiter has returned.
             idle_.wait(lk, [this]() {
                 return active_leases_ == 0;
             });
@@ -741,12 +784,14 @@ void close_l3_host_mapped_region(uint64_t handle) { l3_host_mapped_region_regist
 
 class L3HostMappedRegionHandle {
 public:
-    explicit L3HostMappedRegionHandle(uint64_t handle) :
-        handle_(handle) {}
+    explicit L3HostMappedRegionHandle(uint64_t handle, std::string owner_token) :
+        handle_(handle),
+        owner_token_(std::move(owner_token)) {}
     L3HostMappedRegionHandle(const L3HostMappedRegionHandle &) = delete;
     L3HostMappedRegionHandle &operator=(const L3HostMappedRegionHandle &) = delete;
     L3HostMappedRegionHandle(L3HostMappedRegionHandle &&other) noexcept :
-        handle_(std::exchange(other.handle_, 0)) {}
+        handle_(std::exchange(other.handle_, 0)),
+        owner_token_(std::move(other.owner_token_)) {}
     L3HostMappedRegionHandle &operator=(L3HostMappedRegionHandle &&) = delete;
 
     ~L3HostMappedRegionHandle() noexcept {
@@ -756,10 +801,10 @@ public:
         try {
             close_l3_host_mapped_region(handle_);
         } catch (const std::exception &exc) {
-            l3_host_mapped_region_cleanup_errors().record(exc.what());
+            l3_host_mapped_region_cleanup_errors().record(owner_token_, exc.what());
         } catch (...) {
             l3_host_mapped_region_cleanup_errors().record(
-                "L3-L2 mapped-region owner cleanup failed with an unknown error"
+                owner_token_, "L3-L2 mapped-region owner cleanup failed with an unknown error"
             );
         }
     }
@@ -768,6 +813,7 @@ public:
 
 private:
     uint64_t handle_{0};
+    std::string owner_token_;
 };
 
 class L2ChildOnboardRegionRegistry {
@@ -1642,6 +1688,11 @@ NB_MODULE(_task_interface, m) {
     // breakdown) is no longer returned from run(); the platform emits it as
     // `[STRACE]` log markers — parse with simpler_setup.tools.strace_timing.
 
+    nb::class_<ChipWorkerNativeRun>(m, "_ChipWorkerNativeRun")
+        .def_ro("slot_id", &ChipWorkerNativeRun::slot_id)
+        .def_ro("generation", &ChipWorkerNativeRun::generation)
+        .def_ro("run_epoch", &ChipWorkerNativeRun::run_epoch);
+
     // --- ChipWorker ---
     nb::class_<ChipWorker>(m, "_ChipWorker")
         .def(nb::init<>())
@@ -1733,6 +1784,61 @@ NB_MODULE(_task_interface, m) {
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
             "Internal generation-safe pipeline-slot launch for pre-encoded task args."
+        )
+        .def(
+            "_prepare_native_run_with_pipeline_lease",
+            [](ChipWorker &self, int32_t callable_id, TaskArgs &args, const CallConfig &config, uint32_t slot_id,
+               uint64_t generation) {
+                return self.prepare_native_run(
+                    callable_id, make_view(args), config, PipelineSlotLease{slot_id, 0, generation}
+                );
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
+            nb::call_guard<nb::gil_scoped_release>(),
+            "Prepare a generation-bound native run without crossing its device launch fence."
+        )
+        .def(
+            "_prepare_native_run_with_pipeline_lease",
+            [](ChipWorker &self, int32_t callable_id, ChipStorageTaskArgs &args, const CallConfig &config,
+               uint32_t slot_id, uint64_t generation) {
+                return self.prepare_native_run(callable_id, &args, config, PipelineSlotLease{slot_id, 0, generation});
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
+            nb::call_guard<nb::gil_scoped_release>(),
+            "Prepare a generation-bound native run from pre-encoded task args."
+        )
+        .def(
+            "_prepare_native_run_from_blob",
+            [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
+               const CallConfig &config, uint32_t slot_id, uint64_t generation) {
+                TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
+                return self.prepare_native_run(callable_id, view, config, PipelineSlotLease{slot_id, 0, generation});
+            },
+            nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
+            nb::arg("slot_id"), nb::arg("generation"), nb::call_guard<nb::gil_scoped_release>(),
+            "Prepare a generation-bound native run from a raw mailbox TaskArgs blob."
+        )
+        .def(
+            "_launch_native_run",
+            [](ChipWorker &self, const ChipWorkerNativeRun &run, uint64_t accepted_state_addr, int32_t accepted_value) {
+                self.launch_native_run(run, reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value);
+            },
+            nb::arg("run"), nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0,
+            nb::call_guard<nb::gil_scoped_release>(),
+            "Launch a prepared native run and return after its real device launch fence."
+        )
+        .def(
+            "_poll_native_run", &ChipWorker::poll_native_run, nb::arg("run"),
+            "Return whether a launched native run has reached its completion fence."
+        )
+        .def(
+            "_wait_native_run", &ChipWorker::wait_native_run, nb::arg("run"), nb::call_guard<nb::gil_scoped_release>(),
+            "Wait for a launched native run's completion fence."
+        )
+        .def(
+            "_finalize_native_run", &ChipWorker::finalize_native_run, nb::arg("run"),
+            nb::call_guard<nb::gil_scoped_release>(),
+            "Validate, copy back, emit diagnostics, and destroy a prepared native run."
         )
         .def(
             "run_from_blob",
@@ -1912,12 +2018,18 @@ NB_MODULE(_task_interface, m) {
 
     m.def(
         "_l3_host_mapped_region_import_sim",
-        [](const std::string &token, uint64_t mapping_bytes) -> L3HostMappedRegionHandle {
+        [](const std::string &token, uint64_t mapping_bytes,
+           const std::string &owner_token) -> L3HostMappedRegionHandle {
             if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
                 throw std::invalid_argument("L3-L2 sim L3 Host mapped-region import requires a positive mapping size");
             }
+            if (owner_token.empty()) {
+                throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
+            }
+            std::string handle_owner_token = owner_token;
             std::string name = shm_name_for_open(token);
             auto mapping = std::make_unique<L3HostMappedRegion>();
+            mapping->owner_token = owner_token;
             mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
             if (mapping->fd < 0) {
                 throw std::runtime_error("L3-L2 sim L3 Host mapped-region import shm_open failed");
@@ -1933,21 +2045,28 @@ NB_MODULE(_task_interface, m) {
             mapping->profile = L3L2RegionAccessProfile::SIM_POSIX_SHM;
             mapping->device_addr = reinterpret_cast<uint64_t>(base);
             mapping->mapping_bytes = mapping_bytes;
-            return L3HostMappedRegionHandle(l3_host_mapped_region_registry().emplace(std::move(mapping)));
+            uint64_t handle = l3_host_mapped_region_registry().emplace(std::move(mapping));
+            return L3HostMappedRegionHandle(handle, std::move(handle_owner_token));
         },
-        nb::arg("token"), nb::arg("mapping_bytes"), nb::call_guard<nb::gil_scoped_release>(),
+        nb::arg("token"), nb::arg("mapping_bytes"), nb::arg("owner_token"), nb::call_guard<nb::gil_scoped_release>(),
         "Import a sim L3-L2 POSIX shm region for L3 Host mapped-region access."
     );
     m.def(
         "_l3_host_mapped_region_import_onboard",
-        [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes) -> L3HostMappedRegionHandle {
+        [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes,
+           const std::string &owner_token) -> L3HostMappedRegionHandle {
             if (device_id < 0) {
                 throw std::invalid_argument("L3-L2 onboard mapped-region import requires a non-negative device id");
             }
             if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
                 throw std::invalid_argument("L3-L2 onboard mapped-region import requires a positive mapping size");
             }
+            if (owner_token.empty()) {
+                throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
+            }
+            std::string handle_owner_token = owner_token;
             auto mapping = std::make_unique<L3HostMappedRegion>();
+            mapping->owner_token = owner_token;
             mapping->profile = L3L2RegionAccessProfile::ONBOARD_VMM;
             mapping->device_id = device_id;
             mapping->mapping_bytes = mapping_bytes;
@@ -1959,9 +2078,10 @@ NB_MODULE(_task_interface, m) {
             mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
             api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
             api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
-            return L3HostMappedRegionHandle(l3_host_mapped_region_registry().emplace(std::move(mapping)));
+            uint64_t handle = l3_host_mapped_region_registry().emplace(std::move(mapping));
+            return L3HostMappedRegionHandle(handle, std::move(handle_owner_token));
         },
-        nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"),
+        nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"), nb::arg("owner_token"),
         nb::call_guard<nb::gil_scoped_release>(), "Import an onboard VMM L3-L2 region for L3 Host mapped-region access."
     );
     m.def(
@@ -1980,10 +2100,45 @@ NB_MODULE(_task_interface, m) {
     );
     m.def(
         "_l3_host_mapped_region_take_cleanup_error",
-        []() {
-            return l3_host_mapped_region_cleanup_errors().take();
+        [](const std::string &owner_token) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("L3-L2 cleanup-error lookup requires a non-empty Worker owner token");
+            }
+            return l3_host_mapped_region_cleanup_errors().take(owner_token);
         },
-        "Take a cleanup error recorded by an unadopted native mapped-region owner on this thread."
+        nb::arg("owner_token"),
+        "Take a cleanup error recorded by an unadopted native mapped-region owner for one Worker."
+    );
+    m.def(
+        "_l3_host_mapped_region_peek_cleanup_error",
+        [](const std::string &owner_token) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("L3-L2 cleanup-error lookup requires a non-empty Worker owner token");
+            }
+            return l3_host_mapped_region_cleanup_errors().peek(owner_token);
+        },
+        nb::arg("owner_token"), "Read one Worker's mapped-region cleanup error without consuming it."
+    );
+    m.def(
+        "_l3_host_mapped_region_ack_cleanup_error",
+        [](const std::string &owner_token, const std::string &observed) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("L3-L2 cleanup-error acknowledgement requires a Worker owner token");
+            }
+            l3_host_mapped_region_cleanup_errors().acknowledge(owner_token, observed);
+        },
+        nb::arg("owner_token"), nb::arg("observed"),
+        "Acknowledge the mapped-region cleanup error already published by one Worker."
+    );
+    m.def(
+        "_l3_host_mapped_region_record_cleanup_error_for_test",
+        [](const std::string &owner_token, const std::string &message) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("L3-L2 cleanup-error injection requires a non-empty Worker owner token");
+            }
+            l3_host_mapped_region_cleanup_errors().record(owner_token, message);
+        },
+        nb::arg("owner_token"), nb::arg("message"), "Inject one Worker-owned mapped-region cleanup error."
     );
     m.def(
         "_l3_host_mapped_region_fail_next_registry_insert_for_test",

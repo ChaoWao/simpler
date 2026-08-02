@@ -39,6 +39,7 @@
 #include <runtime/rt.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -69,6 +70,7 @@
 
 struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
 struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
+class NativeRunLaunchSignal;
 
 /**
  * Common base class for both a2a3 and a5 onboard `DeviceRunner`s.
@@ -92,6 +94,16 @@ public:
 
     /** Bind this runner's launch-acceptance publication target. */
     int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
+
+    /**
+     * Reserve the runner for one native prepared-run execution. The opaque
+     * owner and runner-owned timing and diagnostic state remain exclusive
+     * through validation/finalize.
+     */
+    bool try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal);
+    void release_native_run(const void *owner);
+    bool native_run_active() const;
+    bool native_run_owned_by(const void *owner) const;
 
     /** Carry an already-validated run lease into resource selection. */
     int select_pipeline_slot(uint32_t slot_id);
@@ -517,6 +529,12 @@ public:
      */
     virtual void set_dep_gen_enabled(bool /*enable*/) {}
 
+    // Transfer any runtime-specific TLS captured during prepare to the run's
+    // executor. A non-null snapshot stays caller-owned until adopt or destroy.
+    virtual void *take_native_run_thread_state() { return nullptr; }
+    virtual void adopt_native_run_thread_state(void * /*snapshot*/) noexcept {}
+    virtual void destroy_native_run_thread_state(void * /*snapshot*/) noexcept {}
+
     /**
      * Launch an AICPU kernel. Internal helper used by the subclass's
      * `run()`; thin wrapper that dispatches through `load_aicpu_op_`'s
@@ -875,6 +893,8 @@ protected:
     size_t host_dlopen_total_{0};
     volatile int32_t *task_accepted_state_{nullptr};
     int32_t task_accepted_value_{0};
+    std::atomic<const void *> active_native_run_{nullptr};
+    NativeRunLaunchSignal *native_launch_signal_{nullptr};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //

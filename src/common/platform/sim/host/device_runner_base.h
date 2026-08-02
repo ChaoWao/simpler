@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -58,6 +59,7 @@
 
 struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
 struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
+class NativeRunLaunchSignal;
 
 // Width sim resolves the CallConfig "auto" sentinel to, deliberately below
 // PLATFORM_MAX_BLOCKDIM (24 on a2a3, 36 on a5). The simulator runs one OS
@@ -98,6 +100,21 @@ public:
     virtual int finalize() = 0;
     // a2a3 and a5 both override; an arch without dep_gen leaves the no-op.
     virtual void set_dep_gen_enabled(bool /*enable*/) {}
+
+    // Transfer any runtime-specific TLS captured during prepare to the run's
+    // executor. A non-null snapshot stays caller-owned until adopt or destroy.
+    virtual void *take_native_run_thread_state() { return nullptr; }
+    virtual void adopt_native_run_thread_state(void * /*snapshot*/) noexcept {}
+    virtual void destroy_native_run_thread_state(void * /*snapshot*/) noexcept {}
+
+    /** Bind an optional external launch-acceptance target. */
+    int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
+
+    /** Reserve the runner's single active native execution through finalize. */
+    bool try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal);
+    void release_native_run(const void *owner);
+    bool native_run_active() const;
+    bool native_run_owned_by(const void *owner) const;
 
     // --- Shared methods --------------------------------------------------
 
@@ -224,6 +241,8 @@ public:
 
 protected:
     // --- Helpers usable by subclass run() / finalize() -------------------
+    /** Publish after both simulated kernel thread groups have been created. */
+    void publish_task_accepted() const;
     int ensure_device_initialized();
     virtual int ensure_binaries_loaded() = 0;
     // Hand the orch-SO descriptor to the sim AICPU register entry. Built
@@ -362,6 +381,11 @@ protected:
     bool aicpu_so_loaded_{false};
 
     Runtime *last_runtime_{nullptr};
+
+    volatile int32_t *task_accepted_state_{nullptr};
+    int32_t task_accepted_value_{0};
+    std::atomic<const void *> active_native_run_{nullptr};
+    NativeRunLaunchSignal *native_launch_signal_{nullptr};
 
     // Dynamically loaded executor libraries (shared infra; the dlsym'd function-
     // pointer table itself lives on the subclass since signatures diverge

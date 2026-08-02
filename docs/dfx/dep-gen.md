@@ -90,8 +90,9 @@ nothing to capture-then-reconstruct.
   shared-memory ring, and the drain thread are all skipped
   (`dep_gen_host_graph_active()` tells the runner). Nothing is dropped under
   back-pressure because nothing is streamed.
-- **Output.** The same `deps.json`, written at run teardown from the graph that
-  run's orchestration built.
+- **Output.** The same `deps.json`, written at run teardown. After prepare's
+  host orchestration builds the graph, the phased runtime moves it into
+  run-owned storage and the executor adopts it before execution.
 
 ---
 
@@ -394,7 +395,7 @@ list; only the dep_gen replay graph loses the tail.
 | Capture call site (device-orch) | `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/pto_orchestrator.cpp` `submit_task_common` | One conditional block that snapshots inputs into the ring when `is_dep_gen_enabled()`; fires for both `submit_task` and `submit_dummy_task`. The schema carries `kernel_ids[3] = {aic, aiv0, aiv1}` so the swimlane post-processor can resolve `task_id → kernel` from `deps.json` at level=1 where the AICore record is the sole device-side identity source. Inactive subslots stay at `INVALID_KERNEL_ID = -1`. It also carries the SPMD logical block num (`block_num` on a2a3, `core_num` on a5's launch spec) as `tasks[].block_num`. |
 | Replay | `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/host/dep_gen_replay.{h,cpp}` | Pure CPU; runs dual-pass differential replay — `compute_task_fanin` (oracle) + inlined STEP A/B mirror (annotated) against two `PTO2TensorMap` instances. Emits `deps.json` when both passes agree per record. Platform-agnostic — a5 reuses the a2a3 source verbatim. |
 | Host-direct capture (host-orch) | `src/a2a3/runtime/host_build_graph/runtime/dep_gen_host_graph.h`, `src/a2a3/runtime/host_build_graph/host/dep_gen_host_graph.cpp` | Task / tensor / edge tables filled from `submit_task_common` + `compute_task_fanin`'s `Annotate` hooks (`src/a2a3/runtime/host_build_graph/runtime/pto_dep_compute.h`), reset per orchestration by `run_host_orchestration`, serialized by the same `deps.json` writer. The runtime translation unit carries weak no-op fallbacks so the AICPU build links without it. |
-| Device-runner hookup | `src/{a2a3,a5}/platform/{onboard,sim}/host/device_runner.cpp` | `dep_gen_host_graph_active()` picks the shape: host-orch calls `dep_gen_host_graph_emit(deps_path)` and skips collector init/start/reconcile entirely; device-orch calls `dep_gen_replay_emit_deps_json(records.data(), records.size(), deps_path)` post-`reconcile_counters`. The c_api latches the CallConfig before the bind so host capture is armed before the orchestration it records. |
+| Device-runner hookup | `src/{a2a3,a5}/platform/{onboard,sim}/host/device_runner.cpp` | `dep_gen_host_graph_active()` picks the shape: host-orch moves the prepare thread's completed capture into run-owned storage, adopts it on the executor, calls `dep_gen_host_graph_emit(deps_path)` at teardown, and skips collector init/start/reconcile entirely; device-orch calls `dep_gen_replay_emit_deps_json(records.data(), records.size(), deps_path)` post-`reconcile_counters`. The c_api latches the CallConfig before the bind so host capture is armed before the orchestration it records. |
 | Viewer | `simpler_setup/tools/deps_viewer.py` | `deps.json` → text (default) or pan/zoom HTML |
 | Test | `tests/st/{a2a3,a5}/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py` + `test_dep_gen_chain.py`, `tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py` | Smoke test + 6-edge validation against `vector_example` orchestration (both platforms share byte-identical orchestration code). The host_build_graph case runs the *same* orchestration through host-direct capture and asserts the same 6 edges, so a divergence between the two shapes fails a test. |
 

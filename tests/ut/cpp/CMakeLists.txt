@@ -381,6 +381,17 @@ target_link_libraries(test_run_stream_slots PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LI
 add_test(NAME test_run_stream_slots COMMAND test_run_stream_slots)
 set_tests_properties(test_run_stream_slots PROPERTIES LABELS "no_hardware")
 
+# Native launch readiness is a sticky blocking handoff: notification may race
+# either side of wait(), and the waiting host thread must sleep until signaled.
+add_executable(test_native_run_launch_signal common/test_native_run_launch_signal.cpp)
+target_include_directories(test_native_run_launch_signal PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_native_run_launch_signal PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_native_run_launch_signal COMMAND test_native_run_launch_signal)
+set_tests_properties(test_native_run_launch_signal PROPERTIES LABELS "no_hardware")
+
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
 # ---------------------------------------------------------------------------
@@ -669,10 +680,14 @@ add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
 add_a2a3_runtime_test(test_scope_deadlock_detection common/test_scope_deadlock_detection.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
 # PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/shared/pto_tensormap.cpp
+)
+target_sources(test_hbg_dep_gen_host_graph PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/host/dep_gen_host_graph.cpp
 )
 add_a2a3_runtime_test(test_dep_list_pool    a2a3/test_dep_list_pool.cpp)
 add_a2a3_runtime_test(test_scheduler_state  a2a3/test_scheduler_state.cpp)

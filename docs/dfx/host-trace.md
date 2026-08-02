@@ -63,6 +63,23 @@ device-log lines. A phase that was never stamped
 (0 ns) is skipped — e.g. `so_load` is ~0 on a cached-callable run. See
 [device-phases.md](device-phases.md) for the device-side mechanism.
 
+The phased native-run interface preserves this same marker contract. Prepare
+allocates one `inv` and records the host-wall start; prepare, the blocking
+executor thread, and finalize temporarily bind that `(inv, hid)` while emitting
+their spans. Finalize releases the runner claim, destroys the per-run state, and
+then emits the stored `simpler_run` wall, so the root includes that cleanup tail.
+No trace scope or synthetic nesting remains active between C API calls. For
+direct phased use the host wall is the full prepare-to-finalize lifetime,
+including time the caller spends polling or doing other host work; blocking
+`simpler_run` is the same phases composed back-to-back.
+
+| Depth | Span names |
+| ----- | ---------- |
+| 0 | `simpler_run` |
+| 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.validate` |
+| 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
+| 3 | `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched,task_slot_*}` |
+
 ## Reading the markers — `strace_timing.py`
 
 ```bash

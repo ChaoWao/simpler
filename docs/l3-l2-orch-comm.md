@@ -162,11 +162,13 @@ therefore release the child allocation only after no parent operation can still
 touch it.
 
 If an unadopted native owner reports a cleanup failure while an import unwinds,
-the diagnostic stays on the importing thread until the Worker consumes it and
-poisons itself. It cannot be consumed by a Worker importing concurrently on a
-different thread. If the diagnostic survives to a later create on the same
-thread, its original Worker is no longer identifiable, so that Worker is
-conservatively stopped with an explicit attribution message.
+the owner records the diagnostic under its Worker's stable owner token. The
+owning Worker consumes that diagnostic at its next admission, create rollback,
+or close boundary and poisons itself. Transfer is two-phase: native storage is
+read non-destructively and acknowledged only after the Python poison is
+published, so an interruption at that boundary cannot lose the diagnostic.
+Another Worker cannot consume or be poisoned by that error, even when both
+Workers run on the same thread.
 
 ## 4. Signal Counters
 

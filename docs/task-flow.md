@@ -340,6 +340,17 @@ second device execution, or cross-run publication overlap: the endpoint remains
 a single synchronous round trip, and the scheduler dispatches only the run that
 holds the FIFO head and still owns its lease.
 
+The L2 host-runtime boundary is nevertheless progressable. Its opaque native
+run storage supports `prepare -> launch -> poll/wait -> finalize`, and the
+existing `simpler_run` / `ChipWorker.run` surface is the blocking composition
+of those phases. `prepare` constructs and binds the per-run `Runtime` without
+crossing the device launch fence; `launch` returns after the backend has
+actually submitted its execution; `finalize` owns validation, copy-back, DFX,
+and Runtime destruction. Until execution-only `DeviceRunner` state is made
+per-run, the backend admits only one prepared or launched native run at a time.
+The single-frame child intentionally continues to use the blocking composition;
+the phase split is the B3a ownership seam, not a claim of mailbox overlap.
+
 Simulation implements the same depth, so the contract means the same thing on
 both platforms: its runner owns one arena bank and one retained temporary
 buffer per slot, and its single-entry prebuilt-arena cache stays owned by

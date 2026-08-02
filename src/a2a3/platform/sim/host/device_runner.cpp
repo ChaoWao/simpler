@@ -67,6 +67,13 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_d
 
 extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
 extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_set_enabled(bool /*enable*/) {}
+extern "C" __attribute__((weak, visibility("hidden"))) void *dep_gen_host_graph_take_capture() { return nullptr; }
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_adopt_capture(
+    void * /*capture*/
+) noexcept {}
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_destroy_capture(
+    void * /*capture*/
+) noexcept {}
 extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_emit(const char * /*deps_json_path*/) {
     LOG_DEBUG("dep_gen host graph not implemented for this runtime — deps.json skipped");
     return -1;
@@ -224,10 +231,22 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
 void DeviceRunner::set_dep_gen_enabled(bool enable) {
     enable_dep_gen_ = enable;
     // Arms host-side capture for a host-orch runtime (no-op weak stub for the
-    // device-orch one). Enabling clears the previous run's graph, so this must
-    // stay ahead of the orchestration it captures — the c_api latches the
-    // CallConfig before the bind for exactly that reason.
+    // device-orch one). The c_api latches the CallConfig before bind, and the
+    // orchestration entry resets the graph before recording it.
     dep_gen_host_graph_set_enabled(enable);
+}
+
+void *DeviceRunner::take_native_run_thread_state() {
+    if (!enable_dep_gen_ || !dep_gen_host_graph_active()) return nullptr;
+    return dep_gen_host_graph_take_capture();
+}
+
+void DeviceRunner::adopt_native_run_thread_state(void *snapshot) noexcept {
+    dep_gen_host_graph_adopt_capture(snapshot);
+}
+
+void DeviceRunner::destroy_native_run_thread_state(void *snapshot) noexcept {
+    dep_gen_host_graph_destroy_capture(snapshot);
 }
 
 int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
@@ -529,6 +548,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }));
     }
 
+    // Both simulated kernel thread groups now exist. This is the sim's real
+    // launch boundary: publish before joining either group.
+    publish_task_accepted();
+
     for (auto &t : aicpu_threads) {
         t.join();
     }
@@ -600,7 +623,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         pmu_collector_.reconcile_counters();
     }
 
-    // Host-orch emits the graph it captured during this run's orchestration;
+    // Host-orch emits the graph snapshot adopted from the prepare thread;
     // device-orch stops the collector, reconciles the ring, and replays.
     if (enable_dep_gen_) {
         const std::string deps = make_deps_json_path(output_prefix_);
