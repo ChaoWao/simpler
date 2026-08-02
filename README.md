@@ -71,7 +71,8 @@ See runtime docs per arch: [a2a3](src/a2a3/docs/runtimes.md), [a5](src/a5/docs/r
 pytest examples tests/st --platform a2a3sim
 
 # Hardware scene tests (requires Ascend device)
-pytest examples tests/st --platform a2a3 --device 4-7
+# SDMA cases are quarantined by marker, as in CI; run them separately with -m sdma
+pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7
 
 # Python unit tests
 pytest tests/ut -m "not requires_hardware" -v
