@@ -10,11 +10,12 @@ run-name: CI Self CPU / PR ${{ inputs.pr_number || inputs.ref }}
 #
 # Provisioning contract for the cpu runner (out-of-repo, dnf): every cpu agent
 # needs the same set — cmake ninja-build gcc-c++ clang-tools-extra graphviz
-# gtest-devel. T1 jobs use actions/setup-python (3.10) with no venv and a pip
-# cache, like ci.yml's GitHub-hosted jobs: the toolchain python is isolated,
-# so runner system/user python state cannot affect them. T3 (NPU) jobs keep
-# their --system-site-packages venvs (driver bindings). g++-15 is a symlink
-# stand-in for the ubuntu-toolchain ppa g++ — see below.
+# gtest-devel python3-devel. T1 jobs create plain venvs from the runner's
+# python3 (the repo supports >=3.9; the runner's 3.9 caught the zip(strict=)
+# bug that CI's 3.10 never did) with a pip cache; the venv isolates T1 from
+# any system/user python state. T3 (NPU) jobs keep their --system-site-packages
+# venvs (driver bindings). g++-15 is a symlink stand-in for the
+# ubuntu-toolchain ppa g++ — see below.
 
 permissions:
   contents: read
@@ -155,11 +156,6 @@ jobs:
             ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
       - name: Cache pip packages
         uses: actions/cache@v5
         with:
@@ -168,12 +164,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: venv + deps
         run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install .
       - name: Build sim runtimes (per-target compile_commands.json for clang-tidy)
-        run: python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
+        run: |
+          source .venv/bin/activate
+          python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
       - name: Resolve base SHA (merge-base with target main)
         id: base
         run: echo "base_sha=$(git merge-base origin/main HEAD)" >> "$GITHUB_OUTPUT"
@@ -194,11 +194,6 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
       - name: Cache pip packages
         uses: actions/cache@v5
         with:
@@ -207,12 +202,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: venv + deps
         run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
       - name: Run Python unit tests
-        run: python -m pytest tests/ut -m "not requires_hardware" -v
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/ut -m "not requires_hardware" -v
       - name: Build and run C++ unit tests
         run: |
           cmake -B tests/ut/cpp/build -S tests/ut/cpp
@@ -230,11 +229,6 @@ jobs:
         with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref || github.sha }}
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
       - name: Cache pip packages
         uses: actions/cache@v5
         with:
@@ -243,8 +237,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # verify_packaging.sh requires an activated venv; the venv is created
-      # from the setup-python 3.10, so it carries no runner system site.
+      # verify_packaging.sh requires an activated venv, created from the
+      # runner's python3.
       - name: Install build + runtime deps in venv
         run: |
           python3 -m venv .venv
@@ -268,11 +262,6 @@ jobs:
         with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref || github.sha }}
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
       - name: Cache pip packages
         uses: actions/cache@v5
         with:
@@ -281,12 +270,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies (editable)
+      - name: venv + editable install
         run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e '.[test]'
       - name: Run all profiling flag combos x 2 arches
         run: |
+          source .venv/bin/activate
           COMBO_NAMES=(dfx-off orch orch-tensormap sched orch-sched all-on)
           COMBO_DEFS=(
             "-DSIMPLER_DFX=0"
@@ -343,11 +335,6 @@ jobs:
             ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
       - name: Cache pip packages
         uses: actions/cache@v5
         with:
@@ -356,12 +343,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: venv + deps
         run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
       - name: Run pytest scene tests (a2a3sim)
         run: |
+          source .venv/bin/activate
           python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
       # DFX per-feature smokes (dep_gen / l2_swimlane / pmu / args_dump) mirror
@@ -390,11 +380,6 @@ jobs:
             ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
             echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           fi
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
       - name: Cache pip packages
         uses: actions/cache@v5
         with:
@@ -403,12 +388,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: venv + deps
         run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
       - name: Run pytest scene tests (a5sim)
         run: |
+          source .venv/bin/activate
           python -m pytest examples tests/st --platform a5sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
