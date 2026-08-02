@@ -62,7 +62,7 @@ jobs:
   # See docs/python-packaging.md and tools/verify_packaging.sh.
   packaging-matrix:
     needs: [detect-changes, pre-commit]
-    if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.examples_only != 'true'
+    if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.examples_only != 'true' && needs.detect-changes.outputs.tests_only != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -375,7 +375,7 @@ jobs:
   # corresponding profiling block — no cross-contamination from cmake cache.
   profiling-flags-smoke:
     needs: [detect-changes, pre-commit]
-    if: (needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true') && needs.detect-changes.outputs.examples_only != 'true'
+    if: (needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true') && needs.detect-changes.outputs.examples_only != 'true' && needs.detect-changes.outputs.tests_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -725,6 +725,7 @@ jobs:
       st_affected: ${{ steps.check.outputs.st_affected }}
       ut_affected: ${{ steps.check.outputs.ut_affected }}
       examples_only: ${{ steps.check.outputs.examples_only }}
+      tests_only: ${{ steps.check.outputs.tests_only }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -760,6 +761,7 @@ jobs:
             echo "st_affected=true" >> "$GITHUB_OUTPUT"
             echo "ut_affected=true" >> "$GITHUB_OUTPUT"
             echo "examples_only=false" >> "$GITHUB_OUTPUT"
+            echo "tests_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -837,12 +839,15 @@ jobs:
           fi
 
           # `packaging-matrix` and `profiling-flags-smoke` build and install the
-          # product and then exercise it with a fixed, tiny payload. Nothing
-          # under examples/ reaches either: it is absent from both
-          # `wheel.packages` and the sdist `include`, and neither job reads the
-          # example corpus. Everything else stays in — `tests/` in particular,
-          # because `tools/verify_packaging.sh` runs one `tests/st/` file as an
-          # entry-point smoke and `tests/` is in the sdist include.
+          # product and then exercise it with a fixed, tiny payload —
+          # profiling-flags-smoke's lives under examples/ (vector_example),
+          # packaging-matrix's under tests/ (one tests/st/ file is the
+          # entry-point smoke of tools/verify_packaging.sh). Neither job reads
+          # either corpus: `wheel.packages` is ["simpler_setup",
+          # "python/simpler"], so both partitions are provably absent from the
+          # product, and a payload file changed under either is exercised by
+          # the scene-test job that also reads it. Each partition therefore
+          # gets the same axis, written in the same shape.
           EXAMPLES_ONLY='^examples/'
           NON_EXAMPLE=$(echo "$FILES" | grep -vE "$EXAMPLES_ONLY" | grep -vE "$NON_CODE" || true)
           if [ -n "$NON_EXAMPLE" ]; then
@@ -850,6 +855,15 @@ jobs:
           else
             echo "examples_only=true" >> "$GITHUB_OUTPUT"
             echo "All changes are under examples/ or non-code; skipping packaging and the profiling-flag smoke"
+          fi
+
+          TESTS_ONLY='^(tests/)'
+          NON_TEST=$(echo "$FILES" | grep -vE "$TESTS_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$NON_TEST" ]; then
+            echo "tests_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changes are under tests/ or non-code; skipping packaging and the profiling-flag smoke"
           fi
 
   # ---------- Unit tests (a5 hardware, Python + C++) ----------

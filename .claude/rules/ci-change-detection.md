@@ -53,14 +53,14 @@ never sit behind a *more permissive* condition than a GitHub-hosted one. If you
 find yourself writing a looser `if:` for the more expensive job, the vocabulary
 is wrong (see §1) — fix that instead of widening the gate.
 
-## 4. Three axes, layered — and the non-code one is subtracted first
+## 4. Four axes, layered — and the non-code one is subtracted first
 
 | Axis | Output | Answers |
 | ---- | ------ | ------- |
 | non-code | `non_code_only` | can this diff change what the code does at all? |
 | architecture | `a2a3_changed` / `a5_changed` | which silicon can it reach? |
 | test category | `st_affected` / `ut_affected` | which suite can it break? |
-| example corpus | `examples_only` | can it reach a job that builds the product and runs a fixed payload? |
+| corpus | `examples_only` / `tests_only` | can it reach a job that builds the product and runs a fixed payload? |
 
 They are layered, not redundant. **Every arch and category flag subtracts
 `NON_CODE` before deciding**, so a non-code-only change already makes all four
@@ -72,23 +72,35 @@ A job composes the axes it is actually subject to:
 | Job family | Gate |
 | ---------- | ---- |
 | `st-sim-*`, `st-onboard-*` | `<arch>_changed && st_affected` |
-| `profiling-flags-smoke` | `(a2a3_changed \|\| a5_changed) && !examples_only` |
+| `profiling-flags-smoke` | `(a2a3_changed \|\| a5_changed) && !examples_only && !tests_only` |
 | `ut`, `ut-a2a3`, `ut-a5` | `non_code_only != true && ut_affected` |
-| `packaging-matrix` | `non_code_only != true && !examples_only` |
+| `packaging-matrix` | `non_code_only != true && !examples_only && !tests_only` |
 
 `packaging-matrix` and `profiling-flags-smoke` build and install the product and
-then exercise it with a **fixed, tiny payload** — one entry-point script and one
-`vector_example` respectively. They are the only jobs that consume neither test
-suite as a corpus, which is why they take the example axis rather than the
-category one. Note what stays in: `tests/` still triggers packaging, because
-`tools/verify_packaging.sh` runs a `tests/st/` file as its entry-point smoke and
-`tests/` is in the sdist `include`. Only `examples/` is provably absent from
-both jobs.
+then exercise it with a **fixed, tiny payload** — packaging's entry-point smoke
+is one `tests/st/` file, profiling's is one `vector_example`. They are the only
+jobs that consume neither test suite as a corpus, which is why they take the
+corpus axis rather than the category one — and the corpus axis comes in the
+same shape on both sides, so a diff confined to `examples/` or to `tests/`
+cannot reach either job. That is not a gap: `wheel.packages` is
+`["simpler_setup", "python/simpler"]`, so both partitions are provably absent
+from the product, and a payload file changed under either is still exercised by
+the scene-test job that reads the same corpus. A change to a payload file was
+the historical reason `tests/` stayed in — a now-deleted claim that `tests/`
+was "in the sdist include", which no configuration ever made true.
 
 The UT jobs stay off the arch axis on purpose — unit tests cover shared
 contracts, so the cost of a falsely-skipped regression outweighs the minutes.
 That is a decision about the *arch* axis only; the category axis is a different
 question, because a scene-test-only change genuinely cannot break a unit test.
+
+The vocabulary exists twice. `ci-self-cpu.yml` runs its own lane-local
+`detect-changes` with the same outputs, and its file header says the two must
+be kept in sync. That has now failed twice — `examples_only` never reached the
+lane (#1607), and `tests_only` did not either (#1635) — because the gate tables
+here only name `ci.yml`. Any change to an axis therefore means two files:
+`.github/workflows/ci.yml` and `.github/workflows/ci-self-cpu.yml`, same commit,
+and the outputs-consistency grep in §7 runs against both.
 
 ### Write every axis in the same shape
 
@@ -165,7 +177,15 @@ bug shows up as a green check, so "CI passed" is not evidence.** Where the
 change is to `NON_CODE` itself, replay the pattern locally against
 representative file lists — a docs-only set, a `.gitignore`-only set, a
 single-arch set, a `ci.yml` set — and check all four land where you intended
-before pushing.
+before pushing. Where the change is to an *axis*, also verify both workflow
+copies expose the same output set — the lane drifted twice because only
+`ci.yml` was checked:
+
+```bash
+for f in ci.yml ci-self-cpu.yml; do
+  echo "== $f"; grep -oE 'outputs\.[a-z_]+' ".github/workflows/$f" | sort -u
+done   # the two lists must be identical
+```
 
 ## Relation to the other rules
 
