@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 import _task_interface as _ti_module  # pyright: ignore[reportMissingImports]
 from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAILBOX_ERROR_MSG_SIZE,
+    MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
     MAILBOX_SIZE,
     MAX_REGISTERED_CALLABLE_IDS,
@@ -156,6 +157,7 @@ __all__ = [
     "TaskState",
     "_Worker",
     "MAILBOX_SIZE",
+    "MAILBOX_FRAME_SIZE",
     "MAILBOX_OFF_ERROR_MSG",
     "MAILBOX_ERROR_MSG_SIZE",
     "read_args_from_blob",

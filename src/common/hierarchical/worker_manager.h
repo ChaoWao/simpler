@@ -16,17 +16,19 @@
  * Provides idle-worker selection and dispatch to the Scheduler.
  * The Scheduler drives the DAG; the Manager drives the workers.
  *
- * Each WorkerThread encodes `(callable digest, config, args_blob)` into a
- * pre-forked child's shared-memory mailbox, signals TASK_READY, and
- * spin-polls TASK_DONE. The child process loop (Python) reads the
- * digest, resolves it to a child-local slot, and runs that slot on its
- * `ChipWorker` (NEXT_LEVEL) or registered Python callable (SUB) in its
- * own address space.
+ * Each WorkerThread owns one endpoint-progress loop. Compatibility endpoints
+ * serialize a blocking TASK_READY -> TASK_DONE exchange. A two-frame local
+ * endpoint may additionally publish one PREPARE_READY successor while the
+ * active frame runs; FIFO promotion changes it to ACTIVATE. The Python child
+ * resolves each frame's callable digest to a child-local slot and executes it
+ * on its `ChipWorker` (NEXT_LEVEL). SUB and unsupported platform/runtime paths
+ * retain the serialized exchange.
  */
 
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -38,6 +40,8 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../task_interface/call_config.h"
@@ -72,7 +76,14 @@ enum class MailboxState : int32_t {
     // PLATFORM_STREAM_SYNC_TIMEOUT_MS budget (issue #897).
     INIT_READY = 6,
     INIT_FAILED = 7,
+    FRAME_STAGED = 8,
+    TASK_LAUNCHED = 9,
+    TASK_FAILED = 10,
+    ACTIVATE = 11,
+    PREPARE_READY = 12,
 };
+
+bool mailbox_compare_exchange_state(char *frame, MailboxState expected, MailboxState desired) noexcept;
 
 // Sized so the args region can hold any TaskArgs the runtime itself accepts
 // (CHIP_MAX_TENSOR_ARGS tensors + CHIP_MAX_SCALAR_ARGS scalars; see the
@@ -82,7 +93,12 @@ enum class MailboxState : int32_t {
 // to the unified 128 B Tensor: the worst-case blob (CHIP_MAX_TENSOR_ARGS tensors)
 // grew ~3x, and 128*128 B = 16 KB alone exceeded the old mailbox (see the
 // capacity static_assert after MAILBOX_ARGS_CAPACITY).
-static constexpr size_t MAILBOX_SIZE = 32768;
+static constexpr size_t MAILBOX_FRAME_SIZE = 32768;
+static constexpr size_t MAILBOX_TASK_FRAME_COUNT = 2;
+static constexpr size_t MAILBOX_CONTROL_FRAME = 0;
+static constexpr size_t MAILBOX_FIRST_TASK_FRAME = 1;
+static constexpr size_t MAILBOX_SIZE = MAILBOX_FRAME_SIZE * (1 + MAILBOX_TASK_FRAME_COUNT);
+static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 2;
 
 // Error message region lives at the mailbox tail. 256 B of headroom is
 // enough for `<ExceptionType>: <short message>` produced by the child-side
@@ -96,9 +112,8 @@ static constexpr size_t MAILBOX_ERROR_MSG_SIZE = 256;
 // derived by rounding up the lease's end so the
 // args blob's first Tensor field (buffer.addr, a uint64_t at OFF_ARGS+8) is
 // 8-byte aligned, avoiding SIGBUS on strict-alignment platforms (aarch64
-// atomics, some ARM cores). The control region (CTRL_OFF_ARG0..CTRL_OFF_RESULT) lives
-// inside the CallConfig byte range — that's safe because control commands
-// and task dispatch are mutually exclusive in time.
+// atomics, some ARM cores). The base frame carries control commands; task
+// frames use the same relative layout without sharing those bytes.
 static constexpr ptrdiff_t MAILBOX_OFF_STATE = 0;
 static constexpr ptrdiff_t MAILBOX_OFF_ERROR = 4;
 static constexpr ptrdiff_t MAILBOX_OFF_CALLABLE = 8;  // also: control sub-command (uint64)
@@ -117,22 +132,31 @@ static_assert(
     "PipelineSlotLease overflows reserved lease region"
 );
 static constexpr ptrdiff_t MAILBOX_OFF_ERROR_MSG =
-    static_cast<ptrdiff_t>(MAILBOX_SIZE) - static_cast<ptrdiff_t>(MAILBOX_ERROR_MSG_SIZE);
+    static_cast<ptrdiff_t>(MAILBOX_FRAME_SIZE) - static_cast<ptrdiff_t>(MAILBOX_ERROR_MSG_SIZE);
 // Launch acceptance is sticky, not a MailboxState: a state word carrying it
 // loses the ACK whenever the child reaches TASK_DONE between two parent polls,
 // which is exactly the short-task case the fence exists to pipeline. The child
-// sets it after both launches; the parent clears it when it publishes the next
-// TASK_READY, so nothing else can overwrite it in between.
+// sets it only after a real native launch; the parent clears it before reusing
+// that task frame, so nothing else can overwrite it in between.
 static constexpr int32_t MAILBOX_TASK_ACCEPTED = 1;
 static constexpr ptrdiff_t MAILBOX_OFF_ACCEPTED = MAILBOX_OFF_ERROR_MSG - 8;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_PROTOCOL = MAILBOX_OFF_ACCEPTED - 40;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_RUN_ID = MAILBOX_OFF_ACCEPTED - 32;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_SLOT_ID = MAILBOX_OFF_ACCEPTED - 24;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_GENERATION = MAILBOX_OFF_ACCEPTED - 16;
+static constexpr ptrdiff_t MAILBOX_OFF_FRAME_DISPATCH_ID = MAILBOX_OFF_ACCEPTED - 8;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_CALLABLE_HASH = MAILBOX_OFF_ARGS;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_ARGS_BLOB =
     MAILBOX_OFF_TASK_CALLABLE_HASH + static_cast<ptrdiff_t>(CALLABLE_HASH_DIGEST_SIZE);
 static constexpr size_t CTRL_SHM_NAME_BYTES = 32;
 static constexpr ptrdiff_t MAILBOX_OFF_CONTROL_CALLABLE_HASH =
     MAILBOX_OFF_ARGS + static_cast<ptrdiff_t>(CTRL_SHM_NAME_BYTES);
+static_assert(
+    MAILBOX_OFF_TASK_ARGS_BLOB < MAILBOX_OFF_FRAME_PROTOCOL,
+    "mailbox task-args region must precede the frame protocol trailer"
+);
 static constexpr size_t MAILBOX_ARGS_CAPACITY =
-    MAILBOX_SIZE - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB) - MAILBOX_ERROR_MSG_SIZE - 8;
+    static_cast<size_t>(MAILBOX_OFF_FRAME_PROTOCOL) - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB);
 static_assert(
     MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
@@ -174,7 +198,7 @@ static constexpr uint64_t CTRL_L3_L2_REGION_RELEASE = 17;
 // the value to CTRL_OFF_RESULT; the parent sums across children for L3.
 static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
 
-// Control args reuse the task mailbox region (mutually exclusive with task dispatch):
+// Control args occupy the base frame's config-sized region:
 //   offset 16: uint64 arg0 (size for malloc/register; ptr for free; dst for copy)
 //   offset 24: uint64 arg1 (src for copy)
 //   offset 32: uint64 arg2 (nbytes for copy)
@@ -197,7 +221,32 @@ struct ControlResult {
     std::string error_message;
 };
 
-struct WorkerDispatch;
+// =============================================================================
+// WorkerDispatch — per-dispatch handle handed to a WorkerThread.
+// =============================================================================
+//
+// `task_slot` is the slot id; `group_index` is 0 for single tasks and
+// 0..group_size-1 for group members. The thread resolves callable / args /
+// config by reading `ring->slot_state(task_slot)`.
+
+struct WorkerDispatch {
+    TaskSlot task_slot{INVALID_SLOT};
+    int32_t group_index{0};
+    uint64_t dispatch_id{0};
+    bool prepare_only{false};
+};
+
+enum class WorkerProgressKind : int32_t {
+    FRAME_STAGED = 0,
+    ACCEPTED = 1,
+    COMPLETED = 2,
+};
+
+struct WorkerEndpointProgress {
+    WorkerProgressKind kind{WorkerProgressKind::FRAME_STAGED};
+    WorkerDispatch dispatch{};
+    WorkerCompletion completion{};
+};
 
 enum class WorkerEndpointKind : int32_t {
     LOCAL_MAILBOX = 0,
@@ -210,6 +259,8 @@ struct WorkerEndpointCaps {
     bool remote{false};
     bool supports_task_dispatch{true};
     bool supports_control{true};
+    uint32_t max_inflight_tasks{1};
+    bool supports_frame_staging{false};
     std::string transport{"local-mailbox"};
 };
 
@@ -223,6 +274,20 @@ public:
     // conservative completion-time acceptance for remote, SUB and A5 paths.
     virtual WorkerCompletion
     run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept);
+
+    // Progressable endpoints are driven by the owning WorkerThread without a
+    // blocking call per frame. submit_progress publishes one complete frame;
+    // poll_progress reports monotonic events; activate_progress is a sticky
+    // FIFO-launch permission that may arrive before the child stages the frame.
+    virtual bool progressable() const { return false; }
+    virtual void submit_progress(Ring *ring, const WorkerDispatch &dispatch);
+    virtual bool poll_progress(WorkerEndpointProgress &progress);
+    virtual bool activate_progress(RunId run_id);
+    virtual void request_progress_stop() noexcept;
+    // Called when the owning progress driver catches an endpoint exception.
+    // Implementations must turn already-published work into terminal progress
+    // only after their child/device resources are quiescent.
+    virtual void report_progress_error(const std::string &reason);
 
     virtual void shutdown_child() {}
     virtual uint64_t control_malloc(size_t size);
@@ -275,12 +340,18 @@ public:
     // caller does not own a waitable child. A valid pid enables liveness
     // checks that turn a child that dies before publishing TASK_DONE /
     // CONTROL_DONE into a reported failure instead of an endless spin-poll.
-    LocalMailboxEndpoint(int32_t worker_id, void *mailbox, int child_pid = -1);
+    LocalMailboxEndpoint(int32_t worker_id, void *mailbox, int child_pid = -1, uint32_t task_frame_count = 1);
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
     WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
     WorkerCompletion
     run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept) override;
+    bool progressable() const override { return task_frame_count_ > 1; }
+    void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override;
+    bool poll_progress(WorkerEndpointProgress &progress) override;
+    bool activate_progress(RunId run_id) override;
+    void request_progress_stop() noexcept override;
+    void report_progress_error(const std::string &reason) override;
 
     void shutdown_child() override;
     uint64_t control_malloc(size_t size) override;
@@ -330,7 +401,14 @@ private:
     WorkerEndpointCaps caps_;
     void *mailbox_{nullptr};
     std::mutex mailbox_mu_;
-    bool mailbox_control_timed_out_{false};
+    std::mutex child_mu_;
+    std::mutex progress_mu_;
+    uint32_t task_frame_count_{1};
+    bool endpoint_poisoned_{false};
+    std::string endpoint_poison_reason_;
+    size_t poll_cursor_{0};
+    std::chrono::steady_clock::time_point next_liveness_check_{};
+    std::atomic<bool> mailbox_control_timed_out_{false};
     int child_pid_{-1};
     // Set once the child has been reaped or observed unwaitable; the exit
     // status is only available from the reaping waitpid(), so it is retained
@@ -339,31 +417,38 @@ private:
     std::string child_death_reason_;
 
     char *mbox() const { return static_cast<char *>(mailbox_); }
-    MailboxState read_mailbox_state() const;
-    void write_mailbox_state(MailboxState s);
-    // Sticky launch acceptance, cleared only when this endpoint publishes the
-    // next TASK_READY. See MAILBOX_OFF_ACCEPTED.
-    bool read_task_accepted() const;
-    void clear_task_accepted();
+    MailboxState read_mailbox_state(const char *frame = nullptr) const;
+    void write_mailbox_state(MailboxState s, char *frame = nullptr);
+    // Sticky launch acceptance, cleared before this endpoint reuses a task
+    // frame. See MAILBOX_OFF_ACCEPTED.
+    bool read_task_accepted(const char *frame = nullptr) const;
+    void clear_task_accepted(char *frame = nullptr);
+    char *task_frame(size_t index) const;
     void run_control_command(const char *op_name, double timeout_s = -1.0);
+
+    struct FrameRecord {
+        bool occupied{false};
+        bool staged_reported{false};
+        bool accepted_reported{false};
+        bool activation_requested{false};
+        bool activation_published{false};
+        WorkerDispatch dispatch{};
+        RunId run_id{INVALID_RUN_ID};
+        uint64_t slot_id{0};
+        uint64_t generation{0};
+    };
+    std::array<FrameRecord, MAILBOX_TASK_FRAME_COUNT> frames_{};
+
+    bool frame_identity_matches(const FrameRecord &record, const char *frame) const;
+    bool try_publish_activation(FrameRecord &record, char *frame);
+    void poison_progress(const std::string &reason);
+    bool poisoned_progress_quiesced();
+    WorkerCompletion poisoned_completion(const FrameRecord &record) const;
 
     // Returns a description of the child's death, or an empty string while it
     // is still running. Never throws: callers decide whether a dead child is
     // reported as a completion outcome or an exception.
     std::string check_child_death();
-};
-
-// =============================================================================
-// WorkerDispatch — per-dispatch handle handed to a WorkerThread.
-// =============================================================================
-//
-// `task_slot` is the slot id; `group_index` is 0 for single tasks and
-// 0..group_size-1 for group members. The thread resolves callable / args /
-// config by reading `ring->slot_state(task_slot)`.
-
-struct WorkerDispatch {
-    TaskSlot task_slot{INVALID_SLOT};
-    int32_t group_index{0};
 };
 
 // =============================================================================
@@ -396,9 +481,21 @@ public:
 
     // Enqueue a dispatch for the worker. Non-blocking.
     void dispatch(WorkerDispatch d);
+    void dispatch_prepared(WorkerDispatch d);
+    // Complete a slot the scheduler already claimed when publication throws.
+    // No endpoint capacity was consumed, but the run-level acceptance waiter
+    // still needs its conservative terminal fallback.
+    void complete_unpublished(WorkerDispatch d, const std::string &error_message);
+    bool has_staged_run(RunId run_id) const;
+    bool needs_activation(RunId run_id) const;
+    bool activate_prepared(RunId run_id);
 
-    // True if the worker has no active task.
-    bool idle() const { return idle_.load(std::memory_order_acquire); }
+    // The active lane and staged-successor lane are intentionally distinct.
+    // A staged successor must not make a second task from the active run
+    // dispatchable on the same device.
+    bool idle() const { return !active_inflight_.load(std::memory_order_acquire); }
+    bool can_stage() const;
+    bool busy() const { return inflight_.load(std::memory_order_acquire) != 0; }
     const WorkerEndpointCaps &caps() const;
     int32_t worker_id() const;
 
@@ -408,14 +505,12 @@ public:
     // Does NOT waitpid — the Python facade owns the child PID.
     void shutdown_child();
 
-    // Memory control — callable from the orch thread while the worker
-    // thread may be running a task. Issues a control command via the
-    // mailbox and blocks until the child responds.
-    //
-    // The mailbox is a single shared region; dispatch_process and the
-    // control_* methods both write its state field. They serialize on
-    // `mailbox_mu_` so a control request issued mid-dispatch waits for
-    // TASK_DONE before claiming the mailbox.
+    // Memory control — callable from the orch thread while the worker thread
+    // may be running a task. Commands serialize with each other on
+    // `mailbox_mu_`. A compatibility endpoint also serializes task dispatch on
+    // that mutex; a two-frame endpoint has a separate base control frame, so
+    // its single child progress owner may service control while a native run is
+    // active.
     uint64_t control_malloc(size_t size);
     uint64_t control_committed_device_memory();
     void control_free(uint64_t ptr);
@@ -429,9 +524,9 @@ public:
     // Dynamic post-init register/unregister of a ChipCallable identity.
     // `shm_name` is the (NUL-terminated, ≤ CTRL_SHM_NAME_BYTES-1) POSIX shm
     // name where the ChipCallable bytes are staged; `blob_size` is the exact
-    // byte span to read from that shm. Both methods hold mailbox_mu_, so a
-    // CTRL_REGISTER concurrent with dispatch_process waits for the in-flight
-    // TASK_DONE before claiming the mailbox.
+    // byte span to read from that shm. Both methods hold mailbox_mu_; on a
+    // two-frame endpoint the child additionally preserves any callable still
+    // referenced by an outstanding task frame.
     void control_register(const char *shm_name, size_t blob_size, const uint8_t *digest);
     void control_unregister(const uint8_t *digest);
     void control_remote_prepare_register(
@@ -467,8 +562,8 @@ public:
     // request payload (header + rank_ids + buffer_nbytes); for alloc the child
     // writes its (device_ctx, local_window_base, buffer_ptrs) into
     // `reply_shm_name`.  Both names are NUL-terminated and ≤
-    // CTRL_SHM_NAME_BYTES-1.  Holds mailbox_mu_ so it serialises with task
-    // dispatch on the same chip mailbox.
+    // CTRL_SHM_NAME_BYTES-1. Holds mailbox_mu_ so control commands serialize;
+    // two-frame task dispatch uses distinct frame state.
     void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name);
     void control_release_domain(const char *request_shm_name);
 
@@ -488,11 +583,23 @@ private:
     std::queue<WorkerDispatch> queue_;
     std::mutex mu_;
     std::condition_variable cv_;
-    bool shutdown_{false};
-    std::atomic<bool> idle_{true};
+    std::atomic<bool> shutdown_{false};
+    std::atomic<uint32_t> inflight_{0};
+    std::atomic<bool> active_inflight_{false};
+    uint64_t next_dispatch_id_{1};
+    mutable std::mutex lane_mu_;
+    std::atomic<RunId> staged_run_id_{INVALID_RUN_ID};
+    uint64_t staged_dispatch_id_{0};
+    std::atomic<RunId> activated_run_id_{INVALID_RUN_ID};
+    uint64_t activated_dispatch_id_{0};
+    std::unordered_set<uint64_t> accepted_dispatch_ids_;
+    std::unordered_map<uint64_t, std::string> accept_errors_;
 
     void loop();
     WorkerCompletion dispatch_process(WorkerDispatch d, const std::function<void()> &on_accept);
+    void enqueue_dispatch(WorkerDispatch d, RunId staged_run_id = INVALID_RUN_ID);
+    void finish_progress_dispatch(const WorkerEndpointProgress &progress);
+    void fail_progress_driver(const std::string &reason) noexcept;
 };
 
 // =============================================================================
@@ -509,8 +616,8 @@ public:
     // callable for SUB) lives in the forked child.
     // `child_pid` is the forked child servicing `mailbox`; pass -1 when the
     // caller owns no waitable child.
-    void add_next_level(void *mailbox, int child_pid = -1);
-    void add_next_level_at(int32_t worker_id, void *mailbox, int child_pid = -1);
+    void add_next_level(void *mailbox, int child_pid = -1, uint32_t task_frame_count = 1);
+    void add_next_level_at(int32_t worker_id, void *mailbox, int child_pid = -1, uint32_t task_frame_count = 1);
     void add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint);
     void add_sub(void *mailbox, int child_pid = -1);
 
@@ -518,6 +625,7 @@ public:
     // when nothing waits on that fence, since an omitted callback leaves
     // pending_accepts non-zero forever. No default: the choice is the caller's.
     void start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept);
+    void stop_workers();
     void stop();
 
     WorkerThread *get_worker_by_id(WorkerType type, int32_t worker_id) const;
@@ -528,6 +636,9 @@ public:
     WorkerThread *pick_idle_sub_excluding(const std::vector<WorkerThread *> &exclude) const;
 
     bool any_busy() const;
+    bool has_staged_run(RunId run_id) const;
+    bool needs_activation(RunId run_id) const;
+    bool activate_prepared_run(RunId run_id);
 
     // Forward CTRL_PREPARE to a specific NEXT_LEVEL worker. Thin wrapper
     // over WorkerThread::control_prepare; exposed at manager level so the
@@ -596,6 +707,7 @@ private:
         int32_t worker_id{-1};
         void *mailbox{nullptr};
         int child_pid{-1};
+        uint32_t task_frame_count{1};
     };
     struct LocalSubEntry {
         void *mailbox{nullptr};

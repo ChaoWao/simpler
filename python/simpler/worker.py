@@ -133,6 +133,7 @@ from .l3_l2_orch_comm import (
 from .orchestrator import Orchestrator, _callback_run, direct_control
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
+    MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
     MAILBOX_SIZE,
     CallConfig,
@@ -197,10 +198,16 @@ _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # Mirrors MAILBOX_OFF_ACCEPTED / MAILBOX_TASK_ACCEPTED: launch acceptance is a
 # sticky word rather than a MailboxState, because a state carrying it is lost
 # whenever the child reaches TASK_DONE between two parent polls. The parent
-# clears it when it publishes the next TASK_READY.
-_OFF_ACCEPTED = MAILBOX_SIZE - MAILBOX_ERROR_MSG_SIZE - 8
+# clears it when it publishes the next task frame.
+_OFF_ACCEPTED = MAILBOX_FRAME_SIZE - MAILBOX_ERROR_MSG_SIZE - 8
 _TASK_ACCEPTED = 1
-_MAILBOX_ARGS_CAPACITY = MAILBOX_SIZE - _OFF_TASK_ARGS_BLOB - MAILBOX_ERROR_MSG_SIZE - 8
+_OFF_FRAME_PROTOCOL = _OFF_ACCEPTED - 40
+_OFF_FRAME_RUN_ID = _OFF_ACCEPTED - 32
+_OFF_FRAME_SLOT_ID = _OFF_ACCEPTED - 24
+_OFF_FRAME_GENERATION = _OFF_ACCEPTED - 16
+_OFF_FRAME_DISPATCH_ID = _OFF_ACCEPTED - 8
+_TASK_PROTOCOL_VERSION = 2
+_MAILBOX_ARGS_CAPACITY = _OFF_FRAME_PROTOCOL - _OFF_TASK_ARGS_BLOB
 _OFF_CONTROL_CALLABLE_HASH = _OFF_ARGS + 32
 # MAILBOX_OFF_ERROR_MSG / MAILBOX_ERROR_MSG_SIZE come from the C++
 # nanobind module so the two sides cannot drift.
@@ -220,6 +227,19 @@ _CONTROL_DONE = 5
 # deadline aborts startup with a bounded error instead of an unbounded spin.
 _INIT_READY = 6
 _INIT_FAILED = 7
+_FRAME_STAGED = 8
+_TASK_LAUNCHED = 9
+_TASK_FAILED = 10
+_ACTIVATE = 11
+_PREPARE_READY = 12
+_TASK_FRAME_COUNT = 2
+
+
+def _local_task_frame_count(platform: str, _runtime: str, pipeline_depth: int) -> int:
+    if platform == "a2a3" and pipeline_depth >= 2:
+        return _TASK_FRAME_COUNT
+    return 1
+
 
 # Startup readiness bound. A child that neither reports INIT_READY/INIT_FAILED
 # nor exits within this window is treated as hung and startup is aborted.
@@ -2156,21 +2176,22 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     chip_runtime: str = "",
     on_task_done_success=None,
     prepared: set[int] | None = None,
+    task_frame_count: int = 1,
 ) -> None:
     """Chip-process handlers for `_run_mailbox_loop`.
 
-    `on_task_done_success`, if provided, is invoked after a successful
-    ``run_from_blob`` and before publishing TASK_DONE. It must
-    return ``(code, msg)`` — typically ``(0, "")`` on success, or an
-    error tuple if the hook itself failed (e.g. D2H staging error).
-    Returning a non-zero code overrides the kernel's success.
+    `on_task_done_success`, if provided, is invoked after a successful chip task
+    and before publishing TASK_DONE. It must return ``(code, msg)`` — typically
+    ``(0, "")`` on success, or an error tuple if the hook itself failed (e.g.
+    D2H staging error). Returning a non-zero code overrides the kernel's
+    success.
 
-    TASK_READY carries a callable digest. The child resolves it to a
+    Published task frames carry a callable digest. The child resolves it to a
     target-local slot and runs it. The slot must already be prepared: initial
-    startup-snapshot ChipCallables are prepared before INIT_READY (carried in via
-    ``prepared``), and callables registered dynamically after startup arrive via
-    ``_CTRL_PREPARE``. A TASK_READY for an unprepared slot is a control-flow
-    error and fails the task rather than lazily preparing it.
+    startup-snapshot ChipCallables are prepared before INIT_READY (carried in
+    via ``prepared``), and callables registered dynamically after startup
+    arrive via ``_CTRL_PREPARE``. A task frame for an unprepared slot is a
+    control-flow error and fails rather than lazily preparing it.
     """
     prepared = prepared if prepared is not None else set()
     l3_l2_region_store = _L2HostL3L2RegionStore()
@@ -2316,10 +2337,20 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     shm.close()
             elif sub_cmd == _CTRL_UNREGISTER:
                 digest = _read_control_digest(buf)
-                cid, removed = _remove_local_identity(registry, identity_table, identity_refs, digest)
-                if removed and cid is not None:
-                    cw._unregister_slot(int(cid))
-                    prepared.discard(int(cid))
+                cid = identity_table.get(digest)
+                if cid is not None:
+                    refs = identity_refs.get(digest, 1)
+                    if refs > 1:
+                        identity_refs[digest] = refs - 1
+                    else:
+                        # Mutate the resolver only after native unregister
+                        # succeeds. A device error must not leave the digest
+                        # absent locally while its prepared slot remains live.
+                        cw._unregister_slot(int(cid))
+                        identity_refs.pop(digest, None)
+                        identity_table.pop(digest, None)
+                        registry.pop(int(cid), None)
+                        prepared.discard(int(cid))
             elif sub_cmd == _CTRL_ALLOC_DOMAIN:
                 _handle_ctrl_alloc_domain(cw, buf)
             elif sub_cmd == _CTRL_RELEASE_DOMAIN:
@@ -2347,8 +2378,295 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 msg = _format_exc(f"chip_process dev={device_id} ctrl={int(sub_cmd)}", e)
         return code, msg
 
+    def run_two_frame_loop() -> None:  # noqa: PLR0912, PLR0915 -- one progress owner drives control and both task frames
+        frame_bufs = [
+            buf[(1 + index) * MAILBOX_FRAME_SIZE : (2 + index) * MAILBOX_FRAME_SIZE]
+            for index in range(_TASK_FRAME_COUNT)
+        ]
+        frame_addrs = [mailbox_addr + (1 + index) * MAILBOX_FRAME_SIZE for index in range(_TASK_FRAME_COUNT)]
+
+        @dataclass
+        class _StagedFrame:
+            index: int
+            frame_buf: memoryview
+            frame_addr: int
+            identity: tuple[int, int, int, int, int]
+            cid: int
+            config: CallConfig
+            activated: bool
+
+        def read_identity(frame_buf: memoryview) -> tuple[int, int, int, int, int]:
+            return (
+                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_PROTOCOL)[0],
+                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_RUN_ID)[0],
+                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_SLOT_ID)[0],
+                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_GENERATION)[0],
+                struct.unpack_from("=Q", frame_buf, _OFF_FRAME_DISPATCH_ID)[0],
+            )
+
+        def task_frame_references_digest(digest: bytes) -> bool:
+            live_states = (_TASK_READY, _PREPARE_READY, _ACTIVATE, _FRAME_STAGED, _TASK_LAUNCHED)
+            for index, frame_buf in enumerate(frame_bufs):
+                if _mailbox_load_i32(frame_addrs[index] + _OFF_STATE) not in live_states:
+                    continue
+                if _read_task_digest(frame_buf) == digest:
+                    return True
+            return False
+
+        def fail_frame(frame: _StagedFrame, message: str) -> None:
+            _write_error(frame.frame_buf, 1, message)
+            _mailbox_store_i32(frame.frame_addr + _OFF_STATE, _TASK_FAILED)
+
+        def stage_frame(index: int, initial_state: int) -> _StagedFrame | None:
+            frame_buf = frame_bufs[index]
+            frame_addr = frame_addrs[index]
+            try:
+                identity = read_identity(frame_buf)
+                protocol, run_id, slot_id, generation, dispatch_id = identity
+                pipeline_slot, pipeline_reserved, pipeline_generation = _PIPELINE_LEASE_FMT.unpack_from(
+                    frame_buf, _OFF_PIPELINE_LEASE
+                )
+                if protocol != _TASK_PROTOCOL_VERSION:
+                    raise RuntimeError(f"unsupported task frame protocol {protocol}")
+                if run_id == 0 or generation == 0 or dispatch_id == 0:
+                    raise RuntimeError(f"invalid task frame identity {identity}")
+                if slot_id != index or pipeline_slot != index:
+                    raise RuntimeError(
+                        f"task frame {index} does not own pipeline slot (identity={slot_id}, lease={pipeline_slot})"
+                    )
+                if pipeline_reserved != 0 or pipeline_generation != generation:
+                    raise RuntimeError(
+                        "task frame pipeline lease does not match its identity "
+                        f"(reserved={pipeline_reserved}, lease_generation={pipeline_generation}, "
+                        f"identity_generation={generation})"
+                    )
+
+                tensor_count, scalar_count = struct.unpack_from("=ii", frame_buf, _OFF_TASK_ARGS_BLOB)
+                if tensor_count < 0 or scalar_count < 0:
+                    raise RuntimeError(
+                        f"task args has negative counts (tensors={tensor_count}, scalars={scalar_count})"
+                    )
+                args_bytes = (
+                    _BLOB_HEADER_BYTES + tensor_count * _BLOB_TENSOR_STRIDE + scalar_count * struct.calcsize("=Q")
+                )
+                if args_bytes > _MAILBOX_ARGS_CAPACITY:
+                    raise RuntimeError(
+                        f"task args needs {args_bytes} bytes but frame capacity is {_MAILBOX_ARGS_CAPACITY}"
+                    )
+
+                digest = _read_task_digest(frame_buf)
+                cid = identity_table.get(digest)
+                if cid is None:
+                    raise RuntimeError(f"callable hash {_format_digest(digest)} not registered")
+                if cid not in prepared:
+                    raise RuntimeError(
+                        f"cid {cid} not prepared before task frame publication (register via _CTRL_PREPARE first)"
+                    )
+                if host_buf_ranges:
+                    _rewrite_blob_host_addrs(frame_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+                config = _read_config_from_mailbox(frame_buf)
+                activation_required = initial_state != _TASK_READY
+                staged = _StagedFrame(
+                    index=index,
+                    frame_buf=frame_buf,
+                    frame_addr=frame_addr,
+                    identity=identity,
+                    cid=int(cid),
+                    config=config,
+                    activated=not activation_required or initial_state == _ACTIVATE,
+                )
+                _write_error(frame_buf, 0, "")
+                _mailbox_store_i32(frame_addr + _OFF_STATE, _FRAME_STAGED)
+                return staged
+            except Exception as e:  # noqa: BLE001
+                _write_error(frame_buf, 1, _format_exc(f"chip_process dev={device_id} frame={index}", e))
+                _mailbox_store_i32(frame_addr + _OFF_STATE, _TASK_FAILED)
+                return None
+
+        staged_frames: dict[int, _StagedFrame] = {}
+        active_frame: _StagedFrame | None = None
+        active_run: Any = None
+        parent_pid = os.getppid()
+        liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+        shutdown_message = f"chip_process dev={device_id}: task loop shut down"
+        try:
+            while True:
+                control_state = _mailbox_load_i32(state_addr)
+                if control_state == _SHUTDOWN:
+                    break
+                if control_state == _CONTROL_REQUEST:
+                    sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
+                    registry_control = sub_cmd in (_CTRL_PREPARE, _CTRL_REGISTER, _CTRL_UNREGISTER)
+                    defer_control = registry_control and active_frame is not None
+                    if sub_cmd == _CTRL_UNREGISTER:
+                        defer_control = defer_control or task_frame_references_digest(_read_control_digest(buf))
+                    if not defer_control:
+                        code, msg = handle_control(int(sub_cmd))
+                        _write_error(buf, code, msg)
+                        _mailbox_store_i32(state_addr, _CONTROL_DONE)
+
+                for index in range(_TASK_FRAME_COUNT):
+                    frame_state = _mailbox_load_i32(frame_addrs[index] + _OFF_STATE)
+                    staged = staged_frames.get(index)
+                    if staged is None:
+                        if frame_state in (_TASK_READY, _PREPARE_READY, _ACTIVATE):
+                            staged = stage_frame(index, frame_state)
+                            if staged is not None:
+                                staged_frames[index] = staged
+                        continue
+                    if frame_state == _ACTIVATE:
+                        if read_identity(staged.frame_buf) != staged.identity:
+                            fail_frame(staged, f"chip_process dev={device_id}: stale activation identity")
+                            if active_frame is not staged:
+                                staged_frames.pop(index, None)
+                            continue
+                        staged.activated = True
+
+                if active_frame is not None:
+                    try:
+                        run_complete = bool(cw._impl._poll_native_run(active_run))
+                    except Exception as e:  # noqa: BLE001
+                        poll_message = _format_exc(f"chip_process dev={device_id}: native poll", e)
+                        try:
+                            cw._impl._finalize_native_run(active_run)
+                        except Exception as finalize_error:  # noqa: BLE001
+                            poll_message += "; " + _format_exc("native finalize", finalize_error)
+                        fail_frame(active_frame, poll_message)
+                        staged_frames.pop(active_frame.index, None)
+                        active_frame = None
+                        active_run = None
+                        # A failed native progress/finalize fence cannot prove
+                        # that device state is reusable. Stop this endpoint so
+                        # an already-staged successor is failed, never launched
+                        # into potentially poisoned native state.
+                        shutdown_message = poll_message
+                        break
+                    else:
+                        if run_complete:
+                            completed_frame = active_frame
+                            code = 0
+                            msg = ""
+                            finalize_failed = False
+                            try:
+                                cw._impl._finalize_native_run(active_run)
+                            except Exception as e:  # noqa: BLE001
+                                code = 1
+                                finalize_failed = True
+                                msg = _format_exc(f"chip_process dev={device_id}: native finalize", e)
+                            active_frame = None
+                            active_run = None
+                            if code == 0 and on_task_done_success is not None:
+                                try:
+                                    code, msg = on_task_done_success()
+                                except Exception as e:  # noqa: BLE001
+                                    code = 1
+                                    msg = _format_exc(f"chip_process dev={device_id}: task completion hook", e)
+                            _write_error(completed_frame.frame_buf, code, msg)
+                            _mailbox_store_i32(
+                                completed_frame.frame_addr + _OFF_STATE,
+                                _TASK_DONE if code == 0 else _TASK_FAILED,
+                            )
+                            staged_frames.pop(completed_frame.index, None)
+                            if finalize_failed:
+                                # Finalization is the native reuse fence. Its
+                                # failure terminalizes the endpoint before a
+                                # staged successor can cross the launch fence.
+                                shutdown_message = msg
+                                break
+
+                if active_frame is None:
+                    eligible = sorted(
+                        (frame for frame in staged_frames.values() if frame.activated),
+                        key=lambda frame: frame.identity[4],
+                    )
+                    if eligible:
+                        next_frame = eligible[0]
+                        frame_state = _mailbox_load_i32(next_frame.frame_addr + _OFF_STATE)
+                        expected_states = (_FRAME_STAGED, _ACTIVATE)
+                        if (
+                            read_identity(next_frame.frame_buf) != next_frame.identity
+                            or frame_state not in expected_states
+                        ):
+                            fail_frame(
+                                next_frame,
+                                f"chip_process dev={device_id}: staged task frame changed before launch",
+                            )
+                            staged_frames.pop(next_frame.index, None)
+                        else:
+                            _protocol, _run_id, slot_id, generation, _dispatch_id = next_frame.identity
+                            native_run = None
+                            try:
+                                native_run = cw._impl._prepare_native_run_from_blob(
+                                    next_frame.cid,
+                                    next_frame.frame_addr + _OFF_TASK_ARGS_BLOB,
+                                    _MAILBOX_ARGS_CAPACITY,
+                                    next_frame.config,
+                                    slot_id,
+                                    generation,
+                                )
+                                cw._impl._launch_native_run(
+                                    native_run,
+                                    next_frame.frame_addr + _OFF_ACCEPTED,
+                                    _TASK_ACCEPTED,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                launch_message = _format_exc(f"chip_process dev={device_id}: native launch", e)
+                                finalize_failed = False
+                                if native_run is not None:
+                                    try:
+                                        cw._impl._finalize_native_run(native_run)
+                                    except Exception as finalize_error:  # noqa: BLE001
+                                        finalize_failed = True
+                                        launch_message += "; " + _format_exc("native finalize", finalize_error)
+                                fail_frame(next_frame, launch_message)
+                                staged_frames.pop(next_frame.index, None)
+                                if finalize_failed:
+                                    # The launch cleanup did not establish the
+                                    # native reuse fence. Stop before any other
+                                    # staged frame can enter poisoned state.
+                                    shutdown_message = launch_message
+                                    break
+                            else:
+                                active_frame = next_frame
+                                active_run = native_run
+                                _mailbox_store_i32(next_frame.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
+
+                liveness_countdown -= 1
+                if liveness_countdown <= 0:
+                    liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+                    if os.getppid() != parent_pid:
+                        shutdown_message = f"chip_process dev={device_id}: parent exited"
+                        break
+        finally:
+            if active_frame is not None:
+                active_message = shutdown_message
+                try:
+                    cw._impl._finalize_native_run(active_run)
+                except Exception as e:  # noqa: BLE001
+                    active_message += "; " + _format_exc("native finalize", e)
+                fail_frame(active_frame, active_message)
+                staged_frames.pop(active_frame.index, None)
+            for staged in staged_frames.values():
+                fail_frame(staged, shutdown_message)
+            for index, frame_buf in enumerate(frame_bufs):
+                frame_state_addr = frame_addrs[index] + _OFF_STATE
+                if _mailbox_load_i32(frame_state_addr) in (
+                    _TASK_READY,
+                    _PREPARE_READY,
+                    _ACTIVATE,
+                    _FRAME_STAGED,
+                    _TASK_LAUNCHED,
+                ):
+                    _write_error(frame_buf, 1, shutdown_message)
+                    _mailbox_store_i32(frame_state_addr, _TASK_FAILED)
+            for frame_buf in frame_bufs:
+                frame_buf.release()
+
     try:
-        _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
+        if task_frame_count >= 2:
+            run_two_frame_loop()
+        else:
+            _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
         _sweep_l2_host_l3_l2_regions(l3_l2_region_store)
         for host_shm, _lo, _hi, _base in host_buf_table.values():
@@ -2424,6 +2742,9 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
     # child to reach _INIT_READY before dispatching the first task, so the
     # per-rank host-side stream sync budget only covers actual op execution
     # rather than absorbing peer-rank init skew.
+    # Before the first task, the lease word is startup metadata: slot_id carries
+    # the backend's supported admission depth. Dispatches later overwrite the
+    # same fixed wire region with the run-owned slot/generation lease.
     _PIPELINE_LEASE_FMT.pack_into(buf, _OFF_PIPELINE_LEASE, int(cw.pipeline_depth), 0, 0)
     _mailbox_store_i32(state_addr, _INIT_READY)
     sys.stderr.write(f"[chip_process pid={os.getpid()} dev={device_id}] ready\n")
@@ -2442,6 +2763,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
             chip_platform=platform,
             chip_runtime=runtime,
             prepared=prepared,
+            task_frame_count=_local_task_frame_count(platform, runtime, int(cw.pipeline_depth)),
         )
     finally:
         cw.finalize()
@@ -5809,6 +6131,7 @@ class Worker:
         n_sub = self._config.get("num_sub_workers", 0)
         deadline = self._startup_deadline
         direct_chip_pipeline_depth = PTO_PIPELINE_MAX_DEPTH
+        chip_depths: list[int] = []
 
         # Freeze the startup registry snapshot. init() already holds the epoch in
         # the INITIALIZING state, so a concurrent register/unregister is blocked
@@ -5914,10 +6237,11 @@ class Worker:
             # documented in issue #897.  A chip that fails or dies during init
             # raises here rather than spinning forever.
             self._await_children_ready(self._chip_shms, self._chip_pids, "chip", deadline)
-            chip_depths = []
             for shm in self._chip_shms:
                 buf = shm.buf
                 assert buf is not None
+                # INIT_READY repurposes the lease slot_id as the child's depth
+                # advertisement; task dispatch restores normal lease semantics.
                 chip_depths.append(_PIPELINE_LEASE_FMT.unpack_from(buf, _OFF_PIPELINE_LEASE)[0])
             if any(depth <= 0 or depth > PTO_PIPELINE_MAX_DEPTH for depth in chip_depths):
                 raise RuntimeError(f"chip worker published invalid pipeline depths: {chip_depths}")
@@ -5992,8 +6316,11 @@ class Worker:
         # mailbox that can no longer be completed.
         if device_ids:
             _require_matching_pids(self._chip_shms, self._chip_pids, "chip")
-            for shm, pid in zip(self._chip_shms, self._chip_pids):
-                dw.add_next_level_worker(_mailbox_addr(shm), pid)
+            for shm, pid, chip_depth in zip(self._chip_shms, self._chip_pids, chip_depths):
+                task_frame_count = _local_task_frame_count(
+                    str(self._config["platform"]), str(self._config["runtime"]), chip_depth
+                )
+                dw.add_next_level_worker(_mailbox_addr(shm), pid, task_frame_count)
 
         # Register Worker children as NEXT_LEVEL (L4+)
         if self._next_level_shms and not hasattr(dw, "add_next_level_worker_at"):

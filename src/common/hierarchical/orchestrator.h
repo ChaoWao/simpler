@@ -167,6 +167,7 @@ public:
      */
     void await_run_admission(RunId run_id);
     RunId active_run_id() const;
+    RunId preparable_run_id() const;
     void release_run(RunId run_id);
 
     // Open a nested scope. Every task submitted between this call and the

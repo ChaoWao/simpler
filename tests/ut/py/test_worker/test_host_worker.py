@@ -25,7 +25,7 @@ import time
 import weakref
 from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Optional, cast
 from unittest.mock import patch
 
 import pytest
@@ -139,6 +139,7 @@ def _chip_payload_shm(callable_obj: ChipCallable) -> SharedMemory:
 def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
     events: list[tuple] = []
     published_depths: list[int] = []
+    published_frame_counts: list[int] = []
 
     class FakeChipWorker:
         pipeline_depth = 2
@@ -149,8 +150,9 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
         def finalize(self) -> None:
             events.append(("finalize",))
 
-    def fake_run_chip_main_loop(cw, *_args, chip_platform, chip_runtime, prepared=None):
+    def fake_run_chip_main_loop(cw, *_args, chip_platform, chip_runtime, prepared=None, task_frame_count=1):
         published_depths.append(worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)[0])
+        published_frame_counts.append(task_frame_count)
         events.append(("main_loop", cw, chip_platform, chip_runtime))
 
     monkeypatch.setattr(worker_mod, "ChipWorker", FakeChipWorker)
@@ -178,6 +180,611 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
     assert events[1][2:] == ("a2a3", "tensormap_and_ringbuffer")
     assert events[2] == ("finalize",)
     assert published_depths == [2]
+    assert published_frame_counts == [2]
+
+
+@pytest.mark.parametrize(
+    ("platform", "runtime", "depth", "expected"),
+    [
+        ("a2a3", "host_build_graph", 2, 2),
+        ("a2a3", "host_build_graph", 1, 1),
+        ("a2a3", "tensormap_and_ringbuffer", 2, 2),
+        ("a5", "host_build_graph", 2, 1),
+        ("a2a3sim", "host_build_graph", 2, 1),
+    ],
+)
+def test_local_task_frame_count_uses_direct_a2a3_pipeline_depth(platform, runtime, depth, expected):
+    assert worker_mod._local_task_frame_count(platform, runtime, depth) == expected
+
+
+def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypatch):
+    class FakeParentWorker:
+        def __init__(self) -> None:
+            self.configured_depths: list[int] = []
+            self.next_level_calls: list[tuple[int, int, int]] = []
+            self.initialized = False
+
+        def configure_pipeline_depth(self, depth: int) -> None:
+            self.configured_depths.append(int(depth))
+
+        def add_next_level_worker(self, mailbox_addr: int, pid: int, task_frame_count: int) -> None:
+            self.next_level_calls.append((int(mailbox_addr), int(pid), int(task_frame_count)))
+
+        def init(self) -> None:
+            self.initialized = True
+
+        def get_orchestrator(self):
+            return object()
+
+    worker = Worker(
+        level=3,
+        device_ids=[0, 1],
+        num_sub_workers=0,
+        platform="a2a3",
+        runtime="host_build_graph",
+    )
+    worker._chip_shms = [SharedMemory(create=True, size=MAILBOX_SIZE) for _ in range(2)]
+    fake_parent = FakeParentWorker()
+    worker._worker = cast(Any, fake_parent)
+    worker._startup_deadline = time.monotonic() + 5.0
+    fork_pids = iter((12001, 12002))
+
+    def fake_await_children_ready(shms, _pids, kind: str, _deadline: float) -> None:
+        if kind != "chip":
+            return
+        for shm, depth in zip(shms, (2, 1)):
+            assert shm.buf is not None
+            worker_mod._PIPELINE_LEASE_FMT.pack_into(shm.buf, worker_mod._OFF_PIPELINE_LEASE, depth, 0, 0)
+
+    monkeypatch.setattr(worker_mod.os, "fork", lambda: next(fork_pids))
+    monkeypatch.setattr(worker, "_await_children_ready", fake_await_children_ready)
+    monkeypatch.setattr(worker_mod, "Orchestrator", lambda native, owner: (native, owner))
+    try:
+        worker._start_hierarchical()
+    finally:
+        for shm in worker._chip_shms:
+            shm.close()
+            shm.unlink()
+
+    assert fake_parent.configured_depths == [1]
+    assert [call[1:] for call in fake_parent.next_level_calls] == [(12001, 2), (12002, 1)]
+    assert fake_parent.initialized
+
+
+class _FakeNativeRunImpl:
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+        self.completed = [threading.Event(), threading.Event()]
+        self.prepared = [threading.Event(), threading.Event()]
+        self.launched = [threading.Event(), threading.Event()]
+        self.finalized = [threading.Event(), threading.Event()]
+        self.launch_errors: dict[tuple[int, int], BaseException] = {}
+        self.poll_errors: dict[tuple[int, int], BaseException] = {}
+        self.finalize_errors: dict[tuple[int, int], BaseException] = {}
+        self.register_calls: list[tuple[int, int]] = []
+        self.register_called = threading.Event()
+        self._finalized_runs: set[tuple[int, int]] = set()
+        self._polled_slots: set[int] = set()
+
+    def register_callable_from_blob(self, cid: int, blob_addr: int) -> None:
+        self.register_calls.append((int(cid), int(blob_addr)))
+        self.register_called.set()
+
+    def _prepare_native_run_from_blob(self, _cid, _blob_addr, _capacity, _cfg, slot_id, generation):
+        slot = int(slot_id)
+        token = SimpleNamespace(slot_id=slot, generation=int(generation), run_epoch=slot + 1)
+        self.events.append(("prepare", slot))
+        self.prepared[slot].set()
+        return token
+
+    def _launch_native_run(self, token, accepted_addr, accepted_value) -> None:
+        slot = int(token.slot_id)
+        state_addr = int(accepted_addr) - worker_mod._OFF_ACCEPTED
+        self.events.append(
+            (
+                "launch_enter",
+                slot,
+                _mailbox_load_i32(int(accepted_addr)),
+                _mailbox_load_i32(state_addr),
+            )
+        )
+        launch_error = self.launch_errors.get((slot, int(token.generation)))
+        if launch_error is not None:
+            raise launch_error
+        _mailbox_store_i32(int(accepted_addr), int(accepted_value))
+        self.events.append(("launch", slot))
+        self.launched[slot].set()
+
+    def _poll_native_run(self, token) -> bool:
+        slot = int(token.slot_id)
+        error = self.poll_errors.get((slot, int(token.generation)))
+        if error is not None:
+            raise error
+        if slot not in self._polled_slots:
+            self._polled_slots.add(slot)
+            self.events.append(("poll", slot))
+        return self.completed[slot].is_set()
+
+    def _finalize_native_run(self, token) -> None:
+        slot = int(token.slot_id)
+        run_key = (slot, int(token.generation))
+        assert run_key not in self._finalized_runs
+        self._finalized_runs.add(run_key)
+        self.events.append(("finalize", slot))
+        self.finalized[slot].set()
+        error = self.finalize_errors.get(run_key)
+        if error is not None:
+            raise error
+
+
+class _FakeTwoFrameChipWorker:
+    pipeline_depth = 2
+
+    def __init__(self) -> None:
+        self._impl = _FakeNativeRunImpl()
+        self.malloc_called = threading.Event()
+        self.unregister_calls: list[int] = []
+        self.unregister_called = threading.Event()
+        self.unregister_error: Optional[BaseException] = None
+
+    def malloc(self, size: int) -> int:
+        self._impl.events.append(("malloc", int(size)))
+        self.malloc_called.set()
+        return 0xCAFE
+
+    def _unregister_slot(self, cid: int) -> None:
+        self.unregister_calls.append(int(cid))
+        self.unregister_called.set()
+        if self.unregister_error is not None:
+            raise self.unregister_error
+
+
+class _TwoFrameLoopHarness:
+    def __init__(self) -> None:
+        self.shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+        self.buf = cast(memoryview, self.shm.buf)
+        assert self.buf is not None
+        self.mailbox_addr = _mailbox_addr(self.shm)
+        self.digest = bytes([0x42]) * worker_mod.CALLABLE_HASH_DIGEST_BYTES
+        self.cw = _FakeTwoFrameChipWorker()
+        self.registry = {7: object()}
+        self.identity_table = {self.digest: 7}
+        self.identity_refs = {self.digest: 1}
+        self.prepared = {7}
+        self.thread = threading.Thread(
+            target=worker_mod._run_chip_main_loop,
+            args=(
+                self.cw,
+                self.buf,
+                self.mailbox_addr,
+                self.mailbox_addr + _OFF_STATE,
+                0,
+                self.registry,
+                self.identity_table,
+                self.identity_refs,
+            ),
+            kwargs={"chip_platform": "a2a3", "prepared": self.prepared, "task_frame_count": 2},
+        )
+
+    def _frame_offset(self, index: int) -> int:
+        return (1 + index) * worker_mod.MAILBOX_FRAME_SIZE
+
+    def state_addr(self, index: int) -> int:
+        return self.mailbox_addr + self._frame_offset(index) + _OFF_STATE
+
+    def accepted_addr(self, index: int) -> int:
+        return self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_ACCEPTED
+
+    def publish(
+        self,
+        index: int,
+        dispatch_id: int,
+        *,
+        state: int = worker_mod._TASK_READY,
+        generation: int = 11,
+    ) -> None:
+        offset = self._frame_offset(index)
+        frame = self.buf[offset : offset + worker_mod.MAILBOX_FRAME_SIZE]
+        try:
+            frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = self.digest
+            struct.pack_into("=ii", frame, worker_mod._OFF_TASK_ARGS_BLOB, 0, 0)
+            cfg_values = [0] * (6 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+            worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, b"")
+            worker_mod._PIPELINE_LEASE_FMT.pack_into(frame, worker_mod._OFF_PIPELINE_LEASE, index, 0, generation)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_RUN_ID, 5)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_SLOT_ID, index)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, generation)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_DISPATCH_ID, dispatch_id)
+        finally:
+            frame.release()
+        _mailbox_store_i32(self.accepted_addr(index), 0)
+        _mailbox_store_i32(self.state_addr(index), state)
+
+    def wait_state(self, index: int, expected: int) -> None:
+        deadline = time.monotonic() + 5.0
+        while _mailbox_load_i32(self.state_addr(index)) != expected:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+
+    def wait_control_state(self, expected: int) -> None:
+        deadline = time.monotonic() + 5.0
+        while _mailbox_load_i32(self.mailbox_addr + _OFF_STATE) != expected:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+
+    def assert_control_stays_pending(self, duration: float = 0.05) -> None:
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            assert _mailbox_load_i32(self.mailbox_addr + _OFF_STATE) == worker_mod._CONTROL_REQUEST
+            time.sleep(0.001)
+
+    def publish_unregister(self, digest: Optional[bytes] = None) -> None:
+        digest = self.digest if digest is None else digest
+        struct.pack_into("Q", self.buf, worker_mod._OFF_CALLABLE, worker_mod._CTRL_UNREGISTER)
+        self.buf[worker_mod._OFF_CONTROL_CALLABLE_HASH : worker_mod._OFF_CONTROL_CALLABLE_HASH + len(digest)] = digest
+        _mailbox_store_i32(self.mailbox_addr + _OFF_STATE, worker_mod._CONTROL_REQUEST)
+
+    def publish_register(self, callable_obj: ChipCallable, payload_shm: SharedMemory, digest: bytes) -> None:
+        struct.pack_into("Q", self.buf, worker_mod._OFF_CALLABLE, worker_mod._CTRL_REGISTER)
+        struct.pack_into("Q", self.buf, worker_mod._CTRL_OFF_ARG0, int(callable_obj.buffer_size()))
+        self.buf[worker_mod._OFF_CONTROL_CALLABLE_HASH : worker_mod._OFF_CONTROL_CALLABLE_HASH + len(digest)] = digest
+        encoded_name = payload_shm.name.encode("utf-8")
+        assert len(encoded_name) + 1 <= worker_mod._CTRL_SHM_NAME_BYTES
+        self.buf[worker_mod._OFF_ARGS : worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES] = b"\x00" * (
+            worker_mod._CTRL_SHM_NAME_BYTES
+        )
+        self.buf[worker_mod._OFF_ARGS : worker_mod._OFF_ARGS + len(encoded_name)] = encoded_name
+        _mailbox_store_i32(self.mailbox_addr + _OFF_STATE, worker_mod._CONTROL_REQUEST)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        if self.thread.is_alive():
+            _mailbox_store_i32(self.mailbox_addr + _OFF_STATE, worker_mod._SHUTDOWN)
+            self.thread.join(5.0)
+        assert not self.thread.is_alive()
+
+    def close(self) -> None:
+        self.stop()
+        self.shm.close()
+        self.shm.unlink()
+
+
+def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish(1, 2)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert not harness.cw._impl.prepared[1].is_set()
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+
+        harness.cw._impl.completed[0].set()
+        assert harness.cw._impl.finalized[0].wait(5.0)
+        assert harness.cw._impl.launched[1].wait(5.0)
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
+        harness.cw._impl.completed[1].set()
+        harness.wait_state(1, worker_mod._TASK_DONE)
+
+        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        assert lifecycle == [
+            ("prepare", 0),
+            ("launch", 0),
+            ("finalize", 0),
+            ("prepare", 1),
+            ("launch", 1),
+            ("finalize", 1),
+        ]
+        launch_entries = [event for event in harness.cw._impl.events if event[0] == "launch_enter"]
+        assert launch_entries == [
+            ("launch_enter", 0, 0, worker_mod._FRAME_STAGED),
+            ("launch_enter", 1, 0, worker_mod._FRAME_STAGED),
+        ]
+    finally:
+        harness.close()
+
+
+def test_two_frame_launches_by_dispatch_id_when_frames_are_ready_in_reverse_order():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 2)
+        harness.publish(1, 1)
+        harness.start()
+        assert harness.cw._impl.launched[1].wait(5.0)
+        assert not harness.cw._impl.prepared[0].is_set()
+        harness.cw._impl.completed[1].set()
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+        launches = [event for event in harness.cw._impl.events if event[0] == "launch"]
+        assert launches == [("launch", 1), ("launch", 0)]
+    finally:
+        harness.close()
+
+
+def test_two_frame_prepare_ready_waits_for_sticky_activation():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1, state=worker_mod._PREPARE_READY)
+        harness.start()
+        harness.wait_state(0, worker_mod._FRAME_STAGED)
+        assert not harness.cw._impl.prepared[0].is_set()
+
+        _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+    finally:
+        harness.close()
+
+
+def test_two_frame_processes_control_while_native_run_is_active():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        struct.pack_into("Q", harness.buf, worker_mod._OFF_CALLABLE, worker_mod._CTRL_MALLOC)
+        struct.pack_into("Q", harness.buf, worker_mod._CTRL_OFF_ARG0, 4096)
+        _mailbox_store_i32(harness.mailbox_addr + _OFF_STATE, worker_mod._CONTROL_REQUEST)
+        assert harness.cw.malloc_called.wait(5.0)
+        assert _mailbox_load_i32(harness.mailbox_addr + _OFF_STATE) == worker_mod._CONTROL_DONE
+        assert struct.unpack_from("Q", harness.buf, worker_mod._CTRL_OFF_RESULT)[0] == 0xCAFE
+        assert not harness.cw._impl.completed[0].is_set()
+
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+    finally:
+        harness.close()
+
+
+def test_two_frame_defers_unregister_until_active_native_run_finalizes():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish_unregister()
+        harness.assert_control_stays_pending()
+        assert harness.cw.unregister_calls == []
+        assert harness.identity_table == {harness.digest: 7}
+
+        harness.cw._impl.completed[0].set()
+        assert harness.cw._impl.finalized[0].wait(5.0)
+        harness.wait_control_state(worker_mod._CONTROL_DONE)
+        assert harness.cw.unregister_calls == [7]
+        assert harness.identity_table == {}
+        assert harness.registry == {}
+        assert harness.prepared == set()
+    finally:
+        harness.close()
+
+
+def test_two_frame_defers_register_until_active_native_run_finalizes():
+    harness = _TwoFrameLoopHarness()
+    callable_obj = _unique_chip_callable(23)
+    digest = _chip_digest(callable_obj, platform="a2a3")
+    payload_shm = _chip_payload_shm(callable_obj)
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish_register(callable_obj, payload_shm, digest)
+        harness.assert_control_stays_pending()
+        assert harness.cw._impl.register_calls == []
+        assert digest not in harness.identity_table
+
+        harness.cw._impl.completed[0].set()
+        assert harness.cw._impl.finalized[0].wait(5.0)
+        harness.wait_control_state(worker_mod._CONTROL_DONE)
+        assert len(harness.cw._impl.register_calls) == 1
+        cid = harness.identity_table[digest]
+        assert harness.cw._impl.register_calls[0][0] == cid
+        assert cid in harness.registry
+        assert cid in harness.prepared
+    finally:
+        harness.close()
+        payload_shm.close()
+        payload_shm.unlink()
+
+
+def test_two_frame_defers_final_unregister_while_matching_frame_is_staged():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1, state=worker_mod._PREPARE_READY)
+        harness.start()
+        harness.wait_state(0, worker_mod._FRAME_STAGED)
+
+        harness.publish_unregister()
+        harness.assert_control_stays_pending()
+        assert harness.cw.unregister_calls == []
+
+        _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.assert_control_stays_pending()
+        assert harness.cw.unregister_calls == []
+
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+        harness.wait_control_state(worker_mod._CONTROL_DONE)
+        assert harness.cw.unregister_calls == [7]
+        assert harness.identity_table == {}
+        assert harness.registry == {}
+        assert harness.prepared == set()
+    finally:
+        harness.close()
+
+
+def test_two_frame_native_unregister_failure_preserves_local_identity_state():
+    harness = _TwoFrameLoopHarness()
+    original_callable = harness.registry[7]
+    harness.cw.unregister_error = RuntimeError("native unregister failed")
+    try:
+        harness.publish_unregister()
+        harness.start()
+        harness.wait_control_state(worker_mod._CONTROL_DONE)
+
+        assert harness.cw.unregister_calls == [7]
+        assert harness.identity_table == {harness.digest: 7}
+        assert harness.identity_refs == {harness.digest: 1}
+        assert harness.registry == {7: original_callable}
+        assert harness.prepared == {7}
+        assert struct.unpack_from("i", harness.buf, worker_mod._OFF_ERROR)[0] == 1
+        error = bytes(
+            harness.buf[
+                worker_mod.MAILBOX_OFF_ERROR_MSG : worker_mod.MAILBOX_OFF_ERROR_MSG + worker_mod.MAILBOX_ERROR_MSG_SIZE
+            ]
+        ).split(b"\x00", 1)[0]
+        assert b"native unregister failed" in error
+    finally:
+        harness.close()
+
+
+def test_two_frame_shutdown_finalizes_active_and_fails_staged_without_launch():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.publish(1, 2)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+
+        _mailbox_store_i32(harness.mailbox_addr + _OFF_STATE, worker_mod._SHUTDOWN)
+        harness.thread.join(5.0)
+        assert not harness.thread.is_alive()
+        assert harness.cw._impl.finalized[0].is_set()
+        assert not harness.cw._impl.prepared[1].is_set()
+        assert _mailbox_load_i32(harness.state_addr(1)) == worker_mod._TASK_FAILED
+    finally:
+        harness.close()
+
+
+def test_two_frame_reuses_completed_frame_for_next_staged_successor():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        harness.publish(1, 2, state=worker_mod._PREPARE_READY)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+        _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
+        harness.wait_state(1, worker_mod._TASK_LAUNCHED)
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
+
+        harness.cw._impl.completed[0].clear()
+        harness.publish(0, 3, state=worker_mod._PREPARE_READY, generation=12)
+        harness.wait_state(0, worker_mod._FRAME_STAGED)
+        assert _mailbox_load_i32(harness.accepted_addr(0)) == 0
+        lifecycle_before_c_activation = [
+            event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}
+        ]
+        assert lifecycle_before_c_activation == [
+            ("prepare", 0),
+            ("launch", 0),
+            ("finalize", 0),
+            ("prepare", 1),
+            ("launch", 1),
+        ]
+
+        harness.cw._impl.completed[1].set()
+        harness.wait_state(1, worker_mod._TASK_DONE)
+        _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
+        harness.wait_state(0, worker_mod._TASK_LAUNCHED)
+        assert _mailbox_load_i32(harness.accepted_addr(0)) == worker_mod._TASK_ACCEPTED
+        harness.cw._impl.completed[0].set()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+
+        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        assert lifecycle == [
+            ("prepare", 0),
+            ("launch", 0),
+            ("finalize", 0),
+            ("prepare", 1),
+            ("launch", 1),
+            ("finalize", 1),
+            ("prepare", 0),
+            ("launch", 0),
+            ("finalize", 0),
+        ]
+    finally:
+        harness.close()
+
+
+def test_two_frame_launch_failure_does_not_accept_and_finalizes_once():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.cw._impl.launch_errors[(0, 11)] = RuntimeError("launch failed")
+        harness.publish(0, 1)
+        harness.start()
+        harness.wait_state(0, worker_mod._TASK_FAILED)
+
+        assert _mailbox_load_i32(harness.accepted_addr(0)) == 0
+        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        assert lifecycle == [("prepare", 0), ("finalize", 0)]
+        assert harness.cw._impl.finalized[0].is_set()
+        assert sum(event == ("finalize", 0) for event in harness.cw._impl.events) == 1
+    finally:
+        harness.close()
+
+
+def test_two_frame_launch_cleanup_failure_terminalizes_staged_successor():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.cw._impl.launch_errors[(0, 11)] = RuntimeError("launch failed")
+        harness.cw._impl.finalize_errors[(0, 11)] = RuntimeError("launch cleanup failed")
+        harness.publish(0, 1)
+        harness.publish(1, 2)
+        harness.start()
+
+        harness.wait_state(0, worker_mod._TASK_FAILED)
+        harness.wait_state(1, worker_mod._TASK_FAILED)
+        harness.thread.join(5.0)
+        assert not harness.thread.is_alive()
+        assert not harness.cw._impl.prepared[1].is_set()
+        assert not harness.cw._impl.launched[1].is_set()
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+    finally:
+        harness.close()
+
+
+@pytest.mark.parametrize("failure_point", ["poll", "finalize"])
+def test_two_frame_native_progress_failure_terminalizes_staged_successor(failure_point):
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.publish(1, 2)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+
+        if failure_point == "poll":
+            harness.cw._impl.poll_errors[(0, 11)] = RuntimeError("poll failed")
+        else:
+            harness.cw._impl.finalize_errors[(0, 11)] = RuntimeError("finalize failed")
+            harness.cw._impl.completed[0].set()
+
+        harness.wait_state(0, worker_mod._TASK_FAILED)
+        harness.wait_state(1, worker_mod._TASK_FAILED)
+        harness.thread.join(5.0)
+        assert not harness.thread.is_alive()
+        assert not harness.cw._impl.prepared[1].is_set()
+        assert not harness.cw._impl.launched[1].is_set()
+        assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
+    finally:
+        harness.close()
 
 
 def _chip_digest(callable_obj: ChipCallable, *, platform: str = "", runtime: str = "") -> bytes:
@@ -1613,6 +2220,7 @@ class TestRunHandle:
 
         third_callback = threading.Event()
         third_result: dict[str, RunHandle] = {}
+        submitter: Optional[threading.Thread] = None
         hw = Worker(level=3, num_sub_workers=2)
         try:
 
@@ -1671,6 +2279,8 @@ class TestRunHandle:
         finally:
             _set_flag(state_buf, 4, 1)
             _set_flag(state_buf, 12, 1)
+            if submitter is not None:
+                submitter.join(5.0)
             hw.close()
             state_shm.close()
             state_shm.unlink()

@@ -417,10 +417,12 @@ inline void bind_worker(nb::module_ &m) {
 
         .def(
             "add_next_level_worker",
-            [](Worker &self, uint64_t mailbox_ptr, int child_pid) {
-                self.add_worker(WorkerType::NEXT_LEVEL, reinterpret_cast<void *>(mailbox_ptr), child_pid);
+            [](Worker &self, uint64_t mailbox_ptr, int child_pid, uint32_t task_frame_count) {
+                self.add_worker(
+                    WorkerType::NEXT_LEVEL, reinterpret_cast<void *>(mailbox_ptr), child_pid, task_frame_count
+                );
             },
-            nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1,
+            nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1, nb::arg("task_frame_count") = 1,
             "Add a NEXT_LEVEL sub-worker. `mailbox_ptr` is the address of a "
             "MAILBOX_SIZE-byte MAP_SHARED region; the child process loop is "
             "Python-managed (fork + _chip_process_loop). `child_pid` is that "
@@ -428,10 +430,12 @@ inline void bind_worker(nb::module_ &m) {
         )
         .def(
             "add_next_level_worker_at",
-            [](Worker &self, int32_t worker_id, uint64_t mailbox_ptr, int child_pid) {
-                self.add_next_level_worker(worker_id, reinterpret_cast<void *>(mailbox_ptr), child_pid);
+            [](Worker &self, int32_t worker_id, uint64_t mailbox_ptr, int child_pid, uint32_t task_frame_count) {
+                self.add_next_level_worker(
+                    worker_id, reinterpret_cast<void *>(mailbox_ptr), child_pid, task_frame_count
+                );
             },
-            nb::arg("worker_id"), nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1,
+            nb::arg("worker_id"), nb::arg("mailbox_ptr"), nb::arg("child_pid") = -1, nb::arg("task_frame_count") = 1,
             "Add a NEXT_LEVEL sub-worker with an explicit worker id."
         )
         .def(
@@ -792,6 +796,7 @@ inline void bind_worker(nb::module_ &m) {
 
     m.attr("DEFAULT_HEAP_RING_SIZE") = static_cast<uint64_t>(DEFAULT_HEAP_RING_SIZE);
     m.attr("MAILBOX_SIZE") = static_cast<int>(MAILBOX_SIZE);
+    m.attr("MAILBOX_FRAME_SIZE") = static_cast<int>(MAILBOX_FRAME_SIZE);
     m.attr("MAILBOX_OFF_ERROR_MSG") = static_cast<int>(MAILBOX_OFF_ERROR_MSG);
     m.attr("MAILBOX_ERROR_MSG_SIZE") = static_cast<int>(MAILBOX_ERROR_MSG_SIZE);
     m.attr("PTO_PIPELINE_MAX_DEPTH") = static_cast<uint32_t>(PTO_PIPELINE_MAX_DEPTH);

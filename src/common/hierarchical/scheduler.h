@@ -46,7 +46,9 @@
 #include "types.h"
 
 class WorkerManager;  // forward decl
+class WorkerThread;   // forward decl
 class Ring;           // forward decl
+struct WorkerDispatch;
 
 // =============================================================================
 // Scheduler — DAG engine (no worker pool ownership)
@@ -67,6 +69,7 @@ class Ring;           // forward decl
  * window this closes is exactly the code between the queue pop and the launch.
  */
 bool claim_for_dispatch(TaskSlotState &s);
+bool stageable_successor_ready(const NextLevelReadyQueues &ready_queues, const WorkerManager &manager, RunId run_id);
 
 class Scheduler {
 public:
@@ -80,6 +83,7 @@ public:
         // Production workers expose exactly one whole-run FIFO head. Tests
         // that omit this callback retain the legacy unpartitioned queue path.
         std::function<RunId()> active_run_cb;
+        std::function<RunId()> preparable_run_cb;
         // Called when a task reaches CONSUMED (TensorMap cleanup + ring release).
         std::function<void(TaskSlot)> on_consumed_cb;
         // Called as soon as an endpoint reports failure so the error is
@@ -95,6 +99,7 @@ public:
     };
 
     void start(const Config &cfg);
+    void request_stop();
     void stop();
 
     bool running() const { return running_.load(std::memory_order_acquire); }
@@ -131,6 +136,8 @@ private:
     void poison_task(TaskSlot slot, const std::string &root_message);
     void try_consume(TaskSlot slot);
     void dispatch_ready();
+    void dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared);
+    void dispatch_preparable_next_level_singles();
     std::unordered_set<int32_t> dispatch_next_level_group(const std::optional<RunId> &run_snapshot);
     void dispatch_next_level_singles(
         const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot

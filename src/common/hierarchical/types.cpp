@@ -289,6 +289,19 @@ bool NextLevelReadyQueues::empty(RunId run_id) const {
     return true;
 }
 
+bool NextLevelReadyQueues::groups_empty(RunId run_id) const { return group_queue_.empty(run_id); }
+
+bool NextLevelReadyQueues::single_empty(int32_t worker_id, RunId run_id) const {
+    return queues_[index_for(worker_id)]->empty(run_id);
+}
+
+bool NextLevelReadyQueues::singles_empty(RunId run_id) const {
+    for (const auto &queue : queues_) {
+        if (!queue->empty(run_id)) return false;
+    }
+    return true;
+}
+
 void NextLevelReadyQueues::erase_run(RunId run_id) {
     group_queue_.erase_run(run_id);
     for (const auto &queue : queues_)

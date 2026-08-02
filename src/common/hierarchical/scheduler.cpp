@@ -108,9 +108,13 @@ void Scheduler::start(const Config &cfg) {
     sched_thread_ = std::thread(&Scheduler::run, this);
 }
 
-void Scheduler::stop() {
+void Scheduler::request_stop() {
     stop_requested_.store(true, std::memory_order_release);
     completion_cv_.notify_all();
+}
+
+void Scheduler::stop() {
+    request_stop();
 
     if (sched_thread_.joinable()) sched_thread_.join();
 
@@ -216,6 +220,20 @@ void Scheduler::notify_ready() {
     completion_cv_.notify_one();
 }
 
+bool stageable_successor_ready(const NextLevelReadyQueues &ready_queues, const WorkerManager &manager, RunId run_id) {
+    // B3b stages singles only. If the successor has a group head, retain the
+    // established all-or-nothing group priority instead of letting a staged
+    // single occupy one of its reserved workers after FIFO promotion.
+    if (!ready_queues.groups_empty(run_id)) return false;
+    for (int32_t worker_id : ready_queues.worker_ids()) {
+        WorkerThread *worker = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (worker != nullptr && worker->can_stage() && !ready_queues.single_empty(worker_id, run_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // =============================================================================
 // Scheduler loop
 // =============================================================================
@@ -230,7 +248,13 @@ void Scheduler::run() {
                 if (cfg_.active_run_cb) {
                     RunId active = cfg_.active_run_cb();
                     ready = active != INVALID_RUN_ID &&
-                            (!cfg_.ready_next_level_queues->empty(active) || !cfg_.ready_sub_queue->empty(active));
+                            (!cfg_.ready_next_level_queues->empty(active) || !cfg_.ready_sub_queue->empty(active) ||
+                             cfg_.manager->needs_activation(active));
+                    if (!ready && cfg_.preparable_run_cb) {
+                        RunId preparable = cfg_.preparable_run_cb();
+                        ready = preparable != INVALID_RUN_ID && !cfg_.manager->has_staged_run(preparable) &&
+                                stageable_successor_ready(*cfg_.ready_next_level_queues, *cfg_.manager, preparable);
+                    }
                 } else {
                     ready = !cfg_.ready_next_level_queues->empty() || !cfg_.ready_sub_queue->empty();
                 }
@@ -255,8 +279,9 @@ void Scheduler::run() {
             on_task_complete(completion);
         }
 
-        // Phase 2: dispatch ready tasks
-        dispatch_ready();
+        // Phase 2: dispatch ready tasks. Once teardown publishes stop, the
+        // existing endpoint-owned work drains but no new slot enters a worker.
+        if (!stop_requested_.load(std::memory_order_acquire)) dispatch_ready();
 
         // Exit when stop requested and all workers idle
         if (stop_requested_.load(std::memory_order_acquire)) {
@@ -272,7 +297,6 @@ void Scheduler::run() {
                     }
                     on_task_complete(completion);
                 }
-                dispatch_ready();
                 break;  // loop_lk released on scope exit before exiting run()
             }
         }
@@ -398,7 +422,10 @@ void Scheduler::dispatch_ready() {
         RunId active_run = cfg_.active_run_cb();
         if (active_run == INVALID_RUN_ID) return;
         run_snapshot = active_run;
+        cfg_.manager->activate_prepared_run(active_run);
     }
+
+    dispatch_preparable_next_level_singles();
 
     // Group reservations and every queue pop in one pass belong to the same
     // whole-run FIFO head, even if a completion advances the head mid-pass.
@@ -412,6 +439,49 @@ bool claim_for_dispatch(TaskSlotState &s) {
     return s.state.compare_exchange_strong(
         expected, TaskState::RUNNING, std::memory_order_acq_rel, std::memory_order_acquire
     );
+}
+
+void Scheduler::dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared) {
+    try {
+        if (prepared) {
+            worker->dispatch_prepared(dispatch);
+        } else {
+            worker->dispatch(dispatch);
+        }
+    } catch (const std::exception &e) {
+        worker->complete_unpublished(
+            dispatch, std::string("Scheduler failed to publish a claimed dispatch: ") + e.what()
+        );
+    } catch (...) {
+        worker->complete_unpublished(dispatch, "Scheduler failed to publish a claimed dispatch");
+    }
+}
+
+void Scheduler::dispatch_preparable_next_level_singles() {
+    if (!cfg_.preparable_run_cb) return;
+    RunId run_id = cfg_.preparable_run_cb();
+    if (run_id == INVALID_RUN_ID || cfg_.manager->has_staged_run(run_id) ||
+        !cfg_.ready_next_level_queues->groups_empty(run_id)) {
+        return;
+    }
+
+    for (int32_t worker_id : cfg_.ready_next_level_queues->worker_ids()) {
+        WorkerThread *worker = cfg_.manager->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (worker == nullptr || !worker->can_stage()) continue;
+        TaskSlot slot;
+        if (!cfg_.ready_next_level_queues->try_pop_single(worker_id, run_id, slot)) continue;
+        TaskSlotState &state = *cfg_.ring->slot_state(slot);
+        if (state.state.load(std::memory_order_acquire) != TaskState::READY) continue;
+        if (state.run_id != run_id || state.worker_type != WorkerType::NEXT_LEVEL || state.is_group() ||
+            state.target_worker_id(0) != worker_id) {
+            cfg_.enqueue_ready_cb(slot);
+            continue;
+        }
+        if (cfg_.before_claim_cb) cfg_.before_claim_cb(slot);
+        if (!claim_for_dispatch(state)) continue;
+        dispatch_claimed(worker, WorkerDispatch{slot, 0}, /*prepared=*/true);
+        return;
+    }
 }
 
 void Scheduler::dispatch_sub_ready(const std::optional<RunId> &run_snapshot) {
@@ -470,7 +540,7 @@ void Scheduler::dispatch_sub_ready(const std::optional<RunId> &run_snapshot) {
                 if (member_state != GroupMemberState::NOT_DISPATCHED || s.group_failed) continue;
                 member_state = GroupMemberState::RUNNING;
             }
-            workers[static_cast<size_t>(i)]->dispatch(WorkerDispatch{slot, i});
+            dispatch_claimed(workers[static_cast<size_t>(i)], WorkerDispatch{slot, i}, /*prepared=*/false);
         }
     }
 }
@@ -544,7 +614,7 @@ std::unordered_set<int32_t> Scheduler::dispatch_next_level_group(const std::opti
             reset_group_state_locked(s, GroupMemberState::RUNNING);
         }
         for (int32_t i = 0; i < group_size; ++i) {
-            workers[static_cast<size_t>(i)]->dispatch(WorkerDispatch{slot, i});
+            dispatch_claimed(workers[static_cast<size_t>(i)], WorkerDispatch{slot, i}, /*prepared=*/false);
         }
     }
     return {};
@@ -578,7 +648,7 @@ void Scheduler::dispatch_next_level_singles(
             }
             if (cfg_.before_claim_cb) cfg_.before_claim_cb(slot);
             if (!claim_for_dispatch(s)) continue;
-            worker->dispatch(WorkerDispatch{slot, 0});
+            dispatch_claimed(worker, WorkerDispatch{slot, 0}, /*prepared=*/false);
             break;
         }
     }

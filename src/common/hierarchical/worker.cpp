@@ -68,15 +68,16 @@ Worker::~Worker() {
     if (initialized_) close();
 }
 
-void Worker::add_worker(WorkerType type, void *mailbox, int child_pid) {
+void Worker::add_worker(WorkerType type, void *mailbox, int child_pid, uint32_t task_frame_count) {
     if (initialized_) throw std::runtime_error("Worker: add_worker after init");
-    if (type == WorkerType::NEXT_LEVEL) manager_.add_next_level(mailbox, child_pid);
-    else manager_.add_sub(mailbox, child_pid);
+    if (type == WorkerType::NEXT_LEVEL) {
+        manager_.add_next_level(mailbox, child_pid, task_frame_count);
+    } else manager_.add_sub(mailbox, child_pid);
 }
 
-void Worker::add_next_level_worker(int32_t worker_id, void *mailbox, int child_pid) {
+void Worker::add_next_level_worker(int32_t worker_id, void *mailbox, int child_pid, uint32_t task_frame_count) {
     if (initialized_) throw std::runtime_error("Worker: add_next_level_worker after init");
-    manager_.add_next_level_at(worker_id, mailbox, child_pid);
+    manager_.add_next_level_at(worker_id, mailbox, child_pid, task_frame_count);
 }
 
 void Worker::add_remote_l3_socket(
@@ -125,6 +126,9 @@ void Worker::init() {
     cfg.active_run_cb = [this] {
         return orchestrator_.dispatchable_run_id();
     };
+    cfg.preparable_run_cb = [this] {
+        return orchestrator_.preparable_run_id();
+    };
     cfg.on_consumed_cb = [this](TaskSlot slot) {
         orchestrator_.on_consumed(slot);
     };
@@ -140,6 +144,8 @@ void Worker::init() {
 
 void Worker::close() {
     if (!initialized_) return;
+    scheduler_.request_stop();
+    manager_.stop_workers();
     scheduler_.stop();
     manager_.stop();
     allocator_.shutdown();

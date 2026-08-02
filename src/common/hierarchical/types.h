@@ -126,6 +126,7 @@ static constexpr int32_t INVALID_SLOT = -1;
 
 using RunId = uint64_t;
 static constexpr RunId INVALID_RUN_ID = 0;
+using TaskSlot = int32_t;
 
 // Admission reserves a generation-safe pipeline slot before graph construction.
 // Closing the graph publishes PREPARED; only the whole-run FIFO head may enter
@@ -152,7 +153,7 @@ struct RunState {
     mutable std::mutex completion_mu;
     std::condition_variable completion_cv;
     std::exception_ptr first_error;
-    std::vector<int32_t> task_slots;
+    std::vector<TaskSlot> task_slots;
     bool submission_closed{false};
     bool submission_failed{false};
     bool lease_released{false};
@@ -161,8 +162,6 @@ struct RunState {
 // =============================================================================
 // Task slot index type
 // =============================================================================
-
-using TaskSlot = int32_t;
 
 static constexpr size_t CALLABLE_HASH_DIGEST_SIZE = 32;
 
@@ -546,6 +545,9 @@ public:
     bool try_pop_group(RunId run_id, TaskSlot &out);
     bool empty() const;
     bool empty(RunId run_id) const;
+    bool groups_empty(RunId run_id) const;
+    bool single_empty(int32_t worker_id, RunId run_id) const;
+    bool singles_empty(RunId run_id) const;
     void erase_run(RunId run_id);
     const std::vector<int32_t> &worker_ids() const { return worker_ids_; }
 

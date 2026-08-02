@@ -207,6 +207,7 @@ void Orchestrator::close_run_submission(RunId run_id) {
         }
     }
     run->completion_cv.notify_all();
+    if (ready_notify_cb_) ready_notify_cb_();
     activate_fifo_head();
     finish_run_if_ready(run);
 }
@@ -321,6 +322,19 @@ RunId Orchestrator::dispatchable_run_id() const {
 RunId Orchestrator::active_run_id() const {
     std::lock_guard<std::mutex> lk(runs_mu_);
     return active_run_id_;
+}
+
+RunId Orchestrator::preparable_run_id() const {
+    std::lock_guard<std::mutex> lk(runs_mu_);
+    if (!dispatchable_locked(active_run_id_) || run_fifo_.size() < 2 || run_fifo_.front() != active_run_id_) {
+        return INVALID_RUN_ID;
+    }
+    auto it = runs_.find(run_fifo_[1]);
+    if (it == runs_.end() || it->second->phase.load(std::memory_order_acquire) != RunPhase::PREPARED ||
+        !pipeline_slots_.owns(it->second->lease)) {
+        return INVALID_RUN_ID;
+    }
+    return it->first;
 }
 
 bool Orchestrator::quiescent_locked() const { return runs_.empty() && building_run_id_ == INVALID_RUN_ID; }
