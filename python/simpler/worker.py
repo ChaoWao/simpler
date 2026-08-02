@@ -5732,8 +5732,10 @@ class Worker:
         """
         if not self._remote_worker_specs:
             return
+        if len(self._remote_worker_ids) != len(self._remote_worker_specs):
+            raise ValueError("remote worker ids/specs length mismatch")
         session_timeout = self._remote_session_timeout_s()
-        for worker_id, spec in zip(self._remote_worker_ids, self._remote_worker_specs, strict=True):
+        for worker_id, spec in zip(self._remote_worker_ids, self._remote_worker_specs):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError("remote L3 session activation: startup deadline exceeded")
