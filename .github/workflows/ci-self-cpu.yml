@@ -217,7 +217,7 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - name: Install build + runtime deps in venv
         run: |
-          python3 -m venv --system-site-packages .venv
+          python3 -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
           pip install scikit-build-core nanobind cmake pytest
