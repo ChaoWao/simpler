@@ -208,7 +208,7 @@ python tests/st/a2a3/tensormap_and_ringbuffer/batch_paged_attention/test_batch_p
 Final validation:
 
 ```bash
-pytest examples tests/st --platform a2a3
+pytest examples tests/st -m "not sdma" --platform a2a3   # SDMA cases quarantined by marker; run them with -m sdma
 ```
 
 ## 14. Resolved Decisions

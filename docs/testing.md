@@ -46,8 +46,13 @@ ctest --test-dir tests/ut/cpp/build -L "^requires_hardware(_a2a3)?$" --output-on
 # Scene tests (pytest, @scene_test classes)
 pytest examples tests/st                          # all sim platforms (auto-parametrized)
 pytest examples tests/st --platform a2a3sim       # specific sim
-pytest examples tests/st --platform a2a3          # hardware
-pytest examples tests/st --platform a2a3 --device 4-7  # hardware with device pool
+pytest examples tests/st -m "not sdma" --platform a2a3          # hardware
+pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7  # hardware with device pool
+
+# SDMA cases run separately, as they do in CI: they are quarantined by
+# @pytest.mark.sdma so no fault-injection case shares a device with a
+# provisioned SDMA workspace (issue #1425)
+pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 
 # Single scene test (standalone)
 python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
@@ -625,8 +630,8 @@ pytest examples tests/st --platform a2a3sim
 # Standalone (single case)
 python test_my_kernel.py -p a2a3sim
 
-# On hardware
-pytest examples tests/st --platform a2a3
+# On hardware (SDMA cases quarantined by marker; run them with -m sdma)
+pytest examples tests/st -m "not sdma" --platform a2a3
 ```
 
 Key fields:

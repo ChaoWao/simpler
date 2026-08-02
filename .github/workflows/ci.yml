@@ -595,8 +595,11 @@ jobs:
           # device fault/sync domain, so a fault on that device pays a multi-minute
           # teardown (issue #1425). Keep EVERY SDMA test out of this general sweep
           # — which also runs the aicore_op_timeout fault-injection test — and run
-          # them on their own dedicated device(s) in the SDMA step below, so an
-          # SDMA fault's slow teardown can never mix with ordinary fault recovery.
+          # them in the SDMA step below, after this sweep, so an SDMA fault's slow
+          # teardown can never mix with ordinary fault recovery. Device
+          # disjointness holds only on aarch64 (`task-submit --device auto`); the
+          # x86_64 branch has no task-submit and shares ${DEVICE_RANGE}, so there
+          # ordering is the separation.
           #
           # Selected by marker, not by path. `pytest --ignore=<moved path>` exits
           # 0 and says nothing, so a rename used to drop the quarantine silently
@@ -609,8 +612,8 @@ jobs:
               --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
-      # SDMA pytest — every SDMA test runs here on its own dedicated device(s),
-      # isolated from the general sweep's aicore_op_timeout fault-injection test
+      # SDMA pytest — every SDMA test runs here, after the sweep above, isolated
+      # from the general sweep's aicore_op_timeout fault-injection test
       # (issue #1425). Both demos create their Worker with enable_sdma=True so the
       # runtime provisions the SDMA workspace: prefetch_async_demo on 1 device (L2),
       # sdma_async_completion_demo on 2 devices (L3, workspace provisioned per chip
