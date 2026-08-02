@@ -175,13 +175,19 @@ jobs:
         run: |
           source .venv/bin/activate
           python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
-      - name: Resolve base SHA (merge-base with target main)
+      - name: Resolve base SHA (merge-base with canonical main)
         id: base
-        run: echo "base_sha=$(git merge-base origin/main HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          # The checkout is the PR head of the input repository (a fork), whose
+          # main lags; pre-commit's diff must span the PR head against the
+          # canonical repo's main, so fetch it (the runner's github extraheader
+          # authenticates the fetch).
+          git fetch --no-tags https://github.com/${{ github.repository }}.git main
+          echo "base_sha=$(git merge-base FETCH_HEAD HEAD)" >> "$GITHUB_OUTPUT"
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.0
         with:
-          extra_args: --from-ref ${{ steps.base.outputs.base_sha }} --to-ref ${{ github.sha }}
+          extra_args: --from-ref ${{ steps.base.outputs.base_sha }} --to-ref ${{ inputs.ref || github.sha }}
 
   ut:
     needs: [detect-changes]
