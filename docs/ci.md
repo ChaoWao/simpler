@@ -140,6 +140,28 @@ not need `--max-parallel` manually.
 
 - **SDMA tests run as their own step inside `st-onboard-a2a3`.** The sweep deselects them with `-m "not sdma"` and a later step runs `-m sdma`. Ordering is what the two paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection is by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Nothing outside `st-onboard-a2a3` filters on the marker, so a local `pytest examples tests/st` still runs everything.
 
+### CPU emergency lane (`ci-self-cpu.yml`) and the `/run-cpu` button
+
+When GitHub-hosted runners are congested, a repo admin can validate a PR on the
+repo-level self-hosted runners via the emergency lane, bypassing GitHub-hosted
+queueing entirely:
+
+- **Trigger**: comment `/run-cpu` on the PR (`ci-self-cpu-button.yml`), or
+  `gh workflow run ci-self-cpu.yml -f repository=<repo> -f ref=<sha>` manually
+  (covers forks and arbitrary SHAs). The button gate is
+  `permission(commenter) == 'admin'` only (`getCollaboratorPermissionLevel`).
+  `issue_comment` from fork PRs runs with a read-only token, so the permission
+  check must work under it — verify on first fork-PR use.
+- **What it runs**: checks out `repository@ref` (the PR head), then T1 — the
+  no-hardware Linux jobs (`pre-commit`, `ut`, `packaging`, `profiling-flags-smoke`,
+  `st-sim-{a2a3,a5}`) on `[self-hosted, cpu]` — and T3 — the NPU jobs
+  (`ut-a2a3`, `st-onboard-a2a3`, `ut-a5`, `st-onboard-a5`) on
+  `[self-hosted, a2a3/a5]`. T2 (macOS) is intentionally absent. A lane-local
+  `detect-changes` (same `NON_CODE` vocabulary and gates as `ci.yml` — keep the
+  two copies in sync) skips jobs a diff cannot affect.
+- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel; `g++-15` is a symlink stand-in for the ubuntu-toolchain ppa g++.
+- The lane run is standalone — it attaches no checks to the PR; results are read from the run.
+
 ## Hardware Classification
 
 Three hardware tiers, applied to all test categories. See [testing.md](testing.md#hardware-classification) for the full table including per-category mechanisms (pytest markers, ctest labels, folder structure).
