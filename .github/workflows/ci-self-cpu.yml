@@ -168,6 +168,7 @@ jobs:
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install .
       - name: Build sim runtimes (per-target compile_commands.json for clang-tidy)
@@ -206,6 +207,7 @@ jobs:
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
       - name: Run Python unit tests
@@ -274,6 +276,7 @@ jobs:
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e '.[test]'
       - name: Run all profiling flag combos x 2 arches
@@ -347,6 +350,7 @@ jobs:
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
       - name: Run pytest scene tests (a2a3sim)
@@ -392,6 +396,7 @@ jobs:
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install '.[test]'
       - name: Run pytest scene tests (a5sim)
