@@ -1,4 +1,5 @@
 name: CI Self CPU Button
+run-name: /run-cpu PR ${{ github.event.issue.number }}
 
 # PR comment command: a repo admin comments "/run-cpu" on a pull request and
 # this calls ci-self-cpu.yml (workflow_call) to validate that PR's head on the
