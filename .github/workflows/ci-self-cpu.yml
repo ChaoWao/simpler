@@ -8,10 +8,14 @@ run-name: CI Self CPU / PR ${{ inputs.pr_number || inputs.ref }}
 # Jobs gate on a lane-local detect-changes (same NON_CODE vocabulary as ci.yml)
 # so only the diff-affected jobs run; keep the two detect-changes in sync.
 #
-# Provisioning contract for the cpu runner (out-of-repo, dnf):
-#   cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel
-#   plus pip: torch (aarch64 CPU wheel — verify availability) and '.[test]' deps.
-# g++-15 is a symlink stand-in for the ubuntu-toolchain ppa g++ — see below.
+# Provisioning contract for the cpu runner (out-of-repo, dnf): every cpu agent
+# needs the same set — cmake ninja-build gcc-c++ clang-tools-extra graphviz
+# gtest-devel python3-devel — and a CLEAN python site: no simpler/
+# simpler_setup/_task_interface anywhere in system or user site-packages.
+# With --system-site-packages a stale install satisfies pip and shadows the
+# fresh venv install (ci.yml's NPU jobs rely on the same clean-runner
+# contract). g++-15 is a symlink stand-in for the ubuntu-toolchain ppa g++ —
+# see below.
 
 permissions:
   contents: read
@@ -147,7 +151,6 @@ jobs:
           command -v ninja
           command -v g++
           command -v clang-tidy
-          command -v graphviz
           if ! command -v g++-15 >/dev/null 2>&1; then
             mkdir -p "$RUNNER_TEMP/bin"
             ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
@@ -194,7 +197,7 @@ jobs:
       - name: Run Python unit tests
         run: |
           source .venv/bin/activate
-          pytest tests/ut -m "not requires_hardware" -v
+          python -m pytest tests/ut -m "not requires_hardware" -v
       - name: Build and run C++ unit tests
         run: |
           cmake -B tests/ut/cpp/build -S tests/ut/cpp
@@ -214,7 +217,7 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - name: Install build + runtime deps in venv
         run: |
-          python3 -m venv .venv
+          python3 -m venv --system-site-packages .venv
           . .venv/bin/activate
           pip install --upgrade pip
           pip install scikit-build-core nanobind cmake pytest
