@@ -69,6 +69,7 @@ struct MockMailboxWorker {
     std::mutex run_mu;
     std::condition_variable run_cv;
     std::atomic<bool> should_complete{false};
+    std::atomic<bool> drain_mode{false};
     int32_t next_error_code{0};
     std::string next_error_msg;
     std::atomic<bool> is_running{false};
@@ -112,6 +113,15 @@ struct MockMailboxWorker {
         std::lock_guard<std::mutex> lk(run_mu);
         next_error_code = 1;
         next_error_msg = std::move(msg);
+        should_complete.store(true, std::memory_order_release);
+        run_cv.notify_one();
+    }
+
+    // Persistent teardown mode: every dispatch — including one arriving after
+    // this call — completes itself, so Scheduler::stop() can always join.
+    void drain() {
+        drain_mode.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lk(run_mu);
         should_complete.store(true, std::memory_order_release);
         run_cv.notify_one();
     }
@@ -176,7 +186,8 @@ private:
                 {
                     std::unique_lock<std::mutex> lk(run_mu);
                     run_cv.wait(lk, [this] {
-                        return should_complete.load(std::memory_order_acquire);
+                        return should_complete.load(std::memory_order_acquire) ||
+                               drain_mode.load(std::memory_order_acquire);
                     });
                     should_complete.store(false, std::memory_order_relaxed);
                 }
@@ -502,6 +513,7 @@ struct SchedulerFixture : public ::testing::Test {
     }
 
     void TearDown() override {
+        mock_worker.drain();
         sched.stop();
         manager.stop();
         allocator.shutdown();
@@ -916,6 +928,9 @@ struct GroupSchedulerFixture : public ::testing::Test {
     }
 
     void TearDown() override {
+        worker_a.drain();
+        worker_b.drain();
+        worker_c.drain();
         sched.stop();
         manager.stop();
         allocator.shutdown();
@@ -1257,6 +1272,30 @@ TEST_F(GroupSchedulerFixture, ConsecutiveGroupsReserveOnlyBlockedHeadTargets) {
     wait_consumed(second_group.task_slot);
     wait_consumed(single_a.task_slot);
     wait_consumed(single_c.task_slot);
+}
+
+TEST_F(GroupSchedulerFixture, TearDownDrainsCurrentAndQueuedDispatches) {
+    // The verification is the teardown itself: work is left deliberately in
+    // both states — running and queued-but-undispatched — so teardown drains
+    // a worker mid-task and one whose dispatch has not happened yet.
+    {
+        std::lock_guard<std::mutex> scheduler_pause(sched.loop_mutex());
+        (void)orch.submit_next_level_group(
+            C(84), {single_tensor_args(0x106, TensorArgType::OUTPUT), single_tensor_args(0x107, TensorArgType::OUTPUT)},
+            cfg, {0, 1}
+        );
+        (void)orch.submit_next_level_group(
+            C(85), {single_tensor_args(0x108, TensorArgType::OUTPUT), single_tensor_args(0x109, TensorArgType::OUTPUT)},
+            cfg, {1, 2}
+        );
+        (void)orch.submit_next_level(C(86), single_tensor_args(0x10A, TensorArgType::OUTPUT), cfg, 0);
+        (void)orch.submit_next_level(C(87), single_tensor_args(0x10B, TensorArgType::OUTPUT), cfg, 2);
+    }
+
+    worker_a.wait_running();
+    worker_b.wait_running();
+    EXPECT_TRUE(worker_a.is_running.load(std::memory_order_acquire));
+    EXPECT_TRUE(worker_b.is_running.load(std::memory_order_acquire));
 }
 
 TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {
@@ -1743,6 +1782,8 @@ struct MixedTypeSchedulerFixture : public ::testing::Test {
     }
 
     void TearDown() override {
+        next_level_worker.drain();
+        sub_worker.drain();
         sched.stop();
         manager.stop();
         allocator.shutdown();
