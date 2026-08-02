@@ -265,6 +265,27 @@ def _collect_descendant_pids(pid: int) -> list[int]:
     return out
 
 
+def _drain_until_quiet(state: object, max_wait_s: float = 10.0) -> None:
+    """Wait until the pump's output stops growing (bounded), so a signaled
+    process's faulthandler dump lands before the next signal or the SIGTERM.
+    A fixed sleep races slow signal delivery: a starved process can take
+    longer than a few seconds to run its dump, and the dump then dies with
+    the SIGTERM. Called from the session-timeout handler between signals."""
+    drain_deadline = time.monotonic() + max_wait_s
+    quiet_rounds = 0
+    prev_lines = -1
+    while time.monotonic() < drain_deadline:
+        cur_lines = sum(len(rj.output_lines) for rj in state.running.values())
+        if cur_lines == prev_lines:
+            quiet_rounds += 1
+            if quiet_rounds >= 5:  # ~1 s of no new output
+                break
+        else:
+            quiet_rounds = 0
+            prev_lines = cur_lines
+        time.sleep(0.2)
+
+
 def _install_session_timeout(timeout_s: int) -> None:
     # Module-level `_ps` import is intentional (rather than a function-local
     # one): doing `from simpler_setup import parallel_scheduler` inside a
@@ -299,32 +320,17 @@ def _install_session_timeout(timeout_s: int) -> None:
                     continue
                 # Signal the dispatched pytest itself, then every descendant
                 # (in BFS order — closer kin first is fine, ordering doesn't
-                # affect the dump).
+                # affect the dump). Each signal is followed by a drain until
+                # the output settles: concurrent faulthandler dumps to the
+                # same pipe interleave at the byte level, splitting frame
+                # names, so a signaled process must finish dumping before the
+                # next one starts.
                 for target_pid in (p.pid, *kin):
                     try:
                         os.kill(target_pid, signal.SIGUSR1)
                     except (ProcessLookupError, OSError):
                         pass
-
-            # Event-driven drain: wait until the pump's output stops growing
-            # (bounded at 10 s), so a loaded runner's delayed SIGUSR1 handling
-            # still lands in the HUNG group instead of being cut off by the
-            # SIGTERM below. A fixed sleep races slow signal delivery: a
-            # starved descendant can take longer than 2 s to run its
-            # faulthandler dump, and the dump then dies with the SIGTERM.
-            drain_deadline = time.monotonic() + 10.0
-            quiet_rounds = 0
-            prev_lines = -1
-            while time.monotonic() < drain_deadline:
-                cur_lines = sum(len(rj.output_lines) for rj in state.running.values())
-                if cur_lines == prev_lines:
-                    quiet_rounds += 1
-                    if quiet_rounds >= 5:  # ~1 s of no new output
-                        break
-                else:
-                    quiet_rounds = 0
-                    prev_lines = cur_lines
-                time.sleep(0.2)
+                    _drain_until_quiet(state)
 
             now = time.monotonic()
             for p, rj in list(state.running.items()):
