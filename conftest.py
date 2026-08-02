@@ -306,17 +306,33 @@ def _install_session_timeout(timeout_s: int) -> None:
                     except (ProcessLookupError, OSError):
                         pass
 
-            time.sleep(2.0)
+            # Event-driven drain: wait until the pump's output stops growing
+            # (bounded at 10 s), so a loaded runner's delayed SIGUSR1 handling
+            # still lands in the HUNG group instead of being cut off by the
+            # SIGTERM below. A fixed sleep races slow signal delivery: a
+            # starved descendant can take longer than 2 s to run its
+            # faulthandler dump, and the dump then dies with the SIGTERM.
+            drain_deadline = time.monotonic() + 10.0
+            quiet_rounds = 0
+            prev_lines = -1
+            while time.monotonic() < drain_deadline:
+                cur_lines = sum(len(rj.output_lines) for rj in state.running.values())
+                if cur_lines == prev_lines:
+                    quiet_rounds += 1
+                    if quiet_rounds >= 5:  # ~1 s of no new output
+                        break
+                else:
+                    quiet_rounds = 0
+                    prev_lines = cur_lines
+                time.sleep(0.2)
 
             now = time.monotonic()
             for p, rj in list(state.running.items()):
                 elapsed = now - rj.start_time
-                # The pump thread runs continuously and is the actual drain;
-                # the 2 s sleep above already gave faulthandler bytes time to
-                # land in ``output_lines``. ``join`` here only yields the GIL
-                # so the pump's pending ``output_lines.append`` lands before
-                # we read the list. Short timeout — pump will block on the
-                # next ``readline()`` since the child is still alive.
+                # ``join`` here only yields the GIL so the pump's pending
+                # ``output_lines.append`` lands before we read the list. Short
+                # timeout — pump will block on the next ``readline()`` since
+                # the child is still alive.
                 pump = getattr(rj, "pump_thread", None)
                 if pump is not None:
                     pump.join(timeout=0.05)
