@@ -18,6 +18,7 @@
 #include <unordered_map>
 
 #include "common/unified_log.h"
+#include "common/acl_hal_device.h"
 
 namespace pto::a2a3 {
 
@@ -60,7 +61,7 @@ bool query_occupy(uint32_t device_id, uint64_t &out_mask) {
     if (fn == nullptr) return false;
 
     int64_t v = 0;
-    int rc = fn(static_cast<uint64_t>(device_id), kModuleAicpu, kInfoOccupy, &v);
+    int rc = fn(static_cast<uint64_t>(pto::acl_to_hal_device_id(device_id)), kModuleAicpu, kInfoOccupy, &v);
     if (rc != 0) {
         LOG_WARN("a2a3_aicpu_topology_probe: halGetDeviceInfo(AICPU,OCCUPY) rc=%d", rc);
         return false;

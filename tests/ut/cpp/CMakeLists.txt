@@ -662,6 +662,7 @@ set_tests_properties(test_orch_so_file PROPERTIES LABELS "no_hardware")
 # ---------------------------------------------------------------------------
 add_a2a3_test(test_a2a3_fatal a2a3/test_a2a3_fatal.cpp)
 add_a2a3_test(test_task_timing_slots a2a3/test_task_timing_slots.cpp)
+add_a2a3_test(test_acl_hal_device common/test_acl_hal_device.cpp)
 
 # PTO2 runtime-linked tests
 add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
@@ -757,6 +758,7 @@ set_tests_properties(test_onboard_device_log_level PROPERTIES LABELS "no_hardwar
 # compute_allowed_cpus is), but the .cpp references libdl symbols, so link it.
 # Regression barrier for issue #1045 (all survivors in one cluster).
 set(A2A3_ONBOARD_HOST_DIR ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/onboard/host)
+set(SIMPLER_COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
 add_executable(test_a2a3_aicpu_affinity_select
     a2a3/test_aicpu_affinity_select.cpp
     ${A2A3_ONBOARD_HOST_DIR}/aicpu_topology_probe.cpp
@@ -765,6 +767,7 @@ target_include_directories(test_a2a3_aicpu_affinity_select PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${A2A3_ONBOARD_HOST_DIR}
     ${SIMPLER_LOG_DIR}/include
+    ${SIMPLER_COMMON_PLATFORM_DIR}/include
 )
 target_link_libraries(test_a2a3_aicpu_affinity_select PRIVATE
     ${GTEST_MAIN_LIB}
@@ -786,6 +789,7 @@ target_include_directories(test_a5_aicpu_topology_fallback PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${A5_ONBOARD_HOST_DIR}
     ${SIMPLER_LOG_DIR}/include
+    ${SIMPLER_COMMON_PLATFORM_DIR}/include
 )
 target_link_libraries(test_a5_aicpu_topology_fallback PRIVATE
     ${GTEST_MAIN_LIB}

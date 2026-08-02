@@ -20,6 +20,7 @@ extern "C" {
 void unified_log_error(const char *, const char *, ...) {}
 void unified_log_warn(const char *, const char *, ...) {}
 void unified_log_info(const char *, const char *, ...) {}
+void unified_log_debug(const char *, const char *, ...) {}
 }
 
 namespace {
