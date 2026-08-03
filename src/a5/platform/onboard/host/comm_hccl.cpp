@@ -743,10 +743,7 @@ static std::string domain_barrier_tag(uint64_t allocation_id, const char *phase)
 // workspace on the comm handle and mirror its address into host_ctx.  Both
 // the base-window path and the dynamic per-domain path call this; only the
 // first call allocates.  Requires CANN to expose working
-// aclnnShmemSdmaStarsQuery primitives — see docs/a5-sdma-overlay.md for why
-// this is gated behind SIMPLER_ENABLE_PTO_SDMA_WORKSPACE (default OFF) and
-// how to re-enable it once the a5 environment supports it (#1315).  No-op (workSpace
-// stays 0, SDMA demos self-skip) when the macro is undefined.
+// aclnnShmemSdmaStarsQuery primitives.
 static void ensure_sdma_workspace(CommHandle h) {
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
     if (h->sdma_workspace) return;
@@ -755,6 +752,11 @@ static void ensure_sdma_workspace(CommHandle h) {
         h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
         h->host_ctx.workSpaceSize = 16 * 1024;
     } else {
+        // SDMA workspace initialization failed - this may occur due to:
+        // 1. Missing ACL symbols in libopapi.so (CANN version compatibility)
+        // 2. Device state issues (e.g., Critical health status)
+        // 3. Resource exhaustion from repeated test runs
+        // The system gracefully degrades to non-SDMA mode when this occurs.
         h->sdma_workspace.reset();
     }
 #else
@@ -765,8 +767,7 @@ static void ensure_sdma_workspace(CommHandle h) {
 // Callable-declared workspace injection is not available on a5 yet. Its URMA
 // workspace is sized per communication domain (rank count), not per device;
 // reject required masks before a callable runs instead of silently launching
-// it with a null workspace. The separate, default-off communication overlay
-// above remains gated by SIMPLER_ENABLE_PTO_SDMA_WORKSPACE (#1315).
+// it with a null workspace.
 extern "C" uint32_t dma_workspace_supported_mask(void) { return 0; }
 
 extern "C" int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_out, int count, void **handle_out) {

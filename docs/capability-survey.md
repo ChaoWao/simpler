@@ -13,7 +13,7 @@ rather than restating them:
 - Level model → [hierarchical-level-runtime.md](hierarchical-level-runtime.md)
 - Three-program model → [chip-level-arch.md](chip-level-arch.md)
 - AICPU launch mechanics → [aicpu-kernel-launch-mechanisms.md](aicpu-kernel-launch-mechanisms.md)
-- Comm domains / overlays → [comm-domain.md](comm-domain.md), [a5-sdma-overlay.md](a5-sdma-overlay.md)
+- Comm domains / overlays → [comm-domain.md](comm-domain.md)
 - Remote L3 / L4 → [remote-l3-worker-design.md](remote-l3-worker-design.md)
 
 Status claims rot faster than architecture. Re-derive rather than trust this
@@ -272,8 +272,7 @@ Unresolved after this survey, in rough order of how much they block:
    investigation entry, or code comment says whether they are reserved slots or
    leftovers from a dropped design.
 2. **Has a5 URMA ever run on silicon?** No CI run, test artifact, or
-   investigation attests to it, and `a5-sdma-overlay.md` has no URMA re-enable
-   checklist analogous to its SDMA one.
+   investigation attests to it.
 3. **Which CANN mitigation closed issue #822, and is Path B usable on CANN
    9.0.0?** The doc says "CANN-side mitigation landed" without naming it, and
    nobody re-ran the repro.
@@ -299,7 +298,6 @@ re-check before editing.
 | `dynamic-linking.md:355-361` | AICPU launches before AICore; call is `rtKernelLaunch` | AICore launches first; the call is `rtKernelLaunchWithHandleV2` |
 | `comm-domain.md:111` | window is VMM + shareable-handle import with `aclrtDeviceEnablePeerAccess` | a2a3 prefers Fabric V2 (`comm_hccl.cpp:762`); the doc never mentions Fabric |
 | `comm-domain.md:262-264` | a producer `CoreCallable` declares the SDMA workspace requirement | that API was removed by PR #1406 |
-| `a5-sdma-overlay.md:24` | the a2a3 SDMA path "is always on" | build macro is ON; runtime provisioning defaults to `False` |
 | `investigations/2026-07-a2a3-sdma-fault-teardown.md:153` | `sdma_async_completion_demo` is "unaffected by this change" | that demo sets `enable_sdma=True` (test:134), as CI's own comment states |
 | `src/common/worker/pto_runtime_c_api.h:259` | "`config` carries block_dim (0 = auto)" | `CallConfig` has no such field — "There is no block_dim knob" (`src/common/task_interface/call_config.h:22`) |
 | `src/common/platform/sim/host/device_runner_base.h:62-64` | "an explicit block_dim is still honoured" | same as above |

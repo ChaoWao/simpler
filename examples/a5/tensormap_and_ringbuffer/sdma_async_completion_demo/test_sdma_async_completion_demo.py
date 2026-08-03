@@ -45,6 +45,21 @@ from simpler_setup.torch_interop import make_tensor_arg
 HERE = os.path.dirname(os.path.abspath(__file__))
 N = 128 * 128
 DTYPE_NBYTES = 4
+_URMA_WORKSPACE_ENV = "SIMPLER_ENABLE_PTO_URMA_WORKSPACE"
+_WORKSPACE_TRUTHY = {"1", "ON", "TRUE", "YES"}
+
+
+def _urma_workspace_enabled() -> bool:
+    return os.environ.get(_URMA_WORKSPACE_ENV, "").upper() in _WORKSPACE_TRUTHY
+
+
+def _require_sdma_workspace() -> None:
+    if not _urma_workspace_enabled():
+        return
+    raise RuntimeError(
+        "sdma_async_completion_demo requires the default SDMA backend; "
+        f"unset {_URMA_WORKSPACE_ENV} and rebuild simpler."
+    )
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -103,6 +118,7 @@ def run(
     platform: str = "a5",
     device_ids: list[int] | None = None,
 ) -> int:
+    _require_sdma_workspace()
     if device_ids is None:
         device_ids = [0, 1]
     nranks = len(device_ids)
@@ -192,9 +208,8 @@ def run(
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(2)
 @pytest.mark.skipif(
-    os.environ.get("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE", "").upper() not in {"1", "ON", "TRUE", "YES"},
-    reason="SDMA workspace overlay not enabled (set SIMPLER_ENABLE_PTO_SDMA_WORKSPACE=ON to run). "
-    "See docs/a5-sdma-overlay.md (#1315).",
+    _urma_workspace_enabled(),
+    reason="SDMA demo requires the default SDMA backend; unset SIMPLER_ENABLE_PTO_URMA_WORKSPACE and rebuild simpler.",
 )
 def test_sdma_async_completion_demo(st_device_ids, st_platform) -> None:
     assert run(st_platform, [int(d) for d in st_device_ids]) == 0
