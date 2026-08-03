@@ -86,22 +86,29 @@ void create_run_selection_key() {
     g_run_selection_key_error = pthread_key_create(&g_run_selection_key, std::free);
 }
 
-DeviceRunnerBase::NativeRunThreadSelection &run_selection() {
+/** This thread's selection storage, or nullptr when it cannot be installed. */
+NativeRunThreadSelection *try_run_selection() noexcept {
     int once_rc = pthread_once(&g_run_selection_once, create_run_selection_key);
-    if (once_rc != 0 || g_run_selection_key_error != 0) {
-        throw std::runtime_error("failed to create native-run pthread TLS key");
-    }
+    if (once_rc != 0 || g_run_selection_key_error != 0) return nullptr;
     auto *selection = static_cast<NativeRunThreadSelection *>(pthread_getspecific(g_run_selection_key));
     if (selection == nullptr) {
         void *storage = std::malloc(sizeof(NativeRunThreadSelection));
-        if (storage == nullptr) throw std::bad_alloc();
+        if (storage == nullptr) return nullptr;
         selection = new (storage) NativeRunThreadSelection{};
         int set_rc = pthread_setspecific(g_run_selection_key, selection);
         if (set_rc != 0) {
             selection->~NativeRunThreadSelection();
             std::free(storage);
-            throw std::runtime_error("failed to install native-run pthread TLS state");
+            return nullptr;
         }
+    }
+    return selection;
+}
+
+DeviceRunnerBase::NativeRunThreadSelection &run_selection() {
+    NativeRunThreadSelection *selection = try_run_selection();
+    if (selection == nullptr) {
+        throw std::runtime_error("failed to install native-run pthread TLS state");
     }
     return *selection;
 }
@@ -196,7 +203,15 @@ DeviceRunnerBase::NativeRunThreadSelection DeviceRunnerBase::capture_native_run_
 }
 
 void DeviceRunnerBase::restore_native_run_thread_selection(const NativeRunThreadSelection &selection) noexcept {
-    run_selection() = selection;
+    NativeRunThreadSelection *target = try_run_selection();
+    if (target == nullptr) {
+        // Returning would leave this thread on the default slot and bank, so a
+        // run would address storage another run's lease owns. There is no
+        // caller-visible channel for the failure on a freshly started thread.
+        LOG_ERROR("native-run thread selection storage could not be installed");
+        std::abort();
+    }
+    *target = selection;
 }
 
 uint64_t DeviceRunnerBase::arena_bank_gm_heap_base(uint32_t bank_id) const {

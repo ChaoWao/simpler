@@ -785,6 +785,11 @@ int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state
     }
 }
 
+/**
+ * Simulation keeps no per-thread run selection, so the identity is carried only
+ * by the onboard runner's trace attributes and is discarded here. Accepting it
+ * keeps the pipeline symbol set uniform across every host runtime.
+ */
 int set_native_run_identity_ctx(DeviceContextHandle ctx, uint64_t, uint64_t, uint64_t, uint64_t) {
     return ctx == NULL ? -1 : 0;
 }

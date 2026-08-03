@@ -13,6 +13,7 @@
 #define SRC_COMMON_PLATFORM_INCLUDE_HOST_RUN_STREAM_SLOTS_H_
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 
@@ -33,6 +34,15 @@
  * than hand it a fresh stream beside a live one, and teardown needs the handle
  * to retry. Stream creation and destruction are injected so this state machine
  * is exercisable without a device.
+ *
+ * Threading: a `Slot` is touched only by the thread that owns that slot's run,
+ * and admission gives at most one owner per slot, so the per-slot handles need
+ * no synchronization. Two slots are therefore serviced concurrently — a native
+ * prepare acquires the successor's slot while the executor retires the
+ * predecessor's. `created_count_` is the one field shared across those owners
+ * and is additionally readable from an unrelated thread through
+ * `get_run_stream_set_create_count`, so it is atomic. `destroy_all()` walks
+ * every slot and requires all runs to be quiesced.
  */
 class RunStreamSlots {
 public:
@@ -64,7 +74,7 @@ public:
             s.aicore = nullptr;
             return rc;
         }
-        ++created_count_;
+        created_count_.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
 
@@ -99,7 +109,7 @@ public:
     void *aicpu(unsigned slot) const { return slot < slots_.size() ? slots_[slot].aicpu : nullptr; }
     void *aicore(unsigned slot) const { return slot < slots_.size() ? slots_[slot].aicore : nullptr; }
     bool ready(unsigned slot) const { return aicpu(slot) != nullptr && aicore(slot) != nullptr; }
-    size_t created_count() const { return created_count_; }
+    size_t created_count() const { return created_count_.load(std::memory_order_relaxed); }
     static constexpr size_t capacity() { return PTO_PIPELINE_MAX_DEPTH; }
 
 private:
@@ -111,7 +121,7 @@ private:
     CreateFn create_;
     DestroyFn destroy_;
     std::array<Slot, PTO_PIPELINE_MAX_DEPTH> slots_{};
-    size_t created_count_{0};
+    std::atomic<size_t> created_count_{0};
 };
 
 #endif  // SRC_COMMON_PLATFORM_INCLUDE_HOST_RUN_STREAM_SLOTS_H_
