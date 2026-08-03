@@ -101,6 +101,9 @@ void Scheduler::start(const Config &cfg) {
     if (cfg.ring == nullptr || cfg.ready_sub_queue == nullptr || cfg.ready_next_level_queues == nullptr ||
         cfg.manager == nullptr || !cfg.enqueue_ready_cb)
         throw std::invalid_argument("Scheduler::start: null config fields");
+    if (cfg.reservation_stall_warn_after < std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("Scheduler::start: negative reservation stall warning interval");
+    }
     cfg_ = cfg;
 
     {
@@ -110,6 +113,7 @@ void Scheduler::start(const Config &cfg) {
         ++wake_generation_;
     }
     dispatch_round_count_.store(0, std::memory_order_relaxed);
+    reservation_stall_episode_.reset();
     stop_requested_.store(false, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
     sched_thread_ = std::thread(&Scheduler::run, this);
@@ -251,9 +255,15 @@ void Scheduler::run() {
     while (true) {
         {
             std::unique_lock<std::mutex> lk(completion_mu_);
-            completion_cv_.wait(lk, [this, &observed_wake_generation] {
+            auto ready = [this, &observed_wake_generation] {
                 return !completion_queue_.empty() || wake_generation_ != observed_wake_generation;
-            });
+            };
+            const auto stall_deadline = reservation_stall_deadline();
+            if (stall_deadline.has_value()) {
+                completion_cv_.wait_until(lk, *stall_deadline, ready);
+            } else {
+                completion_cv_.wait(lk, ready);
+            }
             observed_wake_generation = wake_generation_;
         }
 
@@ -424,8 +434,9 @@ void Scheduler::dispatch_ready() {
 
     // Group reservations and every queue pop in one pass belong to the same
     // whole-run FIFO head, even if a completion advances the head mid-pass.
-    const std::unordered_set<int32_t> reserved_worker_ids = dispatch_next_level_group(run_snapshot);
-    dispatch_next_level_singles(reserved_worker_ids, run_snapshot);
+    const NextLevelGroupDispatchResult group_result = dispatch_next_level_group(run_snapshot);
+    update_reservation_stall(group_result);
+    dispatch_next_level_singles(group_result.reserved_worker_ids, run_snapshot);
     dispatch_sub_ready(run_snapshot);
 }
 
@@ -540,7 +551,7 @@ void Scheduler::dispatch_sub_ready(const std::optional<RunId> &run_snapshot) {
     }
 }
 
-std::unordered_set<int32_t> Scheduler::dispatch_next_level_group(const std::optional<RunId> &run_snapshot) {
+Scheduler::NextLevelGroupDispatchResult Scheduler::dispatch_next_level_group(const std::optional<RunId> &run_snapshot) {
     TaskSlot slot;
     while (run_snapshot ? cfg_.ready_next_level_queues->try_front_group(*run_snapshot, slot) :
                           cfg_.ready_next_level_queues->try_front_group(slot)) {
@@ -565,10 +576,11 @@ std::unordered_set<int32_t> Scheduler::dispatch_next_level_group(const std::opti
         }
 
         const int32_t group_size = s.group_size();
+        NextLevelGroupDispatchResult result;
+        result.blocked_group_slot = slot;
         std::vector<WorkerThread *> workers;
         workers.reserve(static_cast<size_t>(group_size));
-        std::unordered_set<int32_t> target_worker_ids;
-        target_worker_ids.reserve(static_cast<size_t>(group_size));
+        result.reserved_worker_ids.reserve(static_cast<size_t>(group_size));
         bool all_workers_idle = true;
         for (int32_t i = 0; i < group_size; ++i) {
             const int32_t worker_id = s.target_worker_id(i);
@@ -576,13 +588,33 @@ std::unordered_set<int32_t> Scheduler::dispatch_next_level_group(const std::opti
             if (worker == nullptr) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: invalid target worker");
             }
-            if (!target_worker_ids.insert(worker_id).second) {
+            if (!result.reserved_worker_ids.insert(worker_id).second) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: duplicate target worker");
             }
-            if (!worker->idle()) all_workers_idle = false;
+            const bool worker_idle = worker->idle();
+            if (!worker_idle) {
+                all_workers_idle = false;
+                result.busy_target_worker_ids.push_back(worker_id);
+            }
             workers.push_back(worker);
         }
-        if (!all_workers_idle) return target_worker_ids;
+        if (!all_workers_idle) {
+            for (size_t i = 0; i < workers.size(); ++i) {
+                TaskSlot single_head = INVALID_SLOT;
+                const int32_t worker_id = s.target_worker_id(static_cast<int32_t>(i));
+                if (std::find(result.busy_target_worker_ids.begin(), result.busy_target_worker_ids.end(), worker_id) !=
+                    result.busy_target_worker_ids.end())
+                    continue;
+                const bool has_queued_single =
+                    run_snapshot ?
+                        cfg_.ready_next_level_queues->try_front_single(worker_id, *run_snapshot, single_head) :
+                        cfg_.ready_next_level_queues->try_front_single(worker_id, single_head);
+                if (!has_queued_single) continue;
+                result.idle_queued_target_worker_ids.push_back(worker_id);
+                result.idle_queued_single_head_slots.push_back(single_head);
+            }
+            return result;
+        }
 
         // The head was observed before the worker checks above, so a run
         // cancelling in that window can consume the slot and erase its whole
@@ -613,6 +645,40 @@ std::unordered_set<int32_t> Scheduler::dispatch_next_level_group(const std::opti
         }
     }
     return {};
+}
+
+void Scheduler::update_reservation_stall(const NextLevelGroupDispatchResult &dispatch_result) {
+    if (dispatch_result.blocked_group_slot == INVALID_SLOT || dispatch_result.idle_queued_target_worker_ids.empty()) {
+        reservation_stall_episode_.reset();
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!reservation_stall_episode_.has_value() ||
+        reservation_stall_episode_->group_slot != dispatch_result.blocked_group_slot) {
+        reservation_stall_episode_ = ReservationStallEpisode{dispatch_result.blocked_group_slot, now, false};
+    }
+
+    ReservationStallEpisode &episode = *reservation_stall_episode_;
+    if (episode.reported || now < episode.started_at + cfg_.reservation_stall_warn_after) return;
+
+    if (cfg_.reservation_stall_sink != nullptr) {
+        const ReservationStallDiagnostic diagnostic{
+            dispatch_result.blocked_group_slot,
+            dispatch_result.busy_target_worker_ids.data(),
+            dispatch_result.busy_target_worker_ids.size(),
+            dispatch_result.idle_queued_target_worker_ids.data(),
+            dispatch_result.idle_queued_single_head_slots.data(),
+            dispatch_result.idle_queued_target_worker_ids.size(),
+        };
+        cfg_.reservation_stall_sink(cfg_.reservation_stall_sink_context, diagnostic);
+    }
+    episode.reported = true;
+}
+
+std::optional<std::chrono::steady_clock::time_point> Scheduler::reservation_stall_deadline() const {
+    if (!reservation_stall_episode_.has_value() || reservation_stall_episode_->reported) return std::nullopt;
+    return reservation_stall_episode_->started_at + cfg_.reservation_stall_warn_after;
 }
 
 void Scheduler::dispatch_next_level_singles(

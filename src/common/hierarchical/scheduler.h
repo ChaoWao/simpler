@@ -80,6 +80,17 @@ bool claim_for_dispatch(TaskSlotState &s);
 
 class Scheduler {
 public:
+    struct ReservationStallDiagnostic {
+        TaskSlot group_slot{INVALID_SLOT};
+        const int32_t *busy_target_worker_ids{nullptr};
+        size_t busy_target_count{0};
+        const int32_t *idle_queued_target_worker_ids{nullptr};
+        const TaskSlot *idle_queued_single_head_slots{nullptr};
+        size_t idle_queued_target_count{0};
+    };
+
+    using ReservationStallSink = void (*)(void *, const ReservationStallDiagnostic &) noexcept;
+
     struct Config {
         Ring *ring;  // owns slot state storage; Scheduler reads via ring->slot_state(id)
         ReadyQueue *ready_sub_queue;
@@ -96,6 +107,11 @@ public:
         // Called as soon as an endpoint reports failure so the error is
         // attached to the task's run even when a group has other members live.
         std::function<void(TaskSlot, const std::string &)> on_task_failed_cb;
+        // Diagnostic-only reservation stall reporting. The sink must not
+        // block: it runs on the scheduler dispatch path.
+        std::chrono::milliseconds reservation_stall_warn_after{std::chrono::seconds(5)};
+        ReservationStallSink reservation_stall_sink{nullptr};
+        void *reservation_stall_sink_context{nullptr};
         // Test seam. Invoked immediately before the dispatch claim, which is
         // the one instant a cancelling run can still take a slot away. The
         // window is unreachable from outside — every other observable point is
@@ -141,18 +157,41 @@ private:
     std::thread sched_thread_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> running_{false};
+    struct NextLevelGroupDispatchResult {
+        std::unordered_set<int32_t> reserved_worker_ids;
+        TaskSlot blocked_group_slot{INVALID_SLOT};
+        std::vector<int32_t> busy_target_worker_ids;
+        std::vector<int32_t> idle_queued_target_worker_ids;
+        std::vector<TaskSlot> idle_queued_single_head_slots;
+    };
+
+    struct ReservationStallEpisode {
+        TaskSlot group_slot{INVALID_SLOT};
+        std::chrono::steady_clock::time_point started_at;
+        bool reported{false};
+    };
+
     std::atomic<uint64_t> dispatch_round_count_{0};
+    // sched_thread_ owns this: update_reservation_stall() writes it under
+    // loop_mu_ and reservation_stall_deadline() reads it under completion_mu_,
+    // which is only race-free because both run on that one thread. start()
+    // resets it before the thread exists. Any reader added off sched_thread_
+    // needs a lock the two paths do not currently share.
+    std::optional<ReservationStallEpisode> reservation_stall_episode_;
 
     void run();
     void on_task_complete(const WorkerCompletion &completion);
     void poison_task(TaskSlot slot, const std::string &root_message);
+
     void try_consume(TaskSlot slot);
     void dispatch_ready();
     void dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared);
     void dispatch_preparable_next_level_singles();
-    std::unordered_set<int32_t> dispatch_next_level_group(const std::optional<RunId> &run_snapshot);
+    NextLevelGroupDispatchResult dispatch_next_level_group(const std::optional<RunId> &run_snapshot);
     void dispatch_next_level_singles(
         const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot
     );
     void dispatch_sub_ready(const std::optional<RunId> &run_snapshot);
+    void update_reservation_stall(const NextLevelGroupDispatchResult &dispatch_result);
+    std::optional<std::chrono::steady_clock::time_point> reservation_stall_deadline() const;
 };

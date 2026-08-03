@@ -145,6 +145,14 @@ continue normally, and later groups do not reserve workers because the
 Scheduler does not scan past the FIFO head. The reservation is released when
 the group launches.
 
+A blocked head is structurally stalled when one of its reserved targets is
+idle and that target's single FIFO is non-empty. If that state persists for
+five seconds, the Scheduler emits one native warning for the episode with the
+group slot, busy target IDs, idle-but-queued target IDs, and their single FIFO
+head slots. A head change or disappearance of the structural condition starts
+a new episode. The warning does not classify the state as a deadlock and does
+not release the reservation.
+
 ## 4. SUB dispatch
 
 SUB has no public worker-ID selection. All READY SUB tasks share one FIFO.

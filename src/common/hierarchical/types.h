@@ -537,6 +537,8 @@ public:
     void push_single(int32_t worker_id, RunId run_id, TaskSlot slot);
     bool try_pop_single(int32_t worker_id, TaskSlot &out);
     bool try_pop_single(int32_t worker_id, RunId run_id, TaskSlot &out);
+    bool try_front_single(int32_t worker_id, TaskSlot &out);
+    bool try_front_single(int32_t worker_id, RunId run_id, TaskSlot &out);
     void push_group(TaskSlot slot);
     void push_group(RunId run_id, TaskSlot slot);
     bool try_front_group(TaskSlot &out);

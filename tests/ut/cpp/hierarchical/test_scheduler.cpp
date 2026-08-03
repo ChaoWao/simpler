@@ -2166,6 +2166,9 @@ struct GroupSchedulerFixture : public ::testing::Test {
     Scheduler sched;
     CallConfig cfg;
     RunId run_id{INVALID_RUN_ID};
+    std::chrono::milliseconds reservation_stall_warn_after{std::chrono::seconds(5)};
+    Scheduler::ReservationStallSink reservation_stall_sink{nullptr};
+    void *reservation_stall_sink_context{nullptr};
 
     std::vector<TaskSlot> consumed_slots;
     std::mutex consumed_mu;
@@ -2225,6 +2228,9 @@ struct GroupSchedulerFixture : public ::testing::Test {
         c.on_task_failed_cb = [this](TaskSlot s, const std::string &message) {
             orch.report_task_error(s, message);
         };
+        c.reservation_stall_warn_after = reservation_stall_warn_after;
+        c.reservation_stall_sink = reservation_stall_sink;
+        c.reservation_stall_sink_context = reservation_stall_sink_context;
         sched.start(c);
     }
 
@@ -2250,6 +2256,116 @@ struct GroupSchedulerFixture : public ::testing::Test {
         FAIL() << "Timed out waiting for slot " << slot << " to be consumed";
     }
 };
+
+struct ReservationStallCapture {
+    std::atomic<int> report_count{0};
+    TaskSlot group_slot{INVALID_SLOT};
+    std::array<int32_t, 3> busy_target_worker_ids{};
+    size_t busy_target_count{0};
+    std::array<int32_t, 3> idle_queued_target_worker_ids{};
+    std::array<TaskSlot, 3> idle_queued_single_head_slots{};
+    size_t idle_queued_target_count{0};
+};
+
+void capture_reservation_stall(void *context, const Scheduler::ReservationStallDiagnostic &diagnostic) noexcept {
+    auto *capture = static_cast<ReservationStallCapture *>(context);
+    capture->group_slot = diagnostic.group_slot;
+    capture->busy_target_count = std::min(diagnostic.busy_target_count, capture->busy_target_worker_ids.size());
+    if (capture->busy_target_count > 0) {
+        std::copy_n(
+            diagnostic.busy_target_worker_ids, capture->busy_target_count, capture->busy_target_worker_ids.begin()
+        );
+    }
+    capture->idle_queued_target_count =
+        std::min(diagnostic.idle_queued_target_count, capture->idle_queued_target_worker_ids.size());
+    if (capture->idle_queued_target_count > 0) {
+        std::copy_n(
+            diagnostic.idle_queued_target_worker_ids, capture->idle_queued_target_count,
+            capture->idle_queued_target_worker_ids.begin()
+        );
+        std::copy_n(
+            diagnostic.idle_queued_single_head_slots, capture->idle_queued_target_count,
+            capture->idle_queued_single_head_slots.begin()
+        );
+    }
+    capture->report_count.fetch_add(1, std::memory_order_release);
+}
+
+struct ReservationStallSchedulerFixture : public GroupSchedulerFixture {
+    ReservationStallCapture stall_capture;
+
+    ReservationStallSchedulerFixture() {
+        reservation_stall_warn_after = std::chrono::milliseconds(20);
+        reservation_stall_sink = capture_reservation_stall;
+        reservation_stall_sink_context = &stall_capture;
+    }
+};
+
+TEST_F(ReservationStallSchedulerFixture, ReportsStructuralStallOncePerEpisode) {
+    auto running_a = orch.submit_next_level(C(88), single_tensor_args(0x110, TensorArgType::OUTPUT), cfg, 0);
+    auto running_b = orch.submit_next_level(C(89), single_tensor_args(0x111, TensorArgType::OUTPUT), cfg, 1);
+    worker_a.wait_running();
+    worker_b.wait_running();
+    EXPECT_TRUE(worker_a.is_running.load(std::memory_order_acquire));
+    EXPECT_TRUE(worker_b.is_running.load(std::memory_order_acquire));
+
+    auto group = orch.submit_next_level_group(
+        C(90), {single_tensor_args(0x112, TensorArgType::OUTPUT), single_tensor_args(0x113, TensorArgType::OUTPUT)},
+        cfg, {0, 1}
+    );
+    auto single_a = orch.submit_next_level(C(91), single_tensor_args(0x114, TensorArgType::OUTPUT), cfg, 0);
+    auto single_b = orch.submit_next_level(C(92), single_tensor_args(0x115, TensorArgType::OUTPUT), cfg, 1);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    EXPECT_EQ(stall_capture.report_count.load(std::memory_order_acquire), 0);
+
+    worker_a.complete();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (stall_capture.report_count.load(std::memory_order_acquire) == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(stall_capture.report_count.load(std::memory_order_acquire), 1);
+    EXPECT_EQ(stall_capture.group_slot, group.task_slot);
+    EXPECT_EQ(stall_capture.busy_target_count, 1u);
+    EXPECT_EQ(stall_capture.busy_target_worker_ids[0], 1);
+    EXPECT_EQ(stall_capture.idle_queued_target_count, 1u);
+    EXPECT_EQ(stall_capture.idle_queued_target_worker_ids[0], 0);
+    EXPECT_EQ(stall_capture.idle_queued_single_head_slots[0], single_a.task_slot);
+    EXPECT_EQ(worker_a.dispatched_count(), 1);
+
+    for (int i = 0; i < 3; ++i)
+        sched.notify_ready();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    EXPECT_EQ(stall_capture.report_count.load(std::memory_order_acquire), 1);
+
+    worker_b.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(worker_a.dispatched_count(), 2);
+    EXPECT_EQ(worker_b.dispatched_count(), 2);
+    worker_a.complete();
+    worker_b.complete();
+
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 3 || worker_b.dispatched_count() < 3) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(worker_a.dispatched_count(), 3);
+    EXPECT_EQ(worker_b.dispatched_count(), 3);
+    worker_a.complete();
+    worker_b.complete();
+
+    wait_consumed(running_a.task_slot);
+    wait_consumed(running_b.task_slot);
+    wait_consumed(group.task_slot);
+    wait_consumed(single_a.task_slot);
+    wait_consumed(single_b.task_slot);
+}
 
 TEST_F(GroupSchedulerFixture, GroupDispatchesToNWorkers) {
     TaskArgs a0 = single_tensor_args(0xA0, TensorArgType::OUTPUT);
@@ -2853,8 +2969,9 @@ TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
     EXPECT_EQ(worker_a.dispatched_count(), 2);
     EXPECT_EQ(worker_b.dispatched_count(), 2);
 
-    // Keep cleanup non-fatal so a missing wake reports a test failure instead
-    // of hanging the fixture in Scheduler::stop().
+    // The EXPECTs above already recorded the failure; this retry exists only
+    // to unblock cleanup so a missing wake fails the test instead of hanging
+    // the fixture in Scheduler::stop().
     if (worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) {
         sched.notify_ready();
         deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
