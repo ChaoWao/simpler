@@ -260,6 +260,14 @@ bool NextLevelReadyQueues::try_pop_single(int32_t worker_id, TaskSlot &out) {
     return queues_[index_for(worker_id)]->try_pop(out);
 }
 
+bool NextLevelReadyQueues::try_front_single(int32_t worker_id, TaskSlot &out) {
+    return queues_[index_for(worker_id)]->try_front(out);
+}
+
+bool NextLevelReadyQueues::try_front_single(int32_t worker_id, RunId run_id, TaskSlot &out) {
+    return queues_[index_for(worker_id)]->try_front(run_id, out);
+}
+
 bool NextLevelReadyQueues::try_pop_single(int32_t worker_id, RunId run_id, TaskSlot &out) {
     return queues_[index_for(worker_id)]->try_pop(run_id, out);
 }
