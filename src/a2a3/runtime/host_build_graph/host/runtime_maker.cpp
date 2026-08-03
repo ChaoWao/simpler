@@ -50,6 +50,7 @@
 #include "../common/pto_runtime_status.h"
 #include "../runtime/common.h"
 #include "../runtime/dep_gen_host_graph.h"
+#include "../runtime/host_tensor_access.h"
 #include "../runtime/pto_orchestrator.h"
 #include "../runtime/pto_runtime2.h"
 #include "../runtime/pto_shared_memory.h"
@@ -488,11 +489,11 @@ int32_t run_host_orchestration(
         rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
     );
     rt->mode = PTO2_MODE_EXECUTE;
-    // get_tensor_data/set_tensor_data dereference buffer.addr directly: the
-    // input tensors were mapped into host address space at staging time
-    // (HostApi::register_device_memory_to_host), so the host orchestrator can
-    // read control tensors (e.g. paged_attention's context_lens/block_table) in
-    // place.
+    // get_tensor_data/set_tensor_data resolve buffer.addr through the host
+    // views registered at staging time (runtime/host_tensor_access.h), so the
+    // host orchestrator can read control tensors (e.g. paged_attention's
+    // context_lens/block_table) whether or not the platform maps device memory
+    // into the host address space.
 
     // Bind both framework_current_runtime instances: the host library's (used by
     // rt_scope_* / rt_orchestration_done) and the orch .so's own copy (used by
@@ -693,6 +694,11 @@ extern "C" int bind_callable_to_runtime_impl(
     // Build device args: copy from input, replace host tensor pointers with device pointers
     ChipStorageTaskArgs device_args;
 
+    // Open this run's host-view window. It closes once the orchestrator has
+    // finished, so no host view outlives the point at which a task could make
+    // it stale.
+    host_tensor_access_reset(api->copy_to_device);
+
     int64_t t_args_start = _now_ms();
     for (int i = 0; i < tensor_count; i++) {
         Tensor t = orch_args->tensor(i);
@@ -737,23 +743,20 @@ extern "C" int bind_callable_to_runtime_impl(
 
         // host_build_graph runs the orchestrator on the host, which may read
         // control tensors (e.g. paged_attention's context_lens/block_table) via
-        // get_tensor_data to shape the graph. Map this device buffer into the
-        // host address space so the host can dereference buffer.addr directly.
-        // Released in validate_runtime_impl before device_free.
-        //
-        // The host then reads/writes buffer.addr (== dev_ptr) directly, so this
-        // path REQUIRES an identity mapping (host VA == dev_ptr). a2a3
-        // halHostRegister(DEV_SVM_MAP_HOST) returns identity and sim is already a
-        // host pointer, but the HAL contract permits a non-identity VA — verify
-        // it here and fail the prepare rather than letting the host dereference a
-        // device address (segfault / silent corruption) on a future HAL.
-        void *host_va = api->register_device_memory_to_host(dev_ptr, size);
-        if (host_va != nullptr && host_va != dev_ptr) {
-            LOG_ERROR(
-                "host-orch: SVM map returned non-identity host VA %p for dev_ptr %p; the host orchestrator "
-                "dereferences buffer.addr directly and assumes identity mapping",
-                host_va, dev_ptr
-            );
+        // get_tensor_data to shape the graph. Give it a host view of this
+        // buffer: the device buffer itself where the platform can map it into
+        // the host address space (released in validate_runtime_impl before
+        // device_free), otherwise the staging copy, which holds the same bytes
+        // for the whole orchestration window and whose writes are pushed back
+        // to the device. A tensor with neither is not host-accessible, so the
+        // prepare fails here rather than the orchestrator dereferencing a
+        // device address.
+        void *host_view = api->register_device_memory_to_host(dev_ptr, size);
+        if (host_view == nullptr) {
+            host_view = host_ptr;
+        }
+        if (!host_tensor_access_add(reinterpret_cast<uint64_t>(dev_ptr), size, host_view)) {
+            LOG_ERROR("host-orch: no host view for tensor %d (dev_ptr %p, %zu bytes)", i, dev_ptr, size);
             return -1;
         }
 
@@ -858,6 +861,9 @@ extern "C" int bind_callable_to_runtime_impl(
             runtime, api, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap, eff_heap_sizes,
             eff_task_window_sizes, host_orch_func_ptr, orch_l2
         );
+        // The orchestrator is the only host-view reader; from here the device
+        // owns these buffers, so drop the window on both exits.
+        host_tensor_access_reset(nullptr);
         if (total_tasks < 0) {
             LOG_ERROR("host-orch: orchestration run failed");
             return -1;
