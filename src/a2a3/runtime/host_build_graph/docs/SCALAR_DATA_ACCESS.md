@@ -2,9 +2,11 @@
 
 ## 1. Overview
 
-During task graph construction, orchestration sometimes needs to read InCore kernel results (for control-flow decisions) or write initial values into tensors. `get_tensor_data` / `set_tensor_data` provide **blocking** cross-layer data access, allowing orchestration to safely read and write tensor data.
+During task graph construction, orchestration sometimes needs to read tensor contents (e.g. InCore kernel results for control-flow decisions) or write initial values into tensors. `get_tensor_data` / `set_tensor_data` provide **blocking** cross-layer data access, allowing orchestration to safely read and write tensor data — subject to the host_build_graph restriction noted below.
 
 **Core design principle**: Reuse the existing TensorMap dependency tracking mechanism — no new synchronization infrastructure.
+
+**host_build_graph restriction**: the orchestrator runs to completion on the host before any device task executes (`run_host_orchestration()` populates the SM, `copy_to_device()` uploads it, and only then does the AICPU boot scheduler-only). No device task has run during orchestration, so a producer's `task_state` can never reach `PTO2_TASK_COMPLETED` at that point. `get_tensor_data` / `set_tensor_data` are therefore safe only on tensors with **no producing task** — external tensors (`make_tensor_external`) and initial-value writes. Reading an InCore kernel result mid-graph (for control-flow decisions) is a `tensormap_and_ringbuffer` capability, whose orchestrator runs on the AICPU alongside the schedulers; here it spins to `PTO2_TENSOR_DATA_TIMEOUT_CYCLES` (15 s) and fails with `PTO2_ERROR_TENSOR_WAIT_TIMEOUT`.
 
 ## 2. API
 
@@ -41,7 +43,7 @@ addr null-check → TensorMap lookup → spin-wait producer COMPLETED → comput
 addr null-check → TensorMap lookup → spin-wait producer COMPLETED → spin-wait consumers done → memcpy write
 ```
 
-One extra step versus get_tensor_data: wait for all consumers to finish (`fanout_refcount >= fanout_count - 1`, excluding the scope reference).
+One extra step versus get_tensor_data: wait for all consumers to finish (per-ring `completed_watermark >= producer's last_consumer_local_id`).
 
 ### 3.3 Timeout
 
@@ -73,6 +75,8 @@ args.add_output(ci);
 ## 5. Scalar Dependencies via 1-Element Tensors
 
 Traditional scalars (`L0TaskArgs::add_scalar`) are one-way inputs with no TensorMap tracking. For cross-task scalar values, use a 1-element tensor as the carrier:
+
+> **Not usable as-is in host_build_graph.** The example below submits a producing task and then reads its result with `get_tensor_data`, which waits for kernel completion. Per the §1 restriction, no device task has run during host_build_graph orchestration, so this read spins to `PTO2_ERROR_TENSOR_WAIT_TIMEOUT`. Reading a kernel-produced scalar mid-graph is a `tensormap_and_ringbuffer` capability; in host_build_graph the carrier works only in the producer-less direction (seed it with `set_initial_value` / an external tensor, no producing task).
 
 ```cpp
 uint32_t shapes[1] = {1};
@@ -106,7 +110,7 @@ Three actors:
 | - | ---------- | -------- | ------ | --------- | ----- |
 | 1 | Kernel write (OUTPUT) | Orch Read | RAW | spin-wait producer COMPLETED | Yes |
 | 2 | Kernel write (OUTPUT) | Orch Write | WAW | spin-wait producer COMPLETED | Yes |
-| 3 | Kernel read (INPUT) | Orch Write | WAR | spin-wait fanout_refcount | **Needs INOUT** |
+| 3 | Kernel read (INPUT) | Orch Write | WAR | spin-wait completed_watermark | **Needs INOUT** |
 | 4 | Kernel read-write (INOUT) | Orch Read | RAW | spin-wait producer COMPLETED | Yes |
 | 5 | Kernel read-write (INOUT) | Orch Write | WAW+WAR | spin-wait producer + consumers | Yes |
 | 6 | Orch Write | Kernel read (INPUT) | RAW | blocking completes before next submit | Yes |
@@ -120,7 +124,7 @@ Three actors:
 
 TensorMap tracks only producers (OUTPUT/INOUT), not pure INPUT consumers. If a tensor is only registered via `add_input()`, TensorMap has no producer entry for it. `set_tensor_data`'s `wait_for_tensor_ready()` finds no matching producer (the lookup callback never fires) and returns immediately — but the kernel may still be reading → **WAR data race**.
 
-**Solution**: For tensors that may later be written via `set_tensor_data`, use `add_inout()` instead of `add_input()`. INOUT registers a producer entry in TensorMap, enabling `set_tensor_data` to track all consumers through `fanout_refcount`.
+**Solution**: For tensors that may later be written via `set_tensor_data`, use `add_inout()` instead of `add_input()`. INOUT registers a producer entry in TensorMap, enabling `set_tensor_data` to track all consumers through the ring's `completed_watermark`.
 
 **Scenarios #6–8 serial guarantee**:
 

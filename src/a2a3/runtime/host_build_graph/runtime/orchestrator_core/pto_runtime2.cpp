@@ -124,8 +124,7 @@ void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, cons
 // Checks owner metadata (lifecycle anchor) and OverlapMap (modifier writers).
 // For reads: wait until each producer COMPLETED (done writing).
 // For writes: also wait until all consumers done reading
-//   (consumer low bits of fanout_refcount >= consumer count, excluding the
-//    bit31 scope reference).
+//   (per-ring completed_watermark >= the producer's last_consumer_local_id).
 // Uses cycle-based timeout (checked every 1024 spins).
 // Returns false on timeout (sets orch.fatal).
 MAYBE_UNINITIALIZED_BEGIN
