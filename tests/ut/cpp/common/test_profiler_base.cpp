@@ -107,15 +107,15 @@ using PerThreadModule = TestModuleBase<PLATFORM_MAX_AICPU_THREADS>;
 // many AICPU threads run.
 using SingleShardModule = TestModuleBase<1>;
 
-template <typename Module>
-class TestCollector : public profiling_common::ProfilerBase<TestCollector<Module>, Module> {
+template <typename Module, int IdleTimeoutSeconds = 2>
+class TestCollector : public profiling_common::ProfilerBase<TestCollector<Module, IdleTimeoutSeconds>, Module> {
 public:
-    using Base = profiling_common::ProfilerBase<TestCollector<Module>, Module>;
+    using Base = profiling_common::ProfilerBase<TestCollector<Module, IdleTimeoutSeconds>, Module>;
     using ReadyBufferInfo = typename Module::ReadyBufferInfo;
 
     // Deliberately short: a false-positive idle timeout must fail the test fast
     // rather than stall it.
-    static constexpr int kIdleTimeoutSec = 2;
+    static constexpr int kIdleTimeoutSec = IdleTimeoutSeconds;
     static constexpr const char *kSubsystemName = "TestCollector";
 
     void on_buffer_collected(const ReadyBufferInfo &info, int collector_shard) {
@@ -258,4 +258,28 @@ TEST(ProfilerBaseTest, SilentRunDoesNotTripIdleTimeout) {
 
     collector.stop();
     EXPECT_EQ(collector.collected(), 1);
+}
+
+TEST(ProfilerBaseTest, CollectorStaysAliveAfterArmedIdleTimeout) {
+    using namespace std::chrono_literals;
+
+    TestHeader header{};
+    TestCollector<SingleShardModule, 0> collector;
+    collector.init(2, &header);
+    collector.start(nullptr);
+
+    uint64_t first_buffer = 0;
+    publish(collector, header, 1, &first_buffer);
+    EXPECT_TRUE(wait_for_collected(collector, 1, 5s));
+
+    // Once traffic has armed the idle detector, a zero-second timeout fires on
+    // the next empty poll. The collector must report it without exiting.
+    std::this_thread::sleep_for(250ms);
+
+    uint64_t late_buffer = 0;
+    publish(collector, header, 1, &late_buffer);
+    EXPECT_TRUE(wait_for_collected(collector, 2, 5s));
+
+    collector.stop();
+    EXPECT_EQ(collector.collected(), 2);
 }
