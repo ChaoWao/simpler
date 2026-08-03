@@ -161,7 +161,7 @@ queueing entirely:
   `[self-hosted, a2a3/a5]`. T2 (macOS) is intentionally absent. A lane-local
   `detect-changes` (same `NON_CODE` vocabulary and gates as `ci.yml` — keep the
   two copies in sync) skips jobs a diff cannot affect.
-- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel; `g++-15` is a symlink stand-in for the ubuntu-toolchain ppa g++.
+- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel; `g++-15` is a symlink stand-in for the ubuntu-toolchain ppa g++. On the agents `g++` resolves to a conda GCC 15 prefix rather than `/usr/bin/g++`, so the lane's sim artifacts are built with GCC 15 and `compile_commands.json` names that prefix's `<triple>-g++`; `tests/lint/clang_tidy.py` drops the triple before replaying a command, without which clang-tidy adopts it as a target and resolves no C++ standard library at all. `ci.yml` lints with clang-tidy 18 and HCE 2.0 packages only LLVM 12, so an agent additionally provides 18 on `PATH` as `clang-tidy-18`, installed together with its clang builtin headers — a clang-tidy whose prefix carries no `lib/clang/<major>/include` resolves no resource dir and fails every `#include <stddef.h>`. The `pre-commit` job shadows the distro `clang-tidy` with it when present.
 - The lane run is standalone — it attaches no checks to the PR; results are read from the run.
 
 ## Hardware Classification

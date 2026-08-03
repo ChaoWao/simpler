@@ -19,6 +19,7 @@ If no sim build cache exists, the sim runtimes are built first:
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -75,6 +76,18 @@ _SUPPRESS_ARGS = [
 # GCC-only flags to strip from compile_commands.json before passing to clang-tidy.
 _GCC_ONLY_FLAGS = {"-fno-gnu-unique"}
 
+# A compiler whose program name carries a target-triple prefix — conda-forge and
+# crosstool GCC ship `<triple>-g++` with `g++` as a symlink to it, and CMake
+# records the resolved name. clang-tidy reads that prefix as its target triple,
+# then matches no installed GCC and receives no C++ standard library include
+# dirs: every `#include <cstdint>` fails, and statements that fail to build are
+# dropped from the AST, which turns non-trivial constructors into
+# modernize-use-equals-default reports. Every target in a sim database is
+# host-compiled, so the prefix names nothing clang-tidy needs.
+_TRIPLE_PREFIXED_DRIVER = re.compile(
+    r"^(?:[A-Za-z0-9_]+-)+(?P<driver>gcc|g\+\+|cc|c\+\+|clang|clang\+\+)(?P<suffix>-[0-9.]+)?$"
+)
+
 
 def _ensure_sim_cache() -> None:
     """Build all detectable sim runtimes if no sim compile databases exist."""
@@ -90,16 +103,37 @@ def _ensure_sim_cache() -> None:
         sys.exit(result.returncode)
 
 
-def _strip_gcc_flags(command: str) -> str:
-    """Remove GCC-only flags that clang/clang-tidy does not understand."""
-    parts = shlex.split(command)
-    filtered_parts = [p for p in parts if p not in _GCC_ONLY_FLAGS]
-    return shlex.join(filtered_parts)
+def _strip_target_triple(compiler: str) -> str:
+    """Return the compiler path with any target-triple prefix dropped from its name."""
+    path = Path(compiler)
+    match = _TRIPLE_PREFIXED_DRIVER.match(path.name)
+    if match is None:
+        return compiler
+    return str(path.with_name(match["driver"] + (match["suffix"] or "")))
 
 
-def _strip_gcc_flags_from_args(arguments: list[str]) -> list[str]:
-    """Remove GCC-only flags from an argv-style compile command."""
-    return [arg for arg in arguments if arg not in _GCC_ONLY_FLAGS]
+def _rewrite_argv(argv: list[str]) -> list[str]:
+    """Drop GCC-only flags and any target-triple prefix from a compile command."""
+    if not argv:
+        return argv
+    return [_strip_target_triple(argv[0])] + [arg for arg in argv[1:] if arg not in _GCC_ONLY_FLAGS]
+
+
+def _rewrite_entry(entry: dict) -> bool:
+    """Rewrite one compile database entry in place; return True when it changed."""
+    changed = False
+    if "command" in entry:
+        argv = shlex.split(entry["command"])
+        rewritten = _rewrite_argv(argv)
+        if rewritten != argv:
+            entry["command"] = shlex.join(rewritten)
+            changed = True
+    if "arguments" in entry:
+        rewritten = _rewrite_argv(entry["arguments"])
+        if rewritten != entry["arguments"]:
+            entry["arguments"] = rewritten
+            changed = True
+    return changed
 
 
 def _resolve_target_dirs(config_dir: Path, build_config: dict, target: str) -> tuple[list[str], list[str]]:
@@ -162,32 +196,33 @@ def _parse_compile_database(raw: str, db_file: Path) -> list[dict]:
     entries = json.loads(raw)
     if not isinstance(entries, list):
         raise ValueError(f"compile database is not a JSON array: {db_file}")
+    for entry in entries:
+        if not isinstance(entry, dict) or "file" not in entry:
+            raise ValueError(f"compile database entry is not an object naming a file: {db_file}")
     return entries
 
 
-def _load_compile_database(db_file: Path) -> tuple[str, list[dict]]:
+def _load_compile_database(db_file: Path) -> list[dict]:
     """Load a compile database, rebuilding its target cache dir when it is broken."""
     if not db_file.is_file():
         print(f"WARNING: compile database disappeared, skipping: {db_file}", file=sys.stderr)
-        return "", []
+        return []
 
-    raw = db_file.read_text()
     try:
-        return raw, _parse_compile_database(raw, db_file)
+        return _parse_compile_database(db_file.read_text(), db_file)
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"WARNING: invalid compile database detected: {exc}", file=sys.stderr)
         _reconfigure_compile_database(db_file)
 
     if not db_file.is_file():
         print(f"WARNING: compile database recovery produced no file, skipping: {db_file}", file=sys.stderr)
-        return "", []
+        return []
 
-    rebuilt_raw = db_file.read_text()
     try:
-        return rebuilt_raw, _parse_compile_database(rebuilt_raw, db_file)
+        return _parse_compile_database(db_file.read_text(), db_file)
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"WARNING: recovered compile database is still invalid, skipping: {exc}", file=sys.stderr)
-        return "", []
+        return []
 
 
 def _build_file_index() -> dict[str, list[Path]]:
@@ -197,19 +232,17 @@ def _build_file_index() -> dict[str, list[Path]]:
     folder that contains a compile_commands.json covering the file.
     Only sim variant databases are used (avoids cross-compiler sysroot issues).
 
-    When the compile database contains GCC-only flags, it is modified
-    in-place to remove them so that clang-tidy can parse the commands.
+    When a compile command carries GCC-only flags or a target-triple-prefixed
+    compiler name, the database is modified in-place so that clang-tidy can
+    replay it.
     """
     index: dict[str, list[Path]] = {}
     for db_file in sorted(_CACHE_DIR.glob("*/sim/*/*/compile_commands.json")):
-        raw, entries = _load_compile_database(db_file)
-        needs_filter = any(flag in raw for flag in _GCC_ONLY_FLAGS)
-        if needs_filter:
-            for entry in entries:
-                if "command" in entry:
-                    entry["command"] = _strip_gcc_flags(entry["command"])
-                if "arguments" in entry:
-                    entry["arguments"] = _strip_gcc_flags_from_args(entry["arguments"])
+        entries = _load_compile_database(db_file)
+        changed = False
+        for entry in entries:
+            changed |= _rewrite_entry(entry)
+        if changed:
             db_file.write_text(json.dumps(entries, indent=2))
         for entry in entries:
             filepath = entry["file"]
