@@ -435,6 +435,7 @@ set_tests_properties(test_sim_run_completion PROPERTIES LABELS "no_hardware")
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
 # ---------------------------------------------------------------------------
+add_task_interface_test(test_buffer types/test_buffer.cpp)
 add_task_interface_test(test_child_memory types/test_child_memory.cpp)
 add_task_interface_test(test_chip_max_tensor_args types/test_chip_max_tensor_args.cpp)
 add_task_interface_test(test_call_config types/test_call_config.cpp)

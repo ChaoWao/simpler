@@ -104,6 +104,7 @@ nav:
       - Chip-Level Architecture: chip-level-arch.md
       - Hierarchical Level Runtime: hierarchical-level-runtime.md
       - Task Flow: task-flow.md
+      - Buffer Memory Model: buffer-abi.md
       - Orchestrator: orchestrator.md
       - Scheduler: scheduler.md
       - A5 AICPU core selection: design/a5-fg-pg-core-selection.en.md

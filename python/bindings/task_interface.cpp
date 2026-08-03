@@ -36,6 +36,7 @@
 #include <cstring>
 #include <cstdint>
 #include <exception>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -50,6 +51,7 @@
 #include <vector>
 
 #include "arg_direction.h"
+#include "buffer.h"
 #include "callable.h"
 #include "callable_protocol.h"
 #include "chip_worker.h"
@@ -885,6 +887,23 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
     cleanup_error += message;
 }
 
+// The int wire value of a dtype given either a DataType enumerator or its int value. The nanobind
+// DataType enum is not arithmetic, so a caller holding one has only `.value`; accept both forms.
+uint8_t datatype_wire_value(nb::object dtype) {
+    if (nb::hasattr(dtype, "value")) dtype = dtype.attr("value");
+    return nb::cast<uint8_t>(dtype);
+}
+
+// The leading `ndims` entries of a wire shapes[] / strides[] array as a Python tuple. The trailing
+// entries are unused padding, so exposing them would invent dimensions the tensor does not have.
+nb::tuple dims_tuple(const uint32_t *dims, uint32_t ndims) {
+    if (ndims > static_cast<uint32_t>(MAX_TENSOR_DIMS)) ndims = static_cast<uint32_t>(MAX_TENSOR_DIMS);
+    nb::list out;
+    for (uint32_t i = 0; i < ndims; ++i)
+        out.append(dims[i]);
+    return nb::tuple(out);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -896,7 +915,7 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
 #endif
 
 NB_MODULE(_task_interface, m) {
-    m.doc() = "Nanobind bindings for task_interface (DataType, ChipTensor, TaskArgs variants)";
+    m.doc() = "Nanobind bindings for task_interface (DataType, Buffer/Tensor wire ABI, ChipTensor, TaskArgs variants)";
 
     // Source commit this extension was compiled from; "" when git was
     // unavailable at build time. simpler.task_interface compares it against the
@@ -941,10 +960,266 @@ NB_MODULE(_task_interface, m) {
     m.attr("RUNTIME_ENV_RING_COUNT") = RUNTIME_ENV_RING_COUNT;
     // Byte size of a ChipTensor and the offset of its child_memory flag within it.
     // A task-args blob stores ChipTensors as a raw memcpy array, so a Python-side
-    // blob walker locates tensor i's fields at i * TENSOR_STRIDE_BYTES without
+    // blob walker locates tensor i's fields at i * CHIP_TENSOR_STRIDE_BYTES without
     // reimplementing the struct layout.
-    m.attr("TENSOR_STRIDE_BYTES") = static_cast<int>(sizeof(ChipTensor));
-    m.attr("TENSOR_CHILD_MEMORY_OFFSET") = static_cast<int>(offsetof(ChipTensor, child_memory));
+    m.attr("CHIP_TENSOR_STRIDE_BYTES") = static_cast<int>(sizeof(ChipTensor));
+    m.attr("CHIP_TENSOR_CHILD_MEMORY_OFFSET") = static_cast<int>(offsetof(ChipTensor, child_memory));
+
+    // Width of the opaque per-incarnation nonce, so the owner can draw one of the right size.
+    // The struct sizes stay unexported: no Python path turns these types into bytes or back, so a
+    // byte count here would have no reader — the layout is pinned by buffer.h's static_asserts.
+    m.attr("OWNER_INSTANCE_ID_BYTES") = static_cast<int>(OWNER_INSTANCE_ID_BYTES);
+
+    // --- Buffer ABI enums ---
+    // nb::is_arithmetic makes these IntEnums, so a wire value and an enumerator compare and
+    // int()-convert interchangeably — the descriptor stores them as raw u8.
+    nb::enum_<AddressSpace>(m, "AddressSpace", nb::is_arithmetic())
+        .value("HOST", AddressSpace::HOST)
+        .value("DEVICE", AddressSpace::DEVICE);
+
+    nb::enum_<AccessMode>(m, "AccessMode", nb::is_arithmetic())
+        .value("READ", AccessMode::READ)
+        .value("WRITE", AccessMode::WRITE)
+        .value("READWRITE", AccessMode::READWRITE);
+
+    nb::enum_<BackendKind>(m, "BackendKind", nb::is_arithmetic())
+        .value("FORK_SHM", BackendKind::FORK_SHM)
+        .value("POSIX_SHM", BackendKind::POSIX_SHM)
+        .value("VMM_WINDOW", BackendKind::VMM_WINDOW)
+        .value("REMOTE_SIDECAR", BackendKind::REMOTE_SIDECAR)
+        .value("DEVICE_MALLOC", BackendKind::DEVICE_MALLOC)
+        .value("FORK_COW", BackendKind::FORK_COW);
+
+    // --- CanonicalIdentity ---
+    // Equality and hashing fold exactly the three meaningful fields, so a decode with dirty wire
+    // padding keys identically to a clean one — two views of a backing never split across buckets.
+    // There is deliberately no `pack()`: the only correct key for this type is the value itself, and
+    // exposing its bytes is what once let a registry key on padding and split one backing in two.
+    nb::class_<CanonicalIdentity>(m, "CanonicalIdentity")
+        .def(
+            "__init__",
+            [](CanonicalIdentity *self, nb::bytes owner_instance_id, uint64_t buffer_id, uint32_t generation) {
+                if (owner_instance_id.size() != OWNER_INSTANCE_ID_BYTES) {
+                    throw std::invalid_argument(
+                        "owner_instance_id must be " + std::to_string(OWNER_INSTANCE_ID_BYTES) + " bytes, got " +
+                        std::to_string(owner_instance_id.size())
+                    );
+                }
+                new (self) CanonicalIdentity{};
+                std::memcpy(self->owner_instance_id, owner_instance_id.c_str(), OWNER_INSTANCE_ID_BYTES);
+                self->buffer_id = buffer_id;
+                self->generation = generation;
+            },
+            nb::arg("owner_instance_id"), nb::arg("buffer_id"), nb::arg("generation") = 1
+        )
+
+        .def_prop_ro(
+            "owner_instance_id",
+            [](const CanonicalIdentity &self) {
+                return nb::bytes(reinterpret_cast<const char *>(self.owner_instance_id), OWNER_INSTANCE_ID_BYTES);
+            },
+            "The opaque per-incarnation nonce (bytewise-compared, no integer meaning)."
+        )
+        .def_ro("buffer_id", &CanonicalIdentity::buffer_id)
+        .def_ro("generation", &CanonicalIdentity::generation)
+
+        .def(
+            "__eq__",
+            [](const CanonicalIdentity &a, const CanonicalIdentity &b) {
+                return a == b;
+            }
+        )
+        .def(
+            "__ne__",
+            [](const CanonicalIdentity &a, const CanonicalIdentity &b) {
+                return a != b;
+            }
+        )
+        .def(
+            "__hash__",
+            [](const CanonicalIdentity &self) {
+                return CanonicalIdentityHash{}(self);
+            }
+        )
+        .def("__repr__", [](const CanonicalIdentity &self) -> std::string {
+            std::ostringstream os;
+            os << "CanonicalIdentity(owner_instance_id=0x" << std::hex;
+            for (uint32_t i = 0; i < OWNER_INSTANCE_ID_BYTES; ++i) {
+                os << std::setw(2) << std::setfill('0') << static_cast<int>(self.owner_instance_id[i]);
+            }
+            os << std::dec << ", buffer_id=" << self.buffer_id << ", generation=" << self.generation << ")";
+            return os.str();
+        });
+
+    // --- BufferDescriptor ---
+    // Construction runs validate_buffer_descriptor, so an unsupported address_space x backend_kind
+    // or an over-long backend body is refused before the descriptor can reach a Tensor or the wire.
+    nb::class_<BufferDescriptor>(m, "BufferDescriptor")
+        .def(
+            "__init__",
+            [](BufferDescriptor *self, const CanonicalIdentity &identity, AddressSpace address_space, AccessMode access,
+               BackendKind backend_kind, uint64_t nbytes, nb::bytes body, uint32_t owner_worker_path_id) {
+                if (body.size() > DESC_MAX_BYTES) {
+                    throw std::invalid_argument(
+                        "backend body exceeds DESC_MAX_BYTES (" + std::to_string(DESC_MAX_BYTES) + "), got " +
+                        std::to_string(body.size())
+                    );
+                }
+                new (self) BufferDescriptor{};
+                self->magic = BUFFER_DESCRIPTOR_MAGIC;
+                self->address_space = static_cast<uint8_t>(address_space);
+                self->access = static_cast<uint8_t>(access);
+                self->backend_kind = static_cast<uint8_t>(backend_kind);
+                self->identity = identity;
+                self->nbytes = nbytes;
+                self->owner_worker_path_id = owner_worker_path_id;
+                self->body_len = static_cast<uint16_t>(body.size());
+                std::memcpy(self->body, body.c_str(), body.size());
+                validate_buffer_descriptor(*self);
+            },
+            nb::arg("identity"), nb::arg("address_space"), nb::arg("access"), nb::arg("backend_kind"),
+            nb::arg("nbytes"), nb::arg("body") = nb::bytes(""), nb::arg("owner_worker_path_id") = 0
+        )
+
+        .def_ro("identity", &BufferDescriptor::identity)
+        .def_prop_ro(
+            "address_space",
+            [](const BufferDescriptor &self) {
+                return static_cast<AddressSpace>(self.address_space);
+            }
+        )
+        .def_prop_ro(
+            "access",
+            [](const BufferDescriptor &self) {
+                return static_cast<AccessMode>(self.access);
+            }
+        )
+        .def_prop_ro(
+            "backend_kind",
+            [](const BufferDescriptor &self) {
+                return static_cast<BackendKind>(self.backend_kind);
+            }
+        )
+        .def_ro("nbytes", &BufferDescriptor::nbytes)
+        .def_ro("owner_worker_path_id", &BufferDescriptor::owner_worker_path_id)
+        .def_prop_ro(
+            "body",
+            [](const BufferDescriptor &self) {
+                return nb::bytes(self.body, self.body_len);
+            },
+            "The per-backend materialization payload (shm name, base VA, ...), body_len bytes."
+        )
+
+        .def(
+            "__eq__",
+            [](const BufferDescriptor &a, const BufferDescriptor &b) {
+                return a == b;
+            }
+        )
+        .def(
+            "__ne__",
+            [](const BufferDescriptor &a, const BufferDescriptor &b) {
+                return a != b;
+            }
+        )
+        .def("__repr__", [](const BufferDescriptor &self) -> std::string {
+            std::ostringstream os;
+            os << "BufferDescriptor(buffer_id=" << self.identity.buffer_id
+               << ", generation=" << self.identity.generation << ", address_space=" << int(self.address_space)
+               << ", access=" << int(self.access) << ", backend_kind=" << int(self.backend_kind)
+               << ", nbytes=" << self.nbytes << ", body_len=" << self.body_len << ")";
+            return os.str();
+        });
+
+    // --- Tensor ---
+    // The L3+ task argument: a strided view over a buffer, carrying that buffer's descriptor whole
+    // and no address. Construction runs validate_tensor, the same gate blob decode runs, so a view
+    // that does not fit its backing cannot be built in the first place.
+    //
+    // No bytes cross this binding in either direction. Python builds a Tensor from its fields and
+    // receives one already decoded; turning mailbox bytes into a Tensor is task_args.h's job, and
+    // keeping that the only decode path is what makes validate_tensor a gate rather than a habit.
+    nb::class_<Tensor>(m, "Tensor")
+        .def(
+            "__init__",
+            [](Tensor *self, const BufferDescriptor &buffer, uint64_t byte_offset, nb::sequence shapes,
+               nb::sequence strides, nb::object dtype) {
+                const size_t ndims = nb::len(shapes);
+                if (ndims != nb::len(strides)) {
+                    throw std::invalid_argument("Tensor shapes and strides must have equal length");
+                }
+                if (ndims == 0 || ndims > static_cast<size_t>(MAX_TENSOR_DIMS)) {
+                    throw std::invalid_argument(
+                        "Tensor ndims must be in [1, " + std::to_string(MAX_TENSOR_DIMS) + "], got " +
+                        std::to_string(ndims)
+                    );
+                }
+                new (self) Tensor{};
+                self->buffer = buffer;
+                self->byte_offset = byte_offset;
+                self->ndims = static_cast<uint32_t>(ndims);
+                for (size_t i = 0; i < ndims; ++i) {
+                    self->shapes[i] = nb::cast<uint32_t>(shapes[i]);
+                    self->strides[i] = nb::cast<uint32_t>(strides[i]);
+                }
+                self->dtype = static_cast<DataType>(datatype_wire_value(dtype));
+                validate_tensor(*self);
+            },
+            nb::arg("buffer"), nb::arg("byte_offset"), nb::arg("shapes"), nb::arg("strides"), nb::arg("dtype")
+        )
+
+        .def_ro("buffer", &Tensor::buffer)
+        .def_ro("byte_offset", &Tensor::byte_offset)
+        .def_ro("ndims", &Tensor::ndims)
+        .def_prop_ro(
+            "shapes",
+            [](const Tensor &self) {
+                return dims_tuple(self.shapes, self.ndims);
+            }
+        )
+        .def_prop_ro(
+            "strides",
+            [](const Tensor &self) {
+                return dims_tuple(self.strides, self.ndims);
+            }
+        )
+        .def_prop_ro(
+            "dtype",
+            [](const Tensor &self) {
+                return static_cast<int>(self.dtype);
+            },
+            "The dtype's int wire value (a DataType enumerator's .value)."
+        )
+
+        .def(
+            "__eq__",
+            [](const Tensor &a, const Tensor &b) {
+                if (!(a.buffer == b.buffer) || a.byte_offset != b.byte_offset || a.ndims != b.ndims ||
+                    a.dtype != b.dtype) {
+                    return false;
+                }
+                for (uint32_t i = 0; i < a.ndims; ++i) {
+                    if (a.shapes[i] != b.shapes[i] || a.strides[i] != b.strides[i]) return false;
+                }
+                return true;
+            }
+        )
+        .def("__repr__", [](const Tensor &self) -> std::string {
+            std::ostringstream os;
+            os << "Tensor(buffer_id=" << self.buffer.identity.buffer_id << ", byte_offset=" << self.byte_offset
+               << ", shapes=(";
+            for (uint32_t i = 0; i < self.ndims; ++i) {
+                if (i) os << ", ";
+                os << self.shapes[i];
+            }
+            os << "), strides=(";
+            for (uint32_t i = 0; i < self.ndims; ++i) {
+                if (i) os << ", ";
+                os << self.strides[i];
+            }
+            os << "), dtype=" << get_dtype_name(self.dtype) << ")";
+            return os.str();
+        });
 
     // --- ChipTensor ---
     // The unified strided tensor descriptor. Constructed contiguous via make()

@@ -137,7 +137,7 @@ def test_rehost_rejects_noncontiguous():
 # Characterization (partial) — SceneTest host-tensor rehost adapter.
 #
 # These pin CURRENT behavior of the Python rehost / arg-build layer as input to
-# a planned typed-BufferHandle change (that planning context lives in the PR
+# a planned typed-Buffer change (that planning context lives in the PR
 # description). They assert what is, not what should be:
 #   - a size-1 dimension's stride is normalized away, and
 #   - non-overlapping views of one storage are split into independent buffers.

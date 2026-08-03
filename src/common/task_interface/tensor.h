@@ -23,8 +23,6 @@
 #include "data_type.h"
 #include "pto_task_id.h"
 
-constexpr int MAX_TENSOR_DIMS = 5;
-
 /**
  * Buffer Handle
  *

@@ -82,10 +82,10 @@ from typing import Any, cast
 
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
+    CHIP_TENSOR_CHILD_MEMORY_OFFSET,
     MAX_REGISTERED_CALLABLE_IDS,
     PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
-    TENSOR_CHILD_MEMORY_OFFSET,
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
@@ -100,6 +100,11 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 )
 
 from . import _log as _simpler_log
+from .buffer import (
+    Buffer,
+    create_host_shared_buffer,
+    mint_owner_instance_id,
+)
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
     CallableHandle,
@@ -1243,7 +1248,7 @@ def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[
     base = blob_off + _BLOB_HEADER_BYTES
     for i in range(tensor_count):
         addr_off = base + i * _BLOB_TENSOR_STRIDE
-        if buf[addr_off + TENSOR_CHILD_MEMORY_OFFSET]:
+        if buf[addr_off + CHIP_TENSOR_CHILD_MEMORY_OFFSET]:
             continue
         addr = struct.unpack_from("<Q", buf, addr_off)[0]
         for parent_lo, parent_hi, child_base in ranges:
@@ -3879,6 +3884,13 @@ class Worker:
         # dispatch) is now handled at the C++ boundary via mailbox_mu_, so
         # no quiescent-state guard is needed.
         self._registry_lock = threading.Lock()
+        # Owner-side buffer identity. `_owner_instance_id` is a fresh random draw per Worker
+        # incarnation, so a buffer_id reused by a later process can never collide with a live
+        # identity; `_buffers` keeps every Buffer this Worker owns so close() can unlink
+        # the backings.
+        self._owner_instance_id: bytes = mint_owner_instance_id()
+        self._buffer_id_counter: int = 1
+        self._buffers: dict[int, Buffer] = {}
         self._pending_unregister_cids: set[int] = set()
         self._pending_remote_unregister_hashids: set[bytes] = set()
         self._py_control_timeout_s = float(config.get("py_control_timeout_s", _PY_CONTROL_TIMEOUT_S))
@@ -8219,6 +8231,69 @@ class Worker:
             pass
         return warn
 
+    # ------------------------------------------------------------------
+    # Owner-side Buffer allocation
+    # ------------------------------------------------------------------
+
+    def create_buffer(self, nbytes: int) -> Buffer:
+        """Allocate a shared ``Buffer`` owned by this Worker.
+
+        The backing is a POSIX shm; the Buffer carries a typed canonical identity and a
+        self-describing descriptor, so a consumer can resolve it with no prior handshake. Build a
+        tensor over ``buffer.shm.buf`` with the buffer protocol. Not thread-safe against a concurrent
+        run/create/free on the same Worker.
+        """
+        if self.level < 2:
+            raise TypeError("create_buffer requires a level >= 2 Worker")
+        with self._operation_lease("create_buffer"):
+            return self._create_buffer_locked(int(nbytes))
+
+    def _next_buffer_id(self) -> int:
+        with self._registry_lock:
+            bid = self._buffer_id_counter
+            self._buffer_id_counter += 1
+        return bid
+
+    def _create_buffer_locked(self, nbytes: int) -> Buffer:
+        # An L3+ buffer is consumed by a forked child that lazily maps it, so a childless L3+ buffer
+        # can reach no consumer. An L2 leaf has no children and materializes in-process, so it needs
+        # none.
+        if self.level >= 3 and not self._chip_shms and not self._sub_shms:
+            raise RuntimeError("create_buffer requires at least one forked chip or sub child (this Worker has none)")
+        if nbytes <= 0:
+            raise ValueError("create_buffer: nbytes must be positive")
+        buffer_id = self._next_buffer_id()
+        buffer = create_host_shared_buffer(
+            nbytes,
+            owner_instance_id=self._owner_instance_id,
+            buffer_id=buffer_id,
+            owner_worker_path=f"L{self.level}",
+            generation=1,
+        )
+        with self._registry_lock:
+            self._buffers[buffer_id] = buffer
+        return buffer
+
+    def _release_all_buffers(self) -> None:
+        """Close + unlink every owner Buffer (called from close()).
+
+        Per-buffer best-effort: one buffer's failure never strands the rest, and the first error is
+        raised after all are attempted so close() reports the leak rather than swallowing it. A
+        buffer whose close fails keeps its registry entry so the cleanup journal can retry it."""
+        with self._registry_lock:
+            entries = list(self._buffers.items())
+        errors: list[BaseException] = []
+        for buffer_id, buffer in entries:
+            try:
+                buffer.close()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+                continue
+            with self._registry_lock:
+                self._buffers.pop(buffer_id, None)
+        if errors:
+            raise errors[0]
+
     def _release_all_host_buffers(self) -> None:
         """Unmap + free every still-registered host buffer (called from close()).
 
@@ -9300,6 +9375,7 @@ class Worker:
             ("provenance", "child allocation provenance", self._clear_child_prov),
             ("remote", "active remote slot references", self._release_active_remote_slot_refs),
             ("remote", "pending remote frees", self._flush_pending_remote_frees),
+            ("buffer", "all owner Buffers", self._release_all_buffers),
             ("host-buffer", "all host buffers", self._release_all_host_buffers),
         ):
             self._cleanup_journal.add_once(kind, identity, cleanup)
