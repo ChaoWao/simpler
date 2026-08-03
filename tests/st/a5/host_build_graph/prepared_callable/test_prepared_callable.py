@@ -7,11 +7,13 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""End-to-end white-box test for the private L2 prepared-callable ABI on a5/host_build_graph.
+"""End-to-end white-box test for the private L2 prepared-callable ABI on host_build_graph.
 
-Mirrors tests/st/a2a3/host_build_graph/prepared_callable for the a5 variant.
-Reuses the dump_args example kernels (a + b + 1) since a5/hbg has no
-vector_example today and dump_args already runs cleanly on a5sim.
+Mirrors tests/st/a2a3/tensormap_and_ringbuffer/prepared_callable for the hbg
+variant: instead of the AICPU dlopening the orch SO, hbg dlopens on the host
+inside private slot preparation and replays the cached handle/fn pointer
+on every run. The dlopen counter to assert is `host_dlopen_count`,
+not `aicpu_dlopen_count` (which stays 0 — AICPU never sees the orch SO).
 """
 
 from pathlib import Path
@@ -23,6 +25,7 @@ from simpler.task_interface import ArgDirection as D
 from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
 
+_VECTOR_KERNELS = "../vector_example/kernels"
 _SLOT_PRIMARY = 0
 _SLOT_SECONDARY = 1
 _ORCH_SO_MAP_TOKEN = "/tmp/orch_so_"
@@ -46,7 +49,7 @@ def _count_live_orch_so_mappings():
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestPreparedCallableHbgA5(SceneTestCase):
-    """Exercise private prepare / run / unregister slot ABI on a5/hbg.
+    """Exercise private prepare / run / unregister slot ABI on hbg.
 
     Requires an isolated L2 ``Worker`` (private slot table starts empty); this is
     provided by the directory-local ``conftest.py`` overriding ``st_worker``
@@ -55,34 +58,38 @@ class TestPreparedCallableHbgA5(SceneTestCase):
 
     CALLABLE = {
         "orchestration": {
-            "source": "kernels/orchestration/dump_args_orch.cpp",
-            "function_name": "build_dump_args_graph",
+            "source": f"{_VECTOR_KERNELS}/orchestration/example_orch.cpp",
+            "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.OUT],
         },
         "incores": [
             {
                 "func_id": 0,
-                "source": "kernels/aiv/kernel_add.cpp",
+                "source": f"{_VECTOR_KERNELS}/aiv/kernel_add.cpp",
                 "core_type": "aiv",
                 "signature": [D.IN, D.IN, D.OUT],
             },
             {
                 "func_id": 1,
-                "source": "kernels/aiv/kernel_add_scalar_inplace.cpp",
+                "source": f"{_VECTOR_KERNELS}/aiv/kernel_add_scalar.cpp",
                 "core_type": "aiv",
-                "signature": [D.INOUT],
+                "signature": [D.IN, D.OUT],
+            },
+            {
+                "func_id": 2,
+                "source": f"{_VECTOR_KERNELS}/aiv/kernel_mul.cpp",
+                "core_type": "aiv",
+                "signature": [D.IN, D.IN, D.OUT],
             },
         ],
     }
 
-    _COMMON_CONFIG = {"aicpu_thread_num": 3}
     _PLATFORMS = ["a5sim", "a5"]
 
     CASES = [
         {
             "name": "prepare_run_twice",
             "platforms": _PLATFORMS,
-            "config": _COMMON_CONFIG,
             "params": {"a": 2.0, "b": 3.0},
         },
     ]
@@ -97,8 +104,9 @@ class TestPreparedCallableHbgA5(SceneTestCase):
         )
 
     def compute_golden(self, args, params):
-        # dump_args orchestration computes f = (a + b) + 1
-        args.f[:] = (args.a + args.b) + 1
+        # vector_example orchestration computes (a + b + 1) * (a + b + 2)
+        a, b = args.a, args.b
+        args.f[:] = (a + b + 1) * (a + b + 2)
 
     def _chip_worker(self, worker):
         chip_worker = worker._chip_worker
@@ -149,10 +157,19 @@ class TestPreparedCallableHbgA5(SceneTestCase):
         chip_worker._unregister_slot(_SLOT_PRIMARY)
         chip_worker._unregister_slot(_SLOT_SECONDARY)
 
+    # ------------------------------------------------------------------
+    # host_dlopen_count assertions (hbg path).
+    #
+    # hbg increments host_dlopen_count on every record_host_orch_callable
+    # invocation (i.e. each private slot prepare), independent of how many
+    # times run is invoked afterwards. AICPU never dlopens the orch
+    # SO on this variant, so aicpu_dlopen_count stays at 0.
+    # ------------------------------------------------------------------
+
     def _setup_dlopen_count_test(self, st_worker, st_platform):
         case = self.CASES[0]
         callable_obj = self.build_callable(st_platform)
-        config = self._build_config(case["config"])
+        config = self._build_config(case.get("config", {}))
         return callable_obj, config, case
 
     def _run_one(self, worker, slot, config, case):
@@ -166,6 +183,7 @@ class TestPreparedCallableHbgA5(SceneTestCase):
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
     def test_dlopen_count_same_slot_repeated_runs(self, st_platform, st_worker):
+        """prepare(primary) + run x5 -> host_dlopen delta == 1, aicpu == 0."""
         callable_obj, config, case = self._setup_dlopen_count_test(st_worker, st_platform)
         baseline = st_worker.host_dlopen_count
         baseline_aicpu = st_worker.aicpu_dlopen_count
@@ -176,13 +194,17 @@ class TestPreparedCallableHbgA5(SceneTestCase):
             prepared = True
             for _ in range(5):
                 self._run_one(st_worker, _SLOT_PRIMARY, config, case)
-            assert st_worker.host_dlopen_count - baseline == 1
-            assert st_worker.aicpu_dlopen_count == baseline_aicpu
+            assert st_worker.host_dlopen_count - baseline == 1, (
+                f"expected exactly 1 new host dlopen for 5 runs of primary slot, "
+                f"got delta {st_worker.host_dlopen_count - baseline}"
+            )
+            assert st_worker.aicpu_dlopen_count == baseline_aicpu, "hbg must not trigger any AICPU orch SO dlopens"
         finally:
             if prepared:
                 chip_worker._unregister_slot(_SLOT_PRIMARY)
 
     def test_dlopen_count_two_slots_alternating(self, st_platform, st_worker):
+        """prepare(primary)+prepare(secondary) + alternating runs x5 -> host_dlopen delta == 2."""
         callable_obj, config, case = self._setup_dlopen_count_test(st_worker, st_platform)
         baseline = st_worker.host_dlopen_count
         baseline_aicpu = st_worker.aicpu_dlopen_count
@@ -197,7 +219,10 @@ class TestPreparedCallableHbgA5(SceneTestCase):
             for _ in range(5):
                 self._run_one(st_worker, _SLOT_PRIMARY, config, case)
                 self._run_one(st_worker, _SLOT_SECONDARY, config, case)
-            assert st_worker.host_dlopen_count - baseline == 2
+            assert st_worker.host_dlopen_count - baseline == 2, (
+                f"expected exactly 2 new host dlopens for two slots interleaved, "
+                f"got delta {st_worker.host_dlopen_count - baseline}"
+            )
             assert st_worker.aicpu_dlopen_count == baseline_aicpu
         finally:
             if secondary_prepared:
@@ -206,6 +231,7 @@ class TestPreparedCallableHbgA5(SceneTestCase):
                 chip_worker._unregister_slot(_SLOT_PRIMARY)
 
     def test_dlopen_count_double_prepare_raises(self, st_platform, st_worker):
+        """prepare(primary) twice -> second call raises RuntimeError."""
         callable_obj, _config, _case = self._setup_dlopen_count_test(st_worker, st_platform)
         prepared = False
         chip_worker = self._chip_worker(st_worker)
@@ -246,6 +272,10 @@ class TestPreparedCallableHbgA5(SceneTestCase):
         assert _count_live_orch_so_mappings() == baseline_maps
 
     def test_dlopen_count_unregister_re_prepare(self, st_platform, st_worker):
+        """prepare+run+unregister+prepare+run -> host_dlopen delta == 2.
+
+        Counter is monotonic — re-prepare always counts a fresh dlopen.
+        """
         callable_obj, config, case = self._setup_dlopen_count_test(st_worker, st_platform)
         baseline = st_worker.host_dlopen_count
         prepared = False
@@ -257,11 +287,17 @@ class TestPreparedCallableHbgA5(SceneTestCase):
             assert st_worker.host_dlopen_count - baseline == 1
             chip_worker._unregister_slot(_SLOT_PRIMARY)
             prepared = False
-            assert st_worker.host_dlopen_count - baseline == 1, "unregister must NOT decrement the host dlopen counter"
+            after_unreg = st_worker.host_dlopen_count
+            assert after_unreg - baseline == 1, (
+                f"unregister must NOT decrement the host dlopen counter; baseline={baseline}, after_unreg={after_unreg}"
+            )
             chip_worker._register_callable_at_slot(_SLOT_PRIMARY, callable_obj)
             prepared = True
             self._run_one(st_worker, _SLOT_PRIMARY, config, case)
-            assert st_worker.host_dlopen_count - baseline == 2
+            assert st_worker.host_dlopen_count - baseline == 2, (
+                f"after re-prepare expected counter +2 (two distinct host dlopens), "
+                f"got delta {st_worker.host_dlopen_count - baseline}"
+            )
         finally:
             if prepared:
                 chip_worker._unregister_slot(_SLOT_PRIMARY)
