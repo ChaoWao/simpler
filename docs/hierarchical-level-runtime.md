@@ -115,9 +115,12 @@ See [scheduler.md](scheduler.md) for the dispatch loop and coordination.
 
 The **execution layer**. `WorkerManager` holds two pools of `WorkerThread`s
 (next-level pool and sub pool). Each `WorkerThread` owns one std::thread that
-encodes `(callable, config, args_blob)` into a `MAILBOX_SIZE`-byte shared
-memory region, signals the pre-forked Python child, and spin-polls
-  `TASK_DONE`, returning an explicit completion outcome to the Scheduler.
+owns one shared-memory mailbox region and returns explicit progress/completion
+events to the Scheduler. Compatibility endpoints encode one task in the base
+frame and wait for `TASK_DONE`. Direct A2/A3 onboard chip endpoints instead
+multiplex two task frames: the same progress owner can poll the active native
+run while validating a staged successor, then activate that successor only
+after the predecessor's native finalization fence.
 
 - Next-level (chip) children run `_chip_process_loop`, which constructs a
   `ChipWorker` and dispatches each kernel through it.
@@ -150,8 +153,9 @@ what flows through `ChipWorker::run`.
                  │                                 │ pop directed/shared queue
                  │                                 │ resolve target (NL) or idle SUB
                  │                                 │ wt.dispatch(slot_id) ──────► WorkerThread
-                 │                                 │                              encode mailbox → spin-poll TASK_DONE
-                 │                                 │                              (blocking; child runs the kernel)
+                 │                                 │                              publish mailbox frame → drive progress
+                 │                                 │                              (compat: wait TASK_DONE;
+                 │                                 │                               A2/A3 chip: active + staged lanes)
                  │                                 │◄── completion_queue ────── on_complete_(completion)
                  │                                 │ on_task_complete:
                  │                                 │   success → COMPLETED

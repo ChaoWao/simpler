@@ -58,15 +58,20 @@ to C++:
 
 | Context | Namespace | How it's consumed |
 | ------- | --------- | ----------------- |
-| `w3.submit_next_level(handle, …)` dispatched to a chip child | `LOCAL_CHIP` | child resolves digest to its private chip slot, then calls `ChipWorker::run(local_slot, …)` |
+| `w3.submit_next_level(handle, …)` dispatched to a chip child | `LOCAL_CHIP` | child resolves digest to its private chip slot, then uses blocking `ChipWorker::run` on the compatibility path or the prepare/launch/poll/finalize native lifecycle on a two-frame endpoint |
 | `w4.submit_next_level(handle, …)` dispatched to an L3 `Worker` child | `LOCAL_PYTHON` | child resolves digest to an orchestration function and calls `inner_worker.run(orch_fn, …)` |
 | remote `w4.submit_next_level(handle, …)` dispatched to remote L3 | `REMOTE_TASK_DISPATCHER` | remote endpoint resolves digest in its dispatcher registry and calls its embedded L3 Worker |
 | `w3.submit_sub(handle, …)` dispatched to a SUB child | `LOCAL_PYTHON` | child resolves digest to a Python callable and calls `fn(args)` |
 
-All three paths share one mailbox wire format: `MAILBOX_OFF_CALLABLE` is
-reserved, the run's generation-safe pipeline lease follows `CallConfig`, and
-the 32-byte digest prefixes the args blob. The receiving child does the
-digest-to-slot resolve in its own address space.
+All three paths share the same logical task-frame payload:
+`MAILBOX_OFF_CALLABLE` is reserved, the run's generation-safe pipeline lease
+follows `CallConfig`, and the 32-byte digest prefixes the args blob. SUB,
+nested/remote L3, simulation, A5, and depth-one fallbacks carry that payload in
+the base compatibility frame. A direct A2/A3 onboard chip child can instead
+use either of two task frames after the base control frame, with
+`PREPARE_READY -> FRAME_STAGED -> ACTIVATE` separating validation from native
+launch. The receiving child resolves the digest in its own address space in
+both forms.
 
 The proposed remote L3 path keeps the same callable identity contract, but
 sends it in a versioned TASK frame. The remote endpoint resolves the digest
@@ -334,27 +339,55 @@ depth-one serial behavior instead of receiving an invalid slot-1 lease.
 
 Whole-run admission decides when a slot may be leased and carries the lease
 from `TaskSlot` through the chip mailbox into the runtime slot, so a production
-run now executes under the lease its run holds rather than unconditionally on
-slot 0. What this contract still does not enable is a second mailbox frame, a
-second device execution, or cross-run publication overlap: the endpoint remains
-a single synchronous round trip, and the scheduler dispatches only the run that
-holds the FIFO head and still owns its lease.
+run executes under the lease its run holds rather than unconditionally on slot
+0. The scheduler dispatches device work only for the run that holds the FIFO
+head and still owns its lease.
 
-The L2 host-runtime boundary is nevertheless progressable. Its opaque native
-run storage supports `prepare -> launch -> poll/wait -> finalize`, and the
-existing `simpler_run` / `ChipWorker.run` surface is the blocking composition
-of those phases. `prepare` constructs and binds the per-run `Runtime` without
-crossing the device launch fence; `launch` returns after the backend has
-actually submitted its execution; `finalize` owns validation, copy-back, DFX,
-and Runtime destruction. Until execution-only `DeviceRunner` state is made
-per-run, the backend admits only one prepared or launched native run at a time.
-The single-frame child intentionally continues to use the blocking composition;
-the phase split is the B3a ownership seam, not a claim of mailbox overlap.
+The L2 host-runtime boundary exposes `prepare -> launch -> poll/wait ->
+finalize`, and the existing `simpler_run` / `ChipWorker.run` surface is the
+blocking composition of those phases. `prepare` constructs and binds the
+per-run `Runtime` without crossing the device launch fence; `launch` returns
+after the backend has actually submitted its execution; `finalize` owns
+validation, copy-back, DFX, and Runtime destruction. One runner still permits
+only one unfinished native run, including a prepared-but-not-launched run.
 
-Simulation implements the same depth, so the contract means the same thing on
-both platforms: its runner owns one arena bank and one retained temporary
-buffer per slot, and its single-entry prebuilt-arena cache stays owned by
-bank 0 exactly as onboard's does.
+#### Two-frame endpoint staging lane
+
+A direct A2/A3 chip endpoint with a negotiated depth of at least two uses two
+task frames and advertises `supports_frame_staging`. One `WorkerThread` owns
+both frames and drives them through a non-blocking progress interface; the
+child process likewise has one loop that services control traffic, both task
+frames, and the single native-run lifecycle. There is no thread per frame.
+
+The active and successor paths are:
+
+```text
+IDLE -> TASK_READY    -> FRAME_STAGED -> TASK_LAUNCHED -> TASK_DONE | TASK_FAILED
+IDLE -> PREPARE_READY -> FRAME_STAGED -> ACTIVATE -> TASK_LAUNCHED
+                                               -> TASK_DONE | TASK_FAILED
+```
+
+`FRAME_STAGED` means only that the child validated and owns an immutable frame
+snapshot. It is distinct from both an L3 run in `RunPhase::PREPARED` and a
+runtime-specific `ChipWorkerNativeRun` in its prepared phase. While an active
+native run exists, the successor remains at `FRAME_STAGED`; native prepare is
+deferred until the predecessor has polled complete and finalized.
+
+The scheduler stages only the first eligible single NEXT_LEVEL task from the
+prepared FIFO successor. Tasks from the active run use only the active lane, so
+the second frame cannot create same-device execution overlap. Prepared groups
+remain on their normal queue and dispatch synchronously after FIFO promotion.
+Remote, SUB, A5, simulation, nested-worker, and single-frame endpoints retain
+the blocking compatibility path.
+
+Every task frame carries protocol, run, lease slot, generation, dispatch, and
+callable identity. Its sticky acceptance word is separate from the state word
+and is set only by the real native launch marker. `FRAME_STAGED` never satisfies
+the launch fence. A terminal pre-launch failure may conservatively retire the
+run-level acceptance waiter, but it does not set the frame's acceptance word.
+The parent clears that word only immediately before reusing an `IDLE` frame.
+Control commands continue to use a separate base frame, so they cannot
+overwrite either staged task frame.
 
 #### TRB temporary buffer
 
@@ -466,7 +499,8 @@ Local mailbox path:
 ```text
 slot.callable.digest ─┐
 slot.config          ─┼─► memcpy into shm mailbox ─► child resolves digest
-slot.task_args       ─┘    (dispatch_process)         and runs local slot
+slot.pipeline_lease  ─┤    (dispatch_process)         and runs local slot
+slot.task_args       ─┘
 ```
 
 For SUB children the same mailbox layout is reused; the Python child
@@ -609,7 +643,7 @@ L4 parent process
 | 1 | L4 parent Python | `w4.run(my_l4_orch)` → `scope_begin` → `my_l4_orch(orch4, ...)` |
 | 2 | L4 `Orchestrator.submit_next_level` | the L3 callable handle digest is stored in the slot's callable identity; slot pushed to L4's ready queue |
 | 3 | L4 Scheduler | pop the target worker's FIFO → that L3 child's mailbox |
-| 4 | L4 WorkerThread (PROCESS) | encode `(callable digest, config, args_blob)` into mailbox; write `TASK_READY`; spin-poll |
+| 4 | L4 WorkerThread (PROCESS compatibility endpoint) | encode `(callable digest, config, args_blob)` into the base frame; write `TASK_READY`; wait for terminal state |
 | 5 | L3 child `_child_worker_loop` | wake on `TASK_READY`; read digest → child-local slot → `my_l3_orch` |
 | 6 | L3 child | `inner_worker.run(my_l3_orch, args, cfg)` → `scope_begin` → `my_l3_orch(orch3, ...)` |
 | 7 | L3 `Orchestrator.submit_sub` | `l3_sub_handle` digest dispatched to L3's own sub worker child |
@@ -660,12 +694,12 @@ Step-by-step (one chip worker):
 | 2 | `Worker::run` | `scope_begin` → call `my_orch(&orch_, args.view(), cfg)` |
 | 3 | `Orchestrator::submit_next_level` | `slot = ring.alloc()`; move `chip_args` into `slot.task_args`; walk tags → `tensormap.lookup(a.data)`, `tensormap.lookup(b.data)`, `tensormap.insert(c.data, slot)`; push ready |
 | 4 | Scheduler thread | pop `slot` from worker 0's FIFO; resolve stable worker ID 0 to WT_chip_0; dispatch |
-| 5 | WT_chip_0 parent side | encode mailbox: write reserved callable field, `config`, digest prefix, `write_blob` of task_args; set `TASK_READY`; spin-poll |
-| 6 | chip_0 child process | wake on `TASK_READY`; resolve digest to local slot; `read_blob` → `view`; call `ChipWorker::run(local_slot, view, cfg)` |
-| 7 | `ChipWorker::run` | assemble `ChipStorageTaskArgs` POD (memcpy view); call `pto2_run_runtime(local_slot, &chip_storage, &cfg)` |
+| 5 | WT_chip_0 parent side | encode one leased task frame: write `config`, digest prefix, and the args blob; publish `TASK_READY` for the active lane or `PREPARE_READY` for a staged successor |
+| 6 | chip_0 child process | validate the frame and resolve its digest, then publish `FRAME_STAGED`; a successor waits for `ACTIVATE`, while the active frame may proceed immediately |
+| 7 | chip_0 native-run path | after activation, prepare and launch the native run; poll it to completion and finalize it before another staged frame may launch. Compatibility endpoints perform the equivalent operation through blocking `ChipWorker::run` |
 | 8 | runtime.so | translate host ptrs → device ptrs; dispatch AICPU / AICore; write output into `c`'s shm |
-| 9 | chip_0 child | `run` returns; write `TASK_DONE` |
-| 10 | WT_chip_0 parent | see `TASK_DONE`; push success completion |
+| 9 | chip_0 child | native finalization returns; write `TASK_DONE` |
+| 10 | WT_chip_0 parent | observe `TASK_DONE`; push success completion |
 | 11 | Scheduler | mark slot COMPLETED; fanout release (none in this DAG); scope_end will release scope ref |
 | 12 | `Worker::run` returns | user's `w3.run(...)` returns; `c` contains result in shm, visible to user |
 
@@ -694,8 +728,9 @@ runtime: `ChipStorageTaskArgs` (`task_args.h:157`) is already declared with
 
 `ChipWorker::run` takes `(local_slot, TaskArgsView, const CallConfig&)`
 directly. Wrapping them in a struct added no value and made mailbox serialization
-indirect. Task identity (slot_id) is held by the parent's WorkerThread
-for the completion callback, not passed into the child.
+indirect. The scheduler's parent-private `TaskSlot` is held by WorkerThread for
+the completion callback and is not passed into the child. The distinct,
+generation-safe `PipelineSlotLease.slot_id` does cross the mailbox boundary.
 
 ### Why slots on heap, mailbox on shm
 
@@ -703,7 +738,10 @@ Slots carry scheduler-only state (atomics, mutex, `std::vector` of fanout
 consumers) that is parent-private. Putting them in shm would force cross-
 process atomics and shm-safe containers. The only data that needs to cross
 the fork boundary is per-task: callable, config, args — and that fits in a
-~2 KB mailbox with a one-time memcpy per dispatch.
+fixed 32 KiB task frame with a one-time memcpy per dispatch. A two-frame-capable
+local mailbox reserves a separate 32 KiB control base plus two such task frames;
+single-frame compatibility endpoints use the base frame and leave the reserved
+task frames unused.
 
 ### Why TaskArgs in slot (not encoded blob in slot)
 

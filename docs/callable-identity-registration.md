@@ -45,12 +45,14 @@ dispatch. For chip targets, the local implementation also prewarms executable
 state before first use when startup or dynamic register control reaches the
 child before dispatch.
 
-The chip child loop requires a prepared slot at dispatch: a TASK_READY only
-consumes a slot already staged via `_CTRL_PREPARE` (dynamic register) or via the
-startup snapshot (initial callables, prepared before INIT_READY). Reaching
-TASK_READY for an unprepared slot is a control-flow error and fails loudly
-rather than lazily preparing in the dispatch path. The child never fetches
-missing callable bytes from the parent.
+The chip child loop requires a prewarmed callable slot at dispatch:
+`TASK_READY` and `PREPARE_READY` consume only a slot staged via `_CTRL_PREPARE`
+(dynamic register) or via the startup snapshot (initial callables, prepared
+before `INIT_READY`). Reaching either task state for an unprepared callable slot
+is a control-flow error and fails loudly rather than lazily materializing the
+callable in the dispatch path. This registration prewarm is distinct from
+two-frame endpoint `FRAME_STAGED` and from runtime-native run preparation. The
+child never fetches missing callable bytes from the parent.
 
 ### Chip Executable Prewarm
 
@@ -439,14 +441,22 @@ when the refcount reaches zero.
 Current local slot reuse rule:
 
 - A child resolves `hashid -> local_slot` immediately before execution.
-- Each endpoint has one local mailbox operation in flight at a time.
-- Parent-side dispatch and control operations to the same endpoint are
-  serialized by the per-WorkerThread mailbox lock.
-- Final unregister removes the hashid from resolution and releases the private
-  slot only after the current mailbox operation has completed.
+- A two-frame chip child may retain two resolved task snapshots while one
+  native run is active: the FIFO-head task and one staged successor. Both remain
+  users of the callable registration until their runs retire.
+- The base control frame is separate from the two task frames. Control commands
+  serialize with other control commands. Device-registry mutation waits until
+  the current native run is finalized, and final unregister also waits until no
+  published task frame still references that digest. Other controls may be
+  serviced while a task frame is active or staged.
+- Callers must not unregister a handle while any run may submit or use it. This
+  run-lifetime rule ensures final unregister cannot release a private slot still
+  retained by an active or staged frame.
+- A single-frame compatibility endpoint reuses the base frame for both task and
+  control traffic and therefore serializes those operations.
 
 This rule prevents stale slot reuse without exposing any extra public field.
-A future remote or multi-flight control channel must add explicit
+A future multi-flight control channel must add explicit
 `INSTALLED` / `TOMBSTONED` / `FAILED` target states, sequence numbers, and
 in-flight user draining before it can reuse private slots safely.
 
@@ -502,6 +512,21 @@ callable kind and target namespace. It never stores a child-local slot, `cid`,
 local handle id, or any other integer callable identity. Local mailbox task
 frames carry the fixed `sha256` digest.
 
+On a two-frame endpoint, the parent also binds the payload to a
+generation-safe dispatch identity:
+
+```text
+WorkerDispatch: task_slot, group_index, dispatch_id, prepare_only
+task-frame trailer: protocol, run_id, pipeline_slot, generation, dispatch_id
+```
+
+`WorkerThread` assigns `dispatch_id` only after its queue insertion succeeds.
+The callable digest remains part of the immutable payload, while the trailer
+lets both sides reject a stale activation, acceptance, or completion from an
+older use of the same pipeline frame. `FRAME_STAGED` confirms that this exact
+payload has been validated and retained; it does not resolve to a different
+callable identity and does not mean a native run has been prepared.
+
 The target child loop owns the final execution resolve:
 
 ```text
@@ -531,9 +556,10 @@ UNREGISTER_TOMBSTONE_ACTIVE
 ```
 
 Error messages should include worker id, namespace, `hashid`, and operation.
-The current local mailbox has one outstanding operation per endpoint and does
-not carry a separate sequence field; a future multi-flight control channel must
-add one. Messages must not include user-specific local absolute paths.
+Two-frame task traffic carries `dispatch_id`, but the base control protocol has
+no separate sequence field and remains single-flight under its control mutex. A
+future multi-flight control channel must add an explicit sequence. Messages
+must not include user-specific local absolute paths.
 
 ### Local Control Contract
 
@@ -567,7 +593,8 @@ Rules:
   and decrements the target-local `ref_count`.
 - A reply that returns a different `hashid` than requested is invalid.
 
-Local mailbox task callable reference:
+Local mailbox task callable reference (offsets are relative to the selected
+task frame):
 
 ```text
 MAILBOX_OFF_CALLABLE:
@@ -576,12 +603,26 @@ MAILBOX_OFF_CALLABLE:
 MAILBOX_OFF_ARGS:
   callable_hash_digest: uint8[32]
   task_args_blob: bytes
+
+task-frame trailer:
+  protocol, run_id, pipeline_slot, generation, dispatch_id
 ```
 
 The local mailbox task frame is fixed to `sha256` and carries only the raw
 32-byte digest. It does not carry `target_namespace`; the receiving child
 mailbox determines the target namespace and resolves the digest in its own
-`identity_table`.
+`identity_table`. On a two-frame endpoint the shared region has a separate base
+control frame followed by task frames for pipeline lease slots 0 and 1. The
+frame index and the serialized lease slot must agree. Only the real native
+launch writes the task frame's sticky acceptance word; successful callable
+resolution and `FRAME_STAGED` do not satisfy the launch fence.
+
+Single-frame endpoints retain the blocking compatibility layout: task and
+control operations alternate on the base frame and the two reserved task-frame
+regions are unused. The current facade enables the two-frame task protocol only
+for direct A2/A3 onboard chip children with a published pipeline depth of at
+least two; this contract does not imply support on A5, simulation, SUB, nested
+Worker, or remote endpoints.
 
 This task frame layout is a clean-break wire-format change from the prior
 integer callable-id layout where `MAILBOX_OFF_CALLABLE` carried the callable
@@ -600,15 +641,17 @@ Target unregister sequence:
 
 1. Decrement the target-local refcount for `hashid`.
 2. If the refcount remains nonzero, keep the mapping installed.
-3. If the refcount reaches zero, stop new local resolutions from `hashid` to
-   private slot.
-4. Clear executable state.
-5. Release the private slot for reuse.
-6. Remove or archive the `hashid` entry.
+3. If the refcount reaches zero, wait for any active native run and published
+   task frame using `hashid` to retire.
+4. Clear executable state. If this fails, retain the resolver and prepared-slot
+   bookkeeping unchanged.
+5. Remove the local `hashid -> private slot` resolver.
+6. Release the private slot for reuse.
 
-This sequence is the concrete unregister form of the target-local slot reuse
-rule for the current single-flight local mailbox. A future multi-flight target
-must insert a tombstone/drain phase before clearing executable state.
+The public rule still forbids unregister racing a run that may newly submit the
+handle. The local two-frame endpoint additionally protects already-published
+active and staged frames, so a concurrent final unregister cannot invalidate
+their resolved callable before launch or completion.
 
 If failed-register cleanup cannot be confirmed, the parent must not dispatch
 that hashid to the uncertain target again during the current Worker lifetime.
@@ -654,6 +697,11 @@ Local mailbox task frames are hashid-based:
 - The existing `TaskArgs` blob follows the digest prefix.
 - Chip and sub child loops resolve `hashid -> local_slot` immediately before
   execution.
+- A two-frame chip loop retains the resolved slot and immutable payload at
+  `FRAME_STAGED`; runtime-native prepare waits for activation and native-run
+  availability.
+- Protocol/run/lease-generation/dispatch identity guards task-frame reuse, and
+  a separate sticky word records only real native launch acceptance.
 - `ChipWorker.run(local_slot)` remains private to the child process.
 
 Register failure cleanup is conservative:
@@ -675,6 +723,8 @@ Required tests:
 | L3 run unchanged | `Worker.run(raw_orch_fn, ...)` still works at L3+. |
 | Submit handle only | Submit rejects bare strings and raw callables. |
 | Task frame digest | Local mailbox task frames carry the raw 32-byte digest. |
+| Staged-frame digest | A staged successor retains the digest resolution and cannot be activated under a reused frame identity. |
+| Real launch ACK | `FRAME_STAGED` never sets the sticky native-launch marker. |
 | Private slot resolve | Child loop resolves hashid to private slot. |
 | Slot independence | Same hashid runs with different private slots. |
 | Duplicate register | Repeated register returns independent handles. |

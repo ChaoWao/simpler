@@ -1,9 +1,8 @@
 # Worker Manager — Pool, Threading, and Dispatch
 
-Callable identity update: WorkerThread task frames now carry the submitted
-callable's 32-byte digest; the child resolves that digest to its private local
-slot. Older callable-id snippets below are historical shorthand for
-target-local internals. See
+Local task frames carry the submitted callable's 32-byte digest. The child
+resolves that digest to its private execution slot; no child-local slot crosses
+the mailbox boundary. See
 [callable-identity-registration.md](callable-identity-registration.md).
 
 `WorkerManager`, `WorkerThread`, and `WorkerEndpoint` together implement the
@@ -37,17 +36,20 @@ For where dispatched tasks come from, see [scheduler.md](scheduler.md).
 ```cpp
 class WorkerManager {
 public:
-    // Registration (before init). `mailbox` is a MAILBOX_SIZE-byte
-    // MAP_SHARED region; the real worker (a `ChipWorker` for NEXT_LEVEL,
-    // a Python callable for SUB) lives in the forked child.
-    void add_next_level(void *mailbox);
-    void add_next_level_at(int32_t worker_id, void *mailbox);
+    // Registration (before init). `task_frame_count` selects the blocking
+    // compatibility path (1) or the two-frame progress path (2).
+    void add_next_level(void *mailbox, int child_pid = -1,
+                        uint32_t task_frame_count = 1);
+    void add_next_level_at(int32_t worker_id, void *mailbox,
+                           int child_pid = -1,
+                           uint32_t task_frame_count = 1);
     void add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint);
-    void add_sub       (void *mailbox);
+    void add_sub(void *mailbox, int child_pid = -1);
 
     // Lifecycle
     void start(Ring *ring, OnCompleteFn on_complete,
                OnAcceptFn on_accept);              // starts all WorkerThreads
+    void stop_workers();                            // joins, retains pool entries
     void stop();
 
     // Scheduler API
@@ -60,9 +62,15 @@ private:
     struct LocalNextLevelEntry {
         int32_t worker_id;
         void *mailbox;
+        int child_pid;
+        uint32_t task_frame_count;
+    };
+    struct LocalSubEntry {
+        void *mailbox;
+        int child_pid;
     };
     std::vector<LocalNextLevelEntry> next_level_entries_;
-    std::vector<void *> sub_entries_;
+    std::vector<LocalSubEntry> sub_entries_;
     std::vector<std::unique_ptr<WorkerThread>> next_level_threads_;
     std::vector<std::unique_ptr<WorkerThread>> sub_threads_;
 };
@@ -82,6 +90,9 @@ the public worker id from the local worker vector index.
   another NEXT_LEVEL worker
 - **SUB-only idle selection**: `pick_idle_sub_excluding` chooses an idle SUB
   worker not already used by the same SUB group
+- **Two-step stop**: `stop_workers()` joins the execution threads while
+  retaining their pool entries, so Scheduler completion callbacks still see
+  stable worker objects; `stop()` then clears the pools
 
 Callable and remote-buffer eligibility is validated against the exact target
 during Orchestrator submission. It is not scheduling metadata and is not
@@ -91,12 +102,17 @@ stored on the task slot.
 
 ## 2. `WorkerThread`
 
-One WorkerThread per registered mailbox (i.e. per forked child worker).
+There is one `WorkerThread` and one `std::thread` per endpoint (for a local
+endpoint, per forked child). A two-frame endpoint does not add a thread per
+frame: the same thread owns its dispatch queue, both frame records, activation,
+acceptance, and completion progress.
 
 ```cpp
 struct WorkerDispatch {
     TaskSlot task_slot;
     int32_t  group_index = 0;    // 0 for non-group; 0..N-1 for group members
+    uint64_t dispatch_id = 0;    // assigned by WorkerThread after queue commit
+    bool prepare_only = false;   // stage for the FIFO successor
 };
 
 class WorkerThread {
@@ -106,8 +122,12 @@ public:
                const std::function<void(WorkerDispatch)> &on_accept,
                std::unique_ptr<WorkerEndpoint> endpoint);
     void stop();
-    void dispatch(WorkerDispatch d);       // slot id + group sub-index
-    bool idle() const;
+    void dispatch(WorkerDispatch d);          // reserve the active lane
+    void dispatch_prepared(WorkerDispatch d); // reserve the staged lane
+    bool activate_prepared(RunId run_id);
+    bool idle() const;                        // active lane is free
+    bool can_stage() const;                   // staged lane is free
+    bool busy() const;                        // either lane owns work
     const WorkerEndpointCaps &caps() const;
     int32_t worker_id() const;
 
@@ -119,28 +139,43 @@ private:
     std::mutex mu_;
     std::condition_variable cv_;
 
-    void loop();
+    void loop();  // the sole progress owner for this endpoint
     WorkerCompletion dispatch_process(WorkerDispatch d,
                                       const std::function<void()> &on_accept);
 };
 ```
 
-The WorkerThread's `std::thread` pumps the internal queue and calls
-`endpoint->run_with_accept(...)` once per dispatch. `LocalMailboxEndpoint`
-drives the shm handshake — one mailbox round trip per dispatch. The forked child loop
-that consumes the mailbox lives in Python (`_chip_process_loop` /
-`_sub_worker_loop` in `python/simpler/worker.py`); the parent does not fork
-children.
+For a blocking endpoint the thread pumps its queue and calls
+`endpoint->run_with_accept(...)` once per dispatch. For a progressable endpoint
+it publishes queued frames, forwards a latched activation, and polls monotonic
+`FRAME_STAGED`, `ACCEPTED`, and `COMPLETED` events. The forked child loop lives
+in Python (`_chip_process_loop`, `_child_worker_loop`, or `_sub_worker_loop` in
+`python/simpler/worker.py`); the parent does not fork children.
 
-`WorkerDispatch` carries only `{slot_id, group_index}`; the thread reads
-`slot.callable` / `slot.task_args` / `slot.config` on each dispatch via
-`ring->slot_state(slot_id)`. For a group slot with `group_size() == N`,
-the Scheduler pushes N `WorkerDispatch` entries (one per member) onto N
-exact target threads for NEXT_LEVEL, or N freely selected SUB threads. Each
-thread's `group_index` selects which
-`task_args_list[i]` view to hand to the worker. There is no
-`WorkerPayload` — the per-dispatch carrier is just the slot id plus the
-group sub-index.
+`WorkerDispatch` begins with `{task_slot, group_index}`. `WorkerThread` assigns
+`dispatch_id` under the queue lock only after the queue insertion succeeds, so
+a failed insertion consumes neither capacity nor identity. It also sets
+`prepare_only` for the one staged successor. The endpoint combines this carrier
+with `slot.run_id`, `slot.pipeline_lease`, `slot.callable`, `slot.task_args`,
+and `slot.config` read from `ring->slot_state(task_slot)`. The task frame's
+protocol/run/slot/generation/dispatch trailer makes frame reuse and late child
+publication detectable.
+
+The two capacity lanes have different meanings:
+
+- The **active lane** accepts ordinary tasks from the FIFO-head run. `idle()`
+  refers only to this lane, so an active run cannot use the second frame to run
+  two tasks on one device.
+- The **staged-successor lane** accepts at most the first eligible single
+  NEXT_LEVEL task from the prepared FIFO successor. It remains staged until
+  that run becomes the FIFO head and `activate_prepared(run_id)` succeeds.
+- Prepared groups retain the blocking path after FIFO promotion; they are not
+  split across staged lanes.
+
+For a group slot with `group_size() == N`, the Scheduler pushes N ordinary
+`WorkerDispatch` entries onto N exact NEXT_LEVEL targets, or N distinct idle
+SUB workers. `group_index` selects `task_args_list[i]`. There is no
+`WorkerPayload` wrapper.
 
 ---
 
@@ -152,126 +187,149 @@ The Python facade forks one child per mailbox **before**
 fork runs, avoiding the classical "fork in a multi-threaded process" hazard)
 and the child polls the mailbox for the lifetime of the worker.
 
-### 3.1 Parent-side dispatch
+The region currently consists of three equal `MAILBOX_FRAME_SIZE` frames:
 
-```cpp
-// `run(ring, d)` forwards here with an empty hook; the acceptance-aware
-// overload is what WorkerThread calls.
-WorkerCompletion LocalMailboxEndpoint::run_with_accept(
-    Ring *ring, const WorkerDispatch &d, const std::function<void()> &on_accept
-) {
-    TaskSlotState &s = *ring->slot_state(d.task_slot);
-    char *m = static_cast<char *>(mailbox_);
+| Frame | Two-frame chip endpoint | Single-frame compatibility endpoint |
+| ----- | ----------------------- | ----------------------------------- |
+| Base (0) | Startup and control state only | Startup, control, and the one blocking task round trip |
+| Task 0 (1) | Pipeline lease slot 0 | Unused |
+| Task 1 (2) | Pipeline lease slot 1 | Unused |
 
-    // Write task data: reserved callable field, config, digest prefix, then
-    // length-prefixed TaskArgs blob. Tags are stripped; only
-    // [digest][T][S][tensors][scalars] crosses the fork boundary.
-    uint64_t reserved = 0;
-    memcpy(m + MAILBOX_OFF_CALLABLE, &reserved, sizeof(reserved));
-    memcpy(m + MAILBOX_OFF_CONFIG, &s.config, sizeof(CallConfig));
-    memcpy(m + MAILBOX_OFF_TASK_CALLABLE_HASH, s.callable.digest.data(), 32);
-    const TaskArgs &args = s.is_group() ? s.task_args_list[d.group_index] : s.task_args;
-    write_blob(m + MAILBOX_OFF_TASK_ARGS_BLOB, args);
+`task_frame_count` is an endpoint contract, not a count inferred from the
+allocation size. Parent registration uses each direct chip child's own
+published depth, while whole-run admission uses the minimum depth across the
+chip set. The current Python facade selects two frames only for a direct A2/A3
+onboard chip child whose published pipeline depth is at least two. SUB,
+nested-Worker, remote, A5, simulation, and depth-one local endpoints use the
+single-frame blocking contract.
 
-    // Signal child
-    write_state(mailbox_, MailboxState::TASK_READY);
+### 3.1 Single-frame compatibility path
 
-    // Spin-poll for completion. The task's latency runs through this wait, so
-    // it never sleeps (codestyle rule 5). A child that dies without publishing
-    // TASK_DONE would spin here forever, so its liveness is sampled on a
-    // kChildLivenessPollPeriod steady-clock period rather than an iteration
-    // count, which no longer maps to a bounded time at spin speed.
-    auto next_liveness_check = steady_clock::now() + kChildLivenessPollPeriod;
-    bool acceptance_observed = false;
-    while (true) {
-        MailboxState state = read_state(mailbox_);
-        // Launch acceptance is a sticky word, not a state: the child sets it
-        // before TASK_DONE and nothing clears it until the next TASK_READY, so
-        // a task that finishes between two polls cannot lose the ACK. Read
-        // after the state so a TASK_DONE observation implies it is visible.
-        if (!acceptance_observed && read_accepted(mailbox_)) {
-            acceptance_observed = true;
-            if (on_accept) on_accept();
-        }
-        if (state == MailboxState::TASK_DONE) break;
-        auto now = steady_clock::now();
-        if (now >= next_liveness_check) {
-            next_liveness_check = now + kChildLivenessPollPeriod;
-            std::string death = check_child_death();
-            if (!death.empty()) {
-                completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
-                completion.error_message = "LocalMailboxEndpoint::run: " + death;
-                return completion;
-            }
-        }
-    }
+`LocalMailboxEndpoint::run_with_accept` serializes task and control use of the
+base frame. It copies `CallConfig`, `PipelineSlotLease`, the 32-byte callable
+digest, and the length-prefixed `TaskArgs` blob, publishes `TASK_READY`, then
+spin-polls the base state to `TASK_DONE`. This dispatch wait never sleeps because
+task latency passes through it. A steady-clock liveness sample turns a child
+that exits before completion into `ENDPOINT_FAILURE`.
 
-    int err = read_error(mailbox_);
-    write_state(mailbox_, MailboxState::IDLE);
-    return err == 0
-        ? WorkerCompletion{d.task_slot, d.group_index, EndpointOutcome::SUCCESS, ""}
-        : WorkerCompletion{d.task_slot, d.group_index, EndpointOutcome::TASK_FAILURE,
-                           read_error_msg(mailbox_)};
-}
+The child uses `_run_mailbox_loop`, resolves the digest to a private local slot,
+executes the task synchronously, writes its error tuple, and then publishes
+`TASK_DONE`. This path retains the established behavior for endpoints that do
+not advertise `supports_frame_staging`.
+
+### 3.2 Two-frame progress path
+
+A two-frame `LocalMailboxEndpoint` advertises `supports_frame_staging` and is
+driven through `submit_progress`, `activate_progress`, and `poll_progress`.
+The owning `WorkerThread` is the only parent-side progress owner. The child also
+uses one `run_two_frame_loop`; it services the separate control base, stages
+both task frames, and owns the one native-run lifecycle.
+
+The ordinary active dispatch and the staged successor use distinct initial
+states:
+
+```text
+active:    IDLE -> TASK_READY    -> FRAME_STAGED -> TASK_LAUNCHED
+                                                   -> TASK_DONE | TASK_FAILED
+successor: IDLE -> PREPARE_READY -> FRAME_STAGED -> ACTIVATE
+                                                   -> TASK_LAUNCHED
+                                                   -> TASK_DONE | TASK_FAILED
 ```
 
-Parent-side cost per dispatch:
+`FRAME_STAGED` means the child validated the frame identity and arguments,
+resolved the callable digest, rewrote any mapped host addresses, and retained
+an immutable snapshot. It does **not** mean that the runtime-specific native
+run is prepared. While one native run is active, the successor remains at
+`FRAME_STAGED`. Only after activation and after the predecessor is polled and
+finalized does the child call native `prepare`, `launch`, `poll`, and
+`finalize` for the successor. This preserves the current one-unfinished-native-
+run contract.
 
-- One reserved `uint64`, one `CallConfig`, one 32-byte digest, and one
-  TaskArgs blob
-- One signal (`write_state`)
-- Spin-poll loop, never a sleep — a task's latency passes through this wait
-  ([codestyle](../.claude/rules/codestyle.md) rule 5). Child liveness is sampled
-  on a steady-clock period, so a dead child ends the wait with
-  `ENDPOINT_FAILURE` instead of spinning the parent forever
-- A sticky launch-acceptance word, observed before completion and cleared only
-  when the parent publishes the next `TASK_READY`
-- One explicit completion outcome: success, task failure, or endpoint failure
+Activation is sticky on the parent side: FIFO promotion may be observed before
+the child reaches `FRAME_STAGED`. The endpoint records that permission and
+publishes `ACTIVATE` only by a compare/exchange from the matching
+`FRAME_STAGED` state. The child chooses activated frames by `dispatch_id`, so a
+later frame cannot bypass an earlier eligible dispatch.
 
-Total ~nanoseconds overhead; the wait is dominated by actual kernel execution.
+Task-frame publication briefly shares the base control mutex so it has a
+defined order relative to a control request. Once published, ordinary controls
+may run while the device task is active. Registry-mutating controls are
+deferred until the active native run is finalized; final unregister also waits
+for every published frame using that digest to retire.
 
-### 3.2 Child loop
+Each task frame is bound to its pipeline lease slot and carries a protocol
+trailer with `{run_id, slot_id, generation, dispatch_id}`. Parent and child
+recheck that identity at staging, activation, acceptance, and completion. A
+stale identity, invalid state, unresolved control timeout, or dead child poisons
+the endpoint; the parent returns an endpoint-failure completion for every frame
+it still owns instead of reusing uncertain bytes. Those completions are withheld
+until the child process has exited (or a non-waitable test endpoint has marked
+every owned frame terminal), so releasing a run lease can never race native
+cleanup.
 
-The child loop lives in Python — see `_chip_process_loop` and
-`_sub_worker_loop` in `python/simpler/worker.py`. Each child polls
-`MAILBOX_OFF_STATE`, decodes the digest-prefixed args blob on `TASK_READY`,
-resolves the digest to its private local slot/callable, writes back any error,
-and publishes `TASK_DONE`. An A2A3 onboard chip child also exposes its mailbox
-state word to the native runner, which publishes `TASK_ACCEPTED` after both
-kernel launches succeed. SUB, remote, A5, and failure paths use WorkerThread's
-completion-time acceptance fallback.
+### 3.3 Launch acceptance
+
+Launch acceptance is a sticky per-frame word, separate from `MailboxState`.
+The parent clears it only immediately before publishing a new task into an
+`IDLE` frame. The native launch call receives the word's address and sets it
+only when the real launch boundary is crossed. `FRAME_STAGED`, `ACTIVATE`, and
+the parent-side progress bookkeeping never manufacture an ACK.
+
+The parent reports `ACCEPTED` at most once per `dispatch_id`, before its terminal
+completion when the real word is observed. A task that fails before launch
+still advances the run-level acceptance waiter at terminal completion so the
+waiter cannot hang, but that conservative fallback does not set the mailbox
+word. Blocking chip dispatch uses the same sticky marker. Endpoint paths with
+no earlier native marker retain completion-time acceptance.
+
 The child inherits the parent's full address space at fork time, so:
 
 - ChipCallable objects (pre-fork allocated) are COW-visible at the same VA
 - The Python callable registry is COW-visible
 - Tensor data in `torch.share_memory_()` regions is fully shared (MAP_SHARED)
 
-### 3.3 Mailbox layout
+### 3.4 Frame layout
 
 ```text
-offset 0:                         int32   state
-offset 4:                         int32   error
-offset 8:                         uint64  reserved task callable field
-                                          or control sub-command
-offset 16:                        CallConfig config
+frame + 0:                        int32   state
+frame + 4:                        int32   error
+frame + 8:                        uint64  reserved task field
+                                          or base-frame control sub-command
+frame + 16:                       CallConfig config / control args
+MAILBOX_OFF_PIPELINE_LEASE:       PipelineSlotLease
 MAILBOX_OFF_TASK_CALLABLE_HASH:   uint8[32] callable digest
 MAILBOX_OFF_TASK_ARGS_BLOB:       bytes [int32 T][int32 S]
                                         [Tensor x T][uint64_t x S]
-tail:                             fixed-size NUL-terminated error message
+task-frame trailer:               protocol, run id, lease slot,
+                                  lease generation, dispatch id
+MAILBOX_OFF_ACCEPTED:             int32 sticky native-launch marker
+frame tail:                       fixed-size NUL-terminated error message
 ```
 
-The current mailbox size is the C++ `MAILBOX_SIZE` constant exported through
-the nanobind module; Python derives its offsets from the same binding where
-possible so the two sides cannot drift silently.
+The C++ `MAILBOX_FRAME_SIZE` and `MAILBOX_SIZE` constants are exported through
+the nanobind module. Python derives frame slicing and offsets from those
+bindings where possible. `MAILBOX_ARGS_CAPACITY` ends before the protocol
+trailer, acceptance word, and error-message tail.
 
-### 3.4 Shutdown
+### 3.5 Stop and child shutdown
 
-`WorkerManager::shutdown_children()` writes `SHUTDOWN` to every registered
-endpoint; for `LocalMailboxEndpoint` this writes `SHUTDOWN` to the mailbox.
-Each child loop sees it on its next poll and exits. The Python facade owns the
-child PIDs and calls `waitpid()` after writing `SHUTDOWN` to its own mailbox
-copy. The parent's `WorkerThread::stop()` only joins the C++ dispatcher thread
-— it does not own the child process.
+`Worker::close()` first asks the Scheduler to stop admitting dispatch, then
+calls `WorkerManager::stop_workers()` while Scheduler callbacks and worker pool
+entries are still valid. A progressable `WorkerThread` repeatedly publishes
+`SHUTDOWN` on the control base until its frames terminalize; repetition prevents
+a concurrently finishing control handler's `CONTROL_DONE` from losing the stop
+request. The child finalizes any active native run and marks every
+active or staged task frame failed before leaving; the parent drains those
+terminal events, brings its in-flight count to zero, and joins the one progress
+thread. The Scheduler is joined only after worker threads can no longer invoke
+completion callbacks, and `WorkerManager::stop()` then clears the pools.
+
+A single-frame endpoint has no staged frame to cancel; its blocking round trip
+finishes before its dispatcher thread joins. The Python facade owns every child
+PID. After native worker teardown it broadcasts `SHUTDOWN` to all child base
+frames, reaps them under one shared deadline, and closes their shared-memory
+objects. C++ endpoint code may observe or reap an early child exit for liveness
+diagnostics, but it does not own the normal `waitpid()` lifecycle.
 
 ---
 
