@@ -217,6 +217,12 @@ void DeviceRunnerBase::release_graph_execution_buffers() {
     }
 }
 
+void DeviceRunnerBase::abandon_graph_execution_buffers() {
+    for (GraphExecutionBufferMap &by_key : graph_execution_buffers_) {
+        by_key.clear();
+    }
+}
+
 void DeviceRunnerBase::clear_temporary_buffer() {
     for (size_t slot = 0; slot < retained_temp_addrs_.size(); ++slot) {
         if (retained_temp_addrs_[slot] == nullptr) continue;
@@ -1062,7 +1068,11 @@ int DeviceRunnerBase::launch_aicpu_payload(
     return load_aicpu_op_.LaunchBuiltInOp(stream, args, args_size, aicpu_num, kernel_name);
 }
 
-int DeviceRunnerBase::finalize_common() {
+int DeviceRunnerBase::finalize_common() { return finalize_common_impl(false); }
+
+int DeviceRunnerBase::abandon_common_after_device_failure() { return finalize_common_impl(true); }
+
+int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     int rc = 0;
     auto capture = [&rc](int err) {
         if (err != 0 && rc == 0) rc = err;
@@ -1088,27 +1098,49 @@ int DeviceRunnerBase::finalize_common() {
     // error-state stream at finalize wedges subsequent tests (observed: 507018
     // / 507899 / 507901 cascade across the whole st-onboard-a2a3 suite).
     // rtStreamDestroy on an error-state stream is the supported teardown path.
+    if (abandon_device_resources) {
+        LOG_WARN("Fatal teardown: force reset/quarantine finished; skipping per-resource RTS destroy/free calls");
+    }
     if (stream_aicpu_ != nullptr) {
-        capture(rtStreamDestroy(stream_aicpu_));
+        if (!abandon_device_resources) {
+            capture(rtStreamDestroy(stream_aicpu_));
+        }
         stream_aicpu_ = nullptr;
     }
     if (stream_aicore_ != nullptr) {
-        capture(rtStreamDestroy(stream_aicore_));
+        if (!abandon_device_resources) {
+            capture(rtStreamDestroy(stream_aicore_));
+        }
         stream_aicore_ = nullptr;
     }
 
-    // Release the async-DMA provider (SDMA STARS streams + workspace) while RTS
-    // is live, before the subclass device reset. Null unless the Worker was
-    // created with SDMA enabled; idempotent so a reused runner re-provisions.
+    // Release the async-DMA provider (SDMA STARS streams + workspace) only on
+    // healthy teardown. A fatal reset invalidates its device resources as a
+    // group, so running its per-stream destructor afterwards is unsafe.
     if (dma_workspace_handle_ != nullptr) {
-        dma_workspace_release(dma_workspace_handle_);
+        if (!abandon_device_resources) {
+            dma_workspace_release(dma_workspace_handle_);
+        }
         dma_workspace_handle_ = nullptr;
     }
+    for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind)
+        dma_workspace_addr_[kind] = 0;
 
     // LoadAicpuOp holds a binary_handle_ from rtsBinaryLoadFromFile; unload it
     // here while RTS is live so ~LoadAicpuOp's idempotent Finalize() no-ops
     // instead of unloading after aclFinalize (see the invariant above).
-    load_aicpu_op_.Finalize();
+    if (abandon_device_resources) {
+        load_aicpu_op_.AbandonAfterDeviceFailure();
+        // A force reset invalidates every device allocation at once. If the
+        // reset failed, the device is quarantined and per-allocation rtFree is
+        // still unsafe. Forget allocator ownership before the shared host-side
+        // cleanup below, so arena/free backstops become local no-ops. Per-run
+        // kernel arguments live on PreparedExecution and are abandoned by
+        // cleanup_execution() before finalize is reached.
+        mem_alloc_.abandon_after_device_failure();
+    } else {
+        load_aicpu_op_.Finalize();
+    }
 
     // aicore_bin_handle_ was registered once via rtRegisterAllKernel; CANN
     // releases its device-side state when the device context tears down.
@@ -1120,12 +1152,14 @@ int DeviceRunnerBase::finalize_common() {
     aicpu_init_launched_ = false;
 
     // Release any chip callable buffers callers forgot to unregister.
-    for (auto &kv : chip_callable_buffers_) {
-        mem_alloc_.free(reinterpret_cast<void *>(kv.second.chip_dev));
-        LOG_DEBUG(
-            "Freed chip callable buffer: chip_dev=0x%lx, size=%zu, hash=0x%lx", kv.second.chip_dev,
-            kv.second.total_size, kv.first
-        );
+    if (!abandon_device_resources) {
+        for (auto &kv : chip_callable_buffers_) {
+            mem_alloc_.free(reinterpret_cast<void *>(kv.second.chip_dev));
+            LOG_DEBUG(
+                "Freed chip callable buffer: chip_dev=0x%lx, size=%zu, hash=0x%lx", kv.second.chip_dev,
+                kv.second.total_size, kv.first
+            );
+        }
     }
     chip_callable_buffers_.clear();
 
@@ -1148,9 +1182,15 @@ int DeviceRunnerBase::finalize_common() {
     // mem_alloc_.finalize() so the arenas free through the still-live
     // allocator, not after it.
     for (auto &bank : arena_banks_) {
-        bank->gm_heap.release();
-        bank->gm_sm.release();
-        bank->runtime_pool.release();
+        if (abandon_device_resources) {
+            bank->gm_heap.abandon_after_device_failure();
+            bank->gm_sm.abandon_after_device_failure();
+            bank->runtime_pool.abandon_after_device_failure();
+        } else {
+            bank->gm_heap.release();
+            bank->gm_sm.release();
+            bank->runtime_pool.release();
+        }
     }
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_key_.clear();
@@ -1159,20 +1199,30 @@ int DeviceRunnerBase::finalize_common() {
     prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
     prebuilt_runtime_arena_cache_image_.clear();
 
-    release_graph_execution_buffers();
-    clear_temporary_buffer();
+    if (abandon_device_resources) {
+        abandon_graph_execution_buffers();
+        retained_temp_addrs_.fill(nullptr);
+        retained_temp_sizes_.fill(0);
+    } else {
+        release_graph_execution_buffers();
+        clear_temporary_buffer();
+    }
 
     // Free the device-phase/task-timing buffer (allocated lazily in run()) while
     // mem_alloc_ and the device context are still live. free_tensor() routes
     // through mem_alloc_.free(), so it must run before mem_alloc_.finalize()
     // and before the subclass's `rtDeviceReset()` tears down the device runtime.
     if (device_wall_dev_ptr_ != nullptr) {
-        free_tensor(device_wall_dev_ptr_);
+        if (!abandon_device_resources) {
+            free_tensor(device_wall_dev_ptr_);
+        }
         device_wall_dev_ptr_ = nullptr;
     }
 
     // Free all remaining allocations (including handshake buffer and binGmAddr)
-    mem_alloc_.finalize();
+    if (!abandon_device_resources) {
+        mem_alloc_.finalize();
+    }
 
     block_dim_ = 0;
     worker_count_ = 0;
@@ -1186,6 +1236,9 @@ int DeviceRunnerBase::finalize_common() {
         bank->cached_gm_heap_size = 0;
         bank->cached_gm_sm_size = 0;
         bank->cached_runtime_arena_size = 0;
+    }
+    if (abandon_device_resources) {
+        LOG_WARN("Fatal teardown: host-side ownership cleared without further device calls");
     }
     return rc;
 }

@@ -295,5 +295,5 @@ private:
     // whose init succeeded, in the only safe order (stop() joins mgmt before
     // poll). Idempotent — collectors that never initialized are skipped.
     // Does not release device memory; full release happens in finalize().
-    void finalize_collectors();
+    void finalize_collectors(bool abandon_device_resources = false);
 };

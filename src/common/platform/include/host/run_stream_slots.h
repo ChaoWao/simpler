@@ -157,6 +157,14 @@ public:
         return first_error;
     }
 
+    /** Forget every handle after device reset without invoking destroy_. */
+    void abandon_all() {
+        for (Slot &s : slots_) {
+            s.aicpu = nullptr;
+            s.aicore = nullptr;
+        }
+    }
+
     void *aicpu(unsigned slot) const { return slot < slots_.size() ? slots_[slot].aicpu : nullptr; }
     void *aicore(unsigned slot) const { return slot < slots_.size() ? slots_[slot].aicore : nullptr; }
     bool ready(unsigned slot) const { return aicpu(slot) != nullptr && aicore(slot) != nullptr; }

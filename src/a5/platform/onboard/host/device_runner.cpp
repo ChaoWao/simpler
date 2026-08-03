@@ -42,6 +42,7 @@
 #include "utils/fnv1a_64.h"
 #include "host/host_regs.h"  // Register address retrieval
 #include "host/raii_scope_guard.h"
+#include "utils/fatal_shutdown_latch.h"
 
 // dep_gen_replay_emit_deps_json: strong symbol provided by
 // runtime/tensormap_and_ringbuffer/host/dep_gen_replay.cpp when that runtime is
@@ -501,12 +502,23 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
 void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool launched) noexcept {
     if (!prepared.resources_owned) return;
 
+    // A poisoned card cannot retire per-resource frees, and issuing them can
+    // block in the driver. Drop host-side ownership instead; finalize()'s force
+    // reset invalidates the whole device generation.
+    const bool abandon = device_unusable_.load(std::memory_order_acquire);
+
     // Collectors stop before device/runtime arguments and register buffers.
-    finalize_collectors();
-    (void)prepared.kernel_args.finalize_device_kernel_args();
-    (void)prepared.kernel_args.finalize_runtime_args();
+    finalize_collectors(abandon);
+    if (abandon) {
+        prepared.kernel_args.abandon_after_device_failure();
+    } else {
+        (void)prepared.kernel_args.finalize_device_kernel_args();
+        (void)prepared.kernel_args.finalize_runtime_args();
+    }
     if (prepared.kernel_args.args.regs != 0) {
-        (void)mem_alloc_.free(reinterpret_cast<void *>(prepared.kernel_args.args.regs));
+        if (!abandon) {
+            (void)mem_alloc_.free(reinterpret_cast<void *>(prepared.kernel_args.args.regs));
+        }
         prepared.kernel_args.args.regs = 0;
     }
     prepared.resources_owned = false;
@@ -711,6 +723,58 @@ int DeviceRunner::finalize() {
         return 0;
     }
 
+    // Fatal cleanup must not walk poisoned streams, mappings, or allocations.
+    // Stop collector threads locally, drain and force-reset the card, then
+    // forget the old generation's handles.
+    if (device_unusable_.load(std::memory_order_acquire)) {
+        finalize_collectors(true);
+
+        // force_reset_device() drains before it resets and returns 0 only when
+        // its post-reset probe confirms the card, so a second pass runs against
+        // a settled card and can recover a poison the first pass could not. A
+        // Worker holding CP-process SDMA streams gets a single attempt: there a
+        // non-confirming reset already blocks on the driver's remote-event
+        // timeout, which a retry only multiplies. Read dma_workspace_handle_
+        // before abandon_common_after_device_failure() clears it.
+        constexpr int kFatalResetAttempts = 3;
+        const bool sdma_provisioned = dma_workspace_handle_ != nullptr;
+        int reset_rc = attempt_fatal_reset(
+            [this]() {
+                return force_reset_device();
+            },
+            sdma_provisioned ? 1 : kFatalResetAttempts
+        );
+        const bool reset_confirmed = reset_rc == 0;
+        if (!reset_confirmed) {
+            LOG_ERROR(
+                "Fatal teardown: force reset of device %d did not confirm clean (rc=%d); "
+                "quarantining old handles without per-resource RTS calls",
+                device_id_, reset_rc
+            );
+        }
+
+        int abandon_rc = abandon_common_after_device_failure();
+        if (acl_ready_) {
+            if (reset_confirmed) {
+                int finalize_rc = aclFinalize();
+                if (finalize_rc != 0) {
+                    LOG_ERROR("aclFinalize failed during fatal finalize: %d", finalize_rc);
+                    if (abandon_rc == 0) abandon_rc = finalize_rc;
+                }
+            } else {
+                LOG_WARN("Fatal teardown: skipping aclFinalize because device reset was not confirmed");
+            }
+            acl_ready_ = false;
+        }
+
+        device_id_ = -1;
+        if (reset_confirmed) {
+            device_unusable_.store(false, std::memory_order_release);
+        }
+        LOG_WARN("DeviceRunner finalized after fatal device failure");
+        return abandon_rc != 0 ? abandon_rc : reset_rc;
+    }
+
     int rc = attach_current_thread(device_id_);
     if (rc != 0) {
         LOG_ERROR("Failed to attach finalize thread to device %d: %d", device_id_, rc);
@@ -753,67 +817,23 @@ int DeviceRunner::finalize() {
         }
     }
 
-    // On the poison path the soft reset above does NOT clear the op-timeout
-    // sticky-error — a fresh in-process Worker.init then fails at rtStreamCreate
-    // 507899. A FORCE reset clears it, so the next Worker on this card inits
-    // clean in the SAME process and the remaining tests run instead of cascading
-    // / being skipped. Only reached on the (rare) device-poison path; onboard
-    // work always holds an exclusive task-submit lock on the card (enforced by
-    // .claude/rules/running-onboard.md), and the reset is verified to scope to
-    // this card alone, so it cannot disturb other devices/users.
-    int reset_rc = 0;
-    if (device_unusable_.load(std::memory_order_acquire)) {
-        // Bounded retry: a single force reset normally clears the op-timeout
-        // sticky-error, but the poison occasionally needs a drain-then-reset
-        // cycle, so retry up to kMaxResetAttempts. force_reset_device() drains
-        // (best-effort) and resets inside its own ACL/bound scope, and returns 0
-        // only when its post-reset probe confirms the card is actually clean.
-        constexpr int kMaxResetAttempts = 3;
-        for (int attempt = 1; attempt <= kMaxResetAttempts; ++attempt) {
-            reset_rc = force_reset_device();
-            if (reset_rc == 0) {
-                if (attempt > 1) {
-                    LOG_WARN(
-                        "DeviceRunner finalize: device %d recovered on force-reset attempt %d/%d", device_id_, attempt,
-                        kMaxResetAttempts
-                    );
-                }
-                break;
-            }
-            LOG_ERROR(
-                "DeviceRunner finalize: force-reset attempt %d/%d of device %d did not confirm clean (rc=%d)", attempt,
-                kMaxResetAttempts, device_id_, reset_rc
-            );
-        }
-        if (reset_rc != 0) {
-            LOG_ERROR(
-                "DeviceRunner finalize: device %d still poisoned after %d force-reset attempts; leaving it marked "
-                "unusable so the layer above (st_worker poison-skip + dispatcher retry) recovers it.",
-                device_id_, kMaxResetAttempts
-            );
-        }
-    }
-
+    // Only the healthy path reaches here: a poisoned card returned from the
+    // fatal branch at the top of finalize(), which owns the force reset.
     device_id_ = -1;
-    // Clear the poison flag only if the force reset actually recovered the card,
-    // so a still-poisoned card stays flagged: a reused DeviceRunner then fails
-    // admission instead of being treated as clean. On the normal (not
-    // unusable) path reset_rc stays 0 and the flag is already false.
-    if (reset_rc == 0) {
-        device_unusable_.store(false, std::memory_order_release);
-    }
-    return rc != 0 ? rc : reset_rc;
+    device_unusable_.store(false, std::memory_order_release);
+    return rc;
 }
 
 // `launch_aicpu_kernel` and `launch_aicore_kernel` live on `DeviceRunnerBase`.
 
-void DeviceRunner::finalize_collectors() {
+void DeviceRunner::finalize_collectors(bool abandon_device_resources) {
     // On drain or enqueue rollback, release the diagnostics collectors' shared
     // memory. They are only re-initialized per run, so a
     // Worker reused across runs (e.g. a pytest session-scoped worker pool) would
     // otherwise re-enter init_chip_swimlane() with stale state still allocated.
     // Matches a2a3's finalize_collectors().
-    auto free_cb = [this](void *dev_ptr) -> int {
+    auto free_cb = [this, abandon_device_resources](void *dev_ptr) -> int {
+        if (abandon_device_resources) return 0;
         return mem_alloc_.free(dev_ptr);
     };
     if (chip_swimlane_collector_.is_initialized()) {

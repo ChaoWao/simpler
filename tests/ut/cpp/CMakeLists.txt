@@ -485,6 +485,7 @@ target_include_directories(test_runtime_orch_so PRIVATE
 )
 add_common_utils_test(test_device_arena common/test_device_arena.cpp)
 add_common_utils_test(test_thread_completion_gate common/test_thread_completion_gate.cpp)
+add_common_utils_test(test_fatal_shutdown_latch common/test_fatal_shutdown_latch.cpp)
 add_common_utils_test(test_buffer_pool_manager common/test_buffer_pool_manager.cpp)
 target_sources(test_buffer_pool_manager PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/log/host_log.cpp

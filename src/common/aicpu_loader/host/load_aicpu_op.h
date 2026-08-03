@@ -123,6 +123,14 @@ public:
     void Finalize();
 
     /**
+     * @brief Forget runtime handles without calling rtsBinaryUnload.
+     *
+     * Used after a force reset, or when the device is already unusable and
+     * another runtime teardown request could block waiting for device service.
+     */
+    void AbandonAfterDeviceFailure();
+
+    /**
      * @brief Launch a runtime SO entry point via rtsLaunchCpuKernel.
      *
      * @param stream       RTS stream

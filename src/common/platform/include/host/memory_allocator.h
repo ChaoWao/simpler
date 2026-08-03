@@ -92,6 +92,20 @@ public:
     int finalize();
 
     /**
+     * Forget tracked device pointers without calling the platform free API.
+     *
+     * Use only after a device reset has already invalidated every allocation,
+     * or when a fatal device state makes further runtime calls unsafe. This
+     * makes the RAII destructor a no-op while leaving healthy teardown on the
+     * normal finalize() path.
+     */
+    void abandon_after_device_failure() {
+        std::scoped_lock lk(mu_);
+        ptr_size_map_.clear();
+        committed_bytes_ = 0;
+    }
+
+    /**
      * Get number of tracked allocations
      *
      * @return Number of currently tracked pointers

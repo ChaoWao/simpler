@@ -913,6 +913,23 @@ protected:
     void release_graph_execution_buffers();
 
     /**
+     * Drop the retained graph-execution buffers without freeing them.
+     *
+     * The fatal counterpart of release_graph_execution_buffers(): a force reset
+     * has already invalidated every allocation, so only the host-side map is
+     * cleared.
+     */
+    void abandon_graph_execution_buffers();
+
+    /**
+     * Clear host-side ownership after a fatal device failure without issuing
+     * per-resource RTS calls. The caller must first attempt a force reset.
+     */
+    int abandon_common_after_device_failure();
+
+    int finalize_common_impl(bool abandon_device_resources);
+
+    /**
      * Stamp the active callable_id onto a Runtime so the AICPU knows which
      * orch_so_table_ slot to dispatch. The orch SO itself was already delivered
      * device-side at register time (launch_device_register), so nothing else

@@ -101,6 +101,17 @@ struct KernelArgsHelper {
     int finalize_device_kernel_args();
 
     /**
+     * Clear device-pointer bookkeeping without calling the allocator.
+     *
+     * Used only by fatal teardown after reset/quarantine.
+     */
+    void abandon_after_device_failure() {
+        args.runtime_args = nullptr;
+        device_k_args_ = nullptr;
+        allocator_ = nullptr;
+    }
+
+    /**
      * Implicit conversion operators for seamless use with runtime APIs.
      *
      * These allow `KernelArgsHelper` to be used wherever a payload

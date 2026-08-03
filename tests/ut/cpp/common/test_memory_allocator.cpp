@@ -10,6 +10,7 @@
  */
 
 #include <cstddef>
+#include <cstdlib>
 
 #include <gtest/gtest.h>
 
@@ -73,6 +74,23 @@ TEST(MemoryAllocatorTest, FinalizeReleasesAllAndZeroesCounter) {
     // Idempotent: a second finalize on an empty allocator is a no-op.
     EXPECT_EQ(a.finalize(), 0);
     EXPECT_EQ(a.committed_bytes(), 0u);
+}
+
+TEST(MemoryAllocatorTest, AbandonClearsTrackingWithoutCallingPlatformFree) {
+    MemoryAllocator a;
+    void *p = a.alloc(128);
+    void *q = a.alloc(256);
+    ASSERT_NE(p, nullptr);
+    ASSERT_NE(q, nullptr);
+
+    a.abandon_after_device_failure();
+    EXPECT_EQ(a.committed_bytes(), 0u);
+    EXPECT_EQ(a.get_allocation_count(), 0u);
+    EXPECT_EQ(a.finalize(), 0);
+
+    // The sim test has no device reset to reclaim abandoned allocations.
+    std::free(p);
+    std::free(q);
 }
 
 TEST(MemoryAllocatorTest, DestructorFreesLiveAllocationsWithoutLeak) {

@@ -134,6 +134,11 @@ public:
     // a fresh reserve+commit cycle can run.
     void release() noexcept;
 
+    // Forget the backing buffer without invoking the injected free callback.
+    // Use only after device reset, or when a fatal device state makes any
+    // further per-allocation runtime call unsafe.
+    void abandon_after_device_failure() noexcept;
+
     bool is_committed() const noexcept { return committed_; }
     void *base() const noexcept { return base_; }
 
@@ -246,6 +251,16 @@ inline void DeviceArena::release() noexcept {
         free_(ctx_, raw_base_);
         ++free_count_;
     }
+    raw_base_ = nullptr;
+    base_ = nullptr;
+    raw_size_ = 0;
+    cursor_ = 0;
+    region_count_ = 0;
+    committed_ = false;
+    attached_ = false;
+}
+
+inline void DeviceArena::abandon_after_device_failure() noexcept {
     raw_base_ = nullptr;
     base_ = nullptr;
     raw_size_ = 0;

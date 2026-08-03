@@ -222,6 +222,32 @@ TEST(DeviceArenaTest, ReleaseFreesAndAllowsReuse) {
     EXPECT_EQ(m.alloc_count, 2);
 }
 
+TEST(DeviceArenaTest, AbandonClearsOwnershipWithoutCallingBackendFree) {
+    MockBackend m;
+    DeviceArena arena(mock_alloc, mock_free, &m);
+
+    arena.reserve(128, 64);
+    ASSERT_NE(arena.commit(1024), nullptr);
+    EXPECT_EQ(m.alloc_count, 1);
+
+    arena.abandon_after_device_failure();
+    EXPECT_EQ(m.free_count, 0);
+    EXPECT_FALSE(arena.is_committed());
+    EXPECT_EQ(arena.base(), nullptr);
+    EXPECT_EQ(arena.total_size(), 0u);
+
+    // Destruction/release after abandonment must remain a local no-op.
+    arena.release();
+    EXPECT_EQ(m.free_count, 0);
+
+    // The mock has no device reset to reclaim abandoned storage, so release
+    // its host allocation directly after the behavior assertions.
+    for (void *ptr : m.live) {
+        std::free(ptr);
+    }
+    m.live.clear();
+}
+
 TEST(DeviceArenaTest, ZeroSizedRegionDoesNotAdvanceCursor) {
     MockBackend m;
     DeviceArena arena(mock_alloc, mock_free, &m);
