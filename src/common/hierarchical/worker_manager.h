@@ -87,13 +87,9 @@ bool mailbox_compare_exchange_state(char *frame, MailboxState expected, MailboxS
 
 // Sized so the args region can hold any TaskArgs the runtime itself accepts
 // (CHIP_MAX_TENSOR_ARGS tensors + CHIP_MAX_SCALAR_ARGS scalars; see the
-// static_assert after MAILBOX_ARGS_CAPACITY). 4096 was too tight for composed
-// child kernels with many tensor args (issue #1024).
-// Bumped 16384 -> 32768 when TaskArgs moved from the former 40 B compact tensor
-// to the unified 128 B Tensor: the worst-case blob (CHIP_MAX_TENSOR_ARGS tensors)
-// grew ~3x, and 128*128 B = 16 KB alone exceeded the old mailbox (see the
-// capacity static_assert after MAILBOX_ARGS_CAPACITY).
-static constexpr size_t MAILBOX_FRAME_SIZE = 32768;
+// static_assert after MAILBOX_ARGS_CAPACITY). At the 256-tensor cap, tensors
+// occupy 32 KiB of the 64 KiB frame and leave room for scalars and protocol metadata.
+static constexpr size_t MAILBOX_FRAME_SIZE = 65536;
 static constexpr size_t MAILBOX_TASK_FRAME_COUNT = 2;
 static constexpr size_t MAILBOX_CONTROL_FRAME = 0;
 static constexpr size_t MAILBOX_FIRST_TASK_FRAME = 1;

@@ -867,6 +867,24 @@ class TestChipCallable:
     def _make_child(self, sig, binary):
         return CoreCallable.build(signature=sig, binary=binary)
 
+    def test_signature_capacity(self):
+        chip = ChipCallable.build(
+            signature=[ArgDirection.IN] * 256,
+            func_name="capacity",
+            binary=b"",
+            children=[],
+        )
+        assert chip.sig_count == 256
+
+    def test_signature_overflow_reports_counts(self):
+        with pytest.raises(ValueError, match=r"requested tensor count 257.*supported tensor count 256"):
+            ChipCallable.build(
+                signature=[ArgDirection.IN] * 257,
+                func_name="overflow",
+                binary=b"",
+                children=[],
+            )
+
     def test_build_with_children(self):
         child0 = self._make_child([ArgDirection.IN], b"\x01\x02\x03\x04")
         child1 = self._make_child([ArgDirection.OUT, ArgDirection.SCALAR], b"\x05\x06")

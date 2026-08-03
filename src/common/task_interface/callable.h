@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "arg_direction.h"
@@ -183,7 +184,12 @@ static_assert(
 template <int MaxSig>
 std::vector<uint8_t>
 make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size) {
-    if (sig_count > MaxSig) throw std::invalid_argument("make_callable: sig_count exceeds MaxSig");
+    if (sig_count > MaxSig) {
+        throw std::invalid_argument(
+            "make_callable: requested tensor count " + std::to_string(sig_count) + " exceeds supported tensor count " +
+            std::to_string(MaxSig)
+        );
+    }
     if (sig_count > 0 && sig == nullptr)
         throw std::invalid_argument("make_callable: sig is required when sig_count > 0");
 
@@ -219,7 +225,12 @@ std::vector<uint8_t> make_callable(
     // it to "" at the nb::arg level), so the default was dead anyway.
     const char *config_name
 ) {
-    if (sig_count > MaxSig) throw std::invalid_argument("make_callable: sig_count exceeds MaxSig");
+    if (sig_count > MaxSig) {
+        throw std::invalid_argument(
+            "make_callable: requested tensor count " + std::to_string(sig_count) + " exceeds supported tensor count " +
+            std::to_string(MaxSig)
+        );
+    }
     if (child_count > MaxChildren) throw std::invalid_argument("make_callable: child_count exceeds MaxChildren");
 
     using T = Callable<Child, MaxSig, MaxChildren>;
