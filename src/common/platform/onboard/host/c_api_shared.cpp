@@ -716,8 +716,8 @@ int simpler_prepare_run(
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
         // Diagnostic binding reads runner-global collector configuration. It
-        // is depth-one, while concurrent HBG preparation must leave the active
-        // run's configuration untouched until launch.
+        // is depth-one, while concurrent successor preparation must leave the
+        // active run's configuration untouched until launch.
         if (!overlaps_active_run) runner->apply_call_config(state->config);
 
         {

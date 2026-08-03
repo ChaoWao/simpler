@@ -1790,23 +1790,25 @@ NB_MODULE(_task_interface, m) {
         .def(
             "_prepare_native_run_with_pipeline_lease",
             [](ChipWorker &self, int32_t callable_id, TaskArgs &args, const CallConfig &config, uint32_t slot_id,
-               uint64_t generation) {
+               uint64_t generation, uint64_t run_id, uint64_t dispatch_id) {
                 return self.prepare_native_run(
-                    callable_id, make_view(args), config, PipelineSlotLease{slot_id, 0, generation}
+                    callable_id, make_view(args), config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id
                 );
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
-            nb::call_guard<nb::gil_scoped_release>(),
+            nb::arg("run_id") = 0, nb::arg("dispatch_id") = 0, nb::call_guard<nb::gil_scoped_release>(),
             "Prepare a generation-bound native run without crossing its device launch fence."
         )
         .def(
             "_prepare_native_run_with_pipeline_lease",
             [](ChipWorker &self, int32_t callable_id, ChipStorageTaskArgs &args, const CallConfig &config,
-               uint32_t slot_id, uint64_t generation) {
-                return self.prepare_native_run(callable_id, &args, config, PipelineSlotLease{slot_id, 0, generation});
+               uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id) {
+                return self.prepare_native_run(
+                    callable_id, &args, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id
+                );
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
-            nb::call_guard<nb::gil_scoped_release>(),
+            nb::arg("run_id") = 0, nb::arg("dispatch_id") = 0, nb::call_guard<nb::gil_scoped_release>(),
             "Prepare a generation-bound native run from pre-encoded task args."
         )
         .def(

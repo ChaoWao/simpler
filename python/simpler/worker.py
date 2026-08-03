@@ -3143,6 +3143,20 @@ class _RunResources:
 
 
 @dataclass
+class _L2NativeRun:
+    """One direct L2 submission owned by the Worker's bounded native lane."""
+
+    run_id: int
+    slot_id: int
+    generation: int
+    native_run: Any
+    permits_successor: bool
+    phase: str = "prepared"
+    error: BaseException | None = None
+    handle: RunHandle | None = None
+
+
+@dataclass
 class _PendingRemoteImportReleaseState:
     """Durable local phases after a deferred import-release RPC starts."""
 
@@ -3789,6 +3803,12 @@ class Worker:
 
         # Level-2 internals
         self._chip_worker: ChipWorker | None = None
+        self._l2_progress_mu = threading.RLock()
+        self._l2_progress_cv = threading.Condition(self._l2_progress_mu)
+        self._l2_runs: dict[int, _L2NativeRun] = {}
+        self._l2_fifo: list[int] = []
+        self._l2_slot_generations = [0] * PTO_PIPELINE_MAX_DEPTH
+        self._l2_next_run_id = 1
 
         # Level-3+ internals
         self._worker: _Worker | None = None
@@ -8107,8 +8127,10 @@ class Worker:
         Dispatch:
           - L2: ``callable`` is a ``CallableHandle`` returned by
             ``Worker.register(chip_callable)``. Routes to the private slot
-            carried by the handle. The current L2 backend remains blocking, so
-            the returned handle is already complete.
+            carried by the handle. Submission returns after native launch, and
+            the handle owns completion and finalization. A capable depth-two
+            backend may retain one prepared successor; other configurations
+            deterministically wait for the active run before preparing it.
           - L3+: ``callable`` is a Python orch fn invoked with the
             ``Orchestrator`` handle. Graph construction completes synchronously;
             device completion is reported by the returned handle.
@@ -8144,10 +8166,8 @@ class Worker:
         cfg = config if config is not None else CallConfig()
 
         if self.level == 2:
-            assert self._chip_worker is not None
-            state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
-            self._chip_worker._run_slot(state.slot_id, args, cfg)
-            return RunHandle._completed(self)
+            with self._submit_mu:
+                return self._submit_l2_locked(callable, args, cfg)
 
         with self._submit_mu:
             # Graph callbacks stay serialized, so a predecessor's callback has
@@ -8170,6 +8190,136 @@ class Worker:
             # just waited on — the check at lease time cannot have seen it.
             self._require_no_ordered_cleanup_failure("submit")
             return self._submit_l3_locked(callable, args, cfg)
+
+    @staticmethod
+    def _l2_config_has_diagnostics(config: CallConfig) -> bool:
+        return bool(
+            config.enable_l2_swimlane
+            or config.enable_dump_args
+            or config.enable_pmu
+            or config.enable_dep_gen
+            or config.enable_scope_stats
+        )
+
+    def _l2_finish_front_locked(self, state: _L2NativeRun, error: BaseException | None) -> None:
+        assert self._chip_worker is not None
+        try:
+            self._chip_worker._finalize_native_run(state.native_run)
+        except BaseException as exc:  # noqa: BLE001
+            if error is None:
+                error = exc
+        state.error = error
+        state.phase = "terminal"
+        if self._l2_fifo and self._l2_fifo[0] == state.run_id:
+            self._l2_fifo.pop(0)
+        self._l2_progress_cv.notify_all()
+
+    def _l2_launch_front_locked(self, state: _L2NativeRun) -> None:
+        assert self._chip_worker is not None
+        try:
+            self._chip_worker._launch_native_run(state.native_run)
+        except BaseException as exc:  # noqa: BLE001
+            self._l2_finish_front_locked(state, exc)
+            return
+        state.phase = "launched"
+        self._l2_progress_cv.notify_all()
+
+    def _l2_progress_locked(self, target_run_id: int, deadline: float | None, *, block: bool) -> bool:
+        """Drive the direct L2 FIFO until target terminalizes or progress would block."""
+        assert self._chip_worker is not None
+        while True:
+            target = self._l2_runs.get(target_run_id)
+            if target is None:
+                raise RuntimeError(f"unknown direct L2 run id {target_run_id}")
+            if target.phase == "terminal":
+                return True
+            if not self._l2_fifo:
+                raise RuntimeError("direct L2 native lane lost a nonterminal run")
+
+            front = self._l2_runs[self._l2_fifo[0]]
+            if front.phase == "prepared":
+                self._l2_launch_front_locked(front)
+                if front.phase == "terminal":
+                    continue
+
+            completed = False
+            progress_error: BaseException | None = None
+            try:
+                if block and deadline is None:
+                    self._chip_worker._wait_native_run(front.native_run)
+                    completed = True
+                else:
+                    completed = bool(self._chip_worker._poll_native_run(front.native_run))
+            except BaseException as exc:  # noqa: BLE001
+                progress_error = exc
+                completed = True
+
+            if completed:
+                self._l2_finish_front_locked(front, progress_error)
+                # Launch the successor at the same ordered handoff boundary.
+                if self._l2_fifo:
+                    successor = self._l2_runs[self._l2_fifo[0]]
+                    if successor.phase == "prepared":
+                        self._l2_launch_front_locked(successor)
+                continue
+
+            if not block:
+                return False
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(remaining, _RUN_HANDLE_WAIT_RECHECK_S))
+
+    def _submit_l2_locked(self, callable, args, cfg: CallConfig) -> RunHandle:
+        assert self._chip_worker is not None
+        callable_state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
+        permits_successor = bool(
+            self._chip_worker.supports_concurrent_native_prepare and not self._l2_config_has_diagnostics(cfg)
+        )
+
+        with self._l2_progress_cv:
+            while self._l2_fifo:
+                active = self._l2_runs[self._l2_fifo[0]]
+                capacity = 2 if permits_successor and active.permits_successor else 1
+                if len(self._l2_fifo) < capacity:
+                    break
+                self._l2_progress_locked(active.run_id, None, block=True)
+
+            occupied_slots = {self._l2_runs[run_id].slot_id for run_id in self._l2_fifo}
+            slot_id = next(
+                (slot for slot in range(self._chip_worker.pipeline_depth) if slot not in occupied_slots), None
+            )
+            if slot_id is None:
+                raise RuntimeError("direct L2 native lane has no free pipeline slot after admission")
+            generation = self._l2_slot_generations[slot_id] + 1
+            if generation >= 1 << 64:
+                raise RuntimeError("direct L2 pipeline generation space is exhausted")
+            self._l2_slot_generations[slot_id] = generation
+            run_id = self._l2_next_run_id
+            self._l2_next_run_id += 1
+
+            native_run = self._chip_worker._prepare_native_run_with_pipeline_lease(
+                callable_state.slot_id,
+                args,
+                slot_id,
+                generation,
+                cfg,
+                run_id=run_id,
+                dispatch_id=run_id,
+            )
+            state = _L2NativeRun(run_id, slot_id, generation, native_run, permits_successor)
+            handle = RunHandle(self, run_id, (callable, args, cfg))
+            state.handle = handle
+            self._l2_runs[run_id] = state
+            self._l2_fifo.append(run_id)
+            with self._hierarchical_start_cv:
+                self._accepted_run_handles.add(handle)
+                self._hierarchical_start_cv.notify_all()
+
+            if self._l2_fifo[0] == run_id:
+                self._l2_launch_front_locked(state)
+            return handle
 
     def _record_unreclaimable(self, message: str, cause: BaseException | None = None) -> RuntimeError:
         """Refuse all further work on this worker, and return the reason.
@@ -8388,10 +8538,29 @@ class Worker:
         return handle
 
     def _run_handle_done(self, run_id: int) -> bool:
+        if self.level == 2:
+            with self._l2_progress_cv:
+                self._l2_progress_locked(run_id, time.monotonic(), block=False)
+                state = self._l2_runs.get(run_id)
+                if state is None:
+                    raise RuntimeError(f"unknown direct L2 run id {run_id}")
+                return state.phase == "terminal"
         assert self._orch is not None
         return self._orch._run_done(run_id)
 
     def _wait_run_handle(self, run_id: int, timeout: float | None) -> bool:
+        if self.level == 2:
+            deadline = None if timeout is None else time.monotonic() + timeout
+            with self._l2_progress_cv:
+                completed = self._l2_progress_locked(run_id, deadline, block=True)
+                if not completed:
+                    return False
+                state = self._l2_runs.get(run_id)
+                if state is None:
+                    raise RuntimeError(f"unknown direct L2 run id {run_id}")
+                if state.error is not None:
+                    raise state.error
+                return True
         assert self._orch is not None
         if timeout is None:
             self._orch._wait_run(run_id)
@@ -8399,8 +8568,42 @@ class Worker:
         return self._orch._wait_run_for(run_id, timeout)
 
     def _wait_run_handle_accepted(self, run_id: int) -> None:
+        if self.level == 2:
+            with self._l2_progress_cv:
+                while True:
+                    state = self._l2_runs.get(run_id)
+                    if state is None:
+                        raise RuntimeError(f"unknown direct L2 run id {run_id}")
+                    if state.phase != "prepared":
+                        if state.error is not None:
+                            raise state.error
+                        return
+                    front_run_id = self._l2_fifo[0]
+                    if front_run_id == run_id:
+                        self._l2_launch_front_locked(state)
+                        continue
+                    self._l2_progress_locked(front_run_id, None, block=True)
         assert self._orch is not None
         self._orch._wait_run_accepted(run_id)
+
+    def _finalize_l2_run_handle(
+        self, handle: RunHandle, run_id: int, native_error: BaseException | None
+    ) -> BaseException | None:
+        with self._l2_progress_cv:
+            state = self._l2_runs.get(run_id)
+            if state is None or state.phase != "terminal":
+                native_error = native_error or RuntimeError(
+                    f"direct L2 run {run_id} reached finalization before its native fence"
+                )
+            elif native_error is None:
+                native_error = state.error
+            self._l2_runs.pop(run_id, None)
+        handle._cache_finalization_error(native_error)
+        with self._hierarchical_start_cv:
+            handle._cleanup_published = True
+            self._accepted_run_handles.discard(handle)
+            self._hierarchical_start_cv.notify_all()
+        return handle._finalization_error
 
     def _finalize_run_handle(
         self,
@@ -8411,6 +8614,9 @@ class Worker:
         _after_step: Any | None = None,
     ) -> BaseException | None:
         """Run fence-owned cleanup exactly once and return the cached result."""
+        if self.level == 2:
+            return self._finalize_l2_run_handle(handle, run_id, native_error)
+
         # Two different failures, deliberately not merged. A task that failed is
         # this run's business and says nothing about the worker; a cleanup that
         # failed leaves collective device state nobody can describe, and poisons

@@ -35,7 +35,7 @@ TEST(PipelineContract, AcceptsADeclarationThisBuildCanHonor) {
     EXPECT_TRUE(is_valid_pipeline_contract(&c));
 }
 
-// Runtime loading requires a contract; this helper still rejects malformed null values.
+// A runtime that exports no contract is handled by the caller, not here.
 TEST(PipelineContract, RejectsNull) { EXPECT_FALSE(is_valid_pipeline_contract(nullptr)); }
 
 TEST(PipelineContract, AcceptsAnEmptyResourceList) {

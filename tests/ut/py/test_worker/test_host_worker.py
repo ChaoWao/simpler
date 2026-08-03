@@ -519,7 +519,7 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
         harness.close()
 
 
-def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
+def test_two_frame_capable_backend_prepares_b_while_a_runs_but_accepts_only_after_launch():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -560,7 +560,7 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
         harness.close()
 
 
-def test_two_frame_hbg_publishes_failure_instead_of_staged_when_prepare_fails():
+def test_two_frame_capable_backend_publishes_failure_instead_of_staged_when_prepare_fails():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -577,7 +577,7 @@ def test_two_frame_hbg_publishes_failure_instead_of_staged_when_prepare_fails():
         harness.close()
 
 
-def test_two_frame_hbg_waits_for_first_token_to_launch_before_preparing_second():
+def test_two_frame_capable_backend_waits_for_first_token_to_launch_before_preparing_second():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -606,7 +606,7 @@ def test_two_frame_hbg_waits_for_first_token_to_launch_before_preparing_second()
         harness.close()
 
 
-def test_two_frame_hbg_prepares_and_launches_reverse_ready_frames_by_dispatch_id():
+def test_two_frame_capable_backend_prepares_and_launches_reverse_ready_frames_by_dispatch_id():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -637,7 +637,7 @@ def test_two_frame_hbg_prepares_and_launches_reverse_ready_frames_by_dispatch_id
         harness.close()
 
 
-def test_two_frame_hbg_does_not_prepare_high_dispatch_successor_before_active_frame():
+def test_two_frame_capable_backend_does_not_prepare_high_dispatch_successor_before_active_frame():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -667,7 +667,7 @@ def test_two_frame_hbg_does_not_prepare_high_dispatch_successor_before_active_fr
 
 
 @pytest.mark.parametrize("diagnostic_frame", ["active", "successor"])
-def test_two_frame_hbg_defers_diagnostic_native_prepare_until_predecessor_finalizes(diagnostic_frame):
+def test_two_frame_capable_backend_defers_diagnostic_prepare_until_predecessor_finalizes(diagnostic_frame):
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -740,7 +740,7 @@ def test_two_frame_prepare_ready_waits_for_sticky_activation():
         harness.close()
 
 
-def test_two_frame_hbg_lone_prepare_ready_stages_before_native_prepare():
+def test_two_frame_capable_backend_lone_prepare_ready_stages_before_native_prepare():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -760,7 +760,7 @@ def test_two_frame_hbg_lone_prepare_ready_stages_before_native_prepare():
         harness.close()
 
 
-def test_two_frame_hbg_prepares_already_staged_successor_after_active_claim():
+def test_two_frame_capable_backend_prepares_already_staged_successor_after_active_claim():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
         chip_runtime="host_build_graph",
@@ -2361,6 +2361,141 @@ class TestSingleSubTask:
         finally:
             counter_shm.close()
             counter_shm.unlink()
+
+
+class TestDirectL2RunHandle:
+    class FakeChipWorker:
+        pipeline_depth = 2
+
+        def __init__(self, *, concurrent: bool) -> None:
+            self.supports_concurrent_native_prepare = concurrent
+            self.events: list[tuple] = []
+            self.completed = [threading.Event(), threading.Event()]
+            self.wait_entered = threading.Event()
+
+        def _prepare_native_run_with_pipeline_lease(
+            self, callable_id, args, slot_id, generation, config, *, run_id, dispatch_id
+        ):
+            del args, config
+            token = SimpleNamespace(
+                callable_id=callable_id,
+                slot_id=slot_id,
+                generation=generation,
+                run_id=run_id,
+                dispatch_id=dispatch_id,
+            )
+            self.events.append(("prepare", run_id, slot_id, generation, dispatch_id))
+            return token
+
+        def _launch_native_run(self, token) -> None:
+            self.events.append(("launch", token.run_id, token.slot_id))
+
+        def _poll_native_run(self, token) -> bool:
+            self.events.append(("poll", token.run_id))
+            return self.completed[token.slot_id].is_set()
+
+        def _wait_native_run(self, token) -> None:
+            self.events.append(("wait", token.run_id))
+            self.wait_entered.set()
+            assert self.completed[token.slot_id].wait(5.0)
+
+        def _finalize_native_run(self, token) -> None:
+            self.events.append(("finalize", token.run_id, token.slot_id))
+
+    @staticmethod
+    def _worker(*, concurrent: bool):
+        worker = Worker(level=2, device_id=0, platform="a2a3", runtime="host_build_graph")
+        callable_handle = worker.register(_unique_chip_callable(31))
+        fake = TestDirectL2RunHandle.FakeChipWorker(concurrent=concurrent)
+        worker._chip_worker = cast(Any, fake)
+        return worker, callable_handle, fake
+
+    @staticmethod
+    def _config():
+        return SimpleNamespace(
+            enable_l2_swimlane=0,
+            enable_dump_args=0,
+            enable_pmu=0,
+            enable_dep_gen=0,
+            enable_scope_stats=0,
+        )
+
+    def test_submit_returns_after_launch_before_native_completion(self):
+        worker, callable_handle, fake = self._worker(concurrent=False)
+
+        handle = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+
+        assert isinstance(handle, RunHandle)
+        assert fake.events[:2] == [("prepare", 1, 0, 1, 1), ("launch", 1, 0)]
+        assert not handle.done
+        fake.completed[0].set()
+        handle.wait(5.0)
+        assert handle.done
+        assert ("finalize", 1, 0) in fake.events
+        assert not worker._accepted_run_handles
+
+    def test_capable_lane_keeps_one_launched_and_one_prepared_and_backpressures_third(self):
+        worker, callable_handle, fake = self._worker(concurrent=True)
+        first = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+        second = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+
+        assert fake.events[:3] == [
+            ("prepare", 1, 0, 1, 1),
+            ("launch", 1, 0),
+            ("prepare", 2, 1, 1, 2),
+        ]
+        assert worker._l2_runs[1].phase == "launched"
+        assert worker._l2_runs[2].phase == "prepared"
+
+        third_result: dict[str, RunHandle] = {}
+        submitter = threading.Thread(
+            target=lambda: third_result.setdefault(
+                "handle", worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+            )
+        )
+        submitter.start()
+        assert fake.wait_entered.wait(1.0)
+        assert submitter.is_alive()
+        assert all(event[:2] != ("prepare", 3) for event in fake.events)
+
+        fake.completed[0].set()
+        submitter.join(5.0)
+        assert not submitter.is_alive()
+        third = third_result["handle"]
+        assert ("finalize", 1, 0) in fake.events
+        assert ("launch", 2, 1) in fake.events
+        assert ("prepare", 3, 0, 2, 3) in fake.events
+        assert worker._l2_runs[2].phase == "launched"
+        assert worker._l2_runs[3].phase == "prepared"
+
+        fake.completed[1].set()
+        fake.completed[0].set()
+        third.wait(5.0)
+        first.wait(5.0)
+        second.wait(5.0)
+        assert not worker._accepted_run_handles
+        assert [event[1] for event in fake.events if event[0] == "launch"] == [1, 2, 3]
+
+    def test_successor_acceptance_wait_returns_after_launch_before_completion(self):
+        worker, callable_handle, fake = self._worker(concurrent=True)
+        first = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+        second = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+        accepted = threading.Event()
+
+        waiter = threading.Thread(target=lambda: (second._wait_for_acceptance(), accepted.set()))
+        waiter.start()
+        assert fake.wait_entered.wait(1.0)
+        assert not accepted.is_set()
+
+        fake.completed[0].set()
+        waiter.join(5.0)
+        assert accepted.is_set()
+        assert worker._l2_runs[2].phase == "launched"
+        assert not fake.completed[1].is_set()
+
+        fake.completed[1].set()
+        first.wait(5.0)
+        second.wait(5.0)
 
 
 class TestRunHandle:

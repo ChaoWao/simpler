@@ -118,10 +118,10 @@ public:
      * the token, and the caller must still finalize it. The blocking composition
      * performs that cleanup internally on every exit.
      *
-     * Onboard HBG may prepare one distinct-slot successor while another run
-     * owns the execution claim. Diagnostics and backends without the explicit
-     * capability remain depth-one. The slot/lease-generation/process-unique-
-     * run-epoch token prevents a delayed phase call from touching reused
+     * A capable backend may prepare one distinct-slot successor while another
+     * run owns the execution claim. Diagnostics and backends without that
+     * explicit capability remain depth-one. The slot/lease-generation/process-
+     * unique-run-epoch token prevents a delayed phase call from touching reused
      * storage, including another run under the same pipeline lease or on
      * another ChipWorker.
      */
