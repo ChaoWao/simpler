@@ -21,5 +21,6 @@ collectives/
 ├── reduce_scatter/       # Mesh reduce-scatter
 ├── broadcast/            # Mesh broadcast
 ├── all_to_all/           # Push-based mesh all-to-all (TPUT → barrier → local copy-out)
+├── group_reservation/    # Overlapping NEXT_LEVEL group reservation ordering
 └── README.md
 ```
