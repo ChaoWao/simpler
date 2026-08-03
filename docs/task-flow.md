@@ -770,8 +770,8 @@ Slots carry scheduler-only state (atomics, mutex, `std::vector` of fanout
 consumers) that is parent-private. Putting them in shm would force cross-
 process atomics and shm-safe containers. The only data that needs to cross
 the fork boundary is per-task: callable, config, args — and that fits in a
-fixed 32 KiB task frame with a one-time memcpy per dispatch. A two-frame-capable
-local mailbox reserves a separate 32 KiB control base plus two such task frames;
+fixed 64 KiB task frame with a one-time memcpy per dispatch. A two-frame-capable
+local mailbox reserves a separate 64 KiB control base plus two such task frames;
 single-frame compatibility endpoints use the base frame and leave the reserved
 task frames unused.
 
