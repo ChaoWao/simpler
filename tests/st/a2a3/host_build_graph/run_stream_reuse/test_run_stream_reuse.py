@@ -312,3 +312,13 @@ class TestRunStreamFreshTmr(SceneTestCase):
         rounds = _REPEATED_RUNS - 1
         self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=rounds)
         assert st_worker.run_stream_set_create_count == after_first + rounds
+
+    def test_native_execution_thread_is_persistent(self, st_platform, st_worker):
+        if st_platform != "a2a3":
+            pytest.skip("persistent native execution is an a2a3 onboard resource")
+
+        callable_obj = self.build_callable(st_platform)
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=1)
+        assert st_worker.native_execution_thread_create_count == 1
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=_REPEATED_RUNS)
+        assert st_worker.native_execution_thread_create_count == 1

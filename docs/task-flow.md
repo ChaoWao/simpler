@@ -359,6 +359,12 @@ after launch instead of device completion, and its `RunHandle` drives the
 ordered wait/finalize handoff. At depth two the second handle may own a prepared
 successor; a third submission backpressures before preparing or reusing a slot.
 
+On onboard runners, blocking CANN execution is carried by one persistent host
+thread per runner. Launch wakes that thread through a condition variable, while
+the endpoint or direct-L2 owner continues to drive FIFO preparation, polling,
+and finalization. Runs do not create or destroy host execution threads, and an
+idle runner consumes no polling CPU.
+
 #### Two-frame endpoint staging lane
 
 A direct A2/A3 chip endpoint with a negotiated depth of at least two uses two

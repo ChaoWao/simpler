@@ -41,6 +41,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -236,6 +237,16 @@ public:
      * rtSetDevice(device_id) on entry.
      */
     std::thread create_thread(std::function<void()> fn);
+
+    /** Submit blocking device execution to this runner's persistent host thread. */
+    bool submit_native_execution(std::function<void()> fn);
+
+    /** Stop the persistent execution thread after all native runs have retired. */
+    void shutdown_native_execution();
+
+    size_t native_execution_thread_create_count() const {
+        return native_execution_thread_create_count_.load(std::memory_order_relaxed);
+    }
 
     /**
      * Attach the current host thread to the target device.
@@ -954,6 +965,13 @@ protected:
     std::array<NativeRunReservation, PTO_PIPELINE_MAX_DEPTH> native_run_reservations_{};
     std::atomic<const void *> active_native_run_{nullptr};
     NativeRunLaunchSignal *native_launch_signal_{nullptr};
+    std::mutex native_execution_mu_;
+    std::condition_variable native_execution_cv_;
+    std::thread native_execution_thread_;
+    std::function<void()> native_execution_task_;
+    bool native_execution_active_{false};
+    bool native_execution_stop_{false};
+    std::atomic<size_t> native_execution_thread_create_count_{0};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //

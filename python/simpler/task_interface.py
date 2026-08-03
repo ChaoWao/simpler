@@ -1415,6 +1415,11 @@ class ChipWorker:
         return self._impl.run_stream_set_create_count
 
     @property
+    def native_execution_thread_create_count(self):
+        """Number of persistent native execution threads created by the runner."""
+        return self._impl.native_execution_thread_create_count
+
+    @property
     def pipeline_depth(self):
         return self._impl.pipeline_depth
 

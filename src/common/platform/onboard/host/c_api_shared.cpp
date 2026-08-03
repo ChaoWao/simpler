@@ -795,11 +795,15 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     state->phase.store(NativeRunPhase::Launching, std::memory_order_release);
 
     try {
-        // The compatibility backend uses one blocking executor per run. The
-        // prepare-through-finalize runner claim limits it to one per context.
-        state->executor = state->runner->create_thread([state, ctx]() {
+        const DeviceRunnerBase::NativeRunThreadSelection execution_selection =
+            state->runner->capture_native_run_thread_selection();
+        // The runner owns one persistent blocking execution thread. The
+        // endpoint remains the sole FIFO/progress owner and polls this run's
+        // completion state without creating a host thread for every launch.
+        const bool submitted = state->runner->submit_native_execution([state, ctx, execution_selection]() {
             pthread_once(&g_runner_key_once, create_runner_key);
             pthread_setspecific(g_runner_key, ctx);
+            state->runner->restore_native_run_thread_selection(execution_selection);
             STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
             int rc = -1;
             bool entered_run = false;
@@ -831,10 +835,13 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
                 if (rc == 0) rc = resources_rc;
             }
             pthread_setspecific(g_runner_key, nullptr);
-            state->execution_rc.store(rc, std::memory_order_relaxed);
-            state->execution_done.store(true, std::memory_order_release);
+            // Completion permits finalize to destroy `state`. Keep the launch
+            // fallback notification before that publication so the persistent
+            // executor never dereferences run-owned storage after done=true.
             state->launch_signal.notify();
+            state->publish_execution_complete(rc);
         });
+        if (!submitted) throw std::runtime_error("native execution thread is occupied");
     } catch (...) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
@@ -868,7 +875,7 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Prepared || phase == NativeRunPhase::Launching) return -1;
-    if (state->executor.joinable()) state->executor.join();
+    state->wait_for_execution_complete();
     state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
     return state->execution_rc.load(std::memory_order_relaxed);
 }
@@ -907,7 +914,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     int execution_rc = -1;
     const bool launched = phase != NativeRunPhase::Prepared;
     if (launched) {
-        if (state->executor.joinable()) state->executor.join();
+        state->wait_for_execution_complete();
         execution_rc = state->execution_rc.load(std::memory_order_relaxed);
     }
 
@@ -1060,6 +1067,15 @@ size_t get_run_stream_set_create_count(DeviceContextHandle ctx) {
     if (ctx == NULL) return 0;
     try {
         return static_cast<DeviceRunnerBase *>(ctx)->run_stream_set_create_count();
+    } catch (...) {
+        return 0;
+    }
+}
+
+size_t get_native_execution_thread_create_count(DeviceContextHandle ctx) {
+    if (ctx == NULL) return 0;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->native_execution_thread_create_count();
     } catch (...) {
         return 0;
     }

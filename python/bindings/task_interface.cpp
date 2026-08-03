@@ -1933,6 +1933,10 @@ NB_MODULE(_task_interface, m) {
             "run; platforms whose runs use the persistent bootstrap pair report 0."
         )
         .def_prop_ro(
+            "native_execution_thread_create_count", &ChipWorker::native_execution_thread_create_count,
+            "Number of persistent native execution threads created by this runner."
+        )
+        .def_prop_ro(
             "committed_device_memory", &ChipWorker::committed_device_memory,
             "Total device HBM (bytes) currently committed by this worker's "
             "MemoryAllocator (user tensors + pooled arenas + runtime buffers). "

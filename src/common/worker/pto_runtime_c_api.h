@@ -441,6 +441,9 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx);
  */
 size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
 
+/** Number of persistent native execution threads created by this runner. */
+size_t get_native_execution_thread_create_count(DeviceContextHandle ctx);
+
 /**
  * Provision the async-DMA workspaces named in `required_mask` (a bitmask of
  * DmaWorkspaceKind bits) once at Worker init, latching their device addresses

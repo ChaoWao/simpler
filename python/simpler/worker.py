@@ -8809,6 +8809,13 @@ class Worker:
             return 0
         return self._chip_worker.run_stream_set_create_count
 
+    @property
+    def native_execution_thread_create_count(self) -> int:
+        """L2 only: number of persistent native execution threads created."""
+        if self.level != 2 or self._chip_worker is None:
+            return 0
+        return self._chip_worker.native_execution_thread_create_count
+
     # ------------------------------------------------------------------
     # close
     # ------------------------------------------------------------------
