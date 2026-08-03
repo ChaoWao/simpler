@@ -146,7 +146,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             //
             // Early-dispatch (src_payload != 0): receive_time stays at pickup —
             // before the doorbell wait — so it may precede the producer's end.
-            uint64_t receive_time = get_sys_cnt_aicore();
+            uint64_t receive_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             uint32_t task_id = reg_val;  // Decode: register holds task_id directly
 
@@ -203,10 +203,17 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 }
             }
 
+            // Bind this task to the currently-published L2 buffer generation
+            // before ACK makes progress visible to AICPU. The PMU staging ring
+            // is stable for the full run and does not participate in rotation.
+            __gm__ L2SwimlaneAicoreTaskRecord *l2_swimlane_record = nullptr;
+            if (l2_swimlane_enabled) {
+                l2_swimlane_record = l2_swimlane_aicore_reserve_task_record(l2_swimlane_head, &l2_swimlane_local);
+            }
+
             write_reg(RegId::COND, MAKE_ACK_VALUE(task_id));
 
-            // Performance profiling: record start time
-            uint64_t start_time = get_sys_cnt_aicore();
+            uint64_t start_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             if (pmu_enabled) {
                 pmu_aicore_begin();
@@ -215,10 +222,18 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // Execute the task
             execute_task(exec_payload);
 
+            // Keep start_time -> end_time scoped to AICore execution.
+            uint64_t end_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
+
             if (pmu_enabled) {
                 pmu_aicore_end();
+                // PMU's stable per-core staging slot must be visible before FIN:
+                // the AICPU completion path consumes it as soon as FIN arrives.
                 pmu_aicore_record_task(pmu_ring, pmu_reg_base, task_id);
             }
+
+            last_reg_val = reg_val;
+            write_reg(RegId::COND, MAKE_FIN_VALUE(task_id));
 
             if (dump_args_enabled) {
                 pipe_barrier(PIPE_ALL);
@@ -229,15 +244,11 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // payload); reg_task_id is the per-core dispatch token AICore just
             // read. Host uses reg_task_id as join key vs the AICPU stream.
             if (l2_swimlane_enabled) {
-                uint64_t end_time = get_sys_cnt_aicore();
                 uint64_t task_token_raw = exec_payload->local_context.async_ctx.task_token.raw;
-                l2_swimlane_aicore_record_task(
-                    l2_swimlane_head, &l2_swimlane_local, task_token_raw, task_id, receive_time, start_time, end_time
+                l2_swimlane_aicore_commit_task_record(
+                    l2_swimlane_record, task_token_raw, task_id, receive_time, start_time, end_time
                 );
             }
-
-            last_reg_val = reg_val;
-            write_reg(RegId::COND, MAKE_FIN_VALUE(task_id));
         }
     }
 
