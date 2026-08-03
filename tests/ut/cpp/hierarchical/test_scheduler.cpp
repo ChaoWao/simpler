@@ -1655,7 +1655,7 @@ TEST_F(ProgressSchedulerFixture, PreparedSuccessorGroupRemainsQueuedUntilPromoti
 
     EXPECT_TRUE(endpoint0->wait_submitted(1));
     EXPECT_TRUE(ready_next.singles_empty(second_run));
-    EXPECT_FALSE(ready_next.empty(second_run));
+    EXPECT_FALSE(ready_next.groups_empty(second_run));
     EXPECT_FALSE(manager.has_staged_run(second_run));
     EXPECT_TRUE(endpoint1->submitted().empty());
     std::vector<WorkerDispatch> first_submissions = endpoint0->submitted();
@@ -2252,19 +2252,27 @@ TEST_F(GroupSchedulerFixture, BlockedGroupReservesTargetsThatBecomeIdleOneAtATim
     EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 72u);
     EXPECT_EQ(worker_b.dispatched[1].callable_hash0, 72u);
 
+    // Completing one group member makes only worker A idle. Its queued single
+    // must progress from the incomplete-member wake while worker B still runs
+    // the other member and the group remains aggregate-incomplete.
     worker_a.complete();
-    worker_b.complete();
-
     deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while ((worker_a.dispatched_count() < 3 || worker_b.dispatched_count() < 3) &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (worker_a.dispatched_count() < 3 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_GE(worker_a.dispatched_count(), 3);
-    ASSERT_GE(worker_b.dispatched_count(), 3);
+    EXPECT_EQ(worker_b.dispatched_count(), 2);
+    EXPECT_EQ(S(group.task_slot).state.load(), TaskState::RUNNING);
     EXPECT_EQ(worker_a.dispatched[2].callable_hash0, 73u);
-    EXPECT_EQ(worker_b.dispatched[2].callable_hash0, 74u);
     worker_a.complete();
+
+    worker_b.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_b.dispatched_count() < 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GE(worker_b.dispatched_count(), 3);
+    EXPECT_EQ(worker_b.dispatched[2].callable_hash0, 74u);
     worker_b.complete();
 
     wait_consumed(running_a.task_slot);
@@ -2345,9 +2353,15 @@ TEST(SchedulerDispatchPassTest, ActiveRunSwitchCannotBypassSuccessorGroupReserva
         return active_run.load(std::memory_order_acquire);
     };
     // The run switch lands after the group phase selected A and before the
-    // singles phase can select a queue partition.
+    // singles phase can select a queue partition. Production run admission
+    // advances the scheduler wake generation (ready_notify_cb_), so the seam
+    // must signal the switch the same way: in the edge-triggered wake model
+    // the switch itself is the wake event.
     config.before_claim_cb = [&](TaskSlot slot) {
-        if (allocator.slot_state(slot)->run_id == run_a) active_run.store(run_b, std::memory_order_release);
+        if (allocator.slot_state(slot)->run_id == run_a) {
+            active_run.store(run_b, std::memory_order_release);
+            sched.notify_ready();
+        }
     };
     config.on_consumed_cb = [&](TaskSlot slot) {
         allocator.slot_state(slot)->state.store(TaskState::CONSUMED, std::memory_order_release);
@@ -2478,6 +2492,56 @@ TEST_F(GroupSchedulerFixture, TearDownDrainsCurrentAndQueuedDispatches) {
     EXPECT_TRUE(worker_b.is_running.load(std::memory_order_acquire));
 }
 
+TEST_F(GroupSchedulerFixture, BlockedGroupSleepsUntilWorkerCompletion) {
+    auto running = orch.submit_next_level(C(78), single_tensor_args(0xFA, TensorArgType::OUTPUT), cfg, 0);
+    worker_a.wait_running();
+    EXPECT_TRUE(worker_a.is_running.load(std::memory_order_acquire));
+
+    const uint64_t rounds_before_blocked_group = sched.dispatch_round_count();
+    auto blocked = orch.submit_next_level_group(
+        C(79), {single_tensor_args(0xFB, TensorArgType::OUTPUT), single_tensor_args(0xFC, TensorArgType::OUTPUT)}, cfg,
+        {0, 1}
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (sched.dispatch_round_count() == rounds_before_blocked_group && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const uint64_t settled_rounds = sched.dispatch_round_count();
+    ASSERT_GT(settled_rounds, rounds_before_blocked_group);
+    // The fix's property: with the group blocked, dispatch rounds stop
+    // advancing once the scheduler parks. Poll for a quiet window instead of
+    // a fixed sleep so a loaded runner cannot fail the check spuriously.
+    uint64_t quiet_rounds = settled_rounds;
+    bool parked = false;
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const uint64_t rounds_now = sched.dispatch_round_count();
+        if (rounds_now == quiet_rounds) {
+            parked = true;
+            break;
+        }
+        quiet_rounds = rounds_now;
+    }
+    EXPECT_TRUE(parked) << "scheduler did not park while the group head was blocked";
+    EXPECT_EQ(S(blocked.task_slot).state.load(std::memory_order_acquire), TaskState::READY);
+
+    worker_a.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 1) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(worker_a.dispatched_count(), 2);
+    EXPECT_EQ(worker_b.dispatched_count(), 1);
+    worker_a.complete();
+    worker_b.complete();
+
+    wait_consumed(running.task_slot);
+    wait_consumed(blocked.task_slot);
+}
+
 TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {
     auto running_a = orch.submit_next_level(C(73), single_tensor_args(0xF4, TensorArgType::OUTPUT), cfg, 0);
     auto running_b = orch.submit_next_level(C(74), single_tensor_args(0xF5, TensorArgType::OUTPUT), cfg, 1);
@@ -2602,6 +2666,9 @@ TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
     worker_a.wait_running();
     worker_b.wait_running();
 
+    auto single_a = orch.submit_next_level(C(43), single_tensor_args(0xD2, TensorArgType::OUTPUT), cfg, 0);
+    auto single_b = orch.submit_next_level(C(44), single_tensor_args(0xD3, TensorArgType::OUTPUT), cfg, 1);
+
     WorkerCompletion bad;
     bad.task_slot = slot;
     bad.group_index = 99;
@@ -2612,8 +2679,46 @@ TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
     wait_consumed(slot);
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
 
-    worker_a.complete();
-    worker_b.complete();
+    {
+        // Wait for the invalid completion's dispatch round to finish, then
+        // make both terminalized group members idle while the scheduler loop
+        // is paused. Their completion callbacks must provide the next wake.
+        std::lock_guard<std::mutex> scheduler_pause(sched.loop_mutex());
+        worker_a.complete();
+        worker_b.complete();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        WorkerThread *manager_worker_a = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 0);
+        WorkerThread *manager_worker_b = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 1);
+        while ((!manager_worker_a->idle() || !manager_worker_b->idle()) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        EXPECT_TRUE(manager_worker_a->idle());
+        EXPECT_TRUE(manager_worker_b->idle());
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(worker_a.dispatched_count(), 2);
+    EXPECT_EQ(worker_b.dispatched_count(), 2);
+
+    // Keep cleanup non-fatal so a missing wake reports a test failure instead
+    // of hanging the fixture in Scheduler::stop().
+    if (worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) {
+        sched.notify_ready();
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    if (worker_a.dispatched_count() >= 2) worker_a.complete();
+    if (worker_b.dispatched_count() >= 2) worker_b.complete();
+    wait_consumed(single_a.task_slot);
+    wait_consumed(single_b.task_slot);
 }
 
 TEST_F(GroupSchedulerFixture, ExplicitTargetWithinEligibilityIsUsed) {

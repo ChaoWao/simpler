@@ -40,11 +40,15 @@ NEXT_LEVEL queue after waiting in PENDING.
 Each `ReadyQueue` is a mutex-protected non-blocking FIFO, partitioned by run:
 a task is enqueued under its own `run_id`, and the Scheduler pops only from the
 partition of the run that currently holds the FIFO head. That is what keeps two
-admitted runs from interleaving their device work while both are live. Root
-submission, worker completion, and stop requests notify the Scheduler condition
-variable; its wait predicate checks the completion FIFO, the dispatchable run's
-partitions, and the stop flag. Ready queues have no blocking pop or shutdown
-state.
+admitted runs from interleaving their device work while both are live.
+
+Root submission, stop requests, and group-member completions that do not
+enqueue a terminal task completion advance a wake generation under the
+Scheduler condition-variable mutex. Terminal task completions push the
+completion FIFO under the same mutex. The wait predicate checks for a
+completion or an unconsumed wake generation.
+Blocked queue heads therefore remain queued without keeping the predicate
+permanently true. Ready queues have no blocking pop or shutdown state.
 
 Popping a slot is not the same as owning it. A run whose graph callback throws
 fails and consumes its own unstarted slots, so the Scheduler claims each slot
@@ -57,7 +61,7 @@ The Scheduler drains completions before dispatching new work:
 
 ```cpp
 while (true) {
-    wait_until_completion_ready_or_stop();
+    wait_until_completion_or_new_wake_generation();
 
     while (completion_queue has an item) {
         on_task_complete(item);

@@ -103,6 +103,11 @@ void Scheduler::start(const Config &cfg) {
         throw std::invalid_argument("Scheduler::start: null config fields");
     cfg_ = cfg;
 
+    {
+        std::lock_guard<std::mutex> lk(completion_mu_);
+        wake_generation_ = 1;
+    }
+    dispatch_round_count_.store(0, std::memory_order_relaxed);
     stop_requested_.store(false, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
     sched_thread_ = std::thread(&Scheduler::run, this);
@@ -110,6 +115,10 @@ void Scheduler::start(const Config &cfg) {
 
 void Scheduler::request_stop() {
     stop_requested_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(completion_mu_);
+        ++wake_generation_;
+    }
     completion_cv_.notify_all();
 }
 
@@ -152,7 +161,10 @@ void Scheduler::worker_done(WorkerCompletion completion) {
             int32_t index = invalid_group_index ? -1 : terminal.group_index;
             if (index >= 0 && index < group_size) {
                 GroupMemberState &member_state = s.group_member_states[static_cast<size_t>(index)];
-                if (is_terminal_group_state(member_state)) return;
+                if (is_terminal_group_state(member_state)) {
+                    notify_ready();
+                    return;
+                }
 
                 if (terminal.outcome == EndpointOutcome::SUCCESS) {
                     member_state = GroupMemberState::SUCCESS;
@@ -185,7 +197,10 @@ void Scheduler::worker_done(WorkerCompletion completion) {
                 }
             }
 
-            if (s.group_terminal_count.load(std::memory_order_acquire) < group_size) return;
+            if (s.group_terminal_count.load(std::memory_order_acquire) < group_size) {
+                notify_ready();
+                return;
+            }
 
             if (s.group_failed) {
                 int32_t failure_index = s.group_first_failure_index;
@@ -216,7 +231,10 @@ void Scheduler::worker_done(WorkerCompletion completion) {
 }
 
 void Scheduler::notify_ready() {
-    std::lock_guard<std::mutex> lk(completion_mu_);
+    {
+        std::lock_guard<std::mutex> lk(completion_mu_);
+        ++wake_generation_;
+    }
     completion_cv_.notify_one();
 }
 
@@ -239,27 +257,14 @@ bool stageable_successor_ready(const NextLevelReadyQueues &ready_queues, const W
 // =============================================================================
 
 void Scheduler::run() {
+    uint64_t observed_wake_generation = 0;
     while (true) {
-        // Wait until there's something to process
         {
             std::unique_lock<std::mutex> lk(completion_mu_);
-            completion_cv_.wait(lk, [this] {
-                bool ready = false;
-                if (cfg_.active_run_cb) {
-                    RunId active = cfg_.active_run_cb();
-                    ready = active != INVALID_RUN_ID &&
-                            (!cfg_.ready_next_level_queues->empty(active) || !cfg_.ready_sub_queue->empty(active) ||
-                             cfg_.manager->needs_activation(active));
-                    if (!ready && cfg_.preparable_run_cb) {
-                        RunId preparable = cfg_.preparable_run_cb();
-                        ready = preparable != INVALID_RUN_ID && !cfg_.manager->has_staged_run(preparable) &&
-                                stageable_successor_ready(*cfg_.ready_next_level_queues, *cfg_.manager, preparable);
-                    }
-                } else {
-                    ready = !cfg_.ready_next_level_queues->empty() || !cfg_.ready_sub_queue->empty();
-                }
-                return !completion_queue_.empty() || ready || stop_requested_.load(std::memory_order_acquire);
+            completion_cv_.wait(lk, [this, &observed_wake_generation] {
+                return !completion_queue_.empty() || wake_generation_ != observed_wake_generation;
             });
+            observed_wake_generation = wake_generation_;
         }
 
         // Hold loop_mu_ across the entire slot-touching body so quiescent
@@ -343,7 +348,6 @@ void Scheduler::on_task_complete(const WorkerCompletion &completion) {
         // lost: submit's publication compares the pair under the same lock.
         if (try_mark_ready(cs)) {
             cfg_.enqueue_ready_cb(consumer);
-            completion_cv_.notify_one();
         }
     }
 
@@ -417,6 +421,7 @@ void Scheduler::try_consume(TaskSlot slot) {
 // sched_thread_ with no surrounding handler, any throw is fatal to the whole
 // worker tree (std::terminate), not a per-task failure.
 void Scheduler::dispatch_ready() {
+    dispatch_round_count_.fetch_add(1, std::memory_order_release);
     std::optional<RunId> run_snapshot;
     if (cfg_.active_run_cb) {
         RunId active_run = cfg_.active_run_cb();

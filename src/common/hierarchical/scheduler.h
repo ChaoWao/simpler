@@ -22,7 +22,7 @@
  *   Orch: submit() → directed NEXT_LEVEL queue or shared SUB queue + notify
  *
  *   Scheduler thread:
- *     wait on cv (ready queue OR completion queue OR stop requested)
+ *     wait on cv (completion queue OR unconsumed wake generation)
  *     drain completion_queue → on_task_complete → fanout release → ready_queue
  *     launch directed NEXT_LEVEL tasks, then freely scheduled SUB tasks
  *
@@ -103,6 +103,7 @@ public:
     void stop();
 
     bool running() const { return running_.load(std::memory_order_acquire); }
+    uint64_t dispatch_round_count() const { return dispatch_round_count_.load(std::memory_order_acquire); }
 
     // Called by WorkerManager (from WorkerThread) after endpoint run() reaches
     // a terminal outcome.
@@ -126,10 +127,12 @@ private:
     std::queue<WorkerCompletion> completion_queue_;
     std::mutex completion_mu_;
     std::condition_variable completion_cv_;
+    uint64_t wake_generation_{0};
 
     std::thread sched_thread_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> running_{false};
+    std::atomic<uint64_t> dispatch_round_count_{0};
 
     void run();
     void on_task_complete(const WorkerCompletion &completion);
