@@ -511,6 +511,11 @@ struct alignas(64) SchedL2SwimlaneCounters {
     uint64_t sched_async_cycle{0};
     uint64_t sched_loop_count{0};
     uint32_t phase_complete_count{0};
+    // Sub-block retires that did not finish a slot (SPMD blocks of a
+    // multi-block task retiring one at a time). Keep this separate from
+    // phase_complete_count so the Complete phase remains visible during the
+    // serial-harvest tail of an SPMD task.
+    uint32_t phase_subretire_count{0};
     uint32_t phase_dispatch_count{0};
     // Per-emit delta is (current - *_at_last_emit). Accumulated only when
     // l2_swimlane_level_ >= SCHED_PHASES.
