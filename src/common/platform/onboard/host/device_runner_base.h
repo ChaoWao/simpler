@@ -137,6 +137,12 @@ public:
     uint32_t pipeline_slot() const;
     uint32_t selected_arena_bank() const;
     NativeRunThreadSelection capture_native_run_thread_selection() const;
+    /**
+     * Install `selection` on the calling thread. Aborts if the per-thread
+     * storage cannot be created: every caller either runs inside a scope guard
+     * or on a thread that has not started its run yet, so proceeding on the
+     * default slot and bank would silently address another lease's storage.
+     */
     void restore_native_run_thread_selection(const NativeRunThreadSelection &selection) noexcept;
 
     /**

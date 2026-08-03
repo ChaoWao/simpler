@@ -38,6 +38,7 @@ T load_symbol(void *handle, const char *name) {
         msg += name;
         msg += "': ";
         msg += err;
+        msg += "; every host runtime built from this source tree exports it, so rebuild the runtime";
         throw std::runtime_error(msg);
     }
     return reinterpret_cast<T>(sym);
@@ -668,7 +669,9 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
                 );
             }
         }
-        if (occupied != 0 && occupied != 1) {
+        // The loop above already rejected every predecessor that may not carry a
+        // successor, so more than one survivor means a successor is staged.
+        if (occupied > 1) {
             throw std::runtime_error(
                 "prepare_native_run already owns a prepared successor " + format_native_run_identity(run_identity)
             );

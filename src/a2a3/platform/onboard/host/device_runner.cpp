@@ -259,8 +259,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
-    // prepare_launch_shape() resolved block_dim before the graph was built, so
-    // the geometry this run launches with is already on the runner.
+    // activate_launch_shape() latches this run's geometry onto the runner on the
+    // executor thread immediately before run(), so block_dim_ is this run's.
     const int block_dim = block_dim_;
     int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
@@ -291,7 +291,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     ensure_device_wall_buffer();
 
     if (block_dim < 1) {
-        LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
+        LOG_ERROR("run() reached with unresolved block_dim; activate_launch_shape must run first");
         return -1;
     }
     int num_aicore = block_dim * cores_per_blockdim_;
