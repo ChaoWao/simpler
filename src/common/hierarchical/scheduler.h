@@ -29,6 +29,14 @@
  *   WorkerThread (managed by WorkerManager):
  *     loop: task_queue.pop() → endpoint.run(dispatch) →
  *           completion callback → Scheduler.worker_done(completion)
+ *           → lane state published → idle callback → Scheduler.notify_ready()
+ *
+ * The wait is edge-triggered, so it carries an obligation on everything that
+ * feeds it: any state change that turns already-queued work into placeable
+ * work must push a completion or advance the wake generation. Queue occupancy
+ * is no longer re-read by the predicate, so a change that only mutates it —
+ * a requeue from dispatch, a worker publishing itself idle, a run reaching the
+ * FIFO head — is invisible until someone posts the matching edge.
  */
 
 #pragma once
@@ -69,7 +77,6 @@ struct WorkerDispatch;
  * window this closes is exactly the code between the queue pop and the launch.
  */
 bool claim_for_dispatch(TaskSlotState &s);
-bool stageable_successor_ready(const NextLevelReadyQueues &ready_queues, const WorkerManager &manager, RunId run_id);
 
 class Scheduler {
 public:
@@ -103,7 +110,9 @@ public:
     void stop();
 
     bool running() const { return running_.load(std::memory_order_acquire); }
-    uint64_t dispatch_round_count() const { return dispatch_round_count_.load(std::memory_order_acquire); }
+    // Diagnostic only — counts dispatch passes so an observer can tell a parked
+    // scheduler from one spinning on unplaceable work. Orders nothing.
+    uint64_t dispatch_round_count() const { return dispatch_round_count_.load(std::memory_order_relaxed); }
 
     // Called by WorkerManager (from WorkerThread) after endpoint run() reaches
     // a terminal outcome.

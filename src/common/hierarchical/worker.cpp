@@ -106,6 +106,9 @@ void Worker::init() {
         },
         [this](WorkerDispatch dispatch) {
             orchestrator_.mark_task_accepted(dispatch.task_slot);
+        },
+        [this] {
+            scheduler_.notify_ready();
         }
     );
     ready_next_level_queues_.reset(manager_.next_level_worker_ids());

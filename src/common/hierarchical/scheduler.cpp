@@ -104,8 +104,10 @@ void Scheduler::start(const Config &cfg) {
     cfg_ = cfg;
 
     {
+        // run()'s observed generation restarts at zero, so any advance here
+        // arms the first round.
         std::lock_guard<std::mutex> lk(completion_mu_);
-        wake_generation_ = 1;
+        ++wake_generation_;
     }
     dispatch_round_count_.store(0, std::memory_order_relaxed);
     stop_requested_.store(false, std::memory_order_relaxed);
@@ -145,7 +147,7 @@ void Scheduler::worker_done(WorkerCompletion completion) {
     if (s.is_group()) {
         WorkerCompletion terminal = completion;
         {
-            std::lock_guard<std::mutex> lk(s.group_mu);
+            std::unique_lock<std::mutex> lk(s.group_mu);
             const int32_t group_size = s.group_size();
             PreparedGroupVectors prepared =
                 prepare_group_vectors_locked(s, group_size, GroupMemberState::NOT_DISPATCHED);
@@ -162,6 +164,7 @@ void Scheduler::worker_done(WorkerCompletion completion) {
             if (index >= 0 && index < group_size) {
                 GroupMemberState &member_state = s.group_member_states[static_cast<size_t>(index)];
                 if (is_terminal_group_state(member_state)) {
+                    lk.unlock();
                     notify_ready();
                     return;
                 }
@@ -198,6 +201,7 @@ void Scheduler::worker_done(WorkerCompletion completion) {
             }
 
             if (s.group_terminal_count.load(std::memory_order_acquire) < group_size) {
+                lk.unlock();
                 notify_ready();
                 return;
             }
@@ -236,20 +240,6 @@ void Scheduler::notify_ready() {
         ++wake_generation_;
     }
     completion_cv_.notify_one();
-}
-
-bool stageable_successor_ready(const NextLevelReadyQueues &ready_queues, const WorkerManager &manager, RunId run_id) {
-    // B3b stages singles only. If the successor has a group head, retain the
-    // established all-or-nothing group priority instead of letting a staged
-    // single occupy one of its reserved workers after FIFO promotion.
-    if (!ready_queues.groups_empty(run_id)) return false;
-    for (int32_t worker_id : ready_queues.worker_ids()) {
-        WorkerThread *worker = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
-        if (worker != nullptr && worker->can_stage() && !ready_queues.single_empty(worker_id, run_id)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 // =============================================================================
@@ -421,7 +411,7 @@ void Scheduler::try_consume(TaskSlot slot) {
 // sched_thread_ with no surrounding handler, any throw is fatal to the whole
 // worker tree (std::terminate), not a per-task failure.
 void Scheduler::dispatch_ready() {
-    dispatch_round_count_.fetch_add(1, std::memory_order_release);
+    dispatch_round_count_.fetch_add(1, std::memory_order_relaxed);
     std::optional<RunId> run_snapshot;
     if (cfg_.active_run_cb) {
         RunId active_run = cfg_.active_run_cb();

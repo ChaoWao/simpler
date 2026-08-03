@@ -42,13 +42,32 @@ a task is enqueued under its own `run_id`, and the Scheduler pops only from the
 partition of the run that currently holds the FIFO head. That is what keeps two
 admitted runs from interleaving their device work while both are live.
 
-Root submission, stop requests, and group-member completions that do not
-enqueue a terminal task completion advance a wake generation under the
-Scheduler condition-variable mutex. Terminal task completions push the
-completion FIFO under the same mutex. The wait predicate checks for a
-completion or an unconsumed wake generation.
+Root submission, run activation, stop requests, a worker publishing itself
+idle, and group-member completions that do not enqueue a terminal task
+completion all advance a wake generation under the Scheduler
+condition-variable mutex. Terminal task completions push the completion FIFO
+under the same mutex. The wait predicate checks for a completion or an
+unconsumed wake generation.
 Blocked queue heads therefore remain queued without keeping the predicate
 permanently true. Ready queues have no blocking pop or shutdown state.
+
+The predicate is edge-triggered, and that is a contract on everything that
+feeds it: **any state change that turns already-queued work into placeable
+work must push a completion or advance the generation.** The predicate no
+longer re-reads queue occupancy or worker state, so a change that only mutates
+those is invisible to a parked Scheduler.
+
+Two producers are easy to miss because the change happens outside the
+Scheduler thread and outside `Orchestrator`. `dispatch_ready` re-queues work it
+could not place — through `enqueue_ready_cb`, which by design does not notify —
+so the retry depends entirely on a later edge. And a `WorkerThread` publishes
+its completion *before* it publishes its lane state: it calls `on_complete` and
+only then stores `active_inflight_`/`inflight_`. That order is deliberate, so a
+stopping Scheduler cannot read a worker as no longer busy while its final
+completion is still unqueued — which means the completion wake alone can land
+on a worker that still reads as occupied, and the dispatch pass it triggers
+finds nothing placeable. The `on_idle` callback fires after that publication
+and supplies the edge that makes the retry happen.
 
 Popping a slot is not the same as owning it. A run whose graph callback throws
 fails and consumes its own unstarted slots, so the Scheduler claims each slot
