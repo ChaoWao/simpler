@@ -2370,6 +2370,8 @@ struct GroupSchedulerFixture : public ::testing::Test {
         worker_a.drain();
         worker_b.drain();
         worker_c.drain();
+        sub_worker_a.drain();
+        sub_worker_b.drain();
         sched.stop();
         manager.stop();
         allocator.shutdown();
@@ -2842,8 +2844,8 @@ TEST_F(GroupSchedulerFixture, ConsecutiveGroupsReserveOnlyBlockedHeadTargets) {
 
 TEST_F(GroupSchedulerFixture, TearDownDrainsCurrentAndQueuedDispatches) {
     // The verification is the teardown itself: work is left deliberately in
-    // both states — running and queued-but-undispatched — so teardown drains
-    // a worker mid-task and one whose dispatch has not happened yet.
+    // both states — running and queued-but-undispatched — across NEXT_LEVEL
+    // and SUB workers, so every registered worker type must drain cleanly.
     {
         std::lock_guard<std::mutex> scheduler_pause(sched.loop_mutex());
         (void)orch.submit_next_level_group(
@@ -2856,12 +2858,19 @@ TEST_F(GroupSchedulerFixture, TearDownDrainsCurrentAndQueuedDispatches) {
         );
         (void)orch.submit_next_level(C(86), single_tensor_args(0x10A, TensorArgType::OUTPUT), cfg, 0);
         (void)orch.submit_next_level(C(87), single_tensor_args(0x10B, TensorArgType::OUTPUT), cfg, 2);
+        (void)orch.submit_sub_group(
+            C(88), {single_tensor_args(0x10C, TensorArgType::OUTPUT), single_tensor_args(0x10D, TensorArgType::OUTPUT)}
+        );
     }
 
     worker_a.wait_running();
     worker_b.wait_running();
+    sub_worker_a.wait_running();
+    sub_worker_b.wait_running();
     EXPECT_TRUE(worker_a.is_running.load(std::memory_order_acquire));
     EXPECT_TRUE(worker_b.is_running.load(std::memory_order_acquire));
+    EXPECT_TRUE(sub_worker_a.is_running.load(std::memory_order_acquire));
+    EXPECT_TRUE(sub_worker_b.is_running.load(std::memory_order_acquire));
 }
 
 // The shape that hangs when the idle edge is missing: a second task queued for
