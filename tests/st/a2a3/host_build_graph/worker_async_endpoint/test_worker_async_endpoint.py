@@ -24,7 +24,6 @@ from simpler.worker import (
     _FRAME_STAGED,
     _OFF_ACCEPTED,
     _OFF_STATE,
-    _TASK_LAUNCHED,
     MAILBOX_FRAME_SIZE,
     _mailbox_load_i32,
 )
@@ -198,8 +197,6 @@ class TestWorkerAsyncEndpoint(SceneTestCase):
             shm_buf = st_worker._chip_shms[0].buf
             assert shm_buf is not None
             mailbox_addr = ctypes.addressof(ctypes.c_char.from_buffer(shm_buf))
-            predecessor_frame_addr = mailbox_addr + MAILBOX_FRAME_SIZE
-            predecessor_state_addr = predecessor_frame_addr + _OFF_STATE
             successor_frame_addr = mailbox_addr + 2 * MAILBOX_FRAME_SIZE
             successor_state_addr = successor_frame_addr + _OFF_STATE
             successor_accepted_addr = successor_frame_addr + _OFF_ACCEPTED
@@ -211,15 +208,12 @@ class TestWorkerAsyncEndpoint(SceneTestCase):
                 accepted = _mailbox_load_i32(successor_accepted_addr)
                 if state == _FRAME_STAGED:
                     assert accepted == 0, "the successor crossed its launch fence before activation"
-                    assert _mailbox_load_i32(predecessor_state_addr) == _TASK_LAUNCHED, (
-                        "the successor staged only after the predecessor native run had already terminalized"
-                    )
                     saw_staged = True
                     break
-                assert accepted == 0, "the successor launched while its predecessor was still active"
+                assert accepted == 0, "the successor crossed FIFO activation while its predecessor run remained open"
                 time.sleep(0.001)
 
-            assert saw_staged, "the successor did not reach FRAME_STAGED behind its predecessor"
+            assert saw_staged, "the successor did not reach FRAME_STAGED while its predecessor run remained open"
             assert not first.done, "the predecessor escaped its SubTask fence"
 
             _SUB_RELEASE.set()

@@ -9,6 +9,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """End-to-end validation of the B3a prepare/launch/poll/wait/finalize seam."""
 
+import tempfile
+
 import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
@@ -72,7 +74,8 @@ class TestNativeRunLifecycle(SceneTestCase):
 
         spans = list(parse_spans(capfd.readouterr().err.splitlines()))
         invocations = [inv for inv in group_invocations(spans) if "simpler_run" in inv.by_name()]
-        assert len(invocations) == 3, "abandoned, direct, and blocking runs must each emit one trace invocation"
+        expected_invocations = 3 if st_platform.endswith("sim") else 7
+        assert len(invocations) == expected_invocations
 
         common_depths = {
             "simpler_run": 0,
@@ -100,9 +103,18 @@ class TestNativeRunLifecycle(SceneTestCase):
             for name in expected_depths.keys() - {"simpler_run", "simpler_run.runner_run.device_wall"}:
                 stage = by_name[name]
                 assert root.ts <= stage.ts <= stage.ts + stage.dur <= root_end
-        assert launched_count == 2
+        expected_launched = 2 if st_platform.endswith("sim") else 6
+        assert launched_count == expected_launched
+        if not st_platform.endswith("sim"):
+            root_attrs = [inv.by_name()["simpler_run"].attrs for inv in invocations]
+            assert all(
+                key in attrs
+                for attrs in root_attrs
+                for key in ("run_id=", "slot=", "generation=", "dispatch_id=", "run_epoch=")
+            )
+            assert any("slot=1" in attrs and "generation=1" in attrs for attrs in root_attrs)
 
-    def _run_and_validate_l2(  # noqa: PLR0913
+    def _run_and_validate_l2(  # noqa: PLR0913, PLR0915 -- lifecycle contract is intentionally sequential
         self,
         worker,
         callable_obj,
@@ -121,8 +133,10 @@ class TestNativeRunLifecycle(SceneTestCase):
         config = self._build_config(case["config"])
         chip_worker = worker._chip_worker
         assert chip_worker is not None
+        supports_concurrent_prepare = bool(chip_worker._impl.supports_concurrent_native_prepare)
         chip_worker._register_callable_at_slot(_SLOT, callable_obj)
         native_run = None
+        successor_run = None
         try:
             test_args = self.generate_args(case["params"])
             chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
@@ -134,9 +148,10 @@ class TestNativeRunLifecycle(SceneTestCase):
                 _SLOT, chip_args, _SLOT, _GENERATION, config=config
             )
             first_run = native_run
-            assert chip_worker.run_stream_set_create_count == stream_count_before_prepare
+            expected_stream_count = stream_count_before_prepare + int(supports_concurrent_prepare)
+            assert chip_worker.run_stream_set_create_count == expected_stream_count
             assert torch.count_nonzero(test_args.out) == 0, "prepare crossed the device launch fence"
-            with pytest.raises(RuntimeError, match="unfinished native run|owns the runner"):
+            with pytest.raises(RuntimeError, match="unfinished native run|owns the runner|active predecessor"):
                 chip_worker._prepare_native_run_with_pipeline_lease(_SLOT, chip_args, 1, _GENERATION, config=config)
             with pytest.raises(RuntimeError, match="unregister_callable failed"):
                 chip_worker._unregister_slot(_SLOT)
@@ -181,10 +196,100 @@ class TestNativeRunLifecycle(SceneTestCase):
             self.compute_golden(second_golden, case["params"])
             chip_worker._run_slot(_SLOT, second_chip_args, config=config)
             _compare_outputs(second_args, second_golden, second_output_names, self.RTOL, self.ATOL)
-        finally:
-            if native_run is not None:
-                try:
+
+            if supports_concurrent_prepare:
+
+                def build_run_args():
+                    run_args = self.generate_args(case["params"])
+                    run_chip_args, run_output_names = _build_chip_task_args(
+                        run_args, self.CALLABLE["orchestration"]["signature"]
+                    )
+                    run_golden = run_args.clone()
+                    self.compute_golden(run_golden, case["params"])
+                    return run_args, run_chip_args, run_output_names, run_golden
+
+                # The successor owns a distinct bank and fresh stream while A
+                # still owns the execution claim. A failed early launch must
+                # leave B prepared so the same token can launch after A's
+                # complete fence and finalization.
+                active_args, active_chip_args, active_outputs, active_golden = build_run_args()
+                successor_args, successor_chip_args, successor_outputs, successor_golden = build_run_args()
+                stream_count = chip_worker.run_stream_set_create_count
+                native_run = chip_worker._prepare_native_run_with_pipeline_lease(
+                    _SLOT, active_chip_args, 0, _GENERATION + 1, config=config
+                )
+                assert chip_worker.run_stream_set_create_count == stream_count + 1
+                chip_worker._launch_native_run(native_run)
+                successor_run = chip_worker._prepare_native_run_with_pipeline_lease(
+                    _SLOT, successor_chip_args, 1, _GENERATION, config=config
+                )
+                assert chip_worker.run_stream_set_create_count == stream_count + 2
+                bank0 = chip_worker.arena_bank_gm_heap_base(0)
+                bank1 = chip_worker.arena_bank_gm_heap_base(1)
+                assert bank0 != 0
+                assert bank1 != 0
+                assert bank0 != bank1
+                assert torch.count_nonzero(successor_args.out) == 0
+
+                with pytest.raises(RuntimeError, match="launch_native_run failed") as claim_error:
+                    chip_worker._launch_native_run(successor_run)
+                assert "slot=1" in str(claim_error.value)
+                assert "generation=1" in str(claim_error.value)
+                assert "run_epoch=" in str(claim_error.value)
+
+                chip_worker._wait_native_run(native_run)
+                chip_worker._finalize_native_run(native_run)
+                native_run = None
+                _compare_outputs(active_args, active_golden, active_outputs, self.RTOL, self.ATOL)
+
+                chip_worker._launch_native_run(successor_run)
+                chip_worker._wait_native_run(successor_run)
+                chip_worker._finalize_native_run(successor_run)
+                successor_run = None
+                _compare_outputs(successor_args, successor_golden, successor_outputs, self.RTOL, self.ATOL)
+
+                with tempfile.TemporaryDirectory(prefix="simpler-native-diagnostics-") as output_dir:
+                    diagnostic_config = self._build_config(case["config"])
+                    diagnostic_config.enable_dep_gen = True
+                    diagnostic_config.output_prefix = output_dir
+
+                    # A diagnostic successor cannot overlap an ordinary active
+                    # run, even though the predecessor otherwise permits one.
+                    active_args, active_chip_args, active_outputs, active_golden = build_run_args()
+                    native_run = chip_worker._prepare_native_run_with_pipeline_lease(
+                        _SLOT, active_chip_args, 0, _GENERATION + 2, config=config
+                    )
+                    chip_worker._launch_native_run(native_run)
+                    with pytest.raises(RuntimeError, match="active predecessor"):
+                        chip_worker._prepare_native_run_with_pipeline_lease(
+                            _SLOT, successor_chip_args, 1, _GENERATION + 1, config=diagnostic_config
+                        )
+                    chip_worker._wait_native_run(native_run)
                     chip_worker._finalize_native_run(native_run)
+                    native_run = None
+                    _compare_outputs(active_args, active_golden, active_outputs, self.RTOL, self.ATOL)
+
+                    # A diagnostic predecessor also cannot admit an ordinary
+                    # successor while it owns the execution claim.
+                    active_args, active_chip_args, active_outputs, active_golden = build_run_args()
+                    native_run = chip_worker._prepare_native_run_with_pipeline_lease(
+                        _SLOT, active_chip_args, 0, _GENERATION + 3, config=diagnostic_config
+                    )
+                    chip_worker._launch_native_run(native_run)
+                    with pytest.raises(RuntimeError, match="active predecessor"):
+                        chip_worker._prepare_native_run_with_pipeline_lease(
+                            _SLOT, successor_chip_args, 1, _GENERATION + 1, config=config
+                        )
+                    chip_worker._wait_native_run(native_run)
+                    chip_worker._finalize_native_run(native_run)
+                    native_run = None
+                    _compare_outputs(active_args, active_golden, active_outputs, self.RTOL, self.ATOL)
+        finally:
+            for unfinished_run in (successor_run, native_run):
+                if unfinished_run is None:
+                    continue
+                try:
+                    chip_worker._finalize_native_run(unfinished_run)
                 except Exception:
                     pass
             chip_worker._unregister_slot(_SLOT)

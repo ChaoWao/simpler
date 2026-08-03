@@ -47,6 +47,7 @@
 #include "../runtime/runtime.h"
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
+#include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/strace.h"
@@ -60,6 +61,11 @@
 static_assert(
     RUNTIME_ENV_RING_COUNT == PTO2_MAX_RING_DEPTH, "RuntimeEnv ring count must match PTO2 runtime ring depth"
 );
+
+extern "C" const PipelineContract *get_pipeline_contract(void) {
+    static const PipelineContract contract = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
+    return &contract;
+}
 
 // Helper: return current time in milliseconds
 static int64_t _now_ms() {

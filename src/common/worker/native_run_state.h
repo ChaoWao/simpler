@@ -30,9 +30,9 @@ enum class NativeRunPhase : uint8_t {
 };
 
 /**
- * Caller-owned state for one progressable native lifecycle. Runtime and
- * CallConfig are per-run; Runner-owned streams, diagnostics, and timing require
- * exclusive ownership from prepare through finalize.
+ * Caller-owned state for one progressable native lifecycle. Runtime,
+ * CallConfig, and resource selection are per-run. Runner-owned execution,
+ * diagnostics, and timing remain exclusive from launch through finalize.
  */
 template <typename Runner>
 struct NativeRunState {
@@ -70,6 +70,15 @@ struct NativeRunState {
     std::atomic<NativeRunPhase> phase{NativeRunPhase::Prepared};
     NativeRunLaunchSignal launch_signal{};
     void *host_thread_state{nullptr};
+    uint64_t run_id{0};
+    uint64_t generation{0};
+    uint64_t dispatch_id{0};
+    uint64_t run_epoch{0};
+    uint32_t pipeline_slot{0};
+    uint32_t arena_bank{0};
+    char trace_attrs[192]{};
+    bool runner_resources_owned{false};
+    bool runner_reserved{false};
     bool runner_claimed{false};
 };
 

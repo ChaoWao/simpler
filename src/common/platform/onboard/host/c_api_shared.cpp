@@ -36,6 +36,7 @@
 #include <pthread.h>
 
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <new>
 #include <thread>
@@ -66,6 +67,7 @@ extern "C" {
  * =========================================================================== */
 int register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
+__attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
 
 /* ===========================================================================
  * Per-thread DeviceRunnerBase binding (set by simpler_register_callable / simpler_run)
@@ -258,7 +260,7 @@ static const HostApi g_host_api = {
 
 void destroy_device_context(DeviceContextHandle ctx) {
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-    if (runner != nullptr && runner->native_run_active()) {
+    if (runner != nullptr && runner->native_runs_outstanding()) {
         LOG_ERROR("destroy_device_context: refusing to destroy a context with an unfinalized native run");
         return;
     }
@@ -307,7 +309,7 @@ int finalize_device(DeviceContextHandle ctx) {
     if (ctx == NULL) return -1;
     try {
         DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-        if (runner->native_run_active()) {
+        if (runner->native_runs_outstanding()) {
             LOG_ERROR("finalize_device: native run must be finalized first");
             return -1;
         }
@@ -332,6 +334,9 @@ int simpler_init(
     auto tsd_guard = RAIIScopeGuard([]() {
         pthread_setspecific(g_runner_key, nullptr);
     });
+    (void)runner->select_pipeline_slot(0);
+    (void)runner->select_arena_bank(0);
+    (void)runner->set_native_run_identity(0, 0, 0, 0);
 
     // CANN dlog must be levelled BEFORE the device context is opened
     // (rtSetDevice inside attach_current_thread): CANN snapshots the
@@ -409,7 +414,7 @@ int simpler_init(
 int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, const void *callable) {
     if (ctx == NULL || callable == NULL) return -1;
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-    if (runner->native_run_active()) {
+    if (runner->native_runs_outstanding()) {
         LOG_ERROR("simpler_register_callable: native run must be finalized before mutating the callable registry");
         return -1;
     }
@@ -584,16 +589,23 @@ static OnboardNativeRunState *native_run_state(DeviceContextHandle ctx, RuntimeH
     return state;
 }
 
-static void emit_native_run_host_wall(unsigned trace_inv, uint64_t trace_hid, long long trace_start_ns) {
+static void
+emit_native_run_host_wall(unsigned trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
-    STRACE_HOST_SPAN_AT("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0);
+    STRACE_HOST_SPAN_AT_A("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
+}
+
+int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx) {
+    return ctx != nullptr && concurrent_native_prepare_supported_impl() != 0 ? 1 : 0;
 }
 
 static int cleanup_failed_prepare(OnboardNativeRunState *state, int execution_rc, bool clear_gm_sm) {
     const unsigned trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
+    char trace_attrs[sizeof(state->trace_attrs)];
+    std::memcpy(trace_attrs, state->trace_attrs, sizeof(trace_attrs));
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
     int validation_rc = -1;
     try {
@@ -601,13 +613,28 @@ static int cleanup_failed_prepare(OnboardNativeRunState *state, int execution_rc
     } catch (...) {
         validation_rc = -1;
     }
+    int resources_rc = 0;
+    if (state->runner_resources_owned) {
+        try {
+            resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
+        } catch (...) {
+            resources_rc = -1;
+        }
+        state->runner_resources_owned = false;
+    }
     if (state->runner_claimed) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
+    if (state->runner_reserved) {
+        state->runner->release_native_run_reservation(state);
+        state->runner_reserved = false;
+    }
     destroy_native_run_state(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns);
-    return validation_rc != 0 ? validation_rc : execution_rc;
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
+    if (validation_rc != 0) return validation_rc;
+    if (resources_rc != 0) return resources_rc;
+    return execution_rc;
 }
 
 int simpler_prepare_run(
@@ -650,12 +677,30 @@ int simpler_prepare_run(
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
         state = new (runtime) OnboardNativeRunState(runner, *config, trace_hid);
-        if (!runner->try_acquire_native_run(state, &state->launch_signal)) {
-            LOG_ERROR("simpler_prepare_run: another native run is active on this device context");
+        const DeviceRunnerBase::NativeRunThreadSelection selection = runner->capture_native_run_thread_selection();
+        (void)runner->set_native_run_identity(0, 0, 0, 0);
+        state->run_id = selection.run_id;
+        state->generation = selection.generation;
+        state->dispatch_id = selection.dispatch_id;
+        state->run_epoch = selection.run_epoch;
+        state->pipeline_slot = selection.pipeline_slot;
+        state->arena_bank = selection.arena_bank;
+        std::snprintf(
+            state->trace_attrs, sizeof(state->trace_attrs),
+            "run_id=%llu slot=%u generation=%llu dispatch_id=%llu run_epoch=%llu",
+            static_cast<unsigned long long>(state->run_id), state->pipeline_slot,
+            static_cast<unsigned long long>(state->generation), static_cast<unsigned long long>(state->dispatch_id),
+            static_cast<unsigned long long>(state->run_epoch)
+        );
+        const bool allow_prepared_successor =
+            concurrent_native_prepare_supported_impl() != 0 && !config->diagnostics_any();
+        if (!runner->try_reserve_native_run(state, state->pipeline_slot, state->arena_bank, allow_prepared_successor)) {
+            LOG_ERROR("simpler_prepare_run: native-run admission is occupied (%s)", state->trace_attrs);
             destroy_native_run_state(state);
             return -1;
         }
-        state->runner_claimed = true;
+        state->runner_reserved = true;
+        const bool overlaps_active_run = allow_prepared_successor && runner->native_run_active();
         state->trace_inv = trace_inv;
         state->trace_start_ns = trace_start_ns;
         STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
@@ -663,10 +708,17 @@ int simpler_prepare_run(
         int rc = runner->attach_current_thread(runner->device_id());
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
+        state->runner_resources_owned = true;
+        rc = runner->provision_native_run_resources(state->pipeline_slot);
+        if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+
         rc = runner->prepare_launch_shape(state->runtime, state->config);
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
-        runner->apply_call_config(state->config);
+        // Diagnostic binding reads runner-global collector configuration. It
+        // is depth-one, while concurrent HBG preparation must leave the active
+        // run's configuration untouched until launch.
+        if (!overlaps_active_run) runner->apply_call_config(state->config);
 
         {
             STRACE("simpler_run.bind");
@@ -687,8 +739,34 @@ int simpler_prepare_run(
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     OnboardNativeRunState *state = native_run_state(ctx, runtime, "simpler_launch_run");
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
-    if (!state->runner->can_accept_run()) return -1;
-    if (!state->runner_claimed || !state->runner->native_run_owned_by(state)) return -1;
+    if (!state->runner->can_accept_run() || !state->runner_reserved) return -1;
+    if (!state->runner->try_acquire_native_run(state, &state->launch_signal)) {
+        LOG_ERROR("simpler_launch_run: execution claim is occupied (%s)", state->trace_attrs);
+        return -1;
+    }
+    state->runner_claimed = true;
+    // The active predecessor may poison the device after this successor was
+    // prepared but before the execution claim becomes available.
+    if (!state->runner->can_accept_run()) {
+        state->runner->release_native_run(state);
+        state->runner_claimed = false;
+        return -1;
+    }
+
+    // Phase entry points temporarily install the run's resource selection.
+    // Preserve the caller's selection so interleaving finalize(A) and
+    // launch(B) on one progress thread cannot leave that thread bound to A.
+    const DeviceRunnerBase::NativeRunThreadSelection caller_selection =
+        state->runner->capture_native_run_thread_selection();
+    auto selection_guard = RAIIScopeGuard([runner = state->runner, caller_selection]() {
+        runner->restore_native_run_thread_selection(caller_selection);
+    });
+    if (state->runner->select_pipeline_slot(state->pipeline_slot) != 0 ||
+        state->runner->select_arena_bank(state->arena_bank) != 0) {
+        state->runner->release_native_run(state);
+        state->runner_claimed = false;
+        return -1;
+    }
 
     state->phase.store(NativeRunPhase::Launching, std::memory_order_release);
 
@@ -700,12 +778,15 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
             pthread_setspecific(g_runner_key, ctx);
             STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
             int rc = -1;
+            bool entered_run = false;
             try {
                 int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
                 if (attach_rc == 0) {
                     state->adopt_host_thread_state();
+                    state->runner->activate_launch_shape(state->runtime);
                     {
                         STRACE("simpler_run.runner_run");
+                        entered_run = true;
                         rc = state->runner->run(state->runtime, state->config);
                     }
                 } else {
@@ -714,12 +795,25 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
             } catch (...) {
                 rc = -1;
             }
+            if (entered_run) {
+                // run() owns stream retirement on every exit once entered.
+                state->runner_resources_owned = false;
+            } else if (state->runner_resources_owned) {
+                int resources_rc = -1;
+                try {
+                    resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
+                } catch (...) {}
+                state->runner_resources_owned = false;
+                if (rc == 0) rc = resources_rc;
+            }
             pthread_setspecific(g_runner_key, nullptr);
             state->execution_rc.store(rc, std::memory_order_relaxed);
             state->execution_done.store(true, std::memory_order_release);
             state->launch_signal.notify();
         });
     } catch (...) {
+        state->runner->release_native_run(state);
+        state->runner_claimed = false;
         state->phase.store(NativeRunPhase::Prepared, std::memory_order_release);
         return -1;
     }
@@ -763,6 +857,8 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     const unsigned trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
+    char trace_attrs[sizeof(state->trace_attrs)];
+    std::memcpy(trace_attrs, state->trace_attrs, sizeof(trace_attrs));
 
     pthread_once(&g_runner_key_once, create_runner_key);
     pthread_setspecific(g_runner_key, ctx);
@@ -770,6 +866,19 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         pthread_setspecific(g_runner_key, nullptr);
     });
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
+
+    // Finalization can target A after the same caller has already prepared B.
+    // Resource selection is phase-local; restore B's caller selection on every
+    // return path, including validation and resource-retirement failures.
+    const DeviceRunnerBase::NativeRunThreadSelection caller_selection =
+        state->runner->capture_native_run_thread_selection();
+    auto selection_guard = RAIIScopeGuard([runner = state->runner, caller_selection]() {
+        runner->restore_native_run_thread_selection(caller_selection);
+    });
+    if (state->runner->select_pipeline_slot(state->pipeline_slot) != 0 ||
+        state->runner->select_arena_bank(state->arena_bank) != 0) {
+        return -1;
+    }
 
     int execution_rc = -1;
     const bool launched = phase != NativeRunPhase::Prepared;
@@ -795,13 +904,28 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         validation_rc = -1;
     }
 
+    int resources_rc = 0;
+    if (!launched && state->runner_resources_owned) {
+        try {
+            resources_rc = state->runner->abandon_native_run_resources(state->pipeline_slot);
+        } catch (...) {
+            resources_rc = -1;
+        }
+        state->runner_resources_owned = false;
+    }
+
     if (state->runner_claimed) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
+    if (state->runner_reserved) {
+        state->runner->release_native_run_reservation(state);
+        state->runner_reserved = false;
+    }
     destroy_native_run_state(state);
-    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns);
+    emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns, trace_attrs);
     if (validation_rc != 0) return validation_rc;
+    if (resources_rc != 0) return resources_rc;
     return launched ? execution_rc : 0;
 }
 
@@ -828,9 +952,7 @@ int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state
 int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
     if (ctx == NULL) return -1;
     try {
-        DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-        if (runner->native_run_active()) return -1;
-        return runner->select_pipeline_slot(slot_id);
+        return static_cast<DeviceRunnerBase *>(ctx)->select_pipeline_slot(slot_id);
     } catch (...) {
         return -1;
     }
@@ -839,9 +961,20 @@ int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
 int select_arena_bank_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
     if (ctx == NULL) return -1;
     try {
-        DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-        if (runner->native_run_active()) return -1;
-        return runner->select_arena_bank(bank_id);
+        return static_cast<DeviceRunnerBase *>(ctx)->select_arena_bank(bank_id);
+    } catch (...) {
+        return -1;
+    }
+}
+
+int set_native_run_identity_ctx(
+    DeviceContextHandle ctx, uint64_t run_id, uint64_t generation, uint64_t dispatch_id, uint64_t run_epoch
+) {
+    if (ctx == NULL) return -1;
+    try {
+        return static_cast<DeviceRunnerBase *>(ctx)->set_native_run_identity(
+            run_id, generation, dispatch_id, run_epoch
+        );
     } catch (...) {
         return -1;
     }
@@ -869,7 +1002,7 @@ int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
     if (ctx == NULL) return -1;
     try {
         DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-        if (runner->native_run_active()) {
+        if (runner->native_runs_outstanding()) {
             LOG_ERROR(
                 "simpler_unregister_callable: native run must be finalized before mutating the callable registry"
             );

@@ -2394,6 +2394,27 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             cid: int
             config: CallConfig
             activated: bool
+            native_run: Any = None
+            published: bool = False
+
+        supports_concurrent_native_prepare = bool(cw._impl.supports_concurrent_native_prepare)
+        staged_frames: dict[int, _StagedFrame] = {}
+        active_frame: _StagedFrame | None = None
+        active_run: Any = None
+
+        def config_has_diagnostics(config: CallConfig) -> bool:
+            # Mirrors CallConfig::diagnostics_any(); these modes share native
+            # diagnostic state and therefore use the serial prepare fallback.
+            return bool(
+                config.enable_l2_swimlane
+                or config.enable_dump_args
+                or config.enable_pmu
+                or config.enable_dep_gen
+                or config.enable_scope_stats
+            )
+
+        def has_backend_prepared_frame() -> bool:
+            return any(frame.native_run is not None for frame in staged_frames.values())
 
         def read_identity(frame_buf: memoryview) -> tuple[int, int, int, int, int]:
             return (
@@ -2416,6 +2437,36 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         def fail_frame(frame: _StagedFrame, message: str) -> None:
             _write_error(frame.frame_buf, 1, message)
             _mailbox_store_i32(frame.frame_addr + _OFF_STATE, _TASK_FAILED)
+
+        def publish_frame_staged(frame: _StagedFrame) -> None:
+            _write_error(frame.frame_buf, 0, "")
+            _mailbox_store_i32(frame.frame_addr + _OFF_STATE, _FRAME_STAGED)
+            frame.published = True
+
+        def prepare_frame_native_run(frame: _StagedFrame) -> Any:
+            if frame.native_run is not None:
+                return frame.native_run
+            _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
+            frame.native_run = cw._impl._prepare_native_run_from_blob(
+                frame.cid,
+                frame.frame_addr + _OFF_TASK_ARGS_BLOB,
+                _MAILBOX_ARGS_CAPACITY,
+                frame.config,
+                slot_id,
+                generation,
+                run_id,
+                dispatch_id,
+            )
+            return frame.native_run
+
+        def finalize_frame_native_run(frame: _StagedFrame) -> None:
+            native_run = frame.native_run
+            if native_run is None:
+                return
+            # Clearing ownership before the native call makes every unwind path
+            # attempt this token exactly once, including when finalization fails.
+            frame.native_run = None
+            cw._impl._finalize_native_run(native_run)
 
         def stage_frame(index: int, initial_state: int) -> _StagedFrame | None:
             frame_buf = frame_bufs[index]
@@ -2466,7 +2517,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     _rewrite_blob_host_addrs(frame_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
                 config = _read_config_from_mailbox(frame_buf)
                 activation_required = initial_state != _TASK_READY
-                staged = _StagedFrame(
+                return _StagedFrame(
                     index=index,
                     frame_buf=frame_buf,
                     frame_addr=frame_addr,
@@ -2475,17 +2526,11 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     config=config,
                     activated=not activation_required or initial_state == _ACTIVATE,
                 )
-                _write_error(frame_buf, 0, "")
-                _mailbox_store_i32(frame_addr + _OFF_STATE, _FRAME_STAGED)
-                return staged
             except Exception as e:  # noqa: BLE001
                 _write_error(frame_buf, 1, _format_exc(f"chip_process dev={device_id} frame={index}", e))
                 _mailbox_store_i32(frame_addr + _OFF_STATE, _TASK_FAILED)
                 return None
 
-        staged_frames: dict[int, _StagedFrame] = {}
-        active_frame: _StagedFrame | None = None
-        active_run: Any = None
         parent_pid = os.getppid()
         liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
         shutdown_message = f"chip_process dev={device_id}: task loop shut down"
@@ -2497,7 +2542,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 if control_state == _CONTROL_REQUEST:
                     sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
                     registry_control = sub_cmd in (_CTRL_PREPARE, _CTRL_REGISTER, _CTRL_UNREGISTER)
-                    defer_control = registry_control and active_frame is not None
+                    backend_prepared = has_backend_prepared_frame()
+                    defer_control = registry_control and (active_frame is not None or backend_prepared)
                     if sub_cmd == _CTRL_UNREGISTER:
                         defer_control = defer_control or task_frame_references_digest(_read_control_digest(buf))
                     if not defer_control:
@@ -2505,6 +2551,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         _write_error(buf, code, msg)
                         _mailbox_store_i32(state_addr, _CONTROL_DONE)
 
+                stop_after_frame_scan = False
                 for index in range(_TASK_FRAME_COUNT):
                     frame_state = _mailbox_load_i32(frame_addrs[index] + _OFF_STATE)
                     staged = staged_frames.get(index)
@@ -2516,11 +2563,73 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         continue
                     if frame_state == _ACTIVATE:
                         if read_identity(staged.frame_buf) != staged.identity:
-                            fail_frame(staged, f"chip_process dev={device_id}: stale activation identity")
+                            stale_message = f"chip_process dev={device_id}: stale activation identity"
+                            finalize_failed = False
+                            try:
+                                finalize_frame_native_run(staged)
+                            except Exception as e:  # noqa: BLE001
+                                finalize_failed = True
+                                stale_message += "; " + _format_exc("native finalize", e)
+                            fail_frame(staged, stale_message)
                             if active_frame is not staged:
                                 staged_frames.pop(index, None)
+                            if finalize_failed:
+                                shutdown_message = stale_message
+                                stop_after_frame_scan = True
+                                break
                             continue
                         staged.activated = True
+
+                if stop_after_frame_scan:
+                    break
+
+                next_active = None
+                if active_frame is None:
+                    activated_frames = [frame for frame in staged_frames.values() if frame.activated]
+                    if activated_frames:
+                        next_active = min(activated_frames, key=lambda frame: frame.identity[4])
+
+                for staged in sorted(staged_frames.values(), key=lambda frame: frame.identity[4]):
+                    # A frame published before any active claim is validation-only.
+                    # Keep considering it so activation or a later predecessor
+                    # claim can add the missing native token.
+                    native_prepare_now = (
+                        staged.native_run is None
+                        and supports_concurrent_native_prepare
+                        and not config_has_diagnostics(staged.config)
+                        and (
+                            (active_frame is None and staged is next_active)
+                            or (
+                                active_frame is not None
+                                and staged is not active_frame
+                                and not config_has_diagnostics(active_frame.config)
+                            )
+                        )
+                    )
+                    if staged.published and not native_prepare_now:
+                        continue
+                    try:
+                        if native_prepare_now:
+                            prepare_frame_native_run(staged)
+                        if not staged.published:
+                            publish_frame_staged(staged)
+                    except Exception as e:  # noqa: BLE001
+                        prepare_message = _format_exc(f"chip_process dev={device_id}: native prepare", e)
+                        finalize_failed = False
+                        try:
+                            finalize_frame_native_run(staged)
+                        except Exception as finalize_error:  # noqa: BLE001
+                            finalize_failed = True
+                            prepare_message += "; " + _format_exc("native finalize", finalize_error)
+                        fail_frame(staged, prepare_message)
+                        staged_frames.pop(staged.index, None)
+                        if finalize_failed:
+                            shutdown_message = prepare_message
+                            stop_after_frame_scan = True
+                            break
+
+                if stop_after_frame_scan:
+                    break
 
                 if active_frame is not None:
                     try:
@@ -2528,7 +2637,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     except Exception as e:  # noqa: BLE001
                         poll_message = _format_exc(f"chip_process dev={device_id}: native poll", e)
                         try:
-                            cw._impl._finalize_native_run(active_run)
+                            finalize_frame_native_run(active_frame)
                         except Exception as finalize_error:  # noqa: BLE001
                             poll_message += "; " + _format_exc("native finalize", finalize_error)
                         fail_frame(active_frame, poll_message)
@@ -2548,7 +2657,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                             msg = ""
                             finalize_failed = False
                             try:
-                                cw._impl._finalize_native_run(active_run)
+                                finalize_frame_native_run(active_frame)
                             except Exception as e:  # noqa: BLE001
                                 code = 1
                                 finalize_failed = True
@@ -2576,7 +2685,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
 
                 if active_frame is None:
                     eligible = sorted(
-                        (frame for frame in staged_frames.values() if frame.activated),
+                        (frame for frame in staged_frames.values() if frame.activated and frame.published),
                         key=lambda frame: frame.identity[4],
                     )
                     if eligible:
@@ -2587,23 +2696,22 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                             read_identity(next_frame.frame_buf) != next_frame.identity
                             or frame_state not in expected_states
                         ):
-                            fail_frame(
-                                next_frame,
-                                f"chip_process dev={device_id}: staged task frame changed before launch",
-                            )
+                            launch_message = f"chip_process dev={device_id}: staged task frame changed before launch"
+                            finalize_failed = False
+                            try:
+                                finalize_frame_native_run(next_frame)
+                            except Exception as e:  # noqa: BLE001
+                                finalize_failed = True
+                                launch_message += "; " + _format_exc("native finalize", e)
+                            fail_frame(next_frame, launch_message)
                             staged_frames.pop(next_frame.index, None)
+                            if finalize_failed:
+                                shutdown_message = launch_message
+                                break
                         else:
-                            _protocol, _run_id, slot_id, generation, _dispatch_id = next_frame.identity
                             native_run = None
                             try:
-                                native_run = cw._impl._prepare_native_run_from_blob(
-                                    next_frame.cid,
-                                    next_frame.frame_addr + _OFF_TASK_ARGS_BLOB,
-                                    _MAILBOX_ARGS_CAPACITY,
-                                    next_frame.config,
-                                    slot_id,
-                                    generation,
-                                )
+                                native_run = prepare_frame_native_run(next_frame)
                                 cw._impl._launch_native_run(
                                     native_run,
                                     next_frame.frame_addr + _OFF_ACCEPTED,
@@ -2614,7 +2722,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                                 finalize_failed = False
                                 if native_run is not None:
                                     try:
-                                        cw._impl._finalize_native_run(native_run)
+                                        finalize_frame_native_run(next_frame)
                                     except Exception as finalize_error:  # noqa: BLE001
                                         finalize_failed = True
                                         launch_message += "; " + _format_exc("native finalize", finalize_error)
@@ -2641,13 +2749,18 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             if active_frame is not None:
                 active_message = shutdown_message
                 try:
-                    cw._impl._finalize_native_run(active_run)
+                    finalize_frame_native_run(active_frame)
                 except Exception as e:  # noqa: BLE001
                     active_message += "; " + _format_exc("native finalize", e)
                 fail_frame(active_frame, active_message)
                 staged_frames.pop(active_frame.index, None)
             for staged in staged_frames.values():
-                fail_frame(staged, shutdown_message)
+                staged_message = shutdown_message
+                try:
+                    finalize_frame_native_run(staged)
+                except Exception as e:  # noqa: BLE001
+                    staged_message += "; " + _format_exc("native finalize", e)
+                fail_frame(staged, staged_message)
             for index, frame_buf in enumerate(frame_bufs):
                 frame_state_addr = frame_addrs[index] + _OFF_STATE
                 if _mailbox_load_i32(frame_state_addr) in (

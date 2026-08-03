@@ -490,7 +490,7 @@ public:
     // Enqueue a dispatch for the worker. Non-blocking.
     void dispatch(WorkerDispatch d);
     void dispatch_prepared(WorkerDispatch d);
-    // Complete a slot the scheduler already claimed when publication throws.
+    // Complete a slot the scheduler already claimed when publication fails.
     // No endpoint capacity was consumed, but the run-level acceptance waiter
     // still needs its conservative terminal fallback.
     void complete_unpublished(WorkerDispatch d, const std::string &error_message);
@@ -581,6 +581,13 @@ public:
     void control_l3_l2_region_release(uint64_t region_id);
 
 private:
+    enum class EnqueueDispatchResult : uint8_t {
+        QUEUED,
+        STOPPING,
+        CAPACITY_EXCEEDED,
+        STAGED_IDENTITY_CHANGED,
+    };
+
     Ring *ring_{nullptr};
     std::unique_ptr<WorkerEndpoint> endpoint_;
     std::function<void(WorkerCompletion)> on_complete_;
@@ -605,7 +612,7 @@ private:
 
     void loop();
     WorkerCompletion dispatch_process(WorkerDispatch d, const std::function<void()> &on_accept);
-    void enqueue_dispatch(WorkerDispatch d, RunId staged_run_id = INVALID_RUN_ID);
+    EnqueueDispatchResult enqueue_dispatch(WorkerDispatch d, RunId staged_run_id = INVALID_RUN_ID);
     void finish_progress_dispatch(const WorkerEndpointProgress &progress);
     void fail_progress_driver(const std::string &reason) noexcept;
 };
@@ -630,9 +637,12 @@ public:
     void add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint);
     void add_sub(void *mailbox, int child_pid = -1);
 
-    // `on_accept` advances the run's launch fence; pass an empty function only
-    // when nothing waits on that fence, since an omitted callback leaves
-    // pending_accepts non-zero forever. No default: the choice is the caller's.
+    // `on_complete` and `on_accept` are non-throwing contracts: WorkerThread invokes
+    // `on_complete` after endpoint ownership has ended, so no lower layer can
+    // reconstruct run accounting if it unwinds. `on_accept` advances the run's
+    // launch fence; pass an empty function only when nothing waits on that
+    // fence, since an omitted callback leaves pending_accepts non-zero forever.
+    // No default: the choice is the caller's.
     //
     // `on_idle` fires once per finished dispatch, after that worker's lane
     // state is published. An edge-triggered scheduler must supply it: a

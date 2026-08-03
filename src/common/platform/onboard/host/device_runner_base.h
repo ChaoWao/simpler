@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -83,6 +84,17 @@ class NativeRunLaunchSignal;
  */
 class DeviceRunnerBase {
 public:
+    struct NativeRunThreadSelection {
+        uint32_t pipeline_slot{0};
+        uint32_t arena_bank{0};
+        volatile int32_t *accepted_state{nullptr};
+        int32_t accepted_value{0};
+        uint64_t run_id{0};
+        uint64_t generation{0};
+        uint64_t dispatch_id{0};
+        uint64_t run_epoch{0};
+    };
+
     // Public virtual dtor so the shared c_api can `delete` a polymorphic
     // `DeviceRunnerBase *` (the `destroy_device_context` entrypoint). Each
     // arch's `DeviceRunner` defaults this through the compiler-generated dtor.
@@ -94,16 +106,28 @@ public:
 
     /** Bind this runner's launch-acceptance publication target. */
     int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
+    int set_native_run_identity(uint64_t run_id, uint64_t generation, uint64_t dispatch_id, uint64_t run_epoch);
 
     /**
-     * Reserve the runner for one native prepared-run execution. The opaque
-     * owner and runner-owned timing and diagnostic state remain exclusive
-     * through validation/finalize.
+     * Claim the runner for one native execution. The opaque owner and
+     * runner-owned timing and diagnostic state remain exclusive through
+     * validation/finalize.
      */
     bool try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal);
     void release_native_run(const void *owner);
     bool native_run_active() const;
     bool native_run_owned_by(const void *owner) const;
+
+    /**
+     * Reserve caller-owned native-run storage before binding starts. A
+     * concurrent reservation is admitted only while the first reservation
+     * owns the execution claim and selects distinct per-run resources.
+     */
+    bool try_reserve_native_run(
+        const void *owner, uint32_t pipeline_slot, uint32_t arena_bank, bool allow_prepared_successor
+    );
+    void release_native_run_reservation(const void *owner);
+    bool native_runs_outstanding() const;
 
     /** Carry an already-validated run lease into resource selection. */
     int select_pipeline_slot(uint32_t slot_id);
@@ -111,6 +135,9 @@ public:
 
     /** Slot selected by the current run lease. */
     uint32_t pipeline_slot() const;
+    uint32_t selected_arena_bank() const;
+    NativeRunThreadSelection capture_native_run_thread_selection() const;
+    void restore_native_run_thread_selection(const NativeRunThreadSelection &selection) noexcept;
 
     /**
      * Committed GM heap base of one arena bank, or 0 while that bank has never
@@ -413,7 +440,7 @@ public:
      * Publish this run's core geometry onto `Runtime` before the graph is
      * built: resolves `block_dim`, derives `num_aicore = block_dim *
      * cores_per_blockdim_`, range-checks against `RUNTIME_MAX_WORKER`,
-     * publishes `worker_count` / `worker_count_` / `aicpu_thread_num`,
+     * publishes the Runtime's `worker_count` / `aicpu_thread_num`,
      * and zero-initializes the handshake worker array with AIC/AIV core
      * typing (first `block_dim` cores are AIC, remaining are AIV).
      *
@@ -425,6 +452,9 @@ public:
      * Returns 0 on success, -1 on a bad `block_dim` / `aicpu_thread_num`.
      */
     int prepare_launch_shape(Runtime &runtime, const CallConfig &config);
+
+    /** Latch a prepared Runtime's geometry immediately before execution. */
+    void activate_launch_shape(const Runtime &runtime);
 
     /**
      * Replay a previously-registered callable's state onto a fresh Runtime and
@@ -502,6 +532,10 @@ public:
      * its way to the arch-specific run() fail-fast guard.
      */
     virtual bool can_accept_run() const = 0;
+
+    /** Provision/abandon platform resources owned by one prepared native run. */
+    virtual int provision_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
+    virtual int abandon_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
 
     /**
      * Execute a Runtime. Each arch implements its own `run()` — the bodies
@@ -719,7 +753,8 @@ protected:
      * at bind time, before any stream work for the run.
      *
      * Returns the resolved block_dim on success, -1 if the ceiling was
-     * never latched. Updates `block_dim_` on success.
+     * never latched. The value is latched into runner execution state only
+     * when the prepared Runtime is launched.
      */
     int resolve_block_dim();
 
@@ -891,18 +926,21 @@ protected:
     // Same re-register semantics as `aicpu_dlopen_total_`, but for hbg
     // variants.
     size_t host_dlopen_total_{0};
-    volatile int32_t *task_accepted_state_{nullptr};
-    int32_t task_accepted_value_{0};
+    struct NativeRunReservation {
+        const void *owner{nullptr};
+        uint32_t pipeline_slot{0};
+        uint32_t arena_bank{0};
+        bool permits_prepared_successor{false};
+    };
+    mutable std::mutex native_run_mu_;
+    std::array<NativeRunReservation, PTO_PIPELINE_MAX_DEPTH> native_run_reservations_{};
     std::atomic<const void *> active_native_run_{nullptr};
     NativeRunLaunchSignal *native_launch_signal_{nullptr};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
-    // `device_id_` is set once in `attach_current_thread()` (called from
-    // simpler_init during ChipWorker::init) and read on every subsequent
-    // op. All ChipWorker callers run on the same thread that called
-    // init, so plain int + the init→user happens-before edge is
-    // sufficient.
+    // `device_id_` is written once by simpler_init and is immutable while
+    // native prepare, execution, and collector threads attach to the runner.
     int device_id_{-1};
     int block_dim_{0};
     int cores_per_blockdim_{PLATFORM_CORES_PER_BLOCKDIM};
@@ -980,13 +1018,7 @@ protected:
     // Held by pointer because DeviceArena is non-copyable and non-movable, so
     // the array cannot be brace-initialised without naming every bank.
     std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
-    ArenaBank &arena_bank() { return *arena_banks_[arena_bank_]; }
-
-    // Selection carried by the lease of the run currently being served. Both
-    // default to zero, which is what an unleased run and every depth-one
-    // runtime use.
-    uint32_t pipeline_slot_{0};
-    uint32_t arena_bank_{0};
+    ArenaBank &arena_bank() { return *arena_banks_[selected_arena_bank()]; }
 
     bool prebuilt_runtime_arena_cache_valid_{false};
     uint64_t prebuilt_runtime_arena_cache_hash_{0};

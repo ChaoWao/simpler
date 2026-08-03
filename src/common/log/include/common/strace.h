@@ -228,8 +228,8 @@ emit_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, con
 }
 
 /** Emit an explicitly timed host-domain span in the active invocation. */
-inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_ns, int depth) {
-    emit_span_at(name, ts_ns, dur_ns, depth, "");
+inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_ns, int depth, const char *attrs = "") {
+    emit_span_at(name, ts_ns, dur_ns, depth, attrs);
 }
 
 }  // namespace simpler::strace
@@ -256,6 +256,9 @@ inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_n
 /** Emit a host-domain span measured across disjoint API calls. */
 #define STRACE_HOST_SPAN_AT(name, ts_ns, dur_ns, depth) \
     ::simpler::strace::emit_host_span_at((name), (ts_ns), (dur_ns), (depth))
+/** Emit a disjoint host-domain span with caller-formatted attributes. */
+#define STRACE_HOST_SPAN_AT_A(name, ts_ns, dur_ns, depth, attrs) \
+    ::simpler::strace::emit_host_span_at((name), (ts_ns), (dur_ns), (depth), (attrs))
 /** Emit a device-domain span (device-clock start `ts_ns` + measured `dur_ns`). */
 #define STRACE_DEV_SPAN_AT(name, ts_ns, dur_ns, depth) \
     ::simpler::strace::emit_span_at((name), (ts_ns), (dur_ns), (depth))
@@ -270,6 +273,7 @@ inline void emit_host_span_at(const char *name, long long ts_ns, long long dur_n
 #define STRACE_CONTEXT(inv, hid, depth) ((void)0)
 #define STRACE_NOW_NS() 0LL
 #define STRACE_HOST_SPAN_AT(name, ts_ns, dur_ns, depth) ((void)0)
+#define STRACE_HOST_SPAN_AT_A(name, ts_ns, dur_ns, depth, attrs) ((void)0)
 #define STRACE_DEV_SPAN_AT(name, ts_ns, dur_ns, depth) ((void)0)
 
 #endif  // SIMPLER_HOST_STRACE
