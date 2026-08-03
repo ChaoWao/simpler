@@ -30,9 +30,26 @@
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "host_tensor_access.h"
 #if SIMPLER_DFX
 #include "aicpu/scope_stats_collector_aicpu.h"
 #endif
+
+// Tensor-byte access for a caller that can load a device address directly.
+// The AICPU build compiles this translation unit and links these; the host
+// build overrides them with host/host_tensor_access.cpp, where a device
+// address is not loadable in general. Visibility is hidden so the host .so
+// does not export them into the global dynamic symbol table (same pattern as
+// get_sys_cnt_aicpu above and the dep_gen stubs in pto_orchestrator.cpp).
+__attribute__((weak, visibility("hidden"))) bool host_tensor_read(uint64_t dev_addr, void *dst, uint64_t bytes) {
+    memcpy(dst, reinterpret_cast<const void *>(dev_addr), bytes);
+    return true;
+}
+
+__attribute__((weak, visibility("hidden"))) bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes) {
+    memcpy(reinterpret_cast<void *>(dev_addr), src, bytes);
+    return true;
+}
 
 // Host fallback for the host-orchestration path. The AICPU cycle counter is a
 // device register unavailable on the host, so return a monotonic wall-clock
@@ -247,12 +264,17 @@ uint64_t get_tensor_data(PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, 
 
     uint64_t flat_offset = tensor.compute_flat_offset(indices, ndims);
     uint64_t elem_size = get_element_size(tensor.dtype);
-    void *ptr = reinterpret_cast<void *>(tensor.buffer.addr + flat_offset * elem_size);
-    // buffer.addr is mapped into host address space at staging time
-    // (runtime_maker HostApi::register_device_memory_to_host), so the host
-    // orchestrator reads it directly — same as set_tensor_data's write below.
+    uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
     uint64_t result = 0;
-    memcpy(&result, ptr, elem_size);
+    if (!host_tensor_read(elem_addr, &result, elem_size)) {
+        rt->orchestrator.report_fatal(
+            PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
+            "no host view for device address %#llx (%llu bytes): during host orchestration only tensors the "
+            "runtime staged are readable, not runtime-created or child-memory buffers",
+            (unsigned long long)elem_addr, (unsigned long long)elem_size
+        );
+        return 0;
+    }
     return result;
 }
 
@@ -272,8 +294,15 @@ void set_tensor_data(PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, cons
 
     uint64_t flat_offset = tensor.compute_flat_offset(indices, ndims);
     uint64_t elem_size = get_element_size(tensor.dtype);
-    void *ptr = reinterpret_cast<void *>(tensor.buffer.addr + flat_offset * elem_size);
-    memcpy(ptr, &value, elem_size);
+    uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
+    if (!host_tensor_write(elem_addr, &value, elem_size)) {
+        rt->orchestrator.report_fatal(
+            PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
+            "no writable host view for device address %#llx (%llu bytes): during host orchestration only tensors "
+            "the runtime staged are writable, not runtime-created or child-memory buffers",
+            (unsigned long long)elem_addr, (unsigned long long)elem_size
+        );
+    }
 }
 
 // Ops-table entry that hands the call-site captured by PTO2ScopeGuard to the
