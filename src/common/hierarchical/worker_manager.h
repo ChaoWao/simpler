@@ -474,9 +474,17 @@ public:
     // `ring->slot_state(task_slot)` on each dispatch.
     // on_complete(completion) is called (in the WorkerThread) after each
     // endpoint run().
+    //
+    // on_idle() is called (in the WorkerThread) after the lane state for a
+    // finished dispatch is published, so `idle()` and `busy()` already report
+    // the post-completion values when it runs. on_complete() runs strictly
+    // before that publication — a scheduler that treats the completion as its
+    // only wake can therefore still observe this worker as occupied, and
+    // on_idle() is the edge that says otherwise.
     void start(
         Ring *ring, const std::function<void(WorkerCompletion)> &on_complete,
-        const std::function<void(WorkerDispatch)> &on_accept, std::unique_ptr<WorkerEndpoint> endpoint
+        const std::function<void(WorkerDispatch)> &on_accept, const std::function<void()> &on_idle,
+        std::unique_ptr<WorkerEndpoint> endpoint
     );
 
     // Enqueue a dispatch for the worker. Non-blocking.
@@ -487,7 +495,6 @@ public:
     // still needs its conservative terminal fallback.
     void complete_unpublished(WorkerDispatch d, const std::string &error_message);
     bool has_staged_run(RunId run_id) const;
-    bool needs_activation(RunId run_id) const;
     bool activate_prepared(RunId run_id);
 
     // The active lane and staged-successor lane are intentionally distinct.
@@ -578,6 +585,7 @@ private:
     std::unique_ptr<WorkerEndpoint> endpoint_;
     std::function<void(WorkerCompletion)> on_complete_;
     std::function<void(WorkerDispatch)> on_accept_;
+    std::function<void()> on_idle_;
 
     std::thread thread_;
     std::queue<WorkerDispatch> queue_;
@@ -610,6 +618,7 @@ class WorkerManager {
 public:
     using OnCompleteFn = std::function<void(WorkerCompletion)>;
     using OnAcceptFn = std::function<void(WorkerDispatch)>;
+    using OnIdleFn = std::function<void()>;
 
     // Register a worker. `mailbox` is a MAILBOX_SIZE-byte MAP_SHARED
     // region; the real worker (a `ChipWorker` for NEXT_LEVEL, a Python
@@ -624,7 +633,13 @@ public:
     // `on_accept` advances the run's launch fence; pass an empty function only
     // when nothing waits on that fence, since an omitted callback leaves
     // pending_accepts non-zero forever. No default: the choice is the caller's.
-    void start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept);
+    //
+    // `on_idle` fires once per finished dispatch, after that worker's lane
+    // state is published. An edge-triggered scheduler must supply it: a
+    // completion alone does not prove the worker is dispatchable again. It is
+    // defaulted empty because pools driven by no scheduler have nothing to
+    // wake.
+    void start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept, const OnIdleFn &on_idle = {});
     void stop_workers();
     void stop();
 
@@ -637,7 +652,6 @@ public:
 
     bool any_busy() const;
     bool has_staged_run(RunId run_id) const;
-    bool needs_activation(RunId run_id) const;
     bool activate_prepared_run(RunId run_id);
 
     // Forward CTRL_PREPARE to a specific NEXT_LEVEL worker. Thin wrapper

@@ -273,22 +273,6 @@ bool NextLevelReadyQueues::try_front_group(RunId run_id, TaskSlot &out) { return
 bool NextLevelReadyQueues::try_pop_group(TaskSlot &out) { return group_queue_.try_pop(out); }
 bool NextLevelReadyQueues::try_pop_group(RunId run_id, TaskSlot &out) { return group_queue_.try_pop(run_id, out); }
 
-bool NextLevelReadyQueues::empty() const {
-    if (!group_queue_.empty()) return false;
-    for (const auto &queue : queues_) {
-        if (!queue->empty()) return false;
-    }
-    return true;
-}
-
-bool NextLevelReadyQueues::empty(RunId run_id) const {
-    if (!group_queue_.empty(run_id)) return false;
-    for (const auto &queue : queues_) {
-        if (!queue->empty(run_id)) return false;
-    }
-    return true;
-}
-
 bool NextLevelReadyQueues::groups_empty(RunId run_id) const { return group_queue_.empty(run_id); }
 
 bool NextLevelReadyQueues::single_empty(int32_t worker_id, RunId run_id) const {

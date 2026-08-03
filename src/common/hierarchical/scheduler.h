@@ -22,13 +22,21 @@
  *   Orch: submit() → directed NEXT_LEVEL queue or shared SUB queue + notify
  *
  *   Scheduler thread:
- *     wait on cv (ready queue OR completion queue OR stop requested)
+ *     wait on cv (completion queue OR unconsumed wake generation)
  *     drain completion_queue → on_task_complete → fanout release → ready_queue
  *     launch directed NEXT_LEVEL tasks, then freely scheduled SUB tasks
  *
  *   WorkerThread (managed by WorkerManager):
  *     loop: task_queue.pop() → endpoint.run(dispatch) →
  *           completion callback → Scheduler.worker_done(completion)
+ *           → lane state published → idle callback → Scheduler.notify_ready()
+ *
+ * The wait is edge-triggered, so it carries an obligation on everything that
+ * feeds it: any state change that turns already-queued work into placeable
+ * work must push a completion or advance the wake generation. Queue occupancy
+ * is no longer re-read by the predicate, so a change that only mutates it —
+ * a requeue from dispatch, a worker publishing itself idle, a run reaching the
+ * FIFO head — is invisible until someone posts the matching edge.
  */
 
 #pragma once
@@ -69,7 +77,6 @@ struct WorkerDispatch;
  * window this closes is exactly the code between the queue pop and the launch.
  */
 bool claim_for_dispatch(TaskSlotState &s);
-bool stageable_successor_ready(const NextLevelReadyQueues &ready_queues, const WorkerManager &manager, RunId run_id);
 
 class Scheduler {
 public:
@@ -103,6 +110,9 @@ public:
     void stop();
 
     bool running() const { return running_.load(std::memory_order_acquire); }
+    // Diagnostic only — counts dispatch passes so an observer can tell a parked
+    // scheduler from one spinning on unplaceable work. Orders nothing.
+    uint64_t dispatch_round_count() const { return dispatch_round_count_.load(std::memory_order_relaxed); }
 
     // Called by WorkerManager (from WorkerThread) after endpoint run() reaches
     // a terminal outcome.
@@ -126,10 +136,12 @@ private:
     std::queue<WorkerCompletion> completion_queue_;
     std::mutex completion_mu_;
     std::condition_variable completion_cv_;
+    uint64_t wake_generation_{0};
 
     std::thread sched_thread_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> running_{false};
+    std::atomic<uint64_t> dispatch_round_count_{0};
 
     void run();
     void on_task_complete(const WorkerCompletion &completion);

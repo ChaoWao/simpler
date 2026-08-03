@@ -269,12 +269,14 @@ char *LocalMailboxEndpoint::task_frame(size_t index) const {
 
 void WorkerThread::start(
     Ring *ring, const std::function<void(WorkerCompletion)> &on_complete,
-    const std::function<void(WorkerDispatch)> &on_accept, std::unique_ptr<WorkerEndpoint> endpoint
+    const std::function<void(WorkerDispatch)> &on_accept, const std::function<void()> &on_idle,
+    std::unique_ptr<WorkerEndpoint> endpoint
 ) {
     if (!endpoint) throw std::invalid_argument("WorkerThread::start: null endpoint");
     ring_ = ring;
     on_complete_ = on_complete;
     on_accept_ = on_accept;
+    on_idle_ = on_idle;
     endpoint_ = std::move(endpoint);
     shutdown_ = false;
     if (endpoint_->caps().max_inflight_tasks == 0) {
@@ -391,12 +393,6 @@ bool WorkerThread::activate_prepared(RunId run_id) {
 bool WorkerThread::has_staged_run(RunId run_id) const {
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
     return staged_run_id_.load(std::memory_order_relaxed) == run_id;
-}
-
-bool WorkerThread::needs_activation(RunId run_id) const {
-    std::lock_guard<std::mutex> lane_lk(lane_mu_);
-    return staged_run_id_.load(std::memory_order_relaxed) == run_id &&
-           activated_run_id_.load(std::memory_order_relaxed) != run_id;
 }
 
 bool WorkerThread::can_stage() const {
@@ -578,10 +574,16 @@ void WorkerThread::loop() {
             }
         }
 
+        // on_complete_ runs before the lane state is published so a stopping
+        // scheduler cannot read this worker as no longer busy while its final
+        // completion is still unqueued. That leaves the reverse window — the
+        // scheduler placing work sees a stale non-idle lane — which is what
+        // on_idle_ closes.
         on_complete_(std::move(completion));
         active_inflight_.store(false, std::memory_order_release);
         inflight_.fetch_sub(1, std::memory_order_acq_rel);
         cv_.notify_one();
+        if (on_idle_) on_idle_();
     }
 }
 
@@ -639,6 +641,7 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
     }
     inflight_.fetch_sub(1, std::memory_order_acq_rel);
     cv_.notify_one();
+    if (on_idle_) on_idle_();
 }
 
 void WorkerThread::fail_progress_driver(const std::string &reason) noexcept {
@@ -1095,7 +1098,9 @@ void WorkerManager::add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endp
 
 void WorkerManager::add_sub(void *mailbox, int child_pid) { sub_entries_.push_back(LocalSubEntry{mailbox, child_pid}); }
 
-void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept) {
+void WorkerManager::start(
+    Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept, const OnIdleFn &on_idle
+) {
     if (ring == nullptr) throw std::invalid_argument("WorkerManager::start: null ring");
 
     std::vector<int32_t> next_level_worker_ids;
@@ -1125,7 +1130,7 @@ void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete, const OnA
             auto endpoint = std::make_unique<LocalMailboxEndpoint>(
                 entry.worker_id, entry.mailbox, entry.child_pid, entry.task_frame_count
             );
-            wt->start(ring, on_complete, on_accept, std::move(endpoint));
+            wt->start(ring, on_complete, on_accept, on_idle, std::move(endpoint));
             next_level_threads_.push_back(std::move(wt));
         }
     };
@@ -1136,14 +1141,14 @@ void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete, const OnA
             auto endpoint = std::make_unique<LocalMailboxEndpoint>(
                 static_cast<int32_t>(i), entries[i].mailbox, entries[i].child_pid
             );
-            wt->start(ring, on_complete, on_accept, std::move(endpoint));
+            wt->start(ring, on_complete, on_accept, on_idle, std::move(endpoint));
             threads.push_back(std::move(wt));
         }
     };
     make_next_level_threads();
     for (auto &endpoint : next_level_endpoint_entries_) {
         auto wt = std::make_unique<WorkerThread>();
-        wt->start(ring, on_complete, on_accept, std::move(endpoint));
+        wt->start(ring, on_complete, on_accept, on_idle, std::move(endpoint));
         next_level_threads_.push_back(std::move(wt));
     }
     next_level_endpoint_entries_.clear();
@@ -1633,12 +1638,6 @@ bool WorkerManager::any_busy() const {
 bool WorkerManager::has_staged_run(RunId run_id) const {
     for (const auto &worker : next_level_threads_)
         if (worker->has_staged_run(run_id)) return true;
-    return false;
-}
-
-bool WorkerManager::needs_activation(RunId run_id) const {
-    for (const auto &worker : next_level_threads_)
-        if (worker->needs_activation(run_id)) return true;
     return false;
 }
 
