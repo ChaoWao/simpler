@@ -141,22 +141,28 @@ inline void mark_fq_contended(Header *header, bool *signalled) {
 }
 
 // Leader park for a lane whose own reclaim depends on the host completing an
-// open→drain→release cycle on the FREE-queue (pop) side — only tensor_dump's
+// open→drain→release cycle on the FREE-queue (pop) side — only args_dump's
 // arena barrier today (engine-gate leaders instead spin on a real free slot).
 // Blocks until the host has both opened fq_freeze covering this contention AND
 // released it. Uses the DISJUNCTION (fq_contended || fq_freeze_active): the host
 // opens fq_freeze before consuming fq_contended, so the predicate stays
 // continuously true from mark_fq_contended() to release — no (0,0) escape
-// window. Relaxes via SPIN_WAIT_HINT() (platform-tiered). Null-safe.
+// window. Relaxes via SPIN_WAIT_HINT() (platform-tiered). Null-safe. The caller
+// supplies the start time so this wait and any follow-up acknowledgement wait
+// can share one timeout budget.
 template <typename Header>
-inline void wait_for_release(const Header *header) {
+inline bool wait_for_release(const Header *header, uint64_t wait_start, uint64_t timeout_cycles) {
     if (header == nullptr) {
-        return;
+        return true;
     }
     while (header->backpressure.fq_contended != 0 || header->backpressure.fq_freeze_active != 0) {
+        if (get_sys_cnt_aicpu() - wait_start >= timeout_cycles) {
+            return false;
+        }
         SPIN_WAIT_HINT();
     }
     rmb();  // acquire: order host's pre-release writes before the leader's post-release reads
+    return true;
 }
 
 }  // namespace dfx_backpressure

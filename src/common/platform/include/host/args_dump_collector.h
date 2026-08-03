@@ -31,6 +31,7 @@
 #ifndef SRC_COMMON_PLATFORM_INCLUDE_HOST_ARGS_DUMP_COLLECTOR_H_
 #define SRC_COMMON_PLATFORM_INCLUDE_HOST_ARGS_DUMP_COLLECTOR_H_
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -275,6 +276,9 @@ public:
      */
     void *get_dump_shm_device_ptr() const { return dump_shared_mem_dev_; }
 
+    /** Return whether an active args-dump freeze may release. An idle call returns false. */
+    bool backpressure_release_ready() const;
+
 private:
     struct alignas(64) CollectorShardCounters {
         uint64_t total_collected{0};
@@ -313,6 +317,7 @@ private:
     std::atomic<uint32_t> total_dropped_record_count_{0};
     std::atomic<uint32_t> total_truncated_count_{0};
     std::atomic<uint32_t> total_overwrite_count_{0};
+    std::array<std::atomic<uint64_t>, PLATFORM_MAX_AICPU_THREADS> written_payload_counts_{};
 
     // Run-scoped state for the writer thread (lazily started on first
     // on_buffer_collected and joined by export_dump_files).
@@ -327,11 +332,15 @@ private:
     void start_writer_thread_once();
 
     // Writer thread: streams arg payloads to a single args.bin
+    struct PayloadWriteRequest {
+        uint32_t thread_index;
+        std::vector<uint8_t> bytes;
+    };
     std::thread writer_thread_;
     std::mutex writer_start_mutex_;
     std::mutex write_mutex_;
     std::condition_variable write_cv_;
-    std::queue<DumpedArg> write_queue_;
+    std::queue<PayloadWriteRequest> write_queue_;
     std::atomic<bool> writer_done_{false};
 
     // Resolved dump level; FULL_JSON_ONLY suppresses the .bin file entirely.

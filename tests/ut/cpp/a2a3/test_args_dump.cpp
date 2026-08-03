@@ -11,8 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 #include "aicpu/args_dump_aicpu.h"
 
@@ -187,6 +189,76 @@ TEST_F(ArgsDumpTest, DumpRecordCorrectness) {
     EXPECT_EQ(srec.dtype, static_cast<uint8_t>(DataType::UINT64));
     EXPECT_EQ(srec.func_ids[0], 7u);
     EXPECT_EQ(meta_buf.count, 2u);
+
+    dump_args_flush(0);
+    EXPECT_EQ(state->published_payload_count, 1u);
+
+    set_platform_dump_base(0);
+}
+
+TEST_F(ArgsDumpTest, ArenaBackpressureChecksBeforePayloadOverwrite) {
+    constexpr size_t kDumpMemSize = sizeof(DumpDataHeader) + sizeof(DumpBufferState);
+    alignas(64) uint8_t dump_mem[kDumpMemSize] = {};
+    alignas(64) DumpMetaBuffer meta_buffers[2]{};
+    constexpr size_t kArenaSize = 32;
+    alignas(uint64_t) uint8_t arena[kArenaSize] = {};
+    uint64_t first_data[4] = {1, 2, 3, 4};
+    uint64_t second_data[4] = {5, 6, 7, 8};
+
+    DumpDataHeader *header = get_dump_header(dump_mem);
+    header->magic = ARGS_DUMP_MAGIC;
+    header->dump_args_level = static_cast<uint32_t>(DumpArgsLevel::FULL);
+    header->num_dump_threads = 1;
+    DumpBufferState *state = get_dump_buffer_state(dump_mem, 0);
+    state->free_queue.buffer_ptrs[0] = reinterpret_cast<uint64_t>(&meta_buffers[0]);
+    state->free_queue.buffer_ptrs[1] = reinterpret_cast<uint64_t>(&meta_buffers[1]);
+    state->free_queue.tail = 2;
+    state->arena_base = reinterpret_cast<uint64_t>(arena);
+    state->arena_size = kArenaSize;
+
+    set_platform_dump_base(reinterpret_cast<uint64_t>(dump_mem));
+    dump_args_init(1);
+
+    ArgsDumpInfo info{};
+    info.role = ArgsDumpRole::INPUT;
+    info.stage = ArgsDumpStage::BEFORE_DISPATCH;
+    info.dtype = static_cast<uint8_t>(DataType::UINT64);
+    info.ndims = 1;
+    info.shapes[0] = 4;
+    info.strides[0] = 1;
+    info.kind = static_cast<uint8_t>(ArgsDumpKind::TENSOR);
+    info.func_count = 1;
+    info.func_ids[0] = 1;
+    info.buffer_addr = reinterpret_cast<uint64_t>(first_data);
+    ASSERT_EQ(dump_arg_record(0, info), 0);
+
+    std::atomic<bool> payload_preserved_before_ack{false};
+    std::thread host([header, state, &arena, first_data, &payload_preserved_before_ack] {
+        while (header->backpressure.fq_contended == 0) {
+            std::this_thread::yield();
+        }
+        header->backpressure.fq_freeze_active = 1;
+        wmb();
+        header->backpressure.fq_contended = 0;
+        header->backpressure.fq_freeze_active = 0;
+        wmb();
+        payload_preserved_before_ack.store(
+            *reinterpret_cast<const uint64_t *>(arena) == first_data[0], std::memory_order_release
+        );
+        state->completed_payload_count = state->published_payload_count;
+    });
+
+    info.task_id = 1;
+    info.buffer_addr = reinterpret_cast<uint64_t>(second_data);
+    EXPECT_EQ(dump_arg_record(0, info), 0);
+    host.join();
+
+    EXPECT_TRUE(payload_preserved_before_ack.load(std::memory_order_acquire));
+    EXPECT_EQ(state->published_payload_count, 1u);
+    EXPECT_EQ(state->completed_payload_count, 1u);
+    EXPECT_EQ(state->arena_write_offset, 2 * kArenaSize);
+    EXPECT_EQ(meta_buffers[1].records[0].payload_offset, kArenaSize);
+    EXPECT_EQ(*reinterpret_cast<uint64_t *>(arena), second_data[0]);
 
     set_platform_dump_base(0);
 }
