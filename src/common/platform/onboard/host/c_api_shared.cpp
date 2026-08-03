@@ -68,6 +68,12 @@ extern "C" {
 int register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
 __attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
+__attribute__((weak)) int prepared_run_config_compatible_impl(
+    const HostApi * /*api*/, const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/,
+    const uint64_t * /*ring_dep_pool*/
+) {
+    return 1;
+}
 
 /* ===========================================================================
  * Per-thread DeviceRunnerBase binding (set by simpler_register_callable / simpler_run)
@@ -707,6 +713,24 @@ int simpler_prepare_run(
 
         int rc = runner->attach_current_thread(runner->device_id());
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+
+        if (overlaps_active_run) {
+            int compatibility_rc = 0;
+            {
+                STRACE("simpler_run.bind.compatibility");
+                compatibility_rc = prepared_run_config_compatible_impl(
+                    &g_host_api, config->runtime_env.ring_task_window, config->runtime_env.ring_heap,
+                    config->runtime_env.ring_dep_pool
+                );
+            }
+            if (compatibility_rc <= 0) {
+                if (compatibility_rc == 0) {
+                    LOG_INFO("successor RuntimeEnv requires depth-one native preparation");
+                    compatibility_rc = PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE;
+                }
+                return cleanup_failed_prepare(state, compatibility_rc, true);
+            }
+        }
 
         state->runner_resources_owned = true;
         rc = runner->provision_native_run_resources(state->pipeline_slot);

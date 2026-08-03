@@ -577,6 +577,44 @@ def test_two_frame_capable_backend_publishes_failure_instead_of_staged_when_prep
         harness.close()
 
 
+def test_two_frame_incompatible_successor_stays_staged_and_prepares_after_predecessor():
+    harness = _TwoFrameLoopHarness(
+        supports_concurrent_native_prepare=True,
+        chip_runtime="tensormap_and_ringbuffer",
+    )
+    try:
+        harness.publish(0, 1)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+
+        fallback = RuntimeError("native prepare requires depth-one fallback run_id=2 slot=1")
+        harness.cw._impl.prepare_errors[(1, 11)] = fallback
+        harness.publish(1, 2, state=worker_mod._PREPARE_READY)
+        harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert not harness.cw._impl.prepared[1].is_set()
+        assert not harness.cw._impl.finalized[0].is_set()
+
+        del harness.cw._impl.prepare_errors[(1, 11)]
+        _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
+        harness.cw._impl.completed[0].set()
+        assert harness.cw._impl.finalized[0].wait(5.0)
+        assert harness.cw._impl.launched[1].wait(5.0)
+        harness.cw._impl.completed[1].set()
+        harness.wait_state(1, worker_mod._TASK_DONE)
+
+        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        assert lifecycle == [
+            ("prepare", 0),
+            ("launch", 0),
+            ("finalize", 0),
+            ("prepare", 1),
+            ("launch", 1),
+            ("finalize", 1),
+        ]
+    finally:
+        harness.close()
+
+
 def test_two_frame_capable_backend_waits_for_first_token_to_launch_before_preparing_second():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
@@ -2372,11 +2410,15 @@ class TestDirectL2RunHandle:
             self.events: list[tuple] = []
             self.completed = [threading.Event(), threading.Event()]
             self.wait_entered = threading.Event()
+            self.depth_one_once: set[int] = set()
 
         def _prepare_native_run_with_pipeline_lease(
             self, callable_id, args, slot_id, generation, config, *, run_id, dispatch_id
         ):
             del args, config
+            if run_id in self.depth_one_once:
+                self.depth_one_once.remove(run_id)
+                raise RuntimeError(f"native prepare requires depth-one fallback run_id={run_id}")
             token = SimpleNamespace(
                 callable_id=callable_id,
                 slot_id=slot_id,
@@ -2496,6 +2538,36 @@ class TestDirectL2RunHandle:
         fake.completed[1].set()
         first.wait(5.0)
         second.wait(5.0)
+
+    def test_incompatible_successor_defers_prepare_without_failing_its_handle(self):
+        worker, callable_handle, fake = self._worker(concurrent=True)
+        first = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+        fake.depth_one_once.add(2)
+
+        second = worker._submit_l2_locked(callable_handle, object(), cast(Any, self._config()))
+        assert worker._l2_runs[2].phase == "deferred"
+        assert not second.done
+        assert all(event[:2] != ("prepare", 2) for event in fake.events)
+
+        accepted = threading.Event()
+        waiter = threading.Thread(target=lambda: (second._wait_for_acceptance(), accepted.set()))
+        waiter.start()
+        assert fake.wait_entered.wait(1.0)
+        assert not accepted.is_set()
+
+        fake.completed[0].set()
+        waiter.join(5.0)
+        assert accepted.is_set()
+        assert ("finalize", 1, 0) in fake.events
+        assert ("prepare", 2, 1, 1, 2) in fake.events
+        assert ("launch", 2, 1) in fake.events
+        assert not fake.completed[1].is_set()
+
+        fake.completed[1].set()
+        first.wait(5.0)
+        second.wait(5.0)
+        assert second.done
+        assert not worker._accepted_run_handles
 
 
 class TestRunHandle:

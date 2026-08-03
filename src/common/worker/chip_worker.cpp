@@ -676,7 +676,11 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
                 "prepare_native_run already owns a prepared successor " + format_native_run_identity(run_identity)
             );
         }
-        if (!pipeline_generations_.admit(PipelineSlotLease{slot_id, 0, generation})) {
+        // A compatibility probe may reject this prepare while the predecessor
+        // is still active. Merely attempting that probe must not consume the
+        // lease generation, because the same lease is retried at the ordered
+        // depth-one handoff boundary.
+        if (!pipeline_generations_.is_admissible(PipelineSlotLease{slot_id, 0, generation})) {
             throw std::runtime_error(
                 "native-run pipeline lease generation is stale " + format_native_run_identity(run_identity)
             );
@@ -710,6 +714,11 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
         if (state.run_epoch == run_epoch && state.phase == NativeRunPhase::PREPARING) {
             state = NativeRunSlotState{};
         }
+        if (rc == PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE) {
+            throw std::runtime_error(
+                "native prepare requires depth-one fallback " + format_native_run_identity(run_identity)
+            );
+        }
         throw std::runtime_error(
             "prepare_native_run failed with code " + std::to_string(rc) + " " + format_native_run_identity(run_identity)
         );
@@ -723,6 +732,14 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
             (void)finalize_run_fn_(device_ctx_, runtime_bufs_[slot_id].data());
             state = NativeRunSlotState{};
             throw std::runtime_error("native-run identity changed while prepare was in progress");
+        }
+        if (!pipeline_generations_.admit(PipelineSlotLease{slot_id, 0, generation})) {
+            (void)finalize_run_fn_(device_ctx_, runtime_bufs_[slot_id].data());
+            state = NativeRunSlotState{};
+            throw std::runtime_error(
+                "native-run pipeline lease generation became stale while prepare was in progress " +
+                format_native_run_identity(run_identity)
+            );
         }
         state.phase = NativeRunPhase::PREPARED;
     }

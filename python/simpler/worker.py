@@ -2396,6 +2396,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             activated: bool
             native_run: Any = None
             published: bool = False
+            defer_native_prepare: bool = False
 
         supports_concurrent_native_prepare = bool(cw._impl.supports_concurrent_native_prepare)
         staged_frames: dict[int, _StagedFrame] = {}
@@ -2457,6 +2458,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 run_id,
                 dispatch_id,
             )
+            frame.defer_native_prepare = False
             return frame.native_run
 
         def finalize_frame_native_run(frame: _StagedFrame) -> None:
@@ -2597,6 +2599,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         staged.native_run is None
                         and supports_concurrent_native_prepare
                         and not config_has_diagnostics(staged.config)
+                        and (not staged.defer_native_prepare or active_frame is None)
                         and (
                             (active_frame is None and staged is next_active)
                             or (
@@ -2614,6 +2617,15 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         if not staged.published:
                             publish_frame_staged(staged)
                     except Exception as e:  # noqa: BLE001
+                        if (
+                            active_frame is not None
+                            and staged is not active_frame
+                            and _native_prepare_requires_depth_one(e)
+                        ):
+                            staged.defer_native_prepare = True
+                            if not staged.published:
+                                publish_frame_staged(staged)
+                            continue
                         prepare_message = _format_exc(f"chip_process dev={device_id}: native prepare", e)
                         finalize_failed = False
                         try:
@@ -3149,11 +3161,19 @@ class _L2NativeRun:
     run_id: int
     slot_id: int
     generation: int
-    native_run: Any
+    callable_id: int
+    args: Any
+    config: CallConfig
+    native_run: Any | None
     permits_successor: bool
-    phase: str = "prepared"
+    phase: str = "deferred"
     error: BaseException | None = None
     handle: RunHandle | None = None
+
+
+def _native_prepare_requires_depth_one(error: BaseException) -> bool:
+    """Recognize the backend's explicit, correctness-preserving fallback."""
+    return "native prepare requires depth-one fallback" in str(error)
 
 
 @dataclass
@@ -8203,15 +8223,35 @@ class Worker:
 
     def _l2_finish_front_locked(self, state: _L2NativeRun, error: BaseException | None) -> None:
         assert self._chip_worker is not None
-        try:
-            self._chip_worker._finalize_native_run(state.native_run)
-        except BaseException as exc:  # noqa: BLE001
-            if error is None:
-                error = exc
+        if state.native_run is not None:
+            try:
+                self._chip_worker._finalize_native_run(state.native_run)
+            except BaseException as exc:  # noqa: BLE001
+                if error is None:
+                    error = exc
         state.error = error
         state.phase = "terminal"
         if self._l2_fifo and self._l2_fifo[0] == state.run_id:
             self._l2_fifo.pop(0)
+        self._l2_progress_cv.notify_all()
+
+    def _l2_prepare_front_locked(self, state: _L2NativeRun) -> None:
+        assert self._chip_worker is not None
+        assert state.phase == "deferred"
+        try:
+            state.native_run = self._chip_worker._prepare_native_run_with_pipeline_lease(
+                state.callable_id,
+                state.args,
+                state.slot_id,
+                state.generation,
+                state.config,
+                run_id=state.run_id,
+                dispatch_id=state.run_id,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            self._l2_finish_front_locked(state, exc)
+            return
+        state.phase = "prepared"
         self._l2_progress_cv.notify_all()
 
     def _l2_launch_front_locked(self, state: _L2NativeRun) -> None:
@@ -8224,7 +8264,9 @@ class Worker:
         state.phase = "launched"
         self._l2_progress_cv.notify_all()
 
-    def _l2_progress_locked(self, target_run_id: int, deadline: float | None, *, block: bool) -> bool:
+    def _l2_progress_locked(  # noqa: PLR0912 -- one bounded loop owns all direct-L2 phases
+        self, target_run_id: int, deadline: float | None, *, block: bool
+    ) -> bool:
         """Drive the direct L2 FIFO until target terminalizes or progress would block."""
         assert self._chip_worker is not None
         while True:
@@ -8237,6 +8279,10 @@ class Worker:
                 raise RuntimeError("direct L2 native lane lost a nonterminal run")
 
             front = self._l2_runs[self._l2_fifo[0]]
+            if front.phase == "deferred":
+                self._l2_prepare_front_locked(front)
+                if front.phase == "terminal":
+                    continue
             if front.phase == "prepared":
                 self._l2_launch_front_locked(front)
                 if front.phase == "terminal":
@@ -8259,6 +8305,8 @@ class Worker:
                 # Launch the successor at the same ordered handoff boundary.
                 if self._l2_fifo:
                     successor = self._l2_runs[self._l2_fifo[0]]
+                    if successor.phase == "deferred":
+                        self._l2_prepare_front_locked(successor)
                     if successor.phase == "prepared":
                         self._l2_launch_front_locked(successor)
                 continue
@@ -8299,16 +8347,31 @@ class Worker:
             run_id = self._l2_next_run_id
             self._l2_next_run_id += 1
 
-            native_run = self._chip_worker._prepare_native_run_with_pipeline_lease(
-                callable_state.slot_id,
-                args,
+            state = _L2NativeRun(
+                run_id,
                 slot_id,
                 generation,
+                callable_state.slot_id,
+                args,
                 cfg,
-                run_id=run_id,
-                dispatch_id=run_id,
+                None,
+                permits_successor,
             )
-            state = _L2NativeRun(run_id, slot_id, generation, native_run, permits_successor)
+            try:
+                state.native_run = self._chip_worker._prepare_native_run_with_pipeline_lease(
+                    callable_state.slot_id,
+                    args,
+                    slot_id,
+                    generation,
+                    cfg,
+                    run_id=run_id,
+                    dispatch_id=run_id,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                if not self._l2_fifo or not _native_prepare_requires_depth_one(exc):
+                    raise
+            else:
+                state.phase = "prepared"
             handle = RunHandle(self, run_id, (callable, args, cfg))
             state.handle = handle
             self._l2_runs[run_id] = state
@@ -8574,13 +8637,16 @@ class Worker:
                     state = self._l2_runs.get(run_id)
                     if state is None:
                         raise RuntimeError(f"unknown direct L2 run id {run_id}")
-                    if state.phase != "prepared":
+                    if state.phase in ("launched", "terminal"):
                         if state.error is not None:
                             raise state.error
                         return
                     front_run_id = self._l2_fifo[0]
                     if front_run_id == run_id:
-                        self._l2_launch_front_locked(state)
+                        if state.phase == "deferred":
+                            self._l2_prepare_front_locked(state)
+                        if state.phase == "prepared":
+                            self._l2_launch_front_locked(state)
                         continue
                     self._l2_progress_locked(front_run_id, None, block=True)
         assert self._orch is not None

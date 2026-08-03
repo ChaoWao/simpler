@@ -121,7 +121,9 @@ public:
     /**
      * Reserve caller-owned native-run storage before binding starts. A
      * concurrent reservation is admitted only while the first reservation
-     * owns the execution claim and selects distinct per-run resources.
+     * owns the execution claim and selects a distinct pipeline slot. A backend
+     * that shares an arena bank must reject or defer incompatible preparation
+     * before mutating that bank.
      */
     bool try_reserve_native_run(
         const void *owner, uint32_t pipeline_slot, uint32_t arena_bank, bool allow_prepared_successor
@@ -500,9 +502,9 @@ public:
     size_t host_dlopen_count() const { return host_dlopen_total_; }
 
     /**
-     * Number of run stream generations this runner has created. AICPU streams
-     * belong to pipeline slots, while an AICore stream is reused only for the
-     * same AICore image. Arches whose runs use the persistent pair report 0.
+     * Number of run-owned AICore streams this runner has created. AICPU streams
+     * belong to pipeline slots, while every native prepare provisions a fresh
+     * AICore stream. Arches whose runs use the persistent pair report 0.
      */
     virtual size_t run_stream_set_create_count() const { return 0; }
 

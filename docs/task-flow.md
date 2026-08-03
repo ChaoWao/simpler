@@ -388,6 +388,13 @@ independent `HOST_PER_RUN` arena bank. Once the predecessor owns the active
 claim, the child binds the successor into the inactive bank and provisions its
 fresh AICore stream before publishing `FRAME_STAGED`. The active bank remains
 immutable, and launch still waits for predecessor completion and finalization.
+
+`tensormap_and_ringbuffer` stages slot-private task arguments and Host
+descriptors while sharing arena bank 0. Concurrent native preparation requires
+the successor's resolved runtime sizing key to match the active prebuilt arena.
+An incompatible successor remains staged in FIFO order and retries preparation
+after the active device fence; it is not rejected. Both paths keep a fresh
+AICore stream per run and persistent slot-owned AICPU streams.
 Diagnostics retain validation-only staging because their collectors are
 runner-global.
 
