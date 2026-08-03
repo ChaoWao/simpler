@@ -207,7 +207,15 @@ _OFF_FRAME_SLOT_ID = _OFF_ACCEPTED - 24
 _OFF_FRAME_GENERATION = _OFF_ACCEPTED - 16
 _OFF_FRAME_DISPATCH_ID = _OFF_ACCEPTED - 8
 _TASK_PROTOCOL_VERSION = 2
-_MAILBOX_ARGS_CAPACITY = _OFF_FRAME_PROTOCOL - _OFF_TASK_ARGS_BLOB
+# Mirrors MAILBOX_OFF_SHUTDOWN / MAILBOX_SHUTDOWN_REQUESTED: termination is a
+# sticky one-way word on the control frame, not a MailboxState. _OFF_STATE has
+# three writers (parent CONTROL_REQUEST, child CONTROL_DONE, C++
+# return-to-IDLE), any of which overwrites a _SHUTDOWN store; only a
+# terminating parent writes this word, 0 -> 1, and nothing clears it. The word
+# is reserved on every frame so a task-args blob can never reach it.
+_OFF_SHUTDOWN = _OFF_FRAME_PROTOCOL - 8
+_SHUTDOWN_REQUESTED = 1
+_MAILBOX_ARGS_CAPACITY = _OFF_SHUTDOWN - _OFF_TASK_ARGS_BLOB
 _OFF_CONTROL_CALLABLE_HASH = _OFF_ARGS + 32
 # MAILBOX_OFF_ERROR_MSG / MAILBOX_ERROR_MSG_SIZE come from the C++
 # nanobind module so the two sides cannot drift.
@@ -1655,6 +1663,18 @@ def _buffer_field_addr(buf, offset: int) -> int:
     return ctypes.addressof(ctypes.c_char.from_buffer(buf)) + offset
 
 
+def _request_child_shutdown(buf) -> None:
+    """Ask the child owning this mailbox to leave its serve loop.
+
+    Sole writer of the termination request. The sticky ``_OFF_SHUTDOWN`` word
+    goes first so a child sampling it between the two stores already leaves by
+    the shutdown path; the ``_SHUTDOWN`` state word follows for a child parked
+    on the state word alone.
+    """
+    _mailbox_store_i32(_buffer_field_addr(buf, _OFF_SHUTDOWN), _SHUTDOWN_REQUESTED)
+    _mailbox_store_i32(_buffer_field_addr(buf, _OFF_STATE), _SHUTDOWN)
+
+
 def _write_error(buf, code: int, msg: str = "") -> None:
     """Write an (error code, message) tuple into the mailbox error region.
 
@@ -1742,11 +1762,21 @@ def _run_mailbox_loop(
     kill, a cancelled CI job) would otherwise leave this loop polling a mailbox
     nobody writes to, for the lifetime of the machine. The loop therefore
     samples its own parent and leaves by the SHUTDOWN path once it changes.
+
+    Termination is read from the sticky ``_OFF_SHUTDOWN`` word as well as the
+    state word: the ``_CONTROL_DONE`` this loop publishes for an in-flight
+    control command overwrites a concurrent ``_SHUTDOWN`` store, and only the
+    sticky word survives that.
     """
     parent_pid = os.getppid()
     liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+    shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
     while True:
         state = _mailbox_load_i32(state_addr)
+        if state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
+            if on_shutdown is not None:
+                on_shutdown()
+            break
         if state == _TASK_READY:
             code, msg = handle_task()
             _write_error(buf, code, msg)
@@ -1756,10 +1786,6 @@ def _run_mailbox_loop(
             code, msg = handle_control(int(sub_cmd))
             _write_error(buf, code, msg)
             _mailbox_store_i32(state_addr, _CONTROL_DONE)
-        elif state == _SHUTDOWN:
-            if on_shutdown is not None:
-                on_shutdown()
-            break
         else:
             liveness_countdown -= 1
             if liveness_countdown <= 0:
@@ -2534,10 +2560,14 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         parent_pid = os.getppid()
         liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
         shutdown_message = f"chip_process dev={device_id}: task loop shut down"
+        # The sticky shutdown word outlives the _CONTROL_DONE this loop
+        # publishes for an in-flight control command, which overwrites a
+        # concurrent _SHUTDOWN store on the state word.
+        shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
         try:
             while True:
                 control_state = _mailbox_load_i32(state_addr)
-                if control_state == _SHUTDOWN:
+                if control_state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
                     break
                 if control_state == _CONTROL_REQUEST:
                     sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
@@ -5150,41 +5180,69 @@ class Worker:
             handle = self._register_into_snapshot_or_wait(reg)
             if handle is not None:
                 return handle
-            if not isinstance(target, ChipCallable):
-                with self._operation_lease("register"):
+            # Post-start publication touches the live tree; hold a lease across
+            # the whole transaction, publication included, so close() drains it
+            # before teardown (re-checks READY, closing the gate-then-teardown
+            # race).
+            with self._operation_lease("register"):
+                if not isinstance(target, ChipCallable):
                     return self._post_start_register_python(reg)
-        else:
-            # L2 has no pre-start snapshot, but still linearizes against the
-            # epoch: reject a terminal (CLOSED/FAILED) worker and wait out an
-            # in-progress init so the callable is installed and its device slot
-            # prepared after READY — never left registered-but-not-prepared, and
-            # never accepted onto a closed worker as an inert handle.
-            with self._hierarchical_start_cv:
-                self._wait_out_init_locked("register")
+                return self._post_start_register_chip(reg, target)
 
+        # L2 has no pre-start snapshot, but still linearizes against the
+        # epoch: reject a terminal (CLOSED/FAILED) worker and wait out an
+        # in-progress init so the callable is installed and its device slot
+        # prepared after READY — never left registered-but-not-prepared, and
+        # never accepted onto a closed worker as an inert handle.
+        with self._hierarchical_start_cv:
+            self._wait_out_init_locked("register")
+        if self.level == 2 and self._initialized:
+            with self._operation_lease("register"):
+                return self._post_start_register_l2(reg, target)
+        with self._registry_lock:
+            handle, _is_new = self._install_registration_locked(reg)
+        return handle
+
+    def _post_start_register_chip(self, reg: _CallableRegistration, target: ChipCallable) -> CallableHandle:
+        """Publish a post-READY L3+ ChipCallable and broadcast it to the chip /
+        next-level children via C++ after Host-side slot allocation.
+
+        Caller holds an ``_operation_lease``, so publication and broadcast are
+        one transaction: a close() either drains the whole thing or is refused
+        admission before anything is published. The slot is target-private; task
+        dispatches carry only ``handle.digest``.
+        """
         with self._registry_lock:
             handle, is_new = self._install_registration_locked(reg)
-
-        # L3+ post-init ChipCallable: broadcast to chip / next-level children
-        # via C++ after L3 Host-side slot allocation is complete. The slot is
-        # target-private; task dispatches carry only handle.digest.
-        if self.level >= 3 and self._initialized and isinstance(target, ChipCallable):
-            try:
-                with self._operation_lease("register"):
-                    self._post_init_register(target, handle.digest, is_new=is_new)
-            except Exception:
-                with self._registry_lock:
-                    self._rollback_handle_locked(handle)
-                raise
-
-        # L2 post-init: pre-warm immediately so the very first run(handle, …)
-        # is a clean cache hit.
-        if self.level == 2 and self._initialized and isinstance(target, ChipCallable) and is_new:
-            assert self._chip_worker is not None
+        try:
+            self._post_init_register(target, handle.digest, is_new=is_new)
+        except Exception:
             with self._registry_lock:
-                slot_id = self._identity_registry[handle.digest].slot_id
-            with self._operation_lease("register"):
-                self._chip_worker._register_callable_at_slot(slot_id, target)
+                self._rollback_handle_locked(handle)
+            raise
+        return handle
+
+    def _post_start_register_l2(self, reg: _CallableRegistration, target: ChipCallable) -> CallableHandle:
+        """Publish a post-READY L2 registration and pre-warm its device slot, so
+        the very first ``run(handle, …)`` is a clean cache hit.
+
+        Caller holds an ``_operation_lease``. L2 has no child subtree to
+        broadcast to, so the lease covers only publication and the local
+        pre-warm.
+        """
+        with self._registry_lock:
+            handle, is_new = self._install_registration_locked(reg)
+        if not is_new:
+            return handle
+        assert self._chip_worker is not None
+        with self._registry_lock:
+            slot_id = self._identity_registry[handle.digest].slot_id
+        try:
+            self._chip_worker._register_callable_at_slot(slot_id, target)
+        except Exception:
+            with self._registry_lock:
+                self._rollback_handle_locked(handle)
+            raise
         return handle
 
     def _python_worker_types(self) -> list[WorkerType]:
@@ -5694,6 +5752,26 @@ class Worker:
             return
         if self._pre_start_unregister_if_needed(handle_or_slot):
             return
+        # Symmetric with register: a path that drives the live tree — the L3+
+        # child broadcast, and the L2 device-slot release — makes its registry
+        # mutation and its child-facing call one transaction under a lease, so
+        # a concurrent close() drains it before teardown instead of racing it.
+        # A registry-only decrement takes no lease: it must still work on a
+        # worker that was never initialized, which the lease rejects outright.
+        if self._initialized and self.level >= 2:
+            with self._operation_lease("unregister"):
+                self._unregister_handle(handle_or_slot, live=True)
+            return
+        self._unregister_handle(handle_or_slot, live=False)
+
+    def _unregister_handle(self, handle_or_slot, *, live: bool) -> None:
+        """Pop a handle from the registry and propagate cleanup to its target.
+
+        ``live`` says whether the target is reachable — an L3+ child subtree or
+        an L2 device slot. It is decided once by the caller, under the lease
+        that pins the worker in READY for the whole transaction, rather than
+        re-read from the lifecycle across the broadcast.
+        """
         target = None
         digest = b""
         cid = -1
@@ -5706,9 +5784,7 @@ class Worker:
                 raise KeyError("UNREGISTER_TOMBSTONE_ACTIVE: callable handle already pending unregister")
             self._live_handles.pop(handle_id, None)
             state.ref_count -= 1
-            should_broadcast_decrement = (
-                self.level >= 3 and self._initialized and getattr(self, "_hierarchical_started", False)
-            )
+            should_broadcast_decrement = live and self.level >= 3
             if state.ref_count > 0 and not should_broadcast_decrement:
                 return
             target = self._callable_registry[cid]
@@ -5717,7 +5793,7 @@ class Worker:
                 self._pending_unregister_cids.add(cid)
                 if state.ref_count > 0:
                     remove_target = False
-            elif self.level == 2 and self._initialized:
+            elif live and self.level == 2:
                 assert self._chip_worker is not None
                 self._chip_worker._unregister_slot(cid)
                 self._callable_registry.pop(cid, None)
@@ -6572,7 +6648,7 @@ class Worker:
                 buf = shms_list[idx].buf if idx < len(shms_list) else None
                 if buf is None:
                     continue
-                _mailbox_store_i32(_buffer_field_addr(buf, _OFF_STATE), _SHUTDOWN)
+                _request_child_shutdown(buf)
                 graceful.append(pid)
 
         # Phase 1b: mid-init next-level children get a cooperative cancel so they
@@ -8839,15 +8915,19 @@ class Worker:
 
     @staticmethod
     def _broadcast_child_shutdown(shms: list[SharedMemory]) -> None:
-        """Store _SHUTDOWN into every child mailbox in one group (next-level
-        children trigger ``inner_worker.close()``; chip/sub children exit their
-        serve loop). The first store error is raised after all are attempted."""
+        """Store the shutdown request into every child mailbox in one group
+        (next-level children trigger ``inner_worker.close()``; chip/sub children
+        exit their serve loop). The first store error is raised after all are
+        attempted.
+
+        The request is a sticky word plus the state word (see
+        ``_request_child_shutdown``)."""
         errors: list[BaseException] = []
         for shm in shms:
             try:
                 buf = shm.buf
                 if buf is not None:
-                    _mailbox_store_i32(_buffer_field_addr(buf, _OFF_STATE), _SHUTDOWN)
+                    _request_child_shutdown(buf)
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
         if errors:

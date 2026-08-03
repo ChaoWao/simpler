@@ -316,6 +316,7 @@ MAILBOX_OFF_PIPELINE_LEASE:       PipelineSlotLease
 MAILBOX_OFF_TASK_CALLABLE_HASH:   uint8[32] callable digest
 MAILBOX_OFF_TASK_ARGS_BLOB:       bytes [int32 T][int32 S]
                                         [Tensor x T][uint64_t x S]
+MAILBOX_OFF_SHUTDOWN:             int32 sticky shutdown request
 task-frame trailer:               protocol, run id, lease slot,
                                   lease generation, dispatch id
 MAILBOX_OFF_ACCEPTED:             int32 sticky native-launch marker
@@ -324,17 +325,28 @@ frame tail:                       fixed-size NUL-terminated error message
 
 The C++ `MAILBOX_FRAME_SIZE` and `MAILBOX_SIZE` constants are exported through
 the nanobind module. Python derives frame slicing and offsets from those
-bindings where possible. `MAILBOX_ARGS_CAPACITY` ends before the protocol
-trailer, acceptance word, and error-message tail.
+bindings where possible. `MAILBOX_ARGS_CAPACITY` ends before the shutdown word,
+protocol trailer, acceptance word, and error-message tail.
+
+`MAILBOX_OFF_SHUTDOWN` carries the termination request on the control base
+frame. The state word has three writers — the parent's `CONTROL_REQUEST`, the
+child's `CONTROL_DONE`, and the endpoint's return to `IDLE` — so a `SHUTDOWN`
+state store is erasable. Only a terminating parent writes the shutdown word,
+0 -> 1, and nothing clears it, so a child's serve loop still observes the
+request after an in-flight control command completes over it. Both sides write
+it before the `SHUTDOWN` state store and read it at the top of every serve-loop
+iteration alongside the state word.
 
 ### 3.5 Stop and child shutdown
 
 `Worker::close()` first asks the Scheduler to stop admitting dispatch, then
 calls `WorkerManager::stop_workers()` while Scheduler callbacks and worker pool
 entries are still valid. A progressable `WorkerThread` repeatedly publishes
-`SHUTDOWN` on the control base until its frames terminalize; repetition prevents
-a concurrently finishing control handler's `CONTROL_DONE` from losing the stop
-request. The child finalizes any active native run and marks every
+`SHUTDOWN` on the control base until its frames terminalize; the sticky
+shutdown word (section 3.4) is what makes the request itself unloseable, while
+the repetition keeps the *state* word from resting on a `CONTROL_DONE` a
+concurrently finishing control handler published. The child finalizes any
+active native run and marks every
 active or staged task frame failed before leaving; the parent drains those
 terminal events, brings its in-flight count to zero, and joins the one progress
 thread. The Scheduler is joined only after worker threads can no longer invoke
