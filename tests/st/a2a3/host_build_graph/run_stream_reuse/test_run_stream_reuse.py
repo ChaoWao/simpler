@@ -106,7 +106,7 @@ class TestRunStreamReuseHbg(SceneTestCase):
         {
             "name": "repeated_runs",
             "platforms": ["a2a3", "a2a3sim"],
-            "config": {"aicpu_thread_num": 4, "block_dim": 3},
+            "config": {"block_dim": 3},
             "params": {},
         },
     ]

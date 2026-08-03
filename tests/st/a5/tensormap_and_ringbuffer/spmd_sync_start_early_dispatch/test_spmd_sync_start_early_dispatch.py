@@ -78,13 +78,11 @@ class TestSpmdSyncStartEarlyDispatch(SceneTestCase):
         {
             "name": "EarlyOn",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {"early_on": 1},
         },
         {
             "name": "EarlyOff",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {"early_on": 0},
         },
     ]

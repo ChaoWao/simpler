@@ -1264,11 +1264,29 @@ int DeviceRunnerBase::launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args
 // =============================================================================
 
 int DeviceRunnerBase::validate_launch_aicpu_num(int launch_aicpu_num) {
-    if (launch_aicpu_num < 1 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
-        LOG_ERROR("launch_aicpu_num (%d) must be in range [1, %d]", launch_aicpu_num, PLATFORM_MAX_AICPU_THREADS);
+    if (launch_aicpu_num == 1 || launch_aicpu_num < 0 || launch_aicpu_num > PLATFORM_MAX_AICPU_THREADS) {
+        LOG_ERROR(
+            "launch_aicpu_num (%d) must be 0 (auto) or in range [2, %d]", launch_aicpu_num, PLATFORM_MAX_AICPU_THREADS
+        );
         return -1;
     }
     return 0;
+}
+
+int DeviceRunnerBase::resolve_aicpu_thread_num(int requested, int usable, int arch_default) {
+    if (usable < 2) {
+        LOG_ERROR("AICPU usable count %d < 2 (need >=1 orchestrator + >=1 scheduler)", usable);
+        return -1;
+    }
+    int desired = (requested > 0) ? requested : arch_default;
+    int total = std::min(desired, usable);
+    if (total < desired) {
+        LOG_WARN(
+            "AICPU: requested %d active threads, only %d usable on this die — running 1 orch + %d sched", desired,
+            usable, total - 1
+        );
+    }
+    return total;
 }
 
 void DeviceRunnerBase::ensure_device_wall_buffer() {

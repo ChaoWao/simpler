@@ -84,14 +84,12 @@ class TestPreparedCallableHbg(SceneTestCase):
         ],
     }
 
-    _COMMON_CONFIG = {"aicpu_thread_num": 4}
     _PLATFORMS = ["a2a3sim", "a2a3"]
 
     CASES = [
         {
             "name": "prepare_run_twice",
             "platforms": _PLATFORMS,
-            "config": _COMMON_CONFIG,
             "params": {"a": 2.0, "b": 3.0},
         },
     ]
@@ -171,7 +169,7 @@ class TestPreparedCallableHbg(SceneTestCase):
     def _setup_dlopen_count_test(self, st_worker, st_platform):
         case = self.CASES[0]
         callable_obj = self.build_callable(st_platform)
-        config = self._build_config(case["config"])
+        config = self._build_config(case.get("config", {}))
         return callable_obj, config, case
 
     def _run_one(self, worker, slot, config, case):

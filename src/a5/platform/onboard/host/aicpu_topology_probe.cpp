@@ -173,6 +173,10 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
         return derive_topology_from_occupy(soc_name, occupy, out_user_cpus);
     }
 
+    // Host-side OCCUPY includes the SMT pair reserved by the AICPU OS on a5,
+    // whereas device-side user kernels cannot run on either sibling. Identify
+    // shared physical cores from CPU_TOPO and exclude the whole pair so this
+    // host-side reconstruction matches the device-visible dispatch pool.
     for (uint32_t i = 0; i < topo.total_nums; ++i) {
         const DsmiSingleCpu &c = topo.cpus[i];
         // Skip any cpu_id not in the device-side OCCUPY pool. Guard the
@@ -180,6 +184,14 @@ bool probe_aicpu_topology_uncached(uint32_t device_id, std::vector<AicpuLogicalC
         // to expose more than 64 logical AICPU cpus, but a driver bug or
         // future SKU change shouldn't trip undefined behavior here.
         if (c.cpu_id >= 64 || ((occupy >> c.cpu_id) & 1ULL) == 0) continue;
+        bool has_smt_sibling = false;
+        for (uint32_t j = 0; j < topo.total_nums; ++j) {
+            if (i != j && topo.cpus[j].phy_cpu_id == c.phy_cpu_id) {
+                has_smt_sibling = true;
+                break;
+            }
+        }
+        if (has_smt_sibling) continue;
         AicpuLogicalCpu e{};
         e.cpu_id = static_cast<int32_t>(c.cpu_id);
         e.phy_cpu_id = static_cast<int32_t>(c.phy_cpu_id);

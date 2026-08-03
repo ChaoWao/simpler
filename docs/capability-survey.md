@@ -63,10 +63,10 @@ shared across a device's AICPU/AICore tiers but exclusive per `device_id`.
 | Comm window | Fabric V2 handles, VMM-IPC fallback | VMM shareable handles only |
 
 Two numbers surprise readers who skip the arch docs: the default
-`aicpu_thread_num` is **3** (`src/common/task_interface/call_config.h:112`) —
-neither the per-arch max nor the launch bound — and AICore geometry is not
-selectable at all, because `resolve_block_dim()` unconditionally takes the
-device maximum (`src/common/platform/onboard/host/device_runner_base.cpp:1201-1212`).
+`aicpu_thread_num` is **0 (auto)** — each architecture resolves it against its
+usable AICPU topology — and AICore geometry is not selectable at all, because
+`resolve_block_dim()` unconditionally takes the device maximum
+(`src/common/platform/onboard/host/device_runner_base.cpp:1201-1212`).
 Each arch doc's "three views of how many cores" section explains why the spec
 count, the silicon count, and the runtime-visible count differ
 (`src/a2a3/docs/hardware.md:42-51`).

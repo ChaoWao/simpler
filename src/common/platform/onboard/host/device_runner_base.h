@@ -733,6 +733,16 @@ protected:
     int validate_launch_aicpu_num(int launch_aicpu_num);
 
     /**
+     * Resolve the active AICPU thread count for partial-good tolerance.
+     * requested == 0 means auto (use arch_default = 1 orch + N sched); the
+     * result is clamped to `usable` (the probed AICPU count — PG/OS cores are
+     * absent from OCCUPY) so a degraded die runs with fewer schedulers, and
+     * returns <0 if usable < 2 (need >=1 orch + >=1 sched). Returns the active
+     * total otherwise.
+     */
+    int resolve_aicpu_thread_num(int requested, int usable, int arch_default);
+
+    /**
      * Lazy-allocate the 8-byte device-resident buffer that AICPU writes
      * the run wall (ns) into and that `read_device_wall_ns()` pulls
      * back after stream sync. Idempotent: a no-op once

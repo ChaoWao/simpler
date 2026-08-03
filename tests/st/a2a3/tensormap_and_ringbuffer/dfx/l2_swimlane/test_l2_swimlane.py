@@ -76,7 +76,6 @@ class TestL2Swimlane(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         },
         {

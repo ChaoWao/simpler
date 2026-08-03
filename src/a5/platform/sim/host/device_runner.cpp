@@ -218,8 +218,13 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // prepare_launch_shape() resolved block_dim before the graph was built, so
     // the geometry this run launches with is already on the runner.
     const int block_dim = block_dim_;
-    const int launch_aicpu_num = config.aicpu_thread_num;
+    int launch_aicpu_num = config.aicpu_thread_num;
     clear_cpu_sim_shared_storage();
+    // Sim has no hardware topology to probe, so auto uses the architecture
+    // default directly. Publish the effective count so AICPU init and DFX
+    // setup match the launch gate.
+    if (launch_aicpu_num == 0) launch_aicpu_num = PLATFORM_DEFAULT_AICPU_THREAD_NUM;
+    runtime.set_aicpu_thread_num(launch_aicpu_num);
     if (block_dim < 1) {
         LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
         return -1;

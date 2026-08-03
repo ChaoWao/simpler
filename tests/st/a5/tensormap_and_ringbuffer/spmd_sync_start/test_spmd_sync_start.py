@@ -70,7 +70,6 @@ class TestSpmdSyncStart(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 4},
             "params": {},
         }
     ]

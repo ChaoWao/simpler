@@ -52,6 +52,14 @@ constexpr int PLATFORM_AIV_CORES_PER_BLOCKDIM = 2;
 constexpr int PLATFORM_MAX_AICPU_THREADS = 4;
 
 /**
+ * Default active AICPU thread count when aicpu_thread_num is left at 0 (auto):
+ * 1 orchestrator + 3 schedulers. DeviceRunner clamps it to the probed usable
+ * count (PG/OS cores are absent from the AICPU OCCUPY bitmap), runs with fewer
+ * schedulers if usable < default, and errors if fewer than 2 AICPU are usable.
+ */
+constexpr int PLATFORM_DEFAULT_AICPU_THREAD_NUM = 4;  // 1 orch + 3 sched
+
+/**
  * Maximum AICPU launch threads (physical)
  * Upper bound for the number of AICPU threads that can be launched by Host.
  * Can be larger than PLATFORM_MAX_AICPU_THREADS to allow threads to be dropped

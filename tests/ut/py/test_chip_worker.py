@@ -19,9 +19,8 @@ from _task_interface import CallConfig, RuntimeEnv, _ChipWorker  # pyright: igno
 class TestCallConfig:
     def test_defaults(self):
         config = CallConfig()
-        # 0 is the "auto" sentinel — DeviceRunner resolves it at run() time
-        # to the max the AICore stream allows.
-        assert config.aicpu_thread_num == 3
+        # 0 is the "auto" sentinel for the per-architecture runtime default.
+        assert config.aicpu_thread_num == 0
         assert config.enable_l2_swimlane == 0
         assert config.enable_dump_args == 0
         assert config.enable_pmu == 0
@@ -296,7 +295,7 @@ class TestChipWorkerPython:
 
         worker = ChipWorker()
         with pytest.raises(TypeError, match="CallableHandle returned by ChipWorker.register_callable"):
-            worker.run(0, ChipStorageTaskArgs(), CallConfig())
+            worker.run(0, ChipStorageTaskArgs(), CallConfig())  # pyright: ignore[reportArgumentType]
 
 
 # ============================================================================

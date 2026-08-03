@@ -144,7 +144,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // prepare_launch_shape() resolved block_dim before the graph was built, so
     // the geometry this run launches with is already on the runner.
     const int block_dim = block_dim_;
-    const int launch_aicpu_num = config.aicpu_thread_num;
+    int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
     // in-place drain could not clear it. Refuse to run rather than cascade
     // into halResMap rc=62 (init_aicore_register_addresses) or rtMalloc
@@ -163,6 +163,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return -1;
     }
     if (validate_launch_aicpu_num(launch_aicpu_num) != 0) return -1;
+    if (launch_aicpu_num == 0) launch_aicpu_num = PLATFORM_DEFAULT_AICPU_THREAD_NUM;
+    runtime.set_aicpu_thread_num(launch_aicpu_num);
 
     int rc = ensure_device_initialized();
     if (rc != 0) {
@@ -199,9 +201,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // filter-style gate (see src/common/platform/onboard/aicpu/
     // platform_aicpu_affinity.cpp::platform_aicpu_affinity_gate_filter).
     // Convention: indices 0..n_sched-1 = sched slots, last = orch slot.
-    // n_sched = launch_aicpu_num - 1 (one orch + the rest sched). When
-    // launch_aicpu_num == 1 (init-only path) we leave allowed_cpus empty —
-    // the gate is a no-op for a single thread.
+    // n_sched = launch_aicpu_num - 1 (one orch + the rest sched).
     {
         std::vector<pto::a5::AicpuLogicalCpu> user_cpus;
         std::vector<int32_t> allowed;
@@ -390,10 +390,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // launch_count = popcount(OCCUPY) from the topology probe — one thread
     // per user-schedulable cpu_id. The filter gate barriers exactly this
     // many threads (runtime.aicpu_launch_count is read on the device side
-    // by kernel.cpp). Fall back to the caller-requested active count when
-    // the probe was skipped (single-thread init / launch_aicpu_num == 1)
-    // — over-launching to the compile-time bound on that path would
-    // start 14 threads to do a 1-thread job and deadlock the device.
+    // by kernel.cpp). The fallback is defensive; normal runs always publish
+    // the topology-derived launch count above.
     int aicpu_launch_n = (runtime.get_aicpu_launch_count() > 0) ? runtime.get_aicpu_launch_count() : launch_aicpu_num;
     rc = launch_aicpu_kernel(stream_aicpu_, &kernel_args_.args, host::KernelNames::RunName, aicpu_launch_n);
     if (rc != 0) {

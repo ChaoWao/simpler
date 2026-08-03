@@ -44,8 +44,8 @@ directory to read for that API on its own, against unchanged kernels.
 
 ## Cases
 
-Three — `Case1`–`Case3`, all `platforms=["a2a3"]` with
-`aicpu_thread_num: 4`. The baseline's small and variable-sequence cases have no
+Three — `Case1`–`Case3`, all for `platforms=["a2a3"]` with automatic AICPU
+thread selection. The baseline's small and variable-sequence cases have no
 counterpart here.
 
 ## Run
