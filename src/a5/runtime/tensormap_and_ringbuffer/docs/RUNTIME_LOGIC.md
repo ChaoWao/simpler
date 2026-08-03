@@ -555,7 +555,7 @@ Each scheduler thread runs a tight loop with two main phases:
 
 **Phase 2 — Dispatch** (full model in §8.6):
 
-- For each idle core: pop a task from the matching shape-based ready queue (lock-free MPMC Vyukov queue, one per resource shape)
+- For each idle core: drain the matching sync_start ready queue first, then the regular shape-based ready queue
 - Build `PTO2DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
 - Write task pointer to `Handshake.task`, signal AICore via register `DATA_MAIN_BASE` (DMB offset `0xD0` on a5)
 - After normal ready queues are empty, Phase **4b** may stage speculative early-dispatch candidates onto spare slots (`early_dispatch_queues[]` / `early_sync_start_queue`)
@@ -566,13 +566,13 @@ After these phases, the scheduler updates profiling headers and checks for termi
 
 Ready queues use a lock-free bounded MPMC (Vyukov) design:
 
-- One `PTO2ReadyQueue` per resource shape (`MIX` / `AIC` / `AIV` in the production tensormap path)
+- Two `PTO2ReadyQueue` lanes per resource shape: sync_start Tier-0 and regular work
 - **Push**: any thread (orchestrator via wiring, or scheduler on completion) pushes newly-ready tasks to the queue matching `task->active_mask.to_shape()`
 - **Pop**: scheduler threads pop from the queue matching the idle core's resource shape
 - Per-slot sequence counters prevent ABA problems
 - `enqueue_pos` and `dequeue_pos` are on separate cache lines to avoid false sharing
 
-Unlike a2a3, a5 does **not** keep a separate `ready_sync_queues[]` tier: ready `require_sync_start` cohorts share `ready_queues[]`. Speculative sync_start early candidates still use the dedicated `early_sync_start_queue` (see §8.6).
+Ready `require_sync_start` cohorts use `ready_sync_queues[]` and take cores before regular ready work. Speculative sync_start early candidates use the separate `early_sync_start_queue` (see §8.6).
 
 ### 8.4 Watermark Advancement (last_task_alive)
 
@@ -633,18 +633,18 @@ orthogonal axes decide *what* runs and *where*:
 
 Within each source the occupancy order is **`sync_start` ▸ MIX ▸ AIC/AIV`** (shape), and per
 shape **idle ▸ pending** (an idle core takes its running slot; a busy core takes its gated
-pending slot, promoted on completion). a5 implements this order inline in
-`dispatch_ready_tasks` / `try_early_dispatch` (no separate `run_staging_order` helper).
+pending slot, promoted on completion).`dispatch_ready_tasks` and
+`try_early_dispatch` share `run_staging_order` for this shape/placement order.
 
 #### Queues
 
 | Source | Regular lanes | sync_start lane |
 | ------ | ------------- | --------------- |
-| NORMAL (ready) | `ready_queues[MIX\|AIC\|AIV]` | *(same `ready_queues[]` — a5 has no `ready_sync_queues[]`)* |
+| NORMAL (ready) | `ready_queues[MIX\|AIC\|AIV]` | `ready_sync_queues[MIX\|AIC\|AIV]` |
 | EARLY (speculative) | `early_dispatch_queues[MIX\|AIC\|AIV]` | `early_sync_start_queue` (single) |
 
 A task routes to the early sync lane iff `task_attrs.requires_sync_start()`. Early
-dispatch runs only once normal `ready_queues[]` are empty **and** the local
+dispatch runs only once both normal ready lanes are empty **and** the local
 `CoreTracker` has a spare slot (`has_any_free_slot`, a2a3 #1288).
 
 **Direct-only eligibility (a2a3 #1285/#1292):** a consumer is an early candidate only when

@@ -364,12 +364,25 @@ TEST_F(SchedulerStateTest, GetReadyTasksBatchDrainsSharedQueue) {
     ASSERT_TRUE(sched.release_fanin_and_check_ready(slot_b));
 
     PTO2TaskSlotState *out[4];
-    int count = sched.get_ready_tasks_batch(PTO2ResourceShape::AIC, out, 4);
+    int count = sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 4);
 
     EXPECT_EQ(count, 2);
     // Shared queue is FIFO, so slot_a (pushed first) comes first.
     EXPECT_EQ(out[0], &slot_a);
     EXPECT_EQ(out[1], &slot_b);
+}
+
+TEST_F(SchedulerStateTest, SyncStartRoutesToDedicatedReadyQueue) {
+    alignas(64) PTO2TaskSlotState slot;
+    init_slot(slot, PTO2_TASK_PENDING, 1, 1);
+    slot.task_attrs.set_sync_start();
+
+    ASSERT_TRUE(sched.release_fanin_and_check_ready(slot));
+
+    PTO2TaskSlotState *out[1];
+    EXPECT_EQ(sched.get_ready_tasks_batch(sched.ready_queues, PTO2ResourceShape::AIC, out, 1), 0);
+    ASSERT_EQ(sched.get_ready_tasks_batch(sched.ready_sync_queues, PTO2ResourceShape::AIC, out, 1), 1);
+    EXPECT_EQ(out[0], &slot);
 }
 
 TEST(CoreTrackerTest, MixPartiallyRunningClusterAdmittedAsPerCorePlacement) {
