@@ -9,13 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_HOST_L3_L2_ORCH_REGION_ACCESS_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_HOST_L3_L2_ORCH_REGION_ACCESS_H_
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
 
-enum class L3L2RegionAccessProfile : uint32_t {
+enum class WorkerChipRegionAccessProfile : uint32_t {
     INVALID = 0,
     ONBOARD_VMM = 1,
     SIM_POSIX_SHM = 2,
@@ -23,18 +22,18 @@ enum class L3L2RegionAccessProfile : uint32_t {
 
 struct L3HostRegionMappingHandle {
     uint64_t id{0};
-    L3L2RegionAccessProfile profile{L3L2RegionAccessProfile::INVALID};
+    WorkerChipRegionAccessProfile profile{WorkerChipRegionAccessProfile::INVALID};
     uint64_t mapping_bytes{0};
 };
 
-struct L3L2RegionCreateRequest {
+struct WorkerChipRegionCreateRequest {
     uint64_t magic_version;
     uint64_t request_bytes;
     uint64_t payload_bytes;
     uint64_t counter_bytes;
 };
 
-struct L3L2RegionCreateReply {
+struct WorkerChipRegionCreateReply {
     uint64_t desc[6];
     uint32_t access_profile;
     uint32_t reserved;
@@ -44,7 +43,5 @@ struct L3L2RegionCreateReply {
     uint64_t shareable_handle;
 };
 
-static constexpr size_t L3L2_REGION_CREATE_REQUEST_BYTES = sizeof(L3L2RegionCreateRequest);
-static constexpr size_t L3L2_REGION_CREATE_REPLY_BYTES = sizeof(L3L2RegionCreateReply);
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_HOST_L3_L2_ORCH_REGION_ACCESS_H_
+static constexpr size_t WORKER_CHIP_REGION_CREATE_REQUEST_BYTES = sizeof(WorkerChipRegionCreateRequest);
+static constexpr size_t WORKER_CHIP_REGION_CREATE_REPLY_BYTES = sizeof(WorkerChipRegionCreateReply);

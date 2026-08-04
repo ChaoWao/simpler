@@ -232,7 +232,7 @@
 
     Numeric levels belong in architecture prose, diagrams, and topology tables,
     not in software identifiers. Do not introduce names such as `L2Tensor`,
-    `L2TaskArgs`, `L0TaskArgs`, `L3L2Queue`, or `L2Swimlane`: use the owning
+    `L2TaskArgs`, `L0TaskArgs`, `WorkerChipQueue`, or `L2Swimlane`: use the owning
     software entities instead (`ChipTensor`, `ChipTaskArgs`, `CoreTaskArgs`,
     `WorkerChipQueue`, `ChipSwimlane`). `L2` and `Chip` are not two naming
     dimensions — L2 is the topology position occupied by the Chip context, so

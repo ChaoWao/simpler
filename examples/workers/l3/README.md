@@ -86,8 +86,8 @@ a serving loop rather than a batch DAG. Each needs `aicpu_thread_num = 2`.
 
 | Directory | New concept |
 | --------- | ----------- |
-| [`l3_l2_message_queue/`](l3_l2_message_queue/) | Request/response streaming over the L3-L2 queue: input and output arenas, `peek`/`read_into`/`release`, cooperative `request_stop`. Responses are not paired one-to-one with requests. |
-| [`l3_l2_orch_comm_stream/`](l3_l2_orch_comm_stream/) | The raw form underneath: a shared payload region plus counters, driven by `notify` / `test` / `wait` on a monotonic sequence. |
+| [`worker_chip_message_queue/`](worker_chip_message_queue/) | Request/response streaming over the L3-L2 queue: input and output arenas, `peek`/`read_into`/`release`, cooperative `request_stop`. Responses are not paired one-to-one with requests. |
+| [`worker_chip_orch_comm_stream/`](worker_chip_orch_comm_stream/) | The raw form underneath: a shared payload region plus counters, driven by `notify` / `test` / `wait` on a monotonic sequence. |
 
 **Collective algorithm tests** (allreduce, allgather, reduce_scatter, broadcast, all_to_all) have moved to `tests/st/worker/collectives/`. See the scene tests there for the full algorithm corpus including multi-mode allreduce (onephase, twophase, ring, bidirectional_ring, ibing).
 

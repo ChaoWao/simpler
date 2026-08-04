@@ -42,7 +42,7 @@ class WaitCmp(IntEnum):
     LE = 5
 
 
-class L3L2RegionAccessProfile(IntEnum):
+class WorkerChipRegionAccessProfile(IntEnum):
     INVALID = 0
     ONBOARD_VMM = 1
     SIM_POSIX_SHM = 2
@@ -56,7 +56,7 @@ _WAIT_STATUS_TIMEOUT = -1
 _WAIT_ERROR_SIGNAL_TIMEOUT = 7
 
 _DESC = struct.Struct("<6Q")
-_L3L2_ORCH_REGION_DESC_SCALAR_COUNT = 6
+_WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT = 6
 _CTRL_SHM_TOKEN_BYTES = 32
 _REGION_CREATE_REQUEST = struct.Struct("<QQQQ")
 _REGION_CREATE_REPLY = struct.Struct(f"<6QIIi{_CTRL_SHM_TOKEN_BYTES}s4xQQ")
@@ -87,7 +87,7 @@ def _checked_add_u64(lhs: int, rhs: int) -> int:
 
 
 @dataclass(frozen=True)
-class L3L2OrchRegionDesc:
+class WorkerChipOrchRegionDesc:
     magic_version: int
     region_id: int
     payload_base: int
@@ -113,7 +113,7 @@ class SignalTestResult:
 
 
 @dataclass(frozen=True)
-class L3L2RegionCreateRequest:
+class WorkerChipRegionCreateRequest:
     magic_version: int
     request_bytes: int
     payload_bytes: int
@@ -131,9 +131,9 @@ class L3L2RegionCreateRequest:
 
 
 @dataclass(frozen=True)
-class L3L2RegionCreateReply:
-    desc: L3L2OrchRegionDesc
-    access_profile: L3L2RegionAccessProfile
+class WorkerChipRegionCreateReply:
+    desc: WorkerChipOrchRegionDesc
+    access_profile: WorkerChipRegionAccessProfile
     device_id: int
     backing_shm: str
     mapping_bytes: int
@@ -144,7 +144,7 @@ class L3L2RegionCreateReply:
 class L3HostRegionMapping:
     worker_id: int
     region_id: int
-    access_profile: L3L2RegionAccessProfile
+    access_profile: WorkerChipRegionAccessProfile
     total_bytes: int
     payload_offset: int
     payload_bytes: int
@@ -162,13 +162,13 @@ class L3HostRegionMapping:
             self.closed = True
 
 
-def decode_region_create_reply(buf: memoryview) -> L3L2RegionCreateReply:
+def decode_region_create_reply(buf: memoryview) -> WorkerChipRegionCreateReply:
     fields = _REGION_CREATE_REPLY.unpack_from(buf, 0)
-    desc = L3L2OrchRegionDesc(*[int(v) for v in fields[:6]])
-    access_profile = L3L2RegionAccessProfile(int(fields[6]))
+    desc = WorkerChipOrchRegionDesc(*[int(v) for v in fields[:6]])
+    access_profile = WorkerChipRegionAccessProfile(int(fields[6]))
     device_id = int(fields[8])
     backing_shm = bytes(fields[9]).split(b"\x00", 1)[0].decode("utf-8", "strict")
-    return L3L2RegionCreateReply(
+    return WorkerChipRegionCreateReply(
         desc=desc,
         access_profile=access_profile,
         device_id=device_id,
@@ -190,32 +190,36 @@ def peek_region_create_reply_region_id(buf: memoryview) -> int:
 
 
 def validate_region_create_reply(
-    reply: L3L2RegionCreateReply, expected_access_profile: L3L2RegionAccessProfile
+    reply: WorkerChipRegionCreateReply, expected_access_profile: WorkerChipRegionAccessProfile
 ) -> tuple[int, int]:
     desc = reply.desc
     if desc.magic_version != _REGION_MAGIC_VERSION:
-        raise RuntimeError("create_l3_l2_region: reply magic_version is invalid")
+        raise RuntimeError("create_worker_chip_region: reply magic_version is invalid")
     if desc.region_id == 0:
-        raise RuntimeError("create_l3_l2_region: reply region_id must be nonzero")
+        raise RuntimeError("create_worker_chip_region: reply region_id must be nonzero")
     if reply.access_profile != expected_access_profile:
-        raise RuntimeError(f"create_l3_l2_region: reply access_profile must be {expected_access_profile.name.lower()}")
+        raise RuntimeError(
+            f"create_worker_chip_region: reply access_profile must be {expected_access_profile.name.lower()}"
+        )
     if desc.payload_bytes <= 0:
-        raise RuntimeError("create_l3_l2_region: reply payload_bytes must be positive")
+        raise RuntimeError("create_worker_chip_region: reply payload_bytes must be positive")
     if desc.counter_bytes <= 0 or desc.counter_bytes % 4 != 0:
-        raise RuntimeError("create_l3_l2_region: reply counter_bytes must be positive and a multiple of 4")
+        raise RuntimeError("create_worker_chip_region: reply counter_bytes must be positive and a multiple of 4")
     counter_offset = _align_up(desc.payload_bytes, _REGION_LAYOUT_ALIGNMENT)
     total_bytes = _checked_add_u64(counter_offset, desc.counter_bytes)
     expected_counter_base = _checked_add_u64(desc.payload_base, counter_offset)
     if desc.counter_base != expected_counter_base:
-        raise RuntimeError("create_l3_l2_region: reply counter_base does not match fixed region layout")
+        raise RuntimeError("create_worker_chip_region: reply counter_base does not match fixed region layout")
     if desc.counter_base % _REGION_LAYOUT_ALIGNMENT != 0:
-        raise RuntimeError("create_l3_l2_region: reply counter_base must be 64-byte aligned")
-    if reply.access_profile == L3L2RegionAccessProfile.SIM_POSIX_SHM and reply.mapping_bytes != total_bytes:
+        raise RuntimeError("create_worker_chip_region: reply counter_base must be 64-byte aligned")
+    if reply.access_profile == WorkerChipRegionAccessProfile.SIM_POSIX_SHM and reply.mapping_bytes != total_bytes:
         profile = reply.access_profile.name.lower()
-        raise RuntimeError(f"create_l3_l2_region: {profile} reply mapping_bytes does not match descriptor layout")
-    if reply.access_profile == L3L2RegionAccessProfile.ONBOARD_VMM:
+        raise RuntimeError(f"create_worker_chip_region: {profile} reply mapping_bytes does not match descriptor layout")
+    if reply.access_profile == WorkerChipRegionAccessProfile.ONBOARD_VMM:
         if reply.mapping_bytes < total_bytes:
-            raise RuntimeError("create_l3_l2_region: onboard_vmm reply mapping_bytes is smaller than descriptor layout")
+            raise RuntimeError(
+                "create_worker_chip_region: onboard_vmm reply mapping_bytes is smaller than descriptor layout"
+            )
     return counter_offset, total_bytes
 
 
@@ -263,8 +267,8 @@ class _PinnedBuffer:
         self.close()
 
 
-class L3L2OrchCounter:
-    def __init__(self, region: L3L2OrchRegion, offset: int) -> None:
+class WorkerChipOrchCounter:
+    def __init__(self, region: WorkerChipOrchRegion, offset: int) -> None:
         self._region = region
         self._offset = int(offset)
 
@@ -296,12 +300,12 @@ class L3L2OrchCounter:
         return self._region._direct_counter_wait(self._offset, int(cmp_value), cmp, timeout_ns)
 
 
-class L3L2OrchRegion:
+class WorkerChipOrchRegion:
     def __init__(
         self,
         owner: Any,
         worker_id: int,
-        desc: L3L2OrchRegionDesc,
+        desc: WorkerChipOrchRegionDesc,
         l3_host_mapping: L3HostRegionMapping,
     ) -> None:
         self._owner = owner
@@ -313,7 +317,7 @@ class L3L2OrchRegion:
         self._expired = False
 
     @property
-    def descriptor(self) -> L3L2OrchRegionDesc:
+    def descriptor(self) -> WorkerChipOrchRegionDesc:
         return self._descriptor
 
     @property
@@ -325,7 +329,7 @@ class L3L2OrchRegion:
         return self._expired
 
     def _validate_host_buffer(self, buffer: Any) -> None:
-        self._owner._validate_l3_l2_orch_comm_host_buffer(buffer)
+        self._owner._validate_worker_chip_orch_comm_host_buffer(buffer)
 
     def descriptor_scalars(self) -> list[int]:
         self._ensure_live()
@@ -353,13 +357,13 @@ class L3L2OrchRegion:
                 self._poison()
                 raise
 
-    def counter(self, offset: int) -> L3L2OrchCounter:
+    def counter(self, offset: int) -> WorkerChipOrchCounter:
         self._ensure_live()
         offset = int(offset)
         # Primitive validation is 4-byte; wrapper-owned writers still need separate 64-byte cache lines.
         if offset < 0 or offset % 4 != 0 or offset + 4 > int(self._descriptor.counter_bytes):
             raise ValueError("L3-L2 counter offset must be 4-byte aligned and inside the counter range")
-        return L3L2OrchCounter(self, offset)
+        return WorkerChipOrchCounter(self, offset)
 
     def free(self) -> None:
         if self._released:

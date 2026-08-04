@@ -17,27 +17,27 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
-from .l3_l2_orch_comm import (
-    L3L2OrchRegion,
+from .task_interface import DataType, Tensor
+from .worker_chip_orch_comm import (
     NotifyOp,
     WaitCmp,
+    WorkerChipOrchRegion,
 )
-from .task_interface import DataType, Tensor
 
-L3L2_QUEUE_MAGIC = 0x4C335132
-L3L2_QUEUE_ABI_MAJOR = 1
-L3L2_QUEUE_ABI_MINOR = 1
-L3L2_QUEUE_DESC_SLOT_BYTES = 32
-L3L2_QUEUE_PAYLOAD_ARENA_ALIGNMENT = 64
-L3L2_QUEUE_COUNTER_STRIDE = 64
-L3L2_QUEUE_INPUT_DESC_TAIL_OFFSET = 0
-L3L2_QUEUE_INPUT_DESC_HEAD_OFFSET = 64
-L3L2_QUEUE_OUTPUT_DESC_TAIL_OFFSET = 128
-L3L2_QUEUE_OUTPUT_DESC_HEAD_OFFSET = 192
-L3L2_QUEUE_L3_ABORT_FLAG_OFFSET = 256
-L3L2_QUEUE_L2_ABORT_FLAG_OFFSET = 320
-L3L2_QUEUE_COUNTER_BYTES = 384
-L3L2_QUEUE_MAX_DEPTH = 1 << 30
+WORKER_CHIP_QUEUE_MAGIC = 0x4C335132
+WORKER_CHIP_QUEUE_ABI_MAJOR = 1
+WORKER_CHIP_QUEUE_ABI_MINOR = 1
+WORKER_CHIP_QUEUE_DESC_SLOT_BYTES = 32
+WORKER_CHIP_QUEUE_PAYLOAD_ARENA_ALIGNMENT = 64
+WORKER_CHIP_QUEUE_COUNTER_STRIDE = 64
+WORKER_CHIP_QUEUE_INPUT_DESC_TAIL_OFFSET = 0
+WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET = 64
+WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET = 128
+WORKER_CHIP_QUEUE_OUTPUT_DESC_HEAD_OFFSET = 192
+WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET = 256
+WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET = 320
+WORKER_CHIP_QUEUE_COUNTER_BYTES = 384
+WORKER_CHIP_QUEUE_MAX_DEPTH = 1 << 30
 _UINT64_MAX = (1 << 64) - 1
 
 _DESC = struct.Struct("<4Q")
@@ -51,7 +51,7 @@ class _HostByteSpan:
     view: memoryview | None
 
 
-class L3L2QueueOpcode(IntEnum):
+class WorkerChipQueueOpcode(IntEnum):
     INVALID = 0
     DATA = 1
     STOP = 2
@@ -67,7 +67,7 @@ class _QueueState(IntEnum):
 
 
 @dataclass(frozen=True)
-class L3L2QueueLayout:
+class WorkerChipQueueLayout:
     depth: int
     input_desc_offset: int
     output_desc_offset: int
@@ -86,15 +86,15 @@ class L3L2QueueLayout:
 
 
 @dataclass(frozen=True)
-class L3L2QueueMessage:
+class WorkerChipQueueMessage:
     seq: int
-    opcode: L3L2QueueOpcode
+    opcode: WorkerChipQueueOpcode
     payload_offset: int
     payload_nbytes: int
 
 
-def l3_l2_queue_magic_version() -> int:
-    return (L3L2_QUEUE_MAGIC << 32) | (L3L2_QUEUE_ABI_MAJOR << 16) | L3L2_QUEUE_ABI_MINOR
+def worker_chip_queue_magic_version() -> int:
+    return (WORKER_CHIP_QUEUE_MAGIC << 32) | (WORKER_CHIP_QUEUE_ABI_MAJOR << 16) | WORKER_CHIP_QUEUE_ABI_MINOR
 
 
 def _align_up(value: int, align: int) -> int:
@@ -176,28 +176,28 @@ def _host_byte_span(buffer: Any, nbytes: int, *, writable: bool) -> _HostByteSpa
     raise ValueError(f"L3-L2 queue requires a registered Tensor or {access} contiguous ordinary host buffer")
 
 
-def make_l3_l2_queue_layout(depth: int, input_arena_bytes: int, output_arena_bytes: int) -> L3L2QueueLayout:
+def make_worker_chip_queue_layout(depth: int, input_arena_bytes: int, output_arena_bytes: int) -> WorkerChipQueueLayout:
     depth = int(depth)
     input_arena_bytes = int(input_arena_bytes)
     output_arena_bytes = int(output_arena_bytes)
-    if depth <= 0 or depth & (depth - 1) != 0 or depth > L3L2_QUEUE_MAX_DEPTH:
+    if depth <= 0 or depth & (depth - 1) != 0 or depth > WORKER_CHIP_QUEUE_MAX_DEPTH:
         raise ValueError("L3-L2 queue depth must be a power of two and <= 2^30")
-    if input_arena_bytes <= 0 or input_arena_bytes % L3L2_QUEUE_PAYLOAD_ARENA_ALIGNMENT != 0:
+    if input_arena_bytes <= 0 or input_arena_bytes % WORKER_CHIP_QUEUE_PAYLOAD_ARENA_ALIGNMENT != 0:
         raise ValueError("L3-L2 queue input_arena_bytes must be a positive 64-byte multiple")
-    if output_arena_bytes <= 0 or output_arena_bytes % L3L2_QUEUE_PAYLOAD_ARENA_ALIGNMENT != 0:
+    if output_arena_bytes <= 0 or output_arena_bytes % WORKER_CHIP_QUEUE_PAYLOAD_ARENA_ALIGNMENT != 0:
         raise ValueError("L3-L2 queue output_arena_bytes must be a positive 64-byte multiple")
 
-    desc_ring_bytes = depth * L3L2_QUEUE_DESC_SLOT_BYTES
+    desc_ring_bytes = depth * WORKER_CHIP_QUEUE_DESC_SLOT_BYTES
     if desc_ring_bytes > _UINT64_MAX:
         raise ValueError("L3-L2 queue layout calculation overflowed uint64")
     input_desc_offset = 0
     output_desc_offset = _checked_add_u64(input_desc_offset, desc_ring_bytes)
     desc_end = _checked_add_u64(output_desc_offset, desc_ring_bytes)
-    input_arena_offset = _align_up(desc_end, L3L2_QUEUE_PAYLOAD_ARENA_ALIGNMENT)
+    input_arena_offset = _align_up(desc_end, WORKER_CHIP_QUEUE_PAYLOAD_ARENA_ALIGNMENT)
     input_arena_end = _checked_add_u64(input_arena_offset, input_arena_bytes)
-    output_arena_offset = _align_up(input_arena_end, L3L2_QUEUE_PAYLOAD_ARENA_ALIGNMENT)
+    output_arena_offset = _align_up(input_arena_end, WORKER_CHIP_QUEUE_PAYLOAD_ARENA_ALIGNMENT)
     payload_bytes = _checked_add_u64(output_arena_offset, output_arena_bytes)
-    return L3L2QueueLayout(
+    return WorkerChipQueueLayout(
         depth=depth,
         input_desc_offset=input_desc_offset,
         output_desc_offset=output_desc_offset,
@@ -206,26 +206,26 @@ def make_l3_l2_queue_layout(depth: int, input_arena_bytes: int, output_arena_byt
         input_arena_bytes=input_arena_bytes,
         output_arena_bytes=output_arena_bytes,
         payload_bytes=payload_bytes,
-        input_desc_tail_offset=L3L2_QUEUE_INPUT_DESC_TAIL_OFFSET,
-        input_desc_head_offset=L3L2_QUEUE_INPUT_DESC_HEAD_OFFSET,
-        output_desc_tail_offset=L3L2_QUEUE_OUTPUT_DESC_TAIL_OFFSET,
-        output_desc_head_offset=L3L2_QUEUE_OUTPUT_DESC_HEAD_OFFSET,
-        l3_abort_flag_offset=L3L2_QUEUE_L3_ABORT_FLAG_OFFSET,
-        l2_abort_flag_offset=L3L2_QUEUE_L2_ABORT_FLAG_OFFSET,
-        counter_bytes=L3L2_QUEUE_COUNTER_BYTES,
+        input_desc_tail_offset=WORKER_CHIP_QUEUE_INPUT_DESC_TAIL_OFFSET,
+        input_desc_head_offset=WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET,
+        output_desc_tail_offset=WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET,
+        output_desc_head_offset=WORKER_CHIP_QUEUE_OUTPUT_DESC_HEAD_OFFSET,
+        l3_abort_flag_offset=WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET,
+        l2_abort_flag_offset=WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET,
+        counter_bytes=WORKER_CHIP_QUEUE_COUNTER_BYTES,
     )
 
 
-def create_l3_l2_queue(
+def create_worker_chip_queue(
     orch: Any,
     *,
     worker_id: int,
     depth: int,
     input_arena_bytes: int,
     output_arena_bytes: int,
-) -> L3L2Queue:
-    layout = make_l3_l2_queue_layout(depth, input_arena_bytes, output_arena_bytes)
-    region = orch.create_l3_l2_region(
+) -> WorkerChipQueue:
+    layout = make_worker_chip_queue_layout(depth, input_arena_bytes, output_arena_bytes)
+    region = orch.create_worker_chip_region(
         worker_id=int(worker_id),
         payload_bytes=layout.payload_bytes,
         counter_bytes=layout.counter_bytes,
@@ -233,7 +233,7 @@ def create_l3_l2_queue(
     try:
         desc_fields = orch.alloc([24], DataType.UINT8)
         desc_seq = orch.alloc([8], DataType.UINT8)
-        desc_read = orch.alloc([L3L2_QUEUE_DESC_SLOT_BYTES], DataType.UINT8)
+        desc_read = orch.alloc([WORKER_CHIP_QUEUE_DESC_SLOT_BYTES], DataType.UINT8)
         for offset in (
             layout.input_desc_tail_offset,
             layout.input_desc_head_offset,
@@ -249,15 +249,15 @@ def create_l3_l2_queue(
         except Exception:
             pass
         raise
-    return L3L2Queue(orch, region, layout, desc_fields, desc_seq, desc_read)
+    return WorkerChipQueue(orch, region, layout, desc_fields, desc_seq, desc_read)
 
 
-class L3L2Queue:
+class WorkerChipQueue:
     def __init__(
         self,
         orch: Any,
-        region: L3L2OrchRegion,
-        layout: L3L2QueueLayout,
+        region: WorkerChipOrchRegion,
+        layout: WorkerChipQueueLayout,
         desc_fields: Tensor,
         desc_seq: Tensor,
         desc_read: Tensor,
@@ -276,22 +276,22 @@ class L3L2Queue:
         self._input_payload_tail = 0
         self._input_payload_head = 0
         self._output_payload_head = 0
-        self._output_active: L3L2QueueMessage | None = None
+        self._output_active: WorkerChipQueueMessage | None = None
         self._stop_published = False
         self.input = _L3InputQueue(self)
         self.output = _L3OutputQueue(self)
 
     @property
-    def region(self) -> L3L2OrchRegion:
+    def region(self) -> WorkerChipOrchRegion:
         return self._region
 
     @property
-    def layout(self) -> L3L2QueueLayout:
+    def layout(self) -> WorkerChipQueueLayout:
         return self._layout
 
     @property
     def magic_version(self) -> int:
-        return l3_l2_queue_magic_version()
+        return worker_chip_queue_magic_version()
 
     def l2_task_arg_scalars(self) -> list[int]:
         self._ensure_live()
@@ -306,10 +306,10 @@ class L3L2Queue:
         ]
 
     def try_request_stop(self) -> bool:
-        return self.input._try_enqueue(None, 0, L3L2QueueOpcode.STOP)
+        return self.input._try_enqueue(None, 0, WorkerChipQueueOpcode.STOP)
 
     def request_stop(self, timeout: float) -> None:
-        self.input._enqueue(None, 0, L3L2QueueOpcode.STOP, timeout)
+        self.input._enqueue(None, 0, WorkerChipQueueOpcode.STOP, timeout)
 
     def free(self) -> None:
         if self._state == _QueueState.RELEASED:
@@ -386,7 +386,7 @@ class L3L2Queue:
         self._run_primitive(lambda: self._region.counter(offset).notify(value, NotifyOp.Set))
 
     def _write_descriptor(
-        self, offset: int, seq: int, opcode: L3L2QueueOpcode, payload_offset: int, nbytes: int
+        self, offset: int, seq: int, opcode: WorkerChipQueueOpcode, payload_offset: int, nbytes: int
     ) -> None:
         fields_buf = (ctypes.c_uint8 * 24).from_address(int(self._desc_fields.data))
         fields_buf[:] = _DESC.pack(0, int(opcode), int(payload_offset), int(nbytes))[8:]
@@ -395,16 +395,18 @@ class L3L2Queue:
         self._run_primitive(self._region.payload_write, offset + 8, self._desc_fields, nbytes=24)
         self._run_primitive(self._region.payload_write, offset, self._desc_seq, nbytes=8)
 
-    def _read_descriptor(self, offset: int) -> L3L2QueueMessage:
-        self._run_primitive(self._region.payload_read, offset, self._desc_read, nbytes=L3L2_QUEUE_DESC_SLOT_BYTES)
-        raw = ctypes.string_at(int(self._desc_read.data), L3L2_QUEUE_DESC_SLOT_BYTES)
+    def _read_descriptor(self, offset: int) -> WorkerChipQueueMessage:
+        self._run_primitive(
+            self._region.payload_read, offset, self._desc_read, nbytes=WORKER_CHIP_QUEUE_DESC_SLOT_BYTES
+        )
+        raw = ctypes.string_at(int(self._desc_read.data), WORKER_CHIP_QUEUE_DESC_SLOT_BYTES)
         seq, opcode_value, payload_offset, payload_nbytes = _DESC.unpack(raw)
         try:
-            opcode = L3L2QueueOpcode(opcode_value)
+            opcode = WorkerChipQueueOpcode(opcode_value)
         except ValueError:
             self._poison_local()
             raise RuntimeError("L3-L2 queue observed invalid descriptor opcode") from None
-        return L3L2QueueMessage(
+        return WorkerChipQueueMessage(
             seq=int(seq),
             opcode=opcode,
             payload_offset=int(payload_offset),
@@ -433,7 +435,7 @@ class L3L2Queue:
         cursor = old_head
         while cursor < new_head:
             slot_index = cursor & (self._layout.depth - 1)
-            slot_offset = self._layout.input_desc_offset + slot_index * L3L2_QUEUE_DESC_SLOT_BYTES
+            slot_offset = self._layout.input_desc_offset + slot_index * WORKER_CHIP_QUEUE_DESC_SLOT_BYTES
             message = self._read_descriptor(slot_offset)
             if message.seq != cursor + 1:
                 self._poison_local()
@@ -449,16 +451,16 @@ class L3L2Queue:
 
 
 class _L3InputQueue:
-    def __init__(self, queue: L3L2Queue) -> None:
+    def __init__(self, queue: WorkerChipQueue) -> None:
         self._queue = queue
 
     def enqueue(self, buffer_or_none: Any, nbytes: int, timeout: float) -> None:
-        self._enqueue(buffer_or_none, nbytes, L3L2QueueOpcode.DATA, timeout)
+        self._enqueue(buffer_or_none, nbytes, WorkerChipQueueOpcode.DATA, timeout)
 
     def try_enqueue(self, buffer_or_none: Any, nbytes: int) -> bool:
-        return self._try_enqueue(buffer_or_none, nbytes, L3L2QueueOpcode.DATA)
+        return self._try_enqueue(buffer_or_none, nbytes, WorkerChipQueueOpcode.DATA)
 
-    def _enqueue(self, buffer_or_none: Any, nbytes: int, opcode: L3L2QueueOpcode, timeout: float) -> None:
+    def _enqueue(self, buffer_or_none: Any, nbytes: int, opcode: WorkerChipQueueOpcode, timeout: float) -> None:
         if timeout is None or float(timeout) <= 0:
             raise ValueError("L3-L2 queue blocking operations require a positive timeout")
         deadline = time.monotonic() + float(timeout)
@@ -471,7 +473,7 @@ class _L3InputQueue:
                 self._queue._sample_peer_abort_after_timeout()
             time.sleep(_POLL_INTERVAL_S)
 
-    def _try_enqueue(self, buffer_or_none: Any, nbytes: int, opcode: L3L2QueueOpcode) -> bool:
+    def _try_enqueue(self, buffer_or_none: Any, nbytes: int, opcode: WorkerChipQueueOpcode) -> bool:
         queue = self._queue
         nbytes = int(nbytes)
         if nbytes < 0:
@@ -481,7 +483,7 @@ class _L3InputQueue:
         queue._ensure_live()
         if queue._stop_published:
             return False
-        if opcode == L3L2QueueOpcode.STOP and nbytes != 0:
+        if opcode == WorkerChipQueueOpcode.STOP and nbytes != 0:
             raise ValueError("L3-L2 queue STOP must be zero-byte")
         if nbytes > queue._layout.input_arena_bytes:
             return False
@@ -505,11 +507,11 @@ class _L3InputQueue:
 
         seq = queue._input_tail + 1
         slot_index = queue._input_tail & (queue._layout.depth - 1)
-        slot_offset = queue._layout.input_desc_offset + slot_index * L3L2_QUEUE_DESC_SLOT_BYTES
+        slot_offset = queue._layout.input_desc_offset + slot_index * WORKER_CHIP_QUEUE_DESC_SLOT_BYTES
         queue._write_descriptor(slot_offset, seq, opcode, payload_offset, nbytes)
         queue._input_tail += 1
         queue._signal_notify(queue._layout.input_desc_tail_offset, queue._input_tail)
-        if opcode == L3L2QueueOpcode.STOP:
+        if opcode == WorkerChipQueueOpcode.STOP:
             queue._stop_published = True
         return True
 
@@ -536,10 +538,10 @@ class _L3InputQueue:
 
 
 class _L3OutputQueue:
-    def __init__(self, queue: L3L2Queue) -> None:
+    def __init__(self, queue: WorkerChipQueue) -> None:
         self._queue = queue
 
-    def try_peek(self) -> L3L2QueueMessage | None:
+    def try_peek(self) -> WorkerChipQueueMessage | None:
         queue = self._queue
         queue._ensure_live()
         if queue._output_active is not None:
@@ -550,12 +552,12 @@ class _L3OutputQueue:
         if queue._output_tail == queue._output_head:
             return None
         slot_index = queue._output_head & (queue._layout.depth - 1)
-        slot_offset = queue._layout.output_desc_offset + slot_index * L3L2_QUEUE_DESC_SLOT_BYTES
+        slot_offset = queue._layout.output_desc_offset + slot_index * WORKER_CHIP_QUEUE_DESC_SLOT_BYTES
         message = queue._read_descriptor(slot_offset)
         if message.seq != queue._output_head + 1:
             queue._poison_local()
             raise RuntimeError("L3-L2 queue output descriptor seq mismatch")
-        if message.opcode == L3L2QueueOpcode.STOP:
+        if message.opcode == WorkerChipQueueOpcode.STOP:
             queue._poison_local()
             raise RuntimeError("L3-L2 queue output descriptor cannot be STOP")
         if message.payload_nbytes == 0:
@@ -578,7 +580,7 @@ class _L3OutputQueue:
         queue._output_active = message
         return message
 
-    def peek(self, timeout: float) -> L3L2QueueMessage:
+    def peek(self, timeout: float) -> WorkerChipQueueMessage:
         if timeout is None or float(timeout) <= 0:
             raise ValueError("L3-L2 queue blocking operations require a positive timeout")
         deadline = time.monotonic() + float(timeout)
@@ -590,7 +592,7 @@ class _L3OutputQueue:
                 self._queue._sample_peer_abort_after_timeout()
             time.sleep(_POLL_INTERVAL_S)
 
-    def read_into(self, handle: L3L2QueueMessage, buffer: Any) -> None:
+    def read_into(self, handle: WorkerChipQueueMessage, buffer: Any) -> None:
         queue = self._queue
         queue._ensure_live()
         if queue._output_active != handle:
@@ -605,7 +607,7 @@ class _L3OutputQueue:
             target = buffer
         queue._run_primitive(queue._region.payload_read, handle.payload_offset, target, nbytes=handle.payload_nbytes)
 
-    def release(self, handle: L3L2QueueMessage) -> None:
+    def release(self, handle: WorkerChipQueueMessage) -> None:
         queue = self._queue
         queue._ensure_live()
         if queue._output_active != handle:
@@ -622,13 +624,13 @@ class _L3OutputQueue:
         queue._output_active = None
         queue._signal_notify(queue._layout.output_desc_head_offset, queue._output_head)
 
-    def dequeue_into(self, buffer: Any, timeout: float) -> L3L2QueueMessage:
+    def dequeue_into(self, buffer: Any, timeout: float) -> WorkerChipQueueMessage:
         handle = self.peek(timeout)
         self.read_into(handle, buffer)
         self.release(handle)
         return handle
 
-    def try_dequeue_into(self, buffer: Any) -> L3L2QueueMessage | None:
+    def try_dequeue_into(self, buffer: Any) -> WorkerChipQueueMessage | None:
         handle = self.try_peek()
         if handle is None:
             return None

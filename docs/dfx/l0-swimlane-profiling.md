@@ -327,7 +327,7 @@ here.
 
 **Not l0 targets (excluded).** Runtime-mechanics tests (`orch_so_cache`,
 `prepared_callable`, `dynamic_register`, `l3_group`, `l3_dependency`,
-`l3_l2_orch_comm`, `aicore_op_timeout`, `scope_stats`); comm / notify
+`worker_chip_orch_comm`, `aicore_op_timeout`, `scope_stats`); comm / notify
 demos (`async_notify_demo`, `deferred_notify_demo`,
 `sdma_async_completion_demo`); DFX wrappers that reuse other kernels
 (`dep_gen`, `pmu`, `args_dump`, `l2_swimlane` — they trace `vector_example`

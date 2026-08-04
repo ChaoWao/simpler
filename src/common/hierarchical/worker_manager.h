@@ -198,8 +198,8 @@ static constexpr uint64_t CTRL_RELEASE_DOMAIN = 8;
 static constexpr uint64_t CTRL_COMM_INIT = 9;
 static constexpr uint64_t CTRL_PY_REGISTER = 10;
 static constexpr uint64_t CTRL_PY_UNREGISTER = 11;
-static constexpr uint64_t CTRL_L3_L2_REGION_CREATE = 16;
-static constexpr uint64_t CTRL_L3_L2_REGION_RELEASE = 17;
+static constexpr uint64_t CTRL_WORKER_CHIP_REGION_CREATE = 16;
+static constexpr uint64_t CTRL_WORKER_CHIP_REGION_RELEASE = 17;
 // Query a chip child's MemoryAllocator-committed HBM (bytes). The child writes
 // the value to CTRL_OFF_RESULT; the parent sums across children for L3.
 static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
@@ -336,8 +336,8 @@ public:
     virtual void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name);
     virtual void control_release_domain(const char *request_shm_name);
     virtual void control_comm_init(const char *request_shm_name);
-    virtual void control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name);
-    virtual void control_l3_l2_region_release(uint64_t region_id);
+    virtual void control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name);
+    virtual void control_worker_chip_region_release(uint64_t region_id);
 };
 
 class LocalMailboxEndpoint : public WorkerEndpoint {
@@ -400,8 +400,8 @@ public:
     void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name) override;
     void control_release_domain(const char *request_shm_name) override;
     void control_comm_init(const char *request_shm_name) override;
-    void control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name) override;
-    void control_l3_l2_region_release(uint64_t region_id) override;
+    void control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name) override;
+    void control_worker_chip_region_release(uint64_t region_id) override;
 
 private:
     WorkerEndpointCaps caps_;
@@ -583,8 +583,8 @@ public:
     // Lazy comm_init driver — payload shm carries (rank, nranks, rootinfo_path).
     // Caller dispatches in parallel to every chip; child runs cw.comm_init.
     void control_comm_init(const char *request_shm_name);
-    void control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name);
-    void control_l3_l2_region_release(uint64_t region_id);
+    void control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name);
+    void control_worker_chip_region_release(uint64_t region_id);
 
 private:
     enum class EnqueueDispatchResult : uint8_t {
@@ -682,8 +682,8 @@ public:
     void control_alloc_domain(int worker_id, const char *request_shm_name, const char *reply_shm_name);
     void control_release_domain(int worker_id, const char *request_shm_name);
     void control_comm_init(int worker_id, const char *request_shm_name);
-    void control_l3_l2_region_create(int worker_id, const char *request_shm_name, const char *reply_shm_name);
-    void control_l3_l2_region_release(int worker_id, uint64_t region_id);
+    void control_worker_chip_region_create(int worker_id, const char *request_shm_name, const char *reply_shm_name);
+    void control_worker_chip_region_release(int worker_id, uint64_t region_id);
     ControlResult
     control_digest_only(WorkerType type, int worker_id, uint64_t sub_cmd, const uint8_t *digest, double timeout_s);
     ControlResult control_remote_prepare_register(

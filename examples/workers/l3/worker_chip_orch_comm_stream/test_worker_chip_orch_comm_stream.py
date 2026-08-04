@@ -19,10 +19,10 @@ import os
 import struct
 
 import pytest
-from simpler.l3_l2_orch_comm import NotifyOp, WaitCmp
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CallConfig, ChipCallable, CoreCallable, DataType, TaskArgs, scalar_to_uint64
 from simpler.worker import Worker
+from simpler.worker_chip_orch_comm import NotifyOp, WaitCmp
 
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
@@ -30,8 +30,8 @@ from simpler_setup.pto_isa import ensure_pto_isa_root
 
 _RUNTIME = "tensormap_and_ringbuffer"
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ORCH_SRC = os.path.join(_HERE, "kernels", "orchestration", "l3_l2_orch_comm_orch.cpp")
-_AIV_SRC = os.path.join(_HERE, "kernels", "aiv", "kernel_l3_l2_transform.cpp")
+_ORCH_SRC = os.path.join(_HERE, "kernels", "orchestration", "worker_chip_orch_comm_orch.cpp")
+_AIV_SRC = os.path.join(_HERE, "kernels", "aiv", "kernel_worker_chip_transform.cpp")
 _HEADER = struct.Struct("<QII")
 _HEADER_BYTES = 64
 _NUMEL = 128 * 128
@@ -68,7 +68,7 @@ def _build_chip_callable(platform: str) -> ChipCallable:
     )
     return ChipCallable.build(
         signature=[],
-        func_name="l3_l2_orch_comm_orchestration",
+        func_name="worker_chip_orch_comm_orchestration",
         binary=orch,
         children=[(0, CoreCallable.build(signature=[D.IN, D.OUT], binary=aiv))],
     )
@@ -122,7 +122,7 @@ def run_closed_loop_stream(platform: str, device_id: int) -> None:
         config.aicpu_thread_num = 2
 
         def orch(orch_handle, _args, cfg):
-            region = orch_handle.create_l3_l2_region(
+            region = orch_handle.create_worker_chip_region(
                 worker_id=0, payload_bytes=_PAYLOAD_BYTES, counter_bytes=_COUNTER_BYTES
             )
             data_ready = region.counter(_DATA_READY_COUNTER)
@@ -171,5 +171,5 @@ def run_closed_loop_stream(platform: str, device_id: int) -> None:
 @pytest.mark.platforms(["a2a3sim", "a2a3", "a5sim", "a5"])
 @pytest.mark.device_count(1)
 @pytest.mark.runtime("tensormap_and_ringbuffer")
-def test_l3_l2_orch_comm_stream(st_platform, st_device_ids):
+def test_worker_chip_orch_comm_stream(st_platform, st_device_ids):
     run_closed_loop_stream(st_platform, int(st_device_ids[0]))

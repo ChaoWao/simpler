@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_AICPU_L3_L2_ORCH_ENDPOINT_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_AICPU_L3_L2_ORCH_ENDPOINT_H_
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -18,14 +17,14 @@
 
 #include "aicpu/cache_maintenance.h"
 #include "aicpu/device_time.h"
-#include "common/l3_l2_orch_comm.h"
+#include "common/worker_chip_orch_comm.h"
 
-struct L3L2OrchPayloadView {
+struct WorkerChipOrchPayloadView {
     uint64_t gm_addr;
     uint64_t nbytes;
 };
 
-enum class L3L2EndpointErrorKind : uint32_t {
+enum class WorkerChipEndpointErrorKind : uint32_t {
     NONE = 0,
     BAD_DESCRIPTOR = 1,
     OUT_OF_BOUNDS = 2,
@@ -33,7 +32,7 @@ enum class L3L2EndpointErrorKind : uint32_t {
     SIGNAL_PROTOCOL = 4,
 };
 
-enum class L3L2EndpointOp : uint32_t {
+enum class WorkerChipEndpointOp : uint32_t {
     INIT = 1,
     COUNTER_ADDR = 2,
     PAYLOAD_READ = 3,
@@ -43,30 +42,30 @@ enum class L3L2EndpointOp : uint32_t {
     SIGNAL_WAIT = 7,
 };
 
-inline const char *l3_l2_endpoint_op_to_string(L3L2EndpointOp op) {
+inline const char *worker_chip_endpoint_op_to_string(WorkerChipEndpointOp op) {
     switch (op) {
-    case L3L2EndpointOp::INIT:
+    case WorkerChipEndpointOp::INIT:
         return "init";
-    case L3L2EndpointOp::COUNTER_ADDR:
+    case WorkerChipEndpointOp::COUNTER_ADDR:
         return "counter_addr";
-    case L3L2EndpointOp::PAYLOAD_READ:
+    case WorkerChipEndpointOp::PAYLOAD_READ:
         return "payload_read";
-    case L3L2EndpointOp::PAYLOAD_WRITE:
+    case WorkerChipEndpointOp::PAYLOAD_WRITE:
         return "payload_write";
-    case L3L2EndpointOp::SIGNAL_NOTIFY:
+    case WorkerChipEndpointOp::SIGNAL_NOTIFY:
         return "signal_notify";
-    case L3L2EndpointOp::SIGNAL_TEST:
+    case WorkerChipEndpointOp::SIGNAL_TEST:
         return "signal_test";
-    case L3L2EndpointOp::SIGNAL_WAIT:
+    case WorkerChipEndpointOp::SIGNAL_WAIT:
         return "signal_wait";
     default:
         return "unknown";
     }
 }
 
-struct L3L2EndpointError {
-    L3L2EndpointErrorKind kind;
-    L3L2EndpointOp op;
+struct WorkerChipEndpointError {
+    WorkerChipEndpointErrorKind kind;
+    WorkerChipEndpointOp op;
     uint64_t region_id;
     uint64_t counter_addr;
     int32_t counter_operand;
@@ -74,47 +73,48 @@ struct L3L2EndpointError {
     char message[256];
 };
 
-class L3L2OrchEndpoint {
+class WorkerChipOrchEndpoint {
 public:
-    explicit L3L2OrchEndpoint(const L3L2OrchRegionDesc &desc) :
+    explicit WorkerChipOrchEndpoint(const WorkerChipOrchRegionDesc &desc) :
         desc_(desc) {
-        if (l3_l2_orch_comm::validate_desc(desc_) != L3L2OrchCommValidationError::OK) {
+        if (worker_chip_orch_comm::validate_desc(desc_) != WorkerChipOrchCommValidationError::OK) {
             set_error(
-                L3L2EndpointErrorKind::BAD_DESCRIPTOR, L3L2EndpointOp::INIT, desc_.region_id, 0, 0, "invalid descriptor"
+                WorkerChipEndpointErrorKind::BAD_DESCRIPTOR, WorkerChipEndpointOp::INIT, desc_.region_id, 0, 0,
+                "invalid descriptor"
             );
         }
     }
 
-    L3L2OrchEndpoint(const uint64_t *scalars, size_t scalar_count) {
-        L3L2OrchCommValidationError error = L3L2OrchCommValidationError::OK;
-        if (!l3_l2_orch_comm::decode_desc(scalars, scalar_count, &desc_, &error)) {
+    WorkerChipOrchEndpoint(const uint64_t *scalars, size_t scalar_count) {
+        WorkerChipOrchCommValidationError error = WorkerChipOrchCommValidationError::OK;
+        if (!worker_chip_orch_comm::decode_desc(scalars, scalar_count, &desc_, &error)) {
             uint64_t region_id = scalar_count > 1 && scalars != nullptr ? scalars[1] : 0;
             set_error(
-                L3L2EndpointErrorKind::BAD_DESCRIPTOR, L3L2EndpointOp::INIT, region_id, 0, 0,
+                WorkerChipEndpointErrorKind::BAD_DESCRIPTOR, WorkerChipEndpointOp::INIT, region_id, 0, 0,
                 "invalid descriptor scalars"
             );
         }
     }
 
-    const L3L2EndpointError &error() const { return error_; }
+    const WorkerChipEndpointError &error() const { return error_; }
 
-    const L3L2OrchRegionDesc &descriptor() const { return desc_; }
+    const WorkerChipOrchRegionDesc &descriptor() const { return desc_; }
 
     bool counter_addr(uint64_t offset, uint64_t &out_addr) {
         out_addr = 0;
         if (has_error()) {
             return false;
         }
-        if (l3_l2_orch_comm_add_overflows(desc_.counter_base, offset)) {
+        if (worker_chip_orch_comm_add_overflows(desc_.counter_base, offset)) {
             set_error(
-                L3L2EndpointErrorKind::OUT_OF_BOUNDS, L3L2EndpointOp::COUNTER_ADDR, desc_.region_id, 0, 0,
+                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::COUNTER_ADDR, desc_.region_id, 0, 0,
                 "counter offset is out of bounds"
             );
             return false;
         }
         uint64_t addr = desc_.counter_base + offset;
         if (!validate_counter_addr_for_op(
-                L3L2EndpointOp::COUNTER_ADDR, addr, 0, 0, "counter offset is out of bounds"
+                WorkerChipEndpointOp::COUNTER_ADDR, addr, 0, 0, "counter offset is out of bounds"
             )) {
             return false;
         }
@@ -123,22 +123,23 @@ public:
     }
 
     bool validate_counter_addr(uint64_t counter_addr) const {
-        return l3_l2_orch_comm::validate_counter_addr(desc_, counter_addr) == L3L2OrchCommValidationError::OK;
+        return worker_chip_orch_comm::validate_counter_addr(desc_, counter_addr) ==
+               WorkerChipOrchCommValidationError::OK;
     }
 
-    bool payload_read(uint64_t offset, uint64_t nbytes, L3L2OrchPayloadView &out) {
-        out = L3L2OrchPayloadView{0, 0};
+    bool payload_read(uint64_t offset, uint64_t nbytes, WorkerChipOrchPayloadView &out) {
+        out = WorkerChipOrchPayloadView{0, 0};
         if (has_error()) {
             return false;
         }
-        if (!validate_payload_range(L3L2EndpointOp::PAYLOAD_READ, offset, nbytes)) {
+        if (!validate_payload_range(WorkerChipEndpointOp::PAYLOAD_READ, offset, nbytes)) {
             return false;
         }
         uint64_t gm_addr = desc_.payload_base + offset;
         cache_invalidate_range(
             reinterpret_cast<const void *>(static_cast<uintptr_t>(gm_addr)), static_cast<size_t>(nbytes)
         );
-        out = L3L2OrchPayloadView{gm_addr, nbytes};
+        out = WorkerChipOrchPayloadView{gm_addr, nbytes};
         return true;
     }
 
@@ -148,12 +149,12 @@ public:
         }
         if (src == nullptr) {
             set_error(
-                L3L2EndpointErrorKind::OUT_OF_BOUNDS, L3L2EndpointOp::PAYLOAD_WRITE, desc_.region_id, 0, 0,
+                WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, WorkerChipEndpointOp::PAYLOAD_WRITE, desc_.region_id, 0, 0,
                 "null payload source"
             );
             return false;
         }
-        if (!validate_payload_range(L3L2EndpointOp::PAYLOAD_WRITE, offset, nbytes)) {
+        if (!validate_payload_range(WorkerChipEndpointOp::PAYLOAD_WRITE, offset, nbytes)) {
             return false;
         }
         void *dst = reinterpret_cast<void *>(static_cast<uintptr_t>(desc_.payload_base + offset));
@@ -162,25 +163,25 @@ public:
         return true;
     }
 
-    bool signal_notify(uint64_t counter_addr, int32_t value, L3L2OrchNotifyOp op) {
+    bool signal_notify(uint64_t counter_addr, int32_t value, WorkerChipOrchNotifyOp op) {
         if (has_error()) {
             return false;
         }
         if (!validate_counter_addr_for_op(
-                L3L2EndpointOp::SIGNAL_NOTIFY, counter_addr, value, 0, "invalid counter address"
+                WorkerChipEndpointOp::SIGNAL_NOTIFY, counter_addr, value, 0, "invalid counter address"
             )) {
             return false;
         }
-        if (!l3_l2_orch_comm::valid_notify_op(op)) {
+        if (!worker_chip_orch_comm::valid_notify_op(op)) {
             set_error(
-                L3L2EndpointErrorKind::SIGNAL_PROTOCOL, L3L2EndpointOp::SIGNAL_NOTIFY, desc_.region_id, counter_addr,
-                value, "invalid notify operation"
+                WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL, WorkerChipEndpointOp::SIGNAL_NOTIFY, desc_.region_id,
+                counter_addr, value, "invalid notify operation"
             );
             return false;
         }
 
         volatile int32_t *counter = counter_ptr(counter_addr);
-        if (op == L3L2OrchNotifyOp::Set) {
+        if (op == WorkerChipOrchNotifyOp::Set) {
             *counter = value;
         } else {
             cache_invalidate_range(
@@ -192,43 +193,47 @@ public:
         return true;
     }
 
-    bool signal_test(uint64_t counter_addr, int32_t cmp_value, L3L2OrchWaitCmp cmp, L3L2OrchSignalTestResult &out) {
-        out = L3L2OrchSignalTestResult{false, 0};
+    bool signal_test(
+        uint64_t counter_addr, int32_t cmp_value, WorkerChipOrchWaitCmp cmp, WorkerChipOrchSignalTestResult &out
+    ) {
+        out = WorkerChipOrchSignalTestResult{false, 0};
         if (has_error()) {
             return false;
         }
         if (!validate_counter_addr_for_op(
-                L3L2EndpointOp::SIGNAL_TEST, counter_addr, cmp_value, 0, "invalid counter address"
+                WorkerChipEndpointOp::SIGNAL_TEST, counter_addr, cmp_value, 0, "invalid counter address"
             )) {
             return false;
         }
-        if (!l3_l2_orch_comm::valid_wait_cmp(cmp)) {
+        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
             set_error(
-                L3L2EndpointErrorKind::SIGNAL_PROTOCOL, L3L2EndpointOp::SIGNAL_TEST, desc_.region_id, counter_addr,
-                cmp_value, "invalid wait comparison"
+                WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL, WorkerChipEndpointOp::SIGNAL_TEST, desc_.region_id,
+                counter_addr, cmp_value, "invalid wait comparison"
             );
             return false;
         }
         int32_t observed = load_counter(counter_addr);
-        out = L3L2OrchSignalTestResult{l3_l2_orch_comm::compare_counter(observed, cmp_value, cmp), observed};
+        out =
+            WorkerChipOrchSignalTestResult{worker_chip_orch_comm::compare_counter(observed, cmp_value, cmp), observed};
         return true;
     }
 
-    bool
-    signal_wait(uint64_t counter_addr, int32_t cmp_value, L3L2OrchWaitCmp cmp, uint64_t timeout, int32_t &observed) {
+    bool signal_wait(
+        uint64_t counter_addr, int32_t cmp_value, WorkerChipOrchWaitCmp cmp, uint64_t timeout, int32_t &observed
+    ) {
         observed = 0;
         if (has_error()) {
             return false;
         }
         if (!validate_counter_addr_for_op(
-                L3L2EndpointOp::SIGNAL_WAIT, counter_addr, cmp_value, 0, "invalid counter address"
+                WorkerChipEndpointOp::SIGNAL_WAIT, counter_addr, cmp_value, 0, "invalid counter address"
             )) {
             return false;
         }
-        if (!l3_l2_orch_comm::valid_wait_cmp(cmp)) {
+        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
             set_error(
-                L3L2EndpointErrorKind::SIGNAL_PROTOCOL, L3L2EndpointOp::SIGNAL_WAIT, desc_.region_id, counter_addr,
-                cmp_value, "invalid wait comparison"
+                WorkerChipEndpointErrorKind::SIGNAL_PROTOCOL, WorkerChipEndpointOp::SIGNAL_WAIT, desc_.region_id,
+                counter_addr, cmp_value, "invalid wait comparison"
             );
             return false;
         }
@@ -238,14 +243,14 @@ public:
         while (true) {
             int32_t current = load_counter(counter_addr);
             observed = current;
-            if (l3_l2_orch_comm::compare_counter(current, cmp_value, cmp)) {
+            if (worker_chip_orch_comm::compare_counter(current, cmp_value, cmp)) {
                 return true;
             }
             uint64_t now = device_time_now_ticks();
             if (timeout == 0 || sys_cnt_elapsed_ns(start, now, frequency_hz) >= timeout) {
                 set_error(
-                    L3L2EndpointErrorKind::SIGNAL_TIMEOUT, L3L2EndpointOp::SIGNAL_WAIT, desc_.region_id, counter_addr,
-                    cmp_value, current, "wait timed out"
+                    WorkerChipEndpointErrorKind::SIGNAL_TIMEOUT, WorkerChipEndpointOp::SIGNAL_WAIT, desc_.region_id,
+                    counter_addr, cmp_value, current, "wait timed out"
                 );
                 return false;
             }
@@ -253,27 +258,31 @@ public:
     }
 
 private:
-    bool has_error() const { return error_.kind != L3L2EndpointErrorKind::NONE; }
+    bool has_error() const { return error_.kind != WorkerChipEndpointErrorKind::NONE; }
 
-    bool validate_payload_range(L3L2EndpointOp op, uint64_t offset, uint64_t nbytes) {
-        L3L2OrchCommValidationError error =
-            l3_l2_orch_comm::validate_payload_bounds(offset, nbytes, desc_.payload_bytes);
-        if (error == L3L2OrchCommValidationError::OK) {
+    bool validate_payload_range(WorkerChipEndpointOp op, uint64_t offset, uint64_t nbytes) {
+        WorkerChipOrchCommValidationError error =
+            worker_chip_orch_comm::validate_payload_bounds(offset, nbytes, desc_.payload_bytes);
+        if (error == WorkerChipOrchCommValidationError::OK) {
             return true;
         }
-        set_error(L3L2EndpointErrorKind::OUT_OF_BOUNDS, op, desc_.region_id, 0, 0, "payload range is out of bounds");
+        set_error(
+            WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, op, desc_.region_id, 0, 0, "payload range is out of bounds"
+        );
         return false;
     }
 
     bool validate_counter_addr_for_op(
-        L3L2EndpointOp op, uint64_t counter_addr, int32_t counter_operand, int32_t observed_counter, const char *message
+        WorkerChipEndpointOp op, uint64_t counter_addr, int32_t counter_operand, int32_t observed_counter,
+        const char *message
     ) {
-        if (l3_l2_orch_comm::validate_counter_addr(desc_, counter_addr) == L3L2OrchCommValidationError::OK) {
+        if (worker_chip_orch_comm::validate_counter_addr(desc_, counter_addr) ==
+            WorkerChipOrchCommValidationError::OK) {
             return true;
         }
         set_error(
-            L3L2EndpointErrorKind::OUT_OF_BOUNDS, op, desc_.region_id, counter_addr, counter_operand, observed_counter,
-            message
+            WorkerChipEndpointErrorKind::OUT_OF_BOUNDS, op, desc_.region_id, counter_addr, counter_operand,
+            observed_counter, message
         );
         return false;
     }
@@ -289,25 +298,23 @@ private:
     }
 
     void set_error(
-        L3L2EndpointErrorKind kind, L3L2EndpointOp op, uint64_t region_id, uint64_t counter_addr,
+        WorkerChipEndpointErrorKind kind, WorkerChipEndpointOp op, uint64_t region_id, uint64_t counter_addr,
         int32_t counter_operand, const char *message
     ) {
         set_error(kind, op, region_id, counter_addr, counter_operand, 0, message);
     }
 
     void set_error(
-        L3L2EndpointErrorKind kind, L3L2EndpointOp op, uint64_t region_id, uint64_t counter_addr,
+        WorkerChipEndpointErrorKind kind, WorkerChipEndpointOp op, uint64_t region_id, uint64_t counter_addr,
         int32_t counter_operand, int32_t observed_counter, const char *message
     ) {
         if (has_error()) {
             return;
         }
-        error_ = L3L2EndpointError{kind, op, region_id, counter_addr, counter_operand, observed_counter, ""};
-        l3_l2_orch_comm::copy_error_message(error_.message, sizeof(error_.message), message);
+        error_ = WorkerChipEndpointError{kind, op, region_id, counter_addr, counter_operand, observed_counter, ""};
+        worker_chip_orch_comm::copy_error_message(error_.message, sizeof(error_.message), message);
     }
 
-    L3L2OrchRegionDesc desc_{};
-    L3L2EndpointError error_{L3L2EndpointErrorKind::NONE, L3L2EndpointOp::INIT, 0, 0, 0, 0, ""};
+    WorkerChipOrchRegionDesc desc_{};
+    WorkerChipEndpointError error_{WorkerChipEndpointErrorKind::NONE, WorkerChipEndpointOp::INIT, 0, 0, 0, 0, ""};
 };
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_AICPU_L3_L2_ORCH_ENDPOINT_H_

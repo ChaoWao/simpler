@@ -18,13 +18,8 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Optional, cast
 
 import pytest
-from simpler import l3_l2_orch_comm
 from simpler import worker as worker_module
-from simpler.l3_l2_orch_comm import (
-    NotifyOp,
-    SignalTestResult,
-    WaitCmp,
-)
+from simpler import worker_chip_orch_comm
 from simpler.task_interface import DataType, Tensor
 from simpler.worker import (
     _IDLE,
@@ -32,6 +27,11 @@ from simpler.worker import (
     Worker,
     _buffer_field_addr,
     _mailbox_store_i32,
+)
+from simpler.worker_chip_orch_comm import (
+    NotifyOp,
+    SignalTestResult,
+    WaitCmp,
 )
 
 from simpler_setup.runtime_builder import RuntimeBuilder
@@ -44,7 +44,7 @@ class _FakeDirectCWorker:
         self,
         *,
         payload_base: int = 0xDEAD_0000,
-        access_profile: int = int(l3_l2_orch_comm.L3L2RegionAccessProfile.SIM_POSIX_SHM),
+        access_profile: int = int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.SIM_POSIX_SHM),
         device_id: int = 0,
         shareable_handle: int = 0xABCDEF,
         magic_version: int = 0x4C334C3200020000,
@@ -62,7 +62,7 @@ class _FakeDirectCWorker:
         self.region_id = region_id
         self.mapping_bytes = mapping_bytes
 
-    def control_l3_l2_region_create(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
+    def control_worker_chip_region_create(self, worker_id: int, request_shm_name: str, reply_shm_name: str) -> None:
         self.create_calls.append((int(worker_id), str(request_shm_name), str(reply_shm_name)))
         req_shm = SharedMemory(name=request_shm_name)
         reply_shm = SharedMemory(name=reply_shm_name)
@@ -71,7 +71,7 @@ class _FakeDirectCWorker:
         assert req_buf is not None
         assert reply_buf is not None
         try:
-            req = l3_l2_orch_comm._REGION_CREATE_REQUEST.unpack_from(req_buf, 0)
+            req = worker_chip_orch_comm._REGION_CREATE_REQUEST.unpack_from(req_buf, 0)
             payload_bytes = int(req[2])
             counter_bytes = int(req[3])
             counter_offset = ((payload_bytes + 63) // 64) * 64
@@ -79,14 +79,14 @@ class _FakeDirectCWorker:
             if self.region_id is None:
                 self.next_region_id += 1
             backing_name = f"sim-direct-{region_id}".encode()
-            if self.access_profile == int(l3_l2_orch_comm.L3L2RegionAccessProfile.ONBOARD_VMM):
+            if self.access_profile == int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM):
                 backing_name = b""
             shareable_handle = (
                 self.shareable_handle
-                if self.access_profile == int(l3_l2_orch_comm.L3L2RegionAccessProfile.ONBOARD_VMM)
+                if self.access_profile == int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM)
                 else 0
             )
-            l3_l2_orch_comm._REGION_CREATE_REPLY.pack_into(
+            worker_chip_orch_comm._REGION_CREATE_REPLY.pack_into(
                 reply_buf,
                 0,
                 self.magic_version,
@@ -98,7 +98,7 @@ class _FakeDirectCWorker:
                 self.access_profile,
                 0,
                 self.device_id,
-                backing_name + b"\x00" * (l3_l2_orch_comm._CTRL_SHM_TOKEN_BYTES - len(backing_name)),
+                backing_name + b"\x00" * (worker_chip_orch_comm._CTRL_SHM_TOKEN_BYTES - len(backing_name)),
                 counter_offset + counter_bytes if self.mapping_bytes is None else int(self.mapping_bytes),
                 shareable_handle,
             )
@@ -108,7 +108,7 @@ class _FakeDirectCWorker:
             req_shm.close()
             reply_shm.close()
 
-    def control_l3_l2_region_release(self, worker_id: int, region_id: int) -> None:
+    def control_worker_chip_region_release(self, worker_id: int, region_id: int) -> None:
         self.release_calls.append((int(worker_id), int(region_id)))
 
 
@@ -190,7 +190,7 @@ def _make_started_onboard_worker(platform: str = "a2a3") -> tuple[Worker, Shared
     assert shm.buf is not None
     _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
     fake_c_worker = _FakeDirectCWorker(
-        access_profile=int(l3_l2_orch_comm.L3L2RegionAccessProfile.ONBOARD_VMM),
+        access_profile=int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM),
         device_id=2,
     )
     worker._lifecycle = worker_module._Lifecycle.READY
@@ -209,27 +209,27 @@ def test_sim_direct_region_uses_lifecycle_control_and_l3_host_metadata(monkeypat
             lambda token, mapping_bytes, owner_token: calls.append(("import", token, mapping_bytes, owner_token)) or 99,
         )
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_payload_write",
             lambda handle, offset, src, nbytes: calls.append(("write", handle, offset, src, nbytes)),
         )
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_payload_read",
             lambda handle, offset, dst, nbytes: calls.append(("read", handle, offset, dst, nbytes)),
         )
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_counter_notify",
             lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
         )
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_counter_test",
             lambda handle, offset, value, cmp: (calls.append(("test", handle, offset, value, cmp)) or (True, 7)),
         )
 
-        region = worker._create_l3_l2_region(0, 64, 128)
+        region = worker._create_worker_chip_region(0, 64, 128)
         payload = Tensor.make(0x1234_0000, (16,), DataType.UINT8)
         region.payload_write(0, payload, nbytes=8)
         region.payload_read(8, payload, nbytes=8)
@@ -250,7 +250,7 @@ def test_sim_direct_region_uses_lifecycle_control_and_l3_host_metadata(monkeypat
         assert calls[4] == ("notify", 99, 128, 3, int(NotifyOp.Set))
         assert result == SignalTestResult(matched=True, observed=7)
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -268,12 +268,12 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_l3_host_met
             or 123,
         )
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_counter_notify",
             lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
         )
 
-        region = worker._create_l3_l2_region(0, 64, 128)
+        region = worker._create_worker_chip_region(0, 64, 128)
         region.counter(64).notify(9, NotifyOp.Set)
 
         assert len(fake_c_worker.create_calls) == 1
@@ -281,12 +281,12 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_l3_host_met
         assert 123 not in region.descriptor_scalars()
         l3_host_mapping = region._l3_host_mapping
         assert l3_host_mapping is not None
-        assert l3_host_mapping.access_profile == l3_l2_orch_comm.L3L2RegionAccessProfile.ONBOARD_VMM
+        assert l3_host_mapping.access_profile == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
         assert l3_host_mapping.counter_offset == 64
         assert calls[0] == ("import_onboard", 2, 0xABCDEF, 192, worker._owner_id)
         assert calls[1] == ("notify", 123, 128, 9, int(NotifyOp.Set))
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -301,13 +301,13 @@ def test_sim_direct_create_import_failure_rolls_back_l2_host_region(monkeypatch)
         )
 
         with pytest.raises(RuntimeError, match="import failed"):
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert fake_c_worker.create_calls
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_l3_l2_regions == []
+        assert worker._live_worker_chip_regions == []
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -317,12 +317,12 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
     fake_c_worker.access_profile = 99
     try:
         with pytest.raises(ValueError, match="99 is not a valid"):
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_l3_l2_regions == []
+        assert worker._live_worker_chip_regions == []
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -333,7 +333,7 @@ def test_direct_create_decode_failure_rolls_back_l2_host_region():
         ({"magic_version": 0xBAD}, "magic_version is invalid"),
         ({"region_id": 0}, "region_id must be nonzero"),
         (
-            {"access_profile": int(l3_l2_orch_comm.L3L2RegionAccessProfile.ONBOARD_VMM)},
+            {"access_profile": int(worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM)},
             "access_profile must be sim_posix_shm",
         ),
     ],
@@ -345,12 +345,12 @@ def test_direct_create_validation_failure_rolls_back_l2_host_region(reply_update
     expected_region_id = int(reply_updates.get("region_id", 1))
     try:
         with pytest.raises(RuntimeError, match=match):
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert fake_c_worker.release_calls == ([(0, expected_region_id)] if expected_region_id else [])
-        assert worker._live_l3_l2_regions == []
+        assert worker._live_worker_chip_regions == []
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -367,13 +367,13 @@ def test_onboard_direct_mapping_bytes_too_small_rolls_back_l2_host_region(monkey
         )
 
         with pytest.raises(RuntimeError, match="onboard_vmm reply mapping_bytes is smaller"):
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert calls == []
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_l3_l2_regions == []
+        assert worker._live_worker_chip_regions == []
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -389,13 +389,13 @@ def test_onboard_direct_mapping_allows_granularity_aligned_mapping(monkeypatch):
             lambda *args: calls.append(args) or 123,
         )
 
-        region = worker._create_l3_l2_region(0, 64, 128)
+        region = worker._create_worker_chip_region(0, 64, 128)
 
         assert calls == [(2, 0xABCDEF, 65536, worker._owner_id)]
         assert region._l3_host_mapping is not None
         assert region._l3_host_mapping.total_bytes == 192
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -413,29 +413,29 @@ def test_direct_region_create_rolls_back_partially_published_region(monkeypatch,
     close_calls: list[int] = []
     monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
-        l3_l2_orch_comm,
+        worker_chip_orch_comm,
         "_l3_host_mapped_region_close",
         lambda handle: close_calls.append(int(handle)),
     )
     if interrupted_publication == "worker":
-        worker._live_l3_l2_regions = _AppendThenInterrupt()
+        worker._live_worker_chip_regions = _AppendThenInterrupt()
     else:
-        resources.l3_l2_regions = _AppendThenInterrupt()
+        resources.worker_chip_regions = _AppendThenInterrupt()
 
     try:
         with pytest.raises(KeyboardInterrupt, match=f"interrupted {interrupted_publication} publication"):
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
-        assert worker._live_l3_l2_regions == []
-        assert resources.l3_l2_regions == []
+        assert worker._live_worker_chip_regions == []
+        assert resources.worker_chip_regions == []
         assert resources.requires_ordered_cleanup is False
         assert close_calls == [55]
         assert fake_c_worker.release_calls == [(0, 1)]
     finally:
         worker._building_run_resources = None
-        worker._live_l3_l2_regions.clear()
-        resources.l3_l2_regions.clear()
-        worker._close_l3_l2_orch_comm()
+        worker._live_worker_chip_regions.clear()
+        resources.worker_chip_regions.clear()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -447,26 +447,26 @@ def test_direct_region_create_mapping_rollback_failure_poisons_worker(monkeypatc
             raise KeyboardInterrupt("interrupted publication")
 
     worker, shm, fake_c_worker = _make_started_sim_worker()
-    worker._live_l3_l2_regions = _AppendThenInterrupt()
+    worker._live_worker_chip_regions = _AppendThenInterrupt()
     monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
-        l3_l2_orch_comm,
+        worker_chip_orch_comm,
         "_l3_host_mapped_region_close",
         lambda _handle: (_ for _ in ()).throw(RuntimeError("mapping close failed")),
     )
 
     try:
         with pytest.raises(RuntimeError, match="rollback could not close the L3 Host mapping") as excinfo:
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._live_l3_l2_regions == []
+        assert worker._live_worker_chip_regions == []
         with pytest.raises(RuntimeError, match="no further work is admitted"):
             worker._require_no_ordered_cleanup_failure("submit")
     finally:
-        worker._live_l3_l2_regions.clear()
-        worker._close_l3_l2_orch_comm()
+        worker._live_worker_chip_regions.clear()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -495,7 +495,7 @@ def test_unadopted_native_mapping_cleanup_failure_poisons_worker(monkeypatch):
 
     try:
         with pytest.raises(RuntimeError, match="rollback could not close the L3 Host mapping") as excinfo:
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert "native owner cleanup failed" in str(excinfo.value.__cause__)
@@ -505,7 +505,7 @@ def test_unadopted_native_mapping_cleanup_failure_poisons_worker(monkeypatch):
         with pytest.raises(RuntimeError, match="no further work is admitted"):
             worker._require_no_ordered_cleanup_failure("submit")
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -534,13 +534,13 @@ def test_interrupted_cleanup_ack_happens_after_region_rollback(monkeypatch):
 
     try:
         with pytest.raises(KeyboardInterrupt) as caught:
-            worker._create_l3_l2_region(0, 64, 128)
+            worker._create_worker_chip_region(0, 64, 128)
 
         assert caught.value is ack_interrupt
         assert fake_c_worker.release_calls == [(0, 1)]
         assert worker._ordered_cleanup_error is worker._l3_host_mapped_cleanup_error
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -991,8 +991,8 @@ def test_native_mapping_cleanup_errors_are_keyed_by_owner_token():
 
 
 def test_onboard_region_create_handler_uses_named_export_fields(monkeypatch):
-    req_shm = SharedMemory(create=True, size=l3_l2_orch_comm._REGION_CREATE_REQUEST_BYTES)
-    reply_shm = SharedMemory(create=True, size=l3_l2_orch_comm._REGION_CREATE_REPLY_BYTES)
+    req_shm = SharedMemory(create=True, size=worker_chip_orch_comm._REGION_CREATE_REQUEST_BYTES)
+    reply_shm = SharedMemory(create=True, size=worker_chip_orch_comm._REGION_CREATE_REPLY_BYTES)
     req_buf = cast(memoryview, req_shm.buf)
     reply_buf = cast(memoryview, reply_shm.buf)
     ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
@@ -1001,9 +1001,9 @@ def test_onboard_region_create_handler_uses_named_export_fields(monkeypatch):
     typed_cw = cast(Any, cw)
     close_calls: list[int] = []
     try:
-        l3_l2_orch_comm.L3L2RegionCreateRequest(
+        worker_chip_orch_comm.WorkerChipRegionCreateRequest(
             magic_version=0x4C334C3200020000,
-            request_bytes=l3_l2_orch_comm._REGION_CREATE_REQUEST_BYTES,
+            request_bytes=worker_chip_orch_comm._REGION_CREATE_REQUEST_BYTES,
             payload_bytes=64,
             counter_bytes=128,
         ).encode_into(req_buf)
@@ -1020,19 +1020,19 @@ def test_onboard_region_create_handler_uses_named_export_fields(monkeypatch):
             lambda handle: close_calls.append(int(handle)),
         )
 
-        store = worker_module._L2HostL3L2RegionStore()
-        worker_module._handle_ctrl_l3_l2_region_create(typed_cw, ctrl_buf, "a2a3", store)
+        store = worker_module._HostWorkerChipRegionStore()
+        worker_module._handle_ctrl_worker_chip_region_create(typed_cw, ctrl_buf, "a2a3", store)
 
-        reply = l3_l2_orch_comm.decode_region_create_reply(reply_buf)
+        reply = worker_chip_orch_comm.decode_region_create_reply(reply_buf)
         assert reply.desc.scalars() == [0x4C334C3200020000, 1, 0xD00D_0000, 64, 0xD00D_0040, 128]
-        assert reply.access_profile == l3_l2_orch_comm.L3L2RegionAccessProfile.ONBOARD_VMM
+        assert reply.access_profile == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
         assert reply.device_id == 2
         assert reply.mapping_bytes == 65536
         assert reply.shareable_handle == 0xABCDEF
         assert cw.copy_calls == [(0xD00D_0040, 128)]
 
         region = store.regions.pop(1)
-        worker_module._release_l2_host_l3_l2_region(region)
+        worker_module._release_host_worker_chip_region(region)
         assert close_calls == [77]
     finally:
         ctrl_buf.release()
@@ -1045,33 +1045,33 @@ def test_onboard_region_create_handler_uses_named_export_fields(monkeypatch):
 
 
 def test_region_create_handler_rejects_abi_mismatch():
-    req_shm = SharedMemory(create=True, size=l3_l2_orch_comm._REGION_CREATE_REQUEST_BYTES)
-    reply_shm = SharedMemory(create=True, size=l3_l2_orch_comm._REGION_CREATE_REPLY_BYTES)
+    req_shm = SharedMemory(create=True, size=worker_chip_orch_comm._REGION_CREATE_REQUEST_BYTES)
+    reply_shm = SharedMemory(create=True, size=worker_chip_orch_comm._REGION_CREATE_REPLY_BYTES)
     req_buf = cast(memoryview, req_shm.buf)
     ctrl_storage = bytearray(worker_module._OFF_ARGS + 2 * worker_module._CTRL_SHM_NAME_BYTES)
     ctrl_buf = memoryview(ctrl_storage)
-    store = worker_module._L2HostL3L2RegionStore()
+    store = worker_module._HostWorkerChipRegionStore()
     try:
         _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS, req_shm.name)
         _write_ctrl_shm_name(ctrl_buf, worker_module._OFF_ARGS + worker_module._CTRL_SHM_NAME_BYTES, reply_shm.name)
         bad_requests = (
-            l3_l2_orch_comm.L3L2RegionCreateRequest(
+            worker_chip_orch_comm.WorkerChipRegionCreateRequest(
                 magic_version=0xDEAD,
-                request_bytes=l3_l2_orch_comm._REGION_CREATE_REQUEST_BYTES,
+                request_bytes=worker_chip_orch_comm._REGION_CREATE_REQUEST_BYTES,
                 payload_bytes=64,
                 counter_bytes=128,
             ),
-            l3_l2_orch_comm.L3L2RegionCreateRequest(
+            worker_chip_orch_comm.WorkerChipRegionCreateRequest(
                 magic_version=0x4C334C3200020000,
-                request_bytes=l3_l2_orch_comm._REGION_CREATE_REQUEST_BYTES + 8,
+                request_bytes=worker_chip_orch_comm._REGION_CREATE_REQUEST_BYTES + 8,
                 payload_bytes=64,
                 counter_bytes=128,
             ),
         )
         for bad_request in bad_requests:
             bad_request.encode_into(req_buf)
-            with pytest.raises(RuntimeError, match="CTRL_L3_L2_REGION_CREATE"):
-                worker_module._handle_ctrl_l3_l2_region_create(
+            with pytest.raises(RuntimeError, match="CTRL_WORKER_CHIP_REGION_CREATE"):
+                worker_module._handle_ctrl_worker_chip_region_create(
                     cast(Any, _FakeChipWorkerForRegionCreate()), ctrl_buf, "a2a3", store
                 )
         assert store.regions == {}
@@ -1266,19 +1266,19 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
     try:
         monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_payload_write",
             lambda _handle, _offset, _src, _nbytes: (_ for _ in ()).throw(RuntimeError("copy failed")),
         )
 
-        region = worker._create_l3_l2_region(0, 64, 128)
+        region = worker._create_worker_chip_region(0, 64, 128)
         payload = Tensor.make(0x1234_0000, (16,), DataType.UINT8)
         with pytest.raises(RuntimeError, match="copy failed"):
             region.payload_write(0, payload, nbytes=8)
         with pytest.raises(RuntimeError, match="poisoned"):
             region.descriptor_scalars()
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -1286,30 +1286,30 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
 def test_sim_direct_cleanup_closes_l3_host_mapping_before_l2_host_release(monkeypatch):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     events: list[tuple[str, int]] = []
-    original_release = fake_c_worker.control_l3_l2_region_release
+    original_release = fake_c_worker.control_worker_chip_region_release
 
     def release(worker_id: int, region_id: int) -> None:
         events.append(("release", int(region_id)))
         original_release(worker_id, region_id)
 
     try:
-        fake_c_worker.control_l3_l2_region_release = release
+        fake_c_worker.control_worker_chip_region_release = release
         monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 77)
         monkeypatch.setattr(
-            l3_l2_orch_comm,
+            worker_chip_orch_comm,
             "_l3_host_mapped_region_close",
             lambda handle: events.append(("close", int(handle))),
         )
 
-        region = worker._create_l3_l2_region(0, 64, 128)
+        region = worker._create_worker_chip_region(0, 64, 128)
         region.free()
-        worker._cleanup_l3_l2_regions()
+        worker._cleanup_worker_chip_regions()
 
         assert events == [("close", 77), ("release", 1)]
         with pytest.raises(RuntimeError, match="expired"):
             region.descriptor_scalars()
     finally:
-        worker._close_l3_l2_orch_comm()
+        worker._close_worker_chip_orch_comm()
         shm.close()
         shm.unlink()
 
@@ -1337,7 +1337,7 @@ def test_sim_worker_region_payload_roundtrip(platform):
             buf = buf_t.from_address(int(host.data))
             for i in range(16):
                 buf[i] = (i + 41) & 0xFF
-            region = orch_handle.create_l3_l2_region(worker_id=0, payload_bytes=16, counter_bytes=128)
+            region = orch_handle.create_worker_chip_region(worker_id=0, payload_bytes=16, counter_bytes=128)
             region.payload_write(0, host)
             for i in range(16):
                 buf[i] = 0
@@ -1367,7 +1367,7 @@ def test_sim_worker_counter_wait_timeout_does_not_poison_region_and_free_is_idem
     try:
 
         def orch(orch_handle, _args, _cfg):
-            region = orch_handle.create_l3_l2_region(worker_id=0, payload_bytes=16, counter_bytes=128)
+            region = orch_handle.create_worker_chip_region(worker_id=0, payload_bytes=16, counter_bytes=128)
             with pytest.raises(TimeoutError, match="observed=0"):
                 region.counter(0).wait(1, WaitCmp.EQ, timeout=0.001)
             assert region.descriptor_scalars()[1] != 0

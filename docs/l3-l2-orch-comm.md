@@ -19,7 +19,7 @@ cross-rank communication domains, see [comm-domain.md](comm-domain.md).
 L3 creates a GM communication region for one chip worker:
 
 ```python
-region = orch.create_l3_l2_region(
+region = orch.create_worker_chip_region(
     worker_id=0,
     payload_bytes=payload_bytes,
     counter_bytes=128,
@@ -57,7 +57,7 @@ address-based `int32_t` counters.
 On L2, orchestration code consumes the descriptor and builds an endpoint:
 
 ```cpp
-L3L2OrchEndpoint ep(desc);
+WorkerChipOrchEndpoint ep(desc);
 
 uint64_t data_ready_addr = 0;
 uint64_t completion_addr = 0;
@@ -66,14 +66,14 @@ ep.counter_addr(completion_offset, completion_addr);
 
 int32_t observed = 0;
 bool ok = ep.signal_wait(
-              data_ready_addr, seq, L3L2OrchWaitCmp::GE, timeout, observed) &&
+              data_ready_addr, seq, WorkerChipOrchWaitCmp::GE, timeout, observed) &&
           ep.payload_read(input_offset, input_nbytes, input) &&
           ep.payload_read(output_offset, output_nbytes, output);
 
 // The wrapper combines gm_addr/nbytes with task-level dtype and shape.
 launch_aicore(input, output);
 wait_aicore_done();
-ep.signal_notify(completion_addr, seq, L3L2OrchNotifyOp::Set);
+ep.signal_notify(completion_addr, seq, WorkerChipOrchNotifyOp::Set);
 ```
 
 The L2 endpoint `signal_wait` timeout argument is in nanoseconds. The Python
@@ -189,10 +189,10 @@ L2 endpoint methods expose the same primitive shape over explicit GM counter
 addresses:
 
 ```cpp
-ep.signal_notify(counter_addr, value, L3L2OrchNotifyOp::Set);
-ep.signal_test(counter_addr, cmp_value, L3L2OrchWaitCmp::GE, result);
+ep.signal_notify(counter_addr, value, WorkerChipOrchNotifyOp::Set);
+ep.signal_test(counter_addr, cmp_value, WorkerChipOrchWaitCmp::GE, result);
 ep.signal_wait(
-    counter_addr, cmp_value, L3L2OrchWaitCmp::GE, timeout, observed);
+    counter_addr, cmp_value, WorkerChipOrchWaitCmp::GE, timeout, observed);
 ```
 
 `NotifyOp` supports:
@@ -379,7 +379,7 @@ followed by input and output tensor slices. It can use counter offset `0` for
 `{seq + 1, STOP}` and publish it through `data_ready`.
 
 The related example lives in
-`examples/workers/l3/l3_l2_orch_comm_stream` and is marked for `a2a3sim`,
+`examples/workers/l3/worker_chip_orch_comm_stream` and is marked for `a2a3sim`,
 `a2a3`, `a5sim`, and `a5`. It creates one region, submits one persistent L2
 orchestration task, and drives three DATA
 rounds from L3 while the L2 task stays in flight. Each round copies a

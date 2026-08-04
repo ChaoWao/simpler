@@ -18,10 +18,10 @@ import os
 import struct
 
 import pytest
-from simpler.l3_l2_message_queue import L3L2QueueOpcode
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CallConfig, ChipCallable, CoreCallable, TaskArgs
 from simpler.worker import Worker
+from simpler.worker_chip_message_queue import WorkerChipQueueOpcode
 
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
@@ -29,7 +29,7 @@ from simpler_setup.pto_isa import ensure_pto_isa_root
 
 _RUNTIME = "tensormap_and_ringbuffer"
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ORCH_SRC = os.path.join(_HERE, "kernels", "orchestration", "l3_l2_message_queue_orch.cpp")
+_ORCH_SRC = os.path.join(_HERE, "kernels", "orchestration", "worker_chip_message_queue_orch.cpp")
 _AIV_SRC = os.path.join(_HERE, "kernels", "aiv", "kernel_queue_transform.cpp")
 _TIMEOUT_S = 5.0
 _QUEUE_DEPTH = 8
@@ -80,7 +80,7 @@ def _build_chip_callable(platform: str) -> ChipCallable:
     )
     return ChipCallable.build(
         signature=[],
-        func_name="l3_l2_message_queue_orchestration",
+        func_name="worker_chip_message_queue_orchestration",
         binary=orch,
         children=[(0, _build_core_callable([D.IN, D.IN, D.OUT], aiv))],
     )
@@ -131,7 +131,7 @@ def _expected_outputs() -> list[bytes]:
 def _read_expected_outputs(queue, expected_outputs: list[bytes]) -> None:
     for expected in expected_outputs:
         message = queue.output.peek(timeout=_TIMEOUT_S)
-        assert message.opcode == L3L2QueueOpcode.DATA
+        assert message.opcode == WorkerChipQueueOpcode.DATA
         assert message.payload_nbytes == len(expected)
         assert _read_message_payload(queue, message) == expected
         queue.output.release(message)
@@ -150,7 +150,7 @@ def _read_message_payload(queue, message) -> bytes:
     return bytes(output)
 
 
-def run_l3_l2_message_queue_example(platform: str, device_id: int) -> None:
+def run_worker_chip_message_queue_example(platform: str, device_id: int) -> None:
     chip_callable = _build_chip_callable(platform)
     worker = Worker(
         level=3,
@@ -166,7 +166,7 @@ def run_l3_l2_message_queue_example(platform: str, device_id: int) -> None:
         config.aicpu_thread_num = 2
 
         def orch(orch_handle, _args, cfg):
-            queue = orch_handle.create_l3_l2_queue(
+            queue = orch_handle.create_worker_chip_queue(
                 worker_id=0,
                 depth=_QUEUE_DEPTH,
                 input_arena_bytes=_INPUT_ARENA_BYTES,
@@ -200,5 +200,5 @@ def run_l3_l2_message_queue_example(platform: str, device_id: int) -> None:
 @pytest.mark.platforms(["a2a3sim", "a2a3", "a5sim", "a5"])
 @pytest.mark.device_count(1)
 @pytest.mark.runtime("tensormap_and_ringbuffer")
-def test_l3_l2_message_queue(st_platform, st_device_ids):
-    run_l3_l2_message_queue_example(st_platform, int(st_device_ids[0]))
+def test_worker_chip_message_queue(st_platform, st_device_ids):
+    run_worker_chip_message_queue_example(st_platform, int(st_device_ids[0]))

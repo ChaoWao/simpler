@@ -1,6 +1,6 @@
-# l3_l2_orch_comm_stream — closed-loop host/L2 handshake over a shared region
+# worker_chip_orch_comm_stream — closed-loop host/L2 handshake over a shared region
 
-The lower-level counterpart to [`l3_l2_message_queue`](../l3_l2_message_queue/).
+The lower-level counterpart to [`worker_chip_message_queue`](../worker_chip_message_queue/).
 Same idea — the host drives a task that is already running — but instead of a
 queue with arenas and opcodes, the host and the L2 orchestration share a raw
 **region**: one payload area plus a small counter area they signal through.
@@ -19,7 +19,7 @@ mechanism.
 
 | Concept | How |
 | ------- | --- |
-| **Creating the region** | `orch.create_l3_l2_region(worker_id=0, payload_bytes=..., counter_bytes=...)`, described to L2 via `region.descriptor_scalars()`. |
+| **Creating the region** | `orch.create_worker_chip_region(worker_id=0, payload_bytes=..., counter_bytes=...)`, described to L2 via `region.descriptor_scalars()`. |
 | **Named counters at fixed offsets** | `region.counter(0)` is `data_ready`, `region.counter(64)` is `completion`. The offsets are passed to the kernel as scalars — both sides must agree. |
 | **Notify / test / wait** | `counter.notify(seq, NotifyOp.Set)` publishes; `counter.test(seq, WaitCmp.GE)` polls without blocking and returns a snapshot; `counter.wait(seq, WaitCmp.GE, timeout=...)` blocks. The example calls `test` first and only falls back to `wait` when it did not already match — the fast path costs no block. |
 | **Explicit payload transfer** | `region.payload_write(offset, tensor, nbytes)` and `payload_read(...)`, at offsets the host lays out itself: header at 0, input at 64, output after the input. |
@@ -32,8 +32,8 @@ mechanism.
 Single device, all four platforms:
 
 ```bash
-pytest examples/workers/l3/l3_l2_orch_comm_stream --platform a2a3sim
-pytest examples/workers/l3/l3_l2_orch_comm_stream --platform a2a3 --device 0
+pytest examples/workers/l3/worker_chip_orch_comm_stream --platform a2a3sim
+pytest examples/workers/l3/worker_chip_orch_comm_stream --platform a2a3 --device 0
 ```
 
 The test file is also the example — `run_closed_loop_stream(platform,
@@ -53,12 +53,12 @@ immediately — the inputs differ per round by construction (`round_idx * 1000 +
 ## File structure
 
 ```text
-l3_l2_orch_comm_stream/
+worker_chip_orch_comm_stream/
 ├── kernels/
 │   ├── aiv/
-│   │   └── kernel_l3_l2_transform.cpp
+│   │   └── kernel_worker_chip_transform.cpp
 │   └── orchestration/
-│       └── l3_l2_orch_comm_orch.cpp
-├── test_l3_l2_orch_comm_stream.py
+│       └── worker_chip_orch_comm_orch.cpp
+├── test_worker_chip_orch_comm_stream.py
 └── README.md
 ```

@@ -11,7 +11,7 @@
 
 #include <stdint.h>
 
-#include "aicpu/l3_l2_orch_endpoint.h"
+#include "aicpu/worker_chip_orch_endpoint.h"
 #include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
 
 namespace {
@@ -27,23 +27,25 @@ struct ChannelHeader {
     uint32_t reserved;
 };
 
-void report_endpoint_error(const L3L2OrchEndpoint &endpoint) {
-    const L3L2EndpointError &err = endpoint.error();
+void report_endpoint_error(const WorkerChipOrchEndpoint &endpoint) {
+    const WorkerChipEndpointError &err = endpoint.error();
     rt_report_fatal(
         PTO2_ERROR_EXPLICIT_ORCH_FATAL,
         "L3-L2 endpoint error op=%s kind=%u region=%llu counter_addr=%llu counter_operand=%d observed_counter=%d "
         "msg=%s",
-        l3_l2_endpoint_op_to_string(err.op), static_cast<unsigned>(err.kind),
+        worker_chip_endpoint_op_to_string(err.op), static_cast<unsigned>(err.kind),
         static_cast<unsigned long long>(err.region_id), static_cast<unsigned long long>(err.counter_addr),
         err.counter_operand, err.observed_counter, err.message
     );
 }
 
-bool has_endpoint_error(const L3L2OrchEndpoint &endpoint) {
-    return endpoint.error().kind != L3L2EndpointErrorKind::NONE;
+bool has_endpoint_error(const WorkerChipOrchEndpoint &endpoint) {
+    return endpoint.error().kind != WorkerChipEndpointErrorKind::NONE;
 }
 
-bool read_payload_or_fail(L3L2OrchEndpoint &endpoint, uint64_t offset, uint64_t nbytes, L3L2OrchPayloadView *out) {
+bool read_payload_or_fail(
+    WorkerChipOrchEndpoint &endpoint, uint64_t offset, uint64_t nbytes, WorkerChipOrchPayloadView *out
+) {
     if (out != nullptr && endpoint.payload_read(offset, nbytes, *out)) {
         return true;
     }
@@ -60,12 +62,12 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
     return PTO2OrchestrationConfig{.expected_arg_count = kExpectedArgCount};
 }
 
-__attribute__((visibility("default"))) void l3_l2_orch_comm_orchestration(const L2TaskArgs &orch_args) {
-    uint64_t desc_scalars[L3L2_ORCH_REGION_DESC_SCALAR_COUNT] = {
+__attribute__((visibility("default"))) void worker_chip_orch_comm_orchestration(const L2TaskArgs &orch_args) {
+    uint64_t desc_scalars[WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT] = {
         orch_args.scalar(0), orch_args.scalar(1), orch_args.scalar(2),
         orch_args.scalar(3), orch_args.scalar(4), orch_args.scalar(5),
     };
-    L3L2OrchEndpoint endpoint(desc_scalars, L3L2_ORCH_REGION_DESC_SCALAR_COUNT);
+    WorkerChipOrchEndpoint endpoint(desc_scalars, WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT);
     if (has_endpoint_error(endpoint)) {
         report_endpoint_error(endpoint);
         return;
@@ -92,12 +94,14 @@ __attribute__((visibility("default"))) void l3_l2_orch_comm_orchestration(const 
     for (uint64_t seq = 1;; ++seq) {
         const int32_t signal_value = static_cast<int32_t>(seq);
         int32_t observed = 0;
-        if (!endpoint.signal_wait(data_ready_counter_addr, signal_value, L3L2OrchWaitCmp::GE, timeout, observed)) {
+        if (!endpoint.signal_wait(
+                data_ready_counter_addr, signal_value, WorkerChipOrchWaitCmp::GE, timeout, observed
+            )) {
             report_endpoint_error(endpoint);
             return;
         }
 
-        L3L2OrchPayloadView header_view{};
+        WorkerChipOrchPayloadView header_view{};
         if (!read_payload_or_fail(endpoint, 0, sizeof(ChannelHeader), &header_view)) {
             return;
         }
@@ -118,8 +122,8 @@ __attribute__((visibility("default"))) void l3_l2_orch_comm_orchestration(const 
             return;
         }
 
-        L3L2OrchPayloadView input_view{};
-        L3L2OrchPayloadView output_view{};
+        WorkerChipOrchPayloadView input_view{};
+        WorkerChipOrchPayloadView output_view{};
         if (!read_payload_or_fail(endpoint, input_offset, tensor_nbytes, &input_view)) {
             return;
         }
@@ -141,7 +145,7 @@ __attribute__((visibility("default"))) void l3_l2_orch_comm_orchestration(const 
 
         uint32_t first_index[1] = {0};
         (void)get_tensor_data<float>(output, 1, first_index);
-        if (!endpoint.signal_notify(completion_counter_addr, signal_value, L3L2OrchNotifyOp::Set)) {
+        if (!endpoint.signal_notify(completion_counter_addr, signal_value, WorkerChipOrchNotifyOp::Set)) {
             report_endpoint_error(endpoint);
             return;
         }

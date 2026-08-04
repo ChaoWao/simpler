@@ -1,4 +1,4 @@
-# l3_l2_message_queue — stream requests into a running L2 task
+# worker_chip_message_queue — stream requests into a running L2 task
 
 A different shape from every other L3 example. Elsewhere the host builds a DAG,
 submits it, and waits. Here the host submits **one long-lived L2 task** and then
@@ -14,7 +14,7 @@ the channel's design.
 
 | Concept | How |
 | ------- | --- |
-| **Creating the channel** | `orch.create_l3_l2_queue(worker_id=0, depth=8, input_arena_bytes=..., output_arena_bytes=...)`. |
+| **Creating the channel** | `orch.create_worker_chip_queue(worker_id=0, depth=8, input_arena_bytes=..., output_arena_bytes=...)`. |
 | **Handing it to L2** | `queue.l2_task_arg_scalars()` packs the descriptor into `TaskArgs` as scalars — the L2 side needs no other setup. |
 | **Full-duplex, decoupled** | The host enqueues two requests, drains **three** responses, then enqueues two more. Requests and responses are not paired one-to-one. |
 | **Zero-copy reads** | `queue.output.peek(timeout)` → `read_into(message, buf)` → `release(message)`. `release` is what returns arena space; skipping it stalls the producer once the queue fills. |
@@ -38,11 +38,11 @@ Single device, and unlike the collective examples it runs on all four
 platforms:
 
 ```bash
-pytest examples/workers/l3/l3_l2_message_queue --platform a2a3sim
-pytest examples/workers/l3/l3_l2_message_queue --platform a2a3 --device 0
+pytest examples/workers/l3/worker_chip_message_queue --platform a2a3sim
+pytest examples/workers/l3/worker_chip_message_queue --platform a2a3 --device 0
 ```
 
-The test file is also the example — `run_l3_l2_message_queue_example(platform,
+The test file is also the example — `run_worker_chip_message_queue_example(platform,
 device_id)` is importable directly.
 
 `config.aicpu_thread_num = 2` is required: one AICPU thread drains the queue
@@ -58,12 +58,12 @@ metadata is right but whose tile is wrong.
 ## File structure
 
 ```text
-l3_l2_message_queue/
+worker_chip_message_queue/
 ├── kernels/
 │   ├── aiv/
 │   │   └── kernel_queue_transform.cpp
 │   └── orchestration/
-│       └── l3_l2_message_queue_orch.cpp
-├── test_l3_l2_message_queue.py
+│       └── worker_chip_message_queue_orch.cpp
+├── test_worker_chip_message_queue.py
 └── README.md
 ```

@@ -55,8 +55,8 @@
 #include "chip_worker.h"
 #include "data_type.h"
 #include "dma_workspace.h"
-#include "l3_l2_orch_comm.h"
-#include "l3_l2_orch_region_access.h"
+#include "worker_chip_orch_comm.h"
+#include "worker_chip_orch_region_access.h"
 #include "worker_bind.h"
 #include "task_args.h"
 #include "tensor.h"
@@ -397,7 +397,7 @@ public:
     }
 
     std::string owner_token;
-    L3L2RegionAccessProfile profile{L3L2RegionAccessProfile::SIM_POSIX_SHM};
+    WorkerChipRegionAccessProfile profile{WorkerChipRegionAccessProfile::SIM_POSIX_SHM};
     int fd{-1};
     uint64_t device_addr{0};
     int device_id{-1};
@@ -428,7 +428,7 @@ public:
 
     void copy_to(uint64_t offset, const void *host_ptr, uint64_t nbytes) const {
         validate_mapping_range_or_throw(offset, nbytes);
-        if (profile == L3L2RegionAccessProfile::SIM_POSIX_SHM) {
+        if (profile == WorkerChipRegionAccessProfile::SIM_POSIX_SHM) {
             auto *dst = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(device_addr));
             std::memcpy(dst + offset, host_ptr, static_cast<size_t>(nbytes));
             return;
@@ -440,7 +440,7 @@ public:
 
     void copy_from(void *host_ptr, uint64_t offset, uint64_t nbytes) const {
         validate_mapping_range_or_throw(offset, nbytes);
-        if (profile == L3L2RegionAccessProfile::SIM_POSIX_SHM) {
+        if (profile == WorkerChipRegionAccessProfile::SIM_POSIX_SHM) {
             const auto *src = reinterpret_cast<const uint8_t *>(static_cast<uintptr_t>(device_addr));
             std::memcpy(host_ptr, src + offset, static_cast<size_t>(nbytes));
             return;
@@ -458,45 +458,45 @@ public:
 
     void store_counter(uint64_t offset, int32_t value) const { copy_to(offset, &value, sizeof(value)); }
 
-    void notify_counter(uint64_t offset, int32_t value, L3L2OrchNotifyOp op) const {
+    void notify_counter(uint64_t offset, int32_t value, WorkerChipOrchNotifyOp op) const {
         if (offset % sizeof(int32_t) != 0) {
             throw std::invalid_argument("L3-L2 counter offset must be 4-byte aligned");
         }
-        if (!l3_l2_orch_comm::valid_notify_op(op)) {
+        if (!worker_chip_orch_comm::valid_notify_op(op)) {
             throw std::invalid_argument("L3-L2 counter notify op is invalid");
         }
-        if (op == L3L2OrchNotifyOp::Add) {
+        if (op == WorkerChipOrchNotifyOp::Add) {
             value = load_counter(offset) + value;
         }
         store_counter(offset, value);
     }
 
-    std::tuple<bool, int32_t> test_counter(uint64_t offset, int32_t operand, L3L2OrchWaitCmp cmp) const {
+    std::tuple<bool, int32_t> test_counter(uint64_t offset, int32_t operand, WorkerChipOrchWaitCmp cmp) const {
         if (offset % sizeof(int32_t) != 0) {
             throw std::invalid_argument("L3-L2 counter offset must be 4-byte aligned");
         }
-        if (!l3_l2_orch_comm::valid_wait_cmp(cmp)) {
+        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
             throw std::invalid_argument("L3-L2 counter wait comparison is invalid");
         }
         int32_t observed = load_counter(offset);
-        return std::make_tuple(l3_l2_orch_comm::compare_counter(observed, operand, cmp), observed);
+        return std::make_tuple(worker_chip_orch_comm::compare_counter(observed, operand, cmp), observed);
     }
 
     // Returns (status, error_kind, observed, matched, message). The status/error
     // values are the wire contract with the Python facade
-    // (_WAIT_STATUS_TIMEOUT / _WAIT_ERROR_SIGNAL_TIMEOUT in l3_l2_orch_comm.py).
+    // (_WAIT_STATUS_TIMEOUT / _WAIT_ERROR_SIGNAL_TIMEOUT in worker_chip_orch_comm.py).
     std::tuple<int, int, int32_t, bool, std::string>
-    wait_counter(uint64_t offset, int32_t operand, L3L2OrchWaitCmp cmp, uint64_t timeout_ns) const {
+    wait_counter(uint64_t offset, int32_t operand, WorkerChipOrchWaitCmp cmp, uint64_t timeout_ns) const {
         if (offset % sizeof(int32_t) != 0) {
             throw std::invalid_argument("L3-L2 counter offset must be 4-byte aligned");
         }
-        if (!l3_l2_orch_comm::valid_wait_cmp(cmp)) {
+        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
             throw std::invalid_argument("L3-L2 counter wait comparison is invalid");
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout_ns);
         while (true) {
             int32_t observed = load_counter(offset);
-            bool matched = l3_l2_orch_comm::compare_counter(observed, operand, cmp);
+            bool matched = worker_chip_orch_comm::compare_counter(observed, operand, cmp);
             if (matched) {
                 return std::make_tuple(kWaitStatusOk, kWaitErrorNone, observed, true, std::string{});
             }
@@ -517,7 +517,7 @@ private:
         int mapped_device_id = std::exchange(device_id, -1);
         int mapped_fd = std::exchange(fd, -1);
 
-        if (profile == L3L2RegionAccessProfile::ONBOARD_VMM) {
+        if (profile == WorkerChipRegionAccessProfile::ONBOARD_VMM) {
             if (mapped_addr == 0 && physical_handle == nullptr) {
                 return;
             }
@@ -862,17 +862,17 @@ uint64_t align_vmm_bytes(uint64_t bytes, uint64_t granularity) {
     return bytes + bump;
 }
 
-L3L2OrchNotifyOp checked_notify_op(int op) {
-    auto typed = static_cast<L3L2OrchNotifyOp>(op);
-    if (!l3_l2_orch_comm::valid_notify_op(typed)) {
+WorkerChipOrchNotifyOp checked_notify_op(int op) {
+    auto typed = static_cast<WorkerChipOrchNotifyOp>(op);
+    if (!worker_chip_orch_comm::valid_notify_op(typed)) {
         throw std::invalid_argument("L3-L2 counter notify op is invalid");
     }
     return typed;
 }
 
-L3L2OrchWaitCmp checked_wait_cmp(int cmp) {
-    auto typed = static_cast<L3L2OrchWaitCmp>(cmp);
-    if (!l3_l2_orch_comm::valid_wait_cmp(typed)) {
+WorkerChipOrchWaitCmp checked_wait_cmp(int cmp) {
+    auto typed = static_cast<WorkerChipOrchWaitCmp>(cmp);
+    if (!worker_chip_orch_comm::valid_wait_cmp(typed)) {
         throw std::invalid_argument("L3-L2 counter wait comparison is invalid");
     }
     return typed;
@@ -2051,7 +2051,7 @@ NB_MODULE(_task_interface, m) {
                     std::string("L3-L2 sim L3 Host mapped-region import mmap failed: ") + std::strerror(err)
                 );
             }
-            mapping->profile = L3L2RegionAccessProfile::SIM_POSIX_SHM;
+            mapping->profile = WorkerChipRegionAccessProfile::SIM_POSIX_SHM;
             mapping->device_addr = reinterpret_cast<uint64_t>(base);
             mapping->mapping_bytes = mapping_bytes;
             uint64_t handle = l3_host_mapped_region_registry().emplace(std::move(mapping));
@@ -2076,7 +2076,7 @@ NB_MODULE(_task_interface, m) {
             std::string handle_owner_token = owner_token;
             auto mapping = std::make_unique<L3HostMappedRegion>();
             mapping->owner_token = owner_token;
-            mapping->profile = L3L2RegionAccessProfile::ONBOARD_VMM;
+            mapping->profile = WorkerChipRegionAccessProfile::ONBOARD_VMM;
             mapping->device_id = device_id;
             mapping->mapping_bytes = mapping_bytes;
             mapping->bind_acl_device();
