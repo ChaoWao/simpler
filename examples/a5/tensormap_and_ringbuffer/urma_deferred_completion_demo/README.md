@@ -24,21 +24,21 @@ directories. Only the transfer kernel and the orchestration change:
 | ---- | ---- | ---- |
 | Transfer kernel | `kernel_urma_tget_async.cpp` | `kernel_sdma_tget_async.cpp` |
 | Completion header | `backend/urma/urma_completion_kernel.h` | `backend/sdma/sdma_completion_kernel.h` |
-| Build flag | `SIMPLER_ENABLE_PTO_URMA_WORKSPACE` | `SIMPLER_ENABLE_PTO_SDMA_WORKSPACE` |
+| Build selection | `SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON` | default |
 
 Read them side by side and the transport is the only variable — which is
 exactly what you want when deciding which one a workload should use.
 
-## Both overlays are off by default, and they are mutually exclusive
+## SDMA is the default; URMA is the opt-in alternative
 
 This is the part to know before trying to run either.
 
 ```cmake
-option(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE "..." OFF)
 option(SIMPLER_ENABLE_PTO_URMA_WORKSPACE "..." OFF)
-if(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE AND SIMPLER_ENABLE_PTO_URMA_WORKSPACE)
-    message(FATAL_ERROR "... mutually exclusive because CommContext exposes a
-                         single workSpace/workSpaceSize pair")
+if(SIMPLER_ENABLE_PTO_URMA_WORKSPACE)
+    set(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE OFF)
+else()
+    set(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE ON)
 endif()
 ```
 
@@ -59,7 +59,7 @@ was not built in.
 | `@pytest.mark.skipif(not _urma_workspace_enabled())` | skipped unless `SIMPLER_ENABLE_PTO_URMA_WORKSPACE` is one of `1` / `ON` / `TRUE` / `YES` in the environment |
 | `run()` raises | if `platform != "a5"` or the device count is not 2, and re-checks the env var before doing any work |
 
-Since the CMake option defaults `OFF`, a stock build skips this test even on a5
+Since the URMA CMake option defaults `OFF`, a stock build skips this test even on a5
 hardware. **A green CI run says nothing about URMA.** Treat it as a manual
 bring-up check, not as coverage.
 
@@ -84,6 +84,5 @@ Wrap the hardware run in `task-submit` on a shared box.
 
 ## See also
 
-[`docs/a5-sdma-overlay.md`](../../../../docs/a5-sdma-overlay.md) — why the
-overlays are gated off, what is gated, and the checklist for re-enabling them
-(issue [#1315](https://github.com/hw-native-sys/simpler/issues/1315)).
+[`../sdma_async_completion_demo/`](../sdma_async_completion_demo/) — the
+default SDMA variant of the same protocol.

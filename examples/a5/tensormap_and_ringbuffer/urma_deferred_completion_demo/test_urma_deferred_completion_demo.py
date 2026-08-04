@@ -214,8 +214,8 @@ def run(platform: str = "a5", device_ids: list[int] | None = None) -> int:
 @pytest.mark.device_count(2)
 @pytest.mark.skipif(
     not _urma_workspace_enabled(),
-    reason="URMA workspace overlay not enabled (set SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON to run). "
-    "See docs/a5-sdma-overlay.md (#1315).",
+    reason="URMA workspace backend not enabled (set "
+    "SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON before rebuilding and when running pytest).",
 )
 def test_urma_deferred_completion_demo(st_device_ids, st_platform) -> None:
     assert run(st_platform, [int(d) for d in st_device_ids]) == 0

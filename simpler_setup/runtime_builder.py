@@ -19,11 +19,7 @@ from typing import Optional
 
 from .environment import PROJECT_ROOT
 from .platform_info import TARGETS, load_build_config, parse_platform
-from .runtime_compiler import (
-    RuntimeCompiler,
-    _sdma_workspace_enabled,
-    _urma_workspace_enabled,
-)
+from .runtime_compiler import RuntimeCompiler
 
 logger = logging.getLogger(__name__)
 
@@ -33,20 +29,13 @@ _GIT_COMMIT_FILE = ".git_commit"
 def platform_embeds_pto_isa(platform: str) -> bool:
     """Return True when this platform's onboard host embeds PTO-ISA headers.
 
-    a2a3 onboard always embeds (workspace forced ON in CMake). a5 onboard
-    embeds only when the SDMA or URMA async workspace overlay is opted in
-    (``SIMPLER_ENABLE_PTO_SDMA_WORKSPACE`` / ``SIMPLER_ENABLE_PTO_URMA_WORKSPACE``
-    truthy) — the overlays are opt-in, so default-OFF a5 builds must not pull
-    in pin/metadata machinery. See issues #1351 (SDMA) and #1392 (URMA).
+    a2a3 and a5 onboard always embed a PTO-ISA async workspace. Simulation
+    platforms do not embed PTO-ISA host headers.
     """
     arch, variant = parse_platform(platform)
     if variant != "onboard":
         return False
-    if arch == "a2a3":
-        return True
-    if arch == "a5":
-        return _sdma_workspace_enabled() or _urma_workspace_enabled()
-    return False
+    return arch in {"a2a3", "a5"}
 
 
 def _get_git_head(repo_root: Path) -> str:
@@ -204,19 +193,16 @@ class RuntimeBuilder:
     def _requires_pto_isa_metadata_validation(self) -> bool:
         """Return True when this runtime embeds PTO-ISA headers into host code.
 
-        Driven by :func:`platform_embeds_pto_isa`: a2a3 onboard always (CMake
-        forces the SDMA workspace ON), a5 onboard only when the SDMA or URMA
-        async workspace overlay is truthy. a5 must key on the overlay env/CMake
-        option — not bare ``arch == "a5"`` — so default-OFF a5 builds never
-        clone pto-isa or write metadata for nothing (#1351).
+        Driven by :func:`platform_embeds_pto_isa`: a2a3 and a5 onboard always
+        embed one async workspace backend; simulation platforms do not.
         """
         return platform_embeds_pto_isa(self.platform)
 
     def _resolve_build_pto_isa_commit(self) -> str:
         """Return the pinned pto-isa commit baked into this build.
 
-        When host code embeds pto-isa headers (a2a3 onboard, or a5 onboard
-        with the SDMA or URMA overlay ON), a pto-isa bump must invalidate that build's
+        When host code embeds pto-isa headers (a2a3 or a5 onboard), a pto-isa
+        bump must invalidate that build's
         cmake cache even when the runtime repo HEAD is unchanged (issue #1139:
         a stale host_runtime.so compiled against the old headers otherwise
         survives a reinstall). For every other arch/variant the pto-isa
@@ -236,9 +222,9 @@ class RuntimeBuilder:
     def _build_cache_stamp(self, pto_isa_commit: Optional[str] = None) -> str:
         """Stamp identifying the sources this build was compiled from.
 
-        Combines the runtime repo HEAD with the pto-isa commit (a2a3 onboard
-        only) so the cmake cache is invalidated whenever either changes. An
-        empty runtime HEAD is preserved verbatim so the
+        Combines the runtime repo HEAD with the pto-isa commit for a2a3 and a5
+        onboard builds so the cmake cache is invalidated whenever either
+        changes. An empty runtime HEAD is preserved verbatim so the
         ``_invalidate_cache_if_stale`` 'unavailable → clean rebuild' path still
         fires rather than being masked by a present pto-isa commit.
         """
@@ -378,10 +364,7 @@ class RuntimeBuilder:
 
                         pto_root = ensure_pto_isa_root(verbose=True)
                     defines["PTO_ISA_ROOT"] = pto_root
-                for opt_in_define in (
-                    "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE",
-                    "SIMPLER_ENABLE_PTO_URMA_WORKSPACE",
-                ):
+                for opt_in_define in ("SIMPLER_ENABLE_PTO_URMA_WORKSPACE",):
                     if os.environ.get(opt_in_define, "").upper() in {"1", "ON", "TRUE", "YES"}:
                         defines[opt_in_define] = "ON"
                 cmake_defines = defines or None

@@ -70,7 +70,6 @@ changing simpler's own internals.
 | Document | What it covers |
 | -------- | -------------- |
 | [Communication Domains](comm-domain.md) | Dynamic `CommDomain` allocation and the symmetric window |
-| [a5 SDMA Workspace Overlay](a5-sdma-overlay.md) | a5 SDMA overlay isolation status and the CANN-version gates |
 | [L3-L2 Orchestrator Communication](l3-l2-orch-comm.md) | Host-side L3 talking directly to the L2 AICPU orchestrator |
 | [L3-L2 Message Queue](l3-l2-message-queue.md) | The queue channel between an L3 host and L2 |
 | [Directed NEXT_LEVEL Scheduling](directed-next-level-scheduling.md) | Targeting a specific next-level child instead of any free one |
