@@ -43,7 +43,8 @@ static constexpr int32_t SYNC_CL = SYNC_BLOCK_NUM * SLOTS_PER_BLOCK;      // 18
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 1,
@@ -64,7 +65,7 @@ static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bo
     rt_submit_task(mk, args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
 
     int64_t cl = 0;

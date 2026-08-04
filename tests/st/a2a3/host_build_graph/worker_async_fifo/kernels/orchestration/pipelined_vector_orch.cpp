@@ -23,12 +23,12 @@ constexpr int kChainLength = 512;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &args) {
     (void)args;
     return PTO2OrchestrationConfig{.expected_arg_count = 4};
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
     const Tensor &a = args.tensor(0).ref();
     const Tensor &b = args.tensor(1).ref();
     const Tensor &out = args.tensor(2).ref();

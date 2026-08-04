@@ -15,7 +15,7 @@ the channel's design.
 | Concept | How |
 | ------- | --- |
 | **Creating the channel** | `orch.create_worker_chip_queue(worker_id=0, depth=8, input_arena_bytes=..., output_arena_bytes=...)`. |
-| **Handing it to L2** | `queue.l2_task_arg_scalars()` packs the descriptor into `TaskArgs` as scalars — the L2 side needs no other setup. |
+| **Handing it to L2** | `queue.chip_task_arg_scalars()` packs the descriptor into `TaskArgs` as scalars — the L2 side needs no other setup. |
 | **Full-duplex, decoupled** | The host enqueues two requests, drains **three** responses, then enqueues two more. Requests and responses are not paired one-to-one. |
 | **Zero-copy reads** | `queue.output.peek(timeout)` → `read_into(message, buf)` → `release(message)`. `release` is what returns arena space; skipping it stalls the producer once the queue fills. |
 | **Cooperative shutdown** | `queue.request_stop(timeout)` lets the L2 side finish work already accepted. Responses queued before the stop are still drained afterwards. |

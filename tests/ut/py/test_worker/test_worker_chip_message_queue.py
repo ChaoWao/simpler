@@ -21,10 +21,10 @@ from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType, Tensor, get_element_size
 from simpler.worker import _IDLE, _OFF_STATE, Worker, _buffer_field_addr, _mailbox_store_i32
 from simpler.worker_chip_message_queue import (
+    WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET,
     WORKER_CHIP_QUEUE_COUNTER_BYTES,
     WORKER_CHIP_QUEUE_DESC_SLOT_BYTES,
-    WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET,
-    WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET,
+    WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET,
     WorkerChipQueue,
     WorkerChipQueueMessage,
     WorkerChipQueueOpcode,
@@ -193,7 +193,7 @@ class _FakeClient:
         logical_offset = int(offset) - self.counter_mapping_offset
         observed = (
             1
-            if self.peer_abort and logical_offset == WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET
+            if self.peer_abort and logical_offset == WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET
             else self.counters.get(logical_offset, 0)
         )
         request = _FakeRequest(
@@ -389,8 +389,8 @@ def test_layout_lockstep_cases_match_cpp_helper_expectations(depth, input_arena_
     assert layout.input_desc_head_offset == 64
     assert layout.output_desc_tail_offset == 128
     assert layout.output_desc_head_offset == 192
-    assert layout.l3_abort_flag_offset == WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET
-    assert layout.l2_abort_flag_offset == WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET
+    assert layout.worker_abort_flag_offset == WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET
+    assert layout.chip_abort_flag_offset == WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET
     assert layout.counter_bytes == WORKER_CHIP_QUEUE_COUNTER_BYTES
 
 
@@ -403,7 +403,7 @@ def test_create_worker_chip_queue_allocates_region_and_exposes_l2_task_scalars()
         assert alloc_req.cmd == "alloc_region"
         assert alloc_req.payload_bytes == queue.layout.payload_bytes
         assert alloc_req.counter_bytes == WORKER_CHIP_QUEUE_COUNTER_BYTES
-        assert queue.l2_task_arg_scalars() == [
+        assert queue.chip_task_arg_scalars() == [
             *queue.region.descriptor_scalars(),
             queue.magic_version,
             4,
@@ -417,8 +417,8 @@ def test_create_worker_chip_queue_allocates_region_and_exposes_l2_task_scalars()
             queue.layout.input_desc_head_offset: 0,
             queue.layout.output_desc_tail_offset: 0,
             queue.layout.output_desc_head_offset: 0,
-            queue.layout.l3_abort_flag_offset: 0,
-            queue.layout.l2_abort_flag_offset: 0,
+            queue.layout.worker_abort_flag_offset: 0,
+            queue.layout.chip_abort_flag_offset: 0,
         }
     finally:
         _close(worker, shm)
@@ -514,7 +514,7 @@ def test_enqueue_accepts_ordinary_host_bytes_with_direct_payload_write():
         assert (queue.layout.input_arena_offset, b"ordinary") in fake_client.payload_writes
         assert queue.layout.input_desc_offset in [offset for offset, _data in fake_client.payload_writes]
         assert fake_client.counters[queue.layout.input_desc_tail_offset] == 1
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
         assert len(orch._o._buffers) == alloc_count
         assert queue.region.descriptor_scalars()[1] == 1
     finally:
@@ -593,7 +593,7 @@ def test_direct_mapped_ordinary_host_bytearray_does_not_allocate_queue_buffer():
 
         assert (queue.layout.input_arena_offset, b"ordinary") in fake_client.payload_writes
         assert fake_client.counters.get(queue.layout.input_desc_tail_offset, 0) == 1
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
         assert orch._o.fail_next_alloc is True
         assert queue.region.descriptor_scalars()[1] == 1
     finally:
@@ -647,7 +647,7 @@ def test_output_error_opcode_is_delivered_without_poison():
         assert message.opcode == WorkerChipQueueOpcode.ERROR
         assert ctypes.string_at(int(output.data), 12) == b"error-detail"
         assert fake_client.counters[queue.layout.output_desc_head_offset] == 1
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -665,7 +665,8 @@ def test_try_dequeue_into_empty_returns_none_without_abort():
         assert all(
             not (
                 req.cmd == "counter_notify"
-                and req.counter_addr == queue.region.descriptor.counter_base + WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET
+                and req.counter_addr
+                == queue.region.descriptor.counter_base + WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET
             )
             for req, _timeout in fake_client.requests
         )
@@ -688,7 +689,7 @@ def test_output_read_into_ordinary_buffer_uses_direct_payload_read():
         assert bytes(output) == b"abcdefghijklmnop"
         assert any(req.cmd == "payload_read" for req, _timeout in fake_client.requests)
         assert fake_client.counters[queue.layout.output_desc_head_offset] == 1
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -706,12 +707,12 @@ def test_output_read_rejects_readonly_ordinary_buffer_before_release():
 
         assert all(req.cmd != "payload_read" for req, _timeout in fake_client.requests)
         assert fake_client.counters.get(queue.layout.output_desc_head_offset, 0) == 0
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
 
-def test_output_release_inactive_handle_poisons_and_sets_l3_abort_flag():
+def test_output_release_inactive_handle_poisons_and_sets_worker_abort_flag():
     orch, worker, shm, fake_client = _make_orchestrator()
     try:
         queue = orch.create_worker_chip_queue(worker_id=0, depth=4, input_arena_bytes=128, output_arena_bytes=128)
@@ -723,14 +724,14 @@ def test_output_release_inactive_handle_poisons_and_sets_l3_abort_flag():
         with pytest.raises(RuntimeError, match="not active"):
             queue.output.release(wrong)
 
-        assert fake_client.counters[WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET] == 1
+        assert fake_client.counters[WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET] == 1
         with pytest.raises(RuntimeError, match="poisoned"):
             queue.output.try_peek()
     finally:
         _close(worker, shm)
 
 
-def test_output_stop_descriptor_poisons_and_sets_l3_abort_flag():
+def test_output_stop_descriptor_poisons_and_sets_worker_abort_flag():
     orch, worker, shm, fake_client = _make_orchestrator()
     try:
         queue = orch.create_worker_chip_queue(worker_id=0, depth=4, input_arena_bytes=128, output_arena_bytes=128)
@@ -739,12 +740,12 @@ def test_output_stop_descriptor_poisons_and_sets_l3_abort_flag():
         with pytest.raises(RuntimeError, match="cannot be STOP"):
             queue.output.peek(timeout=0.001)
 
-        assert fake_client.counters[WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET] == 1
+        assert fake_client.counters[WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET] == 1
     finally:
         _close(worker, shm)
 
 
-def test_zero_byte_output_descriptor_with_nonzero_offset_poisons_and_sets_l3_abort_flag():
+def test_zero_byte_output_descriptor_with_nonzero_offset_poisons_and_sets_worker_abort_flag():
     orch, worker, shm, fake_client = _make_orchestrator()
     try:
         queue = orch.create_worker_chip_queue(worker_id=0, depth=4, input_arena_bytes=128, output_arena_bytes=128)
@@ -753,7 +754,7 @@ def test_zero_byte_output_descriptor_with_nonzero_offset_poisons_and_sets_l3_abo
         with pytest.raises(RuntimeError, match="zero-byte.*nonzero"):
             queue.output.peek(timeout=0.001)
 
-        assert fake_client.counters[WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET] == 1
+        assert fake_client.counters[WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET] == 1
     finally:
         _close(worker, shm)
 
@@ -788,7 +789,7 @@ def test_try_enqueue_full_queue_returns_false_without_poison_or_publish():
 
         assert fake_client.payload_writes == []
         assert fake_client.counters[queue.layout.input_desc_tail_offset] == 2
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -808,7 +809,7 @@ def test_try_enqueue_full_queue_ordinary_buffer_does_not_stage():
         assert fake_client.payload_writes == []
         assert len(orch._o._buffers) == alloc_count
         assert fake_client.counters[queue.layout.input_desc_tail_offset] == 2
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -825,7 +826,7 @@ def test_enqueue_after_stop_rejects_locally_without_polling_or_abort():
             queue.input.enqueue(None, nbytes=0, timeout=0.001)
 
         assert fake_client.requests == []
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -842,7 +843,7 @@ def test_try_enqueue_payload_larger_than_arena_returns_false_without_poison_or_p
 
         assert fake_client.payload_writes == []
         assert fake_client.counters.get(queue.layout.input_desc_tail_offset, 0) == 0
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -864,7 +865,7 @@ def test_try_enqueue_wraparound_arena_full_ordinary_buffer_does_not_stage_or_adv
         assert len(orch._o._buffers) == alloc_count
         assert queue._input_payload_tail == old_payload_tail
         assert fake_client.counters[queue.layout.input_desc_tail_offset] == 1
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)
 
@@ -884,7 +885,7 @@ def test_output_payload_offset_mismatch_poisons_before_payload_read():
         with pytest.raises(RuntimeError, match="payload.*mismatch"):
             queue.output.peek(timeout=0.001)
 
-        assert fake_client.counters[WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET] == 1
+        assert fake_client.counters[WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET] == 1
         assert all(
             not (req.cmd == "payload_read" and req.payload_offset == queue.layout.output_arena_offset + 16)
             for req, _timeout in fake_client.requests
@@ -893,7 +894,7 @@ def test_output_payload_offset_mismatch_poisons_before_payload_read():
         _close(worker, shm)
 
 
-def test_enqueue_payload_write_failure_sets_l3_abort_flag():
+def test_enqueue_payload_write_failure_sets_worker_abort_flag():
     orch, worker, shm, fake_client = _make_orchestrator()
     try:
         queue = orch.create_worker_chip_queue(worker_id=0, depth=4, input_arena_bytes=128, output_arena_bytes=128)
@@ -903,7 +904,7 @@ def test_enqueue_payload_write_failure_sets_l3_abort_flag():
         with pytest.raises(RuntimeError, match="injected failure"):
             queue.input.enqueue(host, nbytes=16, timeout=0.001)
 
-        assert fake_client.counters[WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET] == 1
+        assert fake_client.counters[WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET] == 1
         with pytest.raises(RuntimeError, match="poisoned"):
             queue.input.try_enqueue(None, nbytes=0)
     finally:
@@ -923,7 +924,8 @@ def test_timeout_without_peer_abort_flag_returns_timeout_and_keeps_queue_live():
         assert all(
             not (
                 req.cmd == "counter_notify"
-                and req.counter_addr == queue.region.descriptor.counter_base + WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET
+                and req.counter_addr
+                == queue.region.descriptor.counter_base + WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET
             )
             for req, _timeout in fake_client.requests
         )
@@ -946,7 +948,8 @@ def test_timeout_with_peer_abort_flag_reports_remote_aborted_without_setting_own
         assert all(
             not (
                 req.cmd == "counter_notify"
-                and req.counter_addr == queue.region.descriptor.counter_base + WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET
+                and req.counter_addr
+                == queue.region.descriptor.counter_base + WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET
             )
             for req, _timeout in fake_client.requests
         )
@@ -967,6 +970,6 @@ def test_expired_queue_rejects_later_operations_without_abort_flag():
             queue.output.try_peek()
 
         assert fake_client.requests == []
-        assert fake_client.counters.get(WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET, 0) == 0
+        assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:
         _close(worker, shm)

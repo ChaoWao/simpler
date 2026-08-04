@@ -51,14 +51,14 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-ep_dispatch_combine_orchestration_config(const L2TaskArgs &orch_args) {
+ep_dispatch_combine_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 13,  // 11 tensors + 2 scalars
     };
 }
 
-__attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(const ChipTaskArgs &orch_args) {
     const Tensor &indices = orch_args.tensor(0).ref();
     const Tensor &x_norm = orch_args.tensor(1).ref();
     const Tensor &w_padded = orch_args.tensor(2).ref();

@@ -65,11 +65,11 @@
 // Device orchestration function signature (loaded via dlopen).
 // The executor binds the current thread's PTO2Runtime into orchestration TLS
 // before calling the user entry.
-typedef void (*DeviceOrchestrationFunc)(const L2TaskArgs &orch_args);
+typedef void (*DeviceOrchestrationFunc)(const ChipTaskArgs &orch_args);
 typedef void (*DeviceOrchestrationBindRuntimeFunc)(PTO2Runtime *rt);
 
 // Config function exported by orchestration .so
-typedef PTO2OrchestrationConfig (*DeviceOrchestrationConfigFunc)(const L2TaskArgs &orch_args);
+typedef PTO2OrchestrationConfig (*DeviceOrchestrationConfigFunc)(const ChipTaskArgs &orch_args);
 
 // From orchestration/common.cpp linked into this DSO — updates g_current_runtime here (distinct from
 // framework_bind_runtime in the dlopen'd libdevice_orch_*.so).
@@ -147,9 +147,9 @@ struct AicpuExecutor {
     // Default-constructed: libc-backed backend, no ctx.
     DeviceArena runtime_arena_;
 
-    // Entry-arg L2TaskArgs built (via create_from_chip_args) from get_orch_args()
+    // Entry-arg ChipTaskArgs built (via create_from_chip_args) from get_orch_args()
     // before scheduler init; consumed by the (*p_func)(orch_args_cached_) below.
-    L2TaskArgs orch_args_cached_;
+    ChipTaskArgs orch_args_cached_;
 
     // Per-callable_id table. Single orch thread today, so first-write/read
     // race is not possible; if multiple orch threads are ever introduced,

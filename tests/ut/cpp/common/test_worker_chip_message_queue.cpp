@@ -93,8 +93,8 @@ TEST(WorkerChipMessageQueueTest, LayoutAssignsPayloadAndAbortCounterOffsets) {
     EXPECT_EQ(layout.input_desc_head_offset, 64u);
     EXPECT_EQ(layout.output_desc_tail_offset, 128u);
     EXPECT_EQ(layout.output_desc_head_offset, 192u);
-    EXPECT_EQ(layout.l3_abort_flag_offset, 256u);
-    EXPECT_EQ(layout.l2_abort_flag_offset, 320u);
+    EXPECT_EQ(layout.worker_abort_flag_offset, 256u);
+    EXPECT_EQ(layout.chip_abort_flag_offset, 320u);
     EXPECT_EQ(layout.counter_bytes, 384u);
     EXPECT_GE(layout.payload_bytes, layout.output_arena_offset + 192u);
 }
@@ -132,8 +132,8 @@ TEST(WorkerChipMessageQueueTest, LayoutLockstepCasesMatchPythonMirrorExpectation
         EXPECT_EQ(layout.input_desc_head_offset, 64u);
         EXPECT_EQ(layout.output_desc_tail_offset, 128u);
         EXPECT_EQ(layout.output_desc_head_offset, 192u);
-        EXPECT_EQ(layout.l3_abort_flag_offset, 256u);
-        EXPECT_EQ(layout.l2_abort_flag_offset, 320u);
+        EXPECT_EQ(layout.worker_abort_flag_offset, 256u);
+        EXPECT_EQ(layout.chip_abort_flag_offset, 320u);
         EXPECT_EQ(layout.counter_bytes, 384u);
     }
 }
@@ -332,7 +332,7 @@ TEST(WorkerChipMessageQueueTest, L2InputPeekRejectsPayloadOffsetMismatchBeforeRe
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::INVALID_DESCRIPTOR);
     EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET)], 0);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, L2OutputReservePublishWritesDescriptorAndTail) {
@@ -396,7 +396,7 @@ TEST(WorkerChipMessageQueueTest, OrdinaryTimeoutDoesNotSetOwnAbortFlag) {
     EXPECT_EQ(queue.disambiguate_timeout(), WorkerChipQueueTimeoutStatus::ORDINARY_TIMEOUT);
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, OutputCapacityEqualsDepthAndFullIsNoProgressWithoutAbort) {
@@ -415,7 +415,7 @@ TEST(WorkerChipMessageQueueTest, OutputCapacityEqualsDepthAndFullIsNoProgressWit
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
     EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET)], 2);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, FullAndEmptyUseMonotonicCountersNotMaskedIndices) {
@@ -438,7 +438,7 @@ TEST(WorkerChipMessageQueueTest, FullAndEmptyUseMonotonicCountersNotMaskedIndice
     EXPECT_EQ(third.seq, 3u);
     EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET)], 3);
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, OutputReserveTooLargeIsPreMutationNoProgressWithoutAbort) {
@@ -452,7 +452,7 @@ TEST(WorkerChipMessageQueueTest, OutputReserveTooLargeIsPreMutationNoProgressWit
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
     EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET)], 0);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, OutputPublishApplicationErrorDoesNotSetAbortFlag) {
@@ -469,7 +469,7 @@ TEST(WorkerChipMessageQueueTest, OutputPublishApplicationErrorDoesNotSetAbortFla
     std::memcpy(&slot, storage.payload.data() + queue.layout().output_desc_offset, sizeof(slot));
     EXPECT_EQ(slot.opcode, static_cast<uint64_t>(WorkerChipQueueOpcode::ERROR));
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, OutputPublishStaleReservationPoisonsAndSetsOwnAbortFlag) {
@@ -484,7 +484,7 @@ TEST(WorkerChipMessageQueueTest, OutputPublishStaleReservationPoisonsAndSetsOwnA
     EXPECT_FALSE(queue.output().publish(reservation, WorkerChipQueueOpcode::DATA));
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::OWNERSHIP);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, InputApplicationErrorIsNormalMessageAndDoesNotSetAbortFlag) {
@@ -500,7 +500,7 @@ TEST(WorkerChipMessageQueueTest, InputApplicationErrorIsNormalMessageAndDoesNotS
     ASSERT_TRUE(queue.input().release(handle)) << queue.error().message;
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, InputReleaseRejectsCallerMutatedHandleMetadata) {
@@ -518,7 +518,7 @@ TEST(WorkerChipMessageQueueTest, InputReleaseRejectsCallerMutatedHandleMetadata)
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::OWNERSHIP);
     EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET)], 0);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, InputStopReleaseRejectsLaterPublishedInputAsInvalidState) {
@@ -537,7 +537,7 @@ TEST(WorkerChipMessageQueueTest, InputStopReleaseRejectsLaterPublishedInputAsInv
     EXPECT_FALSE(queue.input().try_peek(later));
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::INVALID_DESCRIPTOR);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, InputStopWithPayloadMetadataPoisonsAndSetsOwnAbortFlag) {
@@ -551,7 +551,7 @@ TEST(WorkerChipMessageQueueTest, InputStopWithPayloadMetadataPoisonsAndSetsOwnAb
     EXPECT_FALSE(queue.input().try_peek(handle));
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::INVALID_DESCRIPTOR);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, InputSecondPeekBeforeReleasePoisonsOwnershipAndSetsOwnAbortFlag) {
@@ -569,7 +569,7 @@ TEST(WorkerChipMessageQueueTest, InputSecondPeekBeforeReleasePoisonsOwnershipAnd
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::OWNERSHIP);
     EXPECT_EQ(queue.error().op, WorkerChipQueueOp::INPUT_TRY_PEEK);
     EXPECT_STREQ(worker_chip_queue_op_to_string(queue.error().op), "input.try_peek");
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, MaxInflightGreaterThanDepthSetsBadArgumentWithoutAbortFlag) {
@@ -579,7 +579,7 @@ TEST(WorkerChipMessageQueueTest, MaxInflightGreaterThanDepthSetsBadArgumentWitho
     WorkerChipQueueEndpoint<3> too_large(make_desc(&too_large_storage, args), args);
     EXPECT_EQ(too_large.error().kind, WorkerChipQueueErrorKind::BAD_ARGUMENT);
     EXPECT_EQ(too_large.error().op, WorkerChipQueueOp::INIT);
-    EXPECT_EQ(too_large_storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(too_large_storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, MultiInflightAcquireAllowsSeveralDataInputs) {
@@ -646,7 +646,7 @@ TEST(WorkerChipMessageQueueTest, ErrorCountsAgainstInputWindowAndFullDoesNotPois
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
     EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET)], 0);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, OutOfOrderInputReleaseOnlyAdvancesCompletedFifoPrefix) {
@@ -762,7 +762,7 @@ TEST(WorkerChipMessageQueueTest, TryPeekAfterStopAcquireIsNoProgressWithoutPoiso
     EXPECT_FALSE(queue.input().try_peek(later));
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::NONE);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 0);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 0);
 }
 
 TEST(WorkerChipMessageQueueTest, StopAcquirePoisonsIfLaterInputAlreadyObserved) {
@@ -780,7 +780,7 @@ TEST(WorkerChipMessageQueueTest, StopAcquirePoisonsIfLaterInputAlreadyObserved) 
     EXPECT_FALSE(queue.input().try_peek(stop));
 
     EXPECT_EQ(queue.error().kind, WorkerChipQueueErrorKind::INVALID_DESCRIPTOR);
-    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, InputReleaseRejectsStaleAndDoubleRelease) {
@@ -800,7 +800,7 @@ TEST(WorkerChipMessageQueueTest, InputReleaseRejectsStaleAndDoubleRelease) {
     ASSERT_TRUE(stale_queue.input().release(stale_second)) << stale_queue.error().message;
     EXPECT_FALSE(stale_queue.input().release(stale_first));
     EXPECT_EQ(stale_queue.error().kind, WorkerChipQueueErrorKind::OWNERSHIP);
-    EXPECT_EQ(stale_storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(stale_storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 
     WorkerChipQueueEndpoint<2> double_queue(make_desc(&double_storage, args), args);
     ASSERT_EQ(double_queue.error().kind, WorkerChipQueueErrorKind::NONE) << double_queue.error().message;
@@ -813,7 +813,7 @@ TEST(WorkerChipMessageQueueTest, InputReleaseRejectsStaleAndDoubleRelease) {
     ASSERT_TRUE(double_queue.input().release(second)) << double_queue.error().message;
     EXPECT_FALSE(double_queue.input().release(second));
     EXPECT_EQ(double_queue.error().kind, WorkerChipQueueErrorKind::OWNERSHIP);
-    EXPECT_EQ(double_storage.counters[counter_index(WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET)], 1);
+    EXPECT_EQ(double_storage.counters[counter_index(WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET)], 1);
 }
 
 TEST(WorkerChipMessageQueueTest, OutputReservePublishWorksDuringStopDrain) {

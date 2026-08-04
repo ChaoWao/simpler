@@ -16,14 +16,14 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-group_reservation_orchestration_config(const L2TaskArgs &orch_args) {
+group_reservation_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 4,
     };
 }
 
-__attribute__((visibility("default"))) void group_reservation_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void group_reservation_orchestration(const ChipTaskArgs &orch_args) {
     const Tensor &output = orch_args.tensor(0).ref();
 
     L0TaskArgs params;

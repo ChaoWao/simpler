@@ -39,7 +39,8 @@ extern "C" {
  * Orchestration config — the executor reads these values to set up
  * shared memory and runtime before calling aicpu_orchestration_entry.
  */
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,
@@ -51,7 +52,7 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
  * The executor wraps this call in PTO2_SCOPE, so we are already inside
  * the outer scope on entry.
  */
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // golden shape = kernel shape, use orch_args.tensor(i).ref() directly
     const Tensor &ext_a = orch_args.tensor(0).ref();
     const Tensor &ext_b = orch_args.tensor(1).ref();

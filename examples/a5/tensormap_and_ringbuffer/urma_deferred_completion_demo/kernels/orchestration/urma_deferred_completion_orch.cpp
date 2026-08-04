@@ -17,16 +17,17 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-urma_deferred_completion_orchestration_config(const L2TaskArgs &orch_args) {
+urma_deferred_completion_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 4};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return urma_deferred_completion_orchestration_config(orch_args);
 }
 
-__attribute__((visibility("default"))) void urma_deferred_completion_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void urma_deferred_completion_orchestration(const ChipTaskArgs &orch_args) {
     if (orch_args.tensor_count() != 3 || orch_args.scalar_count() != 1) {
         LOG_ERROR("urma_deferred_completion_demo: expected 3 tensors and 1 scalar");
         return;

@@ -17,16 +17,17 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-async_notify_orchestration_config(const L2TaskArgs &orch_args) {
+async_notify_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 5};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return async_notify_orchestration_config(orch_args);
 }
 
-__attribute__((visibility("default"))) void async_notify_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void async_notify_orchestration(const ChipTaskArgs &orch_args) {
     if (orch_args.tensor_count() + orch_args.scalar_count() != 5) {
         LOG_ERROR("async_notify_demo: expected 5 args");
         return;

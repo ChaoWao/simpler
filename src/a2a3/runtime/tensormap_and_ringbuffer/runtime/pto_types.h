@@ -641,10 +641,10 @@ private:
 //   orchestration (small, stack-friendly).
 using L0TaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
 
-// L2TaskArgs — chip-level entry-arg holding the orchestration entry's
+// ChipTaskArgs — chip-level entry-arg holding the orchestration entry's
 // already-allocated inputs (capacity matches ChipStorageTaskArgs).
-// aicpu_orchestration_entry/config receive a const L2TaskArgs&.
-struct L2TaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
+// aicpu_orchestration_entry/config receive a const ChipTaskArgs&.
+struct ChipTaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
     // Build from the executor's ChipStorageTaskArgs: each input becomes a
     // TensorRef pointing at src's Tensor, so `src` must outlive this (on the
     // executor path src is runtime->dev.orch_args_storage_, alive for the whole run).

@@ -32,13 +32,13 @@ L3 passes the primitive region descriptor and queue layout arguments to L2:
 
 ```python
 l2_args = TaskArgs()
-for value in queue.l2_task_arg_scalars():
+for value in queue.chip_task_arg_scalars():
     l2_args.add_scalar(value)
 
 orch.submit_next_level(l2_handle, l2_args, cfg, worker=0)
 ```
 
-`l2_task_arg_scalars()` returns:
+`chip_task_arg_scalars()` returns:
 
 ```text
 primitive region descriptor scalars[0..5]
@@ -271,8 +271,8 @@ offset 0:   input_desc_tail       writer=L3
 offset 64:  input_desc_head       writer=L2
 offset 128: output_desc_tail      writer=L2
 offset 192: output_desc_head      writer=L3
-offset 256: l3_abort_flag         writer=L3
-offset 320: l2_abort_flag         writer=L2
+offset 256: worker_abort_flag         writer=L3
+offset 320: chip_abort_flag         writer=L2
 ```
 
 Descriptor counters store the low 32 bits of monotonic logical head/tail

@@ -560,7 +560,7 @@ private:
     static constexpr int64_t kWaitPollIntervalNs = 50000;
 };
 
-class L2ChildOnboardRegion {
+class ChipChildOnboardRegion {
 public:
     int device_id{-1};
     uint64_t device_addr{0};
@@ -576,7 +576,7 @@ public:
     }
 };
 
-struct L2ChildOnboardRegionExport {
+struct ChipChildOnboardRegionExport {
     uint64_t device_addr{0};
     uint64_t mapping_bytes{0};
     uint64_t shareable_handle{0};
@@ -816,33 +816,33 @@ private:
     std::string owner_token_;
 };
 
-class L2ChildOnboardRegionRegistry {
+class ChipChildOnboardRegionRegistry {
 public:
-    uint64_t emplace(L2ChildOnboardRegion region) {
+    uint64_t emplace(ChipChildOnboardRegion region) {
         std::lock_guard<std::mutex> lk(mu_);
         uint64_t handle = next_handle_++;
         regions_.emplace(handle, std::move(region));
         return handle;
     }
 
-    std::optional<L2ChildOnboardRegion> remove(uint64_t handle) {
+    std::optional<ChipChildOnboardRegion> remove(uint64_t handle) {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = regions_.find(handle);
         if (it == regions_.end()) {
             return std::nullopt;
         }
-        L2ChildOnboardRegion region = std::move(it->second);
+        ChipChildOnboardRegion region = std::move(it->second);
         regions_.erase(it);
         return region;
     }
 
 private:
     mutable std::mutex mu_;
-    std::unordered_map<uint64_t, L2ChildOnboardRegion> regions_;
+    std::unordered_map<uint64_t, ChipChildOnboardRegion> regions_;
     uint64_t next_handle_{1};
 };
 
-L2ChildOnboardRegionRegistry g_l2_child_onboard_regions;
+ChipChildOnboardRegionRegistry g_chip_child_onboard_regions;
 
 uint64_t align_vmm_bytes(uint64_t bytes, uint64_t granularity) {
     if (bytes == 0 || bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
@@ -2016,11 +2016,11 @@ NB_MODULE(_task_interface, m) {
         "Tags are not preserved (blob wire format strips them)."
     );
 
-    nb::class_<L2ChildOnboardRegionExport>(m, "_L2ChildOnboardRegionExport")
-        .def_ro("device_addr", &L2ChildOnboardRegionExport::device_addr)
-        .def_ro("mapping_bytes", &L2ChildOnboardRegionExport::mapping_bytes)
-        .def_ro("shareable_handle", &L2ChildOnboardRegionExport::shareable_handle)
-        .def_ro("registry_handle", &L2ChildOnboardRegionExport::registry_handle);
+    nb::class_<ChipChildOnboardRegionExport>(m, "_ChipChildOnboardRegionExport")
+        .def_ro("device_addr", &ChipChildOnboardRegionExport::device_addr)
+        .def_ro("mapping_bytes", &ChipChildOnboardRegionExport::mapping_bytes)
+        .def_ro("shareable_handle", &ChipChildOnboardRegionExport::shareable_handle)
+        .def_ro("registry_handle", &ChipChildOnboardRegionExport::registry_handle);
 
     nb::class_<WorkerHostMappedRegionHandle>(m, "_WorkerHostMappedRegionHandle")
         .def("__int__", &WorkerHostMappedRegionHandle::value);
@@ -2210,14 +2210,14 @@ NB_MODULE(_task_interface, m) {
     );
     m.def(
         "_l3_child_onboard_region_create",
-        [](uint64_t nbytes) -> L2ChildOnboardRegionExport {
+        [](uint64_t nbytes) -> ChipChildOnboardRegionExport {
             if (nbytes == 0 || nbytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
                 throw std::invalid_argument("L3-L2 onboard child region requires a positive mapping size");
             }
             AclRuntimeApi &api = acl_api();
             int device_id = api.current_device_with_check();
             uint64_t mapping_bytes = align_vmm_bytes(nbytes, api.vmm_granularity_with_check(device_id));
-            L2ChildOnboardRegion region{};
+            ChipChildOnboardRegion region{};
             region.device_id = device_id;
             region.mapping_bytes = mapping_bytes;
             region.vmm_handle = api.vmm_malloc_physical_with_check(mapping_bytes, device_id);
@@ -2233,8 +2233,8 @@ NB_MODULE(_task_interface, m) {
                 throw;
             }
             region.device_addr = reinterpret_cast<uint64_t>(mapped_addr);
-            uint64_t registry_handle = g_l2_child_onboard_regions.emplace(region);
-            return L2ChildOnboardRegionExport{
+            uint64_t registry_handle = g_chip_child_onboard_regions.emplace(region);
+            return ChipChildOnboardRegionExport{
                 region.device_addr,
                 region.mapping_bytes,
                 region.shareable_handle,
@@ -2247,11 +2247,11 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_l3_child_onboard_region_close",
         [](uint64_t registry_handle) {
-            std::optional<L2ChildOnboardRegion> removed = g_l2_child_onboard_regions.remove(registry_handle);
+            std::optional<ChipChildOnboardRegion> removed = g_chip_child_onboard_regions.remove(registry_handle);
             if (!removed.has_value()) {
                 return;
             }
-            L2ChildOnboardRegion region = *removed;
+            ChipChildOnboardRegion region = *removed;
             region.bind_acl_device();
             std::string cleanup_error;
             acl_api().vmm_release_collecting(

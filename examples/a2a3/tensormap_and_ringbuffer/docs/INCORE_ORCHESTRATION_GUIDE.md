@@ -14,8 +14,8 @@ In tensormap_and_ringbuffer, the orchestration function runs on AICPU and builds
 Your orchestration shared object must export:
 
 ```cpp
-extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args);
-extern "C" void aicpu_orchestration_entry(const L2TaskArgs &orch_args);
+extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args);
+extern "C" void aicpu_orchestration_entry(const ChipTaskArgs &orch_args);
 ```
 
 Both symbols are loaded by AICPU via `dlopen` in `src/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp`.

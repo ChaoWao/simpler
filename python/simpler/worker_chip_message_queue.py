@@ -34,8 +34,8 @@ WORKER_CHIP_QUEUE_INPUT_DESC_TAIL_OFFSET = 0
 WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET = 64
 WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET = 128
 WORKER_CHIP_QUEUE_OUTPUT_DESC_HEAD_OFFSET = 192
-WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET = 256
-WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET = 320
+WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET = 256
+WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET = 320
 WORKER_CHIP_QUEUE_COUNTER_BYTES = 384
 WORKER_CHIP_QUEUE_MAX_DEPTH = 1 << 30
 _UINT64_MAX = (1 << 64) - 1
@@ -80,8 +80,8 @@ class WorkerChipQueueLayout:
     input_desc_head_offset: int
     output_desc_tail_offset: int
     output_desc_head_offset: int
-    l3_abort_flag_offset: int
-    l2_abort_flag_offset: int
+    worker_abort_flag_offset: int
+    chip_abort_flag_offset: int
     counter_bytes: int
 
 
@@ -210,8 +210,8 @@ def make_worker_chip_queue_layout(depth: int, input_arena_bytes: int, output_are
         input_desc_head_offset=WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET,
         output_desc_tail_offset=WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET,
         output_desc_head_offset=WORKER_CHIP_QUEUE_OUTPUT_DESC_HEAD_OFFSET,
-        l3_abort_flag_offset=WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET,
-        l2_abort_flag_offset=WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET,
+        worker_abort_flag_offset=WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET,
+        chip_abort_flag_offset=WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET,
         counter_bytes=WORKER_CHIP_QUEUE_COUNTER_BYTES,
     )
 
@@ -239,8 +239,8 @@ def create_worker_chip_queue(
             layout.input_desc_head_offset,
             layout.output_desc_tail_offset,
             layout.output_desc_head_offset,
-            layout.l3_abort_flag_offset,
-            layout.l2_abort_flag_offset,
+            layout.worker_abort_flag_offset,
+            layout.chip_abort_flag_offset,
         ):
             region.counter(offset).notify(0, NotifyOp.Set)
     except Exception:
@@ -293,7 +293,7 @@ class WorkerChipQueue:
     def magic_version(self) -> int:
         return worker_chip_queue_magic_version()
 
-    def l2_task_arg_scalars(self) -> list[int]:
+    def chip_task_arg_scalars(self) -> list[int]:
         self._ensure_live()
         return [
             *self._region.descriptor_scalars(),
@@ -357,7 +357,7 @@ class WorkerChipQueue:
         return local_value + delta
 
     def _sample_peer_abort_after_timeout(self) -> None:
-        result = self._signal_test(self._layout.l2_abort_flag_offset, 1, WaitCmp.GE)
+        result = self._signal_test(self._layout.chip_abort_flag_offset, 1, WaitCmp.GE)
         if result.matched:
             self._state = _QueueState.POISONED_REMOTE
             raise RuntimeError("L3-L2 queue remote abort observed")
@@ -368,7 +368,7 @@ class WorkerChipQueue:
             return
         self._state = _QueueState.POISONED_LOCAL
         try:
-            self._region._direct_counter_notify(self._layout.l3_abort_flag_offset, 1, NotifyOp.Set)
+            self._region._direct_counter_notify(self._layout.worker_abort_flag_offset, 1, NotifyOp.Set)
         except Exception:
             pass
 

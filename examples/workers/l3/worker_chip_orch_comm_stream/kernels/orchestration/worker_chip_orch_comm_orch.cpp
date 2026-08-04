@@ -57,12 +57,13 @@ bool read_payload_or_fail(
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{.expected_arg_count = kExpectedArgCount};
 }
 
-__attribute__((visibility("default"))) void worker_chip_orch_comm_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void worker_chip_orch_comm_orchestration(const ChipTaskArgs &orch_args) {
     uint64_t desc_scalars[WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT] = {
         orch_args.scalar(0), orch_args.scalar(1), orch_args.scalar(2),
         orch_args.scalar(3), orch_args.scalar(4), orch_args.scalar(5),

@@ -341,7 +341,7 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
 }
 
 // The orchestration .so exports these (PTO2 submit_task form).
-typedef void (*OrchestrationEntryFunc)(const L2TaskArgs &);
+typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(PTO2Runtime *);
 
 // Resolved orchestration .so entry points. register_callable_impl allocates one
@@ -451,7 +451,7 @@ int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
-    void *host_orch_func_ptr, const L2TaskArgs &orch_l2
+    void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
     // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
@@ -855,7 +855,7 @@ extern "C" int bind_callable_to_runtime_impl(
         return -1;
     }
     {
-        L2TaskArgs orch_l2;
+        ChipTaskArgs orch_l2;
         orch_l2.create_from_chip_args(device_args);
         int32_t total_tasks = run_host_orchestration(
             runtime, api, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap, eff_heap_sizes,

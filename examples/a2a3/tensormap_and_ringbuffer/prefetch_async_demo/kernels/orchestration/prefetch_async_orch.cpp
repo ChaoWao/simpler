@@ -23,16 +23,17 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-prefetch_async_orchestration_config(const L2TaskArgs &orch_args) {
+prefetch_async_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 2};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return prefetch_async_orchestration_config(orch_args);
 }
 
-__attribute__((visibility("default"))) void prefetch_async_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void prefetch_async_orchestration(const ChipTaskArgs &orch_args) {
     if (orch_args.tensor_count() + orch_args.scalar_count() != 2) {
         LOG_ERROR("prefetch_async_demo: expected 2 args (in, out)");
         return;

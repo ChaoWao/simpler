@@ -46,14 +46,14 @@ static inline auto set_spmd_count(Spec &s, int16_t n) -> decltype(s.set_core_num
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-task_timing_orchestration_config(const L2TaskArgs &orch_args) {
+task_timing_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,  // a, b, out
     };
 }
 
-__attribute__((visibility("default"))) void task_timing_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void task_timing_orchestration(const ChipTaskArgs &orch_args) {
     const Tensor &a = orch_args.tensor(0).ref();
     const Tensor &b = orch_args.tensor(1).ref();
     const Tensor &out = orch_args.tensor(2).ref();
@@ -83,7 +83,7 @@ __attribute__((visibility("default"))) void task_timing_orchestration(const L2Ta
 // The scheduler folds min(dispatch)/max(finish) across the three tagged tasks,
 // so the single emitted task_slot_0 span must cover the whole chain
 // (dispatch of t0 .. finish of t2), not any single task's window.
-__attribute__((visibility("default"))) void task_timing_dup_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void task_timing_dup_orchestration(const ChipTaskArgs &orch_args) {
     const Tensor &a = orch_args.tensor(0).ref();
     const Tensor &b = orch_args.tensor(1).ref();
     const Tensor &out = orch_args.tensor(2).ref();
@@ -120,7 +120,7 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
 // cross-thread min(dispatch)/max(finish) reduction of every participating
 // block. (The vector_add kernel is not block-partitioned, so each block
 // recomputes out = a + b over the whole tile — redundant but golden-correct.)
-__attribute__((visibility("default"))) void task_timing_spmd_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void task_timing_spmd_orchestration(const ChipTaskArgs &orch_args) {
     const Tensor &a = orch_args.tensor(0).ref();
     const Tensor &b = orch_args.tensor(1).ref();
     const Tensor &out = orch_args.tensor(2).ref();
@@ -139,7 +139,7 @@ __attribute__((visibility("default"))) void task_timing_spmd_orchestration(const
 // is the min-dispatch/max-finish fold across all three subtask handles of the
 // one task. Args: A,B,C (matmul) | D,E,F (add) | G,H,I (mul), 9 tensors.
 // Reuses the mixed_example kernels: func 0 = matmul (AIC), 1 = add, 2 = mul.
-__attribute__((visibility("default"))) void task_timing_mix_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void task_timing_mix_orchestration(const ChipTaskArgs &orch_args) {
     MixedKernels mk;
     mk.aic_kernel_id = 0;   // matmul
     mk.aiv0_kernel_id = 1;  // add
@@ -160,7 +160,7 @@ __attribute__((visibility("default"))) void task_timing_mix_orchestration(const 
 }
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-task_timing_mix_orchestration_config(const L2TaskArgs &orch_args) {
+task_timing_mix_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 9,

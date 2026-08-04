@@ -32,7 +32,8 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,
@@ -117,7 +118,7 @@ static void submit_consumer(const Tensor &out, PTO2TaskId producer, int16_t cons
     rt_submit_aiv_task(FUNC_SYNC_CONSUMER_AIV, args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     const Tensor &output = orch_args.tensor(0).ref();
     const bool use_pending = orch_args.scalar(0) != 0;
     const int16_t consumer_blocks = static_cast<int16_t>(orch_args.scalar(1));

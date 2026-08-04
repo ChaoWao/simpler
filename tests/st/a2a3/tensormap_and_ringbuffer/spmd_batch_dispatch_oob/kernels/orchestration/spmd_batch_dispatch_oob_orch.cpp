@@ -29,7 +29,8 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 1,
@@ -49,7 +50,7 @@ static void submit_spmd_mix(const Tensor &out, int16_t block_num, int64_t base_c
     rt_submit_task(mk, args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     const Tensor &ext_output = orch_args.tensor(0).ref();
 
     // Two back-to-back tasks with block_num=48 (2x cluster count).

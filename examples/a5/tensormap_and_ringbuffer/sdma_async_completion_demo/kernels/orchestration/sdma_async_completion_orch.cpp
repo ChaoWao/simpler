@@ -17,16 +17,17 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-sdma_async_completion_orchestration_config(const L2TaskArgs &orch_args) {
+sdma_async_completion_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 4};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return sdma_async_completion_orchestration_config(orch_args);
 }
 
-__attribute__((visibility("default"))) void sdma_async_completion_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void sdma_async_completion_orchestration(const ChipTaskArgs &orch_args) {
     if (orch_args.tensor_count() + orch_args.scalar_count() != 4) {
         LOG_ERROR("sdma_async_completion_demo: expected 4 args");
         return;

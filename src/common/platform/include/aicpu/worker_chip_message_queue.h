@@ -29,8 +29,8 @@ static constexpr uint64_t WORKER_CHIP_QUEUE_INPUT_DESC_TAIL_OFFSET = 0;
 static constexpr uint64_t WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET = 64;
 static constexpr uint64_t WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET = 128;
 static constexpr uint64_t WORKER_CHIP_QUEUE_OUTPUT_DESC_HEAD_OFFSET = 192;
-static constexpr uint64_t WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET = 256;
-static constexpr uint64_t WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET = 320;
+static constexpr uint64_t WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET = 256;
+static constexpr uint64_t WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET = 320;
 static constexpr uint64_t WORKER_CHIP_QUEUE_COUNTER_BYTES = 384;
 static constexpr uint64_t WORKER_CHIP_QUEUE_MAX_DEPTH = 1ull << 30;
 static constexpr uint64_t WORKER_CHIP_QUEUE_MAGIC_VERSION = worker_chip_orch_comm_pack_magic_version(
@@ -127,8 +127,8 @@ struct WorkerChipQueueLayout {
     uint64_t input_desc_head_offset;
     uint64_t output_desc_tail_offset;
     uint64_t output_desc_head_offset;
-    uint64_t l3_abort_flag_offset;
-    uint64_t l2_abort_flag_offset;
+    uint64_t worker_abort_flag_offset;
+    uint64_t chip_abort_flag_offset;
     uint64_t counter_bytes;
 };
 
@@ -240,8 +240,8 @@ static inline bool worker_chip_queue_make_layout(
         WORKER_CHIP_QUEUE_INPUT_DESC_HEAD_OFFSET,
         WORKER_CHIP_QUEUE_OUTPUT_DESC_TAIL_OFFSET,
         WORKER_CHIP_QUEUE_OUTPUT_DESC_HEAD_OFFSET,
-        WORKER_CHIP_QUEUE_L3_ABORT_FLAG_OFFSET,
-        WORKER_CHIP_QUEUE_L2_ABORT_FLAG_OFFSET,
+        WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET,
+        WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET,
         WORKER_CHIP_QUEUE_COUNTER_BYTES,
     };
     return output_desc_offset % WORKER_CHIP_QUEUE_DESC_RING_ALIGNMENT == 0 &&
@@ -851,7 +851,7 @@ public:
         }
         WorkerChipOrchSignalTestResult result{};
         uint64_t addr = 0;
-        if (!endpoint_.counter_addr(layout_.l3_abort_flag_offset, addr) ||
+        if (!endpoint_.counter_addr(layout_.worker_abort_flag_offset, addr) ||
             !endpoint_.signal_test(addr, 1, WorkerChipOrchWaitCmp::GE, result)) {
             poison(WorkerChipQueueErrorKind::ENDPOINT_ERROR, WorkerChipQueueOp::TIMEOUT, endpoint_.error().message);
             return WorkerChipQueueTimeoutStatus::ORDINARY_TIMEOUT;
@@ -886,7 +886,7 @@ private:
         set_error(kind, op, endpoint_.descriptor().region_id, message);
         if (kind != WorkerChipQueueErrorKind::REMOTE_ABORTED) {
             uint64_t addr = 0;
-            if (endpoint_.counter_addr(layout_.l2_abort_flag_offset, addr)) {
+            if (endpoint_.counter_addr(layout_.chip_abort_flag_offset, addr)) {
                 endpoint_.signal_notify(addr, 1, WorkerChipOrchNotifyOp::Set);
             }
         }
