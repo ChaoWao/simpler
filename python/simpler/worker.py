@@ -249,6 +249,21 @@ def _local_task_frame_count(platform: str, _runtime: str, pipeline_depth: int) -
     return 1
 
 
+def _shm_name(token: str, suffix: str):
+    """Deterministic POSIX shm name from the root token and a per-child suffix.
+    Returns None (random name) when token is empty. Truncates the token to
+    8 hex characters so the full name fits within macOS's 30-character
+    POSIX-shm-name limit (PSHMNAMLEN=31 including NUL).
+
+    Each Worker generates its own token, so a name identifies one mailbox of
+    one startup epoch. Being a fixed name rather than a random one, a segment
+    left behind by a crashed prior run makes ``SharedMemory(create=True)`` fail
+    with ``FileExistsError`` instead of being silently bypassed."""
+    if not token:
+        return None
+    return f"sp-{token[:8]}-{suffix}"
+
+
 # Startup readiness bound. A child that neither reports INIT_READY/INIT_FAILED
 # nor exits within this window is treated as hung and startup is aborted.
 # Generous by default so a legitimately slow device/runtime init (large
@@ -271,6 +286,13 @@ _ROLLBACK_GRACEFUL_TIMEOUT_S = 10.0
 # joiner still re-observes `done` within this interval instead of blocking
 # forever.
 _CLOSE_JOIN_RECHECK_S = 1.0
+# Upper bound on how long close() waits for a cancelled init() to unwind.
+# The cancel token is only observed at cooperative points (the child-readiness
+# poll and the READY commit gate), so an init blocked inside a native segment
+# — ChipWorker.init(), the fork phase — reaches none of them. Past this bound
+# close() raises rather than blocking forever; the init epoch is left to
+# complete on its own thread.
+_CLOSE_CANCEL_UNWIND_TIMEOUT_S = 60.0
 # Bounded re-check interval for a RunHandle waiter parked behind the elected
 # waiter. Same backstop role as _CLOSE_JOIN_RECHECK_S: if the elected waiter's
 # notify_all() is skipped (an async BaseException landing between publishing the
@@ -3025,6 +3047,47 @@ def _child_worker_loop(
     )
 
 
+def _journal_child_survivors(journal, sub_shms, sub_pids, chip_shms, chip_pids, next_shms, next_pids, reaped):
+    """Register unreaped child processes and their paired shms in the cleanup
+    journal so a subsequent close() can retry."""
+    for shms, pids, kind in (
+        (sub_shms, sub_pids, "sub"),
+        (chip_shms, chip_pids, "chip"),
+        (next_shms, next_pids, "next"),
+    ):
+        for i in range(min(len(shms), len(pids))):
+            pid = pids[i]
+            if pid in reaped:
+                continue
+            shm = shms[i]
+
+            def _make_cleanup(_shm=shm, _pid=pid, _kind=kind):
+                def _cleanup_child():
+                    try:
+                        wpid, _status = os.waitpid(_pid, os.WNOHANG)
+                    except OSError:
+                        wpid = 0
+                    if wpid == 0:
+                        raise RuntimeError(f"child {_kind} pid {_pid} still alive; shm not freed")
+                    cleanup_error = None
+                    try:
+                        _shm.close()
+                    except BaseException as exc:  # noqa: BLE001
+                        cleanup_error = exc
+                    try:
+                        _shm.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except BaseException as exc:  # noqa: BLE001
+                        cleanup_error = cleanup_error or exc
+                    if cleanup_error is not None:
+                        raise cleanup_error
+
+                return _cleanup_child
+
+            journal.add("child", f"{kind} pid {pid} (shm unreclaimed)", _make_cleanup())
+
+
 class _Lifecycle(enum.Enum):
     """The single authoritative *public-admission* lifecycle of a Worker (5
     states), guarded by ``_hierarchical_start_cv``.
@@ -3032,8 +3095,8 @@ class _Lifecycle(enum.Enum):
     ``NEW → INITIALIZING → READY | FAILED → CLOSED``. Every level uses this
     machine: an L2 worker inits synchronously (no child barrier) but still claims
     INITIALIZING so two concurrent ``init()`` calls serialize on the same epoch.
-    close() while INITIALIZING fails fast (this worker does not support
-    cancelling an in-progress init); a caller must wait for READY or FAILED.
+    close() while INITIALIZING cooperatively cancels the in-progress init and
+    ultimately reaches CLOSED.
 
     Admission is decided solely by this state: CLOSED rejects every public
     live-tree API, permanently (close() is a commitment, not a reversible
@@ -3056,6 +3119,43 @@ class _CloseOutcome:
 
     error: BaseException | None
     incomplete: bool
+
+
+class CleanupJournal:
+    """Post-success resource cleanup journal shared by _teardown_ready_tree
+    and _abort_hierarchical. Entries removed only after native free succeeds."""
+
+    def __init__(self):
+        self._entries = []
+        self._errors = []
+
+    def add(self, kind, identity, cleanup_fn):
+        self._entries.append((kind, identity, cleanup_fn))
+
+    def extend(self, entries):
+        self._entries.extend(entries)
+
+    @property
+    def empty(self):
+        return len(self._entries) == 0
+
+    @property
+    def errors(self):
+        return list(self._errors)
+
+    def drive(self):
+        errors = []
+        remaining = []
+        for kind, identity, cleanup_fn in self._entries:
+            try:
+                cleanup_fn()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+                remaining.append((kind, identity, cleanup_fn))
+        self._entries = remaining
+        if errors:
+            self._errors.extend(errors)
+        return errors[0] if errors else None
 
 
 class _CloseAttempt:
@@ -3128,8 +3228,18 @@ class _StartupCancelled(BaseException):
     startup (SIGTERM). Unwinds the child's own ``setup`` — recursively rolling
     back any grandchildren it already forked — before it exits.
 
-    Only the forked-child SIGTERM path raises this: the startup *root* is not
-    cancellable (``close()`` fails fast while INITIALIZING)."""
+    Derives from ``BaseException`` because it is delivered from a signal
+    handler and must not be absorbed by the child's own ``except Exception``
+    handlers. Root-thread cancellation uses ``InitCancelled`` instead."""
+
+
+class InitCancelled(RuntimeError):
+    """Raised from ``Worker.init()`` when a concurrent ``close()`` cancelled the
+    startup epoch before it committed READY.
+
+    An ordinary ``RuntimeError`` — the init-owner thread is a normal caller, so
+    the cancellation must be catchable by ``except Exception``. Distinct from
+    ``_StartupCancelled``, which is signal-delivered inside a forked child."""
 
 
 @dataclass(eq=False)
@@ -3693,6 +3803,7 @@ class Worker:
         self._live_handles: dict[int, bytes] = {}
         self._next_handle_id: int = 0
         self._owner_id = uuid.uuid4().hex
+        self._shm_token: str = ""
         self._uncertain_hashids: set[bytes] = set()
         # Single authoritative lifecycle state (see _Lifecycle). All reads and
         # writes hold _hierarchical_start_cv. `_initialized` / `_hierarchical_
@@ -3711,6 +3822,8 @@ class Worker:
         # tree (un-reclaimed resources leak). Only a drain-timeout, which leaves
         # this False, permits a later close() to drive drain+teardown once.
         self._teardown_attempted: bool = False
+        self._cancel_token: bool = False
+        self._cleanup_journal = CleanupJournal()
         # Count of in-flight admitted operations (run / buffer / remote-memory)
         # that passed the READY gate and hold a lease. close() publishes CLOSED
         # (blocking new leases) and drains this to zero before teardown; if it
@@ -3729,9 +3842,9 @@ class Worker:
         # run on this thread: a non-owner close() of a READY tree is always
         # rejected — even after the owner thread has exited, because thread
         # affinity does not transfer (a foreign finalize would run against the
-        # wrong / unbound device context). A close() while INITIALIZING fails
-        # fast (this worker does not cancel an in-progress init); any thread may
-        # join an in-flight close().
+        # wrong / unbound device context). A close() while INITIALIZING is served
+        # by cooperative cancellation on a non-owner thread and rejected on the
+        # init-owner thread itself; any thread may join an in-flight close().
         self._init_owner_thread: threading.Thread | None = None
 
         # Narrow lock around `_callable_registry` mutation so concurrent
@@ -6040,7 +6153,9 @@ class Worker:
                     f"has no eligible dispatch target (needs {need})"
                 )
 
-    def init(self, prewarm_config: CallConfig | None = None, *, _startup_deadline: float | None = None) -> None:
+    def init(  # noqa: PLR0912, PLR0915
+        self, prewarm_config: CallConfig | None = None, *, _startup_deadline: float | None = None
+    ) -> None:
         """Initialize the worker and bring its whole subtree to READY.
 
         For an L3+ worker ``init`` is the single startup submission point: it
@@ -6097,6 +6212,9 @@ class Worker:
             self._prewarm_config = prewarm_config
             self._startup_error = None
             self._init_owner_thread = threading.current_thread()
+            self._cancel_token = False
+            if self._is_startup_root or _startup_deadline is None:
+                self._shm_token = uuid.uuid4().hex
             self._lifecycle = _Lifecycle.INITIALIZING
             if self.level >= 3:
                 self._is_startup_root = _startup_deadline is None
@@ -6128,6 +6246,8 @@ class Worker:
                 # startup this deadline also bounds.
                 if self.level >= 3 and time.monotonic() >= self._startup_deadline:
                     raise RuntimeError("hierarchical startup: startup deadline exceeded before READY")
+                if self._cancel_token:
+                    raise InitCancelled("init cancelled by close() before READY commit")
                 self._lifecycle = _Lifecycle.READY
                 self._hierarchical_start_cv.notify_all()
         except BaseException as exc:
@@ -6142,9 +6262,8 @@ class Worker:
                 self._cleanup_partial_init()
             finally:
                 with self._hierarchical_start_cv:
-                    # Only an INITIALIZING epoch commits FAILED. This thread is
-                    # the sole writer of the INITIALIZING -> FAILED edge (close()
-                    # fails fast while INITIALIZING and never advances it).
+                    # Only an INITIALIZING epoch commits FAILED. FAILED is only
+                    # written by the init thread. CLOSED is absorbing.
                     if self._lifecycle is _Lifecycle.INITIALIZING:
                         self._lifecycle = _Lifecycle.FAILED
                     self._hierarchical_start_cv.notify_all()
@@ -6195,9 +6314,11 @@ class Worker:
         if self._remote_worker_specs:
             self._remote_session_timeout_s()
 
+        for inner in self._next_level_workers:
+            inner._shm_token = self._shm_token
         # 1. Allocate sub-worker mailboxes (unified layout, MAILBOX_SIZE each).
-        for _ in range(n_sub):
-            shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+        for i in range(n_sub):
+            shm = SharedMemory(create=True, size=MAILBOX_SIZE, name=_shm_name(self._shm_token, f"sub-{i}"))
             assert shm.buf is not None
             _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
             self._sub_shms.append(shm)
@@ -6219,15 +6340,15 @@ class Worker:
             self._l3_bins = binaries
 
             # Allocate chip mailboxes (unified layout, MAILBOX_SIZE each).
-            for _ in device_ids:
-                shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+            for i, _dev_id in enumerate(device_ids):
+                shm = SharedMemory(create=True, size=MAILBOX_SIZE, name=_shm_name(self._shm_token, f"chip-{i}"))
                 assert shm.buf is not None
                 _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
                 self._chip_shms.append(shm)
 
         # 3. Allocate next-level Worker child mailboxes (L4+ only).
-        for _ in self._next_level_workers:
-            shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+        for i, _inner in enumerate(self._next_level_workers):
+            shm = SharedMemory(create=True, size=MAILBOX_SIZE, name=_shm_name(self._shm_token, f"next-{i}"))
             assert shm.buf is not None
             _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
             self._next_level_shms.append(shm)
@@ -6568,6 +6689,8 @@ class Worker:
                 still_pending.append(i)
             pending = still_pending
             if pending:
+                if self._cancel_token:
+                    raise InitCancelled(f"{kind} worker readiness wait cancelled by close()")
                 if time.monotonic() > deadline:
                     raise RuntimeError(
                         f"{kind} worker(s) {pending} did not become ready within "
@@ -6738,6 +6861,22 @@ class Worker:
         self._worker = None
         self._orch = None
 
+        # Survivors (children not reaped within the deadline) are registered in
+        # the journal so a subsequent close() can retry. Children that were
+        # SIGKILL'd are excluded — they should die imminently and be reaped
+        # by init; if they survive past SIGKILL they are in an un-recoverable
+        # D-state and journal retry would endlessly fail.
+        _reaped_or_killed = reaped | set(killed)
+        _journal_child_survivors(
+            self._cleanup_journal,
+            self._sub_shms,
+            self._sub_pids,
+            self._chip_shms,
+            self._chip_pids,
+            self._next_level_shms,
+            self._next_level_pids,
+            _reaped_or_killed,
+        )
         self._chip_pids.clear()
         self._sub_pids.clear()
         self._next_level_pids.clear()
@@ -8626,6 +8765,7 @@ class Worker:
             or bool(self._live_domains)
             or bool(self._host_buf_registry)
             or bool(self._pending_remote_buffer_frees or self._pending_remote_import_releases)
+            or not self._cleanup_journal.empty
         )
 
     def _describe_live_resources(self) -> str:
@@ -8660,8 +8800,13 @@ class Worker:
         never closed keeps its device held.
 
         - Reentrant ``close()`` from inside a leased operation is rejected.
-        - ``close()`` during an in-progress ``init()`` fails fast; this worker
-          does not cancel initialization. Wait for READY or FAILED.
+        - ``close()`` during an in-progress ``init()`` on another thread
+          cooperatively cancels it: the init epoch unwinds and this call
+          proceeds to teardown. Cancellation is observed only at cooperative
+          points, so an init blocked inside a native segment is not
+          interrupted — this call raises after
+          ``_CLOSE_CANCEL_UNWIND_TIMEOUT_S`` rather than blocking forever.
+          Closing from the init-owner thread itself is rejected.
         - A concurrent ``close()`` joins the in-flight attempt and observes its
           result; teardown never runs twice at once.
         - Teardown is single-shot. Once it runs, a later ``close()`` re-raises
@@ -8677,8 +8822,9 @@ class Worker:
         # fence — the leased live-tree APIs are rejected once CLOSED) and NEVER
         # reverts to READY. Contract:
         #   - reentrant close() (from inside a leased op) is rejected;
-        #   - close() while init() is INITIALIZING fails fast — this worker does
-        #     not cancel an in-progress init; wait for READY or FAILED;
+        #   - close() while init() is INITIALIZING latches a cancel token and
+        #     waits (bounded) for the init thread to unwind the epoch;
+        #     closing from the init-owner thread is rejected;
         #   - a concurrent close() joins the in-flight attempt and observes its
         #     result; the same worker's teardown never runs twice at once;
         #   - teardown is single-shot and TERMINAL: once it runs, an un-reclaimed
@@ -8717,10 +8863,20 @@ class Worker:
                         "register() / unregister() or other leased Worker operation on this thread"
                     )
                 if self._lifecycle is _Lifecycle.INITIALIZING:
-                    raise RuntimeError(
-                        "Worker.close(): cannot close while init() is in progress; "
-                        "wait for the worker to reach READY or FAILED first"
-                    )
+                    if self._init_owner_thread is threading.current_thread():
+                        raise RuntimeError("Worker.close(): cannot cancel init() from the init-owner thread")
+                    self._cancel_token = True
+                    self._hierarchical_start_cv.notify_all()
+                    _cancel_deadline = time.monotonic() + _CLOSE_CANCEL_UNWIND_TIMEOUT_S
+                    while self._lifecycle is _Lifecycle.INITIALIZING:
+                        _remaining = _cancel_deadline - time.monotonic()
+                        if _remaining <= 0:
+                            raise RuntimeError(
+                                "Worker.close(): cancelled init() did not unwind within "
+                                f"{_CLOSE_CANCEL_UNWIND_TIMEOUT_S}s; the init thread is blocked in a "
+                                "native segment past every cooperative cancellation point"
+                            )
+                        self._hierarchical_start_cv.wait(timeout=min(_remaining, _CLOSE_JOIN_RECHECK_S))
                 # A caller that WAITS on an in-flight attempt must always resolve
                 # against THAT attempt — never re-read _close_completion (a
                 # successor may already be installed) and never start a retry
@@ -8741,7 +8897,12 @@ class Worker:
                 # replays; only a drain-timeout — teardown un-attempted, tree
                 # intact — may be retried by this call.
                 prior = self._close_completion
-                if prior is not None and prior.done and (self._teardown_attempted or prior.error is None):
+                if (
+                    prior is not None
+                    and prior.done
+                    and self._cleanup_journal.empty
+                    and (self._teardown_attempted or prior.error is None)
+                ):
                     deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
                     if prior.error is not None:
                         raise prior.error
@@ -8848,11 +9009,8 @@ class Worker:
                         if result is None and retained_error is not None:
                             result = retained_error
                     had_live = self._has_live_resources()
-                    # Terminal teardown is single-shot and best-effort: a resource
-                    # it could not reclaim LEAKS. Never return success with a
-                    # residual — if teardown ran and left something behind without
-                    # itself raising, synthesize a terminal error.
-                    if teardown_tree and result is None and had_live:
+                    journal_pending = not self._cleanup_journal.empty
+                    if teardown_tree and result is None and had_live and not journal_pending:
                         result = RuntimeError(
                             "Worker.close(): teardown left resources un-reclaimed (leaked): "
                             f"{self._describe_live_resources()}"
@@ -9027,6 +9185,9 @@ class Worker:
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
 
+        journal_err = self._cleanup_journal.drive()
+        if journal_err is not None:
+            errors.append(journal_err)
         # Release any orch-allocated CommDomain handles before tearing down the
         # C++ scheduler: once `dw.close()` runs the chip mailboxes are unusable
         # and we can no longer drive CTRL_RELEASE_DOMAIN.
