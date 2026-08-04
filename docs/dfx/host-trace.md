@@ -1,8 +1,9 @@
 # Host runtime trace markers — `[STRACE]`
 
 `simpler_run()` spans several host-side stages (`bind`, `runner_run`,
-`validate`) plus, inside `runner_run`'s blocking wait, an on-NPU AICPU window
-that itself subdivides into preamble / SO-load / graph-build / post-orch. The
+`validate`) plus, inside `runner_run`'s enqueue-through-drain lifetime, an
+on-NPU AICPU window that itself subdivides into preamble / SO-load /
+graph-build / post-orch. The
 two headline walls (`host_wall` / `device_wall`, see
 [l2-timing.md](l2-timing.md)) cannot show *where* the time goes.
 
@@ -46,7 +47,7 @@ simpler_run                                   (= host_wall)
 ├─ simpler_run.bind
 │  ├─ simpler_run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
 │  └─ simpler_run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
-├─ simpler_run.runner_run          (launch + blocking sync on the AICPU)
+├─ simpler_run.runner_run          (device enqueue + completion drain)
 │  └─ simpler_run.runner_run.device_wall      (whole on-NPU AICPU wall)
 │     └─ .{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}
 │           device-domain (clk=dev): AICPU subdivision of the on-NPU wall
@@ -64,10 +65,11 @@ device-log lines. A phase that was never stamped
 [device-phases.md](device-phases.md) for the device-side mechanism.
 
 The phased native-run interface preserves this same marker contract. Prepare
-allocates one `inv` and records the host-wall start; prepare, the blocking
-executor thread, and finalize temporarily bind that `(inv, hid)` while emitting
-their spans. Finalize releases the runner claim, destroys the per-run state, and
-then emits the stored `simpler_run` wall, so the root includes that cleanup tail.
+allocates one `inv` and records the host-wall start; prepare, the executor's
+enqueue/drain lifecycle, and finalize temporarily bind that `(inv, hid)` while
+emitting their spans. Finalize releases the runner claim, destroys the per-run
+state, and then emits the stored `simpler_run` wall, so the root includes that
+cleanup tail.
 No trace scope or synthetic nesting remains active between C API calls. For
 direct phased use the host wall is the full prepare-to-finalize lifetime,
 including time the caller spends polling or doing other host work; blocking

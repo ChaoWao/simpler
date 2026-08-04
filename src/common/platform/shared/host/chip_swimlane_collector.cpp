@@ -856,9 +856,10 @@ void ChipSwimlaneCollector::read_phase_header_metadata() {
     // orchestrator runs on the last AICPU thread (aicpu_thread_num_ - 1). The
     // orch-phase pool is a single instance, so its pool index does not encode
     // the AICPU thread — derive the thread number from aicpu_thread_num_.
-    // aicpu_thread_num_ is >= 1 (DeviceRunner::run validates launch_aicpu_num in
-    // [1, PLATFORM_MAX_AICPU_THREADS] before initialize()), so the subtraction
-    // can't go negative. This is a log-only display value, never an index.
+    // aicpu_thread_num_ is >= 1 (device-runner enqueue validates
+    // launch_aicpu_num in [1, PLATFORM_MAX_AICPU_THREADS] before initialize()),
+    // so the subtraction can't go negative. This is a log-only display value,
+    // never an index.
     const int orch_thread = aicpu_thread_num_ - 1;
     LOG_INFO("Collecting phase metadata: scheduler threads 0-%d, orchestrator thread %d", num_sched - 1, orch_thread);
 

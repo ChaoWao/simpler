@@ -909,7 +909,8 @@ extern "C" int bind_callable_to_runtime_impl(
  * 3. Clears tensor pair state
  *
  * @param runtime       Pointer to Runtime
- * @param execution_rc  Status returned by DeviceRunner::run
+ * @param execution_rc  Device-runner drain status after successful enqueue,
+ *                      or enqueue status on failure
  * @return 0 on success, -1 on failure
  */
 extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc) {

@@ -836,7 +836,20 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
     }
-    return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
+    int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
+    if (attach_rc != 0) {
+        if (!state->execution_done.load(std::memory_order_acquire)) return SIMPLER_NATIVE_RUN_POLL_ERROR;
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    }
+    const int poll_rc = state->runner->poll_run(state->pipeline_slot);
+    if (state->execution_done.load(std::memory_order_acquire)) {
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    }
+    // The stream fence may precede host-side DFX and resource cleanup, so
+    // terminal publication remains at executor completion.
+    return poll_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE ? SIMPLER_NATIVE_RUN_POLL_NOT_READY : poll_rc;
 }
 
 int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {

@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_COMMON_WORKER_NATIVE_RUN_STATE_H_
-#define SRC_COMMON_WORKER_NATIVE_RUN_STATE_H_
+#pragma once
 
 #include <atomic>
 #include <cstdint>
@@ -50,7 +49,7 @@ struct NativeRunState {
         }
     }
 
-    /** Move prepare-thread state into the executor before runner->run(). */
+    /** Move prepare-thread state into the executor before enqueue and drain. */
     void adopt_host_thread_state() noexcept {
         void *snapshot = host_thread_state;
         host_thread_state = nullptr;
@@ -90,5 +89,3 @@ void destroy_native_run_state(NativeRunState<Runner> *state) {
     constexpr uint64_t kEmpty = 0;
     std::memcpy(storage, &kEmpty, sizeof(kEmpty));
 }
-
-#endif  // SRC_COMMON_WORKER_NATIVE_RUN_STATE_H_

@@ -19,8 +19,7 @@
  * - DeviceRunner: kernel launching and execution
  */
 
-#ifndef RUNTIME_DEVICERUNNER_H
-#define RUNTIME_DEVICERUNNER_H
+#pragma once
 
 #include <runtime/rt.h>
 
@@ -93,29 +92,11 @@ public:
     // `device_id`, `last_device_wall_ns`, `launch_aicpu_kernel`, and
     // `launch_aicore_kernel` are inherited from `DeviceRunnerBase`.
 
-    /**
-     * Execute a runtime
-     *
-     * This method:
-     * 1. Initializes device if not already done (lazy initialization)
-     * 2. Initializes worker handshake buffers in the runtime based on block_dim
-     * 3. Transfers runtime to device memory
-     * 4. Launches AICore kernel
-     * 5. Launches AICPU main kernel
-     * 6. Synchronizes streams
-     * 7. Cleans up runtime memory
-     *
-     * @param runtime             Runtime to execute (will be modified to
-     * initialize workers)
-     * @param block_dim            Number of blocks (1 block = 1 AIC + 2 AIV)
-     * @param launch_aicpu_num     Number of AICPU instances (default: 1)
-     * @return 0 on success, error code on failure
-     *
-     * The bound device id, AICPU/AICore executor binaries, and log filter
-     * are captured once by simpler_init (binaries) / libsimpler_log.so (log)
-     * and read off DeviceRunner state / HostLogger here — no per-run args.
-     */
-    int run(Runtime &runtime, const CallConfig &config) override;
+    // The blocking entry point composes these operations. enqueue owns rollback
+    // until the AICPU launch marker; drain takes that ownership on success.
+    int enqueue_run(Runtime &runtime, const CallConfig &config) override;
+    int poll_run(uint32_t pipeline_slot) override;
+    int drain_run(uint32_t pipeline_slot) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
     int provision_native_run_resources(uint32_t pipeline_slot) override;
     int abandon_native_run_resources(uint32_t pipeline_slot) override;
@@ -221,15 +202,15 @@ private:
     // Set true when an AICore launch/sync error (e.g. an op-timeout reaped by
     // STARS, surfaced as 507000/507018 at stream sync, or a 207001 launch
     // failure) left the device context in a sticky-error state that an
-    // in-place drain could not clear. Once set, run() fails fast instead of
-    // cascading into the confusing downstream failures (rtMalloc 507899, or
+    // in-place drain could not clear. Once set, admission/enqueue fail fast
+    // instead of cascading into the confusing downstream failures (rtMalloc 507899, or
     // halResMap rc=62 at init_aicore_register_addresses) that a poisoned
     // context produces. The poison survives a close()+soft-reset for the life
     // of the process (an in-process re-init fails with rtStreamCreate 507899),
     // but a *force* reset clears it: finalize() calls force_reset_device() on
     // this path so the next Worker re-inits clean in the same process (see
-    // force_reset_device()). This flag fails run() fast and drives that
-    // recovery. See run() and recover_device_or_mark_unusable().
+    // force_reset_device()). This flag drives admission and recovery. See
+    // enqueue_run() and recover_device_or_mark_unusable().
     // The prepared-run admission thread reads this while the sole device
     // executor may poison the runner after a failed launch.
     std::atomic<bool> device_unusable_{false};
@@ -263,18 +244,30 @@ private:
     // the handle when the destroy fails: the stream may still hold the previous
     // image's instructions, so the slot must refuse the next run until finalize
     // reclaims it.
-    int retire_run_aicore_stream(unsigned slot);
+    int retire_run_aicore_stream(unsigned slot, RunStreamSlots::CompletionStatus completion_status);
     int destroy_run_stream_sets();
 
-    // The kernel submission boundary is separate from the stream wait and the
-    // post-run teardown; run() invokes the two back-to-back.
+    struct ActiveRunState {
+        unsigned slot{PTO_PIPELINE_MAX_DEPTH};
+        bool owns_resources{false};
+        bool aicore_retirement_attempted{false};
+    };
+    ActiveRunState active_run_{};
+
+    // Release executor-owned resources in collector, runtime-argument,
+    // register-buffer, then stream order. Stream retirement is optional because
+    // the success path must report its error without retrying it immediately.
+    void cleanup_active_run(bool retire_aicore) noexcept;
+
+    // The kernel submission boundary is separate from the stream wait and
+    // post-run teardown: enqueue_run() launches and drain_run() reaps.
     int launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_num, unsigned slot);
     int reap_run(unsigned slot);
 
     // On an AICore launch/sync error, best-effort drain the device so a later
-    // run() on the same DeviceRunner can recover in place; if the drain itself
+    // enqueue on the same DeviceRunner can recover in place; if the drain itself
     // errors the context is unrecoverable without a full reset, so flip
-    // device_unusable_ and let run() fail fast.
+    // device_unusable_ and let admission/enqueue fail fast.
     void recover_device_or_mark_unusable(int aicore_rc);
 
     // Force-reset the card via aclrtResetDeviceForce to clear an op-timeout
@@ -362,7 +355,7 @@ private:
      *
      * Idempotent and safe to call multiple times: each collector's finalize()
      * early-outs once its shm has been released. Invoked both at the end of
-     * every run() (so a Worker reused across runs starts each run with the
+     * every drain or enqueue rollback (so a reused Worker starts each run with
      * collectors in a pristine, re-initializable state) and from finalize()
      * as a backstop before mem_alloc_.finalize().
      */
@@ -374,5 +367,3 @@ private:
     // dep_gen enablement is a2a3-only.
     bool enable_dep_gen_{false};
 };
-
-#endif  // RUNTIME_DEVICERUNNER_H

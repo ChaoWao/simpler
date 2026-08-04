@@ -11,12 +11,17 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
+#include <future>
+#include <thread>
 #include <vector>
 
 #include "host/run_stream_slots.h"
 
 namespace {
+
+using CompletionStatus = RunStreamSlots::CompletionStatus;
 
 // Hands out distinct fake handles and can be told to fail the next N destroys,
 // which is what makes the destroy-failure path reachable without a device.
@@ -82,7 +87,7 @@ TEST(RunStreamSlots, EveryAcquireCreatesAnAicoreStreamAndKeepsTheAicpuOne) {
     ASSERT_NE(first_aicore, nullptr);
     EXPECT_EQ(slots.created_count(), 1u);
 
-    ASSERT_EQ(slots.retire_aicore(0), 0);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Unproven), 0);
     EXPECT_EQ(slots.aicore(0), nullptr);
 
     ASSERT_EQ(slots.acquire(0), 0);
@@ -97,14 +102,27 @@ TEST(RunStreamSlots, AFailedDestroyReportsKeepsTheHandleAndLocksTheSlot) {
     RunStreamSlots slots = make_slots(fake);
 
     ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
     void *stranded = slots.aicore(0);
 
     // 1. the error reaches the caller
     fake.fail_next_destroys(1);
-    EXPECT_EQ(slots.retire_aicore(0), -13);
+    EXPECT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), -13);
 
     // 2. the handle survives, so teardown still has something to reclaim
     EXPECT_EQ(slots.aicore(0), stranded);
+
+    // Device execution was already drained before retirement. The retained
+    // handle is teardown ownership, not permission to query that stream again.
+    EXPECT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_ERROR;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_COMPLETE
+    );
 
     // 3. the next run is refused rather than handed a second live stream
     EXPECT_NE(slots.acquire(0), 0);
@@ -124,11 +142,11 @@ TEST(RunStreamSlots, AStrandedSlotDoesNotBlockItsPeer) {
 
     ASSERT_EQ(slots.acquire(0), 0);
     fake.fail_next_destroys(1);
-    ASSERT_NE(slots.retire_aicore(0), 0);
+    ASSERT_NE(slots.retire_aicore(0, CompletionStatus::Unproven), 0);
 
     ASSERT_EQ(slots.acquire(1), 0);
     EXPECT_NE(slots.aicore(1), nullptr);
-    EXPECT_EQ(slots.retire_aicore(1), 0);
+    EXPECT_EQ(slots.retire_aicore(1, CompletionStatus::Unproven), 0);
 }
 
 TEST(RunStreamSlots, SuccessorProvisionAndAbandonDoNotTouchTheActiveSlot) {
@@ -147,14 +165,187 @@ TEST(RunStreamSlots, SuccessorProvisionAndAbandonDoNotTouchTheActiveSlot) {
 
     // Abandoning the unpublished successor retires only its fresh AICore
     // stream. Its slot-persistent AICPU stream remains reusable.
-    ASSERT_EQ(slots.retire_aicore(1), 0);
+    ASSERT_EQ(slots.retire_aicore(1, CompletionStatus::Unproven), 0);
     EXPECT_TRUE(slots.ready(0));
     EXPECT_EQ(slots.aicore(0), active_aicore);
     EXPECT_EQ(slots.aicore(1), nullptr);
     EXPECT_NE(slots.aicpu(1), nullptr);
 
-    EXPECT_EQ(slots.retire_aicore(0), 0);
+    EXPECT_EQ(slots.retire_aicore(0, CompletionStatus::Unproven), 0);
     EXPECT_EQ(slots.destroy_all(), 0);
+}
+
+TEST(RunStreamSlots, PollReportsPendingThenStickyCompleteWithoutRetiringStreams) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+
+    void *expected_aicpu = slots.aicpu(0);
+    void *expected_aicore = slots.aicore(0);
+    int query_count = 0;
+    auto query = [&](void *aicpu, void *aicore) {
+        EXPECT_EQ(aicpu, expected_aicpu);
+        EXPECT_EQ(aicore, expected_aicore);
+        ++query_count;
+        return query_count == 1 ? SIMPLER_NATIVE_RUN_POLL_NOT_READY : SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    };
+
+    EXPECT_EQ(slots.poll(0, query), SIMPLER_NATIVE_RUN_POLL_NOT_READY);
+    EXPECT_EQ(fake.live_count(), 2u);
+    EXPECT_EQ(slots.poll(0, query), SIMPLER_NATIVE_RUN_POLL_COMPLETE);
+    EXPECT_EQ(slots.poll(0, query), SIMPLER_NATIVE_RUN_POLL_COMPLETE);
+    EXPECT_EQ(query_count, 2) << "a completed stream pair must not be queried again";
+    EXPECT_EQ(fake.live_count(), 2u) << "poll observes ownership but never retires it";
+}
+
+TEST(RunStreamSlots, UnprovenRetirementClearsAnEarlyCompletion) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+
+    EXPECT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_COMPLETE
+    );
+
+    // A later stream-sync error is authoritative even if a concurrent query
+    // reached COMPLETE first. Error-path cleanup must not preserve that fence.
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Unproven), 0);
+    EXPECT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                ADD_FAILURE() << "an unproven retired stream must not be queried";
+                return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_ERROR
+    );
+}
+
+TEST(RunStreamSlots, PollRequiresSubmissionAndPropagatesQueryErrors) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+    ASSERT_EQ(slots.acquire(0), 0);
+
+    EXPECT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_ERROR
+    );
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+    EXPECT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_ERROR;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_ERROR
+    );
+    EXPECT_EQ(
+        slots.poll(
+            static_cast<unsigned>(RunStreamSlots::capacity()),
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_ERROR
+    );
+}
+
+TEST(RunStreamSlots, RetireWaitsForAnInFlightPoll) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+
+    std::promise<void> query_entered;
+    std::promise<void> release_query;
+    std::shared_future<void> release = release_query.get_future().share();
+    auto poll = std::async(std::launch::async, [&]() {
+        return slots.poll(0, [&](void *, void *) {
+            query_entered.set_value();
+            release.wait();
+            return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
+        });
+    });
+    query_entered.get_future().wait();
+
+    std::promise<void> retire_started;
+    auto retire = std::async(std::launch::async, [&]() {
+        retire_started.set_value();
+        return slots.retire_aicore(0, CompletionStatus::Unproven);
+    });
+    retire_started.get_future().wait();
+    EXPECT_EQ(retire.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    release_query.set_value();
+    EXPECT_EQ(poll.get(), SIMPLER_NATIVE_RUN_POLL_NOT_READY);
+    EXPECT_EQ(retire.get(), 0);
+    EXPECT_EQ(fake.live_count(), 1u);
+    EXPECT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_ERROR;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_ERROR
+    );
+}
+
+TEST(RunStreamSlots, PollDoesNotWaitBehindRetirement) {
+    FakeStreams fake;
+    std::promise<void> destroy_entered;
+    std::promise<void> release_destroy;
+    std::shared_future<void> release = release_destroy.get_future().share();
+    RunStreamSlots slots(
+        [&fake](void **out) {
+            return fake.create(out);
+        },
+        [&](void *stream) {
+            destroy_entered.set_value();
+            release.wait();
+            return fake.destroy(stream);
+        }
+    );
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+
+    auto retire = std::async(std::launch::async, [&]() {
+        return slots.retire_aicore(0, CompletionStatus::Complete);
+    });
+    destroy_entered.get_future().wait();
+
+    std::promise<void> poll_started;
+    bool query_called = false;
+    auto poll = std::async(std::launch::async, [&]() {
+        poll_started.set_value();
+        return slots.poll(0, [&](void *, void *) {
+            query_called = true;
+            return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+        });
+    });
+    poll_started.get_future().wait();
+    const std::future_status poll_status = poll.wait_for(std::chrono::seconds(1));
+
+    release_destroy.set_value();
+    EXPECT_EQ(poll_status, std::future_status::ready);
+    EXPECT_EQ(poll.get(), SIMPLER_NATIVE_RUN_POLL_NOT_READY);
+    EXPECT_FALSE(query_called);
+    EXPECT_EQ(retire.get(), 0);
 }
 
 // destroy_all reports the first failure and keeps only what it could not free,
@@ -188,7 +379,7 @@ TEST(RunStreamSlots, AFailedCreateLeavesTheSlotEmpty) {
     // rather than half-ready.
     fake.fail_next_creates(0);
     ASSERT_EQ(slots.acquire(0), 0);
-    ASSERT_EQ(slots.retire_aicore(0), 0);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Unproven), 0);
     fake.fail_next_creates(1);
     EXPECT_NE(slots.acquire(0), 0);
     EXPECT_FALSE(slots.ready(0));
@@ -199,7 +390,7 @@ TEST(RunStreamSlots, RejectsASlotOutsideTheContractDepth) {
     RunStreamSlots slots = make_slots(fake);
     const unsigned past_end = static_cast<unsigned>(RunStreamSlots::capacity());
     EXPECT_NE(slots.acquire(past_end), 0);
-    EXPECT_NE(slots.retire_aicore(past_end), 0);
+    EXPECT_NE(slots.retire_aicore(past_end, CompletionStatus::Unproven), 0);
     EXPECT_EQ(slots.aicore(past_end), nullptr);
 }
 

@@ -790,12 +790,12 @@ int ArgsDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Dump
 
     // ProfilerBase::stop() only joins the mgmt + poll threads. The writer
     // thread is otherwise torn down solely by export_dump_files(), so any path
-    // that skips export — e.g. run() bailing on a device error before its
+    // that skips export — e.g. drain bailing on a device error before its
     // collector-teardown block — would leak it: left blocked on write_cv_ with
     // writer_done_ == false while writer_thread_ stays joinable, which trips
     // std::terminate when the collector is destroyed or re-run. finalize() is
-    // reached via run()'s perf_cleanup guard on every exit path, so join the
-    // writer here too. Idempotent: export_dump_files() clears writer_started_
+    // reached via device-runner active-run cleanup on every exit path, so join
+    // the writer here too. Idempotent: export_dump_files() clears writer_started_
     // on the success path, making this a no-op.
     if (writer_started_ && writer_thread_.joinable()) {
         writer_done_.store(true);

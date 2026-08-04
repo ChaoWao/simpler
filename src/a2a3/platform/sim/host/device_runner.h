@@ -13,27 +13,30 @@
  * execution model. The shared base (`SimDeviceRunnerBase`) hosts the arena /
  * tensor-copy / callable-registry / chip-callable-buffer pool. This subclass
  * adds the a2a3-specific dlsym'd function-pointer table, dep_gen collector +
- * gating, and the run() / init_* / ensure_binaries_loaded sequence wired to
- * a2a3's aicore_execute signature.
+ * gating, and the enqueue/poll/drain sequence wired to a2a3's aicore_execute
+ * signature.
  */
 
-#ifndef SRC_A2A3_PLATFORM_SIM_HOST_DEVICE_RUNNER_H_
-#define SRC_A2A3_PLATFORM_SIM_HOST_DEVICE_RUNNER_H_
+#pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "common/core_type.h"
 #include "device_runner_base.h"
 #include "host/dep_gen_collector.h"
+#include "sim_run_completion.h"
 
 class DeviceRunner : public SimDeviceRunnerBase {
 public:
-    DeviceRunner() = default;
+    DeviceRunner();
     ~DeviceRunner() override;
 
-    int run(Runtime &runtime, const CallConfig &config) override;
+    int enqueue_run(Runtime &runtime, const CallConfig &config) override;
+    int poll_run() override;
+    int drain_run() override;
     int finalize() override;
     // Also arms the loaded runtime's host-side graph capture, which a host-orch
     // runtime uses instead of the device collector. Defined in the .cpp so this
@@ -44,9 +47,12 @@ public:
     void destroy_native_run_thread_state(void *snapshot) noexcept override;
 
 private:
+    struct ActiveRun;
+
     int ensure_binaries_loaded() override;
     int invoke_device_register(const RegisterCallableArgs &reg_args) override;
     void unload_executor_binaries();
+    void cleanup_active_run() noexcept;
 
     int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
     int init_args_dump(Runtime &runtime, int device_id);
@@ -86,6 +92,6 @@ private:
     // a2a3-only; a5 has no dep_gen.
     DepGenCollector dep_gen_collector_;
     bool enable_dep_gen_{false};
+    std::unique_ptr<ActiveRun> active_run_;
+    simpler::common::sim_host::SimRunCompletion run_completion_;
 };
-
-#endif  // SRC_A2A3_PLATFORM_SIM_HOST_DEVICE_RUNNER_H_

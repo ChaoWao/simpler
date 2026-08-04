@@ -19,11 +19,11 @@
  * - DeviceRunner: kernel launching and execution
  */
 
-#ifndef RUNTIME_DEVICERUNNER_H
-#define RUNTIME_DEVICERUNNER_H
+#pragma once
 
 #include <runtime/rt.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -37,6 +37,7 @@
 
 #include "callable.h"
 #include "prepare_callable_common.h"
+#include "pto_runtime_c_api.h"
 #include "utils/device_arena.h"
 #include "device_runner_base.h"     // common DeviceRunnerBase
 #include "device_runner_helpers.h"  // common KernelArgsHelper
@@ -83,30 +84,12 @@ public:
     // `device_id`, `last_device_wall_ns`, `launch_aicpu_kernel`, and
     // `launch_aicore_kernel` are inherited from `DeviceRunnerBase`.
 
-    /**
-     * Execute a runtime
-     *
-     * This method:
-     * 1. Initializes device if not already done (lazy initialization)
-     * 2. Initializes worker handshake buffers in the runtime based on block_dim
-     * 3. Transfers runtime to device memory
-     * 4. Launches AICPU main kernel
-     * 5. Launches AICore kernel
-     * 6. Synchronizes streams
-     * 7. Cleans up runtime memory
-     *
-     * @param runtime             Runtime to execute (will be modified to
-     * initialize workers)
-     * @param block_dim            Number of blocks (1 block = 1 AIC + 2 AIV)
-     * @param launch_aicpu_num     Number of AICPU instances (default: 1)
-     * @return 0 on success, error code on failure
-     *
-     * The bound device id, AICPU/AICore executor binaries, and log filter
-     * are captured once by simpler_init (binaries) / libsimpler_log.so (log)
-     * and read off DeviceRunner state / HostLogger here — no per-run args.
-     */
-    int run(Runtime &runtime, const CallConfig &config) override;
-    bool can_accept_run() const override { return !device_unusable_; }
+    // The blocking entry point composes these operations. enqueue owns rollback
+    // until the AICPU launch marker; drain takes that ownership on success.
+    int enqueue_run(Runtime &runtime, const CallConfig &config) override;
+    int poll_run(uint32_t pipeline_slot) override;
+    int drain_run(uint32_t pipeline_slot) override;
+    bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
 
     // `set_chip_swimlane_enabled`, `set_dump_args_enabled`,
     // `set_pmu_enabled`, `set_scope_stats_enabled`, `set_output_prefix`,
@@ -202,21 +185,37 @@ private:
     // Set true when an AICore launch/sync error (e.g. an op-timeout reaped by
     // STARS, surfaced as 507000/507018 at stream sync, or a 207001 launch
     // failure) left the device context in a sticky-error state that an
-    // in-place drain could not clear. Once set, run() fails fast instead of
-    // cascading into the confusing downstream failures (halResMap rc=62 at
+    // in-place drain could not clear. Once set, admission/enqueue fail fast
+    // instead of cascading into the confusing downstream failures (halResMap rc=62 at
     // init_aicore_register_addresses, or rtMalloc 507899) that a poisoned
     // context produces. On a5 the poison survives a close()+soft-reset for the
     // life of the process (an in-process re-init fails with rtStreamCreate
     // 507899), but a *force* reset clears it: finalize() calls
     // force_reset_device() on this path so the next Worker re-inits clean in the
-    // same process (see force_reset_device()). This flag fails run() fast and
-    // drives that recovery. See run() and recover_device_or_mark_unusable().
-    bool device_unusable_{false};
+    // same process (see force_reset_device()). This flag drives admission and
+    // recovery. See enqueue_run() and recover_device_or_mark_unusable().
+    // Admission and recovery execute on different host threads.
+    std::atomic<bool> device_unusable_{false};
+
+    enum class RunPollState : uint8_t {
+        Idle,
+        Enqueuing,
+        Submitted,
+        DeviceComplete,
+        Drained,
+    };
+    std::atomic<RunPollState> run_poll_state_{RunPollState::Idle};
+    std::atomic<uint32_t> run_poll_slot_{PTO_PIPELINE_MAX_DEPTH};
+    bool run_resources_owned_{false};
+
+    // Release executor-owned per-run resources and publish a sticky terminal
+    // state. Idempotent so enqueue rollback and drain share one path.
+    void cleanup_active_run() noexcept;
 
     // On an AICore launch/sync error, best-effort drain the device so a later
-    // run() on the same DeviceRunner can recover in place; if the drain itself
+    // enqueue on the same DeviceRunner can recover in place; if the drain itself
     // errors the context is unrecoverable without a full reset, so flip
-    // device_unusable_ and let run() fail fast.
+    // device_unusable_ and let admission/enqueue fail fast.
     void recover_device_or_mark_unusable(int aicore_rc);
 
     // Force-reset the card via aclrtResetDeviceForce to clear an op-timeout
@@ -288,5 +287,3 @@ private:
     // Does not release device memory; full release happens in finalize().
     void finalize_collectors();
 };
-
-#endif  // RUNTIME_DEVICERUNNER_H

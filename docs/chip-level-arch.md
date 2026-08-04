@@ -106,7 +106,7 @@ DeviceRunner runner;
 void *ptr = runner.allocate_tensor(bytes);
 runner.copy_to_device(dev_ptr, host_ptr, bytes);
 runner.set_executors(aicpu_binary, aicore_binary);   // once, at init time
-runner.run(runtime, config);                         // config carries aicpu_thread_num, diagnostics
+runner.run(runtime, config);                         // compatibility composition: enqueue + drain
 runner.finalize();
 ```
 

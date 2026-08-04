@@ -350,9 +350,12 @@ int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx);
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime);
 
 /**
- * Non-blocking completion query. Returns SIMPLER_NATIVE_RUN_POLL_NOT_READY,
- * SIMPLER_NATIVE_RUN_POLL_COMPLETE, or a negative validation/phase error. Call
- * only after simpler_launch_run() returns.
+ * Non-blocking device-completion query. Returns
+ * SIMPLER_NATIVE_RUN_POLL_NOT_READY, SIMPLER_NATIVE_RUN_POLL_COMPLETE, or a
+ * negative validation, phase, or device-query error. COMPLETE is published
+ * only after the executor has also finished host-side drain work. Polling
+ * never releases the prepared run's resources; call only after
+ * simpler_launch_run() returns.
  */
 int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime);
 
