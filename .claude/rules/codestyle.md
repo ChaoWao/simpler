@@ -218,3 +218,42 @@
     convertor ojects the `#ifndef` but misses the `#endif`.  Existing files
     are converted on sight during routine edits; a dedicated sweep is not
     required.
+
+13. **Name runtime domain objects by role (`Worker` / `Chip` / `Core`), not
+    by numeric topology level.** The hierarchy has three software naming
+    contexts, and a type that crosses one of their boundaries must say which
+    context owns its semantics:
+
+    | Context | Naming | Examples |
+    | ------- | ------ | -------- |
+    | L3+ recursive scheduling | Unprefixed public domain name | `Worker`, `Buffer`, `Tensor`, `TaskArgs` |
+    | L2 chip runtime | `Chip` prefix | `ChipWorker`, `ChipTensor`, `ChipTaskArgs`, `ChipCallable` |
+    | L0 AIC/AIV task construction | `Core` prefix | `CoreCallable`, `CoreTaskArgs`, `CoreTaskPredicate` |
+
+    Numeric levels belong in architecture prose, diagrams, and topology tables,
+    not in software identifiers. Do not introduce names such as `L2Tensor`,
+    `L2TaskArgs`, `L0TaskArgs`, `L3L2Queue`, or `L2Swimlane`: use the owning
+    software entities instead (`ChipTensor`, `ChipTaskArgs`, `CoreTaskArgs`,
+    `WorkerChipQueue`, `ChipSwimlane`). `L2` and `Chip` are not two naming
+    dimensions — L2 is the topology position occupied by the Chip context, so
+    retaining both spellings makes one concept look like two.
+
+    A representation change at a boundary is also a type-name change. For
+    example, the address-free `Tensor` carried by an L3+ `TaskArgs` is
+    materialized by a `ChipWorker` into a GM-address-bearing `ChipTensor`; the
+    two must not both be named `Tensor` merely because they share shape and
+    dtype fields. A core task consumes that `ChipTensor` and therefore does not
+    create a third `CoreTensor` concept.
+
+    **Public Python and C++ types use the same canonical name and semantics.**
+    Binding a C++ `Tensor` as Python `ChipTensor`, or maintaining a separate
+    Python dataclass with the same public name as a C++ ABI type, is a naming
+    defect. Bind the canonical C++ type directly where practical; codecs and
+    compatibility aliases stay internal and must not create a second public
+    meaning for the name.
+
+    Existing numeric or mismatched identifiers are migrated when their API or
+    module is already being changed. Finish each identifier across architecture
+    siblings in one change; retain a compatibility alias only where an external
+    source, ABI, or wire contract requires it. Do not open a repository-wide
+    rename sweep.
