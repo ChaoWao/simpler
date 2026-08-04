@@ -25,7 +25,7 @@ mechanism before you theorize:
 2. **Then look up the code** in
    [device-error-codes](../../troubleshooting/device-error-codes.md), the repo's
    own table, with per-mechanism notes in
-   [`device-error-codes/`](../../troubleshooting/device-error-codes/):
+   [`device-error-codes/`](../../troubleshooting/device-error-codes/README.md):
    [aicore-fault](../../troubleshooting/device-error-codes/aicore-fault.md),
    [capacity](../../troubleshooting/device-error-codes/capacity.md),
    [stall](../../troubleshooting/device-error-codes/stall.md).
