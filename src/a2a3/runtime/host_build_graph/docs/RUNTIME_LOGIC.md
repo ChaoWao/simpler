@@ -81,6 +81,33 @@ The host/device boundary is POD and position-independent. Fanins are integer
 producer IDs, not pointers. The only per-slot pointers are rebound to their final
 device addresses before H2D.
 
+### 3.1 Bounded H2D Upload
+
+The shared-memory mirror is sized to ring capacity (task window) but a run only
+writes `[0, total_tasks)`, and the device boots scheduler-only and reads no SM slot
+past `total_tasks`. So the SM H2D shipped each run is bounded, not capacity-sized —
+the contract that keeps `bind` proportional to the workload.
+
+- **Shared memory** — the header is zeroed on the host; `descriptors`, `payloads`,
+  `slot_states` and `completion_flags` are each written per task at submit and
+  H2D-uploaded bounded to `[0, total_tasks)`. Per-slot reset is init-on-write in
+  `orch::prepare_task` as each slot is claimed — there is no window-wide reset.
+
+- **Runtime arena** — the **orchestrator block** (`fanin_seen_epoch` /
+  `scope_tasks` / TensorMap, ~8.5 MB) is **not shipped at all**: it is host-only
+  dep-computation scratch, and the AICPU scheduler holds zero references to it. (The
+  scalar `inline_completed_tasks` the scheduler does read lives in the runtime
+  header, inside the region that still ships whole.) Everything from the scheduler
+  block onward — the ready-queue slot pools, runtime header, and completion mailbox
+  — ships **whole**. The ready queues are *not* bounded to `total_tasks`: graph
+  execution replays a cached GRAPH task that the device Scheduler expands into
+  on-device nodes, and those nodes push into the ready queues past the host task
+  count, so the queue slots must all carry a valid Vyukov sequence on the device.
+
+`bind_callable_to_runtime_impl` `always_assert`s `orch_start <= orch_end` before
+uploading, so a future `runtime_reserve_layout` reorder that moved the scheduler
+block ahead of the orchestrator block faults instead of shipping a misaligned image.
+
 ## 4. Whole-Graph Capacity
 
 The runtime uses one task ring, one graph heap, and one TensorMap pool. They are

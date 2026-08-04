@@ -741,11 +741,24 @@ add_a2a3_test(test_acl_hal_device common/test_acl_hal_device.cpp)
 # PTO2 runtime-linked tests
 add_a2a3_runtime_test(test_task_allocator   a2a3/test_task_allocator.cpp)
 add_a2a3_runtime_test(test_scope_deadlock_detection common/test_scope_deadlock_detection.cpp)
+set(HBG_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime)
 add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp)
+# The submit-poison test drives the real orchestrator submit path, so it links the
+# orchestrator + shared runtime out-of-line members (mirrors a2a3_rt_objs for hbg).
+add_a2a3_hbg_runtime_test(test_hbg_submit_poison a2a3/test_hbg_submit_poison.cpp)
+target_sources(test_hbg_submit_poison PRIVATE
+    ${HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
+    ${HBG_RUNTIME_DIR}/orchestrator_core/pto_ring_buffer.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_shared_memory.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_tensormap.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_runtime2_init.cpp
+    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 add_a2a3_hbg_runtime_test(test_graph_cache a2a3/test_graph_cache.cpp)
 target_sources(test_graph_cache PRIVATE

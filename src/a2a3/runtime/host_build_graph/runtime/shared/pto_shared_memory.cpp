@@ -178,22 +178,11 @@ void PTO2SharedMemoryHandle::init_header_per_ring(
     header->sched_error_code.store(PTO2_ERROR_NONE, std::memory_order_relaxed);
     header->sched_error_thread.store(-1, std::memory_order_relaxed);
 
-    // Per-ring slot_states reset. Previously lived in
-    // PTO2SchedulerState::RingSchedState::init(), but it writes into
-    // ring->slot_states[] which is SM-side storage — keeping it here lets
-    // host-side prebuilt-arena init skip all SM dereferences.
-    // reset_for_reuse() prepares dynamic fanout/refcount fields so the first
-    // submit doesn't need an explicit reset.
-    auto &ring = header->ring;
-    for (uint64_t i = 0; i < task_window_sizes[0]; i++) {
-        ring.slot_states[i].reset_for_reuse();
-        ring.slot_states[i].active_mask = ActiveMask{};
-    }
-
-    // Polling completion flags: 0 = pending. Shared memory is not guaranteed
-    // zero on device; stale non-zero bytes would make consumers observe a
-    // producer as already completed. Zero the whole per-ring array once.
-    __builtin_memset((void *)ring.completion_flags, 0, task_window_sizes[0] * sizeof(std::atomic<uint8_t>));
+    // Per-slot init (slot_states.reset_for_reuse() + active_mask, and clearing the
+    // completion flag) happens init-on-write in orch::prepare_task as each slot
+    // [0, total_tasks) is claimed, so the SM init/upload cost tracks the task
+    // count, not ring capacity. The device reads no slot past total_tasks, so the
+    // unclaimed tail is left uninitialized.
 }
 
 // =============================================================================
