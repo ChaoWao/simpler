@@ -318,7 +318,7 @@ AclRuntimeApi &acl_api() {
     return *api;
 }
 
-class L3HostMappedRegionCleanupErrors {
+class WorkerHostMappedRegionCleanupErrors {
 public:
     void record(const std::string &owner_token, const std::string &message) noexcept {
         try {
@@ -368,29 +368,29 @@ private:
     std::unordered_map<std::string, std::string> errors_;
 };
 
-L3HostMappedRegionCleanupErrors &l3_host_mapped_region_cleanup_errors() {
+WorkerHostMappedRegionCleanupErrors &worker_host_mapped_region_cleanup_errors() {
     // Return-boundary owners can be finalized after their importing call has
     // unwound. The process-lifetime registry preserves Worker-keyed diagnostics
     // until that same Worker reaches an admission or close boundary.
-    static auto *errors = new L3HostMappedRegionCleanupErrors();
+    static auto *errors = new WorkerHostMappedRegionCleanupErrors();
     return *errors;
 }
 
-class L3HostMappedRegion {
+class WorkerHostMappedRegion {
 public:
-    L3HostMappedRegion() = default;
-    L3HostMappedRegion(const L3HostMappedRegion &) = delete;
-    L3HostMappedRegion &operator=(const L3HostMappedRegion &) = delete;
+    WorkerHostMappedRegion() = default;
+    WorkerHostMappedRegion(const WorkerHostMappedRegion &) = delete;
+    WorkerHostMappedRegion &operator=(const WorkerHostMappedRegion &) = delete;
 
-    ~L3HostMappedRegion() noexcept {
+    ~WorkerHostMappedRegion() noexcept {
         try {
             std::string cleanup_error;
             close_collecting(cleanup_error);
             if (!cleanup_error.empty()) {
-                l3_host_mapped_region_cleanup_errors().record(owner_token, cleanup_error);
+                worker_host_mapped_region_cleanup_errors().record(owner_token, cleanup_error);
             }
         } catch (...) {
-            l3_host_mapped_region_cleanup_errors().record(
+            worker_host_mapped_region_cleanup_errors().record(
                 owner_token, "L3-L2 mapped-region cleanup failed with an unknown error"
             );
         }
@@ -583,9 +583,9 @@ struct L2ChildOnboardRegionExport {
     uint64_t registry_handle{0};
 };
 
-class L3HostMappedRegionEntry {
+class WorkerHostMappedRegionEntry {
 public:
-    explicit L3HostMappedRegionEntry(std::unique_ptr<L3HostMappedRegion> mapping) :
+    explicit WorkerHostMappedRegionEntry(std::unique_ptr<WorkerHostMappedRegion> mapping) :
         mapping_(std::move(mapping)) {}
 
     void acquire() {
@@ -607,7 +607,7 @@ public:
         }
     }
 
-    L3HostMappedRegion &mapping() { return *mapping_; }
+    WorkerHostMappedRegion &mapping() { return *mapping_; }
 
     size_t active_leases() const {
         std::lock_guard<std::mutex> lk(mu_);
@@ -615,7 +615,7 @@ public:
     }
 
     void close() {
-        std::unique_ptr<L3HostMappedRegion> mapping;
+        std::unique_ptr<WorkerHostMappedRegion> mapping;
         std::exception_ptr close_error;
         {
             std::unique_lock<std::mutex> lk(mu_);
@@ -660,7 +660,7 @@ public:
 private:
     enum class State { OPEN, CLOSING, CLOSED };
 
-    std::unique_ptr<L3HostMappedRegion> mapping_;
+    std::unique_ptr<WorkerHostMappedRegion> mapping_;
     mutable std::mutex mu_;
     std::condition_variable idle_;
     size_t active_leases_{0};
@@ -668,32 +668,32 @@ private:
     std::exception_ptr close_error_;
 };
 
-class L3HostMappedRegionLease {
+class WorkerHostMappedRegionLease {
 public:
-    explicit L3HostMappedRegionLease(std::shared_ptr<L3HostMappedRegionEntry> entry) :
+    explicit WorkerHostMappedRegionLease(std::shared_ptr<WorkerHostMappedRegionEntry> entry) :
         entry_(std::move(entry)) {
         entry_->acquire();
     }
-    L3HostMappedRegionLease(const L3HostMappedRegionLease &) = delete;
-    L3HostMappedRegionLease &operator=(const L3HostMappedRegionLease &) = delete;
-    L3HostMappedRegionLease(L3HostMappedRegionLease &&) noexcept = default;
-    L3HostMappedRegionLease &operator=(L3HostMappedRegionLease &&) = delete;
-    ~L3HostMappedRegionLease() {
+    WorkerHostMappedRegionLease(const WorkerHostMappedRegionLease &) = delete;
+    WorkerHostMappedRegionLease &operator=(const WorkerHostMappedRegionLease &) = delete;
+    WorkerHostMappedRegionLease(WorkerHostMappedRegionLease &&) noexcept = default;
+    WorkerHostMappedRegionLease &operator=(WorkerHostMappedRegionLease &&) = delete;
+    ~WorkerHostMappedRegionLease() {
         if (entry_ != nullptr) {
             entry_->release();
         }
     }
 
-    L3HostMappedRegion *operator->() { return &entry_->mapping(); }
+    WorkerHostMappedRegion *operator->() { return &entry_->mapping(); }
 
 private:
-    std::shared_ptr<L3HostMappedRegionEntry> entry_;
+    std::shared_ptr<WorkerHostMappedRegionEntry> entry_;
 };
 
-class L3HostMappedRegionRegistry {
+class WorkerHostMappedRegionRegistry {
 public:
-    uint64_t emplace(std::unique_ptr<L3HostMappedRegion> mapping) {
-        auto entry = std::make_shared<L3HostMappedRegionEntry>(std::move(mapping));
+    uint64_t emplace(std::unique_ptr<WorkerHostMappedRegion> mapping) {
+        auto entry = std::make_shared<WorkerHostMappedRegionEntry>(std::move(mapping));
         std::lock_guard<std::mutex> lk(mu_);
         if (std::exchange(fail_next_insert_for_test_, false)) {
             throw std::runtime_error("injected mapped-region registry insertion failure");
@@ -710,13 +710,13 @@ public:
         return handle;
     }
 
-    L3HostMappedRegionLease lease(uint64_t handle) const {
+    WorkerHostMappedRegionLease lease(uint64_t handle) const {
         std::lock_guard<std::mutex> lk(mu_);
         auto it = regions_.find(handle);
         if (it == regions_.end()) {
             throw std::runtime_error("L3-L2 L3 Host mapped-region handle is closed or unknown");
         }
-        return L3HostMappedRegionLease(it->second);
+        return WorkerHostMappedRegionLease(it->second);
     }
 
     size_t active_leases(uint64_t handle) const {
@@ -731,7 +731,7 @@ public:
     void close(uint64_t handle) {
         // Retain the entry while it closes: its state rejects new leases, and
         // duplicate close callers join the same physical-cleanup completion.
-        std::shared_ptr<L3HostMappedRegionEntry> entry;
+        std::shared_ptr<WorkerHostMappedRegionEntry> entry;
         {
             std::lock_guard<std::mutex> lk(mu_);
             auto it = regions_.find(handle);
@@ -767,43 +767,43 @@ public:
 
 private:
     mutable std::mutex mu_;
-    std::unordered_map<uint64_t, std::shared_ptr<L3HostMappedRegionEntry>> regions_;
+    std::unordered_map<uint64_t, std::shared_ptr<WorkerHostMappedRegionEntry>> regions_;
     uint64_t next_handle_{1};
     bool fail_next_insert_for_test_{false};
 };
 
-L3HostMappedRegionRegistry &l3_host_mapped_region_registry() {
+WorkerHostMappedRegionRegistry &worker_host_mapped_region_registry() {
     // Python owners may be finalized after ordinary C++ static destruction has
     // begun. The registry and ACL dispatch table therefore have process
     // lifetime; the OS reclaims any entries still open at process exit.
-    static auto *registry = new L3HostMappedRegionRegistry();
+    static auto *registry = new WorkerHostMappedRegionRegistry();
     return *registry;
 }
 
-void close_l3_host_mapped_region(uint64_t handle) { l3_host_mapped_region_registry().close(handle); }
+void close_worker_host_mapped_region(uint64_t handle) { worker_host_mapped_region_registry().close(handle); }
 
-class L3HostMappedRegionHandle {
+class WorkerHostMappedRegionHandle {
 public:
-    explicit L3HostMappedRegionHandle(uint64_t handle, std::string owner_token) :
+    explicit WorkerHostMappedRegionHandle(uint64_t handle, std::string owner_token) :
         handle_(handle),
         owner_token_(std::move(owner_token)) {}
-    L3HostMappedRegionHandle(const L3HostMappedRegionHandle &) = delete;
-    L3HostMappedRegionHandle &operator=(const L3HostMappedRegionHandle &) = delete;
-    L3HostMappedRegionHandle(L3HostMappedRegionHandle &&other) noexcept :
+    WorkerHostMappedRegionHandle(const WorkerHostMappedRegionHandle &) = delete;
+    WorkerHostMappedRegionHandle &operator=(const WorkerHostMappedRegionHandle &) = delete;
+    WorkerHostMappedRegionHandle(WorkerHostMappedRegionHandle &&other) noexcept :
         handle_(std::exchange(other.handle_, 0)),
         owner_token_(std::move(other.owner_token_)) {}
-    L3HostMappedRegionHandle &operator=(L3HostMappedRegionHandle &&) = delete;
+    WorkerHostMappedRegionHandle &operator=(WorkerHostMappedRegionHandle &&) = delete;
 
-    ~L3HostMappedRegionHandle() noexcept {
+    ~WorkerHostMappedRegionHandle() noexcept {
         if (handle_ == 0) {
             return;
         }
         try {
-            close_l3_host_mapped_region(handle_);
+            close_worker_host_mapped_region(handle_);
         } catch (const std::exception &exc) {
-            l3_host_mapped_region_cleanup_errors().record(owner_token_, exc.what());
+            worker_host_mapped_region_cleanup_errors().record(owner_token_, exc.what());
         } catch (...) {
-            l3_host_mapped_region_cleanup_errors().record(
+            worker_host_mapped_region_cleanup_errors().record(
                 owner_token_, "L3-L2 mapped-region owner cleanup failed with an unknown error"
             );
         }
@@ -2022,13 +2022,13 @@ NB_MODULE(_task_interface, m) {
         .def_ro("shareable_handle", &L2ChildOnboardRegionExport::shareable_handle)
         .def_ro("registry_handle", &L2ChildOnboardRegionExport::registry_handle);
 
-    nb::class_<L3HostMappedRegionHandle>(m, "_L3HostMappedRegionHandle")
-        .def("__int__", &L3HostMappedRegionHandle::value);
+    nb::class_<WorkerHostMappedRegionHandle>(m, "_WorkerHostMappedRegionHandle")
+        .def("__int__", &WorkerHostMappedRegionHandle::value);
 
     m.def(
-        "_l3_host_mapped_region_import_sim",
+        "_worker_host_mapped_region_import_sim",
         [](const std::string &token, uint64_t mapping_bytes,
-           const std::string &owner_token) -> L3HostMappedRegionHandle {
+           const std::string &owner_token) -> WorkerHostMappedRegionHandle {
             if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
                 throw std::invalid_argument("L3-L2 sim L3 Host mapped-region import requires a positive mapping size");
             }
@@ -2037,7 +2037,7 @@ NB_MODULE(_task_interface, m) {
             }
             std::string handle_owner_token = owner_token;
             std::string name = shm_name_for_open(token);
-            auto mapping = std::make_unique<L3HostMappedRegion>();
+            auto mapping = std::make_unique<WorkerHostMappedRegion>();
             mapping->owner_token = owner_token;
             mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
             if (mapping->fd < 0) {
@@ -2054,16 +2054,16 @@ NB_MODULE(_task_interface, m) {
             mapping->profile = WorkerChipRegionAccessProfile::SIM_POSIX_SHM;
             mapping->device_addr = reinterpret_cast<uint64_t>(base);
             mapping->mapping_bytes = mapping_bytes;
-            uint64_t handle = l3_host_mapped_region_registry().emplace(std::move(mapping));
-            return L3HostMappedRegionHandle(handle, std::move(handle_owner_token));
+            uint64_t handle = worker_host_mapped_region_registry().emplace(std::move(mapping));
+            return WorkerHostMappedRegionHandle(handle, std::move(handle_owner_token));
         },
         nb::arg("token"), nb::arg("mapping_bytes"), nb::arg("owner_token"), nb::call_guard<nb::gil_scoped_release>(),
         "Import a sim L3-L2 POSIX shm region for L3 Host mapped-region access."
     );
     m.def(
-        "_l3_host_mapped_region_import_onboard",
+        "_worker_host_mapped_region_import_onboard",
         [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes,
-           const std::string &owner_token) -> L3HostMappedRegionHandle {
+           const std::string &owner_token) -> WorkerHostMappedRegionHandle {
             if (device_id < 0) {
                 throw std::invalid_argument("L3-L2 onboard mapped-region import requires a non-negative device id");
             }
@@ -2074,7 +2074,7 @@ NB_MODULE(_task_interface, m) {
                 throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
             }
             std::string handle_owner_token = owner_token;
-            auto mapping = std::make_unique<L3HostMappedRegion>();
+            auto mapping = std::make_unique<WorkerHostMappedRegion>();
             mapping->owner_token = owner_token;
             mapping->profile = WorkerChipRegionAccessProfile::ONBOARD_VMM;
             mapping->device_id = device_id;
@@ -2087,122 +2087,122 @@ NB_MODULE(_task_interface, m) {
             mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
             api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
             api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
-            uint64_t handle = l3_host_mapped_region_registry().emplace(std::move(mapping));
-            return L3HostMappedRegionHandle(handle, std::move(handle_owner_token));
+            uint64_t handle = worker_host_mapped_region_registry().emplace(std::move(mapping));
+            return WorkerHostMappedRegionHandle(handle, std::move(handle_owner_token));
         },
         nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"), nb::arg("owner_token"),
         nb::call_guard<nb::gil_scoped_release>(), "Import an onboard VMM L3-L2 region for L3 Host mapped-region access."
     );
     m.def(
-        "_l3_host_mapped_region_close",
+        "_worker_host_mapped_region_close",
         [](uint64_t handle) {
-            close_l3_host_mapped_region(handle);
+            close_worker_host_mapped_region(handle);
         },
         nb::arg("handle"), nb::call_guard<nb::gil_scoped_release>(), "Close an L3 Host mapped-region handle."
     );
     m.def(
-        "_l3_host_mapped_region_active_leases",
+        "_worker_host_mapped_region_active_leases",
         [](uint64_t handle) {
-            return l3_host_mapped_region_registry().active_leases(handle);
+            return worker_host_mapped_region_registry().active_leases(handle);
         },
         nb::arg("handle"), "Return the number of in-flight native operations holding this mapped region."
     );
     m.def(
-        "_l3_host_mapped_region_take_cleanup_error",
+        "_worker_host_mapped_region_take_cleanup_error",
         [](const std::string &owner_token) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error lookup requires a non-empty Worker owner token");
             }
-            return l3_host_mapped_region_cleanup_errors().take(owner_token);
+            return worker_host_mapped_region_cleanup_errors().take(owner_token);
         },
         nb::arg("owner_token"),
         "Take a cleanup error recorded by an unadopted native mapped-region owner for one Worker."
     );
     m.def(
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         [](const std::string &owner_token) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error lookup requires a non-empty Worker owner token");
             }
-            return l3_host_mapped_region_cleanup_errors().peek(owner_token);
+            return worker_host_mapped_region_cleanup_errors().peek(owner_token);
         },
         nb::arg("owner_token"), "Read one Worker's mapped-region cleanup error without consuming it."
     );
     m.def(
-        "_l3_host_mapped_region_ack_cleanup_error",
+        "_worker_host_mapped_region_ack_cleanup_error",
         [](const std::string &owner_token, const std::string &observed) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error acknowledgement requires a Worker owner token");
             }
-            l3_host_mapped_region_cleanup_errors().acknowledge(owner_token, observed);
+            worker_host_mapped_region_cleanup_errors().acknowledge(owner_token, observed);
         },
         nb::arg("owner_token"), nb::arg("observed"),
         "Acknowledge the mapped-region cleanup error already published by one Worker."
     );
     m.def(
-        "_l3_host_mapped_region_record_cleanup_error_for_test",
+        "_worker_host_mapped_region_record_cleanup_error_for_test",
         [](const std::string &owner_token, const std::string &message) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error injection requires a non-empty Worker owner token");
             }
-            l3_host_mapped_region_cleanup_errors().record(owner_token, message);
+            worker_host_mapped_region_cleanup_errors().record(owner_token, message);
         },
         nb::arg("owner_token"), nb::arg("message"), "Inject one Worker-owned mapped-region cleanup error."
     );
     m.def(
-        "_l3_host_mapped_region_fail_next_registry_insert_for_test",
+        "_worker_host_mapped_region_fail_next_registry_insert_for_test",
         []() {
-            l3_host_mapped_region_registry().fail_next_insert_for_test();
+            worker_host_mapped_region_registry().fail_next_insert_for_test();
         },
         "Inject one mapped-region registry insertion failure after native acquisition."
     );
     m.def(
-        "_l3_host_mapped_payload_write",
+        "_worker_host_mapped_payload_write",
         [](uint64_t handle, uint64_t payload_offset, uint64_t host_ptr, uint64_t nbytes) {
             if (host_ptr == 0) {
                 throw std::invalid_argument("L3-L2 payload_write host_ptr must be nonzero");
             }
-            L3HostMappedRegionLease mapping = l3_host_mapped_region_registry().lease(handle);
+            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
             mapping->copy_to(payload_offset, reinterpret_cast<const void *>(static_cast<uintptr_t>(host_ptr)), nbytes);
         },
         nb::arg("handle"), nb::arg("payload_offset"), nb::arg("host_ptr"), nb::arg("nbytes"),
         nb::call_guard<nb::gil_scoped_release>(), "Copy L3 Host bytes into an imported L3-L2 payload range."
     );
     m.def(
-        "_l3_host_mapped_payload_read",
+        "_worker_host_mapped_payload_read",
         [](uint64_t handle, uint64_t payload_offset, uint64_t host_ptr, uint64_t nbytes) {
             if (host_ptr == 0) {
                 throw std::invalid_argument("L3-L2 payload_read host_ptr must be nonzero");
             }
-            L3HostMappedRegionLease mapping = l3_host_mapped_region_registry().lease(handle);
+            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
             mapping->copy_from(reinterpret_cast<void *>(static_cast<uintptr_t>(host_ptr)), payload_offset, nbytes);
         },
         nb::arg("handle"), nb::arg("payload_offset"), nb::arg("host_ptr"), nb::arg("nbytes"),
         nb::call_guard<nb::gil_scoped_release>(), "Copy imported L3-L2 payload bytes into L3 Host memory."
     );
     m.def(
-        "_l3_host_mapped_counter_notify",
+        "_worker_host_mapped_counter_notify",
         [](uint64_t handle, uint64_t counter_offset, int32_t value, int op) {
-            L3HostMappedRegionLease mapping = l3_host_mapped_region_registry().lease(handle);
+            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
             mapping->notify_counter(counter_offset, value, checked_notify_op(op));
         },
         nb::arg("handle"), nb::arg("counter_offset"), nb::arg("value"), nb::arg("op"),
         nb::call_guard<nb::gil_scoped_release>(), "Store or add one L3 Host-side L3-L2 signal counter."
     );
     m.def(
-        "_l3_host_mapped_counter_test",
+        "_worker_host_mapped_counter_test",
         [](uint64_t handle, uint64_t counter_offset, int32_t operand, int cmp) -> std::tuple<bool, int32_t> {
-            L3HostMappedRegionLease mapping = l3_host_mapped_region_registry().lease(handle);
+            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
             return mapping->test_counter(counter_offset, operand, checked_wait_cmp(cmp));
         },
         nb::arg("handle"), nb::arg("counter_offset"), nb::arg("operand"), nb::arg("cmp"),
         nb::call_guard<nb::gil_scoped_release>(), "Load and compare one L3 Host-side L3-L2 signal counter."
     );
     m.def(
-        "_l3_host_mapped_counter_wait",
+        "_worker_host_mapped_counter_wait",
         [](uint64_t handle, uint64_t counter_offset, int32_t operand, int cmp,
            uint64_t timeout_ns) -> std::tuple<int, int, int32_t, bool, std::string> {
-            L3HostMappedRegionLease mapping = l3_host_mapped_region_registry().lease(handle);
+            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
             return mapping->wait_counter(counter_offset, operand, checked_wait_cmp(cmp), timeout_ns);
         },
         nb::arg("handle"), nb::arg("counter_offset"), nb::arg("operand"), nb::arg("cmp"), nb::arg("timeout_ns"),

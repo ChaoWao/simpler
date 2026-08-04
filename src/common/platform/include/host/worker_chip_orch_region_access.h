@@ -20,7 +20,7 @@ enum class WorkerChipRegionAccessProfile : uint32_t {
     SIM_POSIX_SHM = 2,
 };
 
-struct L3HostRegionMappingHandle {
+struct WorkerHostRegionMappingHandle {
     uint64_t id{0};
     WorkerChipRegionAccessProfile profile{WorkerChipRegionAccessProfile::INVALID};
     uint64_t mapping_bytes{0};

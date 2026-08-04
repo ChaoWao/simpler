@@ -31,12 +31,12 @@ from simpler.worker_chip_message_queue import (
     make_worker_chip_queue_layout,
 )
 from simpler.worker_chip_orch_comm import (
-    L3HostRegionMapping,
     NotifyOp,
     WaitCmp,
     WorkerChipOrchRegion,
     WorkerChipOrchRegionDesc,
     WorkerChipRegionAccessProfile,
+    WorkerHostRegionMapping,
 )
 
 
@@ -235,25 +235,49 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
     _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
     fake_client = _FakeClient()
     fake_client.original_helpers = [
-        (worker_module, "_l3_host_mapped_region_import_sim", worker_module._l3_host_mapped_region_import_sim),
-        (worker_chip_orch_comm, "_l3_host_mapped_payload_write", worker_chip_orch_comm._l3_host_mapped_payload_write),
-        (worker_chip_orch_comm, "_l3_host_mapped_payload_read", worker_chip_orch_comm._l3_host_mapped_payload_read),
-        (worker_chip_orch_comm, "_l3_host_mapped_counter_notify", worker_chip_orch_comm._l3_host_mapped_counter_notify),
-        (worker_chip_orch_comm, "_l3_host_mapped_counter_test", worker_chip_orch_comm._l3_host_mapped_counter_test),
-        (worker_chip_orch_comm, "_l3_host_mapped_counter_wait", worker_chip_orch_comm._l3_host_mapped_counter_wait),
-        (worker_chip_orch_comm, "_l3_host_mapped_region_close", worker_chip_orch_comm._l3_host_mapped_region_close),
+        (worker_module, "_worker_host_mapped_region_import_sim", worker_module._worker_host_mapped_region_import_sim),
+        (
+            worker_chip_orch_comm,
+            "_worker_host_mapped_payload_write",
+            worker_chip_orch_comm._worker_host_mapped_payload_write,
+        ),
+        (
+            worker_chip_orch_comm,
+            "_worker_host_mapped_payload_read",
+            worker_chip_orch_comm._worker_host_mapped_payload_read,
+        ),
+        (
+            worker_chip_orch_comm,
+            "_worker_host_mapped_counter_notify",
+            worker_chip_orch_comm._worker_host_mapped_counter_notify,
+        ),
+        (
+            worker_chip_orch_comm,
+            "_worker_host_mapped_counter_test",
+            worker_chip_orch_comm._worker_host_mapped_counter_test,
+        ),
+        (
+            worker_chip_orch_comm,
+            "_worker_host_mapped_counter_wait",
+            worker_chip_orch_comm._worker_host_mapped_counter_wait,
+        ),
+        (
+            worker_chip_orch_comm,
+            "_worker_host_mapped_region_close",
+            worker_chip_orch_comm._worker_host_mapped_region_close,
+        ),
     ]
     worker._lifecycle = worker_module._Lifecycle.READY
     worker._worker = _FakeCWorker()
     worker._chip_shms = [shm]
     worker._worker_chip_test_fake_client = fake_client
-    worker_module._l3_host_mapped_region_import_sim = fake_client.import_region
-    worker_chip_orch_comm._l3_host_mapped_payload_write = fake_client.payload_write
-    worker_chip_orch_comm._l3_host_mapped_payload_read = fake_client.payload_read
-    worker_chip_orch_comm._l3_host_mapped_counter_notify = fake_client.counter_notify
-    worker_chip_orch_comm._l3_host_mapped_counter_test = fake_client.counter_test
-    worker_chip_orch_comm._l3_host_mapped_counter_wait = fake_client.counter_wait
-    worker_chip_orch_comm._l3_host_mapped_region_close = lambda _handle: None
+    worker_module._worker_host_mapped_region_import_sim = fake_client.import_region
+    worker_chip_orch_comm._worker_host_mapped_payload_write = fake_client.payload_write
+    worker_chip_orch_comm._worker_host_mapped_payload_read = fake_client.payload_read
+    worker_chip_orch_comm._worker_host_mapped_counter_notify = fake_client.counter_notify
+    worker_chip_orch_comm._worker_host_mapped_counter_test = fake_client.counter_test
+    worker_chip_orch_comm._worker_host_mapped_counter_wait = fake_client.counter_wait
+    worker_chip_orch_comm._worker_host_mapped_region_close = lambda _handle: None
     return Orchestrator(_FakeCOrch(), worker), worker, shm, fake_client
 
 
@@ -497,7 +521,7 @@ def test_enqueue_accepts_ordinary_host_bytes_with_direct_payload_write():
         _close(worker, shm)
 
 
-def test_l3_host_mapped_queue_ordinary_input_uses_direct_payload_write(monkeypatch):
+def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monkeypatch):
     orch = _FakeCOrch()
     layout = make_worker_chip_queue_layout(4, 128, 128)
     desc = WorkerChipOrchRegionDesc(
@@ -512,7 +536,7 @@ def test_l3_host_mapped_queue_ordinary_input_uses_direct_payload_write(monkeypat
         object(),
         0,
         desc,
-        L3HostRegionMapping(
+        WorkerHostRegionMapping(
             worker_id=0,
             region_id=1,
             access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
@@ -542,19 +566,19 @@ def test_l3_host_mapped_queue_ordinary_input_uses_direct_payload_write(monkeypat
     def counter_notify(_handle: int, offset: int, value: int, _op: int) -> None:
         counters[int(offset)] = int(value)
 
-    monkeypatch.setattr(worker_chip_orch_comm, "_l3_host_mapped_payload_write", payload_write)
+    monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_payload_write", payload_write)
     monkeypatch.setattr(
         worker_chip_orch_comm,
-        "_l3_host_mapped_counter_test",
+        "_worker_host_mapped_counter_test",
         lambda _h, off, _v, _cmp: (False, counters.get(off, 0)),
     )
-    monkeypatch.setattr(worker_chip_orch_comm, "_l3_host_mapped_counter_notify", counter_notify)
+    monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_counter_notify", counter_notify)
 
     queue.input.enqueue(b"ordinary", nbytes=8, timeout=0.001)
 
     assert (layout.input_arena_offset, b"ordinary") in payload_writes
     assert len(orch._buffers) == alloc_count
-    assert counters[region._l3_host_mapping.counter_offset + layout.input_desc_tail_offset] == 1
+    assert counters[region._worker_host_mapping.counter_offset + layout.input_desc_tail_offset] == 1
 
 
 def test_direct_mapped_ordinary_host_bytearray_does_not_allocate_queue_buffer():

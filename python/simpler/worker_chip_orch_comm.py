@@ -17,12 +17,12 @@ from enum import IntEnum
 from typing import Any
 
 from _task_interface import (  # pyright: ignore[reportMissingImports]
-    _l3_host_mapped_counter_notify,
-    _l3_host_mapped_counter_test,
-    _l3_host_mapped_counter_wait,
-    _l3_host_mapped_payload_read,
-    _l3_host_mapped_payload_write,
-    _l3_host_mapped_region_close,
+    _worker_host_mapped_counter_notify,
+    _worker_host_mapped_counter_test,
+    _worker_host_mapped_counter_wait,
+    _worker_host_mapped_payload_read,
+    _worker_host_mapped_payload_write,
+    _worker_host_mapped_region_close,
 )
 
 from .task_interface import Tensor
@@ -50,7 +50,7 @@ class WorkerChipRegionAccessProfile(IntEnum):
 
 _MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
 
-# Wire values returned by _l3_host_mapped_counter_wait in _task_interface; must
+# Wire values returned by _worker_host_mapped_counter_wait in _task_interface; must
 # match kWaitStatusTimeout / kWaitErrorSignalTimeout in task_interface.cpp.
 _WAIT_STATUS_TIMEOUT = -1
 _WAIT_ERROR_SIGNAL_TIMEOUT = 7
@@ -141,7 +141,7 @@ class WorkerChipRegionCreateReply:
 
 
 @dataclass
-class L3HostRegionMapping:
+class WorkerHostRegionMapping:
     worker_id: int
     region_id: int
     access_profile: WorkerChipRegionAccessProfile
@@ -157,7 +157,7 @@ class L3HostRegionMapping:
         if self.closed:
             return
         try:
-            _l3_host_mapped_region_close(int(self.handle))
+            _worker_host_mapped_region_close(int(self.handle))
         finally:
             self.closed = True
 
@@ -306,12 +306,12 @@ class WorkerChipOrchRegion:
         owner: Any,
         worker_id: int,
         desc: WorkerChipOrchRegionDesc,
-        l3_host_mapping: L3HostRegionMapping,
+        worker_host_mapping: WorkerHostRegionMapping,
     ) -> None:
         self._owner = owner
         self._worker_id = int(worker_id)
         self._descriptor = desc
-        self._l3_host_mapping = l3_host_mapping
+        self._worker_host_mapping = worker_host_mapping
         self._released = False
         self._poisoned = False
         self._expired = False
@@ -341,7 +341,7 @@ class WorkerChipOrchRegion:
             size = pinned.nbytes if nbytes is None else int(nbytes)
             self._validate_payload_range(offset, size, pinned.nbytes)
             try:
-                _l3_host_mapped_payload_write(int(self._l3_host_mapping.handle), int(offset), pinned.addr, size)
+                _worker_host_mapped_payload_write(int(self._worker_host_mapping.handle), int(offset), pinned.addr, size)
             except Exception:
                 self._poison()
                 raise
@@ -352,7 +352,7 @@ class WorkerChipOrchRegion:
             size = pinned.nbytes if nbytes is None else int(nbytes)
             self._validate_payload_range(offset, size, pinned.nbytes)
             try:
-                _l3_host_mapped_payload_read(int(self._l3_host_mapping.handle), int(offset), pinned.addr, size)
+                _worker_host_mapped_payload_read(int(self._worker_host_mapping.handle), int(offset), pinned.addr, size)
             except Exception:
                 self._poison()
                 raise
@@ -395,28 +395,28 @@ class WorkerChipOrchRegion:
         if offset + nbytes > payload_bytes:
             raise ValueError(f"L3-L2 payload range [{offset}, {offset + nbytes}) exceeds region size {payload_bytes}")
 
-    def _close_l3_host_mapping(self) -> None:
+    def _close_worker_host_mapping(self) -> None:
         try:
-            self._l3_host_mapping.close()
+            self._worker_host_mapping.close()
         except Exception:
             self._poison()
             raise
 
     def _direct_counter_notify(self, offset: int, value: int, op: NotifyOp) -> None:
-        l3_host_mapping = self._l3_host_mapping
-        mapping_offset = int(l3_host_mapping.counter_offset) + int(offset)
+        worker_host_mapping = self._worker_host_mapping
+        mapping_offset = int(worker_host_mapping.counter_offset) + int(offset)
         try:
-            _l3_host_mapped_counter_notify(int(l3_host_mapping.handle), mapping_offset, int(value), int(op))
+            _worker_host_mapped_counter_notify(int(worker_host_mapping.handle), mapping_offset, int(value), int(op))
         except Exception:
             self._poison()
             raise
 
     def _direct_counter_test(self, offset: int, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
-        l3_host_mapping = self._l3_host_mapping
-        mapping_offset = int(l3_host_mapping.counter_offset) + int(offset)
+        worker_host_mapping = self._worker_host_mapping
+        mapping_offset = int(worker_host_mapping.counter_offset) + int(offset)
         try:
-            matched, observed = _l3_host_mapped_counter_test(
-                int(l3_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp)
+            matched, observed = _worker_host_mapped_counter_test(
+                int(worker_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp)
             )
         except Exception:
             self._poison()
@@ -424,11 +424,11 @@ class WorkerChipOrchRegion:
         return SignalTestResult(matched=bool(matched), observed=int(observed))
 
     def _direct_counter_wait(self, offset: int, cmp_value: int, cmp: WaitCmp, timeout_ns: int) -> int:
-        l3_host_mapping = self._l3_host_mapping
-        mapping_offset = int(l3_host_mapping.counter_offset) + int(offset)
+        worker_host_mapping = self._worker_host_mapping
+        mapping_offset = int(worker_host_mapping.counter_offset) + int(offset)
         try:
-            status, error_kind, observed, _matched, message = _l3_host_mapped_counter_wait(
-                int(l3_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp), int(timeout_ns)
+            status, error_kind, observed, _matched, message = _worker_host_mapped_counter_wait(
+                int(worker_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp), int(timeout_ns)
             )
         except Exception:
             self._poison()

@@ -199,33 +199,33 @@ def _make_started_onboard_worker(platform: str = "a2a3") -> tuple[Worker, Shared
     return worker, shm, fake_c_worker
 
 
-def test_sim_direct_region_uses_lifecycle_control_and_l3_host_metadata(monkeypatch):
+def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monkeypatch):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     calls: list[tuple] = []
     try:
         monkeypatch.setattr(
             worker_module,
-            "_l3_host_mapped_region_import_sim",
+            "_worker_host_mapped_region_import_sim",
             lambda token, mapping_bytes, owner_token: calls.append(("import", token, mapping_bytes, owner_token)) or 99,
         )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_payload_write",
+            "_worker_host_mapped_payload_write",
             lambda handle, offset, src, nbytes: calls.append(("write", handle, offset, src, nbytes)),
         )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_payload_read",
+            "_worker_host_mapped_payload_read",
             lambda handle, offset, dst, nbytes: calls.append(("read", handle, offset, dst, nbytes)),
         )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_counter_notify",
+            "_worker_host_mapped_counter_notify",
             lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
         )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_counter_test",
+            "_worker_host_mapped_counter_test",
             lambda handle, offset, value, cmp: (calls.append(("test", handle, offset, value, cmp)) or (True, 7)),
         )
 
@@ -239,10 +239,10 @@ def test_sim_direct_region_uses_lifecycle_control_and_l3_host_metadata(monkeypat
         assert len(fake_c_worker.create_calls) == 1
         assert region.descriptor_scalars() == [0x4C334C3200020000, 1, 0xDEAD_0000, 64, 0xDEAD_0040, 128]
         assert 99 not in region.descriptor_scalars()
-        l3_host_mapping = region._l3_host_mapping
-        assert l3_host_mapping is not None
-        assert l3_host_mapping.handle != region.descriptor.payload_base
-        assert l3_host_mapping.counter_offset == 64
+        worker_host_mapping = region._worker_host_mapping
+        assert worker_host_mapping is not None
+        assert worker_host_mapping.handle != region.descriptor.payload_base
+        assert worker_host_mapping.counter_offset == 64
         assert calls[0] == ("import", "sim-direct-1", 192, worker._owner_id)
         assert calls[1][0:3] == ("write", 99, 0)
         assert calls[2][0:3] == ("read", 99, 8)
@@ -255,13 +255,13 @@ def test_sim_direct_region_uses_lifecycle_control_and_l3_host_metadata(monkeypat
         shm.unlink()
 
 
-def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_l3_host_metadata(monkeypatch):
+def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_worker_host_metadata(monkeypatch):
     worker, shm, fake_c_worker = _make_started_onboard_worker()
     calls: list[tuple] = []
     try:
         monkeypatch.setattr(
             worker_module,
-            "_l3_host_mapped_region_import_onboard",
+            "_worker_host_mapped_region_import_onboard",
             lambda device_id, shareable_handle, mapping_bytes, owner_token: calls.append(
                 ("import_onboard", device_id, shareable_handle, mapping_bytes, owner_token)
             )
@@ -269,7 +269,7 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_l3_host_met
         )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_counter_notify",
+            "_worker_host_mapped_counter_notify",
             lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
         )
 
@@ -279,10 +279,10 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_l3_host_met
         assert len(fake_c_worker.create_calls) == 1
         assert region.descriptor_scalars() == [0x4C334C3200020000, 1, 0xDEAD_0000, 64, 0xDEAD_0040, 128]
         assert 123 not in region.descriptor_scalars()
-        l3_host_mapping = region._l3_host_mapping
-        assert l3_host_mapping is not None
-        assert l3_host_mapping.access_profile == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
-        assert l3_host_mapping.counter_offset == 64
+        worker_host_mapping = region._worker_host_mapping
+        assert worker_host_mapping is not None
+        assert worker_host_mapping.access_profile == worker_chip_orch_comm.WorkerChipRegionAccessProfile.ONBOARD_VMM
+        assert worker_host_mapping.counter_offset == 64
         assert calls[0] == ("import_onboard", 2, 0xABCDEF, 192, worker._owner_id)
         assert calls[1] == ("notify", 123, 128, 9, int(NotifyOp.Set))
     finally:
@@ -296,7 +296,7 @@ def test_sim_direct_create_import_failure_rolls_back_l2_host_region(monkeypatch)
     try:
         monkeypatch.setattr(
             worker_module,
-            "_l3_host_mapped_region_import_sim",
+            "_worker_host_mapped_region_import_sim",
             lambda _token, _mapping_bytes, _owner_token: (_ for _ in ()).throw(RuntimeError("import failed")),
         )
 
@@ -362,7 +362,7 @@ def test_onboard_direct_mapping_bytes_too_small_rolls_back_l2_host_region(monkey
     try:
         monkeypatch.setattr(
             worker_module,
-            "_l3_host_mapped_region_import_onboard",
+            "_worker_host_mapped_region_import_onboard",
             lambda *args: calls.append(args) or 123,
         )
 
@@ -385,15 +385,15 @@ def test_onboard_direct_mapping_allows_granularity_aligned_mapping(monkeypatch):
     try:
         monkeypatch.setattr(
             worker_module,
-            "_l3_host_mapped_region_import_onboard",
+            "_worker_host_mapped_region_import_onboard",
             lambda *args: calls.append(args) or 123,
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
 
         assert calls == [(2, 0xABCDEF, 65536, worker._owner_id)]
-        assert region._l3_host_mapping is not None
-        assert region._l3_host_mapping.total_bytes == 192
+        assert region._worker_host_mapping is not None
+        assert region._worker_host_mapping.total_bytes == 192
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -411,10 +411,10 @@ def test_direct_region_create_rolls_back_partially_published_region(monkeypatch,
     resources = worker_module._RunResources()
     worker._building_run_resources = resources
     close_calls: list[int] = []
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
         worker_chip_orch_comm,
-        "_l3_host_mapped_region_close",
+        "_worker_host_mapped_region_close",
         lambda handle: close_calls.append(int(handle)),
     )
     if interrupted_publication == "worker":
@@ -448,10 +448,10 @@ def test_direct_region_create_mapping_rollback_failure_poisons_worker(monkeypatc
 
     worker, shm, fake_c_worker = _make_started_sim_worker()
     worker._live_worker_chip_regions = _AppendThenInterrupt()
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
     monkeypatch.setattr(
         worker_chip_orch_comm,
-        "_l3_host_mapped_region_close",
+        "_worker_host_mapped_region_close",
         lambda _handle: (_ for _ in ()).throw(RuntimeError("mapping close failed")),
     )
 
@@ -481,15 +481,15 @@ def test_unadopted_native_mapping_cleanup_failure_poisons_worker(monkeypatch):
         consumed_owner_tokens.append(owner_token)
         return next(cleanup_errors)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_ack_cleanup_error",
+        "_worker_host_mapped_region_ack_cleanup_error",
         lambda owner_token, observed: acknowledgements.append((owner_token, observed)),
     )
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_import_sim",
+        "_worker_host_mapped_region_import_sim",
         lambda _token, _size, _owner_token: (_ for _ in ()).throw(KeyboardInterrupt("interrupted native adoption")),
     )
 
@@ -517,7 +517,7 @@ def test_interrupted_cleanup_ack_happens_after_region_rollback(monkeypatch):
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda _owner_token: next(cleanup_errors),
     )
 
@@ -525,10 +525,10 @@ def test_interrupted_cleanup_ack_happens_after_region_rollback(monkeypatch):
         assert fake_c_worker.release_calls == [(0, 1)]
         raise ack_interrupt
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", interrupt_ack)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", interrupt_ack)
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_import_sim",
+        "_worker_host_mapped_region_import_sim",
         lambda _token, _size, _owner_token: (_ for _ in ()).throw(KeyboardInterrupt("interrupted native adoption")),
     )
 
@@ -538,7 +538,7 @@ def test_interrupted_cleanup_ack_happens_after_region_rollback(monkeypatch):
 
         assert caught.value is ack_interrupt
         assert fake_c_worker.release_calls == [(0, 1)]
-        assert worker._ordered_cleanup_error is worker._l3_host_mapped_cleanup_error
+        assert worker._ordered_cleanup_error is worker._worker_host_mapped_cleanup_error
     finally:
         worker._close_worker_chip_orch_comm()
         shm.close()
@@ -561,8 +561,8 @@ def test_deferred_native_cleanup_error_only_poisons_owning_worker_on_admission(m
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     with peer._operation_lease("submit"):
         pass
@@ -591,8 +591,8 @@ def test_close_consumes_only_its_deferred_native_cleanup_error(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     peer.close()
     with pytest.raises(RuntimeError, match="native L3 Host mapping") as excinfo:
@@ -622,8 +622,8 @@ def test_cleanup_error_survives_interrupted_peek_boundary(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     with pytest.raises(KeyboardInterrupt) as caught:
         with owner._operation_lease("submit"):
@@ -637,7 +637,7 @@ def test_cleanup_error_survives_interrupted_peek_boundary(monkeypatch):
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         with owner._operation_lease("submit"):
             pass
-    assert owner._ordered_cleanup_error is owner._l3_host_mapped_cleanup_error
+    assert owner._ordered_cleanup_error is owner._worker_host_mapped_cleanup_error
     assert errors == {}
 
 
@@ -650,7 +650,7 @@ def test_cleanup_error_ack_interrupt_happens_after_poison_publication(monkeypatc
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -662,14 +662,14 @@ def test_cleanup_error_ack_interrupt_happens_after_poison_publication(monkeypatc
             interrupt_ack_once = False
             raise interrupt
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     with pytest.raises(KeyboardInterrupt) as caught:
         with owner._operation_lease("submit"):
             pass
 
     assert caught.value is interrupt
-    assert owner._ordered_cleanup_error is owner._l3_host_mapped_cleanup_error
+    assert owner._ordered_cleanup_error is owner._worker_host_mapped_cleanup_error
     assert errors == {}
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         with owner._operation_lease("submit"):
@@ -683,7 +683,7 @@ def test_later_native_cleanup_error_is_retained_in_sticky_poison(monkeypatch):
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -691,7 +691,7 @@ def test_later_native_cleanup_error_is_retained_in_sticky_poison(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     with pytest.raises(RuntimeError, match="no further work is admitted"):
         with owner._operation_lease("submit"):
@@ -702,9 +702,9 @@ def test_later_native_cleanup_error_is_retained_in_sticky_poison(monkeypatch):
         with owner._operation_lease("submit"):
             pass
 
-    assert owner._l3_host_mapped_cleanup_error is not None
-    assert owner._l3_host_mapped_cleanup_error.__cause__ is not None
-    assert str(owner._l3_host_mapped_cleanup_error.__cause__) == "cleanup A; cleanup B"
+    assert owner._worker_host_mapped_cleanup_error is not None
+    assert owner._worker_host_mapped_cleanup_error.__cause__ is not None
+    assert str(owner._worker_host_mapped_cleanup_error.__cause__) == "cleanup A; cleanup B"
     assert errors == {}
 
 
@@ -717,7 +717,7 @@ def test_interrupted_ack_replay_does_not_duplicate_cleanup_detail(monkeypatch):
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -729,7 +729,7 @@ def test_interrupted_ack_replay_does_not_duplicate_cleanup_detail(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     with pytest.raises(KeyboardInterrupt) as caught:
         with owner._operation_lease("submit"):
@@ -740,9 +740,9 @@ def test_interrupted_ack_replay_does_not_duplicate_cleanup_detail(monkeypatch):
         with owner._operation_lease("submit"):
             pass
 
-    assert owner._l3_host_mapped_cleanup_error is not None
-    assert owner._l3_host_mapped_cleanup_error.__cause__ is not None
-    assert str(owner._l3_host_mapped_cleanup_error.__cause__) == "cleanup A"
+    assert owner._worker_host_mapped_cleanup_error is not None
+    assert owner._worker_host_mapped_cleanup_error.__cause__ is not None
+    assert str(owner._worker_host_mapped_cleanup_error.__cause__) == "cleanup A"
     assert errors == {}
 
 
@@ -752,7 +752,7 @@ def test_late_cleanup_error_after_successful_close_replays_stably(monkeypatch):
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -760,7 +760,7 @@ def test_late_cleanup_error_after_successful_close_replays_stably(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     worker.close()
     errors[worker._owner_id] = "late owner mapping cleanup failed"
@@ -785,7 +785,7 @@ def test_concurrent_close_publishes_joiner_cleanup_error_to_every_caller(monkeyp
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -793,7 +793,7 @@ def test_concurrent_close_publishes_joiner_cleanup_error_to_every_caller(monkeyp
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
 
     def teardown_tree() -> None:
         errors[worker._owner_id] = "joiner observed mapping cleanup failed"
@@ -834,7 +834,7 @@ def test_cleanup_error_after_final_consume_waits_for_next_close_attempt(monkeypa
 
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -842,7 +842,7 @@ def test_cleanup_error_after_final_consume_waits_for_next_close_attempt(monkeypa
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
     monkeypatch.setattr(worker, "_teardown_ready_tree", lambda: setattr(worker, "_worker", None))
 
     def has_live_resources() -> bool:
@@ -911,8 +911,8 @@ def test_wrong_thread_close_does_not_consume_owner_cleanup_error(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_peek_cleanup_error", peek_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
     monkeypatch.setattr(worker, "_teardown_ready_tree", lambda: setattr(worker, "_worker", None))
 
     def close_from_foreign_thread() -> None:
@@ -945,7 +945,7 @@ def test_cleanup_error_survives_close_drain_timeout_retry(monkeypatch):
     monkeypatch.setattr(worker_module, "_ROLLBACK_GRACEFUL_TIMEOUT_S", 0.001)
     monkeypatch.setattr(
         worker_module,
-        "_l3_host_mapped_region_peek_cleanup_error",
+        "_worker_host_mapped_region_peek_cleanup_error",
         lambda owner_token: errors.get(owner_token, ""),
     )
 
@@ -953,12 +953,12 @@ def test_cleanup_error_survives_close_drain_timeout_retry(monkeypatch):
         if errors.get(owner_token) == observed:
             errors.pop(owner_token)
 
-    monkeypatch.setattr(worker_module, "_l3_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
+    monkeypatch.setattr(worker_module, "_worker_host_mapped_region_ack_cleanup_error", acknowledge_cleanup_error)
     monkeypatch.setattr(worker, "_teardown_ready_tree", lambda: setattr(worker, "_worker", None))
 
     with pytest.raises(TimeoutError):
         worker.close()
-    assert worker._l3_host_mapped_cleanup_error is not None
+    assert worker._worker_host_mapped_cleanup_error is not None
     assert errors == {}
 
     worker._active_ops = 0
@@ -973,21 +973,21 @@ def test_cleanup_error_survives_close_drain_timeout_retry(monkeypatch):
 def test_native_mapping_cleanup_errors_are_keyed_by_owner_token():
     owner_token = "owner-a"
     peer_token = "owner-b"
-    _task_interface_ext._l3_host_mapped_region_take_cleanup_error(owner_token)
-    _task_interface_ext._l3_host_mapped_region_take_cleanup_error(peer_token)
+    _task_interface_ext._worker_host_mapped_region_take_cleanup_error(owner_token)
+    _task_interface_ext._worker_host_mapped_region_take_cleanup_error(peer_token)
 
-    _task_interface_ext._l3_host_mapped_region_record_cleanup_error_for_test(
+    _task_interface_ext._worker_host_mapped_region_record_cleanup_error_for_test(
         owner_token, "owner mapping cleanup failed"
     )
 
-    assert _task_interface_ext._l3_host_mapped_region_peek_cleanup_error(peer_token) == ""
-    observed = _task_interface_ext._l3_host_mapped_region_peek_cleanup_error(owner_token)
+    assert _task_interface_ext._worker_host_mapped_region_peek_cleanup_error(peer_token) == ""
+    observed = _task_interface_ext._worker_host_mapped_region_peek_cleanup_error(owner_token)
     assert observed == "owner mapping cleanup failed"
-    _task_interface_ext._l3_host_mapped_region_record_cleanup_error_for_test(owner_token, "later cleanup failed")
-    _task_interface_ext._l3_host_mapped_region_ack_cleanup_error(owner_token, observed)
-    assert _task_interface_ext._l3_host_mapped_region_peek_cleanup_error(owner_token) == "later cleanup failed"
-    _task_interface_ext._l3_host_mapped_region_ack_cleanup_error(owner_token, "later cleanup failed")
-    assert _task_interface_ext._l3_host_mapped_region_take_cleanup_error(owner_token) == ""
+    _task_interface_ext._worker_host_mapped_region_record_cleanup_error_for_test(owner_token, "later cleanup failed")
+    _task_interface_ext._worker_host_mapped_region_ack_cleanup_error(owner_token, observed)
+    assert _task_interface_ext._worker_host_mapped_region_peek_cleanup_error(owner_token) == "later cleanup failed"
+    _task_interface_ext._worker_host_mapped_region_ack_cleanup_error(owner_token, "later cleanup failed")
+    assert _task_interface_ext._worker_host_mapped_region_take_cleanup_error(owner_token) == ""
 
 
 def test_onboard_region_create_handler_uses_named_export_fields(monkeypatch):
@@ -1084,20 +1084,20 @@ def test_region_create_handler_rejects_abi_mismatch():
         reply_shm.unlink()
 
 
-def test_l3_host_mapped_counter_wait_releases_gil_for_python_notifier():
+def test_worker_host_mapped_counter_wait_releases_gil_for_python_notifier():
     shm = SharedMemory(create=True, size=64)
     handle = 0
     try:
-        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64, "counter-wait-test")
+        owner = _task_interface_ext._worker_host_mapped_region_import_sim(shm.name, 64, "counter-wait-test")
         handle = int(owner)
 
         def notify() -> None:
             time.sleep(0.05)
-            _task_interface_ext._l3_host_mapped_counter_notify(handle, 0, 1, int(NotifyOp.Set))
+            _task_interface_ext._worker_host_mapped_counter_notify(handle, 0, 1, int(NotifyOp.Set))
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(notify)
-            status, error_kind, observed, matched, message = _task_interface_ext._l3_host_mapped_counter_wait(
+            status, error_kind, observed, matched, message = _task_interface_ext._worker_host_mapped_counter_wait(
                 handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000
             )
             future.result(timeout=1.0)
@@ -1105,30 +1105,30 @@ def test_l3_host_mapped_counter_wait_releases_gil_for_python_notifier():
         assert (status, error_kind, observed, matched, message) == (0, 0, 1, True, "")
     finally:
         if handle:
-            _task_interface_ext._l3_host_mapped_region_close(handle)
+            _task_interface_ext._worker_host_mapped_region_close(handle)
         shm.close()
         shm.unlink()
 
 
-def test_l3_host_mapped_sim_payload_and_counter_helpers_roundtrip():
+def test_worker_host_mapped_sim_payload_and_counter_helpers_roundtrip():
     shm = SharedMemory(create=True, size=128)
     handle = 0
     try:
-        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 128, "roundtrip-test")
+        owner = _task_interface_ext._worker_host_mapped_region_import_sim(shm.name, 128, "roundtrip-test")
         handle = int(owner)
         src_t = ctypes.c_uint8 * 8
         src = src_t(*range(10, 18))
         dst = src_t()
 
-        _task_interface_ext._l3_host_mapped_payload_write(handle, 16, ctypes.addressof(src), 8)
-        _task_interface_ext._l3_host_mapped_payload_read(handle, 16, ctypes.addressof(dst), 8)
+        _task_interface_ext._worker_host_mapped_payload_write(handle, 16, ctypes.addressof(src), 8)
+        _task_interface_ext._worker_host_mapped_payload_read(handle, 16, ctypes.addressof(dst), 8)
         assert bytes(dst) == bytes(range(10, 18))
 
-        _task_interface_ext._l3_host_mapped_counter_notify(handle, 64, 3, int(NotifyOp.Set))
-        assert _task_interface_ext._l3_host_mapped_counter_test(handle, 64, 3, int(WaitCmp.EQ)) == (True, 3)
-        _task_interface_ext._l3_host_mapped_counter_notify(handle, 64, 4, int(NotifyOp.Add))
-        assert _task_interface_ext._l3_host_mapped_counter_test(handle, 64, 7, int(WaitCmp.GE)) == (True, 7)
-        assert _task_interface_ext._l3_host_mapped_counter_wait(handle, 64, 7, int(WaitCmp.EQ), 1_000_000) == (
+        _task_interface_ext._worker_host_mapped_counter_notify(handle, 64, 3, int(NotifyOp.Set))
+        assert _task_interface_ext._worker_host_mapped_counter_test(handle, 64, 3, int(WaitCmp.EQ)) == (True, 3)
+        _task_interface_ext._worker_host_mapped_counter_notify(handle, 64, 4, int(NotifyOp.Add))
+        assert _task_interface_ext._worker_host_mapped_counter_test(handle, 64, 7, int(WaitCmp.GE)) == (True, 7)
+        assert _task_interface_ext._worker_host_mapped_counter_wait(handle, 64, 7, int(WaitCmp.EQ), 1_000_000) == (
             0,
             0,
             7,
@@ -1136,47 +1136,47 @@ def test_l3_host_mapped_sim_payload_and_counter_helpers_roundtrip():
             "",
         )
 
-        _task_interface_ext._l3_host_mapped_region_close(handle)
+        _task_interface_ext._worker_host_mapped_region_close(handle)
         with pytest.raises(RuntimeError, match="closed or unknown"):
-            _task_interface_ext._l3_host_mapped_payload_read(handle, 16, ctypes.addressof(dst), 8)
+            _task_interface_ext._worker_host_mapped_payload_read(handle, 16, ctypes.addressof(dst), 8)
     finally:
         if handle:
-            _task_interface_ext._l3_host_mapped_region_close(handle)
+            _task_interface_ext._worker_host_mapped_region_close(handle)
         shm.close()
         shm.unlink()
 
 
-def test_l3_host_mapped_region_close_makes_sim_handle_unusable():
+def test_worker_host_mapped_region_close_makes_sim_handle_unusable():
     shm = SharedMemory(create=True, size=64)
     handle = 0
     try:
-        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64, "closed-handle-test")
+        owner = _task_interface_ext._worker_host_mapped_region_import_sim(shm.name, 64, "closed-handle-test")
         handle = int(owner)
-        _task_interface_ext._l3_host_mapped_region_close(handle)
+        _task_interface_ext._worker_host_mapped_region_close(handle)
 
         with pytest.raises(RuntimeError, match="closed or unknown"):
-            _task_interface_ext._l3_host_mapped_counter_test(handle, 0, 0, int(WaitCmp.EQ))
+            _task_interface_ext._worker_host_mapped_counter_test(handle, 0, 0, int(WaitCmp.EQ))
     finally:
         if handle:
-            _task_interface_ext._l3_host_mapped_region_close(handle)
+            _task_interface_ext._worker_host_mapped_region_close(handle)
         shm.close()
         shm.unlink()
 
 
-def test_l3_host_mapped_import_owner_closes_unadopted_mapping():
+def test_worker_host_mapped_import_owner_closes_unadopted_mapping():
     shm = SharedMemory(create=True, size=64)
     raw_handle = 0
     try:
-        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64, "unadopted-owner-test")
+        owner = _task_interface_ext._worker_host_mapped_region_import_sim(shm.name, 64, "unadopted-owner-test")
         raw_handle = int(owner)
         del owner
         gc.collect()
 
         with pytest.raises(RuntimeError, match="closed or unknown"):
-            _task_interface_ext._l3_host_mapped_counter_test(raw_handle, 0, 0, int(WaitCmp.EQ))
+            _task_interface_ext._worker_host_mapped_counter_test(raw_handle, 0, 0, int(WaitCmp.EQ))
     finally:
         if raw_handle:
-            _task_interface_ext._l3_host_mapped_region_close(raw_handle)
+            _task_interface_ext._worker_host_mapped_region_close(raw_handle)
         shm.close()
         shm.unlink()
 
@@ -1203,41 +1203,41 @@ def test_sim_import_registry_failure_releases_pre_registry_mapping():
 
     try:
         baseline = mapped_resource_counts()
-        _task_interface_ext._l3_host_mapped_region_take_cleanup_error(owner_token)
-        _task_interface_ext._l3_host_mapped_region_fail_next_registry_insert_for_test()
+        _task_interface_ext._worker_host_mapped_region_take_cleanup_error(owner_token)
+        _task_interface_ext._worker_host_mapped_region_fail_next_registry_insert_for_test()
 
         with pytest.raises(RuntimeError, match="injected mapped-region registry insertion failure"):
-            _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64, owner_token)
+            _task_interface_ext._worker_host_mapped_region_import_sim(shm.name, 64, owner_token)
 
         gc.collect()
         assert mapped_resource_counts() == baseline
-        assert _task_interface_ext._l3_host_mapped_region_take_cleanup_error(owner_token) == ""
+        assert _task_interface_ext._worker_host_mapped_region_take_cleanup_error(owner_token) == ""
     finally:
         shm.close()
         shm.unlink()
 
 
-def test_l3_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
+def test_worker_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
     shm = SharedMemory(create=True, size=64)
     handle = 0
     try:
-        owner = _task_interface_ext._l3_host_mapped_region_import_sim(shm.name, 64, "concurrent-close-test")
+        owner = _task_interface_ext._worker_host_mapped_region_import_sim(shm.name, 64, "concurrent-close-test")
         handle = int(owner)
         close_entered = [threading.Event(), threading.Event()]
         close_done = [threading.Event(), threading.Event()]
 
         def wait_for_counter():
-            return _task_interface_ext._l3_host_mapped_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000)
+            return _task_interface_ext._worker_host_mapped_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000)
 
         def close_mapping(index: int) -> None:
             close_entered[index].set()
-            _task_interface_ext._l3_host_mapped_region_close(handle)
+            _task_interface_ext._worker_host_mapped_region_close(handle)
             close_done[index].set()
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             wait_future = executor.submit(wait_for_counter)
             deadline = time.monotonic() + 1.0
-            while _task_interface_ext._l3_host_mapped_region_active_leases(handle) != 1:
+            while _task_interface_ext._worker_host_mapped_region_active_leases(handle) != 1:
                 assert time.monotonic() < deadline, "counter wait never acquired its mapped-region lease"
                 time.sleep(0.001)
 
@@ -1253,10 +1253,10 @@ def test_l3_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
                 close_future.result(timeout=1.0)
 
         with pytest.raises(RuntimeError, match="closed or unknown"):
-            _task_interface_ext._l3_host_mapped_counter_test(handle, 0, 1, int(WaitCmp.EQ))
+            _task_interface_ext._worker_host_mapped_counter_test(handle, 0, 1, int(WaitCmp.EQ))
     finally:
         if handle:
-            _task_interface_ext._l3_host_mapped_region_close(handle)
+            _task_interface_ext._worker_host_mapped_region_close(handle)
         shm.close()
         shm.unlink()
 
@@ -1264,10 +1264,12 @@ def test_l3_host_mapped_concurrent_closes_wait_for_in_flight_counter_wait():
 def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
     worker, shm, _fake_c_worker = _make_started_sim_worker()
     try:
-        monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55)
+        monkeypatch.setattr(
+            worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55
+        )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_payload_write",
+            "_worker_host_mapped_payload_write",
             lambda _handle, _offset, _src, _nbytes: (_ for _ in ()).throw(RuntimeError("copy failed")),
         )
 
@@ -1283,7 +1285,7 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
         shm.unlink()
 
 
-def test_sim_direct_cleanup_closes_l3_host_mapping_before_l2_host_release(monkeypatch):
+def test_sim_direct_cleanup_closes_worker_host_mapping_before_l2_host_release(monkeypatch):
     worker, shm, fake_c_worker = _make_started_sim_worker()
     events: list[tuple[str, int]] = []
     original_release = fake_c_worker.control_worker_chip_region_release
@@ -1294,10 +1296,12 @@ def test_sim_direct_cleanup_closes_l3_host_mapping_before_l2_host_release(monkey
 
     try:
         fake_c_worker.control_worker_chip_region_release = release
-        monkeypatch.setattr(worker_module, "_l3_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 77)
+        monkeypatch.setattr(
+            worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 77
+        )
         monkeypatch.setattr(
             worker_chip_orch_comm,
-            "_l3_host_mapped_region_close",
+            "_worker_host_mapped_region_close",
             lambda handle: events.append(("close", int(handle))),
         )
 

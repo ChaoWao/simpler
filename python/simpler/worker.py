@@ -89,13 +89,13 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
-    _l3_host_mapped_region_ack_cleanup_error,
-    _l3_host_mapped_region_close,
-    _l3_host_mapped_region_import_onboard,
-    _l3_host_mapped_region_import_sim,
-    _l3_host_mapped_region_peek_cleanup_error,
     _mailbox_load_i32,
     _mailbox_store_i32,
+    _worker_host_mapped_region_ack_cleanup_error,
+    _worker_host_mapped_region_close,
+    _worker_host_mapped_region_import_onboard,
+    _worker_host_mapped_region_import_sim,
+    _worker_host_mapped_region_peek_cleanup_error,
     read_args_from_blob,
 )
 
@@ -139,10 +139,10 @@ from .worker_chip_orch_comm import (
     _REGION_CREATE_REQUEST_BYTES,
     _REGION_LAYOUT_ALIGNMENT,
     _REGION_MAGIC_VERSION,
-    L3HostRegionMapping,
     WorkerChipOrchRegion,
     WorkerChipRegionAccessProfile,
     WorkerChipRegionCreateRequest,
+    WorkerHostRegionMapping,
     _align_up,
     _checked_add_u64,
     decode_region_create_reply,
@@ -3904,13 +3904,13 @@ class Worker:
         # Sticky copy of this Worker's native return-boundary mapping cleanup
         # diagnostic. Native storage is acknowledged only after this field and
         # the admission poison above have been published.
-        self._l3_host_mapped_cleanup_error: RuntimeError | None = None
+        self._worker_host_mapped_cleanup_error: RuntimeError | None = None
         # (snapshot awaiting acknowledgement, retained distinct detail
         # fragments). This is an ordered diagnostic set, not a resource-count
         # ledger: an identical repeated failure adds no actionable information.
         # Keep it immutable so one attribute assignment publishes both pieces
         # atomically with respect to asynchronous Python exceptions.
-        self._l3_host_mapped_cleanup_state: tuple[str | None, tuple[str, ...]] = (None, ())
+        self._worker_host_mapped_cleanup_state: tuple[str | None, tuple[str, ...]] = (None, ())
         # submit graph construction is serialized by _submit_mu. Resource
         # creation helpers use this pointer to bind new objects to the handle
         # being built; the pointer is cleared before submit() returns.
@@ -5209,7 +5209,7 @@ class Worker:
         callable registration / host-buffer / remote-memory)."""
         tid = threading.get_ident()
         with self._hierarchical_start_cv:
-            self._consume_l3_host_mapped_cleanup_error_locked(api)
+            self._consume_worker_host_mapped_cleanup_error_locked(api)
             if self._lifecycle is not _Lifecycle.READY:
                 raise RuntimeError(f"Worker.{api}: requires an initialized (READY) worker") from self._startup_error
             if self._ordered_cleanup_error is not None:
@@ -6999,7 +6999,7 @@ class Worker:
                 f"L3-L2 payload Tensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
             )
 
-    def _consume_l3_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
+    def _consume_worker_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
         """Publish and then acknowledge this Worker's native cleanup debt.
 
         Must hold ``_hierarchical_start_cv``. The native read is intentionally
@@ -7008,12 +7008,12 @@ class Worker:
         boundary. Acknowledgement may be interrupted only after admission is
         already poisoned.
         """
-        cleanup_error = _l3_host_mapped_region_peek_cleanup_error(self._owner_id)
-        pending_snapshot, details = self._l3_host_mapped_cleanup_state
+        cleanup_error = _worker_host_mapped_region_peek_cleanup_error(self._owner_id)
+        pending_snapshot, details = self._worker_host_mapped_cleanup_state
         if not cleanup_error:
             if pending_snapshot is not None:
-                self._l3_host_mapped_cleanup_state = (None, details)
-            return self._l3_host_mapped_cleanup_error
+                self._worker_host_mapped_cleanup_state = (None, details)
+            return self._worker_host_mapped_cleanup_error
 
         if cleanup_error != pending_snapshot:
             detail = cleanup_error
@@ -7024,26 +7024,26 @@ class Worker:
                 detail = cleanup_error[len(pending_snapshot) + 2 :]
             if detail and detail not in details:
                 details = (*details, detail)
-            self._l3_host_mapped_cleanup_state = (cleanup_error, details)
+            self._worker_host_mapped_cleanup_state = (cleanup_error, details)
 
-        leaked = self._l3_host_mapped_cleanup_error
+        leaked = self._worker_host_mapped_cleanup_error
         if leaked is None:
             leaked = RuntimeError(
                 f"Worker.{api}: a native L3 Host mapping owned by this Worker finalized without explicit close "
                 "and could not be reclaimed; no further work is admitted"
             )
-            self._l3_host_mapped_cleanup_error = leaked
+            self._worker_host_mapped_cleanup_error = leaked
         leaked.__cause__ = RuntimeError("; ".join(details))
         if self._ordered_cleanup_error is None:
             self._ordered_cleanup_error = leaked
 
-        _l3_host_mapped_region_ack_cleanup_error(self._owner_id, cleanup_error)
-        self._l3_host_mapped_cleanup_state = (None, details)
-        return self._l3_host_mapped_cleanup_error
+        _worker_host_mapped_region_ack_cleanup_error(self._owner_id, cleanup_error)
+        self._worker_host_mapped_cleanup_state = (None, details)
+        return self._worker_host_mapped_cleanup_error
 
-    def _consume_l3_host_mapped_cleanup_error(self, api: str) -> RuntimeError | None:
+    def _consume_worker_host_mapped_cleanup_error(self, api: str) -> RuntimeError | None:
         with self._hierarchical_start_cv:
-            return self._consume_l3_host_mapped_cleanup_error_locked(api)
+            return self._consume_worker_host_mapped_cleanup_error_locked(api)
 
     def _create_worker_chip_region(self, worker_id: int, payload_bytes: int, counter_bytes: int):  # noqa: PLR0912
         if payload_bytes <= 0:
@@ -7051,7 +7051,7 @@ class Worker:
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
             raise ValueError("create_worker_chip_region: counter_bytes must be positive and a multiple of 4")
         self._validate_worker_chip_id(int(worker_id))
-        prior_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("create_worker_chip_region")
+        prior_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error("create_worker_chip_region")
         if prior_native_cleanup_error is not None:
             raise prior_native_cleanup_error
         resources = self._building_run_resources
@@ -7061,7 +7061,7 @@ class Worker:
         reply_buf = cast(memoryview, reply_shm.buf)
         region_id = 0
         native_mapping_handle = None
-        l3_host_mapping = None
+        worker_host_mapping = None
         region = None
         dispatched = False
         required_ordered_cleanup_before = resources.requires_ordered_cleanup if resources is not None else False
@@ -7093,17 +7093,17 @@ class Worker:
             )
             counter_offset, total_bytes = validate_region_create_reply(reply, expected_access_profile)
             if platform.endswith("sim"):
-                native_mapping_handle = _l3_host_mapped_region_import_sim(
+                native_mapping_handle = _worker_host_mapped_region_import_sim(
                     reply.backing_shm, int(reply.mapping_bytes), self._owner_id
                 )
             else:
-                native_mapping_handle = _l3_host_mapped_region_import_onboard(
+                native_mapping_handle = _worker_host_mapped_region_import_onboard(
                     int(reply.device_id),
                     int(reply.shareable_handle),
                     int(reply.mapping_bytes),
                     self._owner_id,
                 )
-            l3_host_mapping = L3HostRegionMapping(
+            worker_host_mapping = WorkerHostRegionMapping(
                 worker_id=int(worker_id),
                 region_id=region_id,
                 access_profile=reply.access_profile,
@@ -7115,7 +7115,7 @@ class Worker:
                 handle=native_mapping_handle,
             )
             native_mapping_handle = None
-            region = WorkerChipOrchRegion(self, int(worker_id), reply.desc, l3_host_mapping)
+            region = WorkerChipOrchRegion(self, int(worker_id), reply.desc, worker_host_mapping)
             self._live_worker_chip_regions.append(region)
             if resources is not None:
                 resources.worker_chip_regions.append(region)
@@ -7136,14 +7136,14 @@ class Worker:
                         pass
                     resources.requires_ordered_cleanup = required_ordered_cleanup_before
                 region._expire()
-            if l3_host_mapping is not None:
+            if worker_host_mapping is not None:
                 try:
-                    l3_host_mapping.close()
+                    worker_host_mapping.close()
                 except BaseException as mapping_exc:  # noqa: BLE001
                     mapping_cleanup_error = mapping_exc
             elif native_mapping_handle is not None:
                 try:
-                    _l3_host_mapped_region_close(int(native_mapping_handle))
+                    _worker_host_mapped_region_close(int(native_mapping_handle))
                 except BaseException as mapping_exc:  # noqa: BLE001
                     mapping_cleanup_error = mapping_exc
             if not region_id:
@@ -7182,7 +7182,7 @@ class Worker:
                         f"{int(worker_id)}; it is leaked and no further work is admitted",
                         release_exc,
                     )
-            deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error(
+            deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error(
                 "create_worker_chip_region rollback"
             )
             if deferred_native_cleanup_error is not None:
@@ -7222,7 +7222,7 @@ class Worker:
         errors: list[BaseException] = []
         for region in regions:
             try:
-                region._close_l3_host_mapping()
+                region._close_worker_host_mapping()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
             try:
@@ -7262,7 +7262,7 @@ class Worker:
     def _close_worker_chip_orch_comm(self) -> None:
         for region in self._live_worker_chip_regions:
             try:
-                region._close_l3_host_mapping()
+                region._close_worker_host_mapping()
             except RuntimeError:
                 pass
         self._live_worker_chip_regions.clear()
@@ -8915,7 +8915,7 @@ class Worker:
                     and self._cleanup_journal.empty
                     and (self._teardown_attempted or prior.error is None)
                 ):
-                    deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
+                    deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error_locked("close")
                     if prior.error is not None:
                         raise prior.error
                     if deferred_native_cleanup_error is not None:
@@ -8930,7 +8930,7 @@ class Worker:
                         "Worker.close(): a worker with a live native tree must be closed on the thread that "
                         "init()'d it (native teardown is thread-bound)"
                     )
-                deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
+                deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error_locked("close")
                 # Claim: publish CLOSED (permanent admission fence) and install a
                 # fresh teardown attempt.
                 self._lifecycle = _Lifecycle.CLOSED
@@ -9009,7 +9009,7 @@ class Worker:
                 had_live = True  # conservative default if a read below is interrupted
                 detached_registry: tuple[dict, dict, dict] | None = None
                 try:
-                    deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("close")
+                    deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error("close")
                     if result is None and deferred_native_cleanup_error is not None:
                         result = deferred_native_cleanup_error
                     # A successful tree teardown is the reclamation boundary

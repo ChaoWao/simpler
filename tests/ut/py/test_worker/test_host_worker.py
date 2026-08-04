@@ -3671,7 +3671,7 @@ class TestRunHandle:
                 self.mapping_closed = False
                 self.expired = False
 
-            def _close_l3_host_mapping(self):
+            def _close_worker_host_mapping(self):
                 self.mapping_closed = True
 
             def _expire(self):
@@ -3765,7 +3765,7 @@ class TestRunHandle:
             def __init__(self):
                 self.expired = False
 
-            def _close_l3_host_mapping(self):
+            def _close_worker_host_mapping(self):
                 raise mapping_error
 
             def _expire(self):
@@ -3826,7 +3826,7 @@ class TestRunHandle:
                 self.mapping_closes = 0
                 self.expires = 0
 
-            def _close_l3_host_mapping(self):
+            def _close_worker_host_mapping(self):
                 self.mapping_closes += 1
 
             def _expire(self):
