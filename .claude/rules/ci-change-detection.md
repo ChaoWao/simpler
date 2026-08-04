@@ -1,13 +1,15 @@
 # CI Change Detection and Job Gating
 
-Every *downstream* PR job in `.github/workflows/ci.yml` is gated by an output
-of the `detect-changes` job. Two are deliberately ungated: `detect-changes`
-itself, which produces the outputs, and `pre-commit`, which every gated job
-declares in `needs:` and which must therefore always run. Those gates decide
-whether a change occupies four self-hosted NPU machines for ten minutes or
-finishes in ninety seconds on a GitHub runner. They are cheap to get subtly wrong and the symptom is silent —
-a job that should have skipped merely *passes*, so nobody notices until a
-flake in it reddens an unrelated PR.
+Every *downstream* PR job in `.github/workflows/ci.yml` and the emergency CPU
+lane in `.github/workflows/ci-self-cpu.yml` is gated by an output of the
+canonical `.github/workflows/_detect-changes.yml` reusable workflow. Two jobs
+are deliberately ungated in the main CI path: `detect-changes` itself, which
+produces the outputs, and `pre-commit`, which every gated job declares in
+`needs:` and which must therefore always run. Those gates decide whether a
+change occupies four self-hosted NPU machines for ten minutes or finishes in
+ninety seconds on a GitHub runner. They are cheap to get subtly wrong and the
+symptom is silent — a job that should have skipped merely *passes*, so nobody
+notices until a flake in it reddens an unrelated PR.
 
 This rule is about keeping the gates honest. It is not a description of the
 current filters; those change. It is the set of invariants they must satisfy.
@@ -36,9 +38,10 @@ A file belongs in `NON_CODE` when changing it cannot change what the code does
 - `mkdocs.yml` sits at the repo root and is pure docs tooling. **In.**
 - `.github/workflows/docs.yml` is a workflow, and is also pure docs tooling —
   and it runs unconditionally on every PR, so it is its own gate. **In.**
-- `.github/workflows/ci.yml` defines the gates themselves. **Out, always.** A
-  change to the gating must run everything, including the jobs it might have
-  just switched off.
+- `.github/workflows/ci.yml`, `.github/workflows/ci-self-cpu.yml`, and the
+  reusable `.github/workflows/_*.yml` CI implementation workflows define gates
+  or job bodies. **Out, always.** A change to CI implementation must run
+  everything, including the jobs it might have just switched off.
 
 The corollary is a habit, not a pattern: **adding a top-level config file or a
 tooling workflow is a change-detection event.** Ask whether `NON_CODE` needs to
@@ -94,13 +97,13 @@ contracts, so the cost of a falsely-skipped regression outweighs the minutes.
 That is a decision about the *arch* axis only; the category axis is a different
 question, because a scene-test-only change genuinely cannot break a unit test.
 
-The vocabulary exists twice. `ci-self-cpu.yml` runs its own lane-local
-`detect-changes` with the same outputs, and its file header says the two must
-be kept in sync. That has now failed twice — `examples_only` never reached the
-lane (#1607), and `tests_only` did not either (#1635) — because the gate tables
-here only name `ci.yml`. Any change to an axis therefore means two files:
-`.github/workflows/ci.yml` and `.github/workflows/ci-self-cpu.yml`, same commit,
-and the outputs-consistency grep in §7 runs against both.
+The vocabulary exists once, in `.github/workflows/_detect-changes.yml`. Both
+`.github/workflows/ci.yml` and `.github/workflows/ci-self-cpu.yml` call that
+workflow and consume the same output names. Do not reintroduce a lane-local
+copy. That copy drifted twice — `examples_only` never reached the CPU lane
+(#1607), and `tests_only` did not either (#1635). Any change to an axis now
+means one detector file plus any consumers whose `if:` expression actually
+changes.
 
 ### Write every axis in the same shape
 
@@ -176,15 +179,23 @@ Confirm the jobs you expected to skip report `skipping`, not `pass`. **A gating
 bug shows up as a green check, so "CI passed" is not evidence.** Where the
 change is to `NON_CODE` itself, replay the pattern locally against
 representative file lists — a docs-only set, a `.gitignore`-only set, a
-single-arch set, a `ci.yml` set — and check all four land where you intended
-before pushing. Where the change is to an *axis*, also verify both workflow
-copies expose the same output set — the lane drifted twice because only
-`ci.yml` was checked:
+single-arch set, a CI workflow set — and check all four land where you
+intended before pushing. Where the change is to an *axis*, also verify both callers
+consume only outputs declared by the canonical reusable workflow:
 
 ```bash
-for f in ci.yml ci-self-cpu.yml; do
-  echo "== $f"; grep -oE 'outputs\.[a-z_]+' ".github/workflows/$f" | sort -u
-done   # the two lists must be identical
+echo "== declared by _detect-changes.yml"
+awk '
+  /^jobs:/ { in_outputs = 0; seen_jobs = 1; next }
+  !seen_jobs && /^    outputs:/ { in_outputs = 1; next }
+  in_outputs && /^    [a-z0-9_]+:/ { in_outputs = 0 }
+  in_outputs && /^      [a-z0-9_]+:/ { print }
+' .github/workflows/_detect-changes.yml | sed 's/[ :]*//g' | sort -u
+
+echo "== consumed by callers"
+grep -h -oE 'needs\.detect-changes\.outputs\.[a-z0-9_]+' \
+  .github/workflows/ci.yml .github/workflows/ci-self-cpu.yml |
+  sed 's/.*outputs\.//' | sort -u
 ```
 
 ## Relation to the other rules

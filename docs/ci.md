@@ -24,13 +24,22 @@ The complete test-type × hardware-tier matrix. Empty cells have no tests yet; o
 
 ## GitHub Actions Jobs
 
+`ci.yml` and `ci-self-cpu.yml` are now thin topology callers: they own
+triggers, `needs:`, gate `if:` expressions, runner/setup inputs, and matrix
+shape. The executable job bodies live in reusable workflows:
+`_detect-changes.yml`, `_pre-commit.yml`, `_ut-no-hardware.yml`,
+`_packaging.yml`, `_profiling-flags-smoke.yml`, `_st-sim.yml`,
+`_ut-npu.yml`, and `_st-npu.yml`. Shared step scaffolding that is safe to run
+after checkout lives in composite actions under `.github/actions/`
+(`cache-pip`, `setup-venv`).
+
 ```text
 PullRequest
   ├── pre-commit             (ubuntu-latest)
   ├── packaging-matrix       (ubuntu + macOS)        — [needs !examples_only && !tests_only]
   ├── profiling-flags-smoke  (ubuntu-latest)         — (a2a3_changed || a5_changed) && !examples_only && !tests_only
   ├── ut                     (ubuntu + macOS)        — Python + C++ UT, no hardware [needs ut_affected]
-  ├── detect-changes         (ubuntu-latest)         — outputs non_code_only, a{2a3,5}_changed, {st,ut}_affected, examples_only, tests_only
+  ├── detect-changes         (reusable; ubuntu-latest in ci.yml) — outputs non_code_only, a{2a3,5}_changed, {st,ut}_affected, examples_only, tests_only
   ├── st-sim-a2a3            (ubuntu + macOS)        — a2a3_changed && st_affected
   ├── st-sim-a5              (ubuntu + macOS)        — a5_changed && st_affected
   ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [needs ut_affected]
@@ -131,7 +140,7 @@ not need `--max-parallel` manually.
 ### Scheduling constraints
 
 - Sim scene tests and no-hardware unit tests run on github-hosted runners (no hardware).
-- `detect-changes` computes four axes from the PR diff — non-code (`non_code_only`), architecture (`a2a3_changed` / `a5_changed`), test category (`st_affected` / `ut_affected`), and corpus (`examples_only` / `tests_only`) — **all of them derived from one `NON_CODE` set**: `docs/`, `.docs/`, `.claude/`, `mkdocs.yml`, `.github/workflows/docs.yml`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere. Membership follows a file's *effect*, not its path — `mkdocs.yml` and `docs.yml` are docs tooling that happens to live outside `docs/`. An arch flag is `false` only when every changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in `NON_CODE`. Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or **`.github/workflows/ci.yml` itself** — flips both flags to `true`. `ci.yml` is deliberately excluded from `NON_CODE`: a change to the gates must run everything, including whatever it just switched off.
+- `detect-changes` is implemented once in [`.github/workflows/_detect-changes.yml`](../.github/workflows/_detect-changes.yml) and computes four axes from the PR diff — non-code (`non_code_only`), architecture (`a2a3_changed` / `a5_changed`), test category (`st_affected` / `ut_affected`), and corpus (`examples_only` / `tests_only`) — **all of them derived from one `NON_CODE` set**: `docs/`, `.docs/`, `.claude/`, `mkdocs.yml`, `.github/workflows/docs.yml`, `.gitignore`, `.pre-commit-config.yaml`, and any `*.md` file anywhere. Membership follows a file's *effect*, not its path — `mkdocs.yml` and `docs.yml` are docs tooling that happens to live outside `docs/`. An arch flag is `false` only when every changed file is in the opposite platform's tree (`src/{arch}/`, `examples/{arch}/`, `tests/{st,ut/cpp}/{arch}/`) or in `NON_CODE`. Anything else — shared C++ (`src/common/`), Python (`python/`, `simpler_setup/`), build files (`CMakeLists.txt`, `pyproject.toml`), shared test infra (`tests/ut/py/`, `tests/lint/`), tooling (`tools/`), or any CI implementation workflow (`.github/workflows/ci.yml`, `.github/workflows/ci-self-cpu.yml`, `.github/workflows/_*.yml`) — flips both flags to `true`. CI implementation workflows are deliberately excluded from `NON_CODE`: a change to the gates or reusable job bodies must run everything, including whatever it just switched off.
 - **Test-category axis:** `ST_ONLY='^(tests/st/|examples/)'` and `UT_ONLY='^tests/ut/'`, applied in the same shape as the arch patterns — a category is unaffected only when *every* changed file is exclusively the other's. `st_affected` gates the four scene-test jobs; `ut_affected` gates `ut`, `ut-a2a3`, `ut-a5`. Anything belonging to neither (root `conftest.py`, `pyproject.toml`, `simpler_setup/`, `tests/lint/`) flips both, so shared infrastructure always runs both suites.
 - **Corpus axis:** `EXAMPLES_ONLY='^examples/'` and `TESTS_ONLY='^(tests/)'`, same shape again, one per side of the product jobs' payload. `packaging-matrix` and `profiling-flags-smoke` build and install the product and then exercise it with a fixed, tiny payload — one entry-point script (a `tests/st/` file) and one `vector_example` — so neither reads either suite as a corpus, and a diff confined to `examples/` or to `tests/` cannot reach them: `wheel.packages` is `["simpler_setup", "python/simpler"]`, so both partitions are provably absent from the product. A payload file changed under either is still exercised by the scene-test job that reads the same corpus.
 - **Gated jobs (scene tests):** `st-sim-{a2a3,a5}`, `st-onboard-{a2a3,a5}` run iff their platform's flag **and** `st_affected` are `true`.
@@ -158,9 +167,12 @@ queueing entirely:
   no-hardware Linux jobs (`pre-commit`, `ut`, `packaging`, `profiling-flags-smoke`,
   `st-sim-{a2a3,a5}`) on `[self-hosted, cpu]` — and T3 — the NPU jobs
   (`ut-a2a3`, `st-onboard-a2a3`, `ut-a5`, `st-onboard-a5`) on
-  `[self-hosted, a2a3/a5]`. T2 (macOS) is intentionally absent. A lane-local
-  `detect-changes` (same `NON_CODE` vocabulary and gates as `ci.yml` — keep the
-  two copies in sync) skips jobs a diff cannot affect.
+  `[self-hosted, a2a3/a5]`. T2 (macOS) is intentionally absent. The lane calls
+  the same reusable job-body workflows as `ci.yml`, passing
+  `setup_variant=self-cpu`, `repository`, `ref`, and self-hosted runner labels
+  where the main CI passes `setup_variant=github` and GitHub-hosted runners.
+  Gate outputs still come from the canonical `detect-changes` workflow, executed
+  on `[self-hosted, cpu]` in this lane.
 - **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel; `g++-15` is a symlink stand-in for the ubuntu-toolchain ppa g++. On the agents `g++` resolves to a conda GCC 15 prefix rather than `/usr/bin/g++`, so the lane's sim artifacts are built with GCC 15 and `compile_commands.json` names that prefix's `<triple>-g++`; `tests/lint/clang_tidy.py` drops the triple before replaying a command, without which clang-tidy adopts it as a target and resolves no C++ standard library at all. `ci.yml` lints with clang-tidy 18 and HCE 2.0 packages only LLVM 12, so an agent additionally provides 18 on `PATH` as `clang-tidy-18`, installed together with its clang builtin headers — a clang-tidy whose prefix carries no `lib/clang/<major>/include` resolves no resource dir and fails every `#include <stddef.h>`. The `pre-commit` job shadows the distro `clang-tidy` with it when present.
 - The lane run is standalone — it attaches no checks to the PR; results are read from the run.
 
