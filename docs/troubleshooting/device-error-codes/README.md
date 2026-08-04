@@ -24,4 +24,4 @@ the reported code or watchdog signature, then use the matching guide below.
 | -------- | -------------- |
 | [Local Runtime Timeouts](../local-timeout-defaults.md) | Default watchdog ordering and local overrides used to expose the most useful failure code |
 | [Debug a Failed Run](../../user/how-to/debug-a-failed-run.md) | User-facing first-response workflow for collecting and classifying failure evidence |
-| [L0 Swimlane Profiling](../../dfx/l0-swimlane-profiling.md) | Intra-core task timing for kernels that run but are unexpectedly slow |
+| [Core Swimlane Profiling](../../dfx/core-swimlane-profiling.md) | Intra-core task timing for kernels that run but are unexpectedly slow |

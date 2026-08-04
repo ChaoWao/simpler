@@ -9,12 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Element-wise Tensor Addition Kernel
+ * Element-wise ChipTensor Addition Kernel
  *
  * Implements: out[i] = src0[i] + src1[i]
  * Tile size: ROWS x COLS
  *
- * Args (Tensor*):
+ * Args (ChipTensor*):
  *   args[0] = src0 (INPUT)  - ROWS x COLS
  *   args[1] = src1 (INPUT)  - ROWS x COLS
  *   args[2] = out (OUTPUT)  - ROWS x COLS
@@ -37,7 +37,7 @@ using namespace pto;
 #define __aicore__ [aicore]
 #endif
 
-static __aicore__ inline int get_num_tiles(__gm__ Tensor *tensor, uint64_t tile_elems) {
+static __aicore__ inline int get_num_tiles(__gm__ ChipTensor *tensor, uint64_t tile_elems) {
     uint64_t total_elems = tensor->shapes[0];
     return static_cast<int>(total_elems / tile_elems);
 }
@@ -72,9 +72,9 @@ static __aicore__ void add_impl(__gm__ float *src0, __gm__ float *src1, __gm__ f
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *src0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *src1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *src0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *src1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
 
     constexpr uint64_t TILE_ELEMS = 128 * 128;
     int num_tiles = get_num_tiles(src0_tensor, TILE_ELEMS);

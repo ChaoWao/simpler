@@ -33,14 +33,15 @@ static constexpr int32_t PER_LEVEL = 3;  // < window so no single scope trips SC
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     (void)orch_args;
 
     uint32_t shape[1] = {1};
@@ -49,7 +50,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     for (int32_t d = 0; d < DEPTH; d++) {
         rt_scope_begin();
         for (int32_t t = 0; t < PER_LEVEL; t++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_output(ci);
             rt_submit_dummy_task(args);
         }

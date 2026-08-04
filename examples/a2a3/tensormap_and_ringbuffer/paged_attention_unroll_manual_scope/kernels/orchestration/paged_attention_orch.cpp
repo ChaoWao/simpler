@@ -65,14 +65,15 @@ extern "C" {
  * Orchestration config — the executor reads these values to set up
  * shared memory and runtime before calling aicpu_orchestration_entry.
  */
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
 #ifdef ENABLE_PROFILING
     uint64_t prof_param_extract = 0;
     uint64_t prof_ext_tensor = 0;
@@ -124,16 +125,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         static_cast<uint32_t>(total_blocks_count * block_size), static_cast<uint32_t>(head_dim)
     };
     uint32_t out_shapes[2] = {static_cast<uint32_t>(batch * num_heads), static_cast<uint32_t>(head_dim)};
-    Tensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type, false);
-    Tensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type, false);
-    Tensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type, false);
-    Tensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
+    ChipTensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type, false);
+    ChipTensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type, false);
+    ChipTensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type, false);
+    ChipTensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
 
     uint32_t bt_shapes[2] = {static_cast<uint32_t>(batch), static_cast<uint32_t>(block_num)};
-    Tensor block_table =
+    ChipTensor block_table =
         make_tensor_external(orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false);
     uint32_t cl_shapes[1] = {static_cast<uint32_t>(batch)};
-    Tensor context_lens =
+    ChipTensor context_lens =
         make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
 
 #ifdef ENABLE_PROFILING
@@ -162,19 +163,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
                 uint32_t qi_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t qi_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                Tensor qi = query.view(qi_shapes, qi_offsets);
+                ChipTensor qi = query.view(qi_shapes, qi_offsets);
                 uint32_t out_view_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t out_view_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                Tensor out_view = out.view(out_view_shapes, out_view_offsets, true);
+                ChipTensor out_view = out.view(out_view_shapes, out_view_offsets, true);
 #ifdef ENABLE_PROFILING
                 prof_view_count += 2;
                 CYCLE_COUNT_LAP(prof_tensor_view);
 #endif
                 CYCLE_COUNT_LAP(prof_param_setup);
                 TaskOutputTensors alloc_outs = alloc_tensors(tile2d_ci, scalar_ci, scalar_ci);
-                const Tensor &oi = alloc_outs.get_ref(0);
-                const Tensor &li_update = alloc_outs.get_ref(1);
-                const Tensor &mi_update = alloc_outs.get_ref(2);
+                const ChipTensor &oi = alloc_outs.get_ref(0);
+                const ChipTensor &li_update = alloc_outs.get_ref(1);
+                const ChipTensor &mi_update = alloc_outs.get_ref(2);
                 PTO2TaskId pre_task_id;
 #ifdef ENABLE_PROFILING
                 prof_submit_count++;
@@ -183,7 +184,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
                 // Reusable Arg objects — reset() before each use avoids
                 // repeated stack-frame construction in the inner loop.
-                L0TaskArgs params_qk, params_sf, params_pv, params_up;
+                CoreTaskArgs params_qk, params_sf, params_pv, params_up;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn += N_UNROLL) {
                     uint64_t n_blocks = std::min(static_cast<uint64_t>(N_UNROLL), bn_this_batch - bn);
@@ -212,7 +213,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                     params_qk.add_scalar(b_idx * block_num + bn);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                    const Tensor &sij_buf = qk_outs.get_ref(0);
+                    const ChipTensor &sij_buf = qk_outs.get_ref(0);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
@@ -240,9 +241,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                     params_sf.add_scalar(valid_len_last);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                    const Tensor &pij_buf = sf_outs.get_ref(0);
-                    const Tensor &mi = sf_outs.get_ref(1);
-                    const Tensor &li = sf_outs.get_ref(2);
+                    const ChipTensor &pij_buf = sf_outs.get_ref(0);
+                    const ChipTensor &mi = sf_outs.get_ref(1);
+                    const ChipTensor &li = sf_outs.get_ref(2);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
@@ -260,7 +261,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                     params_pv.add_scalar(b_idx * block_num + bn);
                     CYCLE_COUNT_LAP(prof_param_setup);
                     TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                    const Tensor &oi_new = pv_outs.get_ref(0);
+                    const ChipTensor &oi_new = pv_outs.get_ref(0);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);

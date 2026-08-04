@@ -29,7 +29,7 @@ constexpr int MAX_TENSOR_DIMS = 5;
  * Buffer Handle
  *
  * Represents a device memory buffer with address and total size in bytes.
- * This is the underlying memory allocation that a Tensor describes access patterns for.
+ * This is the underlying memory allocation that a ChipTensor describes access patterns for.
  */
 struct PTOBufferHandle {
     uint64_t addr;  // Device memory address (bytes)
@@ -54,10 +54,10 @@ enum class TensorArgType : int32_t {
 // pto_tensormap.h. `TensorCreateInfo` (submit-time create-info for
 // runtime-allocated outputs) and its materialization helpers live in the
 // runtime tensor_create_info.h. Both are runtime-only and intentionally not
-// part of the wire/host-facing Tensor definition.
+// part of the wire/host-facing ChipTensor definition.
 
 /**
- * Tensor descriptor for Task input/output (128B = 2 cache lines)
+ * ChipTensor descriptor for Task input/output (128B = 2 cache lines)
  *
  * Describes a strided memory access pattern on Global Memory (GM) using:
  *   - `buffer`: underlying memory allocation (addr/size in bytes)
@@ -85,21 +85,21 @@ enum class TensorArgType : int32_t {
  * stride + cached extent_elem.
  *
  * Construction:
- * Default construction is public (Tensor doubles as wire / TaskArgs / blob
+ * Default construction is public (ChipTensor doubles as wire / TaskArgs / blob
  * storage, which needs a default-constructible element) but yields an
  * UNINITIALIZED object that must be filled before use. The parameterized
- * constructor is private, so a *valid* Tensor (real buffer, row-major strides)
+ * constructor is private, so a *valid* ChipTensor (real buffer, row-major strides)
  * is obtained only through controlled entry points:
  *   - make_tensor_external(...)
  *   - TaskOutputTensors returned by submit(...)
- *   - Tensor::view() / reshape() / transpose() / permute() / slice() on an existing valid Tensor
+ *   - ChipTensor::view() / reshape() / transpose() / permute() / slice() on an existing valid ChipTensor
  */
-struct alignas(64) Tensor {
+struct alignas(64) ChipTensor {
     // === Cache line 1 (64B) — hot path ===
     PTOBufferHandle buffer;            // Underlying memory buffer (addr in bytes, size in bytes)
     PTO2TaskId owner_task_id;          // Creator task; PTO2TaskId::invalid() for external tensors
     uint64_t start_offset;             // 1D ELEMENT offset of the view origin into `buffer`
-    int32_t version;                   // Tensor version for overlap detection
+    int32_t version;                   // ChipTensor version for overlap detection
     uint32_t ndims;                    // Number of dimensions used
     DataType dtype;                    // Data type of tensor elements
     bool manual_dep;                   // True when dependency tracking is creator-only (skip OverlapMap lookup/insert)
@@ -109,29 +109,29 @@ struct alignas(64) Tensor {
 
     // === Cache line 2 (64B) — warm path (view metadata) ===
     // Field order: place the 8B-aligned cache before the 4B-aligned strides[]
-    // to avoid 4B padding between them (sizeof(Tensor) must stay 128).
+    // to avoid 4B padding between them (sizeof(ChipTensor) must stay 128).
     uint64_t extent_elem_cache;         // Cached extent_elem (see extent_elem()); maintained by ops
     uint32_t strides[MAX_TENSOR_DIMS];  // Element stride per dimension; ALWAYS > 0 (type-enforced)
     uint8_t _pad_cl2[36];               // Reserved for future extension
 
-    // Default construction is public: Tensor doubles as the wire / TaskArgs
-    // storage type (TaskArgsTpl<Tensor> arrays, ChipStorageTaskArgs POD, blob
+    // Default construction is public: ChipTensor doubles as the wire / TaskArgs
+    // storage type (TaskArgsTpl<ChipTensor> arrays, ChipStorageTaskArgs POD, blob
     // memcpy targets), all of which require a default-constructible element. A
-    // default-constructed Tensor is uninitialized and must be filled via
+    // default-constructed ChipTensor is uninitialized and must be filled via
     // make_tensor_external() / init_external() / a view op before use.
-    Tensor() = default;
+    ChipTensor() = default;
 
     // --- Copy / move / destroy ---
     // Kept trivially copyable (default copy = byte-for-byte) so other modules
     // (PTO2TensorMapEntry::copy_from_tensor, TensorCreateInfo memcpy path)
     // can rely on memcpy semantics. The contiguous fast-path optimization
-    // lives in `init(const Tensor&)`; call sites that care should use
+    // lives in `init(const ChipTensor&)`; call sites that care should use
     // `result.init(*this)` instead of the default copy ctor.
-    Tensor(const Tensor &) = default;
-    Tensor &operator=(const Tensor &) = default;
-    Tensor(Tensor &&) = default;
-    Tensor &operator=(Tensor &&) = default;
-    ~Tensor() = default;
+    ChipTensor(const ChipTensor &) = default;
+    ChipTensor &operator=(const ChipTensor &) = default;
+    ChipTensor(ChipTensor &&) = default;
+    ChipTensor &operator=(ChipTensor &&) = default;
+    ~ChipTensor() = default;
 
     // ========================================================================
     // Accessors / helpers
@@ -173,7 +173,7 @@ struct alignas(64) Tensor {
     }
 
     // ========================================================================
-    // Initialization (operates on already-constructed Tensor)
+    // Initialization (operates on already-constructed ChipTensor)
     // ========================================================================
 
     /// Initialize as a contiguous tensor that covers `shapes[]` starting at `addr`.
@@ -213,7 +213,7 @@ struct alignas(64) Tensor {
     /// derivable from line 1, so we **skip reading other's cache line 2** and
     /// write dst's line 2 from the local shapes instead. Non-contiguous source
     /// pays one line 2 read; contiguous source does not.
-    void init_from(const Tensor &other) {
+    void init_from(const ChipTensor &other) {
         init_from_line1(other);
         if (other.is_contiguous && other.start_offset == 0) {
             // Derive line 2 from line 1: stride = row-major of shapes; extent = numel.
@@ -238,17 +238,17 @@ struct alignas(64) Tensor {
     /// in place and calls `refresh_derived()` to recompute line 2 once. This
     /// avoids the wasted line 2 writes that `init_from()` would do just before
     /// the op overwrites them.
-    void init_from_line1(const Tensor &other) { memcpy(this, &other, 64); }
+    void init_from_line1(const ChipTensor &other) { memcpy(this, &other, 64); }
 
     /// Backward-compat alias used by orchestrator hot paths that need a full
     /// deep copy. Equivalent to `init_from(other)`.
-    void copy(const Tensor &other) { init_from(other); }
+    void copy(const ChipTensor &other) { init_from(other); }
 
     // Materialization from a TensorCreateInfo (runtime-allocated outputs) lives
     // in the runtime tensor_create_info.h as the free functions
     // init_tensor_from_create_info() / fill_tensor_initial_value(); they operate
-    // on a Tensor& through its public members. Kept out of the wire/host-facing
-    // Tensor so this header has no dependency on the runtime-only create-info.
+    // on a ChipTensor& through its public members. Kept out of the wire/host-facing
+    // ChipTensor so this header has no dependency on the runtime-only create-info.
 
     // ========================================================================
     // Address / offset computation
@@ -280,8 +280,8 @@ struct alignas(64) Tensor {
     /// form ``(off >= shape ? 0 : min(...))`` to set the SHAPE dim and leaves
     /// the OFFSET dim as the raw (possibly out-of-range) value, expecting the
     /// runtime to honour the empty-view contract.
-    Tensor view(const uint32_t view_shapes[], const uint32_t view_offsets[], bool in_manual_dep = false) const {
-        Tensor result;
+    ChipTensor view(const uint32_t view_shapes[], const uint32_t view_offsets[], bool in_manual_dep = false) const {
+        ChipTensor result;
         // Copy line 1 only; stride from *this is still in result's line 2 garbage
         // — we need to bring it forward explicitly since view keeps stride.
         result.init_from_line1(*this);
@@ -314,9 +314,9 @@ struct alignas(64) Tensor {
     bool valid_transpose(uint32_t x, uint32_t y) const { return x < ndims && y < ndims; }
 
     /// Swap two dimensions: shapes/stride swapped together. start_offset unchanged.
-    Tensor transpose(uint32_t x, uint32_t y, bool in_manual_dep = false) const {
+    ChipTensor transpose(uint32_t x, uint32_t y, bool in_manual_dep = false) const {
         debug_assert(valid_transpose(x, y));
-        Tensor result;
+        ChipTensor result;
         result.init_from_line1(*this);
         // Carry forward source's stride before swapping (line 2 was not memcpy'd).
         for (uint32_t i = 0; i < ndims; i++)
@@ -330,8 +330,8 @@ struct alignas(64) Tensor {
 
     /// Permute dimensions according to `order[]` (length = ndims).
     /// Both shapes and stride are reordered in-place; start_offset unchanged.
-    Tensor permute(const uint32_t order[], bool in_manual_dep = false) const {
-        Tensor result;
+    ChipTensor permute(const uint32_t order[], bool in_manual_dep = false) const {
+        ChipTensor result;
         result.init_from_line1(*this);
         for (uint32_t i = 0; i < ndims; i++) {
             debug_assert(order[i] < ndims);
@@ -345,12 +345,12 @@ struct alignas(64) Tensor {
 
     /// Slice dimension `dim` with `[start, end)` and positive `step`.
     /// strides[dim] *= step; shapes[dim] = ⌈(end-start)/step⌉; start_offset += start·strides[dim_old].
-    Tensor slice(uint32_t dim, uint32_t start, uint32_t end, uint32_t step = 1, bool in_manual_dep = false) const {
+    ChipTensor slice(uint32_t dim, uint32_t start, uint32_t end, uint32_t step = 1, bool in_manual_dep = false) const {
         debug_assert(dim < ndims);
         debug_assert(step >= 1);
         debug_assert(end > start);
         debug_assert(end <= shapes[dim]);
-        Tensor result;
+        ChipTensor result;
         result.init_from_line1(*this);
         // Carry forward source's stride before patching the sliced dim.
         for (uint32_t i = 0; i < ndims; i++)
@@ -378,10 +378,10 @@ struct alignas(64) Tensor {
     /// Materialize fallback (allocating a contiguous copy) is NOT in this op;
     /// callers must reach contiguous via a copy before calling reshape on a
     /// non-contiguous view.
-    Tensor reshape(const uint32_t new_shapes[], uint32_t new_ndims, bool in_manual_dep = false) const {
+    ChipTensor reshape(const uint32_t new_shapes[], uint32_t new_ndims, bool in_manual_dep = false) const {
         debug_assert(valid_reshape(new_shapes, new_ndims));
         always_assert(is_contiguous);
-        Tensor result;
+        ChipTensor result;
         result.init_from_line1(*this);
         result.ndims = new_ndims;
         result.manual_dep = in_manual_dep;
@@ -429,10 +429,10 @@ struct alignas(64) Tensor {
     }
 
 private:
-    // The parameterized constructor is private: a fully-initialized Tensor with
+    // The parameterized constructor is private: a fully-initialized ChipTensor with
     // a real buffer comes only through make_tensor_external() / view ops. (The
     // default constructor is public — see above — for POD/array storage.)
-    Tensor(
+    ChipTensor(
         void *addr, uint64_t buffer_size_bytes, const uint32_t in_shapes[], uint32_t in_ndims, DataType in_dtype,
         int32_t in_version, bool in_manual_dep = false, uint8_t in_child_memory = 0
     ) {
@@ -471,36 +471,40 @@ private:
         debug_assert(start_offset + extent_elem_cache <= buffer_elems);
     }
 
-    // Friends that need to construct Tensors
+    // Friends that need to construct ChipTensors
     friend struct PTO2TaskPayload;
-    friend inline Tensor make_tensor_external(
+    friend inline ChipTensor make_tensor_external(
         void *addr, const uint32_t shapes[], uint32_t ndims, DataType dtype, bool manual_dep, int32_t version,
         uint8_t child_memory
     );
 };
 
-static_assert(std::is_trivially_copyable_v<Tensor>, "Tensor must be trivially copyable for DMA / wire transport");
-static_assert(sizeof(Tensor) == 128, "Tensor must be exactly 2 cache lines (128 bytes)");
-static_assert(offsetof(Tensor, owner_task_id) == 16, "owner_task_id must be at bytes 16-23 (cacheline 1)");
-static_assert(offsetof(Tensor, start_offset) == 24, "start_offset must be at bytes 24-31 (cacheline 1)");
-static_assert(offsetof(Tensor, version) == 32);
-static_assert(offsetof(Tensor, ndims) == 36);
-static_assert(offsetof(Tensor, dtype) == 40);
-static_assert(offsetof(Tensor, manual_dep) == 41);
-static_assert(offsetof(Tensor, is_contiguous) == 42);
-static_assert(offsetof(Tensor, child_memory) == 43, "child_memory must be at byte 43 (cacheline 1, former _pad_cl1)");
-static_assert(offsetof(Tensor, shapes) == 44, "shapes must start at byte 44 (cacheline 1)");
-static_assert(offsetof(Tensor, extent_elem_cache) == 64, "extent_elem_cache must start at byte 64 (cacheline 2)");
-static_assert(offsetof(Tensor, strides) == 72);
+static_assert(
+    std::is_trivially_copyable_v<ChipTensor>, "ChipTensor must be trivially copyable for DMA / wire transport"
+);
+static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be exactly 2 cache lines (128 bytes)");
+static_assert(offsetof(ChipTensor, owner_task_id) == 16, "owner_task_id must be at bytes 16-23 (cacheline 1)");
+static_assert(offsetof(ChipTensor, start_offset) == 24, "start_offset must be at bytes 24-31 (cacheline 1)");
+static_assert(offsetof(ChipTensor, version) == 32);
+static_assert(offsetof(ChipTensor, ndims) == 36);
+static_assert(offsetof(ChipTensor, dtype) == 40);
+static_assert(offsetof(ChipTensor, manual_dep) == 41);
+static_assert(offsetof(ChipTensor, is_contiguous) == 42);
+static_assert(
+    offsetof(ChipTensor, child_memory) == 43, "child_memory must be at byte 43 (cacheline 1, former _pad_cl1)"
+);
+static_assert(offsetof(ChipTensor, shapes) == 44, "shapes must start at byte 44 (cacheline 1)");
+static_assert(offsetof(ChipTensor, extent_elem_cache) == 64, "extent_elem_cache must start at byte 64 (cacheline 2)");
+static_assert(offsetof(ChipTensor, strides) == 72);
 
 // =============================================================================
-// Tensor factory — canonical construction entry for pre-allocated external
+// ChipTensor factory — canonical construction entry for pre-allocated external
 // memory. Lives here (not in the runtime orchestration header) so host-side
-// consumers (the nanobind binding, make_tensor_arg) build Tensors through the
-// same controlled path as the runtime. The resulting Tensor is contiguous:
+// consumers (the nanobind binding, make_tensor_arg) build ChipTensors through the
+// same controlled path as the runtime. The resulting ChipTensor is contiguous:
 // start_offset == 0 and strides == row_major(shapes).
 // =============================================================================
-inline Tensor make_tensor_external(
+inline ChipTensor make_tensor_external(
     void *addr, const uint32_t shapes[], uint32_t ndims, DataType dtype = DataType::FLOAT32, bool manual_dep = false,
     int32_t version = 0, uint8_t child_memory = 0
 ) {

@@ -25,17 +25,17 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-allreduce_sum_orchestration_config(const L2TaskArgs &orch_args) {
+allreduce_sum_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 5};  // 3 tensors + 2 scalars
 }
 
-__attribute__((visibility("default"))) void allreduce_sum_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &partial_local = orch_args.tensor(0).ref();
-    const Tensor &y = orch_args.tensor(1).ref();
-    const Tensor &scratch = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void allreduce_sum_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &partial_local = orch_args.tensor(0).ref();
+    const ChipTensor &y = orch_args.tensor(1).ref();
+    const ChipTensor &scratch = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(partial_local);
     params.add_output(y);
     params.add_inout(scratch);

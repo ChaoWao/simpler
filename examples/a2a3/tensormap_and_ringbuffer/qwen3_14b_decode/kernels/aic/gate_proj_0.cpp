@@ -581,18 +581,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: mlp_norm_in_inline71__rv_v14
-    __gm__ Tensor *mlp_norm_in_inline71__rv_v14_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *mlp_norm_in_inline71__rv_v14_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ bfloat16_t *mlp_norm_in_inline71__rv_v14 =
         reinterpret_cast<__gm__ bfloat16_t *>(mlp_norm_in_inline71__rv_v14_tensor->buffer.addr) +
         mlp_norm_in_inline71__rv_v14_tensor->start_offset;
 
     // Unpack tensor: w_gate__ssa_v0
-    __gm__ Tensor *w_gate__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *w_gate__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ bfloat16_t *w_gate__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(w_gate__ssa_v0_tensor->buffer.addr) + w_gate__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: gate_acc_all_inline203__ssa_v4
-    __gm__ Tensor *gate_acc_all_inline203__ssa_v4_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *gate_acc_all_inline203__ssa_v4_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *gate_acc_all_inline203__ssa_v4 =
         reinterpret_cast<__gm__ float *>(gate_acc_all_inline203__ssa_v4_tensor->buffer.addr) +
         gate_acc_all_inline203__ssa_v4_tensor->start_offset;

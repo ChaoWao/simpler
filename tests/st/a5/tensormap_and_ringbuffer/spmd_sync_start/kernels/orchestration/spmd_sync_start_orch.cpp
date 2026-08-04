@@ -40,7 +40,8 @@ static constexpr int32_t SLOTS_PER_BLOCK = 3;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 2,
@@ -57,13 +58,13 @@ static int16_t cohort(int32_t clusters, int32_t divisor) {
     return static_cast<int16_t>(n < 1 ? 1 : n);
 }
 
-static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
+static void submit_mix(const ChipTensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     mk.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
     mk.aiv1_kernel_id = FUNC_SPMD_MIX_AIV1;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_core_num(block_num);
@@ -71,9 +72,9 @@ static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bo
     rt_submit_task(mk, args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
-    const Tensor &layout = orch_args.tensor(1).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &layout = orch_args.tensor(1).ref();
 
     const int32_t clusters = rt_available_cluster_count();
     // T0/T2 narrow, T1 mid, T3 wide; T2 is the non-sync_start baseline.

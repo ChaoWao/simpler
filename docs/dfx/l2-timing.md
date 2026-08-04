@@ -6,9 +6,9 @@ from **`[STRACE]` markers** (gated on `SIMPLER_HOST_STRACE`, default on in
 line per stage to stderr, and `simpler_setup.tools.strace_timing` parses them
 offline. Normal execution only *emits*; parsing is a separate, opt-in step.
 
-A richer channel — the **L2 swimlane** per-task / scheduler-phase capture — is
-opt-in (`--enable-l2-swimlane`) and documented separately in
-[l2-swimlane-profiling.md](l2-swimlane-profiling.md).
+A richer channel — the **chip swimlane** per-task / scheduler-phase capture — is
+opt-in (`--enable-chip-swimlane`) and documented separately in
+[chip-swimlane-profiling.md](chip-swimlane-profiling.md).
 
 > Don't confuse any of these with the host-side runtime-stage seconds a test
 > harness prints (`[RUN] runtime done (Ns)`): that is wall-clock around JIT
@@ -25,7 +25,7 @@ opt-in (`--enable-l2-swimlane`) and documented separately in
 | **`simpler_run.runner_run.device_wall`** | **Full on-NPU kernel wall**: earliest `simpler_aicpu_exec` start to latest end across launched threads — i.e. **the whole run + teardown**. | Each `simpler_aicpu_exec` thread stamps its own `AicpuPhase::RunWall` slot in the per-thread `AicpuPhaseRecord` buffer (`KernelArgs.device_wall_data_base`, see `src/{arch}/platform/onboard/aicpu/kernel.cpp`); host reduces `max(end) - min(start)` each run |
 
 Both are emitted whenever the runtime was built with `SIMPLER_HOST_STRACE` (the
-default) — **independent of `--enable-l2-swimlane`**. The `device_wall` marker is
+default) — **independent of `--enable-chip-swimlane`**. The `device_wall` marker is
 absent only on a `SIMPLER_HOST_STRACE`-off build.
 
 Nested under `device_wall` are the AICPU orchestrator / scheduler sub-spans
@@ -131,10 +131,10 @@ instead (see Related docs).
 
 When you only need the dispatch→finish window of a specific task (or the
 interval between two tasks) and not a full timeline, tag the task with
-`L0TaskArgs::set_task_timing_slot(0..15)`. The Scheduler folds that task's AICPU
+`CoreTaskArgs::set_task_timing_slot(0..15)`. The Scheduler folds that task's AICPU
 dispatch/finish (same points as the swimlane's `finish_time`) into one of 16
 fixed slots and the host emits `…device_wall.task_slot_<N>` `[STRACE]` spans —
-with the L2 swimlane **off**, no collector threads, and in `SIMPLER_DFX=0`
+with the chip swimlane **off**, no collector threads, and in `SIMPLER_DFX=0`
 builds. Reuse one slot across tasks for a merged window, or distinct slots to
 recover `finish(B) − dispatch(A)`. Full semantics in
 [device-phases.md](device-phases.md#selective-task-timing-slots-implemented).
@@ -145,6 +145,6 @@ recover `finish(B) − dispatch(A)`. Full semantics in
   device per-stage spans.
 - [device-phases.md](device-phases.md) — how the AICPU phase windows
   (`RunWall` / orch / sched / …) are stamped and read back.
-- [l2-swimlane-profiling.md](l2-swimlane-profiling.md) — the per-task /
+- [chip-swimlane-profiling.md](chip-swimlane-profiling.md) — the per-task /
   scheduler-phase deep dive.
 - `simpler_setup/tools/README.md` — `strace_timing` CLI reference.

@@ -69,7 +69,7 @@ The binding stores a hidden remote sidecar beside the tensor metadata.
 `RemoteTensorRef` is transport metadata, not an extension of the local mailbox
 ABI. Local fork/shm endpoints reject it unless the buffer has first been
 explicitly imported, staged, or materialized into a local-addressable
-`Tensor`. Remote endpoints reject bare host pointers unless explicit
+`ChipTensor`. Remote endpoints reject bare host pointers unless explicit
 staging produced a handle.
 
 `remote_export()` returns an opaque session-scoped export descriptor. It does
@@ -83,14 +83,14 @@ releases the owner allocation after all imports and slot refs have drained.
 
 Current status: Python exposes `RemoteBufferHandle` and `RemoteTensorRef`.
 `TaskArgs.add_tensor(RemoteTensorRef(...), tag)` stores
-`Tensor.data == 0` in the underlying `TaskArgs` and keeps the remote
+`ChipTensor.data == 0` in the underlying `TaskArgs` and keeps the remote
 descriptor in a same-index sidecar. Public `remote_malloc`, `remote_free`,
 `remote_copy_to`, `remote_copy_from`, `remote_export`, `remote_import`, and
 `remote_release_import` are implemented for the simulation backend.
 
 ## TaskArgs Sidecar Contract
 
-`Tensor` remains the tensor metadata ABI. Remote transport metadata
+`ChipTensor` remains the tensor metadata ABI. Remote transport metadata
 is stored in a per-`TaskArgs` sidecar keyed by tensor index.
 
 Python-facing rules:
@@ -109,8 +109,8 @@ Python-facing rules:
   referenced sidecar.
 - Local `submit_next_level()` rejects remote sidecars before slot commit unless
   an explicit import/staging API has converted them into local-addressable
-  `Tensor` values and removed the remote sidecar.
-- Remote submit rejects `OUTPUT` tensors with `Tensor.data == 0`
+  `ChipTensor` values and removed the remote sidecar.
+- Remote submit rejects `OUTPUT` tensors with `ChipTensor.data == 0`
   unless an explicit remote allocation API has already produced a
   `RemoteTensorRef` sidecar for that tensor.
 
@@ -137,7 +137,7 @@ Endpoint rules:
 
 - `LocalMailboxEndpoint` rejects non-empty sidecars. It cannot encode remote
   descriptors into the local fixed-size mailbox, and its child processes expect
-  `Tensor.data` to be a local host/shm pointer or a local child-memory
+  `ChipTensor.data` to be a local host/shm pointer or a local child-memory
   pointer.
 - `RemoteL3Endpoint` requires a sidecar for every tensor payload that crosses
   the remote protocol, including `HOST_INLINE` payloads.
@@ -146,14 +146,14 @@ Endpoint rules:
 - A remote tensor with `child_memory=True` and no sidecar is invalid. Local
   child-memory pointers are meaningful only inside fork/shm topology.
 - The remote session runner translates each `RemoteTensorDesc` into a local
-  `Tensor` and fills `data` from its validated local mapping
+  `ChipTensor` and fills `data` from its validated local mapping
   immediately before invoking `inner_worker.run()`.
 
 ## Remote OUTPUT Allocation Policy
 
 The first implementation does not mirror local HeapRing auto-allocation for
 remote outputs. In the local fork/shm path, an `OUTPUT` tensor with
-`Tensor.data == 0` is assigned a parent HeapRing pointer during
+`ChipTensor.data == 0` is assigned a parent HeapRing pointer during
 submit, and forked children can dereference that shared virtual address. A
 remote L3 worker cannot use a parent-host HeapRing pointer.
 

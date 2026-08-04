@@ -9,7 +9,7 @@
 """End-to-end ST for selective task-timing slots (issue #1325).
 
 A two-task chain (`c = a + b` tagged slot 0, `out = c + b` tagged slot 1) is
-run with L2 swimlane OFF. The contract being verified:
+run with chip swimlane OFF. The contract being verified:
 
     * both `simpler_run.runner_run.device_wall.task_slot_0` and `..._1`
       [STRACE] markers are present with strictly positive duration — proving
@@ -32,9 +32,9 @@ from simpler.task_interface import (
     CallConfig,
     ChipCallable,
     ChipStorageTaskArgs,
+    ChipTensor,
     CoreCallable,
     DataType,
-    Tensor,
 )
 from simpler.worker import Worker
 
@@ -46,7 +46,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
 _A2A3_VECTOR_ADD = os.path.join(_PROJECT_ROOT, "examples", "workers", "l2", "vector_add")
 # a5's ccec/pto-isa needs the qualified `pto::Stride` spelling; the l2/vector_add
 # kernel above (a2a3-only example) uses unqualified `Stride` and does not compile
-# under the a5 AICore toolchain. Use the a5-native add kernel (same out=a+b Tensor*
+# under the a5 AICore toolchain. Use the a5-native add kernel (same out=a+b ChipTensor*
 # ABI) on a5.
 _A5_VECTOR_ADD = os.path.join(_PROJECT_ROOT, "examples", "a5", "tensormap_and_ringbuffer", "vector_example")
 
@@ -134,12 +134,12 @@ def _drive(
         worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
 
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
 
         config = CallConfig()
-        config.enable_l2_swimlane = False  # slots must work with swimlane OFF
+        config.enable_chip_swimlane = False  # slots must work with swimlane OFF
 
         assert worker.run(chip_handle, args, config) is None
 
@@ -323,14 +323,14 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
             worker.copy_to(bufs[name], t.contiguous().data_ptr(), nb)
 
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(bufs["A"], (_MATMUL_SIZE, _MATMUL_SIZE), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(bufs["B"], (_MATMUL_SIZE, _MATMUL_SIZE), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(bufs["C"], (_TILE_ELEMS,), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(bufs["A"], (_MATMUL_SIZE, _MATMUL_SIZE), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(bufs["B"], (_MATMUL_SIZE, _MATMUL_SIZE), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(bufs["C"], (_TILE_ELEMS,), DataType.FLOAT32))
         for n in "DEFGHI":
-            args.add_tensor(Tensor.make(bufs[n], (_TILE_ELEMS,), DataType.FLOAT32))
+            args.add_tensor(ChipTensor.make(bufs[n], (_TILE_ELEMS,), DataType.FLOAT32))
 
         config = CallConfig()
-        config.enable_l2_swimlane = False
+        config.enable_chip_swimlane = False
         assert worker.run(chip_handle, args, config) is None
 
         out_C = torch.zeros(_TILE_ELEMS, dtype=torch.float32)

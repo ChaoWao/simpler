@@ -99,7 +99,7 @@ struct HelloPayload {
 };
 
 struct RemoteTaskArgsWire {
-    std::vector<Tensor> tensor_metadata;
+    std::vector<ChipTensor> tensor_metadata;
     std::vector<RemoteTensorSidecar> remote_desc;
     std::vector<uint64_t> scalars;
     std::vector<uint8_t> inline_payload;
@@ -166,8 +166,8 @@ HelloPayload decode_hello(const uint8_t *data, size_t size);
 std::vector<uint8_t> encode_call_config(const CallConfig &config);
 CallConfig decode_call_config(const uint8_t *data, size_t size, size_t &offset);
 
-std::vector<uint8_t> encode_tensor(const Tensor &tensor);
-Tensor decode_tensor(const uint8_t *data, size_t size, size_t &offset, bool remote_task);
+std::vector<uint8_t> encode_tensor(const ChipTensor &tensor);
+ChipTensor decode_tensor(const uint8_t *data, size_t size, size_t &offset, bool remote_task);
 
 std::vector<uint8_t> encode_remote_tensor_desc(const RemoteTensorDesc &desc);
 RemoteTensorDesc decode_remote_tensor_desc(const uint8_t *data, size_t size, size_t &offset);

@@ -3671,7 +3671,7 @@ class TestRunHandle:
                 self.mapping_closed = False
                 self.expired = False
 
-            def _close_l3_host_mapping(self):
+            def _close_worker_host_mapping(self):
                 self.mapping_closed = True
 
             def _expire(self):
@@ -3681,7 +3681,7 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_l3_l2_region_release(self, worker_id, region_id):
+            def control_worker_chip_region_release(self, worker_id, region_id):
                 self.released_regions.append((worker_id, region_id))
 
         class NativeOrchestrator:
@@ -3714,15 +3714,15 @@ class TestRunHandle:
         first_pending, second_pending = domain("first-pending", 3), domain("second-pending", 4)
         first.remote_slot_refs.append(cast(Any, first_ref))
         second.remote_slot_refs.append(cast(Any, second_ref))
-        first.l3_l2_regions.append(first_region)
-        second.l3_l2_regions.append(second_region)
-        first.l3_l2_orch_comm_host_buffers[0x1000] = 64
-        second.l3_l2_orch_comm_host_buffers[0x2000] = 128
+        first.worker_chip_regions.append(first_region)
+        second.worker_chip_regions.append(second_region)
+        first.worker_chip_orch_comm_host_buffers[0x1000] = 64
+        second.worker_chip_orch_comm_host_buffers[0x2000] = 128
         first.live_domains[first_live.name] = first_live
         second.live_domains[second_live.name] = second_live
         first.pending_release_domains.append(first_pending)
         second.pending_release_domains.append(second_pending)
-        worker._live_l3_l2_regions.extend([first_region, second_region])
+        worker._live_worker_chip_regions.extend([first_region, second_region])
         worker._live_domains.update({first_live.name: first_live, second_live.name: second_live})
 
         released_domains = []
@@ -3744,9 +3744,9 @@ class TestRunHandle:
         assert native_worker.released_regions == [(0, 11)]
         assert first_region.mapping_closed and first_region.expired
         assert not second_region.mapping_closed and not second_region.expired
-        assert worker._live_l3_l2_regions == [second_region]
-        assert first.l3_l2_orch_comm_host_buffers == {}
-        assert second.l3_l2_orch_comm_host_buffers == {0x2000: 128}
+        assert worker._live_worker_chip_regions == [second_region]
+        assert first.worker_chip_orch_comm_host_buffers == {}
+        assert second.worker_chip_orch_comm_host_buffers == {0x2000: 128}
         assert released_domains == [first_pending, first_live]
         assert first_pending.freed and first_live.freed
         assert not second_pending.freed and not second_live.freed
@@ -3765,7 +3765,7 @@ class TestRunHandle:
             def __init__(self):
                 self.expired = False
 
-            def _close_l3_host_mapping(self):
+            def _close_worker_host_mapping(self):
                 raise mapping_error
 
             def _expire(self):
@@ -3775,7 +3775,7 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_l3_l2_region_release(self, worker_id, region_id):
+            def control_worker_chip_region_release(self, worker_id, region_id):
                 self.released_regions.append((worker_id, region_id))
                 raise release_error
 
@@ -3790,8 +3790,8 @@ class TestRunHandle:
         resources = worker_mod._RunResources()
         resources.requires_ordered_cleanup = True
         region = Region()
-        resources.l3_l2_regions.append(region)
-        worker._live_l3_l2_regions.append(region)
+        resources.worker_chip_regions.append(region)
+        worker._live_worker_chip_regions.append(region)
         handle = RunHandle(worker, 1, (), resources)
         worker._accepted_run_handles.add(handle)
 
@@ -3799,8 +3799,8 @@ class TestRunHandle:
 
         assert native_worker.released_regions == [(0, 11)]
         assert region.expired
-        assert resources.l3_l2_regions == []
-        assert worker._live_l3_l2_regions == []
+        assert resources.worker_chip_regions == []
+        assert worker._live_worker_chip_regions == []
         assert worker._ordered_cleanup_error is not None
         with pytest.raises(RuntimeError, match="no further work is admitted"):
             worker._require_no_ordered_cleanup_failure("submit")
@@ -3826,7 +3826,7 @@ class TestRunHandle:
                 self.mapping_closes = 0
                 self.expires = 0
 
-            def _close_l3_host_mapping(self):
+            def _close_worker_host_mapping(self):
                 self.mapping_closes += 1
 
             def _expire(self):
@@ -3836,26 +3836,26 @@ class TestRunHandle:
             def __init__(self):
                 self.released_regions = []
 
-            def control_l3_l2_region_release(self, worker_id, region_id):
+            def control_worker_chip_region_release(self, worker_id, region_id):
                 self.released_regions.append((worker_id, region_id))
 
         first, second = Region(11), Region(22)
         resources = worker_mod._RunResources()
-        resources.l3_l2_regions = cast(Any, InterruptingList([first, second]))
+        resources.worker_chip_regions = cast(Any, InterruptingList([first, second]))
         worker = Worker(level=3, num_sub_workers=0)
         native_worker = NativeWorker()
         worker._worker = cast(Any, native_worker)
-        worker._live_l3_l2_regions.extend([first, second])
+        worker._live_worker_chip_regions.extend([first, second])
 
         with pytest.raises(KeyboardInterrupt) as caught:
-            worker._cleanup_l3_l2_regions(resources)
+            worker._cleanup_worker_chip_regions(resources)
 
         assert caught.value is interrupt
         assert native_worker.released_regions == [(0, 11), (0, 22)]
         assert (first.mapping_closes, first.expires) == (1, 1)
         assert (second.mapping_closes, second.expires) == (1, 1)
-        assert resources.l3_l2_regions == []
-        assert worker._live_l3_l2_regions == []
+        assert resources.worker_chip_regions == []
+        assert worker._live_worker_chip_regions == []
 
     def test_domain_released_after_its_run_retired_is_freed_inline(self):
         """A late release has no fence left to defer behind, so it frees now.
@@ -4377,8 +4377,8 @@ class TestOrderedCleanupDegradation:
         assert resources.requires_ordered_cleanup
 
         # A remote slot reference: releasing it is an RPC to the owning worker.
-        # `create_l3_l2_queue` is not a fourth set-point — it builds its region
-        # through `create_l3_l2_region`, and inherits the flag from there.
+        # `create_worker_chip_queue` is not a fourth set-point — it builds its region
+        # through `create_worker_chip_region`, and inherits the flag from there.
         remote = worker_mod._RunResources()
         worker._building_run_resources = remote
         ref = cast(Any, object())
@@ -6472,14 +6472,14 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         """
         worker = self._worker()
         worker._config = {"platform": "a2a3sim"}
-        worker._validate_l3_l2_worker_id = cast(Any, lambda _wid: None)
+        worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _interrupted(*_args):
             raise KeyboardInterrupt
 
-        worker._worker = cast(Any, SimpleNamespace(control_l3_l2_region_create=_interrupted))
+        worker._worker = cast(Any, SimpleNamespace(control_worker_chip_region_create=_interrupted))
         with pytest.raises(KeyboardInterrupt):
-            worker._create_l3_l2_region(0, 4096, 64)
+            worker._create_worker_chip_region(0, 4096, 64)
         assert worker._ordered_cleanup_error is not None
         with pytest.raises(RuntimeError, match="no further work is admitted"):
             worker._require_no_ordered_cleanup_failure("submit")
@@ -6487,14 +6487,14 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
     def test_an_ordinary_region_create_failure_does_not_refuse_further_work(self):
         worker = self._worker()
         worker._config = {"platform": "a2a3sim"}
-        worker._validate_l3_l2_worker_id = cast(Any, lambda _wid: None)
+        worker._validate_worker_chip_id = cast(Any, lambda _wid: None)
 
         def _failed(*_args):
             raise RuntimeError("chip refused the region")
 
-        worker._worker = cast(Any, SimpleNamespace(control_l3_l2_region_create=_failed))
+        worker._worker = cast(Any, SimpleNamespace(control_worker_chip_region_create=_failed))
         with pytest.raises(RuntimeError, match="chip refused the region"):
-            worker._create_l3_l2_region(0, 4096, 64)
+            worker._create_worker_chip_region(0, 4096, 64)
         assert worker._ordered_cleanup_error is None, "an ordinary failure must not shut the worker"
 
     def test_a_region_rollback_that_cannot_release_refuses_further_work(self):
@@ -6506,9 +6506,9 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
         worker = self._worker()
         assert worker._ordered_cleanup_error is None
 
-        # The shape _create_l3_l2_region's rollback reaches: the region exists
+        # The shape _create_worker_chip_region's rollback reaches: the region exists
         # on the chip and the release for it failed.
-        leaked = RuntimeError("create_l3_l2_region: rollback could not release region 4")
+        leaked = RuntimeError("create_worker_chip_region: rollback could not release region 4")
         with worker._hierarchical_start_cv:
             worker._ordered_cleanup_error = leaked
 
@@ -6696,7 +6696,7 @@ class TestScope:
 
 class TestOrchAlloc:
     def test_alloc_returns_valid_tensor(self):
-        """alloc returns a Tensor whose data ptr is non-zero and writeable."""
+        """alloc returns a ChipTensor whose data ptr is non-zero and writeable."""
         captured = []
 
         hw = Worker(level=3, num_sub_workers=1)
@@ -6810,7 +6810,7 @@ class TestOrchAlloc:
 class TestSubCallableArgs:
     def test_sub_callable_receives_tensor_metadata(self):
         """Sub callable receives TaskArgs with correct tensor count and shape."""
-        from simpler.task_interface import Tensor  # noqa: PLC0415
+        from simpler.task_interface import ChipTensor  # noqa: PLC0415
 
         result_shm, result_buf = _make_shared_counter()
         try:
@@ -6828,7 +6828,7 @@ class TestSubCallableArgs:
 
             # Use a synthetic non-zero pointer — sub callable only checks metadata,
             # doesn't dereference the pointer.
-            ct = Tensor.make(0xCAFE0000, (4,), DataType.FLOAT32)
+            ct = ChipTensor.make(0xCAFE0000, (4,), DataType.FLOAT32)
 
             def orch(o, args, cfg):
                 sub_args = TaskArgs()

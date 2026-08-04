@@ -152,20 +152,20 @@ jobs:
               --require-pto-isa --enable-dep-gen"
           fi
 
-      - name: l2_swimlane smoke (a2a3)
+      - name: chip_swimlane smoke (a2a3)
         if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
               --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-l2-swimlane --enable-dep-gen
+              --require-pto-isa --enable-chip-swimlane --enable-dep-gen
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
               --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-l2-swimlane --enable-dep-gen"
+              --require-pto-isa --enable-chip-swimlane --enable-dep-gen"
           fi
 
       - name: PMU smoke (a2a3)
@@ -210,14 +210,14 @@ jobs:
             --require-pto-isa --enable-dep-gen"
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
 
-      - name: l2_swimlane smoke (a5)
+      - name: chip_swimlane smoke (a5)
         if: inputs.platform == 'a5' && inputs.include_dfx_smokes
         run: |
           source .venv/bin/activate
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-l2-swimlane --enable-dep-gen"
+            --require-pto-isa --enable-chip-swimlane --enable-dep-gen"
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
 
       - name: PMU smoke (a5)

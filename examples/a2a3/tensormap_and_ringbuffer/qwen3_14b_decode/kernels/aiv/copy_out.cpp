@@ -117,12 +117,12 @@ static __aicore__ void copy_out(__gm__ bfloat16_t *v1, __gm__ float *v2, int64_t
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: out__iter_v1
-    __gm__ Tensor *out__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *out__iter_v1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ bfloat16_t *out__iter_v1 =
         reinterpret_cast<__gm__ bfloat16_t *>(out__iter_v1_tensor->buffer.addr) + out__iter_v1_tensor->start_offset;
 
     // Unpack tensor: cur__rv_v7
-    __gm__ Tensor *cur__rv_v7_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *cur__rv_v7_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *cur__rv_v7 =
         reinterpret_cast<__gm__ float *>(cur__rv_v7_tensor->buffer.addr) + cur__rv_v7_tensor->start_offset;
 

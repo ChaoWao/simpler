@@ -17,7 +17,7 @@
  * Software License 2.0). Register offsets live in platform_config.h and are
  * accessed via RegId / reg_index().
  *
- * Streaming buffer design (mirrors l2_swimlane_profiling.h):
+ * Streaming buffer design (mirrors chip_swimlane_profiling.h):
  *   PmuFreeQueue    — SPSC queue: Host pushes free PmuBuffers, AICPU pops them.
  *   PmuBufferState  — Per-core state: current active buffer pointer + free_queue.
  *   PmuDataHeader   — Fixed shared-memory header: per-thread ready queues.
@@ -135,7 +135,7 @@ inline const PmuEventConfig *pmu_resolve_event_config_a2a3(PmuEventType event_ty
  * Per-task PMU snapshot written by AICPU after each AICore task FIN.
  */
 struct PmuRecord {
-    uint64_t task_id;                               // Same encoding as L2SwimlaneAicoreTaskRecord.task_token_raw
+    uint64_t task_id;                               // Same encoding as ChipSwimlaneAicoreTaskRecord.task_token_raw
     uint32_t func_id;                               // Kernel function identifier
     CoreType core_type;                             // AIC or AIV
     uint64_t pmu_total_cycles;                      // PMU_CNT_TOTAL (64-bit combined)
@@ -143,7 +143,7 @@ struct PmuRecord {
 } __attribute__((aligned(64)));
 
 // =============================================================================
-// PMU Streaming Buffer Structures (mirrors l2_swimlane_profiling.h)
+// PMU Streaming Buffer Structures (mirrors chip_swimlane_profiling.h)
 // =============================================================================
 
 /**

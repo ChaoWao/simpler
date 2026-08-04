@@ -122,12 +122,12 @@ static __aicore__ void copy_hidden(__gm__ float *v1, __gm__ bfloat16_t *v2, int6
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: cur__iter_v1
-    __gm__ Tensor *cur__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *cur__iter_v1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *cur__iter_v1 =
         reinterpret_cast<__gm__ float *>(cur__iter_v1_tensor->buffer.addr) + cur__iter_v1_tensor->start_offset;
 
     // Unpack tensor: hidden_states__ssa_v0
-    __gm__ Tensor *hidden_states__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *hidden_states__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ bfloat16_t *hidden_states__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(hidden_states__ssa_v0_tensor->buffer.addr) +
         hidden_states__ssa_v0_tensor->start_offset;

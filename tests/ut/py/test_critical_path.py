@@ -15,7 +15,7 @@ from simpler_setup.tools import critical_path
 
 def _write_rank_artifacts(rank_dir, name_map_filename):
     rank_dir.mkdir(parents=True)
-    (rank_dir / "l2_swimlane_records.json").write_text(
+    (rank_dir / "chip_swimlane_records.json").write_text(
         json.dumps(
             {
                 "metadata": {"clock_freq_hz": 1_000_000},
@@ -36,7 +36,7 @@ def _write_rank_artifacts(rank_dir, name_map_filename):
 
 def _write_visualization_artifacts(rank_dir):
     rank_dir.mkdir(parents=True)
-    (rank_dir / "l2_swimlane_records.json").write_text(
+    (rank_dir / "chip_swimlane_records.json").write_text(
         json.dumps(
             {
                 "metadata": {"clock_freq_hz": 1_000_000},

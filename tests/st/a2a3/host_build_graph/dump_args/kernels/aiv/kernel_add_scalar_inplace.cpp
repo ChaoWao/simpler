@@ -9,12 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * In-place scalar addition kernel (submit_task / Tensor* ABI)
+ * In-place scalar addition kernel (submit_task / ChipTensor* ABI)
  *
  * Implements: inout[i] = inout[i] + scalar over a single 128x128 tile.
  *
  * Args:
- *   args[0] = inout (INOUT, Tensor*)
+ *   args[0] = inout (INOUT, ChipTensor*)
  *   args[1] = scalar (float bits packed in uint64_t — tensors precede scalars)
  */
 
@@ -36,7 +36,7 @@ using namespace pto;
 #endif
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *inout_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *inout_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
 
     union {
         uint64_t u64;

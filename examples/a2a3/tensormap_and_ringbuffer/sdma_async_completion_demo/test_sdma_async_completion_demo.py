@@ -28,11 +28,11 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
+    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker
@@ -160,7 +160,7 @@ def run(
                     domain = handle[rank]
                     args = TaskArgs()
                     args.add_tensor(
-                        Tensor.make(
+                        ChipTensor.make(
                             data=domain.buffer_ptrs["input_window"],
                             shapes=(N,),
                             dtype=DataType.FLOAT32,

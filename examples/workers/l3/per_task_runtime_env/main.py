@@ -154,7 +154,7 @@ def _l2_config(base: CallConfig, spec: dict) -> CallConfig:
     """
     cfg = CallConfig()
     cfg.aicpu_thread_num = base.aicpu_thread_num
-    cfg.enable_l2_swimlane = base.enable_l2_swimlane
+    cfg.enable_chip_swimlane = base.enable_chip_swimlane
     cfg.enable_dump_args = base.enable_dump_args
     cfg.enable_pmu = base.enable_pmu
     cfg.enable_dep_gen = base.enable_dep_gen

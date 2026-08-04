@@ -1,4 +1,4 @@
-# L2 swimlane AICore: switch-overhead source + FIN-early reorder & ACK-gate
+# chip swimlane AICore: switch-overhead source + FIN-early reorder & ACK-gate
 
 **Date**: 2026-07-08
 **Verdict**: measured — the ~0.8 µs inter-task "switch" is the per-task
@@ -13,14 +13,14 @@ flush at BUFFER_SIZE boundaries.
 ## Question
 
 Switching between two back-to-back AICore tasks shows a ~0.7–1.0 µs gap
-on the L2 swimlane in normal dispatch (not in speculative early
+on the chip swimlane in normal dispatch (not in speculative early
 dispatch). Where does it come from, and can moving the FIN write earlier
 (release the core to AICPU sooner) shrink it?
 
 ## What was tried
 
 Ran `qwen3_14b_decode` (`StressBatch16Seq3500`, block_dim auto → 72
-cores, 1088 AICore tasks) with `--enable-l2-swimlane 4` on a2a3 silicon
+cores, 1088 AICore tasks) with `--enable-chip-swimlane 4` on a2a3 silicon
 via `task-submit`. Decomposed each core's inter-task gap from the
 records (`aicore_tasks = [core, token, reg_task_id, start, end,
 receive_to_start_cycles]`, 50 MHz → 20 ns/tick), classifying a gap as a
@@ -78,9 +78,9 @@ side, not a switch-gap reduction.
    op order is now `ACK → pmu_begin → start → execute → FIN → end →
    pmu_end → dump → record`. FIN fires right after `execute_task`;
    `record_task` runs last, off the completion path. The three swimlane
-   timestamps are gated on `l2_swimlane_enabled`.
+   timestamps are gated on `chip_swimlane_enabled`.
 
-2. **AICPU ACK-gate on rotation** (`l2_swimlane_collector_aicpu.cpp`,
+2. **AICPU ACK-gate on rotation** (`chip_swimlane_collector_aicpu.cpp`,
    shared a2a3). Because tmr now writes FIN *before* the record, the
    completion-before-dispatch invariant no longer proves the old
    buffer's tail record has drained at a BUFFER_SIZE rotation — AICPU
@@ -102,7 +102,7 @@ sub-noise against the ~700 µs WAIT tail and self-correcting (the host
 tolerates a dropped tail record). The per-task `dcci(head)` poll was
 separately measured as effectively free, and deferring the record
 `wmb`/`dsb` already measured as sub-noise
-(`2026-06-l2-swimlane-defer-wmb.md`). The accuracy-over-performance rule
+(`2026-06-chip-swimlane-defer-wmb.md`). The accuracy-over-performance rule
 for profiling paths applies.
 
 ## When to reconsider
@@ -118,6 +118,6 @@ for profiling paths applies.
 
 ## References
 
-- [2026-06 — L2 swimlane: defer per-task wmb to rotation](2026-06-l2-swimlane-defer-wmb.md)
+- [2026-06 — chip swimlane: defer per-task wmb to rotation](2026-06-chip-swimlane-defer-wmb.md)
 - `.claude/rules/codestyle.md` (no logging on AICPU hot paths),
   `docs/hardware/mmio-performance.md` (dcci/dsb costs).

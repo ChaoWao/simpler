@@ -73,7 +73,7 @@ from pathlib import Path
 
 
 def _normalize_task_id(v):
-    """Unsigned 64-bit task id (matches deps.json edges and l2_swimlane task_id).
+    """Unsigned 64-bit task id (matches deps.json edges and chip_swimlane task_id).
 
     Accepts ints (legacy) and strings (current schema): deps.json emits all
     uint64 fields as quoted strings to dodge JSON-number precision loss in
@@ -686,7 +686,7 @@ def _merge_task_meta_with_kernel_ids(meta, task_table, func_names=None):
 
 
 def _load_task_meta(deps_path, func_names=None):
-    """Optional l2_swimlane_records.json sidecar → {task_id: {'func_id', 'core_type', ...}}.
+    """Optional chip_swimlane_records.json sidecar → {task_id: {'func_id', 'core_type', ...}}.
 
     Mixed-kernel tasks (single submit_task that spans both AIC and AIV blocks)
     appear as multiple perf-record entries with the same ``task_id`` but
@@ -699,7 +699,7 @@ def _load_task_meta(deps_path, func_names=None):
     Returns {} if no sidecar present. ``func_names`` (optional dict) overrides
     the default ``f{func_id}`` label with a human name.
     """
-    perf_path = Path(deps_path).parent / "l2_swimlane_records.json"
+    perf_path = Path(deps_path).parent / "chip_swimlane_records.json"
     if not perf_path.exists():
         return {}
     try:

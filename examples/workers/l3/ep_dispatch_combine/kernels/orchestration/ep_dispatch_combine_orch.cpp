@@ -51,29 +51,29 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-ep_dispatch_combine_orchestration_config(const L2TaskArgs &orch_args) {
+ep_dispatch_combine_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 13,  // 11 tensors + 2 scalars
     };
 }
 
-__attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &indices = orch_args.tensor(0).ref();
-    const Tensor &x_norm = orch_args.tensor(1).ref();
-    const Tensor &w_padded = orch_args.tensor(2).ref();
-    const Tensor &idx_padded = orch_args.tensor(3).ref();
-    const Tensor &recv_x_out = orch_args.tensor(4).ref();
-    const Tensor &recv_w_out = orch_args.tensor(5).ref();
-    const Tensor &recv_idx_out = orch_args.tensor(6).ref();
-    const Tensor &recv_count_out = orch_args.tensor(7).ref();
-    const Tensor &recv_y = orch_args.tensor(8).ref();
-    const Tensor &routed_y = orch_args.tensor(9).ref();
-    const Tensor &scratch = orch_args.tensor(10).ref();
+__attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &indices = orch_args.tensor(0).ref();
+    const ChipTensor &x_norm = orch_args.tensor(1).ref();
+    const ChipTensor &w_padded = orch_args.tensor(2).ref();
+    const ChipTensor &idx_padded = orch_args.tensor(3).ref();
+    const ChipTensor &recv_x_out = orch_args.tensor(4).ref();
+    const ChipTensor &recv_w_out = orch_args.tensor(5).ref();
+    const ChipTensor &recv_idx_out = orch_args.tensor(6).ref();
+    const ChipTensor &recv_count_out = orch_args.tensor(7).ref();
+    const ChipTensor &recv_y = orch_args.tensor(8).ref();
+    const ChipTensor &routed_y = orch_args.tensor(9).ref();
+    const ChipTensor &scratch = orch_args.tensor(10).ref();
 
     // child 0: dispatch
     {
-        L0TaskArgs p;
+        CoreTaskArgs p;
         p.add_input(indices);
         p.add_input(x_norm);
         p.add_input(w_padded);
@@ -90,7 +90,7 @@ __attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(co
 
     // child 1: local_expert (pure local, host-backed I/O only — no scratch)
     {
-        L0TaskArgs p;
+        CoreTaskArgs p;
         p.add_input(recv_x_out);
         p.add_input(recv_w_out);
         p.add_input(recv_count_out);
@@ -101,7 +101,7 @@ __attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(co
 
     // child 2: combine (push to routed_y_buf in scratch, barrier, reduce_sum)
     {
-        L0TaskArgs p;
+        CoreTaskArgs p;
         p.add_input(recv_y);
         p.add_input(recv_idx_out);
         p.add_output(routed_y);

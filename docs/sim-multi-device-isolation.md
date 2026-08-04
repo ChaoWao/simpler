@@ -24,7 +24,7 @@ Communication uses a fixed-size (`MAILBOX_SIZE`-byte) shared-memory mailbox per 
 
 ## Why Not Fix the Globals
 
-The global state in `host_runtime.so` spans multiple files (`cpu_sim_context.cpp`, `platform_aicpu_affinity.cpp`, `l2_swimlane_collector_aicpu.cpp`, `device_log.cpp`) and is deeply embedded in the AICPU/AICore thread model. Fixing each one individually is fragile. Process isolation solves all of them at once with zero platform code changes.
+The global state in `host_runtime.so` spans multiple files (`cpu_sim_context.cpp`, `platform_aicpu_affinity.cpp`, `chip_swimlane_collector_aicpu.cpp`, `device_log.cpp`) and is deeply embedded in the AICPU/AICore thread model. Fixing each one individually is fragile. Process isolation solves all of them at once with zero platform code changes.
 
 ## Files
 

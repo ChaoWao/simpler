@@ -12,10 +12,10 @@
  * Orchestration Build Graph Types - Data structures for orchestration runtime extensions
  *
  * Standalone header defining orchestration-specific types for:
- * - TaskOutputTensors: Return value from submit containing materialized output Tensors
+ * - TaskOutputTensors: Return value from submit containing materialized output ChipTensors
  * - Arg: Aggregated argument container for pto_submit_task API
  *
- * Tensor descriptor types (Tensor, PTOBufferHandle, TensorCreateInfo) are
+ * ChipTensor descriptor types (ChipTensor, PTOBufferHandle, TensorCreateInfo) are
  * defined in tensor.h.
  *
  * This header is independent of orch_build_graph_runtime.h to allow inclusion from runtime.h
@@ -63,7 +63,7 @@ enum class CompletionType : int32_t {
 };
 
 // =============================================================================
-// Task Output Tensors (return value from submit)
+// Task Output ChipTensors (return value from submit)
 // =============================================================================
 
 enum class PTO2ScopeMode : uint8_t {
@@ -72,12 +72,12 @@ enum class PTO2ScopeMode : uint8_t {
 };
 
 /**
- * TaskOutputTensors — returned by submit, holds materialized output Tensors.
+ * TaskOutputTensors — returned by submit, holds materialized output ChipTensors.
  *
  * Only runtime-created outputs are stored here, indexed in add_output order.
  *
  * The underlying storage is uninitialized; only output_count elements are
- * valid after submit returns.  This avoids default-constructing Tensor[]
+ * valid after submit returns.  This avoids default-constructing ChipTensor[]
  * on the hot path (2 KB of unnecessary zeroing per submit).
  *
  * Users must hold a named TaskOutputTensors variable and borrow via get_ref();
@@ -87,8 +87,8 @@ enum class PTO2ScopeMode : uint8_t {
  *   Internally this class stores pointers into the submitting task's payload
  *   (PTO2TaskPayload::tensors[]), which lives in a ring-buffer slot. After
  *   scope_end the slot becomes eligible for reuse, and a later submit will
- *   overwrite the same Tensor storage in place. Therefore the
- *   TaskOutputTensors instance, the const Tensor& returned by get_ref(), and
+ *   overwrite the same ChipTensor storage in place. Therefore the
+ *   TaskOutputTensors instance, the const ChipTensor& returned by get_ref(), and
  *   any pointer derived from either MUST NOT outlive the PTO2_SCOPE in which
  *   submit was called — do not move/copy them to outer-scope variables, do
  *   not capture references by std::reference_wrapper or raw pointers across
@@ -110,14 +110,14 @@ public:
     uint32_t size() const { return output_count_; }
 
     /// Borrow a materialized output tensor by index (lvalue only).
-    const Tensor &get_ref(uint32_t index) const & {
+    const ChipTensor &get_ref(uint32_t index) const & {
         always_assert(index < output_count_);
         return *tensors_[index];
     }
-    const Tensor &get_ref(uint32_t index) const && = delete;
+    const ChipTensor &get_ref(uint32_t index) const && = delete;
 
-    /// Runtime-internal: append one materialized output Tensor.
-    void materialize_output(const Tensor &tensor) {
+    /// Runtime-internal: append one materialized output ChipTensor.
+    void materialize_output(const ChipTensor &tensor) {
         always_assert(output_count_ < MAX_TENSOR_ARGS);
         tensors_[output_count_++] = &tensor;
     }
@@ -131,7 +131,7 @@ private:
     uint32_t output_count_;
     // Upper bound: a task cannot have more outputs than total tensor args
     // (every OUTPUT/OUTPUT_EXISTING slot is one of the Arg's tensor slots).
-    const Tensor *tensors_[MAX_TENSOR_ARGS];
+    const ChipTensor *tensors_[MAX_TENSOR_ARGS];
 };
 
 // =============================================================================
@@ -141,7 +141,7 @@ private:
 // TensorArgType is defined in tensor.h (included via task_args.h above)
 
 /**
- * Tagged reference to a single Arg slot — either a Tensor* or a
+ * Tagged reference to a single Arg slot — either a ChipTensor* or a
  * TensorCreateInfo*. The active member is determined by the slot's
  * TensorArgType tag (OUTPUT → create_info, else → tensor pointer).
  *
@@ -152,7 +152,7 @@ private:
  */
 class TensorRef {
     union {
-        const Tensor *ptr_;
+        const ChipTensor *ptr_;
         const TensorCreateInfo *create_info_;
     };
 
@@ -164,7 +164,7 @@ public:
     TensorRef &operator=(const TensorRef &) = delete;
     TensorRef &operator=(TensorRef &&) = delete;
 
-    TensorRef &operator=(const Tensor *p) {
+    TensorRef &operator=(const ChipTensor *p) {
         ptr_ = p;
         return *this;
     }
@@ -173,9 +173,9 @@ public:
         return *this;
     }
 
-    const Tensor &ref() const { return *ptr_; }
+    const ChipTensor &ref() const { return *ptr_; }
     const TensorCreateInfo &create_info() const { return *create_info_; }
-    bool refers_to(const Tensor *t) const { return ptr_ == t; }
+    bool refers_to(const ChipTensor *t) const { return ptr_ == t; }
     bool refers_to(const TensorCreateInfo *ci) const { return create_info_ == ci; }
 };
 
@@ -183,32 +183,32 @@ public:
  * Aggregated argument container for pto_submit_task
  *
  * Inherits storage from TaskArgsTpl<TensorRef, uint64_t, MAX_TENSOR_ARGS, MAX_SCALAR_ARGS, TensorArgType>.
- * Each tensor slot stores a TensorRef union (Tensor* or TensorCreateInfo)
+ * Each tensor slot stores a TensorRef union (ChipTensor* or TensorCreateInfo)
  * discriminated by the corresponding tag().
- * Tensors are dispatched first in kernel args, followed by scalars.
+ * ChipTensors are dispatched first in kernel args, followed by scalars.
  *
  * Output arguments follow two distinct ownership models:
  * - add_output(const TensorCreateInfo&): OUTPUT — runtime allocates buffer
- *   and materializes a new Tensor, returned via TaskOutputTensors.
- * - add_inout(const Tensor&): INOUT — reuses an existing Tensor as the write target.
+ *   and materializes a new ChipTensor, returned via TaskOutputTensors.
+ * - add_inout(const ChipTensor&): INOUT — reuses an existing ChipTensor as the write target.
  *
  * Example:
- *   Tensor x = make_tensor_external(dev_a, shapes, 2);
+ *   ChipTensor x = make_tensor_external(dev_a, shapes, 2);
  *   TensorCreateInfo ci(shapes, 2);  // must outlive submit
  *   Arg args;
  *   args.add_input(x);
  *   args.add_output(ci);
  *   args.add_scalar(some_value);
  *   TaskOutputTensors outs = rt_submit_aic_task(kernel_id, args);
- *   const Tensor& y = outs.get_ref(0);
+ *   const ChipTensor& y = outs.get_ref(0);
  */
 
 // Operand of a dispatch predicate (L0 layer): locates one element of a tensor —
 // tensor + ndims + indices, mirroring get_tensor_data. The tensor is borrowed and
 // must outlive submit; its buffer must be allocated by then, and its producer must
 // be a dependency of the predicated task so the value is current at dispatch.
-struct L0PredicateOperand {
-    const Tensor *tensor{nullptr};
+struct CorePredicateOperand {
+    const ChipTensor *tensor{nullptr};
     uint32_t ndims{0};
     uint32_t indices[MAX_TENSOR_DIMS]{};
 };
@@ -217,8 +217,8 @@ struct L0PredicateOperand {
 // op == NONE means "no predicate — always dispatch". Submit resolves the operand
 // into the payload's DispatchPredicate (an absolute GM address). Read in-process;
 // never crosses the wire.
-struct L0TaskPredicate {
-    L0PredicateOperand operand;
+struct CoreTaskPredicate {
+    CorePredicateOperand operand;
     PredicateOp op{PredicateOp::NONE};
     int64_t target{0};
 };
@@ -262,9 +262,9 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
     // resolving fanin/fanout so consumers unlock. The predicate tensor's producer
     // MUST be a dependency of this task so the value is current when the task
     // becomes ready. Read in-process; never crosses the wire.
-    L0TaskPredicate predicate_;
-    void set_predicate(const L0TaskPredicate &pred) { predicate_ = pred; }
-    const L0TaskPredicate &predicate() const { return predicate_; }
+    CoreTaskPredicate predicate_;
+    void set_predicate(const CoreTaskPredicate &pred) { predicate_ = pred; }
+    const CoreTaskPredicate &predicate() const { return predicate_; }
 
     // Selective task-timing slot: tag this task to have the scheduler record its
     // AICPU dispatch/finish cycles into fixed slot `slot` (0..15). Untagged by
@@ -288,7 +288,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         explicit_deps_ = nullptr;
         explicit_dep_count_ = 0;
         allow_early_resolve_ = false;
-        predicate_ = L0TaskPredicate{};
+        predicate_ = CoreTaskPredicate{};
         task_timing_slot_ = TASK_TIMING_SLOT_NONE;
     }
 
@@ -314,7 +314,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         );
         static_assert(
             (is_supported_dump_arg_v<Args> && ...),
-            "dump: all arguments must be Tensor, TensorCreateInfo, or scalar lvalues"
+            "dump: all arguments must be ChipTensor, TensorCreateInfo, or scalar lvalues"
         );
         if constexpr (sizeof...(Args) == 0) {
             mark_all_dump_args();
@@ -343,7 +343,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         ((tensors_[tensor_count_] = &args, tags_[tensor_count_] = TensorArgType::INPUT, tensor_count_++), ...);
     }
 
-    /// Batch add outputs — all Tensor or all TensorCreateInfo:
+    /// Batch add outputs — all ChipTensor or all TensorCreateInfo:
     ///   add_output(ci1, ci2)         — runtime allocates buffers (OUTPUT)
     ///   add_output(t1, t2)           — write-only existing tensors (OUTPUT_EXISTING)
     template <typename... Args>
@@ -521,7 +521,7 @@ private:
 #if SIMPLER_DFX
     template <typename T>
     static constexpr bool is_supported_dump_arg_v =
-        std::is_same_v<std::decay_t<T>, Tensor> || std::is_same_v<std::decay_t<T>, TensorCreateInfo> ||
+        std::is_same_v<std::decay_t<T>, ChipTensor> || std::is_same_v<std::decay_t<T>, TensorCreateInfo> ||
         is_supported_scalar_arg_v<T>;
 #endif
 
@@ -562,7 +562,7 @@ private:
         dump_arg_selection_.mark_all(tensor_count_, scalar_count_);
     }
 
-    void mark_dump_arg(const Tensor &tensor) {
+    void mark_dump_arg(const ChipTensor &tensor) {
         for (int32_t i = 0; i < tensor_count_; i++) {
             if (tags_[i] != TensorArgType::OUTPUT && tensors_[i].refers_to(&tensor)) {
                 dump_arg_selection_.mark_index(i);
@@ -604,12 +604,12 @@ private:
         );
         if constexpr (is_output) {
             static_assert(
-                (std::is_same_v<std::decay_t<Args>, Tensor> && ...) ||
+                (std::is_same_v<std::decay_t<Args>, ChipTensor> && ...) ||
                     (std::is_same_v<std::decay_t<Args>, TensorCreateInfo> && ...),
-                "add_output: all arguments must be the same type (all Tensor or all TensorCreateInfo)"
+                "add_output: all arguments must be the same type (all ChipTensor or all TensorCreateInfo)"
             );
         } else {
-            static_assert((std::is_same_v<std::decay_t<Args>, Tensor> && ...), "all arguments must be Tensor");
+            static_assert((std::is_same_v<std::decay_t<Args>, ChipTensor> && ...), "all arguments must be ChipTensor");
         }
     }
 
@@ -635,24 +635,24 @@ private:
 // Task-args layer aliases
 // =============================================================================
 //
-// L0TaskArgs — core-level container used to build and submit tasks inside
+// CoreTaskArgs — core-level container used to build and submit tasks inside
 //   orchestration (small, stack-friendly).
-using L0TaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
+using CoreTaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
 
-// L2TaskArgs — chip-level entry-arg holding the orchestration entry's
+// ChipTaskArgs — chip-level entry-arg holding the orchestration entry's
 // already-allocated inputs (capacity matches ChipStorageTaskArgs).
-// aicpu_orchestration_entry/config receive a const L2TaskArgs&.
-struct L2TaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
+// aicpu_orchestration_entry/config receive a const ChipTaskArgs&.
+struct ChipTaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
     // Build from the executor's ChipStorageTaskArgs: each input becomes a
-    // TensorRef pointing at src's Tensor, so `src` must outlive this (on the
+    // TensorRef pointing at src's ChipTensor, so `src` must outlive this (on the
     // executor path src is runtime->dev.orch_args_storage_, alive for the whole run).
     void create_from_chip_args(const ChipStorageTaskArgs &src) {
         reset();
         for (int32_t i = 0; i < src.tensor_count(); ++i) {
             // Entry inputs are external submit-time tensors; the entry binds them
-            // by const Tensor& (replacing from_tensor_arg's old version/manual_dep
+            // by const ChipTensor& (replacing from_tensor_arg's old version/manual_dep
             // reset), so this invariant is what keeps that binding behavior-preserving.
-            const Tensor &t = src.tensor(i);
+            const ChipTensor &t = src.tensor(i);
             debug_assert(!t.manual_dep && t.version == 0);
             add_input(t);
         }

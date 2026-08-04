@@ -18,7 +18,7 @@
 #include "aicpu/device_log.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/device_time.h"
-#include "aicpu/l2_swimlane_collector_aicpu.h"
+#include "aicpu/chip_swimlane_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
 #include "aicpu/platform_aicpu_affinity.h"
 #include "aicpu/pmu_collector_aicpu.h"
@@ -78,9 +78,9 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
     set_platform_regs(k_args->regs);
     set_platform_dump_base(k_args->dump_data_base);
     set_dump_args_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS));
-    set_platform_l2_swimlane_base(k_args->l2_swimlane_data_base);
-    set_platform_l2_swimlane_aicore_rotation_table(k_args->l2_swimlane_aicore_rotation_table);
-    set_l2_swimlane_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_L2_SWIMLANE));
+    set_platform_chip_swimlane_base(k_args->chip_swimlane_data_base);
+    set_platform_chip_swimlane_aicore_rotation_table(k_args->chip_swimlane_aicore_rotation_table);
+    set_chip_swimlane_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE));
     set_platform_pmu_base(k_args->pmu_data_base);
     set_pmu_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_PMU));
     set_platform_dep_gen_base(k_args->dep_gen_data_base);

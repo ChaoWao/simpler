@@ -14,15 +14,15 @@ Converts performance data JSON (.json) to Chrome Trace Event Format JSON
 for visualization in Perfetto (https://ui.perfetto.dev/).
 
 Usage:
-    python -m simpler_setup.tools.swimlane_converter  # latest l2_swimlane_records_*.json under ./outputs/
-    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/l2_swimlane_records.json
-    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/l2_swimlane_records.json -o out.json
-    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/l2_swimlane_records.json -k kernel_config.py
-    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/l2_swimlane_records.json -v
+    python -m simpler_setup.tools.swimlane_converter  # latest chip_swimlane_records_*.json under ./outputs/
+    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/chip_swimlane_records.json
+    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/chip_swimlane_records.json -o out.json
+    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/chip_swimlane_records.json -k kernel_config.py
+    python -m simpler_setup.tools.swimlane_converter outputs/<case>_<ts>/chip_swimlane_records.json -v
 
 SPMD (block_num>1): dependency flows use the earliest visible task slice
 per (func_id, task_id) independently in each view; see
-docs/dfx/l2-swimlane-profiling.md §3.5.
+docs/dfx/chip-swimlane-profiling.md §3.5.
 """
 
 import argparse
@@ -126,7 +126,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     function does the AICore↔AICPU join. Schema:
 
         {
-          "l2_swimlane_level": <1..4>,
+          "chip_swimlane_level": <1..4>,
           "metadata": {
             "clock_freq_hz": <int>,
             "num_cores": <int>,
@@ -176,9 +176,9 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     with open(filepath) as f:
         data = json.load(f)
 
-    level = int(data.get("l2_swimlane_level"))
+    level = int(data.get("chip_swimlane_level"))
     if level not in [1, 2, 3, 4]:
-        raise ValueError(f"Unsupported l2_swimlane_level: {level} (expected 1, 2, 3, or 4)")
+        raise ValueError(f"Unsupported chip_swimlane_level: {level} (expected 1, 2, 3, or 4)")
 
     metadata = data.get("metadata") or {}
     clock_freq_hz = int(metadata.get("clock_freq_hz") or 0)
@@ -371,7 +371,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         aicpu_orchestrator_phases.append(converted)
 
     out = {
-        "l2_swimlane_level": level,
+        "chip_swimlane_level": level,
         "tasks": tasks,
     }
     if aicpu_scheduler_phases:
@@ -389,7 +389,7 @@ def load_deps_json(deps_path):
     deps.json is the sole source of truth for the task graph in this tool:
     the device hot path no longer records per-task fanout (see PR #863). The
     typical workflow is a dep_gen run once per topology (``--enable-dep-gen``)
-    to produce ``deps.json``, then any number of ``--enable-l2-swimlane`` runs
+    to produce ``deps.json``, then any number of ``--enable-chip-swimlane`` runs
     that join their per-task timing against that captured graph.
 
     Returns:
@@ -752,7 +752,7 @@ def load_func_names_json(json_path):
     return data.get("callable_id_to_name", {}), data.get("orchestrator_name")
 
 
-def print_task_statistics(tasks, func_id_to_name=None, l2_swimlane_level=None):
+def print_task_statistics(tasks, func_id_to_name=None, chip_swimlane_level=None):
     """Print task statistics grouped by func_id.
 
     Exec = kernel execution time (end_time_us - start_time_us) on AICore.
@@ -764,10 +764,10 @@ def print_task_statistics(tasks, func_id_to_name=None, l2_swimlane_level=None):
     Args:
         tasks: List of task dicts
         func_id_to_name: Optional dict mapping func_id to function name
-        l2_swimlane_level: Source collection level. Level 1 has no AICPU
+        chip_swimlane_level: Source collection level. Level 1 has no AICPU
             dispatch/finish timestamps, so latency-derived metrics are unavailable.
     """
-    has_aicpu_timing = l2_swimlane_level is None or l2_swimlane_level >= 2
+    has_aicpu_timing = chip_swimlane_level is None or chip_swimlane_level >= 2
 
     # Group tasks by func_id with extended metrics
     func_stats: defaultdict[Any, dict[str, Any]] = defaultdict(
@@ -842,13 +842,13 @@ def print_task_statistics(tasks, func_id_to_name=None, l2_swimlane_level=None):
         3: "AICore + AICPU timing + scheduler phases",
         4: "full collection with orchestrator phases",
     }
-    if l2_swimlane_level is None:
+    if chip_swimlane_level is None:
         level_description = "unknown"
         level_value = "unknown"
     else:
-        level_description = level_descriptions.get(l2_swimlane_level, "unknown")
-        level_value = l2_swimlane_level
-    print(f"  Source l2_swimlane_level: {level_value} ({level_description}; recorded in l2_swimlane_records.json)")
+        level_description = level_descriptions.get(chip_swimlane_level, "unknown")
+        level_value = chip_swimlane_level
+    print(f"  Source chip_swimlane_level: {level_value} ({level_description}; recorded in chip_swimlane_records.json)")
     print("  Exec = kernel time on AICore; Latency = dispatch->finish (incl. head OH + Exec + tail OH)")
     print("  Head OH split (v3): Prop = NoC propagation (dispatch_ts→AICore receive); Local = dcci+ack (receive→start)")
     print("=" * 140)
@@ -921,7 +921,7 @@ def print_task_statistics(tasks, func_id_to_name=None, l2_swimlane_level=None):
     if has_aicpu_timing and min_dispatch_time != float("inf") and max_finish_time != float("-inf"):
         total_test_time = max_finish_time - min_dispatch_time
         print(f"\nTotal Test Time: {total_test_time:.2f} us (from earliest dispatch to latest finish)")
-    elif l2_swimlane_level == 1 and min_aicore_time != float("inf") and max_aicore_time != float("-inf"):
+    elif chip_swimlane_level == 1 and min_aicore_time != float("inf") and max_aicore_time != float("-inf"):
         aicore_observed_span = max_aicore_time - min_aicore_time
         print(
             f"\nAICore Observed Span: {aicore_observed_span:.2f} us (from earliest AICore receive to latest AICore end)"
@@ -1108,13 +1108,13 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         output_path: Path to output JSON file
         func_id_to_name: Optional dict mapping func_id to function name
         verbose: Print progress information
-        scheduler_phases: Optional list of per-thread phase record lists (l2_swimlane_level >= 3)
-        orchestrator_phases: Optional list of per-task orchestrator phase records (l2_swimlane_level >= 4)
+        scheduler_phases: Optional list of per-thread phase record lists (chip_swimlane_level >= 3)
+        orchestrator_phases: Optional list of per-task orchestrator phase records (chip_swimlane_level >= 4)
         core_to_thread: Optional list mapping core_id (index) to scheduler thread index (-1 = unassigned)
 
     Generates processes in the trace:
-        - pid=1 "AICPU Orchestrator": orchestrator phase bars (l2_swimlane_level >= 4)
-        - pid=2 "AICPU Scheduler": scheduler phase bars (l2_swimlane_level >= 3)
+        - pid=1 "AICPU Orchestrator": orchestrator phase bars (chip_swimlane_level >= 4)
+        - pid=2 "AICPU Scheduler": scheduler phase bars (chip_swimlane_level >= 3)
         - pid=3 "Scheduler View": dispatch_time_us to finish_time_us (AICPU perspective)
         - pid=4 "Worker View": per-subtask kernel execution on physical cores
     """
@@ -1400,7 +1400,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     deps_flow_count = 0
     edges_by_pred = deps_edges or {}
 
-    # AICPU Scheduler phase events (l2_swimlane_level >= 3)
+    # AICPU Scheduler phase events (chip_swimlane_level >= 3)
     if scheduler_phases:
 
         def sched_lane_tid(thread_idx, lane=0):
@@ -1601,7 +1601,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 tasks_processed = record.get("tasks_processed", 0)
 
                 # Queue-depth snapshot fields. Layout per
-                # L2SwimlaneAicpuSchedPhaseRecord docstring: [AIC, AIV, MIX].
+                # ChipSwimlaneAicpuSchedPhaseRecord docstring: [AIC, AIV, MIX].
                 shared_at_start = record.get("shared_at_start")
                 shared_at_end = record.get("shared_at_end")
                 depths_valid = (
@@ -1713,7 +1713,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
 
-    # AICPU Orchestrator lane (l2_swimlane_level >= 4)
+    # AICPU Orchestrator lane (chip_swimlane_level >= 4)
     #
     # Per-event AicpuPhaseRecord[] is the single source of truth for
     # orchestrator timing. There is no separate aggregate summary — the
@@ -2458,17 +2458,17 @@ def _build_parser():
         epilog="""
 Examples:
   %(prog)s                                            # Use latest .json in outputs/, output to outputs/
-  %(prog)s outputs/<case>_<ts>/l2_swimlane_records.json   # Output: outputs/merged_swimlane_20260210_143526.json
-  %(prog)s outputs/<case>_<ts>/l2_swimlane_records.json -o custom_output.json
-  %(prog)s outputs/<case>_<ts>/l2_swimlane_records.json \
+  %(prog)s outputs/<case>_<ts>/chip_swimlane_records.json   # Output: outputs/merged_swimlane_20260210_143526.json
+  %(prog)s outputs/<case>_<ts>/chip_swimlane_records.json -o custom_output.json
+  %(prog)s outputs/<case>_<ts>/chip_swimlane_records.json \
       -k examples/host_build_graph/paged_attention/kernels/kernel_config.py
-  %(prog)s outputs/<case>_<ts>/l2_swimlane_records.json -v
+  %(prog)s outputs/<case>_<ts>/chip_swimlane_records.json -v
         """,
     )
     parser.add_argument(
         "input",
         nargs="?",
-        help="Input JSON file (.json). If not specified, uses the latest l2_swimlane_records_*.json in outputs/",
+        help="Input JSON file (.json). If not specified, uses the latest chip_swimlane_records_*.json in outputs/",
     )
     parser.add_argument("-o", "--output", help="Output JSON file (default: <input_dir>/merged_swimlane.json)")
     parser.add_argument(
@@ -2501,7 +2501,7 @@ Examples:
 
 
 def _resolve_input_path(args):
-    """Resolve input path, auto-selecting newest outputs/<case>/l2_swimlane_records.json if unspecified."""
+    """Resolve input path, auto-selecting newest outputs/<case>/chip_swimlane_records.json if unspecified."""
     if args.input is not None:
         input_path = Path(args.input)
         if not input_path.exists():
@@ -2510,10 +2510,10 @@ def _resolve_input_path(args):
         return input_path
 
     outputs_dir = Path.cwd() / "outputs"
-    json_files = list(outputs_dir.glob("*/l2_swimlane_records.json"))
+    json_files = list(outputs_dir.glob("*/chip_swimlane_records.json"))
     if not json_files:
-        print(f"Error: No outputs/*/l2_swimlane_records.json found under {outputs_dir}", file=sys.stderr)
-        print("Run a test with --enable-l2-swimlane first, or specify an explicit input.", file=sys.stderr)
+        print(f"Error: No outputs/*/chip_swimlane_records.json found under {outputs_dir}", file=sys.stderr)
+        print("Run a test with --enable-chip-swimlane first, or specify an explicit input.", file=sys.stderr)
         return None
 
     input_path = max(json_files, key=lambda p: p.stat().st_mtime)
@@ -2534,11 +2534,11 @@ def _resolve_output_path(args, input_path):
 
 def _print_verbose_data_info(data, verbose):
     """Print verbose summary of loaded performance data, including phase counts
-    when present (l2_swimlane_level >= SCHED_PHASES)."""
+    when present (chip_swimlane_level >= SCHED_PHASES)."""
     if not verbose:
         return
     print("\n=== Performance Data ===")
-    print(f"  L2 perf level: {data['l2_swimlane_level']}")
+    print(f"  L2 perf level: {data['chip_swimlane_level']}")
     print(f"  Task Count: {len(data['tasks'])}")
     if data["tasks"]:
         start_times = [t["start_time_us"] for t in data["tasks"]]
@@ -2683,14 +2683,14 @@ def main():
         print(f"  Output: {output_path}")
         print(f"\nTo visualize: Open https://ui.perfetto.dev/ and drag in {output_path}")
 
-        print_task_statistics(data["tasks"], func_names, l2_swimlane_level=data["l2_swimlane_level"])
+        print_task_statistics(data["tasks"], func_names, chip_swimlane_level=data["chip_swimlane_level"])
 
         # Scheduler-overhead deep-dive is a SEPARATE manual tool now: it needs
         # the task DAG (deps.json) captured in its own --enable-dep-gen run
         # (co-running dep_gen with swimlane perturbs the timing), so it can't be
         # produced accurately inline here. Run it explicitly:
         #   python -m simpler_setup.tools.sched_overhead_analysis \
-        #       --l2-swimlane-records-json <this> --deps-json <deps from dep_gen run>
+        #       --chip-swimlane-records-json <this> --deps-json <deps from dep_gen run>
         print(
             "\nScheduler-overhead deep-dive: run sched_overhead_analysis manually with a "
             "separately-captured deps.json (--enable-dep-gen)."

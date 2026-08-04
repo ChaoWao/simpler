@@ -15,7 +15,7 @@
  * The buffer (AicpuPhaseRecord[NUM_AICPU_PHASES] per AICPU thread, thread-major)
  * is host-allocated; its base address is published into the AICPU SO via
  * `set_platform_phase_base()` (onboard: kernel.cpp from KernelArgs; sim: the
- * host dlsym's the setter), exactly like the dump / l2_swimlane / pmu bases.
+ * host dlsym's the setter), exactly like the dump / chip_swimlane / pmu bases.
  * The per-thread slot is resolved from `platform_aicpu_affinity_thread_idx()`
  * (POSIX pthread-key TLS) — no C++ `thread_local`, per docs/dynamic-linking.md,
  * so the base survives the dlopen boundary on sim.
@@ -39,7 +39,7 @@
 #include "common/platform_config.h"
 
 // Published by the host (onboard: kernel.cpp from KernelArgs::device_wall_data_base;
-// sim: dlsym'd setter), mirroring set_platform_dump_base / set_platform_l2_swimlane_base.
+// sim: dlsym'd setter), mirroring set_platform_dump_base / set_platform_chip_swimlane_base.
 // Defined in src/common/platform/shared/aicpu/device_phase_aicpu.cpp.
 extern "C" void set_platform_phase_base(uint64_t phase_data_base);
 extern "C" uint64_t get_platform_phase_base();

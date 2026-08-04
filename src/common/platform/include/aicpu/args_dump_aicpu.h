@@ -401,7 +401,7 @@ void dump_args_init(int num_dump_threads);
  * overwritten so execution can continue without losing the active buffer.
  *
  * @param thread_idx Scheduling thread index
- * @param info Tensor metadata and identification
+ * @param info ChipTensor metadata and identification
  * @return 0 on success or intentional drop, -1 only when dump state is unavailable
  */
 int dump_arg_record(int thread_idx, const ArgsDumpInfo &info);

@@ -40,32 +40,33 @@ static constexpr uint32_t TILE_ELEMS = 128 * 128;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 15,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // Input tensors use orch_args.tensor(i).ref() — golden shape = kernel shape
-    const Tensor &ext_A = orch_args.tensor(0).ref();
-    const Tensor &ext_B = orch_args.tensor(1).ref();
-    const Tensor &ext_D = orch_args.tensor(3).ref();
-    const Tensor &ext_E = orch_args.tensor(4).ref();
-    const Tensor &ext_G = orch_args.tensor(6).ref();
-    const Tensor &ext_H = orch_args.tensor(7).ref();
+    const ChipTensor &ext_A = orch_args.tensor(0).ref();
+    const ChipTensor &ext_B = orch_args.tensor(1).ref();
+    const ChipTensor &ext_D = orch_args.tensor(3).ref();
+    const ChipTensor &ext_E = orch_args.tensor(4).ref();
+    const ChipTensor &ext_G = orch_args.tensor(6).ref();
+    const ChipTensor &ext_H = orch_args.tensor(7).ref();
 
     // Output tensors — full buffers
-    const Tensor &ext_C = orch_args.tensor(2).ref();
-    const Tensor &ext_F = orch_args.tensor(5).ref();
-    const Tensor &ext_I = orch_args.tensor(8).ref();
-    const Tensor &ext_J = orch_args.tensor(9).ref();
-    const Tensor &ext_K = orch_args.tensor(10).ref();
-    const Tensor &ext_L = orch_args.tensor(11).ref();
-    const Tensor &ext_M = orch_args.tensor(12).ref();
-    const Tensor &ext_N = orch_args.tensor(13).ref();
-    const Tensor &ext_O = orch_args.tensor(14).ref();
+    const ChipTensor &ext_C = orch_args.tensor(2).ref();
+    const ChipTensor &ext_F = orch_args.tensor(5).ref();
+    const ChipTensor &ext_I = orch_args.tensor(8).ref();
+    const ChipTensor &ext_J = orch_args.tensor(9).ref();
+    const ChipTensor &ext_K = orch_args.tensor(10).ref();
+    const ChipTensor &ext_L = orch_args.tensor(11).ref();
+    const ChipTensor &ext_M = orch_args.tensor(12).ref();
+    const ChipTensor &ext_N = orch_args.tensor(13).ref();
+    const ChipTensor &ext_O = orch_args.tensor(14).ref();
 
     // Derive num_iters from output tensor size
     uint32_t total_elems = orch_args.tensor(2).ref().shapes[0];
@@ -78,15 +79,15 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
             uint32_t view_shapes[1] = {TILE_ELEMS};
             uint32_t view_offsets[1] = {static_cast<uint32_t>(i) * TILE_ELEMS};
 
-            Tensor C_view = ext_C.view(view_shapes, view_offsets);
-            Tensor F_view = ext_F.view(view_shapes, view_offsets);
-            Tensor I_view = ext_I.view(view_shapes, view_offsets);
-            Tensor J_view = ext_J.view(view_shapes, view_offsets);
-            Tensor K_view = ext_K.view(view_shapes, view_offsets);
-            Tensor L_view = ext_L.view(view_shapes, view_offsets);
-            Tensor M_view = ext_M.view(view_shapes, view_offsets);
-            Tensor N_view = ext_N.view(view_shapes, view_offsets);
-            Tensor O_view = ext_O.view(view_shapes, view_offsets);
+            ChipTensor C_view = ext_C.view(view_shapes, view_offsets);
+            ChipTensor F_view = ext_F.view(view_shapes, view_offsets);
+            ChipTensor I_view = ext_I.view(view_shapes, view_offsets);
+            ChipTensor J_view = ext_J.view(view_shapes, view_offsets);
+            ChipTensor K_view = ext_K.view(view_shapes, view_offsets);
+            ChipTensor L_view = ext_L.view(view_shapes, view_offsets);
+            ChipTensor M_view = ext_M.view(view_shapes, view_offsets);
+            ChipTensor N_view = ext_N.view(view_shapes, view_offsets);
+            ChipTensor O_view = ext_O.view(view_shapes, view_offsets);
 
             // 1. AIC_AIV_X2: matmul + add + mul
             {
@@ -94,7 +95,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                 mk.aic_kernel_id = FUNC_MATMUL;
                 mk.aiv0_kernel_id = FUNC_ADD;
                 mk.aiv1_kernel_id = FUNC_MUL;
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_A);
                 args.add_input(ext_B);
                 args.add_output(C_view);
@@ -109,7 +110,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
             // 2. AIC_ONLY: standalone matmul
             {
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_A);
                 args.add_input(ext_B);
                 args.add_output(J_view);
@@ -118,7 +119,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
             // 3. AIV_X1: standalone add
             {
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_D);
                 args.add_input(ext_E);
                 args.add_output(K_view);
@@ -130,7 +131,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                 MixedKernels mk;
                 mk.aiv0_kernel_id = FUNC_ADD_STANDALONE;
                 mk.aiv1_kernel_id = FUNC_MUL_STANDALONE;
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_D);
                 args.add_input(ext_E);
                 args.add_output(L_view);
@@ -145,7 +146,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                 MixedKernels mk;
                 mk.aic_kernel_id = FUNC_MATMUL;
                 mk.aiv0_kernel_id = FUNC_ADD;
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_A);
                 args.add_input(ext_B);
                 args.add_output(N_view);

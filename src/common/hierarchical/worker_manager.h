@@ -106,7 +106,7 @@ static constexpr size_t MAILBOX_ERROR_MSG_SIZE = 256;
 //
 // The generation-safe run lease follows CallConfig. MAILBOX_OFF_ARGS is
 // derived by rounding up the lease's end so the
-// args blob's first Tensor field (buffer.addr, a uint64_t at OFF_ARGS+8) is
+// args blob's first ChipTensor field (buffer.addr, a uint64_t at OFF_ARGS+8) is
 // 8-byte aligned, avoiding SIGBUS on strict-alignment platforms (aarch64
 // atomics, some ARM cores). The base frame carries control commands; task
 // frames use the same relative layout without sharing those bytes.
@@ -118,7 +118,7 @@ static constexpr ptrdiff_t MAILBOX_OFF_PIPELINE_LEASE =
     (MAILBOX_OFF_CONFIG + static_cast<ptrdiff_t>(sizeof(CallConfig)) + 7) & ~ptrdiff_t{7};
 static constexpr ptrdiff_t MAILBOX_OFF_ARGS =
     (MAILBOX_OFF_PIPELINE_LEASE + static_cast<ptrdiff_t>(sizeof(PipelineSlotLease)) + 7) & ~ptrdiff_t{7};
-static_assert(MAILBOX_OFF_ARGS % 8 == 0, "MAILBOX_OFF_ARGS must be 8-aligned for Tensor.buffer.addr");
+static_assert(MAILBOX_OFF_ARGS % 8 == 0, "MAILBOX_OFF_ARGS must be 8-aligned for ChipTensor.buffer.addr");
 static_assert(
     MAILBOX_OFF_CONFIG + static_cast<ptrdiff_t>(sizeof(CallConfig)) <= MAILBOX_OFF_ARGS,
     "CallConfig overflows reserved config region"
@@ -164,7 +164,8 @@ static_assert(
 static constexpr size_t MAILBOX_ARGS_CAPACITY =
     static_cast<size_t>(MAILBOX_OFF_SHUTDOWN) - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB);
 static_assert(
-    MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
+    MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE +
+                                 static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(ChipTensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
     "mailbox args region must hold the largest TaskArgs blob the runtime accepts (issue #1024)"
 );
@@ -198,8 +199,8 @@ static constexpr uint64_t CTRL_RELEASE_DOMAIN = 8;
 static constexpr uint64_t CTRL_COMM_INIT = 9;
 static constexpr uint64_t CTRL_PY_REGISTER = 10;
 static constexpr uint64_t CTRL_PY_UNREGISTER = 11;
-static constexpr uint64_t CTRL_L3_L2_REGION_CREATE = 16;
-static constexpr uint64_t CTRL_L3_L2_REGION_RELEASE = 17;
+static constexpr uint64_t CTRL_WORKER_CHIP_REGION_CREATE = 16;
+static constexpr uint64_t CTRL_WORKER_CHIP_REGION_RELEASE = 17;
 // Query a chip child's MemoryAllocator-committed HBM (bytes). The child writes
 // the value to CTRL_OFF_RESULT; the parent sums across children for L3.
 static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
@@ -336,8 +337,8 @@ public:
     virtual void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name);
     virtual void control_release_domain(const char *request_shm_name);
     virtual void control_comm_init(const char *request_shm_name);
-    virtual void control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name);
-    virtual void control_l3_l2_region_release(uint64_t region_id);
+    virtual void control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name);
+    virtual void control_worker_chip_region_release(uint64_t region_id);
 };
 
 class LocalMailboxEndpoint : public WorkerEndpoint {
@@ -400,8 +401,8 @@ public:
     void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name) override;
     void control_release_domain(const char *request_shm_name) override;
     void control_comm_init(const char *request_shm_name) override;
-    void control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name) override;
-    void control_l3_l2_region_release(uint64_t region_id) override;
+    void control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name) override;
+    void control_worker_chip_region_release(uint64_t region_id) override;
 
 private:
     WorkerEndpointCaps caps_;
@@ -583,8 +584,8 @@ public:
     // Lazy comm_init driver — payload shm carries (rank, nranks, rootinfo_path).
     // Caller dispatches in parallel to every chip; child runs cw.comm_init.
     void control_comm_init(const char *request_shm_name);
-    void control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name);
-    void control_l3_l2_region_release(uint64_t region_id);
+    void control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name);
+    void control_worker_chip_region_release(uint64_t region_id);
 
 private:
     enum class EnqueueDispatchResult : uint8_t {
@@ -682,8 +683,8 @@ public:
     void control_alloc_domain(int worker_id, const char *request_shm_name, const char *reply_shm_name);
     void control_release_domain(int worker_id, const char *request_shm_name);
     void control_comm_init(int worker_id, const char *request_shm_name);
-    void control_l3_l2_region_create(int worker_id, const char *request_shm_name, const char *reply_shm_name);
-    void control_l3_l2_region_release(int worker_id, uint64_t region_id);
+    void control_worker_chip_region_create(int worker_id, const char *request_shm_name, const char *reply_shm_name);
+    void control_worker_chip_region_release(int worker_id, uint64_t region_id);
     ControlResult
     control_digest_only(WorkerType type, int worker_id, uint64_t sub_cmd, const uint8_t *digest, double timeout_s);
     ControlResult control_remote_prepare_register(

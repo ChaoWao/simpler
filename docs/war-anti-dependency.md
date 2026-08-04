@@ -69,21 +69,21 @@ stay pure `INPUT` and run concurrently.
 
 ```cpp
 // Reader: keep it a pure INPUT.
-L0TaskArgs r_args;
+CoreTaskArgs r_args;
 r_args.add_input(ext_X);
 r_args.add_inout(ext_Y);
 TaskOutputTensors r = rt_submit_aic_task(FUNC_READ_X, r_args);
 
 // Later writer: depend on the reader so the overwrite waits for the read.
-// add_dep() lives on the convenience wrapper L0TaskArgsWithDeps<N>.
-L0TaskArgsWithDeps<> w_args;
+// add_dep() lives on the convenience wrapper CoreTaskArgsWithDeps<N>.
+CoreTaskArgsWithDeps<> w_args;
 w_args.add_inout(ext_X);
 w_args.add_dep(r.task_id());          // <-- the WAR edge R -> W
 rt_submit_aic_task(FUNC_WRITE_X, w_args);
 ```
 
 `add_dep` is the convenience layer over the primitive
-`L0TaskArgs::set_dependencies(ptr, count)`; both are documented in
+`CoreTaskArgs::set_dependencies(ptr, count)`; both are documented in
 [`pto_arg_with_deps.h`](../src/a5/runtime/tensormap_and_ringbuffer/orchestration/pto_arg_with_deps.h).
 Multiple readers each contribute one `add_dep(reader.task_id())` on the writer
 and still run in parallel with each other — only the writer waits.

@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * TaskArgsTpl - Tensor + scalar argument storage (template)
+ * TaskArgsTpl - ChipTensor + scalar argument storage (template)
  *
  * Template: TaskArgsTpl<T, S, MaxT, MaxS, TensorTag=void>
  *   - Static:  MaxT>0, MaxS>0 — fixed-size arrays
@@ -43,7 +43,7 @@
 #include <vector>
 
 #include "arg_direction.h"
-#include "tensor.h"  // unified Tensor (strided) + TensorArgType, carried by TaskArgs and on the wire
+#include "tensor.h"  // unified ChipTensor (strided) + TensorArgType, carried by TaskArgs and on the wire
 
 // ============================================================================
 // TensorTagMixin — conditionally provides per-tensor tag storage
@@ -174,11 +174,11 @@ struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
 // Unified user-facing builder: vector-backed with TensorArgType tags.
 // Used by Orchestrator.submit_*; tags drive dependency inference at submit
 // time and are stripped before the args cross the dispatch boundary.
-using TaskArgs = TaskArgsTpl<Tensor, uint64_t, 0, 0, TensorArgType>;
+using TaskArgs = TaskArgsTpl<ChipTensor, uint64_t, 0, 0, TensorArgType>;
 
 // L2 runtime ABI: fixed POD matching runtime.so byte-for-byte.
 // Assembled from a TaskArgsView on the child side just before pto2_run_runtime.
-using ChipStorageTaskArgs = TaskArgsTpl<Tensor, uint64_t, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS>;
+using ChipStorageTaskArgs = TaskArgsTpl<ChipTensor, uint64_t, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS>;
 
 // ============================================================================
 // TaskArgsView — zero-copy view used by ChipWorker::run and the wire format
@@ -190,9 +190,9 @@ using ChipStorageTaskArgs = TaskArgsTpl<Tensor, uint64_t, CHIP_MAX_TENSOR_ARGS, 
 struct TaskArgsView {
     int32_t tensor_count;
     int32_t scalar_count;
-    // Raw bytes of the tensor array, NOT a `const Tensor*`. When this view is
+    // Raw bytes of the tensor array, NOT a `const ChipTensor*`. When this view is
     // over a mailbox blob the tensor region starts at an 8-byte boundary, but
-    // `Tensor` is `alignas(64)` — forming a `Tensor*`/`Tensor&` to it would be
+    // `ChipTensor` is `alignas(64)` — forming a `ChipTensor*`/`ChipTensor&` to it would be
     // undefined behavior. Copy a tensor out with tensors(i); bulk movers
     // memcpy straight from these bytes. (For the make_view path the bytes are
     // a 64-aligned vector, but the accessor keeps a single uniform contract.)
@@ -202,12 +202,12 @@ struct TaskArgsView {
     // Copy the i-th tensor into a properly-aligned local. Never forms a pointer
     // into the (possibly under-aligned) tensor_bytes region. Bounds-checked: a
     // negative index would otherwise wrap to a huge offset once cast to size_t.
-    Tensor tensors(int32_t i) const {
+    ChipTensor tensors(int32_t i) const {
         if (i < 0 || i >= tensor_count) {
             throw std::out_of_range("TaskArgsView::tensors: index out of range");
         }
-        Tensor t;
-        std::memcpy(&t, tensor_bytes + static_cast<size_t>(i) * sizeof(Tensor), sizeof(Tensor));
+        ChipTensor t;
+        std::memcpy(&t, tensor_bytes + static_cast<size_t>(i) * sizeof(ChipTensor), sizeof(ChipTensor));
         return t;
     }
 };
@@ -226,19 +226,19 @@ inline TaskArgsView make_view(const TaskArgs &a) {
 // Byte layout (tags stripped):
 //   offset 0:                 int32 tensor_count = T
 //   offset 4:                 int32 scalar_count = S
-//   offset 8:                 Tensor tensors[T]             (128 B each)
+//   offset 8:                 ChipTensor tensors[T]             (128 B each)
 //   offset 8 + 128T:          uint64_t scalars[S]           (8 B each)
 // total bytes used:           8 + 128T + 8S
 //
-// NOTE: Tensor is alignas(64) but the array starts at the 8-byte header
-// boundary, so blob Tensors are NOT guaranteed 64-aligned. All consumers
+// NOTE: ChipTensor is alignas(64) but the array starts at the 8-byte header
+// boundary, so blob ChipTensors are NOT guaranteed 64-aligned. All consumers
 // extract them via memcpy / trivially-copyable copy (never in-place SIMD or
 // atomics), which is alignment-tolerant on aarch64.
 
 inline constexpr size_t TASK_ARGS_BLOB_HEADER_SIZE = 8;
 
 inline size_t task_args_blob_size(const TaskArgs &a) {
-    return TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(a.tensor_count()) * sizeof(Tensor) +
+    return TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(a.tensor_count()) * sizeof(ChipTensor) +
            static_cast<size_t>(a.scalar_count()) * sizeof(uint64_t);
 }
 
@@ -250,11 +250,11 @@ inline void write_blob(uint8_t *dst, const TaskArgs &a) {
     std::memcpy(dst + 0, &T, sizeof(T));
     std::memcpy(dst + 4, &S, sizeof(S));
     if (T > 0) {
-        std::memcpy(dst + TASK_ARGS_BLOB_HEADER_SIZE, a.tensor_data(), static_cast<size_t>(T) * sizeof(Tensor));
+        std::memcpy(dst + TASK_ARGS_BLOB_HEADER_SIZE, a.tensor_data(), static_cast<size_t>(T) * sizeof(ChipTensor));
     }
     if (S > 0) {
         std::memcpy(
-            dst + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(Tensor), a.scalar_data(),
+            dst + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(ChipTensor), a.scalar_data(),
             static_cast<size_t>(S) * sizeof(uint64_t)
         );
     }
@@ -284,7 +284,7 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
             "read_blob: negative counts — tensors=" + std::to_string(T) + ", scalars=" + std::to_string(S)
         );
     }
-    const size_t needed = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(Tensor) +
+    const size_t needed = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(ChipTensor) +
                           static_cast<size_t>(S) * sizeof(uint64_t);
     if (needed > capacity) {
         throw std::runtime_error(
@@ -297,7 +297,9 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
         T,
         S,
         src + TASK_ARGS_BLOB_HEADER_SIZE,
-        reinterpret_cast<const uint64_t *>(src + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(Tensor)),
+        reinterpret_cast<const uint64_t *>(
+            src + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(ChipTensor)
+        ),
     };
 }
 
@@ -317,7 +319,7 @@ inline ChipStorageTaskArgs view_to_chip_storage(TaskArgsView view) {
     out.tensor_count_ = view.tensor_count;
     out.scalar_count_ = view.scalar_count;
     if (view.tensor_count > 0) {
-        std::memcpy(out.tensors_, view.tensor_bytes, static_cast<size_t>(view.tensor_count) * sizeof(Tensor));
+        std::memcpy(out.tensors_, view.tensor_bytes, static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor));
     }
     if (view.scalar_count > 0) {
         std::memcpy(out.scalars_, view.scalars, static_cast<size_t>(view.scalar_count) * sizeof(uint64_t));

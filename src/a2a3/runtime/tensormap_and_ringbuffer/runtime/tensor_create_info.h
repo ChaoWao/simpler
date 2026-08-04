@@ -12,10 +12,10 @@
  * TensorCreateInfo — submit-time create-info for runtime-allocated outputs.
  *
  * Runtime-only: this header (and the materialization helpers below) are NOT
- * part of the wire/host-facing Tensor in src/common/task_interface/tensor.h.
+ * part of the wire/host-facing ChipTensor in src/common/task_interface/tensor.h.
  * It carries the metadata required to materialize a fresh contiguous output:
  * dtype, ndims, shapes, manual_dep, and an optional initial value fill. Its
- * 64B layout mirrors Tensor cache line 1 so init_tensor_from_create_info() can
+ * 64B layout mirrors ChipTensor cache line 1 so init_tensor_from_create_info() can
  * copy the whole line with a single memcpy.
  */
 
@@ -36,12 +36,12 @@ public:
         initial_value(0),
         has_initial_value(false),
         __pad2__(0),
-        start_offset(0),  // mirrors Tensor::start_offset; pre-zeroed for create-info outputs
+        start_offset(0),  // mirrors ChipTensor::start_offset; pre-zeroed for create-info outputs
         version(0),
         ndims(ndims_in),
         dtype(dtype_in),
         manual_dep(manual_dep_in),
-        is_contiguous(true),  // mirrors Tensor::is_contiguous; pre-set for create-info outputs
+        is_contiguous(true),  // mirrors ChipTensor::is_contiguous; pre-set for create-info outputs
         __pad_flags__(0) {
         // Bound the write below: shapes[] holds MAX_TENSOR_DIMS, and ndims_in
         // comes from user-submitted output shapes — guard before the loop so an
@@ -70,46 +70,46 @@ public:
 
 public:
     // --- Bytes [0, 32): TensorCreateInfo-only fields ---
-    // These occupy the same positions as Tensor::buffer, Tensor::owner_task_id,
-    // and Tensor::start_offset. The runtime overwrites owner metadata after the
+    // These occupy the same positions as ChipTensor::buffer, ChipTensor::owner_task_id,
+    // and ChipTensor::start_offset. The runtime overwrites owner metadata after the
     // memcpy and recomputes start_offset / stride during payload materialization.
     uint64_t initial_value;
     bool has_initial_value;
     uint8_t __pad1__[7];
-    uint64_t __pad2__;      // → Tensor::owner_task_id (overwritten post-memcpy)
-    uint64_t start_offset;  // mirrors Tensor::start_offset; always 0 for create-info outputs
+    uint64_t __pad2__;      // → ChipTensor::owner_task_id (overwritten post-memcpy)
+    uint64_t start_offset;  // mirrors ChipTensor::start_offset; always 0 for create-info outputs
 
-    // --- Bytes [32, 64): Matches Tensor cache line 1 layout ---
+    // --- Bytes [32, 64): Matches ChipTensor cache line 1 layout ---
     int32_t version;  // Always 0 for create-info outputs
     uint32_t ndims;
     DataType dtype;
     bool manual_dep;
     bool is_contiguous;                // Always true for create-info outputs
-    uint8_t __pad_flags__;             // → Tensor::child_memory (always 0 for create-info outputs)
-    uint32_t shapes[MAX_TENSOR_DIMS];  // → Tensor::shapes
+    uint8_t __pad_flags__;             // → ChipTensor::child_memory (always 0 for create-info outputs)
+    uint32_t shapes[MAX_TENSOR_DIMS];  // → ChipTensor::shapes
 
     TensorCreateInfo() = default;
 };
 
-// TensorCreateInfo layout must match Tensor cacheline 1 for memcpy optimization
-static_assert(sizeof(TensorCreateInfo) == 64, "TensorCreateInfo must match Tensor cacheline 1 size (64 bytes)");
-static_assert(offsetof(TensorCreateInfo, start_offset) == offsetof(Tensor, start_offset));
-static_assert(offsetof(TensorCreateInfo, version) == offsetof(Tensor, version));
-static_assert(offsetof(TensorCreateInfo, ndims) == offsetof(Tensor, ndims));
-static_assert(offsetof(TensorCreateInfo, dtype) == offsetof(Tensor, dtype));
-static_assert(offsetof(TensorCreateInfo, manual_dep) == offsetof(Tensor, manual_dep));
-static_assert(offsetof(TensorCreateInfo, is_contiguous) == offsetof(Tensor, is_contiguous));
-static_assert(offsetof(TensorCreateInfo, __pad_flags__) == offsetof(Tensor, child_memory));
-static_assert(offsetof(TensorCreateInfo, shapes) == offsetof(Tensor, shapes));
+// TensorCreateInfo layout must match ChipTensor cacheline 1 for memcpy optimization
+static_assert(sizeof(TensorCreateInfo) == 64, "TensorCreateInfo must match ChipTensor cacheline 1 size (64 bytes)");
+static_assert(offsetof(TensorCreateInfo, start_offset) == offsetof(ChipTensor, start_offset));
+static_assert(offsetof(TensorCreateInfo, version) == offsetof(ChipTensor, version));
+static_assert(offsetof(TensorCreateInfo, ndims) == offsetof(ChipTensor, ndims));
+static_assert(offsetof(TensorCreateInfo, dtype) == offsetof(ChipTensor, dtype));
+static_assert(offsetof(TensorCreateInfo, manual_dep) == offsetof(ChipTensor, manual_dep));
+static_assert(offsetof(TensorCreateInfo, is_contiguous) == offsetof(ChipTensor, is_contiguous));
+static_assert(offsetof(TensorCreateInfo, __pad_flags__) == offsetof(ChipTensor, child_memory));
+static_assert(offsetof(TensorCreateInfo, shapes) == offsetof(ChipTensor, shapes));
 
 // ============================================================================
-// Materialization helpers — operate on a Tensor& through its public members.
-// Factored out of Tensor (which now lives in the wire/host-facing common
+// Materialization helpers — operate on a ChipTensor& through its public members.
+// Factored out of ChipTensor (which now lives in the wire/host-facing common
 // header) so the create-info dependency stays runtime-only.
 // ============================================================================
 
 /// Fill the entire backing buffer of `t` with `initial_value` (doubling memcpy).
-inline void fill_tensor_initial_value(Tensor &t, uint64_t initial_value) {
+inline void fill_tensor_initial_value(ChipTensor &t, uint64_t initial_value) {
     always_assert(reinterpret_cast<char *>(t.buffer.addr) != nullptr);
     uint64_t elem_size = get_element_size(t.dtype);
     char *dst = reinterpret_cast<char *>(t.buffer.addr);
@@ -130,7 +130,7 @@ inline void fill_tensor_initial_value(Tensor &t, uint64_t initial_value) {
 /// Single 64B memcpy covers cache line 1; `ci` pre-initialises start_offset (=0)
 /// and is_contiguous (=true) in its line-1 slots so they need no reset here.
 /// Cache line 2 (stride/extent) is computed from `ci.shapes` in a single reverse pass.
-inline void init_tensor_from_create_info(Tensor &t, const TensorCreateInfo &ci, void *addr, uint64_t buffer_size) {
+inline void init_tensor_from_create_info(ChipTensor &t, const TensorCreateInfo &ci, void *addr, uint64_t buffer_size) {
     always_assert(ci.ndims > 0 && ci.ndims <= MAX_TENSOR_DIMS);
     memcpy(&t, &ci, 64);
     t.buffer = {reinterpret_cast<uint64_t>(addr), buffer_size};

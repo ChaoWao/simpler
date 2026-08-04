@@ -30,7 +30,7 @@
 // (a5: set_core_num, a2a3: set_block_num) for the same field. Bridge it so this
 // one fixture compiles on both; keyed off the arch's pto_types.h include guard,
 // which pto_orchestration_api.h pulls in transitively.
-static inline void set_block_count(L0TaskArgs &args, int16_t n) {
+static inline void set_block_count(CoreTaskArgs &args, int16_t n) {
 #if defined(SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_)
     args.launch_spec.set_core_num(n);
 #else
@@ -40,20 +40,21 @@ static inline void set_block_count(L0TaskArgs &args, int16_t n) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     (void)orch_args;
 
     uint32_t shape[1] = {1};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_output(ci);
     set_block_count(args, 1000);                    // >> available AIV cores
     args.launch_spec.set_require_sync_start(true);  // arm the sync-start deadlock guard

@@ -42,12 +42,12 @@
 #include "device_runner_helpers.h"  // common KernelArgsHelper
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host/function_cache.h"
 #include "host/memory_allocator.h"
-#include "host/l2_swimlane_collector.h"
+#include "host/chip_swimlane_collector.h"
 #include "host/pmu_collector.h"
 #include "host/dep_gen_collector.h"
 #include "host/scope_stats_collector.h"
@@ -64,7 +64,7 @@
  * This class provides a unified interface for launching AICPU and AICore
  * kernels on Ascend devices. It handles:
  * - Device initialization and resource management
- * - Tensor memory allocation and data transfer
+ * - ChipTensor memory allocation and data transfer
  * - AICPU kernel launching with dynamic arguments
  * - AICore kernel registration and launching
  * - Coordinated execution of both kernel types
@@ -108,7 +108,7 @@ public:
     int run(Runtime &runtime, const CallConfig &config) override;
     bool can_accept_run() const override { return !device_unusable_; }
 
-    // `set_l2_swimlane_enabled`, `set_dump_args_enabled`,
+    // `set_chip_swimlane_enabled`, `set_dump_args_enabled`,
     // `set_pmu_enabled`, `set_scope_stats_enabled`, `set_output_prefix`,
     // `output_prefix()`, and `launch_aicpu_kernel` live on
     // `DeviceRunnerBase`.
@@ -183,7 +183,7 @@ private:
     // (`ChipCallableBuffer`, `CallableState`) are
     // inherited from `DeviceRunnerBase`.
 
-    // Shared collectors (`l2_swimlane_collector_`, `dump_collector_`,
+    // Shared collectors (`chip_swimlane_collector_`, `dump_collector_`,
     // `pmu_collector_`, `scope_stats_collector_`) live on `DeviceRunnerBase`.
 
     // dep_gen collector — captures orchestrator submit_task inputs for
@@ -235,16 +235,16 @@ private:
     /**
      * Initialize performance profiling device buffers
      *
-     * Allocates L2SwimlaneSetupHeader and per-core/per-thread buffers on device;
-     * caller publishes the device pointer via kernel_args.l2_swimlane_data_base
-     * (AICPU reads it through get_platform_l2_swimlane_base()).
+     * Allocates ChipSwimlaneSetupHeader and per-core/per-thread buffers on device;
+     * caller publishes the device pointer via kernel_args.chip_swimlane_data_base
+     * (AICPU reads it through get_platform_chip_swimlane_base()).
      *
      * @param runtime Runtime instance to configure
      * @param num_aicore Number of AICore instances
      * @param device_id Device ID
      * @return 0 on success, error code on failure
      */
-    int init_l2_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
+    int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
 
     /**
      * Initialize args dump device buffers.
@@ -263,8 +263,8 @@ private:
      * publishes the data-header pointer into kernel_args.pmu_data_base.
      * Signature matches a2a3 for cross-platform consistency.
      */
-    // Shared enable flags (`enable_l2_swimlane_`, `enable_dump_args_`,
-    // `enable_pmu_`, `enable_scope_stats_`, `l2_swimlane_level_`,
+    // Shared enable flags (`enable_chip_swimlane_`, `enable_dump_args_`,
+    // `enable_pmu_`, `enable_scope_stats_`, `chip_swimlane_level_`,
     // `pmu_event_type_`, `output_prefix_`) live on `DeviceRunnerBase`.
     //
     // dep_gen enablement is a5-specific (a2a3 carries its own copy).

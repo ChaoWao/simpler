@@ -314,30 +314,30 @@ static __aicore__ void residual_rms_cast(
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: mlp_norm_in_inline71__ssa_v0
-    __gm__ Tensor *mlp_norm_in_inline71__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *mlp_norm_in_inline71__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ bfloat16_t *mlp_norm_in_inline71__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(mlp_norm_in_inline71__ssa_v0_tensor->buffer.addr) +
         mlp_norm_in_inline71__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: post_norm_partial_inline118__ssa_v0
-    __gm__ Tensor *post_norm_partial_inline118__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *post_norm_partial_inline118__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *post_norm_partial_inline118__ssa_v0 =
         reinterpret_cast<__gm__ float *>(post_norm_partial_inline118__ssa_v0_tensor->buffer.addr) +
         post_norm_partial_inline118__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: attn_proj_fp32_inline220__ssa_v7
-    __gm__ Tensor *attn_proj_fp32_inline220__ssa_v7_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *attn_proj_fp32_inline220__ssa_v7_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *attn_proj_fp32_inline220__ssa_v7 =
         reinterpret_cast<__gm__ float *>(attn_proj_fp32_inline220__ssa_v7_tensor->buffer.addr) +
         attn_proj_fp32_inline220__ssa_v7_tensor->start_offset;
 
     // Unpack tensor: cur__iter_v6
-    __gm__ Tensor *cur__iter_v6_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *cur__iter_v6_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
     __gm__ float *cur__iter_v6 =
         reinterpret_cast<__gm__ float *>(cur__iter_v6_tensor->buffer.addr) + cur__iter_v6_tensor->start_offset;
 
     // Unpack tensor: post_rms_weight__ssa_v0
-    __gm__ Tensor *post_rms_weight__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
+    __gm__ ChipTensor *post_rms_weight__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
     __gm__ float *post_rms_weight__ssa_v0 =
         reinterpret_cast<__gm__ float *>(post_rms_weight__ssa_v0_tensor->buffer.addr) +
         post_rms_weight__ssa_v0_tensor->start_offset;

@@ -573,18 +573,18 @@ down_proj(__gm__ bfloat16_t *v1, __gm__ bfloat16_t *v2, __gm__ float *v3, int64_
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: mlp_tile_inline149__rv_v2
-    __gm__ Tensor *mlp_tile_inline149__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *mlp_tile_inline149__rv_v2_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ bfloat16_t *mlp_tile_inline149__rv_v2 =
         reinterpret_cast<__gm__ bfloat16_t *>(mlp_tile_inline149__rv_v2_tensor->buffer.addr) +
         mlp_tile_inline149__rv_v2_tensor->start_offset;
 
     // Unpack tensor: w_down__ssa_v0
-    __gm__ Tensor *w_down__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *w_down__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ bfloat16_t *w_down__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(w_down__ssa_v0_tensor->buffer.addr) + w_down__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: down_acc_all_inline168__iter_v6
-    __gm__ Tensor *down_acc_all_inline168__iter_v6_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *down_acc_all_inline168__iter_v6_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *down_acc_all_inline168__iter_v6 =
         reinterpret_cast<__gm__ float *>(down_acc_all_inline168__iter_v6_tensor->buffer.addr) +
         down_acc_all_inline168__iter_v6_tensor->start_offset;

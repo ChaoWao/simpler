@@ -32,26 +32,27 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     (void)orch_args;
 
     uint32_t shape[1] = {1};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_output(ci);
     TaskOutputTensors outs = rt_submit_aic_task(FUNC_AIC_HANG, args);
 
     // Reading the hung producer's output blocks until it completes (it never
     // does) -> TENSOR_WAIT_TIMEOUT after the fixed data-wait timeout.
-    const Tensor &out = outs.get_ref(0);
+    const ChipTensor &out = outs.get_ref(0);
     uint32_t idx[1] = {0};
     (void)get_tensor_data(out, 1, idx);
 }

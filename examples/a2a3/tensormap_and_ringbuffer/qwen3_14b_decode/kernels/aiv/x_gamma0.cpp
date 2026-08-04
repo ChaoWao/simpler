@@ -224,17 +224,17 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: normed__ssa_v0
-    __gm__ Tensor *normed__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *normed__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ bfloat16_t *normed__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(normed__ssa_v0_tensor->buffer.addr) + normed__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: cur__rv_v2
-    __gm__ Tensor *cur__rv_v2_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *cur__rv_v2_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *cur__rv_v2 =
         reinterpret_cast<__gm__ float *>(cur__rv_v2_tensor->buffer.addr) + cur__rv_v2_tensor->start_offset;
 
     // Unpack tensor: input_rms_weight__ssa_v0
-    __gm__ Tensor *input_rms_weight__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *input_rms_weight__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *input_rms_weight__ssa_v0 =
         reinterpret_cast<__gm__ float *>(input_rms_weight__ssa_v0_tensor->buffer.addr) +
         input_rms_weight__ssa_v0_tensor->start_offset;

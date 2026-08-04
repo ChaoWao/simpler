@@ -11,7 +11,7 @@
 
 /**
  * @file buffer_pool_manager.h
- * @brief Generic buffer-pool data structure shared by L2Swimlane, PMU,
+ * @brief Generic buffer-pool data structure shared by ChipSwimlane, PMU,
  *        DepGen, ArgsDump, and ScopeStats collectors. Owns:
  *
  *   - ready_queue shard(s) (mgmt → collector) as SPSC rings,
@@ -43,7 +43,7 @@
  *      A bulk host→device write-back is deliberately avoided — it would
  *      race with AICPU writes to device-only fields (current_buf_ptr,
  *      total/dropped/mismatch counters, queue_tails, free_queue.head, and
- *      on a5 L2SwimlaneAicpuPhaseHeader::magic).
+ *      on a5 ChipSwimlaneAicpuPhaseHeader::magic).
  *   2. Pulls each popped buffer's contents from device via
  *      `copy_buffer_from_device` inside ProfilerAlgorithms::process_entry
  *      before delivering it to the collector.
@@ -572,7 +572,7 @@ public:
     }
 
     /**
-     * Pull a single buffer's contents (e.g. an L2SwimlaneAicpuTaskBuffer / PmuBuffer /
+     * Pull a single buffer's contents (e.g. an ChipSwimlaneAicpuTaskBuffer / PmuBuffer /
      * DumpMetaBuffer) from device to its host shadow. Called by
      * ProfilerAlgorithms::process_entry after resolving the host pointer
      * for a popped ready entry, before delivering it to the collector.

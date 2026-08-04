@@ -37,19 +37,20 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 4,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    // Tensor args
-    const Tensor &ext_A = orch_args.tensor(0).ref();
-    const Tensor &ext_B = orch_args.tensor(1).ref();
-    const Tensor &ext_C = orch_args.tensor(2).ref();
-    const Tensor &ext_config = orch_args.tensor(3).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    // ChipTensor args
+    const ChipTensor &ext_A = orch_args.tensor(0).ref();
+    const ChipTensor &ext_B = orch_args.tensor(1).ref();
+    const ChipTensor &ext_C = orch_args.tensor(2).ref();
+    const ChipTensor &ext_config = orch_args.tensor(3).ref();
 
     // Read config from tensor data: [tile_size, grid_k, num_groups, incore_loop]
     int64_t *host_config = orch_args.tensor(3).ref().data_as<int64_t>();
@@ -82,7 +83,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
         uint32_t c_elem_offset = static_cast<uint32_t>(static_cast<uint64_t>(group_idx) * group_tile_elems);
         uint32_t c_view_offsets[1] = {c_elem_offset};
-        Tensor C_view = ext_C.view(group_shapes, c_view_offsets);
+        ChipTensor C_view = ext_C.view(group_shapes, c_view_offsets);
 
         for (int k_idx = 0; k_idx < grid_k; k_idx++) {
             // In layout [num_groups, grid_k, incore_loop, tile_size, tile_size],
@@ -91,10 +92,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                 (static_cast<uint64_t>(group_idx) * grid_k + static_cast<uint64_t>(k_idx)) * group_tile_elems;
 
             uint32_t a_view_offsets[1] = {static_cast<uint32_t>(ab_offset)};
-            Tensor A_view = ext_A.view(group_shapes, a_view_offsets);
+            ChipTensor A_view = ext_A.view(group_shapes, a_view_offsets);
             uint32_t b_view_offsets[1] = {static_cast<uint32_t>(ab_offset)};
-            Tensor B_view = ext_B.view(group_shapes, b_view_offsets);
-            L0TaskArgs params_gemm;
+            ChipTensor B_view = ext_B.view(group_shapes, b_view_offsets);
+            CoreTaskArgs params_gemm;
             params_gemm.add_input(A_view);
             params_gemm.add_input(B_view);
             params_gemm.add_output(group_ci);
@@ -102,7 +103,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
             TaskOutputTensors gemm_outs = rt_submit_aic_task(FUNC_GEMM_TILE, params_gemm);
             total_gemm++;
 
-            L0TaskArgs params_add;
+            CoreTaskArgs params_add;
             params_add.add_inout(C_view);
             params_add.add_input(gemm_outs.get_ref(0));
             params_add.add_input(ext_config);

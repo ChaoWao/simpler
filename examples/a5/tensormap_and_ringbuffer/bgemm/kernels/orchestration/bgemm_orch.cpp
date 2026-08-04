@@ -32,7 +32,7 @@
  * Intermediate result P flows via TPUSH/TPOP (VEC_FIFO), bypassing GM.
  * Dependencies are automatic via TensorMap overlap detection.
  *
- * Arg layout: [A, B, C]  — shape/dtype/size in Tensor metadata
+ * Arg layout: [A, B, C]  — shape/dtype/size in ChipTensor metadata
  */
 
 #include <cstdint>
@@ -53,18 +53,19 @@ static constexpr uint32_t TILE_ELEMS = TILE * TILE;  // 4096 elements
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // 1D external tensors for the full A, B, C arrays
-    const Tensor &ext_A = orch_args.tensor(0).ref();
-    const Tensor &ext_B = orch_args.tensor(1).ref();
-    const Tensor &ext_C = orch_args.tensor(2).ref();
+    const ChipTensor &ext_A = orch_args.tensor(0).ref();
+    const ChipTensor &ext_B = orch_args.tensor(1).ref();
+    const ChipTensor &ext_C = orch_args.tensor(2).ref();
 
     LOG_INFO("[bgemm_orch] Grid: %dx%dx%d, Batch: %d, Tile: %d", GRID_M, GRID_K, GRID_N, BATCH, TILE);
 
@@ -78,7 +79,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                                               static_cast<uint32_t>(m_idx) * GRID_N + static_cast<uint32_t>(n_idx)) *
                                              TILE_ELEMS;
                     uint32_t c_view_offsets[1] = {c_elem_offset};
-                    Tensor C_view = ext_C.view(tile_shapes, c_view_offsets);
+                    ChipTensor C_view = ext_C.view(tile_shapes, c_view_offsets);
 
                     for (int k_idx = 0; k_idx < GRID_K; k_idx++) {
                         uint32_t a_elem_offset =
@@ -91,12 +92,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                             TILE_ELEMS;
 
                         uint32_t a_view_offsets[1] = {a_elem_offset};
-                        Tensor A_view = ext_A.view(tile_shapes, a_view_offsets);
+                        ChipTensor A_view = ext_A.view(tile_shapes, a_view_offsets);
                         uint32_t b_view_offsets[1] = {b_elem_offset};
-                        Tensor B_view = ext_B.view(tile_shapes, b_view_offsets);
+                        ChipTensor B_view = ext_B.view(tile_shapes, b_view_offsets);
 
                         // P = A[m,k] @ B[k,n], then C[m,n] += P
-                        L0TaskArgs args;
+                        CoreTaskArgs args;
                         args.add_input(A_view);
                         args.add_input(B_view);
                         args.add_inout(C_view);

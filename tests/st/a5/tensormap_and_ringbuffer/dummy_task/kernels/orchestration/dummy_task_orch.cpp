@@ -55,17 +55,18 @@ static constexpr int32_t DENSE_DEP_COUNT = 18;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 4,  // 3 tensors + 1 case scalar
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_X = orch_args.tensor(0).ref();
-    const Tensor &ext_Y = orch_args.tensor(1).ref();
-    const Tensor &ext_W = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_X = orch_args.tensor(0).ref();
+    const ChipTensor &ext_Y = orch_args.tensor(1).ref();
+    const ChipTensor &ext_W = orch_args.tensor(2).ref();
 
     uint64_t case_id = orch_args.scalar(0);
     LOG_INFO("[dummy_task_orch] case_id=%llu", static_cast<unsigned long long>(case_id));
@@ -73,19 +74,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     if (case_id == 1) {
         // producer writes X
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_X);
             rt_submit_aic_task(FUNC_WRITE_CONST, args);
         }
         // dummy_T INOUTs X (becomes new producer)
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_X);
             rt_submit_dummy_task(args);
         }
         // consumer reads X -> writes Y
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_input(ext_X);
             args.add_inout(ext_Y);
             rt_submit_aic_task(FUNC_COPY_FIRST, args);
@@ -93,19 +94,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     } else if (case_id == 2) {
         // producer writes X
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_X);
             rt_submit_aic_task(FUNC_WRITE_CONST, args);
         }
         // long dummy chain
         for (int32_t i = 0; i < LONG_CHAIN_DUMMIES; i++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_X);
             rt_submit_dummy_task(args);
         }
         // consumer
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_input(ext_X);
             args.add_inout(ext_Y);
             rt_submit_aic_task(FUNC_COPY_FIRST, args);
@@ -115,26 +116,26 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         PTO2TaskId a_id;
         PTO2TaskId b_id;
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_X);
             a_id = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
         }
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_W);
             b_id = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
         }
         // dummy barrier on A + B (no tensor args, only explicit deps)
         PTO2TaskId dummy_id;
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             PTO2TaskId barrier_deps[] = {a_id, b_id};
             args.set_dependencies(barrier_deps, 2);
             dummy_id = rt_submit_dummy_task(args).task_id();
         }
         // consumer: explicit dep on dummy, reads X
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             PTO2TaskId consumer_deps[] = {dummy_id};
             args.set_dependencies(consumer_deps, 1);
             args.add_input(ext_X);
@@ -146,19 +147,19 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         // depends on all of them, exercising both dense-dependency diagnostics.
         PTO2TaskId a_id;
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_inout(ext_X);
             a_id = rt_submit_aic_task(FUNC_WRITE_CONST, args).task_id();
         }
         PTO2TaskId dummies[DENSE_DEP_COUNT];
         for (int32_t i = 0; i < DENSE_DEP_COUNT; i++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             PTO2TaskId dep[] = {a_id};
             args.set_dependencies(dep, 1);
             dummies[i] = rt_submit_dummy_task(args).task_id();
         }
         {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.set_dependencies(dummies, DENSE_DEP_COUNT);
             args.add_input(ext_X);
             args.add_inout(ext_Y);

@@ -45,17 +45,18 @@ static constexpr int GRID_N = 4;
 static constexpr int BATCH = 1;
 static constexpr uint32_t TILE_ELEMS = TILE * TILE;
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &c = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &c = orch_args.tensor(2).ref();
 
     uint32_t tile_shape[1] = {TILE_ELEMS};
     TensorCreateInfo p_ci(tile_shape, 1, DataType::FLOAT32);
@@ -74,20 +75,20 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                         static_cast<uint32_t>((batch * GRID_M * GRID_N + m_idx * GRID_N + n_idx) * TILE_ELEMS)
                     };
 
-                    Tensor a_view = a.view(tile_shape, a_off);
-                    Tensor b_view = b.view(tile_shape, b_off);
-                    Tensor c_view = c.view(tile_shape, c_off);
+                    ChipTensor a_view = a.view(tile_shape, a_off);
+                    ChipTensor b_view = b.view(tile_shape, b_off);
+                    ChipTensor c_view = c.view(tile_shape, c_off);
 
                     // P_k = A[m,k] @ B[k,n]
-                    L0TaskArgs p_gemm;
+                    CoreTaskArgs p_gemm;
                     p_gemm.add_input(a_view);
                     p_gemm.add_input(b_view);
                     p_gemm.add_output(p_ci);
                     TaskOutputTensors p_out = rt_submit_aic_task(FUNC_GEMM, p_gemm);
-                    Tensor p = p_out.get_ref(0);
+                    ChipTensor p = p_out.get_ref(0);
 
                     // C[m,n] += P_k
-                    L0TaskArgs p_add;
+                    CoreTaskArgs p_add;
                     p_add.add_inout(c_view);
                     p_add.add_input(p);
                     rt_submit_aiv_task(FUNC_TILE_ADD, p_add);

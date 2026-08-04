@@ -37,7 +37,8 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 2,
@@ -53,8 +54,8 @@ static int16_t cohort(int32_t total, int32_t divisor, int32_t delta) {
     return static_cast<int16_t>(n < 1 ? 1 : n);
 }
 
-static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
-    L0TaskArgs args;
+static void submit_aiv(const ChipTensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_core_num(block_num);
@@ -62,9 +63,9 @@ static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bo
     rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
-    const Tensor &layout = orch_args.tensor(1).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &layout = orch_args.tensor(1).ref();
 
     const int32_t aiv_cores = rt_available_aiv_count();
     const int16_t block_nums[4] = {

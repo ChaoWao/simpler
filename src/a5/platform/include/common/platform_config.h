@@ -148,7 +148,7 @@ constexpr int PLATFORM_MAX_CORES = PLATFORM_MAX_BLOCKDIM * PLATFORM_CORES_PER_BL
 
 /**
  * Performance buffer capacity per buffer
- * Number of L2SwimlaneAicpuTaskRecord entries per dynamically allocated L2SwimlaneAicpuTaskBuffer
+ * Number of ChipSwimlaneAicpuTaskRecord entries per dynamically allocated ChipSwimlaneAicpuTaskBuffer
  */
 constexpr int PLATFORM_PROF_BUFFER_SIZE = 1000;
 
@@ -163,7 +163,7 @@ constexpr int PLATFORM_PROF_BUFFER_SIZE = 1000;
 constexpr int PLATFORM_PROF_SLOT_COUNT = 4;
 
 /**
- * L2SwimlaneAicpuTaskBuffer pre-allocation count per AICore.
+ * ChipSwimlaneAicpuTaskBuffer pre-allocation count per AICore.
  * 1 goes into the free_queue at init, the rest into the recycled pool.
  */
 constexpr int PLATFORM_PROF_BUFFERS_PER_CORE = 8;
@@ -184,7 +184,7 @@ constexpr int PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD = 6;
 constexpr int PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD = 8;
 
 /**
- * Per-core L2SwimlaneAicoreTaskBuffer pre-allocation count.
+ * Per-core ChipSwimlaneAicoreTaskBuffer pre-allocation count.
  * 1 goes into the free_queue at init, the rest are recycled by host as
  * AICPU rotates per BUFFER_SIZE dispatches. Declared here so the ready-queue
  * formula below can include the AICore-pool worst-case burst depth.
@@ -198,7 +198,7 @@ constexpr int PLATFORM_AICORE_BUFFERS_PER_CORE = 4;
  *
  * The phase term is sized to the ORIGINAL per-thread count (16), decoupled from
  * PLATFORM_PROF_{SCHED,ORCH}_BUFFERS_PER_THREAD, on purpose: this array sizes the
- * device-visible L2SwimlaneDataHeader::queues[], so shrinking the host
+ * device-visible ChipSwimlaneDataHeader::queues[], so shrinking the host
  * preallocation must NOT shrink it (that would change the shm layout = ABI).
  */
 constexpr int PLATFORM_PROF_READYQUEUE_BUFFERS_PER_THREAD = 16;
@@ -207,7 +207,7 @@ constexpr int PLATFORM_PROF_READYQUEUE_SIZE =
     2 * PLATFORM_MAX_AICPU_THREADS * PLATFORM_PROF_READYQUEUE_BUFFERS_PER_THREAD +
     PLATFORM_MAX_CORES * PLATFORM_AICORE_BUFFERS_PER_CORE;
 
-// PLATFORM_PHASE_RECORDS_PER_THREAD lives in l2_swimlane_profiling.h (16384) —
+// PLATFORM_PHASE_RECORDS_PER_THREAD lives in chip_swimlane_profiling.h (16384) —
 // kept beside the buffer types that use it. Do not redeclare here.
 
 /**
@@ -242,7 +242,7 @@ inline double cycles_to_us(uint64_t cycles) {
 // "Profiling" is the umbrella; each bit is a parallel diagnostics sub-feature.
 #define SIMPLER_DFX_FLAG_NONE 0u
 #define SIMPLER_DFX_FLAG_DUMP_ARGS (1u << 0)
-#define SIMPLER_DFX_FLAG_L2_SWIMLANE (1u << 1)
+#define SIMPLER_DFX_FLAG_CHIP_SWIMLANE (1u << 1)
 #define SIMPLER_DFX_FLAG_PMU (1u << 2)
 #define SIMPLER_DFX_FLAG_DEP_GEN (1u << 3)
 #define SIMPLER_DFX_FLAG_SCOPE_STATS (1u << 4)
@@ -347,7 +347,7 @@ constexpr int PLATFORM_PMU_TIMEOUT_SECONDS = 30;
 
 /**
  * Number of DepGenRecord entries per DepGenBuffer.
- * Each DepGenRecord is 4672 B (16 Tensor blobs + small header). At 4×1024 =
+ * Each DepGenRecord is 4672 B (16 ChipTensor blobs + small header). At 4×1024 =
  * 4096 in-flight records (~19 MB), aligning dep_gen's in-flight count with the
  * scope_stats / l2 AicoreTask pools (also 4096) per the #977 cross-subsystem
  * review. History: original 32 (dropped 50% on unroll Case1) → #977 commit

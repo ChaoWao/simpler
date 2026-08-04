@@ -1,7 +1,7 @@
 # DFX Buffer Capacity Audit (a2a3)
 
 > Cross-subsystem buffer-capacity audit of the five a2a3 DFX profiling
-> collectors (l2_swimlane / dep_gen / pmu / scope_stats / args_dump), with a
+> collectors (chip_swimlane / dep_gen / pmu / scope_stats / args_dump), with a
 > full **data → theory → measurement → conclusion** argument per verdict.
 > The right-sizing it recommends is landed in this PR; a2a3 onboard-validated
 > zero-drop. Responds to
@@ -15,7 +15,7 @@ over-provisioned pools frees **~66 MB, zero ABI**.
 
 | Subsystem | Verdict | Action | Memory |
 | --------- | ------- | ------ | -----: |
-| **l2_swimlane** | phase pools 2–16× over (task pools at the edge, leave) | split `BUFFERS_PER_THREAD` → `SCHED 16→6` / `ORCH 16→8` | phase 72 → **28 MB** |
+| **chip_swimlane** | phase pools 2–16× over (task pools at the edge, leave) | split `BUFFERS_PER_THREAD` → `SCHED 16→6` / `ORCH 16→8` | phase 72 → **28 MB** |
 | **pmu** | over, free margin 75%, L≈1 | `BUFFERS_PER_CORE` **4→2** | 9.2 → **4.6 MB** |
 | **scope_stats** | over, free margin 87.5%, L≈1 | `BUFFERS_PER_INSTANCE` **8→4** | 0.21 → **0.11 MB** |
 | **dep_gen** | drops are **rate-limited, not capacity** | `RECORDS_PER_BUFFER` → **1024** (corrects a 2048 overshoot) | frees ~17.5 MB |
@@ -135,13 +135,13 @@ verdict reads the weaker dimension):
 | --------- | ----------- | ------------ | ------- |
 | pmu | 3/4 → **75%** | 93% | **over** |
 | scope_stats | 7/8 → **87.5%** | 87% | **over** |
-| l2_swimlane | **0/4 → 0%** | 95% | **at edge** (free bottomed, but zero-drop) → §4.2 |
+| chip_swimlane | **0/4 → 0%** | 95% | **at edge** (free bottomed, but zero-drop) → §4.2 |
 | dep_gen | 3/4 → 75% | 50% | **rate-limited**: both have room yet it still drops (§5.2) |
 | args_dump | 3/4 → 75% | 92% | **adequate** (no overwrite) |
 
-### 4.2 l2_swimlane: the four pools in detail
+### 4.2 chip_swimlane: the four pools in detail
 
-l2_swimlane is not one pool — 4 **heterogeneous** buffer pools, all reusing the
+chip_swimlane is not one pool — 4 **heterogeneous** buffer pools, all reusing the
 same `ActiveHead(64B) + FreeQueue(128B)` three-party pipeline (Host refills empty
 buffers → device writes & rotates → Host recycles & drains); both `free_queue`
 and `ready_queue` are SPSC rings of depth `SLOT_COUNT=4`. **A single buffer does
@@ -242,7 +242,7 @@ drop ≈ (P − R) × T − N × S      P=produce rate, R=host drain rate, N×S=
   workload that doesn't exist. So it stays at 1024 (cohort-aligned), correcting the
   2048 overshoot.
 
-### 5.3 l2_swimlane: phase over-provisioned → cut count
+### 5.3 chip_swimlane: phase over-provisioned → cut count
 
 - **Verdict** (§4.3): phase pools over-provisioned (throughput 1/16, 5/16), task
   pools at the edge, leave.

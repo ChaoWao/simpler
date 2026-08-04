@@ -89,13 +89,13 @@ static __aicore__ void simt_scatter_impl(__gm__ float *src, __gm__ int32_t *idx,
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *src_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *src_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *src = reinterpret_cast<__gm__ float *>(src_tensor->buffer.addr) + src_tensor->start_offset;
 
-    __gm__ Tensor *idx_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *idx_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ int32_t *idx = reinterpret_cast<__gm__ int32_t *>(idx_tensor->buffer.addr) + idx_tensor->start_offset;
 
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     simt_scatter_impl(src, idx, out);

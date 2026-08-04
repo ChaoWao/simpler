@@ -28,7 +28,7 @@
  * MTE pipes before ``NeighborBarrier`` fires ``TNOTIFY`` (hand-written
  * equivalent of PTOAS v0.45's automatic ``emitTNotifyMteDrain``).
  *
- * args layout (passed as Tensor arg slots — see allreduce_ring_orch.cpp):
+ * args layout (passed as ChipTensor arg slots — see allreduce_ring_orch.cpp):
  *   tensor(0) = input    (host-backed, framework-supplied device addr)
  *   tensor(1) = output   (host-backed, framework-supplied device addr)
  *   tensor(2) = scratch  (HCCL window slot, cross-rank addressable)
@@ -81,9 +81,9 @@ NeighborBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *input_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *output_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *scratch_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *input_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *output_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *scratch_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     int nranks = static_cast<int>(args[3]);
     __gm__ CommContext *commCtx = reinterpret_cast<__gm__ CommContext *>(args[4]);
 

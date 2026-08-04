@@ -61,7 +61,7 @@ protected:
 };
 
 static void
-add_runtime_output_arg(L0TaskArgs &args, std::vector<TensorCreateInfo> &create_infos, uint32_t float_count) {
+add_runtime_output_arg(CoreTaskArgs &args, std::vector<TensorCreateInfo> &create_infos, uint32_t float_count) {
     uint32_t shape[] = {float_count};
     create_infos.emplace_back(shape, 1, DataType::FLOAT32);
     args.add_output(create_infos.back());
@@ -70,12 +70,12 @@ add_runtime_output_arg(L0TaskArgs &args, std::vector<TensorCreateInfo> &create_i
 TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
     orch.begin_scope();
 
-    L0TaskArgs producer_args;
+    CoreTaskArgs producer_args;
     TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
     ASSERT_TRUE(producer.task_id().is_valid());
 
     PTO2TaskId deps[] = {producer.task_id(), producer.task_id()};
-    L0TaskArgs consumer_args;
+    CoreTaskArgs consumer_args;
     consumer_args.set_dependencies(deps, 2);
     TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);
     ASSERT_TRUE(consumer.task_id().is_valid());
@@ -102,7 +102,7 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     orch.begin_scope();
     ASSERT_EQ(orch.current_ring_id(), 1);
 
-    L0TaskArgs first_args;
+    CoreTaskArgs first_args;
     add_runtime_output_arg(first_args, create_infos, 1024);  // 4096 bytes
     TaskOutputTensors first = orch.submit_dummy_task(first_args);
     ASSERT_TRUE(first.task_id().is_valid());
@@ -117,19 +117,19 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
     orch.begin_scope();
     ASSERT_EQ(orch.current_ring_id(), 1);
 
-    L0TaskArgs wrap_args;
+    CoreTaskArgs wrap_args;
     add_runtime_output_arg(wrap_args, create_infos, 1);  // wraps, packed to 1024 bytes
     TaskOutputTensors wrapped = orch.submit_dummy_task(wrap_args);
     ASSERT_TRUE(wrapped.task_id().is_valid());
 
-    L0TaskArgs fill_args;
+    CoreTaskArgs fill_args;
     add_runtime_output_arg(fill_args, create_infos, 512);  // 2048 bytes
     TaskOutputTensors filled = orch.submit_dummy_task(fill_args);
     ASSERT_TRUE(filled.task_id().is_valid());
     ASSERT_EQ(orch.rings[1].task_allocator.heap_used_bytes(), 3072ULL);
     ASSERT_EQ(orch.rings[1].task_allocator.heap_available(), 1024ULL);
 
-    L0TaskArgs blocked_args;
+    CoreTaskArgs blocked_args;
     add_runtime_output_arg(blocked_args, create_infos, 1);
     testing::internal::CaptureStderr();
     TaskOutputTensors blocked = orch.submit_dummy_task(blocked_args);
@@ -155,7 +155,7 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
     }
     ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
 
-    L0TaskArgs parent_args;
+    CoreTaskArgs parent_args;
     add_runtime_output_arg(parent_args, create_infos, 1024);
     TaskOutputTensors parent = orch.submit_dummy_task(parent_args);
     ASSERT_TRUE(parent.task_id().is_valid());
@@ -163,7 +163,7 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
     orch.begin_scope();
     ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
 
-    L0TaskArgs child_args;
+    CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 1);
     testing::internal::CaptureStderr();
     TaskOutputTensors child = orch.submit_dummy_task(child_args);
@@ -185,7 +185,7 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
     orch.begin_scope();
     ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
 
-    L0TaskArgs child_args;
+    CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 768);
     TaskOutputTensors child = orch.submit_dummy_task(child_args);
     ASSERT_TRUE(child.task_id().is_valid());
@@ -193,12 +193,12 @@ TEST_F(OrchestratorFaninTest, ClosedChildHeadUsesTimeoutWithOpenParentOnSharedRi
     orch.end_scope();
     ASSERT_EQ(orch.current_ring_id(), PTO2_MAX_RING_DEPTH - 1);
 
-    L0TaskArgs parent_args;
+    CoreTaskArgs parent_args;
     add_runtime_output_arg(parent_args, create_infos, 256);
     TaskOutputTensors parent = orch.submit_dummy_task(parent_args);
     ASSERT_TRUE(parent.task_id().is_valid());
 
-    L0TaskArgs blocked_args;
+    CoreTaskArgs blocked_args;
     add_runtime_output_arg(blocked_args, create_infos, 1);
     testing::internal::CaptureStderr();
     TaskOutputTensors blocked = orch.submit_dummy_task(blocked_args);

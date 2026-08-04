@@ -9,11 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Tiled accumulate-add kernel (AIV, submit_task / Tensor* ABI)
+ * Tiled accumulate-add kernel (AIV, submit_task / ChipTensor* ABI)
  *
  * Implements: C[i] = C[i] + P[i] in place over a single 64x64 tile.
  *
- * Args (Tensor*):
+ * Args (ChipTensor*):
  *   args[0] = C (INOUT)
  *   args[1] = P (INPUT)
  */
@@ -38,8 +38,8 @@ using namespace pto;
 #endif
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *c_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *p_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *c_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *p_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
 
     __gm__ float *c_ptr = reinterpret_cast<__gm__ float *>(c_tensor->buffer.addr) + c_tensor->start_offset;
     __gm__ float *p_ptr = reinterpret_cast<__gm__ float *>(p_tensor->buffer.addr) + p_tensor->start_offset;

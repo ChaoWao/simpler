@@ -30,8 +30,8 @@ Analysis CLIs that consume these outputs are documented in
 
 | Document | What it covers |
 | -------- | -------------- |
-| [L2 Swimlane Profiling](l2-swimlane-profiling.md) | Per-task timing and scheduler phases across cores |
-| [L0 Swimlane Profiling](l0-swimlane-profiling.md) | Intra-core AICore pipeline trace for a single task |
+| [Chip Swimlane Profiling](chip-swimlane-profiling.md) | Per-task timing and scheduler phases across cores |
+| [Core Swimlane Profiling](core-swimlane-profiling.md) | Intra-core AICore pipeline trace for a single task |
 | [PMU Profiling](pmu-profiling.md) | Per-task AICore hardware counters |
 
 ## Data and dependencies

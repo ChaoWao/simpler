@@ -27,7 +27,7 @@ import re
 
 import pytest
 from simpler._log import get_current_config
-from simpler.task_interface import CallConfig, ChipStorageTaskArgs, DataType, Tensor
+from simpler.task_interface import CallConfig, ChipStorageTaskArgs, ChipTensor, DataType
 from simpler.worker import Worker
 
 from simpler_setup.log_config import configure_logging
@@ -47,7 +47,7 @@ def _strace_durs(captured: str, name: str) -> list:
     return out
 
 
-def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = False):
+def _drive_one_run(platform: str, device_id: int, *, enable_chip_swimlane: bool = False):
     import torch  # noqa: PLC0415
 
     worker = Worker(
@@ -72,12 +72,12 @@ def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = 
         worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
 
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
 
         config = CallConfig()
-        config.enable_l2_swimlane = enable_l2_swimlane
+        config.enable_chip_swimlane = enable_chip_swimlane
 
         # run() returns None; timing is emitted as [STRACE] markers on stderr.
         assert worker.run(chip_handle, args, config) is None

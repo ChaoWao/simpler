@@ -30,22 +30,23 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 1,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
 
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_SPMD_READ_AIC;
     mk.aiv0_kernel_id = FUNC_SPMD_READ_AIV0;
     mk.aiv1_kernel_id = FUNC_SPMD_READ_AIV1;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(ext_output);
 
     rt_submit_task(mk, args);

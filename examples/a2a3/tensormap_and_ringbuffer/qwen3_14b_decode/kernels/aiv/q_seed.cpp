@@ -124,7 +124,7 @@ static __aicore__ void q_seed(__gm__ float *v1) {
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: q_proj_inline139__ssa_v0
-    __gm__ Tensor *q_proj_inline139__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *q_proj_inline139__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *q_proj_inline139__ssa_v0 =
         reinterpret_cast<__gm__ float *>(q_proj_inline139__ssa_v0_tensor->buffer.addr) +
         q_proj_inline139__ssa_v0_tensor->start_offset;

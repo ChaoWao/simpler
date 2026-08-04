@@ -89,13 +89,13 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     WorkerType,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
-    _l3_host_mapped_region_ack_cleanup_error,
-    _l3_host_mapped_region_close,
-    _l3_host_mapped_region_import_onboard,
-    _l3_host_mapped_region_import_sim,
-    _l3_host_mapped_region_peek_cleanup_error,
     _mailbox_load_i32,
     _mailbox_store_i32,
+    _worker_host_mapped_region_ack_cleanup_error,
+    _worker_host_mapped_region_close,
+    _worker_host_mapped_region_import_onboard,
+    _worker_host_mapped_region_import_sim,
+    _worker_host_mapped_region_peek_cleanup_error,
     read_args_from_blob,
 )
 
@@ -112,24 +112,6 @@ from .callable_identity import (
     parse_python_callable_payload,
     parse_python_import_target,
 )
-from .l3_l2_orch_comm import (
-    _CTRL_SHM_TOKEN_BYTES,
-    _REGION_CREATE_REPLY,
-    _REGION_CREATE_REPLY_BYTES,
-    _REGION_CREATE_REQUEST,
-    _REGION_CREATE_REQUEST_BYTES,
-    _REGION_LAYOUT_ALIGNMENT,
-    _REGION_MAGIC_VERSION,
-    L3HostRegionMapping,
-    L3L2OrchRegion,
-    L3L2RegionAccessProfile,
-    L3L2RegionCreateRequest,
-    _align_up,
-    _checked_add_u64,
-    decode_region_create_reply,
-    peek_region_create_reply_region_id,
-    validate_region_create_reply,
-)
 from .orchestrator import Orchestrator, _callback_run, direct_control
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
@@ -139,6 +121,7 @@ from .task_interface import (
     CallConfig,
     ChipCallable,
     ChipDomainContext,
+    ChipTensor,
     ChipWorker,
     CommBufferSpec,
     CommDomainHandle,
@@ -146,8 +129,25 @@ from .task_interface import (
     RemoteBufferExport,
     RemoteBufferHandle,
     TaskArgs,
-    Tensor,
     _Worker,
+)
+from .worker_chip_orch_comm import (
+    _CTRL_SHM_TOKEN_BYTES,
+    _REGION_CREATE_REPLY,
+    _REGION_CREATE_REPLY_BYTES,
+    _REGION_CREATE_REQUEST,
+    _REGION_CREATE_REQUEST_BYTES,
+    _REGION_LAYOUT_ALIGNMENT,
+    _REGION_MAGIC_VERSION,
+    WorkerChipOrchRegion,
+    WorkerChipRegionAccessProfile,
+    WorkerChipRegionCreateRequest,
+    WorkerHostRegionMapping,
+    _align_up,
+    _checked_add_u64,
+    decode_region_create_reply,
+    peek_region_create_reply_region_id,
+    validate_region_create_reply,
 )
 
 # Upper bound on how long the parent waits for every chip's bootstrap mailbox
@@ -159,7 +159,7 @@ _PY_CONTROL_TIMEOUT_S = 30.0
 # L2 endpoint metadata currently reaches the parent through the canonical fatal
 # text emitted by the orchestration wrapper; keep this pattern in sync with the
 # wrapper's ``L3-L2 endpoint error ... region=<id>`` format.
-_L3_L2_ENDPOINT_ERROR_REGION_RE = re.compile(r"\bL3-L2 endpoint error\b[^\n]*\bregion=(\d+)\b")
+_WORKER_CHIP_ENDPOINT_ERROR_REGION_RE = re.compile(r"\bL3-L2 endpoint error\b[^\n]*\bregion=(\d+)\b")
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ _OFF_ERROR = 4
 _OFF_CALLABLE = 8
 _OFF_CONFIG = 16
 # Packed CallConfig wire layout — must match call_config.h byte for byte:
-# 6 int32 (aicpu_thread_num, enable_l2_swimlane, enable_dump_args,
+# 6 int32 (aicpu_thread_num, enable_chip_swimlane, enable_dump_args,
 # enable_pmu, enable_dep_gen, enable_scope_stats) + uint64 ring sizing
 # overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT: ring_task_window,
 # ring_heap, ring_dep_pool) + 1024-byte NUL-terminated output_prefix. Log config
@@ -184,12 +184,12 @@ _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
 _CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # The generation-safe pipeline lease follows CONFIG. Args start after the
 # lease, rounded up to 8 bytes so the first
-# Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
+# ChipTensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
 # SIGBUS on strict-alignment platforms (aarch64 atomics, some ARM cores).
 _PIPELINE_LEASE_FMT = struct.Struct("=IIQ")
 _OFF_PIPELINE_LEASE = (_OFF_CONFIG + _CFG_FMT.size + 7) & ~7
 _OFF_ARGS = (_OFF_PIPELINE_LEASE + _PIPELINE_LEASE_FMT.size + 7) & ~7
-assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for Tensor.data"
+assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for ChipTensor.data"
 _OFF_TASK_CALLABLE_HASH = _OFF_ARGS
 _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # MAILBOX_ARGS_CAPACITY mirrors the C++ constexpr in worker_manager.h so the
@@ -364,16 +364,16 @@ _CTRL_OP_NAMES = {
 _HOST_BUF_MAP_HEADER = struct.Struct("<QQQ")
 _HOST_BUF_UNMAP = struct.Struct("<Q")
 
-# Wire layout of a Tensor inside a task-args blob, pinned by static_assert in
-# src/common/task_interface/tensor.h: each Tensor is 128 B and buffer.addr is its
-# first field (offset 0). The blob is [int32 T][int32 S][Tensor[T]][scalars], so
+# Wire layout of a ChipTensor inside a task-args blob, pinned by static_assert in
+# src/common/task_interface/tensor.h: each ChipTensor is 128 B and buffer.addr is its
+# first field (offset 0). The blob is [int32 T][int32 S][ChipTensor[T]][scalars], so
 # tensor i's host pointer lives at _OFF_TASK_ARGS_BLOB + 8 + i*128. The child
 # rewrites that u64 in place to redirect a registered host pointer at its own
 # mapping (the pure-Python blob-rewrite scheme, no runtime C++ change).
 _BLOB_TENSOR_STRIDE = 128
 _BLOB_HEADER_BYTES = 8
-_CTRL_L3_L2_REGION_CREATE = 16
-_CTRL_L3_L2_REGION_RELEASE = 17
+_CTRL_WORKER_CHIP_REGION_CREATE = 16
+_CTRL_WORKER_CHIP_REGION_RELEASE = 17
 _CTRL_COMMITTED_DEVICE_MEMORY = 18
 
 # Layout of the CTRL_COMM_INIT request shm.
@@ -1231,7 +1231,7 @@ def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[
     child has mapped via _CTRL_MAP_HOST. For every host tensor whose
     ``buffer.addr`` (a parent VA) lands in a registered range, rewrite it in
     place to ``child_base + (addr - parent_lo)`` so the runtime dereferences the
-    child's own mapping. Tensors outside every range (fork-inherited or
+    child's own mapping. ChipTensors outside every range (fork-inherited or
     child-allocated) are left untouched. A ``child_memory`` tensor carries a
     child-owned device pointer, never a host VA, so it is skipped even when its
     address numerically falls inside a registered host range — rewriting it would
@@ -1737,7 +1737,7 @@ def _read_args_from_mailbox(buf) -> TaskArgs:
     to C++ run use the zero-copy `run_from_blob` path
     instead — see those loops for the matching comment.
 
-    Delegates to the nanobind helper so the Tensor layout is
+    Delegates to the nanobind helper so the ChipTensor layout is
     parsed by C++ `read_blob` (single source of truth) instead of being
     reimplemented in Python.  The Python re-implementation that lived
     here previously dropped the `child_memory` byte (offset 33), which
@@ -1991,7 +1991,7 @@ def _handle_ctrl_comm_init(cw: ChipWorker, buf: memoryview) -> None:
 
 
 @dataclass
-class _L2HostL3L2Region:
+class _HostWorkerChipRegion:
     region_id: int
     payload_bytes: int
     counter_offset: int
@@ -2003,23 +2003,23 @@ class _L2HostL3L2Region:
 
 
 @dataclass
-class _L2HostL3L2RegionStore:
+class _HostWorkerChipRegionStore:
     """Per-chip-child registry of live L3-L2 direct regions (loop-local state)."""
 
-    regions: dict[int, _L2HostL3L2Region] = field(default_factory=dict)
+    regions: dict[int, _HostWorkerChipRegion] = field(default_factory=dict)
     next_region_id: int = 1
 
 
 @dataclass(frozen=True)
-class _L2HostL3L2RegionReplyMeta:
+class _HostWorkerChipRegionReplyMeta:
     payload_base: int
     backing_name: bytes
-    access_profile: L3L2RegionAccessProfile
+    access_profile: WorkerChipRegionAccessProfile
     mapping_bytes: int
     shareable_handle: int
 
 
-def _release_l2_host_l3_l2_region(region: _L2HostL3L2Region) -> None:
+def _release_host_worker_chip_region(region: _HostWorkerChipRegion) -> None:
     if region.shm is not None:
         region.shm.close()
         region.shm.unlink()
@@ -2028,11 +2028,11 @@ def _release_l2_host_l3_l2_region(region: _L2HostL3L2Region) -> None:
         _l3_child_onboard_region_close(region.onboard_handle)
 
 
-def _create_sim_l3_l2_region(
-    request: L3L2RegionCreateRequest, region_id: int, counter_offset: int, total_bytes: int
-) -> tuple[_L2HostL3L2Region, _L2HostL3L2RegionReplyMeta]:
+def _create_sim_worker_chip_region(
+    request: WorkerChipRegionCreateRequest, region_id: int, counter_offset: int, total_bytes: int
+) -> tuple[_HostWorkerChipRegion, _HostWorkerChipRegionReplyMeta]:
     shm = SharedMemory(create=True, size=total_bytes)
-    region = _L2HostL3L2Region(
+    region = _HostWorkerChipRegion(
         region_id=region_id,
         payload_bytes=request.payload_bytes,
         counter_offset=counter_offset,
@@ -2050,23 +2050,23 @@ def _create_sim_l3_l2_region(
         del region_buf
     backing_name = shm.name.encode("utf-8")
     if len(backing_name) >= _CTRL_SHM_TOKEN_BYTES:
-        raise RuntimeError("CTRL_L3_L2_REGION_CREATE backing shm token is too long")
-    meta = _L2HostL3L2RegionReplyMeta(
+        raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE backing shm token is too long")
+    meta = _HostWorkerChipRegionReplyMeta(
         payload_base=payload_base,
         backing_name=backing_name,
-        access_profile=L3L2RegionAccessProfile.SIM_POSIX_SHM,
+        access_profile=WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
         mapping_bytes=total_bytes,
         shareable_handle=0,
     )
     return region, meta
 
 
-def _create_onboard_l3_l2_region(
-    cw: ChipWorker, request: L3L2RegionCreateRequest, region_id: int, counter_offset: int, total_bytes: int
-) -> tuple[_L2HostL3L2Region, _L2HostL3L2RegionReplyMeta]:
+def _create_onboard_worker_chip_region(
+    cw: ChipWorker, request: WorkerChipRegionCreateRequest, region_id: int, counter_offset: int, total_bytes: int
+) -> tuple[_HostWorkerChipRegion, _HostWorkerChipRegionReplyMeta]:
     export = _l3_child_onboard_region_create(total_bytes)
     dev_ptr = int(export.device_addr)
-    region = _L2HostL3L2Region(
+    region = _HostWorkerChipRegion(
         region_id=region_id,
         payload_bytes=request.payload_bytes,
         counter_offset=counter_offset,
@@ -2077,18 +2077,18 @@ def _create_onboard_l3_l2_region(
     )
     zeros = ctypes.create_string_buffer(request.counter_bytes)
     cw.copy_to(dev_ptr + counter_offset, ctypes.addressof(zeros), request.counter_bytes)
-    meta = _L2HostL3L2RegionReplyMeta(
+    meta = _HostWorkerChipRegionReplyMeta(
         payload_base=dev_ptr,
         backing_name=b"",
-        access_profile=L3L2RegionAccessProfile.ONBOARD_VMM,
+        access_profile=WorkerChipRegionAccessProfile.ONBOARD_VMM,
         mapping_bytes=int(export.mapping_bytes),
         shareable_handle=int(export.shareable_handle),
     )
     return region, meta
 
 
-def _handle_ctrl_l3_l2_region_create(
-    cw: ChipWorker, buf: memoryview, chip_platform: str, store: _L2HostL3L2RegionStore
+def _handle_ctrl_worker_chip_region_create(
+    cw: ChipWorker, buf: memoryview, chip_platform: str, store: _HostWorkerChipRegionStore
 ) -> None:
     request_shm_name = _read_shm_name(buf, _OFF_ARGS)
     reply_shm_name = _read_shm_name(buf, _OFF_ARGS + _CTRL_SHM_NAME_BYTES)
@@ -2096,10 +2096,10 @@ def _handle_ctrl_l3_l2_region_create(
     reply_shm = SharedMemory(name=reply_shm_name)
     req_buf = cast(memoryview, req_shm.buf)
     reply_buf = cast(memoryview, reply_shm.buf)
-    region: _L2HostL3L2Region | None = None
+    region: _HostWorkerChipRegion | None = None
     try:
         fields = _REGION_CREATE_REQUEST.unpack_from(req_buf, 0)
-        request = L3L2RegionCreateRequest(
+        request = WorkerChipRegionCreateRequest(
             magic_version=int(fields[0]),
             request_bytes=int(fields[1]),
             payload_bytes=int(fields[2]),
@@ -2108,22 +2108,22 @@ def _handle_ctrl_l3_l2_region_create(
         # Reject ABI mismatches loudly. The reply carries this child's own
         # magic (not the request echo) so the L3 side can detect version skew.
         if request.magic_version != _REGION_MAGIC_VERSION:
-            raise RuntimeError("CTRL_L3_L2_REGION_CREATE magic_version mismatch")
+            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE magic_version mismatch")
         if request.request_bytes != _REGION_CREATE_REQUEST_BYTES:
-            raise RuntimeError("CTRL_L3_L2_REGION_CREATE request_bytes mismatch")
+            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE request_bytes mismatch")
         if request.payload_bytes <= 0:
-            raise RuntimeError("CTRL_L3_L2_REGION_CREATE payload_bytes must be positive")
+            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE payload_bytes must be positive")
         if request.counter_bytes <= 0 or request.counter_bytes % 4 != 0:
-            raise RuntimeError("CTRL_L3_L2_REGION_CREATE counter_bytes must be positive and a multiple of 4")
+            raise RuntimeError("CTRL_WORKER_CHIP_REGION_CREATE counter_bytes must be positive and a multiple of 4")
         counter_offset = _align_up(request.payload_bytes, _REGION_LAYOUT_ALIGNMENT)
         total_bytes = _checked_add_u64(counter_offset, request.counter_bytes)
 
         region_id = store.next_region_id
         store.next_region_id += 1
         if str(chip_platform).endswith("sim"):
-            region, meta = _create_sim_l3_l2_region(request, region_id, counter_offset, total_bytes)
+            region, meta = _create_sim_worker_chip_region(request, region_id, counter_offset, total_bytes)
         else:
-            region, meta = _create_onboard_l3_l2_region(cw, request, region_id, counter_offset, total_bytes)
+            region, meta = _create_onboard_worker_chip_region(cw, request, region_id, counter_offset, total_bytes)
         _REGION_CREATE_REPLY.pack_into(
             reply_buf,
             0,
@@ -2145,7 +2145,7 @@ def _handle_ctrl_l3_l2_region_create(
     finally:
         if region is not None:
             try:
-                _release_l2_host_l3_l2_region(region)
+                _release_host_worker_chip_region(region)
             except (BufferError, FileNotFoundError, OSError, RuntimeError):
                 pass
         del req_buf
@@ -2154,19 +2154,19 @@ def _handle_ctrl_l3_l2_region_create(
         reply_shm.close()
 
 
-def _handle_ctrl_l3_l2_region_release(buf: memoryview, store: _L2HostL3L2RegionStore) -> None:
+def _handle_ctrl_worker_chip_region_release(buf: memoryview, store: _HostWorkerChipRegionStore) -> None:
     region_id = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
     region = store.regions.pop(int(region_id), None)
     if region is None:
         return
-    _release_l2_host_l3_l2_region(region)
+    _release_host_worker_chip_region(region)
 
 
-def _sweep_l2_host_l3_l2_regions(store: _L2HostL3L2RegionStore) -> None:
+def _sweep_host_worker_chip_regions(store: _HostWorkerChipRegionStore) -> None:
     for region_id in list(store.regions):
         region = store.regions.pop(region_id)
         try:
-            _release_l2_host_l3_l2_region(region)
+            _release_host_worker_chip_region(region)
         except (BufferError, FileNotFoundError, OSError, RuntimeError):
             pass
 
@@ -2242,7 +2242,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     control-flow error and fails rather than lazily preparing it.
     """
     prepared = prepared if prepared is not None else set()
-    l3_l2_region_store = _L2HostL3L2RegionStore()
+    worker_chip_region_store = _HostWorkerChipRegionStore()
     # Post-fork host buffers mapped into this child. `host_buf_table`
     # owns the mmap per token (for unmap + teardown); `host_buf_ranges` is the
     # parent-VA → child-VA translation table the per-task blob rewrite consults,
@@ -2409,10 +2409,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
             elif sub_cmd == _CTRL_UNMAP_HOST:
                 _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-            elif sub_cmd == _CTRL_L3_L2_REGION_CREATE:
-                _handle_ctrl_l3_l2_region_create(cw, buf, chip_platform, l3_l2_region_store)
-            elif sub_cmd == _CTRL_L3_L2_REGION_RELEASE:
-                _handle_ctrl_l3_l2_region_release(buf, l3_l2_region_store)
+            elif sub_cmd == _CTRL_WORKER_CHIP_REGION_CREATE:
+                _handle_ctrl_worker_chip_region_create(cw, buf, chip_platform, worker_chip_region_store)
+            elif sub_cmd == _CTRL_WORKER_CHIP_REGION_RELEASE:
+                _handle_ctrl_worker_chip_region_release(buf, worker_chip_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
             else:
@@ -2454,7 +2454,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # Mirrors CallConfig::diagnostics_any(); these modes share native
             # diagnostic state and therefore use the serial prepare fallback.
             return bool(
-                config.enable_l2_swimlane
+                config.enable_chip_swimlane
                 or config.enable_dump_args
                 or config.enable_pmu
                 or config.enable_dep_gen
@@ -2833,7 +2833,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         else:
             _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
-        _sweep_l2_host_l3_l2_regions(l3_l2_region_store)
+        _sweep_host_worker_chip_regions(worker_chip_region_store)
         for host_shm, _lo, _hi, _base in host_buf_table.values():
             try:
                 host_shm.close()
@@ -2951,7 +2951,7 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     ring_dep_pool = list(ring_values[2 * RUNTIME_ENV_RING_COUNT : 3 * RUNTIME_ENV_RING_COUNT])
     cfg = CallConfig()
     cfg.aicpu_thread_num = aicpu_tn
-    cfg.enable_l2_swimlane = swl
+    cfg.enable_chip_swimlane = swl
     cfg.enable_dump_args = int(dt)
     cfg.enable_pmu = pmu
     cfg.enable_dep_gen = bool(dep_gen)
@@ -3257,8 +3257,8 @@ class _RunResources:
     remote_slot_refs: list[_RemoteSlotRefClaim | RemoteBufferHandle] = field(default_factory=list)
     live_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
     pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
-    l3_l2_regions: list[Any] = field(default_factory=list)
-    l3_l2_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
+    worker_chip_regions: list[Any] = field(default_factory=list)
+    worker_chip_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
     # True once the owning run's fence has claimed the domains above. A release
     # that arrives after this has no fence left to run behind and frees inline.
     # Read and written only under `domain_lock`.
@@ -3904,13 +3904,13 @@ class Worker:
         # Sticky copy of this Worker's native return-boundary mapping cleanup
         # diagnostic. Native storage is acknowledged only after this field and
         # the admission poison above have been published.
-        self._l3_host_mapped_cleanup_error: RuntimeError | None = None
+        self._worker_host_mapped_cleanup_error: RuntimeError | None = None
         # (snapshot awaiting acknowledgement, retained distinct detail
         # fragments). This is an ordered diagnostic set, not a resource-count
         # ledger: an identical repeated failure adds no actionable information.
         # Keep it immutable so one attribute assignment publishes both pieces
         # atomically with respect to asynchronous Python exceptions.
-        self._l3_host_mapped_cleanup_state: tuple[str | None, tuple[str, ...]] = (None, ())
+        self._worker_host_mapped_cleanup_state: tuple[str | None, tuple[str, ...]] = (None, ())
         # submit graph construction is serialized by _submit_mu. Resource
         # creation helpers use this pointer to bind new objects to the handle
         # being built; the pointer is cleared before submit() returns.
@@ -3985,8 +3985,8 @@ class Worker:
         # starts the C++ scheduler; no comm work happens there.
         self._comm_base_ready: bool = False
 
-        self._live_l3_l2_regions: list[Any] = []
-        self._l3_l2_orch_comm_host_buffers: dict[int, int] = {}
+        self._live_worker_chip_regions: list[Any] = []
+        self._worker_chip_orch_comm_host_buffers: dict[int, int] = {}
 
         # Live-provenance of child (kind4, device) pointers, keyed on the exact
         # ``(worker_id, device_ptr)`` composite: a raw device VA is not globally
@@ -5209,7 +5209,7 @@ class Worker:
         callable registration / host-buffer / remote-memory)."""
         tid = threading.get_ident()
         with self._hierarchical_start_cv:
-            self._consume_l3_host_mapped_cleanup_error_locked(api)
+            self._consume_worker_host_mapped_cleanup_error_locked(api)
             if self._lifecycle is not _Lifecycle.READY:
                 raise RuntimeError(f"Worker.{api}: requires an initialized (READY) worker") from self._startup_error
             if self._ordered_cleanup_error is not None:
@@ -6926,35 +6926,35 @@ class Worker:
         """
         return dict(self._live_domains)
 
-    def _validate_l3_l2_worker_id(self, worker_id: int) -> None:
+    def _validate_worker_chip_id(self, worker_id: int) -> None:
         if self.level < 3:
-            raise RuntimeError("create_l3_l2_region requires a hierarchical Worker")
+            raise RuntimeError("create_worker_chip_region requires a hierarchical Worker")
         if self._worker is None:
-            raise RuntimeError("create_l3_l2_region requires Worker.init()")
+            raise RuntimeError("create_worker_chip_region requires Worker.init()")
         device_ids = self._config.get("device_ids", [])
         if worker_id < 0 or worker_id >= len(device_ids):
-            raise ValueError(f"create_l3_l2_region: worker_id {worker_id} outside [0, {len(device_ids)})")
+            raise ValueError(f"create_worker_chip_region: worker_id {worker_id} outside [0, {len(device_ids)})")
 
-    def _poison_l3_l2_region_from_endpoint_error(
+    def _poison_worker_chip_region_from_endpoint_error(
         self, exc: BaseException, resources: _RunResources | None = None
     ) -> bool:
-        match = _L3_L2_ENDPOINT_ERROR_REGION_RE.search(str(exc))
+        match = _WORKER_CHIP_ENDPOINT_ERROR_REGION_RE.search(str(exc))
         if match is None:
             return False
         region_id = int(match.group(1))
         if region_id == 0:
             return False
         poisoned = False
-        regions = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
+        regions = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
         for region in regions:
             if int(region.region_id) == region_id:
                 region._poison()
                 poisoned = True
         return poisoned
 
-    def _register_l3_l2_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, Tensor):
-            raise TypeError("L3-L2 host buffer registration expects a Tensor")
+    def _register_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
+        if not isinstance(tensor, ChipTensor):
+            raise TypeError("L3-L2 host buffer registration expects a ChipTensor")
         if tensor.child_memory:
             raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
         if not tensor.is_contiguous:
@@ -6964,15 +6964,19 @@ class Worker:
         if base <= 0 or nbytes <= 0:
             return
         resources = self._building_run_resources
-        buffers = self._l3_l2_orch_comm_host_buffers if resources is None else resources.l3_l2_orch_comm_host_buffers
+        buffers = (
+            self._worker_chip_orch_comm_host_buffers
+            if resources is None
+            else resources.worker_chip_orch_comm_host_buffers
+        )
         buffers[base] = max(
             int(buffers.get(base, 0)),
             nbytes,
         )
 
-    def _validate_l3_l2_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, Tensor):
-            raise ValueError("L3-L2 payload buffer must be a Tensor returned by orch.alloc(...)")
+    def _validate_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
+        if not isinstance(tensor, ChipTensor):
+            raise ValueError("L3-L2 payload buffer must be a ChipTensor returned by orch.alloc(...)")
         if tensor.child_memory:
             raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
         if not tensor.is_contiguous:
@@ -6982,16 +6986,20 @@ class Worker:
         if base <= 0 or nbytes <= 0:
             raise ValueError("L3-L2 payload buffer must have a nonzero address and size")
         resources = self._building_run_resources
-        buffers = self._l3_l2_orch_comm_host_buffers if resources is None else resources.l3_l2_orch_comm_host_buffers
+        buffers = (
+            self._worker_chip_orch_comm_host_buffers
+            if resources is None
+            else resources.worker_chip_orch_comm_host_buffers
+        )
         registered_nbytes = buffers.get(base)
         if registered_nbytes is None:
-            raise ValueError("L3-L2 payload Tensor is not registered; use a tensor returned by orch.alloc(...)")
+            raise ValueError("L3-L2 payload ChipTensor is not registered; use a tensor returned by orch.alloc(...)")
         if nbytes > int(registered_nbytes):
             raise ValueError(
-                f"L3-L2 payload Tensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
+                f"L3-L2 payload ChipTensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
             )
 
-    def _consume_l3_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
+    def _consume_worker_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
         """Publish and then acknowledge this Worker's native cleanup debt.
 
         Must hold ``_hierarchical_start_cv``. The native read is intentionally
@@ -7000,12 +7008,12 @@ class Worker:
         boundary. Acknowledgement may be interrupted only after admission is
         already poisoned.
         """
-        cleanup_error = _l3_host_mapped_region_peek_cleanup_error(self._owner_id)
-        pending_snapshot, details = self._l3_host_mapped_cleanup_state
+        cleanup_error = _worker_host_mapped_region_peek_cleanup_error(self._owner_id)
+        pending_snapshot, details = self._worker_host_mapped_cleanup_state
         if not cleanup_error:
             if pending_snapshot is not None:
-                self._l3_host_mapped_cleanup_state = (None, details)
-            return self._l3_host_mapped_cleanup_error
+                self._worker_host_mapped_cleanup_state = (None, details)
+            return self._worker_host_mapped_cleanup_error
 
         if cleanup_error != pending_snapshot:
             detail = cleanup_error
@@ -7016,34 +7024,34 @@ class Worker:
                 detail = cleanup_error[len(pending_snapshot) + 2 :]
             if detail and detail not in details:
                 details = (*details, detail)
-            self._l3_host_mapped_cleanup_state = (cleanup_error, details)
+            self._worker_host_mapped_cleanup_state = (cleanup_error, details)
 
-        leaked = self._l3_host_mapped_cleanup_error
+        leaked = self._worker_host_mapped_cleanup_error
         if leaked is None:
             leaked = RuntimeError(
                 f"Worker.{api}: a native L3 Host mapping owned by this Worker finalized without explicit close "
                 "and could not be reclaimed; no further work is admitted"
             )
-            self._l3_host_mapped_cleanup_error = leaked
+            self._worker_host_mapped_cleanup_error = leaked
         leaked.__cause__ = RuntimeError("; ".join(details))
         if self._ordered_cleanup_error is None:
             self._ordered_cleanup_error = leaked
 
-        _l3_host_mapped_region_ack_cleanup_error(self._owner_id, cleanup_error)
-        self._l3_host_mapped_cleanup_state = (None, details)
-        return self._l3_host_mapped_cleanup_error
+        _worker_host_mapped_region_ack_cleanup_error(self._owner_id, cleanup_error)
+        self._worker_host_mapped_cleanup_state = (None, details)
+        return self._worker_host_mapped_cleanup_error
 
-    def _consume_l3_host_mapped_cleanup_error(self, api: str) -> RuntimeError | None:
+    def _consume_worker_host_mapped_cleanup_error(self, api: str) -> RuntimeError | None:
         with self._hierarchical_start_cv:
-            return self._consume_l3_host_mapped_cleanup_error_locked(api)
+            return self._consume_worker_host_mapped_cleanup_error_locked(api)
 
-    def _create_l3_l2_region(self, worker_id: int, payload_bytes: int, counter_bytes: int):  # noqa: PLR0912
+    def _create_worker_chip_region(self, worker_id: int, payload_bytes: int, counter_bytes: int):  # noqa: PLR0912
         if payload_bytes <= 0:
-            raise ValueError("create_l3_l2_region: payload_bytes must be positive")
+            raise ValueError("create_worker_chip_region: payload_bytes must be positive")
         if counter_bytes <= 0 or counter_bytes % 4 != 0:
-            raise ValueError("create_l3_l2_region: counter_bytes must be positive and a multiple of 4")
-        self._validate_l3_l2_worker_id(int(worker_id))
-        prior_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("create_l3_l2_region")
+            raise ValueError("create_worker_chip_region: counter_bytes must be positive and a multiple of 4")
+        self._validate_worker_chip_id(int(worker_id))
+        prior_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error("create_worker_chip_region")
         if prior_native_cleanup_error is not None:
             raise prior_native_cleanup_error
         resources = self._building_run_resources
@@ -7053,12 +7061,12 @@ class Worker:
         reply_buf = cast(memoryview, reply_shm.buf)
         region_id = 0
         native_mapping_handle = None
-        l3_host_mapping = None
+        worker_host_mapping = None
         region = None
         dispatched = False
         required_ordered_cleanup_before = resources.requires_ordered_cleanup if resources is not None else False
         try:
-            L3L2RegionCreateRequest(
+            WorkerChipRegionCreateRequest(
                 magic_version=_REGION_MAGIC_VERSION,
                 request_bytes=_REGION_CREATE_REQUEST_BYTES,
                 payload_bytes=int(payload_bytes),
@@ -7071,7 +7079,7 @@ class Worker:
             # before the id is read back — the rollback below cannot assume
             # "no id" means "nothing exists".
             dispatched = True
-            worker.control_l3_l2_region_create(int(worker_id), req_shm.name, reply_shm.name)
+            worker.control_worker_chip_region_create(int(worker_id), req_shm.name, reply_shm.name)
             # Peek before decode: decode rejects malformed replies, but the
             # child has already created the region and the rollback below
             # still needs the id.
@@ -7079,23 +7087,23 @@ class Worker:
             reply = decode_region_create_reply(reply_buf)
             platform = str(self._config.get("platform", ""))
             expected_access_profile = (
-                L3L2RegionAccessProfile.SIM_POSIX_SHM
+                WorkerChipRegionAccessProfile.SIM_POSIX_SHM
                 if platform.endswith("sim")
-                else L3L2RegionAccessProfile.ONBOARD_VMM
+                else WorkerChipRegionAccessProfile.ONBOARD_VMM
             )
             counter_offset, total_bytes = validate_region_create_reply(reply, expected_access_profile)
             if platform.endswith("sim"):
-                native_mapping_handle = _l3_host_mapped_region_import_sim(
+                native_mapping_handle = _worker_host_mapped_region_import_sim(
                     reply.backing_shm, int(reply.mapping_bytes), self._owner_id
                 )
             else:
-                native_mapping_handle = _l3_host_mapped_region_import_onboard(
+                native_mapping_handle = _worker_host_mapped_region_import_onboard(
                     int(reply.device_id),
                     int(reply.shareable_handle),
                     int(reply.mapping_bytes),
                     self._owner_id,
                 )
-            l3_host_mapping = L3HostRegionMapping(
+            worker_host_mapping = WorkerHostRegionMapping(
                 worker_id=int(worker_id),
                 region_id=region_id,
                 access_profile=reply.access_profile,
@@ -7107,10 +7115,10 @@ class Worker:
                 handle=native_mapping_handle,
             )
             native_mapping_handle = None
-            region = L3L2OrchRegion(self, int(worker_id), reply.desc, l3_host_mapping)
-            self._live_l3_l2_regions.append(region)
+            region = WorkerChipOrchRegion(self, int(worker_id), reply.desc, worker_host_mapping)
+            self._live_worker_chip_regions.append(region)
             if resources is not None:
-                resources.l3_l2_regions.append(region)
+                resources.worker_chip_regions.append(region)
                 # Region teardown is mailbox control on its owning chip.
                 resources.requires_ordered_cleanup = True
             return region
@@ -7118,24 +7126,24 @@ class Worker:
             mapping_cleanup_error: BaseException | None = None
             if region is not None:
                 try:
-                    self._live_l3_l2_regions.remove(region)
+                    self._live_worker_chip_regions.remove(region)
                 except ValueError:
                     pass
                 if resources is not None:
                     try:
-                        resources.l3_l2_regions.remove(region)
+                        resources.worker_chip_regions.remove(region)
                     except ValueError:
                         pass
                     resources.requires_ordered_cleanup = required_ordered_cleanup_before
                 region._expire()
-            if l3_host_mapping is not None:
+            if worker_host_mapping is not None:
                 try:
-                    l3_host_mapping.close()
+                    worker_host_mapping.close()
                 except BaseException as mapping_exc:  # noqa: BLE001
                     mapping_cleanup_error = mapping_exc
             elif native_mapping_handle is not None:
                 try:
-                    _l3_host_mapped_region_close(int(native_mapping_handle))
+                    _worker_host_mapped_region_close(int(native_mapping_handle))
                 except BaseException as mapping_exc:  # noqa: BLE001
                     mapping_cleanup_error = mapping_exc
             if not region_id:
@@ -7153,14 +7161,14 @@ class Worker:
                 # this case: the child releases its own region before reporting
                 # one, so a zero id there really does mean nothing exists.
                 self._record_unreclaimable(
-                    f"create_l3_l2_region: interrupted on worker {int(worker_id)} before the region id was "
+                    f"create_worker_chip_region: interrupted on worker {int(worker_id)} before the region id was "
                     "read back; a region may be live on the chip and no further work is admitted",
                     exc,
                 )
             if region_id:
                 try:
                     assert self._worker is not None
-                    self._worker.control_l3_l2_region_release(int(worker_id), int(region_id))
+                    self._worker.control_worker_chip_region_release(int(worker_id), int(region_id))
                 except BaseException as release_exc:  # noqa: BLE001
                     # The chip created the region and this call could not give
                     # it back. Nothing else knows the id — it was never tracked
@@ -7170,11 +7178,13 @@ class Worker:
                     # unreclaimed-device-state condition, recorded here directly
                     # because there is no handle for a fence to fail on.
                     raise self._record_unreclaimable(
-                        f"create_l3_l2_region: rollback could not release region {region_id} on worker "
+                        f"create_worker_chip_region: rollback could not release region {region_id} on worker "
                         f"{int(worker_id)}; it is leaked and no further work is admitted",
                         release_exc,
                     )
-            deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("create_l3_l2_region rollback")
+            deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error(
+                "create_worker_chip_region rollback"
+            )
             if deferred_native_cleanup_error is not None:
                 deferred_exc = deferred_native_cleanup_error.__cause__ or deferred_native_cleanup_error
                 if mapping_cleanup_error is not None:
@@ -7187,7 +7197,7 @@ class Worker:
                     mapping_cleanup_error = deferred_exc
             if mapping_cleanup_error is not None:
                 raise self._record_unreclaimable(
-                    f"create_l3_l2_region: rollback could not close the L3 Host mapping for region "
+                    f"create_worker_chip_region: rollback could not close the L3 Host mapping for region "
                     f"{region_id} on worker {int(worker_id)}; it is leaked and no further work is admitted",
                     mapping_cleanup_error,
                 )
@@ -7202,22 +7212,22 @@ class Worker:
                 except (BufferError, FileNotFoundError, OSError):
                     pass
 
-    def _cleanup_l3_l2_regions(self, resources: _RunResources | None = None) -> None:
+    def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
         # Per-region best-effort: mapping close and child release are independent
         # ownership debts, so both are attempted before the region is expired.
-        tracked = self._live_l3_l2_regions if resources is None else resources.l3_l2_regions
+        tracked = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
         if not tracked:
             return
         regions = list(tracked)
         errors: list[BaseException] = []
         for region in regions:
             try:
-                region._close_l3_host_mapping()
+                region._close_worker_host_mapping()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
             try:
                 if self._worker is not None:
-                    self._worker.control_l3_l2_region_release(region._worker_id, region.region_id)
+                    self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
             try:
@@ -7225,7 +7235,9 @@ class Worker:
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
 
-            tracking_lists = (tracked,) if tracked is self._live_l3_l2_regions else (tracked, self._live_l3_l2_regions)
+            tracking_lists = (
+                (tracked,) if tracked is self._live_worker_chip_regions else (tracked, self._live_worker_chip_regions)
+            )
             next_tracking_list = 0
 
             def retire_tracking() -> None:
@@ -7247,14 +7259,14 @@ class Worker:
         if errors:
             raise errors[0]
 
-    def _close_l3_l2_orch_comm(self) -> None:
-        for region in self._live_l3_l2_regions:
+    def _close_worker_chip_orch_comm(self) -> None:
+        for region in self._live_worker_chip_regions:
             try:
-                region._close_l3_host_mapping()
+                region._close_worker_host_mapping()
             except RuntimeError:
                 pass
-        self._live_l3_l2_regions.clear()
-        self._l3_l2_orch_comm_host_buffers.clear()
+        self._live_worker_chip_regions.clear()
+        self._worker_chip_orch_comm_host_buffers.clear()
 
     # ------------------------------------------------------------------
     # Dynamic CommDomain allocation (driven by Orchestrator.allocate_domain;
@@ -8280,7 +8292,7 @@ class Worker:
         found by bisecting the snapshot's sorted keys so this stays log-time on
         the per-submit hot path rather than scanning every buffer.
 
-        Sub-view matching assumes the blob's ``Tensor.buffer.addr`` is the
+        Sub-view matching assumes the blob's ``ChipTensor.buffer.addr`` is the
         contiguous base of the host buffer (``make_tensor_arg`` builds tensors with
         ``start_offset == 0``); a non-zero ``start_offset`` would shift ``addr``
         and is not modelled here.
@@ -8630,7 +8642,7 @@ class Worker:
 
             def _poison_endpoint() -> None:
                 if native_error is not None:
-                    self._poison_l3_l2_region_from_endpoint_error(native_error, resources)
+                    self._poison_worker_chip_region_from_endpoint_error(native_error, resources)
 
             def _release_native_run() -> None:
                 if orch is None:
@@ -8642,8 +8654,8 @@ class Worker:
                     ("endpoint_poison", _poison_endpoint),
                     ("remote_slot_refs", lambda: self._release_active_remote_slot_refs(resources)),
                     ("remote_frees", self._flush_pending_remote_frees),
-                    ("l3_l2_regions", lambda: self._cleanup_l3_l2_regions(resources)),
-                    ("l3_l2_host_buffers", resources.l3_l2_orch_comm_host_buffers.clear),
+                    ("worker_chip_regions", lambda: self._cleanup_worker_chip_regions(resources)),
+                    ("worker_chip_host_buffers", resources.worker_chip_orch_comm_host_buffers.clear),
                     ("pending_domains", lambda: self._execute_pending_domain_releases(resources)),
                     ("live_domains", lambda: self._release_all_live_domains(resources)),
                     ("retire_domains", lambda: self._retire_run_domains(resources)),
@@ -8761,7 +8773,7 @@ class Worker:
             self._has_native_tree()
             or bool(self._sub_pids or self._chip_pids or self._next_level_pids)
             or bool(self._sub_shms or self._chip_shms or self._next_level_shms)
-            or bool(self._live_l3_l2_regions)
+            or bool(self._live_worker_chip_regions)
             or bool(self._live_domains)
             or bool(self._host_buf_registry)
             or bool(self._pending_remote_buffer_frees or self._pending_remote_import_releases)
@@ -8780,8 +8792,8 @@ class Worker:
         n_shms = len(self._sub_shms) + len(self._chip_shms) + len(self._next_level_shms)
         if n_shms:
             parts.append(f"{n_shms} child shm(s)")
-        if self._live_l3_l2_regions:
-            parts.append(f"{len(self._live_l3_l2_regions)} L3-L2 region(s)")
+        if self._live_worker_chip_regions:
+            parts.append(f"{len(self._live_worker_chip_regions)} L3-L2 region(s)")
         if self._live_domains:
             parts.append(f"{len(self._live_domains)} comm domain(s)")
         if self._host_buf_registry:
@@ -8903,7 +8915,7 @@ class Worker:
                     and self._cleanup_journal.empty
                     and (self._teardown_attempted or prior.error is None)
                 ):
-                    deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
+                    deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error_locked("close")
                     if prior.error is not None:
                         raise prior.error
                     if deferred_native_cleanup_error is not None:
@@ -8918,7 +8930,7 @@ class Worker:
                         "Worker.close(): a worker with a live native tree must be closed on the thread that "
                         "init()'d it (native teardown is thread-bound)"
                     )
-                deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error_locked("close")
+                deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error_locked("close")
                 # Claim: publish CLOSED (permanent admission fence) and install a
                 # fresh teardown attempt.
                 self._lifecycle = _Lifecycle.CLOSED
@@ -8997,7 +9009,7 @@ class Worker:
                 had_live = True  # conservative default if a read below is interrupted
                 detached_registry: tuple[dict, dict, dict] | None = None
                 try:
-                    deferred_native_cleanup_error = self._consume_l3_host_mapped_cleanup_error("close")
+                    deferred_native_cleanup_error = self._consume_worker_host_mapped_cleanup_error("close")
                     if result is None and deferred_native_cleanup_error is not None:
                         result = deferred_native_cleanup_error
                     # A successful tree teardown is the reclamation boundary
@@ -9191,7 +9203,7 @@ class Worker:
         # Release any orch-allocated CommDomain handles before tearing down the
         # C++ scheduler: once `dw.close()` runs the chip mailboxes are unusable
         # and we can no longer drive CTRL_RELEASE_DOMAIN.
-        _step(self._cleanup_l3_l2_regions)
+        _step(self._cleanup_worker_chip_regions)
         if self._live_domains:
             _step(self._release_all_live_domains)
         _step(self._clear_child_prov)
@@ -9238,7 +9250,7 @@ class Worker:
             # is left in place and reported as an error (terminal, not retried).
             reap_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
             _step(lambda: self._reap_child_groups(groups, reap_deadline))
-            _step(self._close_l3_l2_orch_comm)
+            _step(self._close_worker_chip_orch_comm)
             # Drop next-level worker refs only once their pids/shms are reclaimed.
             if not self._next_level_pids and not self._next_level_shms:
                 self._next_level_workers.clear()

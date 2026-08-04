@@ -35,9 +35,9 @@ An experiment build (not merged) that:
   **every** task (moved out of the gate branch), then gates only when
   `gated`.
 
-Measured `paged_attention_unroll` (`--enable-l2-swimlane`, 1024 AICore
+Measured `paged_attention_unroll` (`--enable-chip-swimlane`, 1024 AICore
 tasks, a2a3 silicon) and read each task's AICore setup —
-`receive_to_start_cycles` from `l2_swimlane_records.json::aicore_tasks`
+`receive_to_start_cycles` from `chip_swimlane_records.json::aicore_tasks`
 (50 MHz → 20 ns/cycle).
 
 ## Result
@@ -86,6 +86,6 @@ So the asymmetry is intrinsic: offload where there is idle time to spend
 - Dispatch cold-write PR (folded-gate `src_payload`, AICore fill on the
   gated path, init prefill, deferred-slab-at-completion, prefetch):
   hw-native-sys/simpler#1328.
-- [2026-07 — L2 swimlane AICore switch-overhead](2026-07-aicore-swimlane-switch-overhead-and-ack-gate.md)
+- [2026-07 — chip swimlane AICore switch-overhead](2026-07-aicore-swimlane-switch-overhead-and-ack-gate.md)
   — the baseline ~0.28–0.35 µs AICore setup (`payload dcci + ACK`) this
   experiment adds onto.

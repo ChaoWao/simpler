@@ -14,7 +14,7 @@
  * (base_cl + block_idx * 3 + 1 + sub_block_id), then optionally spins so the task
  * holds its cluster while a dependent sync_start cohort pre-stages.
  *
- * Args: args[0] = output Tensor* (INOUT), args[1] = base_cl, args[2] = spin_iters.
+ * Args: args[0] = output ChipTensor* (INOUT), args[1] = base_cl, args[2] = spin_iters.
  */
 
 #include <cstdint>
@@ -48,7 +48,7 @@ static constexpr int32_t SLOTS_PER_BLOCK = 3;
 #endif
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     int32_t base_cl = static_cast<int32_t>(args[1]);

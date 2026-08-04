@@ -23,26 +23,26 @@ constexpr int kChainLength = 512;
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &args) {
     (void)args;
     return PTO2OrchestrationConfig{.expected_arg_count = 4};
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &args) {
-    const Tensor &a = args.tensor(0).ref();
-    const Tensor &b = args.tensor(1).ref();
-    const Tensor &out = args.tensor(2).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
+    const ChipTensor &a = args.tensor(0).ref();
+    const ChipTensor &b = args.tensor(1).ref();
+    const ChipTensor &out = args.tensor(2).ref();
     const uint64_t spin_iters = args.scalar(0);
     uint32_t shape[1] = {a.shapes[0]};
     TensorCreateInfo temporary(shape, 1, DataType::FLOAT32);
 
-    L0TaskArgs add_args;
+    CoreTaskArgs add_args;
     add_args.add_input(a);
     add_args.add_input(b);
     add_args.add_output(temporary);
     add_args.add_scalar(spin_iters);
     TaskOutputTensors add_outputs = rt_submit_aiv_task(kDelayedAdd, add_args);
-    Tensor current = add_outputs.get_ref(0);
+    ChipTensor current = add_outputs.get_ref(0);
 
     union {
         float f32;
@@ -50,7 +50,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     } scalar{};
     scalar.f32 = 1.0F;
     for (int i = 0; i < kChainLength; ++i) {
-        L0TaskArgs step_args;
+        CoreTaskArgs step_args;
         step_args.add_input(current);
         if (i + 1 == kChainLength) {
             step_args.add_output(out);

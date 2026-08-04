@@ -341,7 +341,7 @@ bool create_orch_so_tempfile(const uint8_t *data, size_t size, std::string *out_
 }
 
 // The orchestration .so exports these (PTO2 submit_task form).
-typedef void (*OrchestrationEntryFunc)(const L2TaskArgs &);
+typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(PTO2Runtime *);
 
 // Resolved orchestration .so entry points. register_callable_impl allocates one
@@ -451,7 +451,7 @@ int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
-    void *host_orch_func_ptr, const L2TaskArgs &orch_l2
+    void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
     // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
@@ -701,10 +701,10 @@ extern "C" int bind_callable_to_runtime_impl(
 
     int64_t t_args_start = _now_ms();
     for (int i = 0; i < tensor_count; i++) {
-        Tensor t = orch_args->tensor(i);
+        ChipTensor t = orch_args->tensor(i);
 
         if (t.is_child_memory()) {
-            LOG_DEBUG("  Tensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
+            LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             device_args.add_tensor(t);
             continue;
         }
@@ -739,7 +739,7 @@ extern "C" int bind_callable_to_runtime_impl(
         // copying back.
         bool needs_copy_back = !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN);
         runtime->tensor_pairs_.push_back({host_ptr, dev_ptr, size, needs_copy_back});
-        LOG_DEBUG("  Tensor %d: %zu bytes at %p", i, size, dev_ptr);
+        LOG_DEBUG("  ChipTensor %d: %zu bytes at %p", i, size, dev_ptr);
 
         // host_build_graph runs the orchestrator on the host, which may read
         // control tensors (e.g. paged_attention's context_lens/block_table) via
@@ -855,7 +855,7 @@ extern "C" int bind_callable_to_runtime_impl(
         return -1;
     }
     {
-        L2TaskArgs orch_l2;
+        ChipTaskArgs orch_l2;
         orch_l2.create_from_chip_args(device_args);
         int32_t total_tasks = run_host_orchestration(
             runtime, api, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap, eff_heap_sizes,
@@ -930,7 +930,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     TensorPair *tensor_pairs = runtime->tensor_pairs_.data();
     int tensor_pair_count = static_cast<int>(runtime->tensor_pairs_.size());
 
-    LOG_INFO("Tensor pairs to process: %d", tensor_pair_count);
+    LOG_INFO("ChipTensor pairs to process: %d", tensor_pair_count);
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
@@ -954,13 +954,13 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
             // Skip if device pointer is null
             if (pair.dev_ptr == nullptr) {
-                LOG_WARN("Tensor %d has null device pointer, skipping", i);
+                LOG_WARN("ChipTensor %d has null device pointer, skipping", i);
                 continue;
             }
 
             // If host pointer is null, this is a device-only allocation (no copy-back)
             if (pair.host_ptr == nullptr) {
-                LOG_DEBUG("Tensor %d: device-only allocation (no copy-back)", i);
+                LOG_DEBUG("ChipTensor %d: device-only allocation (no copy-back)", i);
                 continue;
             }
 
@@ -968,7 +968,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
             // wrote them — copying them back (potentially ~GB) is pure waste.
             // They are still device_free'd in the cleanup loop below.
             if (!pair.needs_copy_back) {
-                LOG_DEBUG("Tensor %d: read-only input, skipping copy-back", i);
+                LOG_DEBUG("ChipTensor %d: read-only input, skipping copy-back", i);
                 continue;
             }
 
@@ -977,7 +977,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
                 LOG_ERROR("Failed to copy tensor %d from device: %d", i, copy_rc);
                 rc = copy_rc;
             } else {
-                LOG_DEBUG("Tensor %d: %zu bytes copied to host", i, pair.size);
+                LOG_DEBUG("ChipTensor %d: %zu bytes copied to host", i, pair.size);
             }
         }
     }

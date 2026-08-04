@@ -35,14 +35,15 @@ static constexpr int32_t PRODUCER_COUNT = 128;  // > PTO2_FANIN_INLINE_CAP (64)
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     (void)orch_args;
 
     uint32_t shape[1] = {1};
@@ -51,12 +52,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     PTO2_SCOPE() {
         PTO2TaskId producers[PRODUCER_COUNT];
         for (int32_t i = 0; i < PRODUCER_COUNT; i++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_output(ci);
             producers[i] = rt_submit_dummy_task(args).task_id();
         }
 
-        L0TaskArgs consumer;
+        CoreTaskArgs consumer;
         consumer.set_dependencies(producers, PRODUCER_COUNT);
         rt_submit_dummy_task(consumer);
     }

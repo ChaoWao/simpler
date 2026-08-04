@@ -74,7 +74,7 @@ from .remote_l3_protocol import (
     read_frame,
     send_frame,
 )
-from .task_interface import ChipCallable, TaskArgs, Tensor
+from .task_interface import ChipCallable, ChipTensor, TaskArgs
 from .worker import Worker
 
 sys.modules.setdefault("simpler.remote_l3_session", sys.modules[__name__])
@@ -472,8 +472,8 @@ def _buffer_key(buffer_id: int, generation: int) -> tuple[int, int]:
     return int(buffer_id), int(generation)
 
 
-def _tensor_with_data(tensor: Tensor, data: int) -> Tensor:
-    return Tensor.make(int(data), tuple(tensor.shapes), tensor.dtype, bool(tensor.child_memory))
+def _tensor_with_data(tensor: ChipTensor, data: int) -> ChipTensor:
+    return ChipTensor.make(int(data), tuple(tensor.shapes), tensor.dtype, bool(tensor.child_memory))
 
 
 def _materialize_task_args(  # noqa: PLR0912

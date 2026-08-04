@@ -51,14 +51,15 @@
 #define FUNC_ONLINE_UPDATE 3
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // Read dimensions from tensor metadata
     uint64_t batch = orch_args.tensor(0).ref().shapes[0];
     uint64_t num_heads = orch_args.tensor(0).ref().shapes[1];
@@ -82,11 +83,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     void *out_ptr = orch_args.tensor(5).ref().data_as<void>();
 
     uint32_t bt_shapes[2] = {static_cast<uint32_t>(batch), static_cast<uint32_t>(block_num)};
-    Tensor block_table =
+    ChipTensor block_table =
         make_tensor_external(orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false);
 
     uint32_t cl_shapes[1] = {static_cast<uint32_t>(batch)};
-    Tensor context_lens =
+    ChipTensor context_lens =
         make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
 
     uint64_t max_bn = 0;
@@ -104,10 +105,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     uint32_t value_cache_shapes[2] = {static_cast<uint32_t>(kv_total_rows), static_cast<uint32_t>(head_dim)};
     uint32_t out_shapes[2] = {static_cast<uint32_t>(batch * num_heads), static_cast<uint32_t>(head_dim)};
 
-    Tensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type);
-    Tensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type);
-    Tensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type);
-    Tensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32, true);
+    ChipTensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type);
+    ChipTensor key_cache = make_tensor_external(kc_ptr, key_cache_shapes, 2, data_type);
+    ChipTensor value_cache = make_tensor_external(vc_ptr, value_cache_shapes, 2, data_type);
+    ChipTensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32, true);
 
     constexpr uint64_t IN_CORE_BATCH = 16;
     uint64_t num_chunks = (batch + IN_CORE_BATCH - 1) / IN_CORE_BATCH;
@@ -126,9 +127,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                 TensorCreateInfo oi_batch_ci(oi_acc_shapes, 2, DataType::FLOAT32);
                 TensorCreateInfo scalar_acc_ci(scalar_acc_shapes, 1, DataType::FLOAT32);
                 TaskOutputTensors alloc_outs = alloc_tensors(oi_batch_ci, scalar_acc_ci, scalar_acc_ci);
-                const Tensor &oi_batch = alloc_outs.get_ref(0);
-                const Tensor &li_batch = alloc_outs.get_ref(1);
-                const Tensor &mi_batch = alloc_outs.get_ref(2);
+                const ChipTensor &oi_batch = alloc_outs.get_ref(0);
+                const ChipTensor &li_batch = alloc_outs.get_ref(1);
+                const ChipTensor &mi_batch = alloc_outs.get_ref(2);
 
                 // Inner-loop create infos: shapes are loop-invariant, hoist out of bn loop
                 uint32_t sij_shapes[2] = {static_cast<uint32_t>(chunk_bc * q_tile), static_cast<uint32_t>(block_size)};
@@ -141,7 +142,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
                 for (uint64_t bn = 0; bn < max_bn; bn++) {
                     PTO2_SCOPE() {
-                        L0TaskArgs params_qk;
+                        CoreTaskArgs params_qk;
                         params_qk.add_input(query);
                         params_qk.add_input(key_cache);
                         params_qk.add_input(block_table);
@@ -153,9 +154,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                         params_qk.add_scalar(num_heads);
                         params_qk.add_scalar(batch_start);
                         TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                        const Tensor &sij_b = qk_outs.get_ref(0);
+                        const ChipTensor &sij_b = qk_outs.get_ref(0);
 
-                        L0TaskArgs params_sf;
+                        CoreTaskArgs params_sf;
                         params_sf.add_input(sij_b);
                         params_sf.add_input(context_lens);
                         params_sf.add_output(pij_ci);
@@ -166,11 +167,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                         params_sf.add_scalar(bn);
                         params_sf.add_scalar(batch_start);
                         TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                        const Tensor &pij_b = sf_outs.get_ref(0);
-                        const Tensor &mij_b = sf_outs.get_ref(1);
-                        const Tensor &lij_b = sf_outs.get_ref(2);
+                        const ChipTensor &pij_b = sf_outs.get_ref(0);
+                        const ChipTensor &mij_b = sf_outs.get_ref(1);
+                        const ChipTensor &lij_b = sf_outs.get_ref(2);
 
-                        L0TaskArgs params_pv;
+                        CoreTaskArgs params_pv;
                         params_pv.add_input(pij_b);
                         params_pv.add_input(value_cache);
                         params_pv.add_input(block_table);
@@ -180,11 +181,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                         params_pv.add_scalar(block_num);
                         params_pv.add_scalar(batch_start);
                         TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                        const Tensor &oi_new_b = pv_outs.get_ref(0);
+                        const ChipTensor &oi_new_b = pv_outs.get_ref(0);
 
                         uint64_t is_first = (bn == 0) ? 1 : 0;
                         uint64_t is_last = (bn == max_bn - 1) ? 1 : 0;
-                        L0TaskArgs params_up;
+                        CoreTaskArgs params_up;
                         params_up.add_input(mij_b);
                         params_up.add_input(lij_b);
                         params_up.add_input(oi_new_b);

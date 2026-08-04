@@ -16,17 +16,17 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-domain_allreduce_orchestration_config(const L2TaskArgs &orch_args) {
+domain_allreduce_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 5};
 }
 
-__attribute__((visibility("default"))) void domain_allreduce_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &input = orch_args.tensor(0).ref();
-    const Tensor &output = orch_args.tensor(1).ref();
-    const Tensor &scratch = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void domain_allreduce_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &input = orch_args.tensor(0).ref();
+    const ChipTensor &output = orch_args.tensor(1).ref();
+    const ChipTensor &scratch = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(input);
     params.add_output(output);
     params.add_inout(scratch);

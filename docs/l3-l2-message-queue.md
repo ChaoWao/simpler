@@ -16,7 +16,7 @@ the runtime stack, see
 L3 creates one queue for one chip worker:
 
 ```python
-queue = orch.create_l3_l2_queue(
+queue = orch.create_worker_chip_queue(
     worker_id=0,
     depth=4,
     input_arena_bytes=1 << 20,
@@ -24,7 +24,7 @@ queue = orch.create_l3_l2_queue(
 )
 ```
 
-The queue owns one underlying `L3L2OrchRegion`. Its payload range is split into
+The queue owns one underlying `WorkerChipOrchRegion`. Its payload range is split into
 input/output descriptor rings and input/output payload arenas. Its counter
 range stores descriptor head/tail signals and abort flags.
 
@@ -32,13 +32,13 @@ L3 passes the primitive region descriptor and queue layout arguments to L2:
 
 ```python
 l2_args = TaskArgs()
-for value in queue.l2_task_arg_scalars():
+for value in queue.chip_task_arg_scalars():
     l2_args.add_scalar(value)
 
 orch.submit_next_level(l2_handle, l2_args, cfg, worker=0)
 ```
 
-`l2_task_arg_scalars()` returns:
+`chip_task_arg_scalars()` returns:
 
 ```text
 primitive region descriptor scalars[0..5]
@@ -97,7 +97,7 @@ queue.free()
 ```
 
 `try_request_stop()` is the non-blocking form. `queue.free()` releases the L3
-queue handle and marks the underlying `L3L2OrchRegion` handle released. It does
+queue handle and marks the underlying `WorkerChipOrchRegion` handle released. It does
 not synchronously free device memory; physical cleanup follows the underlying
 region lifetime model after submitted L2 work has drained. Small Python wrapper
 scratch tensors used for descriptor packing are owned by the queue object and
@@ -108,8 +108,8 @@ On L2, orchestration code receives the primitive descriptor and queue args,
 then constructs an endpoint:
 
 ```cpp
-L3L2OrchRegionDesc desc{/* scalars from TaskArgs */};
-L3L2QueueArgs queue_args{
+WorkerChipOrchRegionDesc desc{/* scalars from TaskArgs */};
+WorkerChipQueueArgs queue_args{
     magic_version,
     depth,
     input_arena_bytes,
@@ -118,8 +118,8 @@ L3L2QueueArgs queue_args{
     counter_bytes,
 };
 
-L3L2QueueEndpoint<> queue(desc, queue_args);
-if (queue.error().kind != L3L2QueueErrorKind::NONE) {
+WorkerChipQueueEndpoint<> queue(desc, queue_args);
+if (queue.error().kind != WorkerChipQueueErrorKind::NONE) {
     return;
 }
 ```
@@ -129,7 +129,7 @@ L2 can opt into a larger input window with a compile-time endpoint structure
 parameter:
 
 ```cpp
-L3L2QueueEndpoint<4> queue(desc, queue_args);
+WorkerChipQueueEndpoint<4> queue(desc, queue_args);
 ```
 
 The template argument is not part of L3 queue creation and does not change the
@@ -144,17 +144,17 @@ L2 consumes input messages from `queue.input()` and publishes outputs through
 
 ```cpp
 while (true) {
-    L3L2QueueInputHandle input{};
+    WorkerChipQueueInputHandle input{};
     if (!queue.input().peek(timeout_ns, input)) {
         return;
     }
 
-    if (input.opcode == L3L2QueueOpcode::STOP) {
+    if (input.opcode == WorkerChipQueueOpcode::STOP) {
         queue.input().release(input);
         return;
     }
 
-    L3L2QueueOutputReservation output{};
+    WorkerChipQueueOutputReservation output{};
     if (!queue.output().reserve(input.payload_nbytes, timeout_ns, output)) {
         return;
     }
@@ -162,7 +162,7 @@ while (true) {
     launch_aicore(input.payload, output.payload);
     wait_aicore_done();
 
-    queue.output().publish(output, L3L2QueueOpcode::DATA);
+    queue.output().publish(output, WorkerChipQueueOpcode::DATA);
     queue.input().release(input);
 }
 ```
@@ -172,7 +172,7 @@ while (true) {
 return can mean ordinary no-progress, validation failure, or poison; check
 `queue.error().kind` to distinguish ordinary no-progress from terminal error.
 
-With `L3L2QueueEndpoint<N>` where `N > 1`, L2 may acquire several DATA or
+With `WorkerChipQueueEndpoint<N>` where `N > 1`, L2 may acquire several DATA or
 ERROR inputs before releasing earlier ones. `release(handle)` then marks the
 input logically complete; the queue physically advances the shared input head
 only for the completed FIFO prefix. This lets L2 publish outputs in an
@@ -229,7 +229,7 @@ layout cases for the mirrored Python and C++ calculations.
 Each descriptor slot is 32 bytes:
 
 ```cpp
-struct L3L2QueueDescSlot {
+struct WorkerChipQueueDescSlot {
     uint64_t seq;
     uint64_t opcode;
     uint64_t payload_offset;
@@ -271,8 +271,8 @@ offset 0:   input_desc_tail       writer=L3
 offset 64:  input_desc_head       writer=L2
 offset 128: output_desc_tail      writer=L2
 offset 192: output_desc_head      writer=L3
-offset 256: l3_abort_flag         writer=L3
-offset 320: l2_abort_flag         writer=L2
+offset 256: worker_abort_flag         writer=L3
+offset 320: chip_abort_flag         writer=L2
 ```
 
 Descriptor counters store the low 32 bits of monotonic logical head/tail
@@ -323,11 +323,11 @@ same handle. The caller may read the payload with `read_into(handle, buffer)`
 before releasing it. Releasing the wrong handle is an ownership error and
 poisons the queue.
 
-On L2 input, `L3L2QueueEndpoint<>` keeps one active DATA/ERROR input handle.
+On L2 input, `WorkerChipQueueEndpoint<>` keeps one active DATA/ERROR input handle.
 L2 must not call `peek()` again before releasing that handle, except that STOP
 may also be acquired into the endpoint's extra STOP slot.
 
-When L2 constructs `L3L2QueueEndpoint<N>`, it may hold up to `N` active DATA
+When L2 constructs `WorkerChipQueueEndpoint<N>`, it may hold up to `N` active DATA
 or ERROR input handles. DATA and ERROR both count against the window because
 either may carry payload bytes that remain owned by L2 application code. STOP
 does not count against the DATA/ERROR window, but it is still normal FIFO
@@ -417,10 +417,10 @@ After poison, normal queue operations reject. Cleanup remains valid.
 The example lives at:
 
 ```text
-examples/workers/l3/l3_l2_message_queue/
+examples/workers/l3/worker_chip_message_queue/
 ```
 
-It uses `L3L2QueueEndpoint<4>` and a PTO-ISA AIV kernel. L3 sends an initial
+It uses `WorkerChipQueueEndpoint<4>` and a PTO-ISA AIV kernel. L3 sends an initial
 pair of DATA inputs, drains the outputs that the persistent L2 run publishes
 for them, then sends another pair of DATA inputs followed by STOP. L2 acquires
 multiple inputs before releasing the earlier ones, publishes outputs in a
@@ -450,5 +450,5 @@ Simulation backends preserve the same API, ordering, timeout, and error
 semantics as onboard backends.
 
 The runnable example lives in
-`examples/workers/l3/l3_l2_message_queue` and is marked for `a2a3sim`,
+`examples/workers/l3/worker_chip_message_queue` and is marked for `a2a3sim`,
 `a2a3`, `a5sim`, and `a5`.

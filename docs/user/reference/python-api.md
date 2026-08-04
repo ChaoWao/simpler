@@ -17,7 +17,7 @@ extension.
 from simpler import Worker           # or: from simpler.worker import Worker
 from simpler.task_interface import (
     ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs,
-    CoreCallable, DataType, Tensor,
+    ChipTensor, CoreCallable, DataType,
 )
 from simpler_setup import KernelCompiler, SceneTestCase, scene_test
 ```
@@ -108,10 +108,10 @@ orchestration submits. `ChipCallable` exposes `binary_size`.
 
 ```python
 args = ChipStorageTaskArgs()
-args.add_tensor(Tensor.make(dev_ptr, (rows, cols), DataType.FLOAT32))
+args.add_tensor(ChipTensor.make(dev_ptr, (rows, cols), DataType.FLOAT32))
 ```
 
-Tensors are added **in signature order**. `Tensor.make(data_ptr, shape, dtype)`
+Tensors are added **in signature order**. `ChipTensor.make(data_ptr, shape, dtype)`
 takes a device pointer; `DataType` carries the element types.
 
 ## `CallConfig`
@@ -121,7 +121,7 @@ takes a device pointer; `DataType` carries the element types.
 | Field | Default | Meaning |
 | ----- | ------- | ------- |
 | `aicpu_thread_num` | `0` | AICPU threads for this run; `0` selects the architecture default |
-| `enable_l2_swimlane` | `0` | `0` off; `1`–`4` select detail. L2 only |
+| `enable_chip_swimlane` | `0` | `0` off; `1`–`4` select detail. L2 only |
 | `enable_dump_args` | `0` | Capture per-task arguments |
 | `enable_pmu` | `0` | `0` off; `>0` selects the event type |
 | `enable_dep_gen` | `0` | Emit the dependency graph |

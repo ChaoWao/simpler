@@ -68,7 +68,7 @@ acquire_qwen_fai_metadata(GM_ADDR metadata) {
 template <typename T>
 static __aicore__ __attribute__((always_inline)) GM_ADDR
 tensor_data(__gm__ int64_t *args, int32_t index) {
-  __gm__ Tensor *tensor = reinterpret_cast<__gm__ Tensor *>(args[index]);
+  __gm__ ChipTensor *tensor = reinterpret_cast<__gm__ ChipTensor *>(args[index]);
   __gm__ T *data =
       reinterpret_cast<__gm__ T *>(tensor->buffer.addr) + tensor->start_offset;
   return reinterpret_cast<GM_ADDR>(data);
@@ -207,7 +207,7 @@ run_qwen_fai(__gm__ int64_t *args, __gm__ int32_t *barrier_state = nullptr) {
     // slot_mapping, rope_cos, rope_sin, k_proj, k_norm_w, v_proj, q_proj,
     // q_norm_w, layer_cache_base, KV_CACHE_ROWS, block_idx, block_num).
     int64_t kv_cache_rows = static_cast<int64_t>(
-        reinterpret_cast<__gm__ Tensor *>(args[2])->shapes[0]);
+        reinterpret_cast<__gm__ ChipTensor *>(args[2])->shapes[0]);
     uint32_t rope_lane = block_idx * 2 + sub_block_idx;
     if (rope_lane < kQwenRopeCores) {
       qwen_rope_gen::rope_qkv(

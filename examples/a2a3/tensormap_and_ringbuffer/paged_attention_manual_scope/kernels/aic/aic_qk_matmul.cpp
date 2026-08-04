@@ -36,7 +36,7 @@ using namespace pto;
 #endif
 
 template <int M, int K, int N>
-static __aicore__ void qk_matmul_impl(__gm__ Tensor *qi, __gm__ Tensor *kj, __gm__ Tensor *sij) {
+static __aicore__ void qk_matmul_impl(__gm__ ChipTensor *qi, __gm__ ChipTensor *kj, __gm__ ChipTensor *sij) {
     __gm__ bfloat16_t *qi_addr = reinterpret_cast<__gm__ bfloat16_t *>(qi->buffer.addr);
     __gm__ bfloat16_t *kj_addr = reinterpret_cast<__gm__ bfloat16_t *>(kj->buffer.addr);
     __gm__ float *sij_addr = reinterpret_cast<__gm__ float *>(sij->buffer.addr);
@@ -100,9 +100,9 @@ static __aicore__ void qk_matmul_impl(__gm__ Tensor *qi, __gm__ Tensor *kj, __gm
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *qi = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *kj = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *sij = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *qi = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *kj = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *sij = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     uint64_t q_tile_size = static_cast<uint64_t>(qi->shapes[0]);
 
     if (q_tile_size == 16 && qi->shapes[1] <= 16) {

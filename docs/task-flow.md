@@ -34,7 +34,7 @@ Every task flowing through any level carries exactly three pieces of data:
 | Handle | Type | What it is |
 | ------ | ---- | ---------- |
 | `CallableHandle` / `CallableIdentity` | hash digest + kind + namespace | What the target worker should execute; targets resolve the digest to a local slot |
-| `TaskArgs` | user builder class | Tensors + scalars + per-tensor tags (IN/OUT/INOUT/etc.) |
+| `TaskArgs` | user builder class | ChipTensors + scalars + per-tensor tags (IN/OUT/INOUT/etc.) |
 | `CallConfig` | small POD | Execution knobs (aicpu_thread_num, profiling/dump/PMU flags, …) |
 
 Everything else in the engine is either plumbing (slots, ring, tensormap,
@@ -103,11 +103,11 @@ hierarchy levels.
 
 ```cpp
 class TaskArgs {
-    std::vector<Tensor> tensors_;
+    std::vector<ChipTensor> tensors_;
     std::vector<TensorArgType>    tags_;     // per-tensor: INPUT/OUTPUT/INOUT/OUTPUT_EXISTING/NO_DEP
     std::vector<uint64_t>         scalars_;
 public:
-    void add_tensor(const Tensor&, TensorArgType tag = TensorArgType::INPUT);
+    void add_tensor(const ChipTensor&, TensorArgType tag = TensorArgType::INPUT);
     void add_scalar(uint64_t);
     TaskArgsView view() const;
     int32_t tensor_count() const;
@@ -121,7 +121,7 @@ public:
 
 For remote L3 submits, public Python still uses the same `TaskArgs` builder.
 `TaskArgs.add_tensor(RemoteTensorRef(...), tag)` appends a normal
-`Tensor` metadata entry with `data == 0` plus a hidden remote
+`ChipTensor` metadata entry with `data == 0` plus a hidden remote
 sidecar at the same tensor index. The local mailbox path rejects non-empty
 remote sidecars; the remote framed path encodes the sidecar as a
 `RemoteTensorDescWire`.
@@ -146,7 +146,7 @@ thread, child, and runtime.so all ignore per-tensor direction.
 ```text
 offset 0:            int32  tensor_count = T
 offset 4:            int32  scalar_count = S
-offset 8:            Tensor tensors[T]    // 128 B each
+offset 8:            ChipTensor tensors[T]    // 128 B each
 offset 8 + 128T:      uint64_t scalars[S]            // 8 B each
 total used:          8 + 128T + 8S
 ```
@@ -162,7 +162,7 @@ decoder (over the mailbox blob bytes) yield the same view type:
 struct TaskArgsView {
     int32_t tensor_count;
     int32_t scalar_count;
-    const Tensor *tensors;   // T items
+    const ChipTensor *tensors;   // T items
     const uint64_t         *scalars;   // S items
 };
 ```
@@ -170,7 +170,7 @@ struct TaskArgsView {
 24 bytes, POD, passable by value. Where the pointed-to arrays live depends on
 mode:
 
-- **THREAD**: `tensors` points into the `std::vector<Tensor>` heap
+- **THREAD**: `tensors` points into the `std::vector<ChipTensor>` heap
   backing inside `slot.task_args`
 - **PROCESS**: `tensors` points into the shm mailbox blob region
 
@@ -187,7 +187,7 @@ View does **not** own memory. Valid for the duration of a single
 ② slot.task_args: TaskArgs           — parent heap, stored in slot
      │
      │ LocalMailboxEndpoint::run: memcpy into shm mailbox blob
-     │   layout = [int32 T][int32 S][Tensor × T][uint64 × S]
+     │   layout = [int32 T][int32 S][ChipTensor × T][uint64 × S]
      ▼
 ③ shm mailbox bytes (MAP_SHARED)     — visible to forked child
      │
@@ -211,7 +211,7 @@ View does **not** own memory. Valid for the duration of a single
 ```cpp
 struct CallConfig {
     int32_t aicpu_thread_num = 0;  // auto
-    int32_t enable_l2_swimlane = 0;  // perf_level 0–4 (0=off, 4=full)
+    int32_t enable_chip_swimlane = 0;  // perf_level 0–4 (0=off, 4=full)
     int32_t enable_dump_args = 0;
     int32_t enable_pmu = 0;           // 0 = disabled; >0 selects PMU event type
     int32_t enable_dep_gen = 0;
@@ -255,7 +255,7 @@ void ChipWorker::run(int32_t local_slot, TaskArgsView view, const CallConfig &co
     ChipStorageTaskArgs chip_storage;
     chip_storage.tensor_count_ = view.tensor_count;
     chip_storage.scalar_count_ = view.scalar_count;
-    memcpy(chip_storage.tensors_, view.tensors, view.tensor_count * sizeof(Tensor));
+    memcpy(chip_storage.tensors_, view.tensors, view.tensor_count * sizeof(ChipTensor));
     memcpy(chip_storage.scalars_, view.scalars, view.scalar_count * sizeof(uint64_t));
     pto2_run_runtime(local_slot, &chip_storage, &config);
 }
@@ -588,8 +588,8 @@ success; a non-zero child error maps to task failure. The parent
 
 At this point:
 
-- Tensor output data is already written to shm (kernel wrote via
-  `Tensor.data` pointer → shm page visible to parent)
+- ChipTensor output data is already written to shm (kernel wrote via
+  `ChipTensor.data` pointer → shm page visible to parent)
 - Control returns to the Scheduler, which marks the slot `COMPLETED` on
   success or `FAILED` on task/endpoint failure, then releases fanout refs and
   either wakes or poisons downstream consumers
@@ -788,7 +788,7 @@ time.
 View is constructed at both ends of the mailbox handshake (from
 `TaskArgs::view()` on the parent side for encoding, from a decoded
 mailbox blob on the child side). Making it POD (24 B) lets it pass by
-value through `ChipWorker::run`. The underlying `Tensor[]`
+value through `ChipWorker::run`. The underlying `ChipTensor[]`
 lives in the mailbox blob bytes on the child side — view doesn't care.
 
 ---
@@ -806,4 +806,4 @@ lives in the mailbox blob bytes on the child side — view doesn't care.
 - [`../src/common/task_interface/task_args.h`](../src/common/task_interface/task_args.h)
   — `TaskArgs` template and `ChipStorageTaskArgs` alias
 - [`../src/common/task_interface/tensor.h`](../src/common/task_interface/tensor.h)
-  — `Tensor` POD and `TensorArgType` enum
+  — `ChipTensor` POD and `TensorArgType` enum

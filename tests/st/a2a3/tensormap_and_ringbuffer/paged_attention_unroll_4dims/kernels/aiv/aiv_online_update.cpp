@@ -40,8 +40,8 @@ using namespace pto;
 
 template <int M, int N>
 static __aicore__ void online_update_impl(
-    __gm__ Tensor *mij, __gm__ Tensor *lij, __gm__ Tensor *oi_new, __gm__ Tensor *mi, __gm__ Tensor *li,
-    __gm__ Tensor *oi, uint64_t is_first, uint64_t is_last, __gm__ Tensor *dst
+    __gm__ ChipTensor *mij, __gm__ ChipTensor *lij, __gm__ ChipTensor *oi_new, __gm__ ChipTensor *mi,
+    __gm__ ChipTensor *li, __gm__ ChipTensor *oi, uint64_t is_first, uint64_t is_last, __gm__ ChipTensor *dst
 ) {
     __gm__ float *mij_ptr = reinterpret_cast<__gm__ float *>(mij->buffer.addr);
     __gm__ float *lij_ptr = reinterpret_cast<__gm__ float *>(lij->buffer.addr);
@@ -242,13 +242,13 @@ static __aicore__ void online_update_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *mij = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *lij = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *oi_new = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *mi = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ Tensor *li = reinterpret_cast<__gm__ Tensor *>(args[4]);
-    __gm__ Tensor *oi = reinterpret_cast<__gm__ Tensor *>(args[5]);
-    __gm__ Tensor *dst = reinterpret_cast<__gm__ Tensor *>(args[6]);
+    __gm__ ChipTensor *mij = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *lij = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *oi_new = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *mi = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ ChipTensor *li = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+    __gm__ ChipTensor *oi = reinterpret_cast<__gm__ ChipTensor *>(args[5]);
+    __gm__ ChipTensor *dst = reinterpret_cast<__gm__ ChipTensor *>(args[6]);
     uint64_t is_first = static_cast<uint64_t>(args[7]);
     uint64_t is_last = static_cast<uint64_t>(args[8]);
     // mij is 3D (1, 1, q_tile) to match softmax's 3D scalar output.

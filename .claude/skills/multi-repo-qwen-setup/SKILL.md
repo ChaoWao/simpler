@@ -63,7 +63,7 @@ styles**. They measure different things; don't confuse them:
 - **Path B — `decode_fwd` kernel (pypto-lib).** A single JIT case, not the
   engine. Entry `models/qwen3/14b/decode_fwd.py`, flags `-p <platform> -d
   <device>` plus `--validate-fwd --fwd-layers N --decode-steps M --max-seq`
-  (device TPOT) and `--enable-dep-gen` / `--enable-l2-swimlane <1-4>` (DFX,
+  (device TPOT) and `--enable-dep-gen` / `--enable-chip-swimlane <1-4>` (DFX,
   two separate rounds). Measures **per-step device decode cost + scheduler
   timeline** (per-op / Orch/Sched breakdown); read via
   `sched_overhead_analysis` / `swimlane_converter` (§6). Use it to dig into
@@ -310,17 +310,17 @@ layer — enough to read per-op / scheduler structure.
 
 ```bash
 python models/qwen3/14b/decode_fwd.py -p a2a3 -d $DEV --validate-fwd --fwd-layers 2 --max-seq --enable-dep-gen        # topology -> deps.json
-python models/qwen3/14b/decode_fwd.py -p a2a3 -d $DEV --validate-fwd --fwd-layers 2 --max-seq --enable-l2-swimlane 4  # 1=AICore 2=+dispatch 3=+sched 4=+orch
+python models/qwen3/14b/decode_fwd.py -p a2a3 -d $DEV --validate-fwd --fwd-layers 2 --max-seq --enable-chip-swimlane 4  # 1=AICore 2=+dispatch 3=+sched 4=+orch
 ```
 
 Both write `build_output/_jit_*/dfx_outputs/`: `deps.json`,
-`l2_swimlane_records.json`, and a ready-to-load **`merged_swimlane_*.json`**
+`chip_swimlane_records.json`, and a ready-to-load **`merged_swimlane_*.json`**
 (Perfetto — drag into ui.perfetto.dev). Analyze from the simpler worktree
 (its `simpler_setup/tools` wins by cwd precedence):
 
 ```bash
 $PY -m simpler_setup.tools.swimlane_converter RECORDS.json --deps-json DEPS.json [--overhead] -o swim.json
-$PY -m simpler_setup.tools.sched_overhead_analysis --l2-swimlane-records-json RECORDS.json --deps-json DEPS.json
+$PY -m simpler_setup.tools.sched_overhead_analysis --chip-swimlane-records-json RECORDS.json --deps-json DEPS.json
 $PY -m simpler_setup.tools.deps_viewer DEPS.json --format html --func-names NAME_MAP.json -o deps.html
 ```
 

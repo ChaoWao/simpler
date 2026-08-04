@@ -42,14 +42,15 @@ extern "C" {
  * Orchestration config — the executor reads these values to set up
  * shared memory and runtime before calling aicpu_orchestration_entry.
  */
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 7,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     // Read dimensions from tensor metadata
     // query: shape=[batch, seq_len, num_heads, head_dim]
     uint64_t batch = orch_args.tensor(0).ref().shapes[0];
@@ -69,11 +70,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     uint64_t q_loop = (num_heads + q_tile - 1) / q_tile;
 
     // External 4D tensors inherit shape/dtype from TaskArg (golden provides 4D).
-    const Tensor &query = orch_args.tensor(0).ref();
-    const Tensor &key_cache = orch_args.tensor(1).ref();
-    const Tensor &value_cache = orch_args.tensor(2).ref();
-    const Tensor &block_table = orch_args.tensor(3).ref();
-    const Tensor &out = orch_args.tensor(5).ref();
+    const ChipTensor &query = orch_args.tensor(0).ref();
+    const ChipTensor &key_cache = orch_args.tensor(1).ref();
+    const ChipTensor &value_cache = orch_args.tensor(2).ref();
+    const ChipTensor &block_table = orch_args.tensor(3).ref();
+    const ChipTensor &out = orch_args.tensor(5).ref();
 
     int *host_context_lens = orch_args.tensor(4).ref().data_as<int>();
 
@@ -100,18 +101,18 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                 // 4D views into query/out, matching (1, 1, q_tile, head_dim).
                 uint32_t view_shapes[4] = {1, 1, (uint32_t)q_tile, (uint32_t)head_dim};
                 uint32_t view_offsets[4] = {(uint32_t)b_idx, 0, (uint32_t)(q_idx * q_tile), 0};
-                Tensor qi = query.view(view_shapes, view_offsets);
-                Tensor out_view = out.view(view_shapes, view_offsets, true);
+                ChipTensor qi = query.view(view_shapes, view_offsets);
+                ChipTensor out_view = out.view(view_shapes, view_offsets, true);
 
                 // Per-group accumulators: oi (4D data), mi_update/li_update (3D scalars).
                 TaskOutputTensors alloc_outs = alloc_tensors(tile4d_ci, scalar_ci, scalar_ci);
-                const Tensor &oi = alloc_outs.get_ref(0);
-                const Tensor &li_update = alloc_outs.get_ref(1);
-                const Tensor &mi_update = alloc_outs.get_ref(2);
+                const ChipTensor &oi = alloc_outs.get_ref(0);
+                const ChipTensor &li_update = alloc_outs.get_ref(1);
+                const ChipTensor &mi_update = alloc_outs.get_ref(2);
 
                 // Reusable Arg objects — reset() before each use avoids
                 // repeated stack-frame construction in the inner loop.
-                L0TaskArgs params_qk, params_sf, params_pv, params_up;
+                CoreTaskArgs params_qk, params_sf, params_pv, params_up;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn += N_UNROLL) {
                     uint64_t n_blocks = std::min((uint64_t)N_UNROLL, bn_this_batch - bn);
@@ -132,7 +133,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                     params_qk.add_scalar(n_blocks);
                     params_qk.add_scalar(b_idx * block_num + bn);
                     TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
-                    const Tensor &sij_buf = qk_outs.get_ref(0);
+                    const ChipTensor &sij_buf = qk_outs.get_ref(0);
 
                     // === Task 2: Two-pass softmax — produces 4D pij_buf, 3D mi, li ===
                     uint32_t pij_buf_shapes[4] = {1, 1, (uint32_t)q_tile, (uint32_t)(n_blocks * block_size)};
@@ -147,9 +148,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                     params_sf.add_scalar(n_blocks);
                     params_sf.add_scalar(valid_len_last);
                     TaskOutputTensors sf_outs = rt_submit_aiv_task(FUNC_SOFTMAX_PREPARE, params_sf);
-                    const Tensor &pij_buf = sf_outs.get_ref(0);
-                    const Tensor &mi = sf_outs.get_ref(1);
-                    const Tensor &li = sf_outs.get_ref(2);
+                    const ChipTensor &pij_buf = sf_outs.get_ref(0);
+                    const ChipTensor &mi = sf_outs.get_ref(1);
+                    const ChipTensor &li = sf_outs.get_ref(2);
 
                     // === Task 3: SplitK PV matmul — produces 4D oi_new ===
                     params_pv.reset();
@@ -160,7 +161,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
                     params_pv.add_scalar(n_blocks);
                     params_pv.add_scalar(b_idx * block_num + bn);
                     TaskOutputTensors pv_outs = rt_submit_aic_task(FUNC_PV_MATMUL, params_pv);
-                    const Tensor &oi_new = pv_outs.get_ref(0);
+                    const ChipTensor &oi_new = pv_outs.get_ref(0);
 
                     // === Task 4: Online update (per-group) ===
                     uint64_t is_first = (bn == 0) ? 1 : 0;

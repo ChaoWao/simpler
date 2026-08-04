@@ -36,7 +36,7 @@ using namespace pto;
 #endif
 
 template <int M, int K, int N>
-static __aicore__ void pv_matmul_impl(__gm__ Tensor *pij, __gm__ Tensor *vj, __gm__ Tensor *oi) {
+static __aicore__ void pv_matmul_impl(__gm__ ChipTensor *pij, __gm__ ChipTensor *vj, __gm__ ChipTensor *oi) {
     __gm__ bfloat16_t *pij_addr = reinterpret_cast<__gm__ bfloat16_t *>(pij->buffer.addr);
     __gm__ bfloat16_t *vj_addr = reinterpret_cast<__gm__ bfloat16_t *>(vj->buffer.addr);
     __gm__ float *oi_addr = reinterpret_cast<__gm__ float *>(oi->buffer.addr);
@@ -99,9 +99,9 @@ static __aicore__ void pv_matmul_impl(__gm__ Tensor *pij, __gm__ Tensor *vj, __g
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *pij = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *vj = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *oi_new = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *pij = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *vj = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *oi_new = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     uint64_t q_tile_size = static_cast<uint64_t>(pij->shapes[0]);
     // args[4] = block_size, args[5] = head_dim
 

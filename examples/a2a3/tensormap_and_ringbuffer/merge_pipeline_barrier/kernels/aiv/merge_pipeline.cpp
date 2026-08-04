@@ -148,12 +148,12 @@ stage_tile(__gm__ float *src, __gm__ float *dst, int32_t t, int32_t op, float b,
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *x_t = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *sync_t = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *s1_t = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *s2_t = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ Tensor *out_t = reinterpret_cast<__gm__ Tensor *>(args[4]);
-    __gm__ Tensor *tm_t = reinterpret_cast<__gm__ Tensor *>(args[5]);
+    __gm__ ChipTensor *x_t = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *sync_t = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *s1_t = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *s2_t = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ ChipTensor *out_t = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+    __gm__ ChipTensor *tm_t = reinterpret_cast<__gm__ ChipTensor *>(args[5]);
 
     __gm__ float *x = reinterpret_cast<__gm__ float *>(x_t->buffer.addr) + x_t->start_offset;
     __gm__ int32_t *sync = reinterpret_cast<__gm__ int32_t *>(sync_t->buffer.addr) + sync_t->start_offset;

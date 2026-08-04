@@ -517,7 +517,7 @@ void PmuCollector::reconcile_counters() {
 
     // Cross-check device-side totals against host CSV.  PMU is single-kind
     // (one per-core pool), so reconcile_one is invoked once; the lambda
-    // shape matches L2SwimlaneCollector::reconcile_counters so the two
+    // shape matches ChipSwimlaneCollector::reconcile_counters so the two
     // single-arch implementations stay diff-able.
     auto reconcile_one = [&](int unit_count, auto get_state, uint64_t collected, bool optional) {
         uint64_t total_device = 0;

@@ -16,18 +16,18 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-affine_orchestration_config(const L2TaskArgs &orch_args) {
+affine_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 4};
 }
 
-__attribute__((visibility("default"))) void affine_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &reduce_out = orch_args.tensor(0).ref();
-    const Tensor &scale = orch_args.tensor(1).ref();
-    const Tensor &bias = orch_args.tensor(2).ref();
-    const Tensor &out = orch_args.tensor(3).ref();
+__attribute__((visibility("default"))) void affine_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &reduce_out = orch_args.tensor(0).ref();
+    const ChipTensor &scale = orch_args.tensor(1).ref();
+    const ChipTensor &bias = orch_args.tensor(2).ref();
+    const ChipTensor &out = orch_args.tensor(3).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(reduce_out);
     params.add_input(scale);
     params.add_input(bias);

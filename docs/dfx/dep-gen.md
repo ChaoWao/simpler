@@ -9,7 +9,7 @@ the record entirely. The device hot path no longer carries fanout;
 `deps.json` is now the sole source of truth for swimlane edges.
 
 When it existed, each producer task carried its own
-`L2SwimlaneAicpuTaskRecord.fanout[]`, populated by the AICPU scheduler at the
+`ChipSwimlaneAicpuTaskRecord.fanout[]`, populated by the AICPU scheduler at the
 moment it wired a downstream consumer. If a producer had already finished and
 transitioned to `PTO2_TASK_COMPLETED` by the time a later submit wanted to
 register a dependency on it, the consumer's edge had nowhere to go — the
@@ -99,29 +99,29 @@ nothing to capture-then-reconstruct.
 ## 3. How to Enable
 
 `dep_gen` is gated by `CallConfig.enable_dep_gen` (alongside
-`enable_l2_swimlane`, `enable_dump_args`, `enable_pmu`). The CLI flag
+`enable_chip_swimlane`, `enable_dump_args`, `enable_pmu`). The CLI flag
 is `--enable-dep-gen`:
 
 ```bash
 # Standalone
-python test_my_case.py --platform <a2a3|a5> --enable-dep-gen --enable-l2-swimlane
+python test_my_case.py --platform <a2a3|a5> --enable-dep-gen --enable-chip-swimlane
 
 # Pytest
-pytest tests/st/... --platform <a2a3|a5> --enable-dep-gen --enable-l2-swimlane
+pytest tests/st/... --platform <a2a3|a5> --enable-dep-gen --enable-chip-swimlane
 ```
 
-The `--enable-l2-swimlane` flag is independent but recommended in pair
+The `--enable-chip-swimlane` flag is independent but recommended in pair
 because:
 
 - `deps.json` is the dep_gen artifact.
-- `l2_swimlane_records.json` (from swimlane) is the timing artifact;
+- `chip_swimlane_records.json` (from swimlane) is the timing artifact;
   `merged_swimlane.json` (the Perfetto trace) uses `deps.json` for
   dependency arrows when both files exist (without it, the trace has no
   dependency arrows — the record no longer carries `fanout[]`).
 
 For perf-sensitive runs where you'd rather measure each profiler in
 isolation, see the **split workflow** described in
-[l2-swimlane-profiling §3.5](l2-swimlane-profiling.md#35-dependency-arrows-from-dep_gen)
+[chip-swimlane-profiling §3.5](chip-swimlane-profiling.md#35-dependency-arrows-from-dep_gen)
 — one dep_gen capture per topology, then any number of swimlane
 runs that the converter joins back to that captured graph.
 
@@ -267,7 +267,7 @@ The default text output contains:
   - `tasks`: number of task ids rendered in the output
   - `unique_task_edges`: number of unique `(pred, succ)` task pairs
   - `annotated_edges`: number of annotated edge rows across all task pairs
-  - `perf_sidecar`: `yes` when `l2_swimlane_records.json` was successfully loaded
+  - `perf_sidecar`: `yes` when `chip_swimlane_records.json` was successfully loaded
   - `func_name_map`: `yes` when at least one task label resolved to a named `func_name`
     from either an explicit `--func-names` file or an auto-discovered sibling
     `name_map*.json`. When the `kernel_ids` fallback is used, `func_id=` shows an
@@ -328,7 +328,7 @@ edges — which is exactly why it replaced them as the sole edge source:
 
 | Edge source | Captures | Drops on race? |
 | ----------- | -------- | -------------- |
-| `task.fanout[]` (removed; formerly on L2SwimlaneAicpuTaskRecord) | Successors known at producer-retire time | **Yes** — sealed when producer retires |
+| `task.fanout[]` (removed; formerly on ChipSwimlaneAicpuTaskRecord) | Successors known at producer-retire time | **Yes** — sealed when producer retires |
 | `deps.json` (this feature) | Every consumer → producer reachable via tensormap / explicit_deps | No — replay sees every submit |
 
 `tests/st/{a2a3,a5}/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py`
@@ -380,7 +380,7 @@ base via `task_id`.
 budget (`PLATFORM_DEP_GEN_RECORDS_PER_BUFFER = 1024` slots → roughly
 `64 + 1023 × 582 = 595450` deps max in the best case) is logged via
 `LOG_ERROR` and truncated to the largest dc that fits. Runtime
-correctness is unaffected — `L0TaskArgs::set_dependencies` keeps the full dep
+correctness is unaffected — `CoreTaskArgs::set_dependencies` keeps the full dep
 list; only the dep_gen replay graph loses the tail.
 
 ---

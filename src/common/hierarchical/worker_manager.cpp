@@ -135,11 +135,11 @@ void WorkerEndpoint::control_alloc_domain(const char *, const char *) {
 }
 void WorkerEndpoint::control_release_domain(const char *) { throw_unsupported_control("control_release_domain"); }
 void WorkerEndpoint::control_comm_init(const char *) { throw_unsupported_control("control_comm_init"); }
-void WorkerEndpoint::control_l3_l2_region_create(const char *, const char *) {
-    throw_unsupported_control("control_l3_l2_region_create");
+void WorkerEndpoint::control_worker_chip_region_create(const char *, const char *) {
+    throw_unsupported_control("control_worker_chip_region_create");
 }
-void WorkerEndpoint::control_l3_l2_region_release(uint64_t) {
-    throw_unsupported_control("control_l3_l2_region_release");
+void WorkerEndpoint::control_worker_chip_region_release(uint64_t) {
+    throw_unsupported_control("control_worker_chip_region_release");
 }
 
 WorkerCompletion
@@ -768,7 +768,7 @@ WorkerCompletion LocalMailboxEndpoint::run_with_accept(
     std::memcpy(mbox() + MAILBOX_OFF_PIPELINE_LEASE, &s.pipeline_lease, sizeof(PipelineSlotLease));
 
     // Write length-prefixed TaskArgs blob: [T][S][tensors][scalars].
-    size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor) +
+    size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor) +
                         static_cast<size_t>(view.scalar_count) * sizeof(uint64_t);
     if (blob_bytes > MAILBOX_ARGS_CAPACITY) {
         completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
@@ -786,12 +786,13 @@ WorkerCompletion LocalMailboxEndpoint::run_with_accept(
     std::memcpy(d + 4, &view.scalar_count, sizeof(int32_t));
     if (view.tensor_count > 0) {
         std::memcpy(
-            d + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes, static_cast<size_t>(view.tensor_count) * sizeof(Tensor)
+            d + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes,
+            static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor)
         );
     }
     if (view.scalar_count > 0) {
         std::memcpy(
-            d + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor), view.scalars,
+            d + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor), view.scalars,
             static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
         );
     }
@@ -868,7 +869,7 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
         state.pipeline_lease.slot_id >= task_frame_count_) {
         throw std::runtime_error("task frame has an invalid pipeline lease identity");
     }
-    const size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor) +
+    const size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor) +
                               static_cast<size_t>(view.scalar_count) * sizeof(uint64_t);
     if (blob_bytes > MAILBOX_ARGS_CAPACITY) {
         throw std::runtime_error(
@@ -913,13 +914,13 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     if (view.tensor_count > 0) {
         std::memcpy(
             blob + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes,
-            static_cast<size_t>(view.tensor_count) * sizeof(Tensor)
+            static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor)
         );
     }
     if (view.scalar_count > 0) {
         std::memcpy(
-            blob + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor), view.scalars,
-            static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
+            blob + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor),
+            view.scalars, static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
         );
     }
 
@@ -1529,21 +1530,21 @@ void LocalMailboxEndpoint::control_comm_init(const char *request_shm_name) {
     run_control_command("control_comm_init");
 }
 
-void LocalMailboxEndpoint::control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name) {
+void LocalMailboxEndpoint::control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name) {
     if (!request_shm_name || !*request_shm_name || !reply_shm_name || !*reply_shm_name) {
-        throw std::runtime_error("control_l3_l2_region_create: request and reply shm names must be non-empty");
+        throw std::runtime_error("control_worker_chip_region_create: request and reply shm names must be non-empty");
     }
     std::lock_guard<std::mutex> lk(mailbox_mu_);
-    uint64_t sub_cmd = CTRL_L3_L2_REGION_CREATE;
+    uint64_t sub_cmd = CTRL_WORKER_CHIP_REGION_CREATE;
     std::memcpy(mbox() + MAILBOX_OFF_CALLABLE, &sub_cmd, sizeof(uint64_t));
     write_shm_name_pair(mbox(), request_shm_name, reply_shm_name);
-    run_control_command("control_l3_l2_region_create");
+    run_control_command("control_worker_chip_region_create");
 }
 
-void LocalMailboxEndpoint::control_l3_l2_region_release(uint64_t region_id) {
+void LocalMailboxEndpoint::control_worker_chip_region_release(uint64_t region_id) {
     std::lock_guard<std::mutex> lk(mailbox_mu_);
-    write_control_args(mbox(), CTRL_L3_L2_REGION_RELEASE, region_id);
-    run_control_command("control_l3_l2_region_release");
+    write_control_args(mbox(), CTRL_WORKER_CHIP_REGION_RELEASE, region_id);
+    run_control_command("control_worker_chip_region_release");
 }
 
 uint64_t WorkerThread::control_malloc(size_t size) {
@@ -1679,14 +1680,14 @@ void WorkerThread::control_comm_init(const char *request_shm_name) {
     endpoint_->control_comm_init(request_shm_name);
 }
 
-void WorkerThread::control_l3_l2_region_create(const char *request_shm_name, const char *reply_shm_name) {
-    if (!endpoint_) throw std::runtime_error("control_l3_l2_region_create: null endpoint");
-    endpoint_->control_l3_l2_region_create(request_shm_name, reply_shm_name);
+void WorkerThread::control_worker_chip_region_create(const char *request_shm_name, const char *reply_shm_name) {
+    if (!endpoint_) throw std::runtime_error("control_worker_chip_region_create: null endpoint");
+    endpoint_->control_worker_chip_region_create(request_shm_name, reply_shm_name);
 }
 
-void WorkerThread::control_l3_l2_region_release(uint64_t region_id) {
-    if (!endpoint_) throw std::runtime_error("control_l3_l2_region_release: null endpoint");
-    endpoint_->control_l3_l2_region_release(region_id);
+void WorkerThread::control_worker_chip_region_release(uint64_t region_id) {
+    if (!endpoint_) throw std::runtime_error("control_worker_chip_region_release: null endpoint");
+    endpoint_->control_worker_chip_region_release(region_id);
 }
 
 bool WorkerManager::any_busy() const {
@@ -1831,22 +1832,22 @@ void WorkerManager::control_comm_init(int worker_id, const char *request_shm_nam
     wt->control_comm_init(request_shm_name);
 }
 
-void WorkerManager::control_l3_l2_region_create(
+void WorkerManager::control_worker_chip_region_create(
     int worker_id, const char *request_shm_name, const char *reply_shm_name
 ) {
     auto *wt = get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
     if (wt == nullptr) {
-        throw std::runtime_error("control_l3_l2_region_create: invalid worker_id " + std::to_string(worker_id));
+        throw std::runtime_error("control_worker_chip_region_create: invalid worker_id " + std::to_string(worker_id));
     }
-    wt->control_l3_l2_region_create(request_shm_name, reply_shm_name);
+    wt->control_worker_chip_region_create(request_shm_name, reply_shm_name);
 }
 
-void WorkerManager::control_l3_l2_region_release(int worker_id, uint64_t region_id) {
+void WorkerManager::control_worker_chip_region_release(int worker_id, uint64_t region_id) {
     auto *wt = get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
     if (wt == nullptr) {
-        throw std::runtime_error("control_l3_l2_region_release: invalid worker_id " + std::to_string(worker_id));
+        throw std::runtime_error("control_worker_chip_region_release: invalid worker_id " + std::to_string(worker_id));
     }
-    wt->control_l3_l2_region_release(region_id);
+    wt->control_worker_chip_region_release(region_id);
 }
 
 ControlResult WorkerManager::control_digest_only(

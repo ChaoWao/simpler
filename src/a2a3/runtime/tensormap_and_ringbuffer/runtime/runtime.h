@@ -16,7 +16,7 @@
  * only handles:
  * - Handshake buffers for AICPU-AICore communication
  * - Execution parameters (block_dim, aicpu_thread_num)
- * - Tensor pair management for host-device memory tracking
+ * - ChipTensor pair management for host-device memory tracking
  * - Device orchestration state (gm_sm_ptr_, orch_args_)
  * - Function address mapping (func_id_to_addr_)
  *
@@ -40,7 +40,7 @@
 
 #include "common/core_type.h"
 #include "common/host_api.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "pto2_dispatch_payload.h"
@@ -110,7 +110,7 @@ enum class TensorReleaseKind {
 };
 
 /**
- * Tensor lease for tracking host-device memory mappings and release ownership.
+ * ChipTensor lease for tracking host-device memory mappings and release ownership.
  */
 struct TensorLease {
     void *host_ptr;

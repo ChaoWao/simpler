@@ -501,8 +501,8 @@ struct SlotTransition {
 // =============================================================================
 
 #if SIMPLER_DFX
-struct alignas(64) SchedL2SwimlaneCounters {
-    bool l2_swimlane_enabled{false};
+struct alignas(64) SchedChipSwimlaneCounters {
+    bool chip_swimlane_enabled{false};
     uint64_t sched_start_ts{0};
     uint64_t sched_scan_cycle{0};
     uint64_t sched_complete_cycle{0};
@@ -518,7 +518,7 @@ struct alignas(64) SchedL2SwimlaneCounters {
     uint32_t phase_subretire_count{0};
     uint32_t phase_dispatch_count{0};
     // Per-emit delta is (current - *_at_last_emit). Accumulated only when
-    // l2_swimlane_level_ >= SCHED_PHASES.
+    // chip_swimlane_level_ >= SCHED_PHASES.
     uint64_t pop_hit{0};
     uint64_t pop_miss{0};
     uint64_t pop_hit_at_last_emit{0};
@@ -530,7 +530,7 @@ struct alignas(64) SchedL2SwimlaneCounters {
     uint64_t sched_dispatch_pop_cycle{0};
     uint64_t sched_dispatch_setup_cycle{0};
 #endif
-    void reset() { *this = SchedL2SwimlaneCounters{}; }
+    void reset() { *this = SchedChipSwimlaneCounters{}; }
 };
 #endif
 

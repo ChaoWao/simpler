@@ -2,7 +2,7 @@
 
 ## Problem
 
-Profiling data (`l2_swimlane_records.json`) identifies tasks by numeric IDs
+Profiling data (`chip_swimlane_records.json`) identifies tasks by numeric IDs
 (e.g., `func_id: 0`).  Without a mapping, swimlane visualizations show
 opaque labels like `func_0_a(t0)` instead of human-readable names like
 `QK(t0)`.
@@ -45,7 +45,7 @@ Every level uses the same structure:
 ### L2 (Orchestration + Incores)
 
 `callable_id` = incore `func_id` (the integer assigned in the CALLABLE
-spec).  These are the same IDs that appear in L2 swimlane data.
+spec).  These are the same IDs that appear in chip swimlane data.
 
 ```json
 {
@@ -129,7 +129,7 @@ class TestL3Group(SceneTestCase):
 
 ## Automatic Dump and Consumption
 
-When `--enable-l2-swimlane` is used, SceneTest automatically:
+When `--enable-chip-swimlane` is used, SceneTest automatically:
 
 1. Extracts the name mapping from `CALLABLE` via `_extract_name_map()`.
 2. Writes `<output_prefix>/name_map_<ClassName_casename>.json`.
@@ -140,7 +140,7 @@ mapping file is written and the tools fall back to default labels:
 `func_<id>(rXtY)` when a `deps.json` resolved the `func_id`, or
 `task(rXtY)` when none is available (the host emits `func_id = -1`,
 so without `deps.json` tasks cannot be told apart by function — see
-[dfx/l2-swimlane-profiling.md §3.5](l2-swimlane-profiling.md#35-dependency-arrows-from-dep_gen)).
+[dfx/chip-swimlane-profiling.md §3.5](chip-swimlane-profiling.md#35-dependency-arrows-from-dep_gen)).
 
 ## Tool Usage
 
@@ -151,12 +151,12 @@ multiple sibling candidates require an explicit `--func-names` selection.
 
 ```bash
 # Automatic (via SceneTest profiling)
-pytest tests/st/... --platform a5onboard --enable-l2-swimlane
+pytest tests/st/... --platform a5onboard --enable-chip-swimlane
 
-# Manual (paths land alongside l2_swimlane_records.json inside the same
+# Manual (paths land alongside chip_swimlane_records.json inside the same
 # <output_prefix> directory)
 python -m simpler_setup.tools.swimlane_converter \
-    outputs/<case>_<ts>/l2_swimlane_records.json \
+    outputs/<case>_<ts>/chip_swimlane_records.json \
     --func-names outputs/<case>_<ts>/name_map_TestPA_basic.json
 
 python -m simpler_setup.tools.deps_viewer \
@@ -180,7 +180,7 @@ cannot collide.
 
 ```text
 outputs/TestPA_basic_20260416_151301/
-  l2_swimlane_records.json         # perf data (runtime)
+  chip_swimlane_records.json         # perf data (runtime)
   name_map_TestPA_basic.json   # name mapping (SceneTest)
   merged_swimlane.json         # Perfetto trace (converter)
 ```

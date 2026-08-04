@@ -9,15 +9,15 @@ simpler already ships end-user analysis CLIs under `simpler_setup.tools` —
 **use them; do not re-invent timing/instrumentation in the runtime.** Canonical
 reference (tool flags, examples, output paths): `simpler_setup/tools/README.md`.
 Per-DFX docs: `docs/dfx/` (`l2-timing.md`, `sched-overhead-model.md`,
-`l2-swimlane-profiling.md`, `scope-stats.md`, `dep-gen.md`, `args-dump.md`).
+`chip-swimlane-profiling.md`, `scope-stats.md`, `dep-gen.md`, `args-dump.md`).
 
 ## Pick the tool by question
 
 | You want… | Tool | Needs |
 | --------- | ---- | ----- |
 | Per-run **Host / Device / Effective / Orch / Sched** timing | `strace_timing --rounds-table` | nothing extra — `[STRACE]` markers are on stderr (`SIMPLER_HOST_STRACE`, compile-time default on, **NOT** gated by swimlane) |
-| AICPU **scheduler overhead / Tail-OH / critical-path** breakdown | `sched_overhead_analysis` | a `--enable-l2-swimlane` (level≥3) run + `--enable-dep-gen` run |
-| Swimlane → **Perfetto** Chrome trace | `swimlane_converter` | `--enable-l2-swimlane` run (`--overhead` track needs deps.json too) |
+| AICPU **scheduler overhead / Tail-OH / critical-path** breakdown | `sched_overhead_analysis` | a `--enable-chip-swimlane` (level≥3) run + `--enable-dep-gen` run |
+| Swimlane → **Perfetto** Chrome trace | `swimlane_converter` | `--enable-chip-swimlane` run (`--overhead` track needs deps.json too) |
 | Task **dependency graph** (text / HTML) | `deps_viewer` | `--enable-dep-gen` run → `deps.json` |
 | **Per-scope ring-fill peaks** (task_window / heap / tensormap) | `scope_stats_plot` | `--enable-scope-stats` run → `scope_stats.jsonl` |
 | Inspect / export **args dumps** | `dump_viewer` | `--dump-args` run → `args_dump/` |

@@ -741,7 +741,7 @@ def _build_output_prefix(case_label: str) -> Path:
     """Per-case directory for diagnostic artifacts.
 
     Each case gets its own ``outputs/<case_label>_<timestamp>/`` directory; the
-    runtime writes ``l2_swimlane_records.json``, ``args_dump/``, and ``pmu.csv``
+    runtime writes ``chip_swimlane_records.json``, ``args_dump/``, and ``pmu.csv``
     under that root with fixed filenames. Two cases of the same name run in
     the same second is not a contemplated scenario (parallel xdist runs differ
     by class+method).
@@ -768,7 +768,7 @@ def _run_swimlane_converter(
 
     When ``input_path`` is given, the converter derives its output filename from
     the input's timestamp (see ``swimlane_converter._resolve_output_path``).
-    Without it, the converter auto-selects the latest ``l2_swimlane_records_*.json``.
+    Without it, the converter auto-selects the latest ``chip_swimlane_records_*.json``.
 
     ``enable_overhead`` forwards the converter's ``--overhead`` flag — adds the
     8 Overhead Analysis counter tracks (per-engine idle/ready/overhead + system
@@ -810,13 +810,13 @@ def _convert_case_swimlane(
     enable_overhead: bool = False,
 ) -> None:
     """Post-case: invoke the swimlane converter on the perf file the runtime
-    just wrote into ``<output_prefix>/l2_swimlane_records.json``. No diff/rename
+    just wrote into ``<output_prefix>/chip_swimlane_records.json``. No diff/rename
     dance — the path is known a priori from CallConfig.output_prefix.
     """
     import logging  # noqa: PLC0415
 
     logger = logging.getLogger(__name__)
-    perf_file = output_prefix / "l2_swimlane_records.json"
+    perf_file = output_prefix / "chip_swimlane_records.json"
     if not perf_file.exists():
         logger.warning(f"[{case_label}] {perf_file} not produced; skipping conversion")
         return
@@ -923,7 +923,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     sub_handles,
     rounds,
     skip_golden,
-    enable_l2_swimlane,
+    enable_chip_swimlane,
     enable_dump_args,
     enable_pmu,
     enable_dep_gen,
@@ -938,13 +938,13 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     """
     cls_name = type(cls_inst).__name__
     callable_spec = getattr(type(cls_inst), "CALLABLE", None)
-    diagnostics_on = enable_l2_swimlane or enable_dump_args or enable_pmu or enable_dep_gen or enable_scope_stats
+    diagnostics_on = enable_chip_swimlane or enable_dump_args or enable_pmu or enable_dep_gen or enable_scope_stats
     for case in cases:
         case_label = f"{cls_name}_{case['name']}"
         # Per-case directory the runtime writes into. Required (non-empty) when
         # any diagnostic flag is on; CallConfig::validate() throws otherwise.
         # scope_stats now writes <prefix>/scope_stats/scope_stats.jsonl (sibling of
-        # l2_swimlane_records.json / deps.json), so it pulls output_prefix the
+        # chip_swimlane_records.json / deps.json), so it pulls output_prefix the
         # same way the other DFX flags do.
         prefix = _build_output_prefix(case_label) if diagnostics_on else Path("")
         try:
@@ -955,7 +955,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
                 sub_handles=sub_handles,
                 rounds=rounds,
                 skip_golden=skip_golden,
-                enable_l2_swimlane=enable_l2_swimlane,
+                enable_chip_swimlane=enable_chip_swimlane,
                 enable_dump_args=enable_dump_args,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
@@ -963,7 +963,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
                 output_prefix=str(prefix) if diagnostics_on else "",
             )
         finally:
-            if enable_l2_swimlane:
+            if enable_chip_swimlane:
                 _convert_case_swimlane(
                     case_label,
                     prefix,
@@ -1171,7 +1171,7 @@ class SceneTestCase:
     def _build_config(
         self,
         config_dict,
-        enable_l2_swimlane=0,
+        enable_chip_swimlane=0,
         enable_dump_args=False,
         enable_pmu=0,
         enable_dep_gen=False,
@@ -1193,7 +1193,7 @@ class SceneTestCase:
         config.runtime_env.ring_task_window = runtime_env.get("ring_task_window", 0)
         config.runtime_env.ring_heap = runtime_env.get("ring_heap", 0)
         config.runtime_env.ring_dep_pool = runtime_env.get("ring_dep_pool", 0)
-        config.enable_l2_swimlane = enable_l2_swimlane
+        config.enable_chip_swimlane = enable_chip_swimlane
         config.enable_dump_args = enable_dump_args
         config.enable_pmu = enable_pmu  # 0=disabled, >0=enabled with event type
         config.enable_dep_gen = enable_dep_gen
@@ -1230,7 +1230,7 @@ class SceneTestCase:
         sub_handles=None,
         rounds=1,
         skip_golden=False,
-        enable_l2_swimlane=0,
+        enable_chip_swimlane=0,
         enable_dump_args=False,
         enable_pmu=0,
         enable_dep_gen=False,
@@ -1244,7 +1244,7 @@ class SceneTestCase:
                 case,
                 rounds=rounds,
                 skip_golden=skip_golden,
-                enable_l2_swimlane=enable_l2_swimlane,
+                enable_chip_swimlane=enable_chip_swimlane,
                 enable_dump_args=enable_dump_args,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
@@ -1259,7 +1259,7 @@ class SceneTestCase:
                 case,
                 rounds=rounds,
                 skip_golden=skip_golden,
-                enable_l2_swimlane=enable_l2_swimlane,
+                enable_chip_swimlane=enable_chip_swimlane,
                 enable_dump_args=enable_dump_args,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
@@ -1274,7 +1274,7 @@ class SceneTestCase:
         case,
         rounds=1,
         skip_golden=False,
-        enable_l2_swimlane=0,
+        enable_chip_swimlane=0,
         enable_dump_args=False,
         enable_pmu=0,
         enable_dep_gen=False,
@@ -1321,14 +1321,14 @@ class SceneTestCase:
                 for name, initial in initial_outputs.items():
                     getattr(test_args, name).copy_(initial)
 
-            # enable_l2_swimlane / enable_dep_gen are already forced False by
+            # enable_chip_swimlane / enable_dep_gen are already forced False by
             # the upstream gate in test_run / run_module when rounds > 1, so an
             # extra `and round_idx == 0` here is dead code; pass them through
             # verbatim. (If the upstream gate is ever relaxed, restore the
             # per-round masking here.)
             config = self._build_config(
                 config_dict,
-                enable_l2_swimlane=enable_l2_swimlane,
+                enable_chip_swimlane=enable_chip_swimlane,
                 enable_dump_args=enable_dump_args,
                 enable_pmu=enable_pmu,
                 enable_dep_gen=enable_dep_gen,
@@ -1350,7 +1350,7 @@ class SceneTestCase:
         case,
         rounds=1,
         skip_golden=False,
-        enable_l2_swimlane=0,
+        enable_chip_swimlane=0,
         enable_dump_args=False,
         enable_pmu=0,
         enable_dep_gen=False,
@@ -1358,11 +1358,11 @@ class SceneTestCase:
         output_prefix="",
     ):
         # Defensive belt-and-braces: the pytest dispatcher and run_module both
-        # block --enable-l2-swimlane for L3 at the CLI boundary. Catch any code
+        # block --enable-chip-swimlane for L3 at the CLI boundary. Catch any code
         # path that reaches here with the flag on anyway (direct API use,
         # future refactors) so we fail loud rather than produce garbage perf
         # files. Lift once the runtime embeds device_id in the perf filename.
-        if enable_l2_swimlane:
+        if enable_chip_swimlane:
             raise NotImplementedError(
                 "L3 profiling is not supported yet (multi-chip-process perf "
                 "filename collision). Gate at the CLI level in "
@@ -1416,7 +1416,7 @@ class SceneTestCase:
                 # under the existing upstream gate. Keep parity by passing through.
                 config = self._build_config(
                     config_dict,
-                    enable_l2_swimlane=enable_l2_swimlane,
+                    enable_chip_swimlane=enable_chip_swimlane,
                     enable_dump_args=enable_dump_args,
                     enable_pmu=enable_pmu,
                     enable_dep_gen=enable_dep_gen,
@@ -1465,16 +1465,16 @@ class SceneTestCase:
         manual_mode = request.config.getoption("--manual", default="exclude")
         rounds = request.config.getoption("--rounds", default=1)
         skip_golden = request.config.getoption("--skip-golden", default=False)
-        enable_l2_swimlane = request.config.getoption("--enable-l2-swimlane", default=0)
+        enable_chip_swimlane = request.config.getoption("--enable-chip-swimlane", default=0)
         enable_dump_args = request.config.getoption("--dump-args", default=0)
         enable_pmu = request.config.getoption("--enable-pmu", default=0)
         enable_dep_gen = self._effective_enable_dep_gen(request, warn=True)
         enable_scope_stats = request.config.getoption("--enable-scope-stats", default=False)
         enable_swimlane_overhead = request.config.getoption("--enable-swimlane-overhead", default=False)
         if rounds > 1:
-            if enable_l2_swimlane:
+            if enable_chip_swimlane:
                 logger.warning("Profiling disabled: --rounds > 1")
-                enable_l2_swimlane = 0
+                enable_chip_swimlane = 0
             if enable_dump_args:
                 logger.warning("Dump args disabled: --rounds > 1")
                 enable_dump_args = 0
@@ -1520,7 +1520,7 @@ class SceneTestCase:
             sub_handles=sub_handles,
             rounds=rounds,
             skip_golden=skip_golden,
-            enable_l2_swimlane=enable_l2_swimlane,
+            enable_chip_swimlane=enable_chip_swimlane,
             enable_dump_args=enable_dump_args,
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,
@@ -1577,13 +1577,13 @@ class SceneTestCase:
         parser.add_argument("--rounds", type=int, default=1, help="Run each case N times (default: 1)")
         parser.add_argument("--skip-golden", action="store_true", help="Skip golden comparison (benchmark mode)")
         parser.add_argument(
-            "--enable-l2-swimlane",
+            "--enable-chip-swimlane",
             nargs="?",
             const=4,
             default=0,
             type=int,
             metavar="PERF_LEVEL",
-            help="Enable L2 swimlane. Bare flag=level 4 (full). "
+            help="Enable chip swimlane. Bare flag=level 4 (full). "
             "1=AICore timing, 2=+dispatch/fanout, 3=+sched phases, 4=+orch phases",
         )
         parser.add_argument(
@@ -1624,7 +1624,7 @@ class SceneTestCase:
             default=False,
             help="Add the 8 Overhead Analysis counter tracks (per-engine "
             "idle/ready/overhead + system all/has overhead) to the swimlane "
-            "JSON. Requires --enable-l2-swimlane + deps.json (re-run with "
+            "JSON. Requires --enable-chip-swimlane + deps.json (re-run with "
             "--enable-dep-gen if absent).",
         )
         parser.add_argument(
@@ -1687,9 +1687,9 @@ class SceneTestCase:
         # pto_isa_root explicitly. Do not export PTO_ISA_ROOT (#1403).
         ensure_pto_isa_root(verbose=True)
 
-        if args.rounds > 1 and args.enable_l2_swimlane:
+        if args.rounds > 1 and args.enable_chip_swimlane:
             logger.warning("Profiling disabled: --rounds > 1")
-            args.enable_l2_swimlane = 0
+            args.enable_chip_swimlane = 0
         if args.rounds > 1 and args.enable_dep_gen:
             logger.warning("dep_gen disabled: --rounds > 1")
             args.enable_dep_gen = False
@@ -1759,14 +1759,14 @@ class SceneTestCase:
 
         # L3 profiling not supported yet (multi-chip-process filename collision).
         # Mirror the pytest-side guard so standalone users get the same early-fail.
-        if args.enable_l2_swimlane:
+        if args.enable_chip_swimlane:
             l3_classes = sorted(cls.__name__ for cls in selected_by_cls if cls._st_level == 3)
             if l3_classes:
                 print(
-                    f"ERROR: --enable-l2-swimlane is not supported for L3 tests yet — "
+                    f"ERROR: --enable-chip-swimlane is not supported for L3 tests yet — "
                     f"multi-chip-process filename collision unresolved. "
                     f"L3 classes selected: {', '.join(l3_classes)}. "
-                    f"Either drop --enable-l2-swimlane or scope to L2 with --level 2.",
+                    f"Either drop --enable-chip-swimlane or scope to L2 with --level 2.",
                     file=sys.stderr,
                 )
                 sys.exit(2)
@@ -1825,7 +1825,7 @@ class SceneTestCase:
                                 sub_handles=sub_handles,
                                 rounds=args.rounds,
                                 skip_golden=args.skip_golden,
-                                enable_l2_swimlane=args.enable_l2_swimlane,
+                                enable_chip_swimlane=args.enable_chip_swimlane,
                                 enable_dump_args=args.dump_args,
                                 enable_pmu=args.enable_pmu,
                                 enable_dep_gen=args.enable_dep_gen,
@@ -1866,8 +1866,8 @@ def _dispatch_test_phases_standalone(module_name, selected_by_cls, args):  # noq
         common += ["--rounds", str(args.rounds)]
     if args.skip_golden:
         common.append("--skip-golden")
-    if args.enable_l2_swimlane:
-        common += ["--enable-l2-swimlane", str(args.enable_l2_swimlane)]
+    if args.enable_chip_swimlane:
+        common += ["--enable-chip-swimlane", str(args.enable_chip_swimlane)]
     if args.dump_args:
         common += ["--dump-args", str(args.dump_args)]
     if args.enable_dep_gen:

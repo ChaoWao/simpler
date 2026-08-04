@@ -76,11 +76,11 @@ from simpler.task_interface import (  # noqa: E402
     ArgDirection,
     CallConfig,
     ChipCallable,
+    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker  # noqa: E402
@@ -568,7 +568,7 @@ def run(
                     chip_args.add_tensor(make_tensor_arg(recv_y_outs[i]), TensorArgType.OUTPUT_EXISTING)
                     chip_args.add_tensor(make_tensor_arg(routed_y_outs[i]), TensorArgType.OUTPUT_EXISTING)
                     chip_args.add_tensor(
-                        Tensor.make(
+                        ChipTensor.make(
                             data=domain.buffer_ptrs["scratch"],
                             shapes=(SCRATCH_NBYTES // 4,),
                             dtype=DataType.FLOAT32,

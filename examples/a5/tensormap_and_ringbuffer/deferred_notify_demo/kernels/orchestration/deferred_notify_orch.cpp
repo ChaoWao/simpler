@@ -17,30 +17,31 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-deferred_notify_orchestration_config(const L2TaskArgs &orch_args) {
+deferred_notify_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 5};
 }
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     return deferred_notify_orchestration_config(orch_args);
 }
 
-__attribute__((visibility("default"))) void deferred_notify_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void deferred_notify_orchestration(const ChipTaskArgs &orch_args) {
     if (orch_args.tensor_count() + orch_args.scalar_count() != 5) {
         LOG_ERROR("deferred_notify_demo: expected 5 args");
         return;
     }
 
-    const Tensor &partial = orch_args.tensor(0).ref();
-    const Tensor &mailbox = orch_args.tensor(1).ref();
-    const Tensor &result = orch_args.tensor(2).ref();
-    const Tensor &notify_counter = orch_args.tensor(3).ref();
+    const ChipTensor &partial = orch_args.tensor(0).ref();
+    const ChipTensor &mailbox = orch_args.tensor(1).ref();
+    const ChipTensor &result = orch_args.tensor(2).ref();
+    const ChipTensor &notify_counter = orch_args.tensor(3).ref();
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
 
     uint32_t shapes[1] = {128 * 128};
     TensorCreateInfo producer_output_info(shapes, 1, DataType::FLOAT32);
-    L0TaskArgs params_producer;
+    CoreTaskArgs params_producer;
     params_producer.add_input(partial);
     params_producer.add_inout(mailbox);
     params_producer.add_output(producer_output_info);
@@ -50,14 +51,14 @@ __attribute__((visibility("default"))) void deferred_notify_orchestration(const 
 
     uint32_t notify_token_shape[1] = {1};
     TensorCreateInfo notify_token_info(notify_token_shape, 1, DataType::INT32);
-    L0TaskArgs params_notify;
+    CoreTaskArgs params_notify;
     params_notify.add_output(notify_token_info);
     params_notify.add_scalar(notify_counter.buffer.addr);
     params_notify.add_scalar(static_cast<uint64_t>(1));
     TaskOutputTensors notify_outputs = rt_submit_aiv_task(2, params_notify);
-    Tensor notify_token = notify_outputs.get_ref(0);
+    ChipTensor notify_token = notify_outputs.get_ref(0);
 
-    L0TaskArgs params_consumer;
+    CoreTaskArgs params_consumer;
     params_consumer.add_input(notify_token);
     params_consumer.add_input(mailbox);
     params_consumer.add_output(result);

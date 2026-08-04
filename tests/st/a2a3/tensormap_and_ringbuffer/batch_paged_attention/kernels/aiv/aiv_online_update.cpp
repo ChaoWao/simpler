@@ -43,9 +43,10 @@ using namespace pto;
 
 template <int M, int N>
 static __aicore__ void online_update_batch_impl(
-    __gm__ Tensor *mij_batch, __gm__ Tensor *lij_batch, __gm__ Tensor *oi_new_batch, __gm__ Tensor *mi_batch,
-    __gm__ Tensor *li_batch, __gm__ Tensor *oi_batch, __gm__ Tensor *out, uint64_t is_first, uint64_t is_last,
-    uint64_t batch_count, uint64_t q_offset, uint64_t num_heads, uint64_t batch_start
+    __gm__ ChipTensor *mij_batch, __gm__ ChipTensor *lij_batch, __gm__ ChipTensor *oi_new_batch,
+    __gm__ ChipTensor *mi_batch, __gm__ ChipTensor *li_batch, __gm__ ChipTensor *oi_batch, __gm__ ChipTensor *out,
+    uint64_t is_first, uint64_t is_last, uint64_t batch_count, uint64_t q_offset, uint64_t num_heads,
+    uint64_t batch_start
 ) {
     __gm__ float *mij_base = reinterpret_cast<__gm__ float *>(mij_batch->buffer.addr);
     __gm__ float *lij_base = reinterpret_cast<__gm__ float *>(lij_batch->buffer.addr);
@@ -194,13 +195,13 @@ static __aicore__ void online_update_batch_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *mij_batch = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *lij_batch = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *oi_new_batch = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *mi_batch = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ Tensor *li_batch = reinterpret_cast<__gm__ Tensor *>(args[4]);
-    __gm__ Tensor *oi_batch = reinterpret_cast<__gm__ Tensor *>(args[5]);
-    __gm__ Tensor *out = reinterpret_cast<__gm__ Tensor *>(args[6]);
+    __gm__ ChipTensor *mij_batch = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *lij_batch = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *oi_new_batch = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *mi_batch = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ ChipTensor *li_batch = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+    __gm__ ChipTensor *oi_batch = reinterpret_cast<__gm__ ChipTensor *>(args[5]);
+    __gm__ ChipTensor *out = reinterpret_cast<__gm__ ChipTensor *>(args[6]);
     uint64_t is_first = static_cast<uint64_t>(args[7]);
     uint64_t is_last = static_cast<uint64_t>(args[8]);
     uint64_t batch_count = static_cast<uint64_t>(args[9]);

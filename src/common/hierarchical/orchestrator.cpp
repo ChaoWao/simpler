@@ -578,12 +578,12 @@ TaskSlotState &Orchestrator::slot_state(TaskSlot s) {
 // alloc(shape, dtype) — user-facing intermediate buffer from the HeapRing
 // ---------------------------------------------------------------------------
 
-uint64_t Orchestrator::output_alloc_bytes(const Tensor &t) { return align_up(t.nbytes(), HEAP_ALIGN); }
+uint64_t Orchestrator::output_alloc_bytes(const ChipTensor &t) { return align_up(t.nbytes(), HEAP_ALIGN); }
 
-Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
+ChipTensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     auto run = current_building_run();
     if (shape.empty()) {
-        // Rank-0 tensors are not supported across the ABI (Tensor enforces
+        // Rank-0 tensors are not supported across the ABI (ChipTensor enforces
         // ndims > 0). Reject here so we never allocate + register a buffer in
         // the tensormap only to hand back an unusable addr==0 sentinel.
         throw std::invalid_argument("Orchestrator::alloc: shape must have at least one dimension");
@@ -672,12 +672,12 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
 
     s.state.store(TaskState::COMPLETED, std::memory_order_release);
 
-    // Build a contiguous external Tensor over the allocated buffer. ptr may be
+    // Build a contiguous external ChipTensor over the allocated buffer. ptr may be
     // 0 for a 0-byte request (a shape with a zero dim), in which case
     // init_external sets buffer.addr == 0 — the "no tensor" sentinel honored by
     // infer_deps; buffer.size carries numel*elem. shape is non-empty (rejected
     // at entry), so ndims >= 1 holds for init_external's assertion.
-    Tensor t{};
+    ChipTensor t{};
     t.init_external(
         reinterpret_cast<void *>(ptr), bytes, shape.data(), static_cast<uint32_t>(shape.size()), dtype,
         /*version=*/0
@@ -1083,7 +1083,7 @@ void Orchestrator::validate_remote_sidecars(
             }
         }
         for (int32_t i = 0; i < args.tensor_count(); ++i) {
-            const Tensor &tensor = args.tensor(i);
+            const ChipTensor &tensor = args.tensor(i);
             const RemoteTensorSidecar &tensor_sidecar = sidecar.tensors[static_cast<size_t>(i)];
             if (tensor_sidecar.present && tensor.buffer.addr != 0) {
                 throw std::invalid_argument("Orchestrator: remote tensor metadata data field must be zero");
@@ -1161,7 +1161,7 @@ AllocResult Orchestrator::reserve_outputs_and_slot(
         TaskArgs &a = args_list[g];
         for (int32_t i = 0; i < a.tensor_count(); ++i) {
             if (a.tag(i) != TensorArgType::OUTPUT) continue;
-            Tensor &t = a.tensor(i);
+            ChipTensor &t = a.tensor(i);
             if (t.buffer.addr != 0) continue;
             bool remote_output = !remote_sidecars.empty() &&
                                  static_cast<size_t>(i) < remote_sidecars[g].tensors.size() &&
@@ -1218,7 +1218,7 @@ void Orchestrator::infer_deps(
         int32_t worker_id = (g < target_worker_ids.size()) ? target_worker_ids[g] : -1;
         const TaskArgs &a = args_list[g];
         for (int32_t i = 0; i < a.tensor_count(); ++i) {
-            const Tensor &t = a.tensor(i);
+            const ChipTensor &t = a.tensor(i);
             TensorKey key{};
             bool has_key = false;
             if (!remote_sidecars.empty()) {

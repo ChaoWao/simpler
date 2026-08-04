@@ -25,14 +25,15 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     (void)orch_args;
 
     uint32_t shape[1] = {1};
@@ -43,10 +44,10 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
 
     // Exercise API short-circuit after fatal: these must become no-ops, not fall
     // through into runtime-side asserts or extra reporting.
-    L0TaskArgs alloc_args;
+    CoreTaskArgs alloc_args;
     (void)alloc_tensors(alloc_args);
 
-    Tensor dummy = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
+    ChipTensor dummy = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
     uint32_t indices[1] = {0};
     (void)get_tensor_data<uint64_t>(dummy, 0, indices);
     set_tensor_data<uint64_t>(dummy, 0, indices, 1U);

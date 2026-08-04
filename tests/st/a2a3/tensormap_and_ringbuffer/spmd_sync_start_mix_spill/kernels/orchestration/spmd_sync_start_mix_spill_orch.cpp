@@ -49,7 +49,8 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 2,
@@ -69,8 +70,8 @@ static MixedKernels mix_kernels() {
     return mk;
 }
 
-static PTO2TaskId submit_aiv_producer(const Tensor &out, int16_t block_num, int64_t base_cl) {
-    L0TaskArgs args;
+static PTO2TaskId submit_aiv_producer(const ChipTensor &out, int16_t block_num, int64_t base_cl) {
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.add_scalar(PRODUCER_SPIN_ITERS);
@@ -79,8 +80,8 @@ static PTO2TaskId submit_aiv_producer(const Tensor &out, int16_t block_num, int6
     return rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args).task_id();
 }
 
-static void submit_mix_sync_consumer(const Tensor &out, int16_t block_num, int64_t base_cl, PTO2TaskId dep) {
-    L0TaskArgsWithDeps<4> args;
+static void submit_mix_sync_consumer(const ChipTensor &out, int16_t block_num, int64_t base_cl, PTO2TaskId dep) {
+    CoreTaskArgsWithDeps<4> args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.add_scalar(0);  // consumer does not spin
@@ -90,9 +91,9 @@ static void submit_mix_sync_consumer(const Tensor &out, int16_t block_num, int64
     rt_submit_task(mix_kernels(), args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
-    const Tensor &layout = orch_args.tensor(1).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &layout = orch_args.tensor(1).ref();
 
     // The spill this case exercises needs the producer on EVERY AIV core and the
     // consumer on EVERY cluster, so both widths are the device's own counts

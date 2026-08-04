@@ -32,7 +32,7 @@
  * All-primitive interface (no runtime types in platform header):
  *   - task_id passed as raw uint64 (PTO2TaskId::raw)
  *   - tensor data passed via opaque void* pointers (memcpy'd into the
- *     DEP_GEN_TENSOR_SIZE-byte slot; static_asserted against sizeof(Tensor)
+ *     DEP_GEN_TENSOR_SIZE-byte slot; static_asserted against sizeof(ChipTensor)
  *     in the .cpp)
  *   - explicit_deps passed as uint64*
  *
@@ -56,7 +56,7 @@ extern "C" bool is_dep_gen_enabled();
  * the per-thread ready_queue when buffers fill or on flush. Must be called by
  * aicpu_executor.cpp before any dep_gen_aicpu_record_submit() can fire.
  *
- * Mirrors l2_swimlane_aicpu_set_orch_thread_idx().
+ * Mirrors chip_swimlane_aicpu_set_orch_thread_idx().
  */
 void dep_gen_aicpu_set_orch_thread_idx(int thread_idx);
 
@@ -85,9 +85,9 @@ void dep_gen_aicpu_init();
  * free_queue / ready_queue protocol when the current buffer cannot hold the
  * full chain. No-op if dep_gen is disabled.
  *
- * Tensor handling: for slot i, if tensor_ptrs[i] is non-null, its first
+ * ChipTensor handling: for slot i, if tensor_ptrs[i] is non-null, its first
  * DEP_GEN_TENSOR_SIZE bytes are memcpy'd into record.tensors[i]. If null
- * (e.g. arg_types[i] == OUTPUT, where the Tensor is materialized later by
+ * (e.g. arg_types[i] == OUTPUT, where the ChipTensor is materialized later by
  * the runtime), the slot is left zeroed. Replay decides what to do with
  * each slot based on arg_types[i].
  *
@@ -99,7 +99,7 @@ void dep_gen_aicpu_init();
  * @param task_id_raw         PTO2TaskId::raw (the assigned task_id for this submit)
  * @param in_manual_scope     true iff the submit happened inside a manual scope
  * @param tensor_count        Number of slots in tensor_ptrs / arg_types (≤ CORE_MAX_TENSOR_ARGS)
- * @param tensor_ptrs         Per-slot Tensor pointer (nullptr to skip the slot)
+ * @param tensor_ptrs         Per-slot ChipTensor pointer (nullptr to skip the slot)
  * @param arg_types           Per-slot TensorArgType (interpreted as raw byte)
  * @param explicit_dep_count  Number of explicit_deps — no static cap; truncated only when the
  *                            chain would not fit in a single DepGenBuffer

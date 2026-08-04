@@ -13,7 +13,7 @@
  * PTO Runtime2 - TensorMap Interface
  *
  * TensorMap provides producer lookup for dependency discovery:
- * - Maps Tensor -> producer task ID
+ * - Maps ChipTensor -> producer task ID
  * - Used by pto_submit_task() to find dependencies
  *
  * Key design features:
@@ -50,7 +50,7 @@
 
 // Overlap geometry types. Relocated here from tensor.h: they are used only by
 // the runtime's overlap-detection / dependency machinery, not by the
-// wire/host-facing Tensor definition.
+// wire/host-facing ChipTensor definition.
 enum class OverlapStatus {
     NO_OVERLAP,
     COVERED,
@@ -99,10 +99,10 @@ extern uint64_t g_insert_count;
 /**
  * TensorMap entry structure — cache-line optimized for lookup
  *
- * Cache line 1 (64B, lookup hot path) mirrors Tensor cache line 1 byte-for-byte
+ * Cache line 1 (64B, lookup hot path) mirrors ChipTensor cache line 1 byte-for-byte
  * from byte 16 onward, so that `memcpy(this, &tensor, 64)` populates everything
  * we need for overlap checks. Bytes [0, 16) carry entry-only fields (hash
- * bucket head + chain pointer) that overlap Tensor::buffer (addr in [0, 8) is
+ * bucket head + chain pointer) that overlap ChipTensor::buffer (addr in [0, 8) is
  * the hash key, size in [8, 16) is unused by the entry — we repurpose it for
  * `next_in_bucket`).
  *
@@ -120,21 +120,22 @@ extern uint64_t g_insert_count;
  * When both entry & probe are `is_contiguous && start_offset == 0`, the overlap
  * check derives `extent_elem = prod(shapes)` from cache line 1 alone.
  *
- * Entry size: 128B (2 cache lines), matches Tensor.
+ * Entry size: 128B (2 cache lines), matches ChipTensor.
  */
 struct alignas(64) PTO2TensorMapEntry {
-    // === Cache line 1 (64B) — lookup hot path; mirrors Tensor line 1 from byte 16 ===
-    uint64_t buffer_addr;                // 8B [0, 8):   tensor base address (hash key, mirrors Tensor::buffer.addr)
-    PTO2TensorMapEntry *next_in_bucket;  // 8B [8, 16):  next entry in hash bucket chain (overlays Tensor::buffer.size)
-    PTO2TaskId producer_task_id;         // 8B [16,24):  mirrors Tensor::owner_task_id slot
-    uint64_t start_offset;               // 8B [24,32):  mirrors Tensor::start_offset (element offset)
-    int32_t version;                     // 4B [32,36):  mirrors Tensor::version
-    uint32_t ndims;                      // 4B [36,40):  mirrors Tensor::ndims
-    DataType dtype;                      // 1B [40,41):  mirrors Tensor::dtype
-    bool manual_dep;                     // 1B [41,42):  mirrors Tensor::manual_dep
-    bool is_contiguous;                  // 1B [42,43):  mirrors Tensor::is_contiguous
-    uint8_t __padding1__;                // 1B [43,44):  mirrors Tensor padding
-    uint32_t shapes[MAX_TENSOR_DIMS];    // 20B [44,64): mirrors Tensor::shapes
+    // === Cache line 1 (64B) — lookup hot path; mirrors ChipTensor line 1 from byte 16 ===
+    uint64_t buffer_addr;  // 8B [0, 8):   tensor base address (hash key, mirrors ChipTensor::buffer.addr)
+    PTO2TensorMapEntry
+        *next_in_bucket;          // 8B [8, 16):  next entry in hash bucket chain (overlays ChipTensor::buffer.size)
+    PTO2TaskId producer_task_id;  // 8B [16,24):  mirrors ChipTensor::owner_task_id slot
+    uint64_t start_offset;        // 8B [24,32):  mirrors ChipTensor::start_offset (element offset)
+    int32_t version;              // 4B [32,36):  mirrors ChipTensor::version
+    uint32_t ndims;               // 4B [36,40):  mirrors ChipTensor::ndims
+    DataType dtype;               // 1B [40,41):  mirrors ChipTensor::dtype
+    bool manual_dep;              // 1B [41,42):  mirrors ChipTensor::manual_dep
+    bool is_contiguous;           // 1B [42,43):  mirrors ChipTensor::is_contiguous
+    uint8_t __padding1__;         // 1B [43,44):  mirrors ChipTensor padding
+    uint32_t shapes[MAX_TENSOR_DIMS];  // 20B [44,64): mirrors ChipTensor::shapes
 
     // === Cache line 2 (64B) — chain manipulation + non-contiguous overlap data ===
     PTO2TensorMapEntry *prev_in_bucket;  // 8B [64, 72)
@@ -142,25 +143,25 @@ struct alignas(64) PTO2TensorMapEntry {
     PTO2TensorMapEntry *prev_in_task;    // 8B [80, 88)
     int32_t bucket_index;                // 4B [88, 92): -1 when unlinked
     uint32_t __padding2__;               // 4B [92, 96)
-    uint64_t extent_elem_cache;          // 8B [96,104): non-contiguous extent (mirrors Tensor)
-    uint32_t strides[MAX_TENSOR_DIMS];   // 20B [104,124): element strides, mirrors Tensor::strides
+    uint64_t extent_elem_cache;          // 8B [96,104): non-contiguous extent (mirrors ChipTensor)
+    uint32_t strides[MAX_TENSOR_DIMS];   // 20B [104,124): element strides, mirrors ChipTensor::strides
     uint8_t __padding3__[4];             // 4B [124,128)
 
     /**
-     * Copy overlap-relevant fields from a Tensor into this entry.
+     * Copy overlap-relevant fields from a ChipTensor into this entry.
      *
-     * 64B memcpy of Tensor cache line 1 populates buffer_addr (byte [0,8)),
+     * 64B memcpy of ChipTensor cache line 1 populates buffer_addr (byte [0,8)),
      * producer_task_id, start_offset, version, ndims, dtype, manual_dep,
-     * is_contiguous and shapes[]. Byte [8,16) holds Tensor::buffer.size in
+     * is_contiguous and shapes[]. Byte [8,16) holds ChipTensor::buffer.size in
      * the source and gets written into next_in_bucket; that's harmless
      * because link_entry() overwrites next_in_bucket immediately after.
      *
      * Cache line 2 (stride / extent_elem_cache) is derived from line 1 when
      * the source is canonically contiguous (is_contiguous && start_offset==0),
-     * so the producer Tensor's cache line 2 stays cold during insert. Only
+     * so the producer ChipTensor's cache line 2 stays cold during insert. Only
      * non-contiguous producers pay one extra line 2 read.
      */
-    void copy_from_tensor(const Tensor &tensor) {
+    void copy_from_tensor(const ChipTensor &tensor) {
         memcpy(this, &tensor, 64);
         if (tensor.is_contiguous && tensor.start_offset == 0) {
             uint64_t numel = 1;
@@ -229,7 +230,7 @@ struct alignas(64) PTO2TensorMapEntry {
      * COVERED is returned when `input` completely contains `entry` per-dim
      * — dep_compute uses this to retire the now-redundant entry.
      */
-    OverlapStatus check_overlap(const Tensor &input) const {
+    OverlapStatus check_overlap(const ChipTensor &input) const {
         debug_assert(input.buffer.addr == buffer_addr);
         debug_assert(input.version >= version);
         if (input.version > version) {
@@ -290,7 +291,7 @@ struct alignas(64) PTO2TensorMapEntry {
         const uint64_t elem_size = get_element_size(dtype);
         if (elem_size == 0) return OverlapStatus::OTHER;
         const uint64_t numel_storage = input.buffer.size / elem_size;
-        const uint32_t stride0 = strides[0];  // > 0 by Tensor invariant
+        const uint32_t stride0 = strides[0];  // > 0 by ChipTensor invariant
         if (numel_storage % stride0 != 0) return OverlapStatus::OTHER;
         ref_shapes[0] = static_cast<uint32_t>(numel_storage / stride0);
 
@@ -334,15 +335,15 @@ struct alignas(64) PTO2TensorMapEntry {
 };
 
 static_assert(sizeof(PTO2TensorMapEntry) == 128, "TensorMapEntry must be exactly 2 cache lines (128 bytes)");
-static_assert(offsetof(PTO2TensorMapEntry, buffer_addr) == offsetof(Tensor, buffer.addr));
-static_assert(offsetof(PTO2TensorMapEntry, producer_task_id) == offsetof(Tensor, owner_task_id));
-static_assert(offsetof(PTO2TensorMapEntry, start_offset) == offsetof(Tensor, start_offset));
-static_assert(offsetof(PTO2TensorMapEntry, version) == offsetof(Tensor, version));
-static_assert(offsetof(PTO2TensorMapEntry, ndims) == offsetof(Tensor, ndims));
-static_assert(offsetof(PTO2TensorMapEntry, dtype) == offsetof(Tensor, dtype));
-static_assert(offsetof(PTO2TensorMapEntry, manual_dep) == offsetof(Tensor, manual_dep));
-static_assert(offsetof(PTO2TensorMapEntry, is_contiguous) == offsetof(Tensor, is_contiguous));
-static_assert(offsetof(PTO2TensorMapEntry, shapes) == offsetof(Tensor, shapes));
+static_assert(offsetof(PTO2TensorMapEntry, buffer_addr) == offsetof(ChipTensor, buffer.addr));
+static_assert(offsetof(PTO2TensorMapEntry, producer_task_id) == offsetof(ChipTensor, owner_task_id));
+static_assert(offsetof(PTO2TensorMapEntry, start_offset) == offsetof(ChipTensor, start_offset));
+static_assert(offsetof(PTO2TensorMapEntry, version) == offsetof(ChipTensor, version));
+static_assert(offsetof(PTO2TensorMapEntry, ndims) == offsetof(ChipTensor, ndims));
+static_assert(offsetof(PTO2TensorMapEntry, dtype) == offsetof(ChipTensor, dtype));
+static_assert(offsetof(PTO2TensorMapEntry, manual_dep) == offsetof(ChipTensor, manual_dep));
+static_assert(offsetof(PTO2TensorMapEntry, is_contiguous) == offsetof(ChipTensor, is_contiguous));
+static_assert(offsetof(PTO2TensorMapEntry, shapes) == offsetof(ChipTensor, shapes));
 static_assert(
     offsetof(PTO2TensorMapEntry, prev_in_bucket) == 64, "TensorMapEntry must be exactly 2 cache lines (128 bytes)"
 );
@@ -502,11 +503,11 @@ struct PTO2TensorMap {
      * the callback to call remove_entry() on the current entry: next_in_bucket
      * is latched before invocation.
      *
-     * @param tensor    Tensor to look up
+     * @param tensor    ChipTensor to look up
      * @param on_match  Callback invoked for each overlapping entry
      */
     template <typename Fn>
-    void lookup(const Tensor &tensor, Fn &&on_match) {
+    void lookup(const ChipTensor &tensor, Fn &&on_match) {
         uint32_t bucket_index = hash(tensor.buffer.addr);
         PTO2TensorMapEntry *cur_entry = buckets[bucket_index];
 
@@ -566,10 +567,10 @@ struct PTO2TensorMap {
      * Allocates from ring buffer pool, may overwrite stale entries.
      * Inserts at head of hash bucket chain (maintains task_id ordering).
      *
-     * @param tensor            Tensor produced
+     * @param tensor            ChipTensor produced
      * @param producer_task_id  Task ID of producer
      */
-    void insert(const Tensor &tensor, PTO2TaskId producer_task_id) {
+    void insert(const ChipTensor &tensor, PTO2TaskId producer_task_id) {
         PTO2TensorMapEntry *entry = new_entry();
         entry->copy_from_tensor(tensor);
         link_entry(entry, tensor.buffer.addr, producer_task_id);

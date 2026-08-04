@@ -183,16 +183,16 @@ TEST(TaskTimingSlots, MarkersFlagsIndependent) {
     EXPECT_EQ(m.timing_slot(), 9);
 }
 
-// --- L0TaskArgs setter: bounds + sentinel ---------------------------------
+// --- CoreTaskArgs setter: bounds + sentinel ---------------------------------
 
 TEST(TaskTimingSlots, ArgDefaultsUntagged) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     EXPECT_EQ(args.task_timing_slot(), TASK_TIMING_SLOT_NONE);
     EXPECT_FALSE(args.has_error);
 }
 
 TEST(TaskTimingSlots, ArgSetValidSlot) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.set_task_timing_slot(0);
     EXPECT_EQ(args.task_timing_slot(), 0);
     args.set_task_timing_slot(15);
@@ -202,7 +202,7 @@ TEST(TaskTimingSlots, ArgSetValidSlot) {
 
 TEST(TaskTimingSlots, ArgRejectsOutOfRange) {
     for (int bad : {-1, 16, 100}) {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.set_task_timing_slot(bad);
         EXPECT_TRUE(args.has_error) << "slot " << bad;
         // Rejected value must not be recorded.
@@ -211,7 +211,7 @@ TEST(TaskTimingSlots, ArgRejectsOutOfRange) {
 }
 
 TEST(TaskTimingSlots, ArgClearResetsSlot) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.set_task_timing_slot(5);
     args.clear();
     EXPECT_EQ(args.task_timing_slot(), TASK_TIMING_SLOT_NONE);

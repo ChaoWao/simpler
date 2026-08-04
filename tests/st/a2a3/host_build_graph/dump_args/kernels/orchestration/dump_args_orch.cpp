@@ -31,20 +31,21 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &f = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &f = orch_args.tensor(2).ref();
 
     // t0: f = a + b
-    L0TaskArgs p0;
+    CoreTaskArgs p0;
     p0.add_input(a);
     p0.add_input(b);
     p0.add_output(f);
@@ -56,7 +57,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
         uint64_t u64;
     } sconv;
     sconv.f32 = 1.0f;
-    L0TaskArgs p1;
+    CoreTaskArgs p1;
     p1.add_inout(f);
     p1.add_scalar(sconv.u64);
     rt_submit_aiv_task(FUNC_ADD_SCALAR_INPLACE, p1);

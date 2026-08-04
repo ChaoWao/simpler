@@ -11,9 +11,9 @@
 
 #include "aicore/aicore.h"
 #include "aicore/aicore_profiling_state.h"
-#include "aicore/l2_swimlane_collector_aicore.h"
+#include "aicore/chip_swimlane_collector_aicore.h"
 #include "aicore/pmu_collector_aicore.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"  // Register-based communication
 #include "common/pmu_profiling.h"
 #include "pto2_dispatch_payload.h"
@@ -103,15 +103,15 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // AICore kernel entry from KernelArgs::regs[physical_core_id]), so
     // they are safe to cache here.
     uint32_t profiling_flag = get_aicore_profiling_flag();
-    bool l2_swimlane_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_L2_SWIMLANE);
+    bool chip_swimlane_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE);
     bool dump_args_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     bool pmu_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_PMU);
-    // Per-core L2SwimlaneActiveHead channel — lazy-resolved on first task; the
-    // table slot AICPU populates inside `l2_swimlane_aicpu_init` runs
+    // Per-core ChipSwimlaneActiveHead channel — lazy-resolved on first task; the
+    // table slot AICPU populates inside `chip_swimlane_aicpu_init` runs
     // concurrently with kernel entry, so we cannot deref at startup. The
     // first dispatch is proof AICPU init is done.
-    __gm__ L2SwimlaneActiveHead *l2_swimlane_head = nullptr;
-    L2SwimlaneAicoreLocalState l2_swimlane_local = {nullptr, UINT32_MAX, 0};
+    __gm__ ChipSwimlaneActiveHead *chip_swimlane_head = nullptr;
+    ChipSwimlaneAicoreLocalState chip_swimlane_local = {nullptr, UINT32_MAX, 0};
     __gm__ PmuAicoreRing *pmu_ring = pmu_enabled ? get_aicore_pmu_ring() : nullptr;
     uint64_t pmu_reg_base = pmu_enabled ? get_aicore_pmu_reg_base() : 0;
 
@@ -146,13 +146,13 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             //
             // Early-dispatch (src_payload != 0): receive_time stays at pickup —
             // before the doorbell wait — so it may precede the producer's end.
-            uint64_t receive_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
+            uint64_t receive_time = chip_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             uint32_t task_id = reg_val;  // Decode: register holds task_id directly
 
             // First-task lazy resolve of the rotation channel.
-            if (l2_swimlane_enabled && l2_swimlane_head == nullptr) {
-                l2_swimlane_head = get_l2_swimlane_aicore_head();
+            if (chip_swimlane_enabled && chip_swimlane_head == nullptr) {
+                chip_swimlane_head = get_chip_swimlane_aicore_head();
             }
 
             // Select dual-buffer slot: same bit as AICPU used when writing payload
@@ -206,14 +206,15 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // Bind this task to the currently-published L2 buffer generation
             // before ACK makes progress visible to AICPU. The PMU staging ring
             // is stable for the full run and does not participate in rotation.
-            __gm__ L2SwimlaneAicoreTaskRecord *l2_swimlane_record = nullptr;
-            if (l2_swimlane_enabled) {
-                l2_swimlane_record = l2_swimlane_aicore_reserve_task_record(l2_swimlane_head, &l2_swimlane_local);
+            __gm__ ChipSwimlaneAicoreTaskRecord *chip_swimlane_record = nullptr;
+            if (chip_swimlane_enabled) {
+                chip_swimlane_record =
+                    chip_swimlane_aicore_reserve_task_record(chip_swimlane_head, &chip_swimlane_local);
             }
 
             write_reg(RegId::COND, MAKE_ACK_VALUE(task_id));
 
-            uint64_t start_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
+            uint64_t start_time = chip_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             if (pmu_enabled) {
                 pmu_aicore_begin();
@@ -223,7 +224,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             execute_task(exec_payload);
 
             // Keep start_time -> end_time scoped to AICore execution.
-            uint64_t end_time = l2_swimlane_enabled ? get_sys_cnt_aicore() : 0;
+            uint64_t end_time = chip_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             if (pmu_enabled) {
                 pmu_aicore_end();
@@ -243,10 +244,10 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // the PTO2 identity (already in AICore cache from the dispatch
             // payload); reg_task_id is the per-core dispatch token AICore just
             // read. Host uses reg_task_id as join key vs the AICPU stream.
-            if (l2_swimlane_enabled) {
+            if (chip_swimlane_enabled) {
                 uint64_t task_token_raw = exec_payload->local_context.async_ctx.task_token.raw;
-                l2_swimlane_aicore_commit_task_record(
-                    l2_swimlane_record, task_token_raw, task_id, receive_time, start_time, end_time
+                chip_swimlane_aicore_commit_task_record(
+                    chip_swimlane_record, task_token_raw, task_id, receive_time, start_time, end_time
                 );
             }
         }

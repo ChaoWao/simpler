@@ -70,7 +70,7 @@ struct OrchestratorFixture : public ::testing::Test {
     // Helper: build a TaskArgs whose only tensor has the given (data, tag).
     static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
         TaskArgs a;
-        Tensor t{};
+        ChipTensor t{};
         t.buffer.addr = data_ptr;
         t.ndims = 1;
         t.shapes[0] = 1;
@@ -312,7 +312,7 @@ TEST_F(OrchestratorFixture, OutputAutoAllocsFromHeapRing) {
     // data pointer that falls inside the allocator's mmap'd region, and
     // the TensorMap routes that pointer to the slot.
     TaskArgs args;
-    Tensor t{};
+    ChipTensor t{};
     t.buffer.addr = 0;
     t.ndims = 1;
     t.shapes[0] = 1024;  // 1024 * 1 byte = 1024, one aligned slab
@@ -334,7 +334,7 @@ TEST_F(OrchestratorFixture, OutputAutoAllocsFromHeapRing) {
 
 TEST_F(OrchestratorFixture, RemoteOutputSidecarSkipsLocalAutoAllocAndRegistersRemoteKey) {
     TaskArgs args;
-    Tensor t{};
+    ChipTensor t{};
     t.buffer.addr = 0;
     t.ndims = 1;
     t.shapes[0] = 1024;
@@ -370,7 +370,7 @@ TEST_F(OrchestratorFixture, RemoteBarePayloadFailsBeforeSlotCommit) {
 
 TEST_F(OrchestratorFixture, RemoteSidecarRejectsNonOwnerEligibleEndpointWithoutImport) {
     TaskArgs args;
-    Tensor t{};
+    ChipTensor t{};
     t.buffer.addr = 0;
     t.ndims = 1;
     t.shapes[0] = 1;
@@ -391,7 +391,7 @@ TEST_F(OrchestratorFixture, RemoteSidecarRejectsNonOwnerEligibleEndpointWithoutI
 
 TEST_F(OrchestratorFixture, RemoteInputSidecarUsesRemoteTensorMapKey) {
     TaskArgs output_args;
-    Tensor out{};
+    ChipTensor out{};
     out.buffer.addr = 0;
     out.ndims = 1;
     out.shapes[0] = 1;
@@ -413,7 +413,7 @@ TEST_F(OrchestratorFixture, RemoteInputSidecarUsesRemoteTensorMapKey) {
     ASSERT_EQ(ready, producer.task_slot);
 
     TaskArgs input_args;
-    Tensor in = out;
+    ChipTensor in = out;
     input_args.add_tensor(in, TensorArgType::INPUT);
     auto consumer = orch.submit_next_level(C(43), input_args, cfg, 3, {3}, output_sidecar);
 
@@ -988,7 +988,7 @@ TEST(DepthOneAdmission, ARetiringRunAlwaysWakesTheOneWaiterItUnblocks) {
         RunId first = orch.begin_run();
         CallConfig cfg;
         TaskArgs args;
-        Tensor t{};
+        ChipTensor t{};
         t.buffer.addr = 0xD000 + static_cast<uint64_t>(round);
         t.ndims = 1;
         t.shapes[0] = 1;
@@ -1078,7 +1078,7 @@ TEST(SubmitFailure, ASlotWhoseSubmitThrewIsFullyReclaimedByCancellation) {
 
     CallConfig cfg;
     TaskArgs args;
-    Tensor t{};
+    ChipTensor t{};
     t.buffer.addr = 0xE100;
     t.ndims = 1;
     t.shapes[0] = 1;
@@ -1194,7 +1194,7 @@ TEST_F(OrchestratorFixture, SubmitRegistrationFailureReleasesTheUnownedHeapRingS
     });
 
     TaskArgs args;
-    Tensor output{};
+    ChipTensor output{};
     output.buffer.addr = 0;
     output.ndims = 1;
     output.shapes[0] = 16;
@@ -1241,13 +1241,13 @@ TEST_F(OrchestratorFixture, SubmitOutputJournalFailurePreservesThePreviousOwnerA
     });
 
     TaskArgs replacement;
-    Tensor first{};
+    ChipTensor first{};
     first.buffer.addr = first_key_addr;
     first.ndims = 1;
     first.shapes[0] = 1;
     first.dtype = DataType::UINT8;
     replacement.add_tensor(first, TensorArgType::OUTPUT_EXISTING);
-    Tensor second = first;
+    ChipTensor second = first;
     second.buffer.addr = previous_key_addr;
     replacement.add_tensor(second, TensorArgType::OUTPUT_EXISTING);
 

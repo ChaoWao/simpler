@@ -85,6 +85,6 @@ that block never exists in this runtime.
 ## Related Tools
 
 - `python -m simpler_setup.tools.strace_timing` summarizes host/device run markers.
-- `simpler_setup.tools.l0_swimlane` reconstructs intra-core execution from dumps.
+- `simpler_setup.tools.core_swimlane` reconstructs intra-core execution from dumps.
 - The repository's DFX analysis workflow combines scheduler timing with
   dependency and task records.

@@ -18,7 +18,7 @@ from __future__ import annotations
 import ctypes
 
 import torch
-from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, Tensor, TensorArgType
+from simpler.task_interface import ChipTensor, CommBufferSpec, DataType, TaskArgs, TensorArgType
 
 from simpler_setup import Tensor as STensor
 from simpler_setup.scene_test import TaskArgsBuilder
@@ -127,7 +127,7 @@ def allreduce_orch_fn(orch, callables, task_args, config):
             chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
             chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING)
             chip_args.add_tensor(
-                Tensor.make(
+                ChipTensor.make(
                     data=domain.buffer_ptrs["scratch"],
                     shapes=(float_elems,),
                     dtype=DataType.FLOAT32,
@@ -196,7 +196,7 @@ def generic_collective_orch_fn(
             chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"in_{i}")), TensorArgType.INPUT)
             chip_args.add_tensor(make_tensor_arg(getattr(task_args, f"out_{i}")), TensorArgType.OUTPUT_EXISTING)
             chip_args.add_tensor(
-                Tensor.make(
+                ChipTensor.make(
                     data=domain.buffer_ptrs["scratch"],
                     shapes=(float_elems,),
                     dtype=DataType.FLOAT32,

@@ -12,10 +12,10 @@ How this repo organizes Python packages, the build system, and example / test di
 
 `simpler` exposes `Worker` and the `task_interface` submodule lazily (PEP 562
 `__getattr__`), so `from simpler import Worker` works while `import simpler`
-still costs nothing and does not require the `_task_interface` extension. Note
-that `simpler.task_interface.Tensor` (a device tensor descriptor) and
-`simpler_setup.Tensor` (a scene-test arg spec `NamedTuple`) are **different
-types with the same name** — do not flatten them into one namespace.
+still costs nothing and does not require the `_task_interface` extension.
+`simpler.task_interface.ChipTensor` is the GM-address-bearing device descriptor
+a `ChipWorker` consumes; `simpler_setup.Tensor` is the address-free scene-test
+arg spec `NamedTuple`. They are separate types in separate namespaces.
 
 The 4 files `kernel_compiler.py`, `runtime_compiler.py`, `toolchain.py`, `elf_parser.py` exist in **both** `python/simpler/` and `simpler_setup/` during transition. The `simpler_setup/` copies are authoritative; the `python/simpler/` copies are excluded from wheel via `pyproject.toml::wheel.exclude`. New code must `import` from `simpler_setup.*`, not `simpler.*`, for these four.
 

@@ -365,7 +365,7 @@ inline void bind_worker(nb::module_ &m) {
                 return self.alloc(shape, dtype);
             },
             nb::arg("shape"), nb::arg("dtype"),
-            "Allocate an intermediate Tensor from the orchestrator's MAP_SHARED "
+            "Allocate an intermediate ChipTensor from the orchestrator's MAP_SHARED "
             "pool (visible to forked child workers). Lifetime: until the next Worker.run() call."
         )
         .def(
@@ -784,14 +784,14 @@ inline void bind_worker(nb::module_ &m) {
             "Drive one NEXT_LEVEL chip child through CTRL_COMM_INIT (lazy base comm init)."
         )
         .def(
-            "control_l3_l2_region_create", &Worker::control_l3_l2_region_create, nb::arg("worker_id"),
+            "control_worker_chip_region_create", &Worker::control_worker_chip_region_create, nb::arg("worker_id"),
             nb::arg("request_shm_name"), nb::arg("reply_shm_name"), nb::call_guard<nb::gil_scoped_release>(),
-            "Drive one NEXT_LEVEL chip child through CTRL_L3_L2_REGION_CREATE."
+            "Drive one NEXT_LEVEL chip child through CTRL_WORKER_CHIP_REGION_CREATE."
         )
         .def(
-            "control_l3_l2_region_release", &Worker::control_l3_l2_region_release, nb::arg("worker_id"),
+            "control_worker_chip_region_release", &Worker::control_worker_chip_region_release, nb::arg("worker_id"),
             nb::arg("region_id"), nb::call_guard<nb::gil_scoped_release>(),
-            "Drive one NEXT_LEVEL chip child through CTRL_L3_L2_REGION_RELEASE."
+            "Drive one NEXT_LEVEL chip child through CTRL_WORKER_CHIP_REGION_RELEASE."
         );
 
     m.attr("DEFAULT_HEAP_RING_SIZE") = static_cast<uint64_t>(DEFAULT_HEAP_RING_SIZE);

@@ -25,7 +25,7 @@ choice:
 | API | Shape | Suited to |
 | --- | ----- | --------- |
 | Primitive | `PTO2TaskId deps[] = {...}; params.set_dependencies(deps, n);` | Codegen, and any task whose dependency set is fixed and known at the call site. The caller owns the buffer; the `Arg` stores `(ptr, count)`. |
-| Convenience | `L0TaskArgsWithDeps<> params; params.add_dep(id);` | Hand-written orchestration where the set is assembled conditionally across branches. The wrapper owns a stack-sized buffer and binds it on submit. |
+| Convenience | `CoreTaskArgsWithDeps<> params; params.add_dep(id);` | Hand-written orchestration where the set is assembled conditionally across branches. The wrapper owns a stack-sized buffer and binds it on submit. |
 
 `SF` and `PV` use the primitive form (one predecessor each). `UP` uses the
 convenience form, because its edges are conditional: always the `PV` output,

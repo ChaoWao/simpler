@@ -88,7 +88,7 @@ implementations.
 
 - **Collectives are single-host, multi-card.** Both backends state this
   explicitly; there is no cross-node collective path today.
-- **`--enable-l2-swimlane` does not work on L3.** It is rejected up front. To
+- **`--enable-chip-swimlane` does not work on L3.** It is rejected up front. To
   get a swimlane, scope the run to one chip with `--level 2`.
 - **Multi-host (L4) is not usable for data movement yet.** The control plane is
   real — you can register a remote worker, and the remote side builds a genuine

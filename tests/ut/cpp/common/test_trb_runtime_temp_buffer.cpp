@@ -198,8 +198,8 @@ HostApi make_host_api(bool with_temporary_buffer = true) {
     };
 }
 
-Tensor make_tensor(std::vector<uint8_t> &storage, bool child_memory = false) {
-    Tensor tensor;
+ChipTensor make_tensor(std::vector<uint8_t> &storage, bool child_memory = false) {
+    ChipTensor tensor;
     uint32_t shape[1] = {static_cast<uint32_t>(storage.size())};
     tensor.init_external(storage.data(), storage.size(), shape, 1, DataType::UINT8, 0, false, child_memory ? 1 : 0);
     return tensor;

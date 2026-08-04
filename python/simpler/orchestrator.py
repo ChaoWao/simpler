@@ -46,12 +46,12 @@ from .callable_identity import CallableHandle
 from .task_interface import (
     CallConfig,
     ChipCallable,
+    ChipTensor,
     CommBufferSpec,
     CommDomainHandle,
     DataType,
     RemoteAddressSpace,
     TaskArgs,
-    Tensor,
     _empty_remote_sidecar_for,
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
@@ -516,25 +516,25 @@ class Orchestrator:
         """Collective release.  Equivalent to ``handle.release()``."""
         handle.release()
 
-    def create_l3_l2_region(self, *, worker_id: int, payload_bytes: int, counter_bytes: int):
+    def create_worker_chip_region(self, *, worker_id: int, payload_bytes: int, counter_bytes: int):
         """Create an L3-L2 communication region on one NEXT_LEVEL chip worker."""
         if self._worker is None:
-            raise RuntimeError("create_l3_l2_region requires an Orchestrator bound to a Worker")
-        with self._control_admission("create_l3_l2_region"):
-            return self._worker._create_l3_l2_region(int(worker_id), int(payload_bytes), int(counter_bytes))
+            raise RuntimeError("create_worker_chip_region requires an Orchestrator bound to a Worker")
+        with self._control_admission("create_worker_chip_region"):
+            return self._worker._create_worker_chip_region(int(worker_id), int(payload_bytes), int(counter_bytes))
 
-    def create_l3_l2_queue(self, *, worker_id: int, depth: int, input_arena_bytes: int, output_arena_bytes: int):
+    def create_worker_chip_queue(self, *, worker_id: int, depth: int, input_arena_bytes: int, output_arena_bytes: int):
         """Create an L3-L2 message queue backed by one L3-L2 communication region."""
         if self._worker is None:
-            raise RuntimeError("create_l3_l2_queue requires an Orchestrator bound to a Worker")
-        from .l3_l2_message_queue import create_l3_l2_queue  # noqa: PLC0415
+            raise RuntimeError("create_worker_chip_queue requires an Orchestrator bound to a Worker")
+        from .worker_chip_message_queue import create_worker_chip_queue  # noqa: PLC0415
 
         # Reserved across the whole build, not just the region creation it
         # nests: the descriptor writes that follow are device effects too. The
-        # reservation is re-entrant, so the inner create_l3_l2_region joins this
+        # reservation is re-entrant, so the inner create_worker_chip_region joins this
         # one rather than deadlocking on it.
-        with self._control_admission("create_l3_l2_queue"):
-            return create_l3_l2_queue(
+        with self._control_admission("create_worker_chip_queue"):
+            return create_worker_chip_queue(
                 self,
                 worker_id=int(worker_id),
                 depth=int(depth),
@@ -667,10 +667,10 @@ class Orchestrator:
                 self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
                 self._o.copy_from(wid, int(dst), s, int(size))
 
-    def alloc(self, shape: Sequence[int], dtype: DataType) -> Tensor:
+    def alloc(self, shape: Sequence[int], dtype: DataType) -> ChipTensor:
         """Allocate a runtime-managed intermediate buffer.
 
-        Returns a ``Tensor`` whose backing memory comes from a
+        Returns a ``ChipTensor`` whose backing memory comes from a
         per-allocation MAP_SHARED mmap (visible to forked child workers).
         Lifetime is bound to a synthetic task slot that the Orchestrator
         treats as the buffer's producer; the buffer is freed when all
@@ -682,7 +682,7 @@ class Orchestrator:
         """
         tensor = self._o.alloc(list(shape), dtype)
         if self._worker is not None:
-            self._worker._register_l3_l2_orch_comm_host_buffer(tensor)
+            self._worker._register_worker_chip_orch_comm_host_buffer(tensor)
         return tensor
 
     # ------------------------------------------------------------------

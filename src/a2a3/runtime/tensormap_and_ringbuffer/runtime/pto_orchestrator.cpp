@@ -41,10 +41,12 @@
 #include "aicpu/args_dump_aicpu.h"
 #endif
 
-// Verify the captured Tensor blob size in DepGenRecord matches the runtime
-// Tensor layout. The platform header defines DEP_GEN_TENSOR_SIZE without
+// Verify the captured ChipTensor blob size in DepGenRecord matches the runtime
+// ChipTensor layout. The platform header defines DEP_GEN_TENSOR_SIZE without
 // including runtime/tensor.h, so this check lives at the orch callsite.
-static_assert(sizeof(Tensor) == DEP_GEN_TENSOR_SIZE, "DepGenRecord::tensors slot size out of sync with sizeof(Tensor)");
+static_assert(
+    sizeof(ChipTensor) == DEP_GEN_TENSOR_SIZE, "DepGenRecord::tensors slot size out of sync with sizeof(ChipTensor)"
+);
 // DEP_GEN_MAX_EXPLICIT_DEPS is a diagnostic-side capture cap only; the runtime
 // imposes no hard cap on explicit dep count. If a submit exceeds this cap,
 // dep_gen_aicpu_record_submit() logs and truncates — runtime correctness is
@@ -55,7 +57,7 @@ static_assert(sizeof(Tensor) == DEP_GEN_TENSOR_SIZE, "DepGenRecord::tensors slot
 // link these no-op stubs so the runtime translation unit is self-contained.
 // Visibility is hidden so the HOST .so doesn't export them into the global
 // dynamic symbol table where they'd shadow the AICPU .so's strong symbols
-// (same pattern as get_sys_cnt_aicpu / l2_swimlane_aicpu_record_orch_phase below).
+// (same pattern as get_sys_cnt_aicpu / chip_swimlane_aicpu_record_orch_phase below).
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_dep_gen_enabled() { return false; }
 __attribute__((weak, visibility("hidden"))) void dep_gen_aicpu_record_submit(
     uint64_t, bool, bool, int, const void *const *, const uint8_t *, int, const uint64_t *, int, const int32_t[3]
@@ -77,7 +79,7 @@ extern "C" __attribute__((weak, visibility("hidden"))) void scope_stats_note_hea
 // =============================================================================
 #if SIMPLER_ORCH_PROFILING
 #include "aicpu/device_time.h"
-#include "aicpu/l2_swimlane_collector_aicpu.h"
+#include "aicpu/chip_swimlane_collector_aicpu.h"
 // Weak fallback for builds that don't link device_time.cpp (e.g. host).
 // The strong symbol from platform/.../device_time.cpp wins in the AICPU build.
 //
@@ -90,11 +92,11 @@ extern "C" __attribute__((weak, visibility("hidden"))) void scope_stats_note_hea
 // so the AICPU .so's PLT resolves to its own strong definition from
 // device_time.cpp.
 __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() { return 0; }
-// Weak fallback for builds that don't link l2_swimlane_collector_aicpu.cpp.
+// Weak fallback for builds that don't link chip_swimlane_collector_aicpu.cpp.
 // The strong symbol from the AICPU build wins when profiling is available.
 // Also hidden to prevent HOST .so from polluting the global symbol table.
 __attribute__((weak, visibility("hidden"))) void
-l2_swimlane_aicpu_record_orch_phase(uint64_t, uint64_t, uint64_t, uint32_t) {}
+chip_swimlane_aicpu_record_orch_phase(uint64_t, uint64_t, uint64_t, uint32_t) {}
 // Accumulated cycles per sub-step (only needed for ORCH_PROFILING export)
 static uint64_t g_orch_sync_cycle = 0;       // tensormap sync
 static uint64_t g_orch_alloc_cycle = 0;      // unified task+heap alloc
@@ -120,9 +122,9 @@ uint64_t g_orch_scope_end_atomic_count = 0;
 // in favour of the cumulatives + per-submit envelope; the dispatcher
 // already inserts one record at the end of each submit path via
 // CYCLE_COUNT_ORCH_SUBMIT_RECORD.
-#define CYCLE_COUNT_START()                                                        \
-    bool _prof_active = (orch->l2_swimlane_level >= L2SwimlaneLevel::ORCH_PHASES); \
-    uint64_t _t0 = get_sys_cnt_aicpu(), _t1;                                       \
+#define CYCLE_COUNT_START()                                                            \
+    bool _prof_active = (orch->chip_swimlane_level >= ChipSwimlaneLevel::ORCH_PHASES); \
+    uint64_t _t0 = get_sys_cnt_aicpu(), _t1;                                           \
     uint64_t _submit_start_ts = _t0
 #define CYCLE_COUNT_LAP(acc)       \
     do {                           \
@@ -130,33 +132,33 @@ uint64_t g_orch_scope_end_atomic_count = 0;
         acc += (_t1 - _t0);        \
         _t0 = _t1;                 \
     } while (0)
-#define CYCLE_COUNT_ORCH_SUBMIT_RECORD(tid)                                                       \
-    do {                                                                                          \
-        if (_prof_active) {                                                                       \
-            l2_swimlane_aicpu_record_orch_phase(_submit_start_ts, _t1, (tid), g_orch_submit_idx); \
-        }                                                                                         \
+#define CYCLE_COUNT_ORCH_SUBMIT_RECORD(tid)                                                         \
+    do {                                                                                            \
+        if (_prof_active) {                                                                         \
+            chip_swimlane_aicpu_record_orch_phase(_submit_start_ts, _t1, (tid), g_orch_submit_idx); \
+        }                                                                                           \
     } while (0)
 #elif SIMPLER_DFX
 #include "aicpu/device_time.h"
-#include "aicpu/l2_swimlane_collector_aicpu.h"
+#include "aicpu/chip_swimlane_collector_aicpu.h"
 __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() { return 0; }
 __attribute__((weak, visibility("hidden"))) void
-l2_swimlane_aicpu_record_orch_phase(uint64_t, uint64_t, uint64_t, uint32_t) {}
+chip_swimlane_aicpu_record_orch_phase(uint64_t, uint64_t, uint64_t, uint32_t) {}
 // submit_idx needed for swimlane task_id tagging (no cycle accumulation at this level)
 static uint32_t g_orch_submit_idx = 0;
-#define CYCLE_COUNT_START()                                                        \
-    bool _prof_active = (orch->l2_swimlane_level >= L2SwimlaneLevel::ORCH_PHASES); \
-    uint64_t _t0 = _prof_active ? get_sys_cnt_aicpu() : 0, _t1 = 0;                \
+#define CYCLE_COUNT_START()                                                            \
+    bool _prof_active = (orch->chip_swimlane_level >= ChipSwimlaneLevel::ORCH_PHASES); \
+    uint64_t _t0 = _prof_active ? get_sys_cnt_aicpu() : 0, _t1 = 0;                    \
     uint64_t _submit_start_ts = _t0
 #define CYCLE_COUNT_LAP(acc) \
     do {                     \
     } while (0)
-#define CYCLE_COUNT_ORCH_SUBMIT_RECORD(tid)                                                       \
-    do {                                                                                          \
-        if (_prof_active) {                                                                       \
-            _t1 = get_sys_cnt_aicpu();                                                            \
-            l2_swimlane_aicpu_record_orch_phase(_submit_start_ts, _t1, (tid), g_orch_submit_idx); \
-        }                                                                                         \
+#define CYCLE_COUNT_ORCH_SUBMIT_RECORD(tid)                                                         \
+    do {                                                                                            \
+        if (_prof_active) {                                                                         \
+            _t1 = get_sys_cnt_aicpu();                                                              \
+            chip_swimlane_aicpu_record_orch_phase(_submit_start_ts, _t1, (tid), g_orch_submit_idx); \
+        }                                                                                           \
     } while (0)
 #else
 #define CYCLE_COUNT_START()
@@ -468,7 +470,7 @@ struct PTO2PreparedTask {
     PTO2TaskSlotState *slot_state = nullptr;
 };
 
-static PTO2OutputLayout calculate_output_layout(const L0TaskArgs &args) {
+static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
     PTO2OutputLayout layout;
     for (int32_t i = 0; i < args.tensor_count(); i++) {
         if (args.tag(i) != TensorArgType::OUTPUT) {
@@ -516,7 +518,7 @@ static bool check_scope_can_accept_task(PTO2OrchestratorState *orch, PTO2TaskAll
 }
 
 static bool prepare_task(
-    PTO2OrchestratorState *orch, const L0TaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
+    PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
     TaskAttrs task_attrs, PTO2PreparedTask *out
 ) {
     uint8_t ring_id = orch->current_ring_id();
@@ -804,7 +806,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
 // computation (explicit_deps + auto), output registration, slot init, and
 // Orch-side wiring/ready publication.
 static TaskOutputTensors submit_task_common(
-    PTO2OrchestratorState *orch, const L0TaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     CYCLE_COUNT_START();
@@ -844,7 +846,7 @@ static TaskOutputTensors submit_task_common(
         const int tc_raw = args.tensor_count();
         const int tc = tc_raw > MAX_TENSOR_ARGS ? MAX_TENSOR_ARGS : tc_raw;
         for (int i = 0; i < tc; i++) {
-            // OUTPUT slots carry create_info (not yet a Tensor); skip them —
+            // OUTPUT slots carry create_info (not yet a ChipTensor); skip them —
             // they have no producer to look up and replay's per-tensor loop
             // also skips OUTPUT.
             tensor_ptrs[i] = (args.tag(i) == TensorArgType::OUTPUT) ? nullptr : &args.tensor(i).ref();
@@ -973,10 +975,10 @@ static TaskOutputTensors submit_task_common(
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
-    // no Arg/Tensor access. Both branches write predicate.op explicitly because
+    // no Arg/ChipTensor access. Both branches write predicate.op explicitly because
     // payload slots are ring-reused; op == NONE means "always dispatch".
     {
-        const L0TaskPredicate &pred = args.predicate();
+        const CoreTaskPredicate &pred = args.predicate();
         if (pred.op != PredicateOp::NONE && pred.operand.tensor != nullptr && pred.operand.tensor->buffer.addr != 0) {
             uint64_t elem_size = get_element_size(pred.operand.tensor->dtype);
             uint64_t flat_offset = pred.operand.tensor->compute_flat_offset(pred.operand.indices, pred.operand.ndims);
@@ -1045,7 +1047,7 @@ static TaskOutputTensors submit_task_common(
     return result;
 }
 
-TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const L0TaskArgs &args) {
+TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     auto *orch = this;
 
     // Orchestration API should short-circuit after fatal, but keep this entry
@@ -1125,7 +1127,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
 // AICore dispatch. Empty active_mask routes the slot to the DUMMY ready
 // bucket; dispatch loop short-circuits to completion. Accepts the same Arg
 // shape as submit_task; scalars are permitted but never consumed.
-TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const L0TaskArgs &args) {
+TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
     auto *orch = this;
 
     if (orch->fatal) {
@@ -1155,7 +1157,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const L0TaskArgs &arg
     );
 }
 
-TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const L0TaskArgs &args) {
+TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     auto *orch = this;
     // Orchestration API should short-circuit after fatal, but keep this entry
     // robust as a no-op in case a caller reaches it directly.

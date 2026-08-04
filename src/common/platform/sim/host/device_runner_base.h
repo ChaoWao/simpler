@@ -47,11 +47,11 @@
 #include "utils/device_arena.h"
 #include "common/kernel_args.h"
 #include "common/device_phase.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host/memory_allocator.h"
-#include "host/l2_swimlane_collector.h"
+#include "host/chip_swimlane_collector.h"
 #include "host/args_dump_collector.h"
 #include "host/pmu_collector.h"
 #include "host/scope_stats_collector.h"
@@ -212,9 +212,9 @@ public:
     uint64_t last_task_slot_dispatch_ns(int slot) const { return task_slot_dispatch_ns_[slot]; }
     uint64_t last_task_slot_finish_ns(int slot) const { return task_slot_finish_ns_[slot]; }
 
-    void set_l2_swimlane_enabled(int level) {
-        l2_swimlane_level_ = static_cast<L2SwimlaneLevel>(level);
-        enable_l2_swimlane_ = (l2_swimlane_level_ != L2SwimlaneLevel::DISABLED);
+    void set_chip_swimlane_enabled(int level) {
+        chip_swimlane_level_ = static_cast<ChipSwimlaneLevel>(level);
+        enable_chip_swimlane_ = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
     }
     void set_dump_args_enabled(int level) {
         dump_args_level_ = static_cast<DumpArgsLevel>(level);
@@ -396,20 +396,20 @@ protected:
     std::string aicore_so_path_;
 
     // Performance / diagnostics collectors shared across arches.
-    L2SwimlaneCollector l2_swimlane_collector_;
+    ChipSwimlaneCollector chip_swimlane_collector_;
     ArgsDumpCollector dump_collector_;
     PmuCollector pmu_collector_;
     ScopeStatsCollector scope_stats_collector_;
 
     // Enablement flags. Written via setters before run(); read inside run().
-    bool enable_l2_swimlane_{false};
+    bool enable_chip_swimlane_{false};
     bool enable_dump_args_{false};
     DumpArgsLevel dump_args_level_{DumpArgsLevel::OFF};  // resolved from set_dump_args_enabled()
     bool enable_pmu_{false};
     bool enable_scope_stats_{false};
-    L2SwimlaneLevel l2_swimlane_level_{L2SwimlaneLevel::DISABLED};  // resolved from set_l2_swimlane_enabled()
-    PmuEventType pmu_event_type_{PmuEventType::PIPE_UTILIZATION};   // resolved from set_pmu_enabled()
-    std::string output_prefix_{};                                   // diagnostic artifact root directory
+    ChipSwimlaneLevel chip_swimlane_level_{ChipSwimlaneLevel::DISABLED};  // resolved from set_chip_swimlane_enabled()
+    PmuEventType pmu_event_type_{PmuEventType::PIPE_UTILIZATION};         // resolved from set_pmu_enabled()
+    std::string output_prefix_{};                                         // diagnostic artifact root directory
 };
 
 namespace simpler::common::sim_host {

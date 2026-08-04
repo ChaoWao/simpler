@@ -48,7 +48,7 @@ private:
     int invoke_device_register(const RegisterCallableArgs &reg_args) override;
     void unload_executor_binaries();
 
-    int init_l2_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
+    int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
     int init_args_dump(Runtime &runtime, int device_id);
     int init_pmu(int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id);
     int init_dep_gen(int num_threads, int device_id);
@@ -71,9 +71,9 @@ private:
     void (*set_platform_dump_base_func_)(uint64_t){nullptr};
     void (*set_platform_phase_base_func_)(uint64_t){nullptr};
     void (*set_dump_args_enabled_func_)(bool){nullptr};
-    void (*set_platform_l2_swimlane_base_func_)(uint64_t){nullptr};
-    void (*set_platform_l2_swimlane_aicore_rotation_table_func_)(uint64_t){nullptr};
-    void (*set_l2_swimlane_enabled_func_)(bool){nullptr};
+    void (*set_platform_chip_swimlane_base_func_)(uint64_t){nullptr};
+    void (*set_platform_chip_swimlane_aicore_rotation_table_func_)(uint64_t){nullptr};
+    void (*set_chip_swimlane_enabled_func_)(bool){nullptr};
     void (*set_platform_pmu_base_func_)(uint64_t){nullptr};
     void (*set_platform_pmu_reg_addrs_func_)(uint64_t){nullptr};
     void (*set_pmu_enabled_func_)(bool){nullptr};

@@ -45,7 +45,7 @@ See [tensormap_and_ringbuffer/docs/](../runtime/tensormap_and_ringbuffer/docs/):
 - [profiling_levels.md](../runtime/tensormap_and_ringbuffer/docs/profiling_levels.md) — Profiling levels
 - [device_log_profiling.md](../runtime/tensormap_and_ringbuffer/docs/device_log_profiling.md) — Device log profiling guide
 - [pmu-profiling.md](../../../docs/dfx/pmu-profiling.md) — PMU design and per-task CSV output
-- [l2-swimlane-profiling.md](../../../docs/dfx/l2-swimlane-profiling.md) — L2 swimlane and scheduler-phase profiling
+- [chip-swimlane-profiling.md](../../../docs/dfx/chip-swimlane-profiling.md) — chip swimlane and scheduler-phase profiling
 - [args-dump.md](../../../docs/dfx/args-dump.md) — Per-task argument capture
 
 ## Shared Components
@@ -58,5 +58,5 @@ Ring buffer and submit type definitions are duplicated per-runtime (not in a sha
 Cross-architecture shared files are in `src/common/task_interface/`:
 
 - `data_type.h` — DataType enum and element size helpers
-- `tensor.h` — unified strided `Tensor` type + `TensorArgType` (host↔device data transport)
+- `tensor.h` — unified strided `ChipTensor` type + `TensorArgType` (host↔device data transport)
 - `task_args.h` — TaskArgs template (separated tensor/scalar argument storage)

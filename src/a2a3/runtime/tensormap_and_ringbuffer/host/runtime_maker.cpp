@@ -340,7 +340,7 @@ public:
         offset_ = 0;
         size_t required = 0;
         for (int i = 0; i < orch_args->tensor_count(); i++) {
-            Tensor t = orch_args->tensor(i);
+            ChipTensor t = orch_args->tensor(i);
             if (t.is_child_memory() || t.nbytes() == 0) {
                 continue;
             }
@@ -556,10 +556,10 @@ static bool stage_device_args(
     int64_t t_args_start = _now_ms();
     STRACE_A("simpler_run.bind.args", "");
     for (int i = 0; i < tensor_count; i++) {
-        Tensor t = orch_args->tensor(i);
+        ChipTensor t = orch_args->tensor(i);
 
         if (t.is_child_memory()) {
-            LOG_DEBUG("  Tensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
+            LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             out->add_tensor(t);
             continue;
         }
@@ -612,7 +612,7 @@ static bool stage_device_args(
         // copying back.
         bool needs_copy_back = !(signature != nullptr && i < sig_count && signature[i] == ArgDirection::IN);
         runtime->tensor_leases_.push_back({host_ptr, dev_ptr, size, needs_copy_back, release_kind});
-        LOG_DEBUG("  Tensor %d: %zu bytes at %p", i, size, dev_ptr);
+        LOG_DEBUG("  ChipTensor %d: %zu bytes at %p", i, size, dev_ptr);
 
         t.buffer.addr = reinterpret_cast<uint64_t>(dev_ptr);
         out->add_tensor(t);
@@ -987,7 +987,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     TensorLease *tensor_leases = runtime->tensor_leases_.data();
     int tensor_lease_count = static_cast<int>(runtime->tensor_leases_.size());
 
-    LOG_INFO("Tensor leases to process: %d", tensor_lease_count);
+    LOG_INFO("ChipTensor leases to process: %d", tensor_lease_count);
 
     bool skip_tensor_copy_back = execution_rc != 0;
     int32_t runtime_status = 0;
@@ -1029,13 +1029,13 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
             // Skip if device pointer is null
             if (lease.dev_ptr == nullptr) {
-                LOG_WARN("Tensor %d has null device pointer, skipping", i);
+                LOG_WARN("ChipTensor %d has null device pointer, skipping", i);
                 continue;
             }
 
             // If host pointer is null, this is a device-only allocation (no copy-back)
             if (lease.host_ptr == nullptr) {
-                LOG_DEBUG("Tensor %d: device-only allocation (no copy-back)", i);
+                LOG_DEBUG("ChipTensor %d: device-only allocation (no copy-back)", i);
                 continue;
             }
 
@@ -1043,7 +1043,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
             // wrote them — copying them back (potentially ~GB) is pure waste.
             // They are still released through release_kind below.
             if (!lease.needs_copy_back) {
-                LOG_DEBUG("Tensor %d: read-only input, skipping copy-back", i);
+                LOG_DEBUG("ChipTensor %d: read-only input, skipping copy-back", i);
                 continue;
             }
 
@@ -1052,7 +1052,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
                 LOG_ERROR("Failed to copy tensor %d from device: %d", i, copy_rc);
                 rc = copy_rc;
             } else {
-                LOG_DEBUG("Tensor %d: %zu bytes copied to host", i, lease.size);
+                LOG_DEBUG("ChipTensor %d: %zu bytes copied to host", i, lease.size);
             }
         }
     }

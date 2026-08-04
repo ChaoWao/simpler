@@ -25,19 +25,19 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-vector_add_orchestration_config(const L2TaskArgs &orch_args) {
+vector_add_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,  // a, b, out
     };
 }
 
-__attribute__((visibility("default"))) void vector_add_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void vector_add_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(a);
     params.add_input(b);
     params.add_output(out);

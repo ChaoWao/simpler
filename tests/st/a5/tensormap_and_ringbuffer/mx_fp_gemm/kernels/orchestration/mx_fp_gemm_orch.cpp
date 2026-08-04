@@ -24,19 +24,20 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 6,  // A, As, B, Bs, C, mode
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_a = orch_args.tensor(0).ref();
-    const Tensor &ext_as = orch_args.tensor(1).ref();
-    const Tensor &ext_b = orch_args.tensor(2).ref();
-    const Tensor &ext_bs = orch_args.tensor(3).ref();
-    const Tensor &ext_c = orch_args.tensor(4).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_a = orch_args.tensor(0).ref();
+    const ChipTensor &ext_as = orch_args.tensor(1).ref();
+    const ChipTensor &ext_b = orch_args.tensor(2).ref();
+    const ChipTensor &ext_bs = orch_args.tensor(3).ref();
+    const ChipTensor &ext_c = orch_args.tensor(4).ref();
     const uint64_t mode = orch_args.scalar(0);
 
     LOG_INFO(
@@ -46,7 +47,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     );
 
     PTO2_SCOPE() {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ext_a);
         args.add_input(ext_as);
         args.add_input(ext_b);

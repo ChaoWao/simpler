@@ -43,11 +43,11 @@ Workload: `examples/a2a3/tensormap_and_ringbuffer/spmd_serial_chain_mix/`
 — 4 chained MIX tasks (AIC + AIV0 + AIV1), `block_num=24`, 72 AICore
 cores per task, each task busy-waits 50 µs in `get_sys_cnt()`. Run on
 a2a3 onboard via `task-submit --device auto --device-num 1 --run "...
---enable-l2-swimlane 2"`. Compared three runs, all with the
+--enable-chip-swimlane 2"`. Compared three runs, all with the
 batched-publish dispatch optimization (PR #989) and the eager swimlane
 head resolve (also in #989). Head-OH per task = `start_time_us -
 dispatch_time_us`, joined per `(core_id, reg_task_id)` from the level-2
-`l2_swimlane_records.json`.
+`chip_swimlane_records.json`.
 
 ## Result
 
@@ -97,7 +97,7 @@ magnitude smaller than the 5 µs tail).
   resolvable.
 - **The avg-only win does not justify code on the hot path.** The
   warmup is 3 instructions on every kernel entry, including the
-  `l2_swimlane_enabled == false` case where head-OH measurement is not
+  `chip_swimlane_enabled == false` case where head-OH measurement is not
   even being collected. Trading 3 hot-path instructions for a 0.32 µs
   avg-only win that the slow-core tail (the only thing that matters
   for end-to-end wall time) doesn't see is a poor trade.

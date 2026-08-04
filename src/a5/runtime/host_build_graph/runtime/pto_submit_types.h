@@ -53,7 +53,7 @@ enum class PredicateOp : uint8_t { NONE = 0, EQ, NE, GT, LT, GE, LE };
 // Resolved dispatch predicate stored on a task's payload (AICPU-side only): the
 // absolute GM address of the predicate element + the comparison. op == NONE
 // means "no predicate — always dispatch". Populated at submit from an
-// L0TaskPredicate; evaluated by the scheduler at the dispatch point via pass().
+// CoreTaskPredicate; evaluated by the scheduler at the dispatch point via pass().
 // Layout is 18 bytes (8-aligned).
 struct DispatchPredicate {
     uint64_t addr{0};      // absolute GM address of the predicate element (0 when op == NONE)

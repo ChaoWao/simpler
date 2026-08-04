@@ -29,8 +29,8 @@ MixedKernels mix_kernels() {
     return kernels;
 }
 
-PTO2TaskId submit_aiv(const Tensor &output, int16_t block_num) {
-    L0TaskArgs args;
+PTO2TaskId submit_aiv(const ChipTensor &output, int16_t block_num) {
+    CoreTaskArgs args;
     args.add_inout(output);
     args.add_scalar(0);
     args.add_scalar(0);
@@ -38,8 +38,8 @@ PTO2TaskId submit_aiv(const Tensor &output, int16_t block_num) {
     return rt_submit_aiv_task(FUNC_SPMD_WRITE_AIV, args).task_id();
 }
 
-PTO2TaskId submit_sync_mix(const Tensor &output, int16_t block_num, int64_t base, PTO2TaskId producer) {
-    L0TaskArgsWithDeps<1> args;
+PTO2TaskId submit_sync_mix(const ChipTensor &output, int16_t block_num, int64_t base, PTO2TaskId producer) {
+    CoreTaskArgsWithDeps<1> args;
     args.add_inout(output);
     args.add_scalar(base);
     args.add_scalar(0);
@@ -49,8 +49,8 @@ PTO2TaskId submit_sync_mix(const Tensor &output, int16_t block_num, int64_t base
     return rt_submit_task(mix_kernels(), args).task_id();
 }
 
-void submit_normal_mix(const Tensor &output, int16_t block_num, int64_t base, PTO2TaskId producer) {
-    L0TaskArgsWithDeps<1> args;
+void submit_normal_mix(const ChipTensor &output, int16_t block_num, int64_t base, PTO2TaskId producer) {
+    CoreTaskArgsWithDeps<1> args;
     args.add_inout(output);
     args.add_scalar(base);
     args.add_scalar(0);
@@ -63,14 +63,15 @@ void submit_normal_mix(const Tensor &output, int16_t block_num, int64_t base, PT
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 2};
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &output = orch_args.tensor(0).ref();
-    const Tensor &layout = orch_args.tensor(1).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &output = orch_args.tensor(0).ref();
+    const ChipTensor &layout = orch_args.tensor(1).ref();
     int16_t aiv_blocks = static_cast<int16_t>(rt_available_aiv_count());
     int16_t mix_blocks = static_cast<int16_t>(rt_available_cluster_count());
 

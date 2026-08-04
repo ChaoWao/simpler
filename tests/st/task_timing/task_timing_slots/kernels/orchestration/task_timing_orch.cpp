@@ -46,32 +46,32 @@ static inline auto set_spmd_count(Spec &s, int16_t n) -> decltype(s.set_core_num
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-task_timing_orchestration_config(const L2TaskArgs &orch_args) {
+task_timing_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 3,  // a, b, out
     };
 }
 
-__attribute__((visibility("default"))) void task_timing_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void task_timing_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
     uint32_t shapes[2] = {a.shapes[0], a.shapes[1]};
     TensorCreateInfo inter_ci(shapes, 2, DataType::FLOAT32);
 
     // t0: c = a + b, tagged slot 0 (interval start).
-    L0TaskArgs params_t0;
+    CoreTaskArgs params_t0;
     params_t0.add_input(a);
     params_t0.add_input(b);
     params_t0.add_output(inter_ci);
     params_t0.set_task_timing_slot(0);
     TaskOutputTensors outs_t0 = rt_submit_aiv_task(0, params_t0);
-    const Tensor &c = outs_t0.get_ref(0);
+    const ChipTensor &c = outs_t0.get_ref(0);
 
     // t1: out = c + b, tagged slot 1 (interval end). Depends on c -> runs after t0.
-    L0TaskArgs params_t1;
+    CoreTaskArgs params_t1;
     params_t1.add_input(c);
     params_t1.add_input(b);
     params_t1.add_output(out);
@@ -83,31 +83,31 @@ __attribute__((visibility("default"))) void task_timing_orchestration(const L2Ta
 // The scheduler folds min(dispatch)/max(finish) across the three tagged tasks,
 // so the single emitted task_slot_0 span must cover the whole chain
 // (dispatch of t0 .. finish of t2), not any single task's window.
-__attribute__((visibility("default"))) void task_timing_dup_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void task_timing_dup_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
     uint32_t shapes[2] = {a.shapes[0], a.shapes[1]};
     TensorCreateInfo inter_ci(shapes, 2, DataType::FLOAT32);
 
-    L0TaskArgs p0;
+    CoreTaskArgs p0;
     p0.add_input(a);
     p0.add_input(b);
     p0.add_output(inter_ci);
     p0.set_task_timing_slot(0);
     TaskOutputTensors o0 = rt_submit_aiv_task(0, p0);
-    const Tensor &c = o0.get_ref(0);
+    const ChipTensor &c = o0.get_ref(0);
 
-    L0TaskArgs p1;
+    CoreTaskArgs p1;
     p1.add_input(c);
     p1.add_input(b);
     p1.add_output(inter_ci);
     p1.set_task_timing_slot(0);
     TaskOutputTensors o1 = rt_submit_aiv_task(0, p1);
-    const Tensor &d = o1.get_ref(0);
+    const ChipTensor &d = o1.get_ref(0);
 
-    L0TaskArgs p2;
+    CoreTaskArgs p2;
     p2.add_input(d);
     p2.add_input(b);
     p2.add_output(out);
@@ -120,12 +120,12 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
 // cross-thread min(dispatch)/max(finish) reduction of every participating
 // block. (The vector_add kernel is not block-partitioned, so each block
 // recomputes out = a + b over the whole tile — redundant but golden-correct.)
-__attribute__((visibility("default"))) void task_timing_spmd_orchestration(const L2TaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+__attribute__((visibility("default"))) void task_timing_spmd_orchestration(const ChipTaskArgs &orch_args) {
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(a);
     params.add_input(b);
     params.add_output(out);
@@ -139,13 +139,13 @@ __attribute__((visibility("default"))) void task_timing_spmd_orchestration(const
 // is the min-dispatch/max-finish fold across all three subtask handles of the
 // one task. Args: A,B,C (matmul) | D,E,F (add) | G,H,I (mul), 9 tensors.
 // Reuses the mixed_example kernels: func 0 = matmul (AIC), 1 = add, 2 = mul.
-__attribute__((visibility("default"))) void task_timing_mix_orchestration(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void task_timing_mix_orchestration(const ChipTaskArgs &orch_args) {
     MixedKernels mk;
     mk.aic_kernel_id = 0;   // matmul
     mk.aiv0_kernel_id = 1;  // add
     mk.aiv1_kernel_id = 2;  // mul
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_input(orch_args.tensor(0).ref());   // A
     args.add_input(orch_args.tensor(1).ref());   // B
     args.add_output(orch_args.tensor(2).ref());  // C = A @ B
@@ -160,7 +160,7 @@ __attribute__((visibility("default"))) void task_timing_mix_orchestration(const 
 }
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-task_timing_mix_orchestration_config(const L2TaskArgs &orch_args) {
+task_timing_mix_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 9,

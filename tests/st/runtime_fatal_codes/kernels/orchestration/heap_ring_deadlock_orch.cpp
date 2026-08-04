@@ -26,14 +26,15 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 0,
     };
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
     (void)orch_args;
 
     // 8192 INT32 = 32 KiB output; the test pins ring_heap far below this so the
@@ -41,7 +42,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
     uint32_t shape[1] = {8192};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_output(ci);
     rt_submit_dummy_task(args);
 }

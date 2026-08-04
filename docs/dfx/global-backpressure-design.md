@@ -1,6 +1,6 @@
 # Global DFX Backpressure — block-on-contention + dual-signal freeze
 
-The shared design for how every DFX profiling subsystem (L2Swimlane, PMU,
+The shared design for how every DFX profiling subsystem (ChipSwimlane, PMU,
 DepGen, ArgsDump, ScopeStats, tensor_dump) reacts when the host collector
 cannot keep the device-side buffer pool refilled. It replaces the older
 "bounded wait, then drop the record" model with a **resident block-on-contention

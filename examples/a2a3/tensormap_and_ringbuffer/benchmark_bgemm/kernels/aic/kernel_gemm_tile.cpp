@@ -17,7 +17,7 @@
  * Tile size is determined by golden.py configuration and passed through
  * tensor shapes from orchestration.
  *
- * Args (Tensor*):
+ * Args (ChipTensor*):
  *   args[0] = input_a (INPUT)
  *   args[1] = input_b (INPUT)
  *   args[2] = output  (OUTPUT)
@@ -111,10 +111,10 @@ static __aicore__ void gemm_tile_impl(__gm__ float *input_a, __gm__ float *input
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *input_a = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *input_b = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *output = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *config = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *input_a = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *input_b = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *output = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *config = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
 
     __gm__ int64_t *cfg = reinterpret_cast<__gm__ int64_t *>(config->buffer.addr);
     uint64_t tile_size = static_cast<uint64_t>(cfg[0]);

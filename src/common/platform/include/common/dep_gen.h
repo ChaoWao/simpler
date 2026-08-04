@@ -16,10 +16,10 @@
  * Captures the inputs to every Orchestrator::submit_task call into a streaming
  * ring of DepGenRecord. The host side replays these records offline to
  * reconstruct the full task dependency graph (deps.json). deps.json is the
- * sole source of truth for fanout edges; the L2 swimlane hot path no longer
+ * sole source of truth for fanout edges; the chip swimlane hot path no longer
  * carries fanout to keep AICPU off the per-task GM-store critical path.
  *
- * Streaming buffer design mirrors PMU / L2Swimlane / ArgsDump (single source of
+ * Streaming buffer design mirrors PMU / ChipSwimlane / ArgsDump (single source of
  * algorithmic truth in src/common/platform/include/host/profiler_base.h):
  *
  *   DepGenFreeQueue    — SPSC: Host pushes free DepGenBuffers, AICPU pops them.
@@ -29,11 +29,11 @@
  *
  * Single-instance: the orchestrator is one AICPU thread, so the BufferState
  * array has length 1. Kept array-shaped (vs scalar) for symmetry with PMU /
- * L2Swimlane and to match ProfilerBase<DepGenModule>::for_each_instance.
+ * ChipSwimlane and to match ProfilerBase<DepGenModule>::for_each_instance.
  *
- * Tensor data is captured as opaque 128-byte blobs (`DEP_GEN_TENSOR_SIZE`)
- * matching the runtime Tensor struct size. The AICPU writer
- * (dep_gen_collector_aicpu.cpp) static_asserts sizeof(Tensor) == 128 against
+ * ChipTensor data is captured as opaque 128-byte blobs (`DEP_GEN_TENSOR_SIZE`)
+ * matching the runtime ChipTensor struct size. The AICPU writer
+ * (dep_gen_collector_aicpu.cpp) static_asserts sizeof(ChipTensor) == 128 against
  * the runtime headers it imports; the platform shared-memory header stays
  * runtime-agnostic.
  */
@@ -53,7 +53,7 @@
 // =============================================================================
 
 /**
- * Bytes per captured Tensor slot — matches runtime sizeof(Tensor). Verified
+ * Bytes per captured ChipTensor slot — matches runtime sizeof(ChipTensor). Verified
  * in dep_gen_collector_aicpu.cpp via static_assert against the runtime header.
  * Two cache lines: cache line 1 (lookup hot path) + cache line 2 (offsets).
  */
@@ -106,13 +106,13 @@ enum DepGenRecordFlags : uint32_t {
 struct DepGenRecord {
     uint64_t task_id;                                   // PTO2 encoding (ring_id << 32) | local_id
     uint32_t flags;                                     // DepGenRecordFlags bitmask
-    uint16_t tensor_count;                              // number of valid Tensor slots
+    uint16_t tensor_count;                              // number of valid ChipTensor slots
     uint16_t explicit_dep_count;                        // number of valid explicit_dep slots
     uint64_t explicit_deps[DEP_GEN_MAX_EXPLICIT_DEPS];  // PTO2TaskId::raw, length = explicit_dep_count
     uint8_t arg_types[CORE_MAX_TENSOR_ARGS];            // TensorArgType, length = tensor_count
     int32_t kernel_id[3];  // per-subslot kernel id (AIC, AIV0, AIV1); INVALID_KERNEL_ID = -1
     uint32_t block_num;    // SPMD logical block count; 1 means non-SPMD
-    uint8_t tensors[CORE_MAX_TENSOR_ARGS][DEP_GEN_TENSOR_SIZE];  // opaque Tensor blobs
+    uint8_t tensors[CORE_MAX_TENSOR_ARGS][DEP_GEN_TENSOR_SIZE];  // opaque ChipTensor blobs
 } __attribute__((aligned(64)));
 
 static_assert(sizeof(DepGenRecord) == 4672, "DepGenRecord size changed — update header comment + docs/dfx/dep-gen.md");

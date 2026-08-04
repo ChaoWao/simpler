@@ -45,7 +45,7 @@ static_assert(offsetof(FakeRuntime, ops) == 0);  // Guard: reinterpret_cast belo
 
 FakeRuntime *as_fake(PTO2Runtime *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
 
-TaskOutputTensors fake_submit(PTO2Runtime *rt, const MixedKernels &, const L0TaskArgs &) {
+TaskOutputTensors fake_submit(PTO2Runtime *rt, const MixedKernels &, const CoreTaskArgs &) {
     as_fake(rt)->submit_calls++;
     return TaskOutputTensors{};
 }
@@ -74,21 +74,21 @@ void fake_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, co
 
 void fake_log(const char *, const char *, ...) {}
 
-uint64_t fake_get_tensor_data(PTO2Runtime *rt, const Tensor &, uint32_t, const uint32_t[]) {
+uint64_t fake_get_tensor_data(PTO2Runtime *rt, const ChipTensor &, uint32_t, const uint32_t[]) {
     as_fake(rt)->get_calls++;
     return 0x1234ULL;
 }
 
-void fake_set_tensor_data(PTO2Runtime *rt, const Tensor &, uint32_t, const uint32_t[], uint64_t) {
+void fake_set_tensor_data(PTO2Runtime *rt, const ChipTensor &, uint32_t, const uint32_t[], uint64_t) {
     as_fake(rt)->set_calls++;
 }
 
-TaskOutputTensors fake_alloc_tensors(PTO2Runtime *rt, const L0TaskArgs &) {
+TaskOutputTensors fake_alloc_tensors(PTO2Runtime *rt, const CoreTaskArgs &) {
     as_fake(rt)->alloc_calls++;
     return TaskOutputTensors{};
 }
 
-TaskOutputTensors fake_submit_dummy(PTO2Runtime *, const L0TaskArgs &) { return TaskOutputTensors{}; }
+TaskOutputTensors fake_submit_dummy(PTO2Runtime *, const CoreTaskArgs &) { return TaskOutputTensors{}; }
 
 const PTO2RuntimeOps kFakeOps = {
     .submit_task = fake_submit,
@@ -129,10 +129,10 @@ TEST(A5Fatal, ApiShortCircuitsAfterFatal) {
     RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
 
     MixedKernels mixed{};
-    L0TaskArgs args;
+    CoreTaskArgs args;
     uint32_t indices[1] = {0};
     uint32_t shape[1] = {1};
-    Tensor tensor = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
+    ChipTensor tensor = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
 
     EXPECT_TRUE(rt_submit_task(mixed, args).empty());
     EXPECT_TRUE(alloc_tensors(args).empty());
@@ -168,7 +168,7 @@ TEST(A5Fatal, ExplicitFatalRoutesThroughOps) {
     EXPECT_FALSE(runtime.last_fatal_func.empty());
 
     MixedKernels mixed{};
-    L0TaskArgs args;
+    CoreTaskArgs args;
     EXPECT_TRUE(rt_submit_task(mixed, args).empty());
     EXPECT_EQ(runtime.submit_calls, 0);
 }

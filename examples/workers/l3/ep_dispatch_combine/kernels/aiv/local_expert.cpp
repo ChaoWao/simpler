@@ -52,10 +52,10 @@ static constexpr int R = 192;
 static constexpr int D = 4096;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *recv_x_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *recv_w_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *recv_count_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *recv_y_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *recv_x_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *recv_w_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *recv_count_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *recv_y_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
     (void)comm_ctx;  // unused; kept for ABI symmetry with dispatch / combine
 

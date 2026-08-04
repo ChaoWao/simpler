@@ -13,7 +13,7 @@ kernels.aic_kernel_id = aic_func_id;
 kernels.aiv0_kernel_id = aiv0_func_id;
 kernels.aiv1_kernel_id = aiv1_func_id;
 
-L0TaskArgs args;
+CoreTaskArgs args;
 args.add_inout(output);
 args.launch_spec.set_block_num(block_num);
 TaskOutputTensors result = rt_submit_task(kernels, args);

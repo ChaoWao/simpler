@@ -19,9 +19,9 @@ from simpler.task_interface import (
     CallConfig,
     ChipCallable,
     ChipStorageTaskArgs,
+    ChipTensor,
     CoreCallable,
     DataType,
-    Tensor,
 )
 from simpler.worker import Worker
 
@@ -90,7 +90,7 @@ def test_invalid_input_reports_code_five(st_platform, st_device_ids, case_name, 
         worker.copy_to(buffer, host_value.data_ptr(), host_value.nbytes)
 
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(buffer, (1,), DataType.INT32))
+        args.add_tensor(ChipTensor.make(buffer, (1,), DataType.INT32))
         args.add_scalar(CASES[case_name])
 
         config = CallConfig()

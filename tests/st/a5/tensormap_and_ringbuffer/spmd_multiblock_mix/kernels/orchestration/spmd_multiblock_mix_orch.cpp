@@ -34,7 +34,8 @@
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
         .expected_arg_count = 1,
@@ -42,22 +43,22 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 }
 
 static void submit_spmd_mix(
-    int32_t aic_id, int32_t aiv0_id, int32_t aiv1_id, const Tensor &out, int16_t block_num, int64_t base_cl
+    int32_t aic_id, int32_t aiv0_id, int32_t aiv1_id, const ChipTensor &out, int16_t block_num, int64_t base_cl
 ) {
     MixedKernels mk;
     mk.aic_kernel_id = aic_id;
     mk.aiv0_kernel_id = aiv0_id;
     mk.aiv1_kernel_id = aiv1_id;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_core_num(block_num);
     rt_submit_task(mk, args);
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
 
     // T0: 2 blocks (6 CL) — basic multi-block MIX
     submit_spmd_mix(FUNC_SPMD_MIX_AIC, FUNC_SPMD_MIX_AIV0, FUNC_SPMD_MIX_AIV1, ext_output, 2, 0);

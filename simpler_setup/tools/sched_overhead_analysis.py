@@ -11,8 +11,8 @@
 
 Inputs (BOTH required, captured in SEPARATE runs — do not co-run the flags, as
 dep_gen perturbs the swimlane timing):
-  1. Per-task perf profiling data (l2_swimlane_records_*.json) with
-     ``aicpu_scheduler_phases``, from a ``--enable-l2-swimlane`` (level >= 3) run.
+  1. Per-task perf profiling data (chip_swimlane_records_*.json) with
+     ``aicpu_scheduler_phases``, from a ``--enable-chip-swimlane`` (level >= 3) run.
   2. deps.json (the task DAG) from a separate ``--enable-dep-gen`` run. It drives
      ready(C) = max(producer.end), which separates scheduler bubbles from
      dependency stalls. Required — the report errors without it.
@@ -25,7 +25,7 @@ Report (see docs/dfx/sched-overhead-model.md for the model):
 
 Usage:
     python -m simpler_setup.tools.sched_overhead_analysis \\
-        --l2-swimlane-records-json <swimlane.json> --deps-json <deps.json>
+        --chip-swimlane-records-json <swimlane.json> --deps-json <deps.json>
 """
 
 import argparse
@@ -55,7 +55,7 @@ def compute_dag_stats_from_deps(deps_data, perf_data, threads):
 
     Why this lives in Python and not the runtime: the DAG edge set is already
     captured structurally by dep_gen (deps.json), and the per-task → scheduler-
-    thread map is in ``l2_swimlane_records.json::core_to_thread``. Re-instrumenting
+    thread map is in ``chip_swimlane_records.json::core_to_thread``. Re-instrumenting
     the AICPU to track fanout edge counts is duplicate work; running this in
     Python over the existing artifacts is cheaper, more accurate (deps.json
     captures #599 race-window edges that fanout[] dropped), and lets the
@@ -115,7 +115,7 @@ def compute_dag_stats_from_deps(deps_data, perf_data, threads):
     per_thread_fanin = defaultdict(lambda: {"edges": 0, "max": 0, "tasks": 0})
 
     # Dedup by task_id: mixed (AIC+AIV) tasks emit one perf row per subtask /
-    # core (see l2_swimlane_collector.cpp:567 — collected_perf_records_ is keyed by
+    # core (see chip_swimlane_collector.cpp:567 — collected_perf_records_ is keyed by
     # core_idx). Without dedup a mixed task's fanout would be charged once per
     # subtask, inflating per-thread edge counts by the subtask count.
     seen_task_ids = set()
@@ -152,21 +152,21 @@ def compute_dag_stats_from_deps(deps_data, perf_data, threads):
         t["fanin_max_degree"] = fi["max"]
 
 
-def auto_select_l2_swimlane_records_json():
-    """Find the latest outputs/<case>/l2_swimlane_records.json (sorted by mtime)."""
+def auto_select_chip_swimlane_records_json():
+    """Find the latest outputs/<case>/chip_swimlane_records.json (sorted by mtime)."""
     outputs_dir = Path.cwd() / "outputs"
-    files = sorted(outputs_dir.glob("*/l2_swimlane_records.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(outputs_dir.glob("*/chip_swimlane_records.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
-        raise FileNotFoundError(f"No outputs/*/l2_swimlane_records.json found under {outputs_dir}")
+        raise FileNotFoundError(f"No outputs/*/chip_swimlane_records.json found under {outputs_dir}")
     return files[0]
 
 
 def parse_scheduler_from_json_phases(data):  # noqa: PLR0912
-    """Extract scheduler Phase breakdown from l2_swimlane_records JSON.
+    """Extract scheduler Phase breakdown from chip_swimlane_records JSON.
 
     Computes per-thread loop counts, logical task counts, FIN/retire counts,
     and phase totals from aicpu_scheduler_phases records (present at
-    l2_swimlane_level >= 3). Complete.tasks_processed is a FIN/retire count;
+    chip_swimlane_level >= 3). Complete.tasks_processed is a FIN/retire count;
     logical task counts are reconstructed from the final finish row per task.
 
     Returns:
@@ -327,12 +327,13 @@ def validate_perf_tasks_for_overhead_analysis(tasks):
                 f"Missing required fields (showing up to 5 tasks): {detail}",
                 "",
                 "Why this happens:",
-                "  - The input is not a runtime-generated l2_swimlane_records_*.json, OR",
+                "  - The input is not a runtime-generated chip_swimlane_records_*.json, OR",
                 "  - The runtime binary does not include / emit dispatch+finish timestamps.",
                 "",
                 "How to fix:",
-                "  1) Re-run workload with profiling enabled (e.g. run_example.py --enable-l2-swimlane).",
-                "  2) Pass the newly generated outputs/<case>/l2_swimlane_records.json via --l2-swimlane-records-json.",
+                "  1) Re-run workload with profiling enabled (e.g. run_example.py --enable-chip-swimlane).",
+                "  2) Pass the newly generated outputs/<case>/chip_swimlane_records.json",
+                "     via --chip-swimlane-records-json.",
                 "  3) Verify each task includes dispatch_time_us and finish_time_us.",
                 "",
                 "Note:",
@@ -646,7 +647,7 @@ def compute_critical_path(preds_by_id, end_by_id, finish_by_id, start_by_id, dis
 
 
 def run_analysis(  # noqa: PLR0912, PLR0915
-    l2_swimlane_records_path,
+    chip_swimlane_records_path,
     print_sources=True,
     deps_json_path=None,
     perf_data=None,
@@ -654,7 +655,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     """Run scheduler overhead analysis report.
 
     Args:
-        l2_swimlane_records_path: Path to l2_swimlane_records_*.json.
+        chip_swimlane_records_path: Path to chip_swimlane_records_*.json.
         print_sources: Whether to print selected input files.
         perf_data: Optional pre-parsed perf JSON dict. When provided, skip
             re-reading from disk — main() already parses the file to probe
@@ -667,20 +668,20 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     Returns:
         int: 0 on success, non-zero on failure.
     """
-    l2_swimlane_records_path = Path(l2_swimlane_records_path)
+    chip_swimlane_records_path = Path(chip_swimlane_records_path)
 
-    if not l2_swimlane_records_path.exists():
-        print(f"Error: Perf JSON not found: {l2_swimlane_records_path}", file=sys.stderr)
+    if not chip_swimlane_records_path.exists():
+        print(f"Error: Perf JSON not found: {chip_swimlane_records_path}", file=sys.stderr)
         return 1
 
     # Auto-discover deps.json sibling when caller didn't specify one.
     if deps_json_path is None:
-        sibling = l2_swimlane_records_path.parent / "deps.json"
+        sibling = chip_swimlane_records_path.parent / "deps.json"
         if sibling.exists():
             deps_json_path = sibling
 
     if print_sources:
-        print(f"Perf data:  {l2_swimlane_records_path}")
+        print(f"Perf data:  {chip_swimlane_records_path}")
         if deps_json_path is not None:
             print(f"Deps JSON:  {deps_json_path}")
 
@@ -694,7 +695,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
         # aicore_tasks / aicpu_tasks arrays.
         from .swimlane_converter import read_perf_data  # noqa: PLC0415
 
-        data = read_perf_data(l2_swimlane_records_path)
+        data = read_perf_data(chip_swimlane_records_path)
     tasks = data["tasks"]
     n_total = len(tasks)
 
@@ -711,11 +712,11 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     # scheduler-starvation split — without it we can't separate scheduler
     # bubbles from dependency stalls, which is the whole point of this tool.
     # Capture deps.json SEPARATELY with --enable-dep-gen (do NOT co-run with
-    # --enable-l2-swimlane: dep_gen perturbs timing).
+    # --enable-chip-swimlane: dep_gen perturbs timing).
     if deps_json_path is None:
         print(
             "Error: scheduler-overhead analysis needs the task DAG (deps.json). Capture it in a "
-            "SEPARATE run with --enable-dep-gen (not co-run with --enable-l2-swimlane), then pass --deps-json.",
+            "SEPARATE run with --enable-dep-gen (not co-run with --enable-chip-swimlane), then pass --deps-json.",
             file=sys.stderr,
         )
         return 1
@@ -847,7 +848,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     if not threads:
         print(
             "Error: perf JSON has no aicpu_scheduler_phases — rerun the case "
-            "with --enable-l2-swimlane so phase data is captured.",
+            "with --enable-chip-swimlane so phase data is captured.",
             file=sys.stderr,
         )
         return 1
@@ -942,7 +943,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     else:
         pop_hit = pop_miss = 0
         pop_hit_rate = 0.0
-        print("  Pop: (no per-emit pop deltas in input — needs --enable-l2-swimlane at level >= 3)")
+        print("  Pop: (no per-emit pop deltas in input — needs --enable-chip-swimlane at level >= 3)")
 
     print()
     # Tail-vs-loop cause analysis (closes Part 5).
@@ -1008,14 +1009,14 @@ def main():
         epilog="""
 Examples:
   %(prog)s                                          # auto-select latest files
-  %(prog)s --l2-swimlane-records-json outputs/<case>_<ts>/l2_swimlane_records.json
-  %(prog)s --l2-swimlane-records-json outputs/<case>_<ts>/l2_swimlane_records.json \
+  %(prog)s --chip-swimlane-records-json outputs/<case>_<ts>/chip_swimlane_records.json
+  %(prog)s --chip-swimlane-records-json outputs/<case>_<ts>/chip_swimlane_records.json \
       --deps-json outputs/<case>_<ts>/deps.json
         """,
     )
     parser.add_argument(
-        "--l2-swimlane-records-json",
-        help="Path to l2_swimlane_records_*.json file. If not specified, uses the latest in outputs/",
+        "--chip-swimlane-records-json",
+        help="Path to chip_swimlane_records_*.json file. If not specified, uses the latest in outputs/",
     )
     parser.add_argument(
         "--deps-json",
@@ -1029,17 +1030,17 @@ Examples:
 
     # Resolve perf path
     try:
-        l2_swimlane_records_path = (
-            Path(args.l2_swimlane_records_json)
-            if args.l2_swimlane_records_json
-            else auto_select_l2_swimlane_records_json()
+        chip_swimlane_records_path = (
+            Path(args.chip_swimlane_records_json)
+            if args.chip_swimlane_records_json
+            else auto_select_chip_swimlane_records_json()
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    if not l2_swimlane_records_path.exists():
-        print(f"Error: Perf JSON not found: {l2_swimlane_records_path}", file=sys.stderr)
+    if not chip_swimlane_records_path.exists():
+        print(f"Error: Perf JSON not found: {chip_swimlane_records_path}", file=sys.stderr)
         return 1
 
     # Single load — go through swimlane_converter.read_perf_data so the raw
@@ -1050,15 +1051,15 @@ Examples:
     try:
         from .swimlane_converter import read_perf_data  # noqa: PLC0415
 
-        perf_data = read_perf_data(l2_swimlane_records_path)
+        perf_data = read_perf_data(chip_swimlane_records_path)
     except (OSError, ValueError) as e:
-        print(f"Error: failed to read perf JSON {l2_swimlane_records_path}: {e}", file=sys.stderr)
+        print(f"Error: failed to read perf JSON {chip_swimlane_records_path}: {e}", file=sys.stderr)
         return 1
 
     deps_json_path = Path(args.deps_json) if args.deps_json else None
 
     return run_analysis(
-        l2_swimlane_records_path,
+        chip_swimlane_records_path,
         print_sources=True,
         deps_json_path=deps_json_path,
         perf_data=perf_data,

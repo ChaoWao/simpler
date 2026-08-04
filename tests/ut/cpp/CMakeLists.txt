@@ -500,7 +500,7 @@ target_include_directories(test_profiler_device_engine PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
 )
 
-add_common_utils_test(test_l3_l2_orch_comm common/test_l3_l2_orch_comm.cpp)
+add_common_utils_test(test_worker_chip_orch_comm common/test_worker_chip_orch_comm.cpp)
 add_common_utils_test(test_file_marker_handshake common/test_file_marker_handshake.cpp)
 
 add_executable(test_trb_runtime_temp_buffer
@@ -531,39 +531,39 @@ target_link_libraries(test_trb_runtime_temp_buffer PRIVATE
 add_test(NAME test_trb_runtime_temp_buffer COMMAND test_trb_runtime_temp_buffer)
 set_tests_properties(test_trb_runtime_temp_buffer PROPERTIES LABELS "no_hardware")
 
-add_executable(test_l3_l2_message_queue
-    common/test_l3_l2_message_queue.cpp
+add_executable(test_worker_chip_message_queue
+    common/test_worker_chip_message_queue.cpp
     stubs/test_stubs.cpp
 )
-target_include_directories(test_l3_l2_message_queue PRIVATE
+target_include_directories(test_worker_chip_message_queue PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
 )
-target_link_libraries(test_l3_l2_message_queue PRIVATE
+target_link_libraries(test_worker_chip_message_queue PRIVATE
     ${GTEST_MAIN_LIB}
     ${GTEST_LIB}
     pthread
 )
-add_test(NAME test_l3_l2_message_queue COMMAND test_l3_l2_message_queue)
-set_tests_properties(test_l3_l2_message_queue PROPERTIES LABELS "no_hardware")
+add_test(NAME test_worker_chip_message_queue COMMAND test_worker_chip_message_queue)
+set_tests_properties(test_worker_chip_message_queue PROPERTIES LABELS "no_hardware")
 
-add_executable(test_l3_l2_orch_endpoint
-    common/test_l3_l2_orch_endpoint.cpp
+add_executable(test_worker_chip_orch_endpoint
+    common/test_worker_chip_orch_endpoint.cpp
     stubs/test_stubs.cpp
 )
-target_include_directories(test_l3_l2_orch_endpoint PRIVATE
+target_include_directories(test_worker_chip_orch_endpoint PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
 )
-target_link_libraries(test_l3_l2_orch_endpoint PRIVATE
+target_link_libraries(test_worker_chip_orch_endpoint PRIVATE
     ${GTEST_MAIN_LIB}
     ${GTEST_LIB}
     pthread
 )
-add_test(NAME test_l3_l2_orch_endpoint COMMAND test_l3_l2_orch_endpoint)
-set_tests_properties(test_l3_l2_orch_endpoint PROPERTIES LABELS "no_hardware")
+add_test(NAME test_worker_chip_orch_endpoint COMMAND test_worker_chip_orch_endpoint)
+set_tests_properties(test_worker_chip_orch_endpoint PROPERTIES LABELS "no_hardware")
 
 add_common_utils_test(test_runtime_timeout_config common/test_runtime_timeout_config.cpp)
 target_include_directories(test_runtime_timeout_config PRIVATE
@@ -601,22 +601,22 @@ target_link_libraries(test_scope_stats_collector PRIVATE
 add_test(NAME test_scope_stats_collector COMMAND test_scope_stats_collector)
 set_tests_properties(test_scope_stats_collector PROPERTIES LABELS "no_hardware")
 
-add_executable(test_l2_swimlane_aicore
-    common/test_l2_swimlane_aicore.cpp
+add_executable(test_chip_swimlane_aicore
+    common/test_chip_swimlane_aicore.cpp
 )
-target_include_directories(test_l2_swimlane_aicore PRIVATE
+target_include_directories(test_chip_swimlane_aicore PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/sim/aicore
     ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
 )
-target_link_libraries(test_l2_swimlane_aicore PRIVATE
+target_link_libraries(test_chip_swimlane_aicore PRIVATE
     ${GTEST_MAIN_LIB}
     ${GTEST_LIB}
     pthread
 )
-add_test(NAME test_l2_swimlane_aicore COMMAND test_l2_swimlane_aicore)
-set_tests_properties(test_l2_swimlane_aicore PROPERTIES LABELS "no_hardware")
+add_test(NAME test_chip_swimlane_aicore COMMAND test_chip_swimlane_aicore)
+set_tests_properties(test_chip_swimlane_aicore PROPERTIES LABELS "no_hardware")
 
 # AICPU-side dep_gen writer. The shared-memory layout is byte-identical across
 # platforms, so compiling against a2a3's platform_config covers a5 too.

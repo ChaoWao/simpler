@@ -63,7 +63,7 @@ static __aicore__ void attn_out_seed(__gm__ bfloat16_t *v1) {
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: attn_out_inline282__ssa_v0
-    __gm__ Tensor *attn_out_inline282__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *attn_out_inline282__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ bfloat16_t *attn_out_inline282__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(attn_out_inline282__ssa_v0_tensor->buffer.addr) +
         attn_out_inline282__ssa_v0_tensor->start_offset;
