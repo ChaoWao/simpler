@@ -66,6 +66,8 @@ from simpler.worker import (
     _pack_py_callable_payload,
 )
 
+from ._harness import chip_callable, fake_chip_l3, requires_sim_binaries
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -335,6 +337,14 @@ class _FakeNativeRunImpl:
 
 
 class _FakeTwoFrameChipWorker:
+    """Collaborator double handed straight to ``_run_chip_main_loop`` in-process.
+
+    Distinct from ``_harness.FakeChipWorker``, which stands in for the class the
+    forked chip child instantiates: this one is never bound as
+    ``worker.ChipWorker`` and never init'd or finalized, so it implements only
+    the two-frame native-run surface the loop drives.
+    """
+
     pipeline_depth = 2
 
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
@@ -1394,20 +1404,28 @@ class TestLifecycle:
                 hw._hierarchical_start_cv.wait = original_wait
             hw.close()
 
-    def test_prepare_chip_callable_after_init_no_chips_succeeds(self):
-        # With no chip children (device_ids unset), the C++ broadcast is a
-        # no-op (next_level_threads_ is empty) — exercises the facade path
-        # (registry lock, cid allocation, broadcast call, return) end-to-end
-        # without needing an NPU.
-        hw = Worker(level=3, num_sub_workers=0)
-        hw.init()
-        try:
-            callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
-            handle = hw.register(callable_obj)
+    @requires_sim_binaries
+    def test_prepare_chip_callable_after_init_succeeds(self, monkeypatch):
+        # A post-init ChipCallable travels the whole dynamic-prepare path —
+        # registry lock, cid allocation, broadcast, chip-child CTRL_REGISTER,
+        # native register — and returns a handle bound to a live slot. The
+        # chipless counterpart is the opposite claim and lives with the rest of
+        # the eligibility rule, in
+        # test_startup_readiness.py::TestEligibleTargetPrecheck.
+        with fake_chip_l3(monkeypatch) as hw:
+            handle = hw.register(chip_callable())
             assert isinstance(handle, CallableHandle)
             assert _slot_for(hw, handle) >= 0
-        finally:
-            hw.close()
+
+    @requires_sim_binaries
+    def test_prepare_chip_callable_surfaces_chip_child_register_failure(self, monkeypatch):
+        # The broadcast reaches the chip child rather than terminating in the
+        # parent: a native register that raises on the child comes back to the
+        # caller as REGISTER_PARTIAL_FAILURE, and the handle is rolled back.
+        with fake_chip_l3(monkeypatch, register_error="injected chip register failure") as hw:
+            with pytest.raises(RuntimeError, match="REGISTER_PARTIAL_FAILURE"):
+                hw.register(chip_callable())
+            assert hw._callable_registry == {}
 
     def test_prepare_chip_callable_at_cid_overflow_raises(self):
         # cid budget is enforced under the new dynamic-prepare path too:
@@ -1415,14 +1433,19 @@ class TestLifecycle:
         # post-init ChipCallable prepare and observe the existing
         # MAX_REGISTERED_CALLABLE_IDS RuntimeError. A sub child gives the
         # pre-registered python callables an eligible dispatch target.
+        #
+        # This worker is chipless, so the ChipCallable is over the cid budget
+        # AND ineligible under the startup dispatch-target rule. Only the cid
+        # budget is asserted; the relative order of the two checks is unpinned
+        # here (see the b2 xfail in
+        # test_startup_readiness.py::TestEligibleTargetPrecheck).
         hw = Worker(level=3, num_sub_workers=1)
         try:
             for i in range(MAX_REGISTERED_CALLABLE_IDS):
                 hw.register(_unique_py_callable(i))
             hw.init()
-            callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
             with pytest.raises(RuntimeError, match="MAX_REGISTERED_CALLABLE_IDS"):
-                hw.register(callable_obj)
+                hw.register(chip_callable())
         finally:
             hw.close()
 
@@ -1437,16 +1460,15 @@ class TestLifecycle:
         finally:
             hw.close()
 
-    def test_unregister_chip_callable_after_init_no_chips_succeeds(self):
-        # With zero chip mailboxes the C++ broadcast is a no-op, so the
-        # facade path (registry lock, broadcast, registry pop) is exercised
-        # end-to-end without an NPU. Also verifies slot reuse — unregistering
-        # frees the slot and the next register reuses the same slot via
-        # `_allocate_cid` (smallest-unused-integer).
-        hw = Worker(level=3, num_sub_workers=0)
-        hw.init()
-        try:
-            callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
+    @requires_sim_binaries
+    def test_unregister_chip_callable_after_init_succeeds(self, monkeypatch):
+        # Register and unregister both broadcast to a live chip child, which
+        # drops the digest from its identity table and releases the native
+        # slot. Also verifies slot reuse — unregistering frees the slot and the
+        # next register reuses the same slot via `_allocate_cid`
+        # (smallest-unused-integer).
+        with fake_chip_l3(monkeypatch) as hw:
+            callable_obj = chip_callable()
             handle_a = hw.register(callable_obj)
             slot_a = _slot_for(hw, handle_a)
             assert slot_a in hw._callable_registry
@@ -1454,8 +1476,6 @@ class TestLifecycle:
             assert slot_a not in hw._callable_registry
             handle_b = hw.register(callable_obj)
             assert _slot_for(hw, handle_b) == slot_a, "smallest-unused-cid policy should reuse the freed slot"
-        finally:
-            hw.close()
 
     def test_prepare_chip_callable_broadcast_runs_without_registry_lock(self):
         hw = Worker(level=3, num_sub_workers=0)
