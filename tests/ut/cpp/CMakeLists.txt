@@ -146,6 +146,33 @@ function(add_a2a3_hbg_runtime_test name src)
     set_tests_properties(${name} PROPERTIES LABELS "no_hardware")
 endfunction()
 
+function(add_a5_hbg_runtime_test name src)
+    add_executable(${name}
+        ${src}
+        ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/scope_stats_collector_aicpu.cpp
+    )
+    target_include_directories(${name} PRIVATE
+        ${GTEST_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/orchestration
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/common
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/include
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+        ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+        ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+        ${CMAKE_SOURCE_DIR}/../../../src/common
+    )
+    target_link_libraries(${name} PRIVATE
+        ${GTEST_MAIN_LIB}
+        ${GTEST_LIB}
+        pthread
+    )
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES LABELS "no_hardware")
+endfunction()
+
 function(add_a2a3_orchestrator_runtime_test name src)
     add_executable(${name}
         ${src}
@@ -430,6 +457,7 @@ target_include_directories(test_runtime_orch_so PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
 )
 add_common_utils_test(test_device_arena common/test_device_arena.cpp)
+add_common_utils_test(test_thread_completion_gate common/test_thread_completion_gate.cpp)
 add_common_utils_test(test_buffer_pool_manager common/test_buffer_pool_manager.cpp)
 target_sources(test_buffer_pool_manager PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/log/host_log.cpp
@@ -700,6 +728,8 @@ add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp)
+add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 # PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE

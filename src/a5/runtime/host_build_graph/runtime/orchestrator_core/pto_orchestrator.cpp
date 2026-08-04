@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Orchestrator Implementation
+ * host_build_graph orchestrator implementation
  *
  * Implements orchestrator state management, scope handling, and task submission.
  *
@@ -21,6 +21,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <limits>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -387,6 +388,18 @@ static bool prepare_task(
     uint8_t ring_id = 0;
     auto &allocator = orch->ring.task_allocator;
 
+    int16_t block_num = args.launch_spec.block_num();
+    int32_t active_subtasks_per_block = __builtin_popcount(active_mask.core_mask());
+    int32_t total_required_subtasks = static_cast<int32_t>(block_num) * active_subtasks_per_block;
+    if (block_num <= 0 || total_required_subtasks > std::numeric_limits<int16_t>::max()) {
+        orch->report_fatal(
+            PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
+            "block_num=%d with %d active slots requires %d subtasks; expected block_num >= 1 and total <= %d",
+            block_num, active_subtasks_per_block, total_required_subtasks, std::numeric_limits<int16_t>::max()
+        );
+        return false;
+    }
+
     if (!check_scope_can_accept_task(orch, allocator, ring_id)) {
         return false;
     }
@@ -419,17 +432,15 @@ static bool prepare_task(
     // single payload-init point, which runs before Orch-side wiring publish.
 
     // Fields already zeroed by reset_for_reuse() at slot init:
-    //   fanout_lock=0, fanout_count=PTO2_FANOUT_SCOPE_BIT, fanout_head=nullptr,
-    //   fanin_refcount=0, fanout_refcount=0, completed_subtasks=0, next_block_idx=0
+    //   wake_list_head=nullptr, next_in_wake_list=nullptr,
+    //   any_subtask_deferred=false, completed_subtasks=0, next_block_idx=0
     // Fields immutable after RingSchedState::init():
     //   ring_id
     // task_state is set to PENDING here as the orchestrator populates the slot
     // (host_build_graph does not recycle slots at runtime, so there is no
     // post-CONSUMED reset path).
     out->slot_state->task_state.store(PTO2_TASK_PENDING, std::memory_order_relaxed);
-    int16_t block_num = args.launch_spec.block_num();
-    out->slot_state->total_required_subtasks =
-        static_cast<int16_t>(block_num * __builtin_popcount(active_mask.core_mask()));
+    out->slot_state->total_required_subtasks = static_cast<int16_t>(total_required_subtasks);
     out->slot_state->logical_block_num = block_num;
     out->slot_state->active_mask = active_mask;
     out->slot_state->task_attrs = task_attrs;
@@ -891,7 +902,6 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
     always_assert(static_cast<bool>(active_mask) && "MixedKernels must have at least one active slot");
 
     int16_t block_num = args.launch_spec.block_num();
-    always_assert(block_num >= 1 && "block_num must be >= 1");
 
     // Normalize single-AIV tasks: if only aiv1 is set (no aic, no aiv0), move
     // it to the aiv0 slot.  This guarantees the dispatch path can always use

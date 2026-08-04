@@ -188,7 +188,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 // already invalidated src's lines, so tensor_count/scalar_count/
                 // scalars read coherently with the orchestrator's submit writes.
                 // args[SPMD_LOCAL_CONTEXT_INDEX]/[SPMD_GLOBAL_CONTEXT_INDEX] are
-                // still written by the AICPU (num_args <= 48 never reaches them).
+                // pre-filled once at init() and never changed; tensor and scalar
+                // counts are set by the orchestrator, so num_args never reaches them.
                 __gm__ char *src = reinterpret_cast<__gm__ char *>(exec_payload->src_payload);
                 int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_TENSOR_COUNT_OFFSET);
                 int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + PTO2_TASKPAYLOAD_SCALAR_COUNT_OFFSET);

@@ -392,15 +392,9 @@ void SchedulerContext::dispatch_shape(
             CoreTracker::BitStates selected_mix_clusters(0ULL);
 
             if (is_mix) {
-                auto candidates = cores;
                 uint8_t cmask = slot_state->active_mask.core_mask();
                 auto wanted = is_pending ? CoreTracker::MixPlacement::PENDING : CoreTracker::MixPlacement::RUNNING;
-                while (candidates.has_value()) {
-                    int32_t cluster_offset = candidates.pop_first();
-                    if (tracker.classify_mix_cluster(cluster_offset, cmask) == wanted) {
-                        selected_mix_clusters |= CoreTracker::BitStates(1ULL << cluster_offset);
-                    }
-                }
+                selected_mix_clusters = tracker.get_mix_cluster_offset_states(cmask, wanted) & cores;
                 if (!selected_mix_clusters.has_value()) {
                     disp_queues[static_cast<int32_t>(shape)].push(slot_state);
                     continue;
@@ -745,13 +739,7 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
         if (is_mix) {
             auto wanted = is_idle ? CoreTracker::MixPlacement::RUNNING : CoreTracker::MixPlacement::PENDING;
             uint8_t cmask = c->active_mask.core_mask();
-            CoreTracker::BitStates candidates = tracker.get_cluster_offset_states();
-            while (candidates.has_value()) {
-                int32_t cluster_offset = candidates.pop_first();
-                if (tracker.classify_mix_cluster(cluster_offset, cmask) == wanted) {
-                    bucket |= CoreTracker::BitStates(1ULL << cluster_offset);
-                }
-            }
+            bucket = tracker.get_mix_cluster_offset_states(cmask, wanted);
         } else {
             bucket = tracker.get_dispatchable_cores(shape, phase);
         }
