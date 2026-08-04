@@ -118,16 +118,6 @@ def _drive(
     """
     import torch  # noqa: PLC0415
 
-    # This harness compiles the RT2-style orch (task_timing_orch.cpp: L0TaskArgs +
-    # rt_submit_aiv_task), which a5 host_build_graph's legacy add_task API cannot
-    # consume. That path's slots are covered by the dedicated legacy-API ST at
-    # tests/st/task_timing/task_timing_a5hbg/test_task_timing_a5hbg.py.
-    if platform.startswith("a5") and runtime == "host_build_graph":
-        pytest.skip(
-            "a5 host_build_graph uses the legacy add_task orch API, incompatible with this "
-            "RT2 orch; slots covered by tests/st/task_timing/task_timing_a5hbg"
-        )
-
     worker = Worker(level=2, platform=platform, runtime=runtime, device_id=device_id)
     chip_callable = _build_chip_callable(platform, func_name, runtime)
     chip_handle = worker.register(chip_callable)
@@ -217,9 +207,8 @@ def test_duplicate_slot_merges_window(st_platform, st_device_ids, capfd):
 # a2a3 host_build_graph exercises a distinct fold path from tensormap_and_ringbuffer:
 # the RT2 orch is identical, but hbg builds the graph on the host and its Scheduler
 # folds dispatch via the PublishHandle (scheduler_context.h) rather than the inline
-# tensormap dispatch. These two cases give that path direct e2e coverage. (a5
-# host_build_graph uses the legacy add_task orch — covered by task_timing_a5hbg.)
-@pytest.mark.platforms(["a2a3sim", "a2a3"])
+# tensormap dispatch. These two cases give that path direct e2e coverage.
+@pytest.mark.platforms(["a2a3sim", "a2a3", "a5sim", "a5"])
 @pytest.mark.runtime("host_build_graph")
 @pytest.mark.device_count(1)
 def test_hbg_distinct_slots_emit_markers(st_platform, st_device_ids, capfd):
@@ -239,7 +228,7 @@ def test_hbg_distinct_slots_emit_markers(st_platform, st_device_ids, capfd):
     assert disp1 >= fin0, f"expected dispatch(slot1)={disp1} >= finish(slot0)={fin0} (dependency ordering)"
 
 
-@pytest.mark.platforms(["a2a3sim", "a2a3"])
+@pytest.mark.platforms(["a2a3sim", "a2a3", "a5sim", "a5"])
 @pytest.mark.runtime("host_build_graph")
 @pytest.mark.device_count(1)
 def test_hbg_duplicate_slot_merges_window(st_platform, st_device_ids, capfd):

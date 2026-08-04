@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Paged attention — host_build_graph test (production scale, bfloat16).
+"""Paged attention — tensormap_and_ringbuffer test (production scale, bfloat16).
 
 AIC+AIV mixed execution with online softmax paged attention.
 Production-scale cases for A5 hardware validation.
@@ -22,8 +22,8 @@ from simpler_setup.goldens.paged_attention import generate_inputs as _pa_generat
 
 
 @scene_test(level=2, runtime="host_build_graph")
-class TestPagedAttentionHostBuildGraph(SceneTestCase):
-    """Paged attention with host_build_graph runtime on A5."""
+class TestPagedAttentionHostBuildGraphA5(SceneTestCase):
+    """Paged attention with tensormap_and_ringbuffer runtime on A5."""
 
     RTOL = 1e-3
     ATOL = 1e-3
@@ -68,16 +68,22 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
 
     CASES = [
         {
+            # Marked manual for host_build_graph: this batch=256 case submits
+            # ~64K tasks, and host-orchestration populates the whole task graph
+            # before the device schedules — so the ring cannot reclaim
+            # mid-orchestration and must hold the entire graph at once. That
+            # exceeds the default ring window (16384 slots). Run it explicitly
+            # with a large PTO2_RING_TASK_WINDOW / PTO2_RING_HEAP if needed.
             "name": "Case1",
             "platforms": ["a5"],
-            "config": {"aicpu_thread_num": 3},
+            "manual": True,
             "params": {
                 "batch": 256,
                 "num_heads": 16,
                 "kv_head_num": 1,
                 "head_dim": 128,
                 "block_size": 128,
-                "context_len": 8100,
+                "context_len": 8192,
                 "max_model_len": 32768,
                 "dtype": "bfloat16",
             },
@@ -85,7 +91,6 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "Case2",
             "platforms": ["a5"],
-            "config": {"aicpu_thread_num": 3},
             "manual": True,
             "params": {
                 "batch": 64,
@@ -93,7 +98,22 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
                 "kv_head_num": 1,
                 "head_dim": 128,
                 "block_size": 64,
-                "context_len": 8150,
+                "context_len": 8192,
+                "max_model_len": 32768,
+                "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "Case3",
+            "platforms": ["a5"],
+            "manual": True,
+            "params": {
+                "batch": 64,
+                "num_heads": 64,
+                "kv_head_num": 1,
+                "head_dim": 256,
+                "block_size": 64,
+                "context_len": 8192,
                 "max_model_len": 32768,
                 "dtype": "bfloat16",
             },
@@ -101,14 +121,13 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "SmallCase1",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 3},
             "params": {
                 "batch": 1,
                 "num_heads": 16,
                 "kv_head_num": 1,
                 "head_dim": 16,
                 "block_size": 16,
-                "context_len": 16,
+                "context_len": 33,
                 "max_model_len": 256,
                 "dtype": "bfloat16",
             },
@@ -116,7 +135,6 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "SmallCase2",
             "platforms": ["a5sim", "a5"],
-            "config": {"aicpu_thread_num": 3},
             "manual": True,
             "params": {
                 "batch": 1,
@@ -124,7 +142,39 @@ class TestPagedAttentionHostBuildGraph(SceneTestCase):
                 "kv_head_num": 1,
                 "head_dim": 16,
                 "block_size": 16,
-                "context_len": 64,
+                "context_len": 128,
+                "max_model_len": 256,
+                "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "SmallCaseVarSeq2",
+            "platforms": ["a5sim", "a5"],
+            "manual": True,
+            "params": {
+                "batch": 2,
+                "num_heads": 16,
+                "kv_head_num": 1,
+                "head_dim": 16,
+                "block_size": 16,
+                "context_len": 33,
+                "context_lens_list": [33, 17],
+                "max_model_len": 256,
+                "dtype": "bfloat16",
+            },
+        },
+        {
+            "name": "SmallCaseVarSeq4",
+            "platforms": ["a5sim", "a5"],
+            "manual": True,
+            "params": {
+                "batch": 4,
+                "num_heads": 16,
+                "kv_head_num": 1,
+                "head_dim": 16,
+                "block_size": 16,
+                "context_len": 128,
+                "context_lens_list": [33, 64, 128, 15],
                 "max_model_len": 256,
                 "dtype": "bfloat16",
             },

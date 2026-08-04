@@ -8,9 +8,21 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
+/**
+ * Scalar addition kernel (submit_task / Tensor* ABI)
+ *
+ * Implements: out[i] = src[i] + scalar over a single 128x128 tile.
+ *
+ * Args:
+ *   args[0] = src (INPUT, Tensor*)
+ *   args[1] = out (OUTPUT, Tensor*)
+ *   args[2] = scalar (float bits packed in uint64_t — tensors precede scalars)
+ */
 
 #include <cstdint>
 #include <pto/pto-inst.hpp>
+
+#include "tensor.h"
 
 using namespace pto;
 
@@ -25,9 +37,18 @@ using namespace pto;
 #endif
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ float *src0 = reinterpret_cast<__gm__ float *>(args[0]);
-    __gm__ float *src1 = reinterpret_cast<__gm__ float *>(args[1]);
-    __gm__ float *out = reinterpret_cast<__gm__ float *>(args[2]);
+    __gm__ Tensor *src_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+
+    union {
+        uint64_t u64;
+        float f32;
+    } converter;
+    converter.u64 = static_cast<uint64_t>(args[2]);
+    float scalar = converter.f32;
+
+    __gm__ float *src = reinterpret_cast<__gm__ float *>(src_tensor->buffer.addr) + src_tensor->start_offset;
+    __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     constexpr int kTRows_ = 128;
     constexpr int kTCols_ = 128;
@@ -39,22 +60,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     using GlobalData = GlobalTensor<float, DynShapeDim5, DynStridDim5>;
     using TileData = Tile<TileType::Vec, float, kTRows_, kTCols_, BLayout::RowMajor, -1, -1>;
 
-    TileData src0Tile(vRows, vCols);
-    TileData src1Tile(vRows, vCols);
+    TileData srcTile(vRows, vCols);
     TileData dstTile(vRows, vCols);
-    TASSIGN(src0Tile, 0x0);
-    TASSIGN(src1Tile, 0x10000);
-    TASSIGN(dstTile, 0x20000);
+    TASSIGN(srcTile, 0x0);
+    TASSIGN(dstTile, 0x10000);
 
-    GlobalData src0Global(src0);
-    GlobalData src1Global(src1);
+    GlobalData srcGlobal(src);
     GlobalData dstGlobal(out);
 
-    TLOAD(src0Tile, src0Global);
-    TLOAD(src1Tile, src1Global);
+    TLOAD(srcTile, srcGlobal);
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
-    TADD(dstTile, src0Tile, src1Tile);
+    TADDS(dstTile, srcTile, scalar);
     set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
     TSTORE(dstGlobal, dstTile);

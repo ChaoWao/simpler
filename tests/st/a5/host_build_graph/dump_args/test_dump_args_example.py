@@ -21,13 +21,13 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 
 @scene_test(level=2, runtime="host_build_graph")
-class TestDumpArgsExample(SceneTestCase):
+class TestDumpArgsExampleA5(SceneTestCase):
     """f = (a + b) + 1, where a=2.0, b=3.0 -> f=6.0."""
 
     CALLABLE = {
         "orchestration": {
             "source": "kernels/orchestration/dump_args_orch.cpp",
-            "function_name": "build_dump_args_graph",
+            "function_name": "aicpu_orchestration_entry",
             "signature": [D.IN, D.IN, D.OUT],
         },
         "incores": [
@@ -50,7 +50,6 @@ class TestDumpArgsExample(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a5"],
-            "config": {"aicpu_thread_num": 3},
             "params": {},
         },
     ]
