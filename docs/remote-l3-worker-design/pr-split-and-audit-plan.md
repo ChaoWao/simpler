@@ -366,7 +366,7 @@ Minimum verification:
 - PR 3: C++ remote wire tests and Python protocol codec tests.
 - PR 4: C++ scheduler, orchestrator, and worker-manager tests.
 - PR 5: C++ remote endpoint tests and binding smoke tests.
-- PR 6: remote simulation integration tests, buffer export/import/release
+- PR 6: remote host_tcp integration tests, buffer export/import/release
   tests, health lane tests, and session-exit failure tests.
 
 Top-of-stack verification:

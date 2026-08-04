@@ -27,7 +27,7 @@ def _manifest(**extra):
         "parent_worker_level": 4,
         "remote_worker_level": 3,
         "platform": "a2a3sim",
-        "transport": "sim",
+        "transport": "host_tcp",
         "listen_host": "127.0.0.1",
         "connect_host": "127.0.0.1",
         "session_timeout_s": 0.01,

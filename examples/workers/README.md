@@ -33,12 +33,81 @@ workers/
   l3/                       # Multi-chip examples (host-level DAG)
     multi_chip_dispatch/    # Worker(level=3) + orchestration + SubWorker
     child_memory/           # orch.malloc + child_memory=True, weight reuse across tasks
+  l4/                       # Multi-machine examples (one L3 here, one over TCP)
+    vector_add_mixed_l3/    # Worker(level=4) + add_remote_worker, golden checked on both sides
 ```
 
 Why no `tensormap_and_ringbuffer/` layer? Because every example here hard-codes
 `runtime="tensormap_and_ringbuffer"` in its `Worker(...)` call — that is the
 default user-facing runtime. The other runtime (`host_build_graph`) is
 covered by scene tests under `tests/st/`, not here.
+
+## L4: examples that span two machines
+
+An L4 example is the only kind here that needs **two hosts**. The parent runs
+on one, holding a forked local L3, and attaches a second L3 running on the
+other over TCP:
+
+```text
+L4 parent on machine B ─┬─ local  L3 on machine B  → its own NPUs
+                        └─ remote L3 on machine A  → machine A's NPUs
+```
+
+Two processes, then, not one: a **daemon** on the peer and a **parent** here.
+The daemon is `python -m simpler.remote_l3_worker --host H --port P` — generic,
+identical for every example, nothing to write. All an example ships is the
+parent side.
+
+### What a new L4 example needs
+
+```text
+l4/<your_example>/
+  README.md
+  kernels/aiv/*.cpp
+  kernels/orchestration/*.cpp
+  main.py                   # entry point: argparse + main()
+  run_parent.sh             # maps environment variables onto main.py's flags
+```
+
+Copy [`vector_add_mixed_l3/`](l4/vector_add_mixed_l3/) and work outwards from
+it. Three things are load-bearing:
+
+- **`main.py` must not be named `test_*.py`.** `pyproject.toml` sets
+  `testpaths = ["tests", "examples"]`, so pytest imports anything matching that
+  name. A file with no test functions collects as zero tests and looks
+  harmless — until someone adds one, and the single-machine scene-test job
+  starts trying to run a two-machine example.
+- **The remote imports your module by path.** `REMOTE_ORCH_TARGET` is a
+  `"package.module:function"` string the *peer* resolves, so renaming or moving
+  the file means updating that string in the same commit — nothing on the local
+  side will fail if you forget.
+- **Exit non-zero when the golden check fails.** CI reads the exit code and
+  nothing else.
+
+### The environment-variable contract
+
+`run_parent.sh` exists to turn environment variables into `main.py`'s flags,
+because that is the interface CI drives it through. Pick a prefix and read
+these five; CI sets exactly them:
+
+| Variable | Meaning |
+| -------- | ------- |
+| `<PREFIX>_REMOTE` | The peer's daemon, as `host:port` |
+| `<PREFIX>_LOCAL_DEVICES` | Device ids the local L3 owns |
+| `<PREFIX>_REMOTE_DEVICES` | Device ids the peer's L3 owns |
+| `<PREFIX>_SESSION_TIMEOUT` | Seconds to wait on the remote session |
+| `<PREFIX>_SESSION_LISTEN_HOST` | Interface the parent's session runner binds |
+
+Anything else — platform, runtime — defaults inside `run_parent.sh`.
+
+### Running it in CI
+
+The `st-pod-onboard-a2a3` job runs L4 examples across a pair of a2a3 machines.
+Adding yours to it is one block plus one line, and the wiring, the log
+artifact, and the failure semantics are described in
+[`docs/ci.md`](../../docs/ci.md#multi-machine-pod-jobs). Read that before adding the
+block — in particular why a step that reports green there may still have
+failed.
 
 ## Prerequisites
 
@@ -75,6 +144,12 @@ Flags:
 
 Simulator (`a2a3sim`) works on any Linux host with gcc; hardware platforms
 require an Ascend NPU box with `ASCEND_HOME_PATH` set.
+
+L2 and L3 examples follow that uniform CLI. **L4 examples do not** — they need
+a peer's address and a device split on each side, so they take `--remote`,
+`--local-devices` and `--remote-devices` instead of `-p`/`-d`, and are normally
+launched through their `run_parent.sh`. See each L4 example's README for the
+two-machine sequence.
 
 ## Related documentation
 

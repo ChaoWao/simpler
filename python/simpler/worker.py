@@ -63,6 +63,7 @@ import bisect
 import contextlib
 import ctypes
 import enum
+import hashlib
 import importlib
 import json
 import math
@@ -113,6 +114,7 @@ from .callable_identity import (
     parse_python_import_target,
 )
 from .orchestrator import Orchestrator, _callback_run, direct_control
+from .remote_l3_protocol import HOST_TCP_TRANSPORT_PROFILE
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
@@ -465,8 +467,8 @@ class RemoteCallable:
 class RemoteWorkerSpec:
     """Describes a remote L3 worker to attach via ``Worker.add_remote_worker``.
 
-    ``transport`` selects the data plane and is simulation-backed today; the
-    daemon rejects any other value.
+    ``transport`` selects the data plane. The shipped daemon accepts
+    only the host_tcp profile today.
     """
 
     # endpoint is "host:port"; host must be a numeric IP (or "localhost").
@@ -477,7 +479,7 @@ class RemoteWorkerSpec:
     runtime: str = "tensormap_and_ringbuffer"
     device_ids: tuple[int, ...] = ()
     num_sub_workers: int = 0
-    transport: str = "sim"
+    transport: str = HOST_TCP_TRANSPORT_PROFILE
     session_listen_host: str | None = None
     allow_wildcard_session_bind: bool = False
 
@@ -1224,6 +1226,10 @@ def _validate_domain_allocation(
     return resources
 
 
+class _NoHostBufferChildrenError(RuntimeError):
+    """The Worker has no process child that can attach a host buffer."""
+
+
 def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[int, int, int]]) -> None:
     """Redirect registered host pointers in a task-args blob to child mappings.
 
@@ -1421,14 +1427,15 @@ def _pack_py_callable_payload(target) -> bytes:
 def _chip_descriptor_context(worker: Worker) -> tuple[str, str]:
     platform = str(worker._config.get("platform", ""))
     runtime = str(worker._config.get("runtime", ""))
-    if platform or runtime:
-        return platform, runtime
-
     contexts: list[tuple[str, str]] = []
+    if platform or runtime:
+        contexts.append((platform, runtime))
     for child in getattr(worker, "_next_level_workers", []):
         child_context = _chip_descriptor_context(child)
         if child_context != ("", ""):
             contexts.append(child_context)
+    for spec in getattr(worker, "_remote_worker_specs", []):
+        contexts.append((str(spec.platform), str(spec.runtime)))
     if not contexts:
         return "", ""
     first = contexts[0]
@@ -4246,6 +4253,50 @@ class Worker:
             )
         return entries
 
+    def _inner_registry_entries_for_spec(self, spec: RemoteWorkerSpec) -> list[dict[str, Any]]:
+        from .remote_l3_protocol import (  # noqa: PLC0415
+            ChipCallableBlobLocation,
+            RemoteChipCallablePayload,
+            encode_remote_chip_callable_payload,
+        )
+
+        entries: list[dict[str, Any]] = []
+        with self._registry_lock:
+            states = list(self._identity_registry.values())
+        for state in states:
+            if state.target_namespace != "LOCAL_CHIP":
+                continue
+            if not isinstance(state.target, ChipCallable):
+                raise RuntimeError(f"inner chip hashid {state.hashid} does not carry a ChipCallable target")
+            descriptor = build_chip_callable_descriptor(
+                target=state.target,
+                platform=spec.platform,
+                runtime=spec.runtime,
+            )
+            if descriptor != state.descriptor:
+                raise RuntimeError(f"inner chip hashid {state.hashid} was registered for a different platform/runtime")
+            blob = ctypes.string_at(int(state.target.buffer_ptr()), int(state.target.buffer_size()))
+            payload = encode_remote_chip_callable_payload(
+                RemoteChipCallablePayload(
+                    descriptor_bytes=descriptor,
+                    blob_location=ChipCallableBlobLocation.INLINE_BLOB,
+                    blob_size=len(blob),
+                    blob_sha256=hashlib.sha256(blob).digest(),
+                    inline_blob=blob,
+                    staged_blob_token=b"",
+                )
+            )
+            entries.append(
+                {
+                    "hashid": state.digest.hex(),
+                    "kind": "CHIP_CALLABLE",
+                    "target_registry": "INNER_L3_WORKER",
+                    "payload_version": 1,
+                    "payload_hex": payload.hex(),
+                }
+            )
+        return entries
+
     def _build_remote_manifest(
         self, *, spec: RemoteWorkerSpec, worker_id: int, session_id: int, startup_remaining_s: float
     ) -> dict[str, Any]:
@@ -4272,7 +4323,7 @@ class Worker:
             "listen_host": listen_host,
             "connect_host": daemon_host,
             "remote_task_dispatcher": self._remote_dispatcher_entries_for_worker(worker_id),
-            "inner_l3_worker": [],
+            "inner_l3_worker": self._inner_registry_entries_for_spec(spec),
             "feature_flags": [],
         }
 
@@ -4578,7 +4629,7 @@ class Worker:
         offset: int = 0,
         nbytes: int | None = None,
         access: str | int = "readwrite",
-        transport_profile: str = "sim",
+        transport_profile: str = HOST_TCP_TRANSPORT_PROFILE,
     ) -> RemoteBufferExport:
         """Export a range of an owner buffer so another worker can import it.
 
@@ -4598,7 +4649,7 @@ class Worker:
         offset: int = 0,
         nbytes: int | None = None,
         access: str | int = "readwrite",
-        transport_profile: str = "sim",
+        transport_profile: str = HOST_TCP_TRANSPORT_PROFILE,
     ) -> RemoteBufferExport:
         self._require_live_remote_buffer(handle)
         if handle.is_imported:
@@ -6181,8 +6232,17 @@ class Worker:
             has_python_child = self._config.get("num_sub_workers", 0) > 0 or bool(self._next_level_workers)
             return None if has_python_child else "a SUB or next-level child"
         if namespace == "LOCAL_CHIP":
-            has_chip_child = bool(self._config.get("device_ids")) or bool(self._next_level_workers)
-            return None if has_chip_child else "a chip device (device_ids)"
+            # A chip target need not be this worker's own: an L4 parent carries
+            # no device_ids and reaches its chips through a next-level child or
+            # a remote spec, so the search walks the frozen topology.
+            def has_chip_target(worker: Worker) -> bool:
+                if worker._config.get("device_ids"):
+                    return True
+                if any(spec.device_ids for spec in worker._remote_worker_specs):
+                    return True
+                return any(has_chip_target(child) for child in worker._next_level_workers)
+
+            return None if has_chip_target(self) else "a chip device (device_ids)"
         if namespace == "REMOTE_TASK_DISPATCHER":
             has_remote_workers = set(self._remote_worker_ids)
             ok = bool(has_remote_workers) and set(eligible_worker_ids) <= has_remote_workers
@@ -8080,7 +8140,7 @@ class Worker:
         # and sub alike, via _broadcast_host_control). Only a truly childless L3
         # has nowhere to attach it.
         if not self._chip_shms and not self._sub_shms:
-            raise RuntimeError(
+            raise _NoHostBufferChildrenError(
                 "create_host_buffer requires at least one forked chip or sub child (this Worker has none)"
             )
         assert self._worker is not None
