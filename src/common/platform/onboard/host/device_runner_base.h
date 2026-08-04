@@ -28,13 +28,13 @@
  *
  * Subclasses (`{a2a3,a5}::DeviceRunner`) add arch-specific state
  * (callable registry, profiling collectors, ACL/HCCL plumbing on a2a3,
- * `enable_*` flags) and the divergent methods (`run`, `finalize`,
- * `setup_static_arena`, the kernel launch / chip-callable upload, the
- * per-callable registration helpers, and the per-diagnostic `init_*`).
+ * `enable_*` flags) and the divergent methods (`enqueue_run`, `poll_run`,
+ * `drain_run`, `finalize`, `setup_static_arena`, the kernel launch /
+ * chip-callable upload, the per-callable registration helpers, and the
+ * per-diagnostic `init_*`).
  */
 
-#ifndef SIMPLER_COMMON_PLATFORM_ONBOARD_HOST_DEVICE_RUNNER_BASE_H
-#define SIMPLER_COMMON_PLATFORM_ONBOARD_HOST_DEVICE_RUNNER_BASE_H
+#pragma once
 
 #include <runtime/rt.h>
 
@@ -70,7 +70,7 @@
 #include "pto_runtime_c_api.h"
 
 struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
-struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
+struct CallConfig;  // task_interface/call_config.h — per-run execution config
 class NativeRunLaunchSignal;
 
 /**
@@ -267,14 +267,14 @@ public:
     /**
      * Print handshake results from device. Reads the per-core
      * `Handshake` array out of device memory and logs it at DEBUG. Must
-     * be called after `run()` and before `finalize()`.
+     * be called after `drain_run()` and before `finalize()`.
      */
     void print_handshake_results();
 
     /**
      * Take ownership of the AICPU + AICore executor binaries. Called
      * once by simpler_init at ChipWorker::init time; subsequent
-     * `run()` invocations read from `aicpu_so_binary_` /
+     * enqueue invocations read from `aicpu_so_binary_` /
      * `aicore_kernel_binary_`.
      */
     void set_executors(std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary) {
@@ -527,15 +527,16 @@ public:
     //
     // The shared `pto_runtime_c_api` glue (`src/common/platform/onboard/host/
     // c_api_shared.cpp`) works through `DeviceRunnerBase *` and dispatches
-    // through these virtuals. Each arch's `DeviceRunner` overrides
-    // `run` and `finalize`; a2a3 and a5 both override `set_dep_gen_enabled`
-    // (an arch without dep_gen keeps the base no-op default).
+    // through these virtuals. Each arch's `DeviceRunner` overrides the
+    // enqueue/poll/drain lifecycle and `finalize`; a2a3 and a5 both override
+    // `set_dep_gen_enabled` (an arch without dep_gen keeps the base no-op
+    // default).
 
     /**
      * Whether this runner may start another run without first being finalized.
      * The shared c_api checks this before attaching the thread or provisioning
      * optional resources, so a poisoned runner cannot create SDMA streams on
-     * its way to the arch-specific run() fail-fast guard.
+     * its way to the arch-specific enqueue fail-fast guard.
      */
     virtual bool can_accept_run() const = 0;
 
@@ -543,15 +544,33 @@ public:
     virtual int provision_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
     virtual int abandon_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
 
+    /** Compatibility composition retained while the C API owns an executor. */
+    int run(Runtime &runtime, const CallConfig &config) {
+        const uint32_t slot = pipeline_slot();
+        const int rc = enqueue_run(runtime, config);
+        return rc == 0 ? drain_run(slot) : rc;
+    }
+
     /**
-     * Execute a Runtime. Each arch implements its own `run()` — the bodies
-     * are too divergent for a shared implementation (FFTS / dep_gen / ACL
-     * register init on a2a3; MIX core handling on a5). See the subclass
-     * docs for the per-arch contract. `config` carries block_dim (0 = auto),
-     * aicpu_thread_num, and the diagnostic enables; each arch calls
-     * `apply_call_config(config)` at entry to latch the `enable_*_` members.
+     * Prepare host-owned execution state and submit the Runtime to the device.
+     * Success means the platform's real kernel-launch boundary was crossed;
+     * all state needed by poll_run() and drain_run() remains owned by the
+     * runner until drain completes.
      */
-    virtual int run(Runtime &runtime, const CallConfig &config) = 0;
+    virtual int enqueue_run(Runtime &runtime, const CallConfig &config) = 0;
+
+    /**
+     * Query the active run without waiting. Returns one of the
+     * SIMPLER_NATIVE_RUN_POLL_* values. This may run concurrently with
+     * drain_run() on the compatibility executor.
+     */
+    virtual int poll_run(uint32_t pipeline_slot) = 0;
+
+    /**
+     * Wait for the enqueued run, publish DFX, and release its execution
+     * resources. Called on the same executor thread as enqueue_run().
+     */
+    virtual int drain_run(uint32_t pipeline_slot) = 0;
 
     /**
      * Cleanup all resources. Each arch's `finalize()` wraps
@@ -621,8 +640,8 @@ public:
 
     /**
      * Enablement setters for the four shared diagnostics sub-features.
-     * Applied from the per-run CallConfig by `apply_call_config()` at `run()`
-     * entry; downstream `run()` paths read the corresponding `enable_*_`
+     * Applied from the per-run CallConfig by `apply_call_config()` at enqueue;
+     * downstream execution paths read the corresponding `enable_*_`
      * members directly.
      *
      * `set_dep_gen_enabled` is a2a3-only and lives on the subclass.
@@ -643,8 +662,8 @@ public:
 
     /**
      * Latch this run's per-run diagnostic config onto the runner's `enable_*_`
-     * members before `run()` uses them. Each arch's `run()` calls this once at
-     * entry — the c_api no longer reaches in with individual set_*_enabled
+     * members before enqueue uses them. Each arch calls this once at enqueue —
+     * the c_api no longer reaches in with individual set_*_enabled
      * calls; it just threads the CallConfig through. Defined in the .cpp so this
      * header does not need the full CallConfig definition.
      */
@@ -724,9 +743,9 @@ protected:
      */
     int query_max_block_dim(rtStream_t stream, uint32_t *out_cube = nullptr, uint32_t *out_vector = nullptr);
 
-    // ---- run() sub-sequence helpers --------------------------------------
+    // ---- execution sub-sequence helpers ---------------------------------
     //
-    // Each arch's `run()` keeps the heavily-divergent middle (register
+    // Each arch keeps the heavily-divergent middle (register
     // address setup, profiling flag building, init_*, collector start /
     // teardown, dep_gen, ffts setup, kernel launches). These helpers
     // cover the byte-identical sub-sequences at the head and tail.
@@ -777,7 +796,7 @@ protected:
     /**
      * Rewrites each task's `function_bin_addr` from
      * `runtime.get_function_bin_addr(func_id) +
-     * CoreCallable::binary_data_offset()`. Runs inside `run()`, after the
+     * CoreCallable::binary_data_offset()`. Runs during enqueue, after the
      * bind that populates the task table.
      */
     void resolve_task_binary_addrs(Runtime &runtime);
@@ -1058,7 +1077,7 @@ protected:
     // AicpuPhaseRecord[NUM_AICPU_PHASES] per launched AICPU thread (thread-
     // major), whose address rides on `KernelArgs.device_wall_data_base`. AICPU
     // stamps raw sys-counter cycles per phase through that pointer; subclass
-    // `run()` pulls it back via `read_device_wall_ns()` after stream sync and
+    // drain pulls it back via `read_device_wall_ns()` after stream sync and
     // caches the per-phase ns spans for `last_device_phase_ns()` (and RunWall
     // for `last_device_wall_ns()`). Allocated once at simpler_init, freed in the
     // subclass `finalize()`.
@@ -1088,8 +1107,7 @@ protected:
     ScopeStatsCollector scope_stats_collector_;
 
     // Enablement for the four shared diagnostics sub-features.
-    // Written by the c_api entry point via `set_*_enabled()` before
-    // `run()`, read inside `run()` and its helpers.
+    // Written from CallConfig before enqueue and read by execution helpers.
     bool enable_chip_swimlane_{false};
     bool enable_dump_args_{false};
     DumpArgsLevel dump_args_level_{DumpArgsLevel::OFF};  // resolved from set_dump_args_enabled()
@@ -1099,5 +1117,3 @@ protected:
     PmuEventType pmu_event_type_{PmuEventType::PIPE_UTILIZATION};         // resolved from set_pmu_enabled()
     std::string output_prefix_{};                                         // diagnostic artifact root directory
 };
-
-#endif  // SIMPLER_COMMON_PLATFORM_ONBOARD_HOST_DEVICE_RUNNER_BASE_H

@@ -249,8 +249,8 @@ Applies to all 4 runtime executors: a2a3 (hbg, tmr), a5 (hbg, tmr).
 | SO | Caching | Lifecycle |
 | -- | ------- | --------- |
 | Host runtime | `ChipWorker::lib_handle_` | Per-init: dlopen in `init()`, dlclose in `finalize()` |
-| AICPU | `DeviceRunner::aicpu_so_handle_` | Per-run: loaded in `ensure_binaries_loaded()`, closed in `unload_executor_binaries()` at end of `run()` |
-| AICore | `DeviceRunner::aicore_so_handle_` | Same as AICPU |
+| AICPU | `DeviceRunner::aicpu_so_handle_` | Per-init: loaded lazily by the first `enqueue_run()`, retained across runs, closed by `finalize()` |
+| AICore | `DeviceRunner::aicore_so_handle_` | Per-run: reloaded for the run's kernel binary, closed after a successful `drain_run()` (or by final cleanup) |
 | Kernel | `DeviceRunner::func_id_to_addr_` (map by func_id) | Per-task: uploaded in `init_runtime_impl()`, removed in `validate_runtime_impl()` |
 | Orchestration | `AicpuExecutor::orch_so_handle_` | Per-run: loaded by orchestrator thread, closed by last thread in `deinit()` |
 
@@ -271,9 +271,10 @@ Applies to all 4 runtime executors: a2a3 (hbg, tmr), a5 (hbg, tmr).
 Onboard caches more aggressively. The `DeviceRunner` persists across tasks
 within a runtime group, the runtime AICPU SO is preinstalled once through the
 dispatcher bootstrap, and per-task launches reuse cached `rtFuncHandle`s.
-Simulation re-loads AICPU/AICore SOs every `run()` call because the SO's
-internal static state (`g_aicpu_executor`) must be fresh for each task when
-different tasks have different configurations.
+Simulation also retains the AICPU SO across runs so `g_aicpu_executor` can
+reuse its orchestration-SO cache; `AicpuExecutor::deinit()` resets its per-run
+state. The AICore SO is reloaded for each run because its kernel binary varies
+per callable.
 
 Onboard per-task launches pass the front-less `KernelArgs` payload directly to
 `rtsLaunchCpuKernel` with no CANN launch front: runtime state flows through
@@ -315,12 +316,16 @@ ChipWorker.run(handle, args, config)                   # public wrapper path
       new (buf) NativeRunState()             owns Runtime + executor state
       DeviceRunner::bind_callable_to_runtime(r, cid, api, args, rings)
     simpler_launch_run(...)
-      executor thread: DeviceRunner::run(r, config)
+      executor thread: DeviceRunner::enqueue_run(r, config)
         clear_cpu_sim_shared_storage()
-        ensure_binaries_loaded()             dlopen aicpu/aicore SOs once
+        ensure_binaries_loaded()             lazily dlopen AICPU; reload AICore for this run
         launch AICPU + AICore threads
+        publish launch fence                 simpler_launch_run may return
+      executor thread: DeviceRunner::drain_run()
         join all threads
-        unload_executor_binaries()           dlclose aicpu/aicore SOs
+        dlclose AICore SO                     AICPU stays loaded across runs
+    simpler_poll_run(...)                    caller thread, concurrent with drain
+      DeviceRunner::poll_run()                nonblocking completion query
     simpler_wait_run(...)
     simpler_finalize_run(...)
       validate_runtime_impl(r)               copy results, remove kernels
@@ -328,6 +333,7 @@ ChipWorker.run(handle, args, config)                   # public wrapper path
 
 ChipWorker.finalize()
   finalize_device(ctx)
+    unload_executor_binaries()               dlclose AICPU and any residual AICore SO
   destroy_device_context(ctx)
   dlclose(host_runtime.so)                   -fno-gnu-unique ensures real unload
 ```
@@ -372,12 +378,16 @@ device_worker_main(device_id)
                 new (buf) NativeRunState()     owns Runtime + executor state
                 bind_callable_to_runtime()     replay + rtMalloc, rtMemcpy to device
               simpler_launch_run(...)
-                executor thread: DeviceRunner::run()
+                executor thread: DeviceRunner::enqueue_run()
                   ensure_binaries_loaded()     already done by init
                   launch_aicore_kernel()       cached rtRegisterAllKernel handle
                                                  + rtKernelLaunchWithHandleV2
                   launch_aicpu_kernel(Run)     rtsLaunchCpuKernel, cached rtFuncHandle
+                  publish launch fence         simpler_launch_run may return
+                executor thread: DeviceRunner::drain_run()
                   aclrtSynchronizeStreamWithTimeout() wait on both streams
+              simpler_poll_run(...)            caller thread, concurrent with drain
+                DeviceRunner::poll_run()       nonblocking stream query
               simpler_wait_run(...)
               simpler_finalize_run(...)        rtMemcpy results back; destroy state
 

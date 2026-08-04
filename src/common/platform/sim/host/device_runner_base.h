@@ -14,16 +14,15 @@
  * Mirrors the onboard DeviceRunnerBase pattern: shared lifecycle / callable
  * registry / arena / tensor-copy methods live here once; per-arch DeviceRunner
  * subclasses (in src/{a2a3,a5}/platform/sim/host/) implement the arch-specific
- * run() / finalize() / init_* / ensure_binaries_loaded path with their own
- * dlsym'd function-pointer table.
+ * enqueue/poll/drain / finalize / init_* / ensure_binaries_loaded path with
+ * their own dlsym'd function-pointer table.
  *
  * Polymorphism keeps the c_api shared glue (c_api_shared.cpp) arch-agnostic —
- * it works through SimDeviceRunnerBase* and dispatches run() / finalize() /
- * set_dep_gen_enabled() through virtuals.
+ * it works through SimDeviceRunnerBase* and dispatches the execution lifecycle,
+ * finalize(), and set_dep_gen_enabled() through virtuals.
  */
 
-#ifndef SRC_COMMON_PLATFORM_SIM_HOST_DEVICE_RUNNER_BASE_H_
-#define SRC_COMMON_PLATFORM_SIM_HOST_DEVICE_RUNNER_BASE_H_
+#pragma once
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -58,7 +57,7 @@
 #include "runtime.h"
 
 struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
-struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
+struct CallConfig;  // task_interface/call_config.h — per-run execution config
 class NativeRunLaunchSignal;
 
 // Width sim resolves the CallConfig "auto" sentinel to, deliberately below
@@ -96,7 +95,18 @@ public:
     virtual ~SimDeviceRunnerBase() = default;
 
     // --- Pure / no-op virtuals dispatched from the shared c_api glue ----
-    virtual int run(Runtime &runtime, const CallConfig &config) = 0;
+    /** Compatibility composition retained while the C API owns an executor. */
+    int run(Runtime &runtime, const CallConfig &config) {
+        const int rc = enqueue_run(runtime, config);
+        return rc == 0 ? drain_run() : rc;
+    }
+
+    /** Submit a Runtime and retain all state needed to query and drain it. */
+    virtual int enqueue_run(Runtime &runtime, const CallConfig &config) = 0;
+    /** Return one of the SIMPLER_NATIVE_RUN_POLL_* values without waiting. */
+    virtual int poll_run() = 0;
+    /** Wait for completion, publish DFX, and release per-run resources. */
+    virtual int drain_run() = 0;
     virtual int finalize() = 0;
     // a2a3 and a5 both override; an arch without dep_gen leaves the no-op.
     virtual void set_dep_gen_enabled(bool /*enable*/) {}
@@ -231,8 +241,8 @@ public:
     const std::string &output_prefix() const { return output_prefix_; }
 
     // Latch this run's per-run diagnostic config onto the runner's enable_*_
-    // members before run() uses them. Each arch's run() calls this at entry; the
-    // c_api threads the CallConfig through instead of calling set_*_enabled.
+    // members before enqueue_run() uses them. Each arch calls this at enqueue;
+    // the c_api threads the CallConfig through instead of calling setters.
     // Defined in the .cpp so this header does not need the full CallConfig.
     void apply_call_config(const CallConfig &config);
 
@@ -240,7 +250,7 @@ public:
     size_t host_dlopen_count() const { return host_dlopen_total_; }
 
 protected:
-    // --- Helpers usable by subclass run() / finalize() -------------------
+    // --- Helpers usable by subclass execution / finalize -----------------
     /** Publish after both simulated kernel thread groups have been created. */
     void publish_task_accepted() const;
     int ensure_device_initialized();
@@ -256,7 +266,7 @@ protected:
     // finalize() calls this before mem_alloc_.finalize(). Idempotent.
     void release_callable_state();
 
-    // --- Shared state (protected so subclass run() / init_* / finalize()
+    // --- Shared state (protected so subclass execution / init_* / finalize()
     // can read or write directly) ----------------------------------------
 
     // Configuration. device_id_ is set once in attach_current_thread() during
@@ -321,7 +331,7 @@ protected:
     size_t prebuilt_runtime_arena_cache_runtime_off_{0};
     std::vector<uint8_t> prebuilt_runtime_arena_cache_image_;
 
-    // Simulation state — written by run() / init_* and read by the AICPU /
+    // Simulation state — written by enqueue/init and read by the AICPU /
     // AICore execute functions via the platform-regs setter functions.
     KernelArgs kernel_args_;
 
@@ -329,7 +339,7 @@ protected:
     // address rides on KernelArgs.device_wall_data_base. AICPU writes the
     // run wall (ns) through that pointer; this DeviceRunner pulls it back
     // via copy_from_device after stream sync and caches it for
-    // last_device_wall_ns(). Allocated lazily in run(), freed in finalize().
+    // last_device_wall_ns(). Allocated lazily at enqueue, freed in finalize().
     void *device_wall_dev_ptr_{nullptr};
     uint64_t device_wall_ns_{0};
     uint64_t device_phase_ns_[NUM_AICPU_PHASES] = {0};
@@ -401,7 +411,7 @@ protected:
     PmuCollector pmu_collector_;
     ScopeStatsCollector scope_stats_collector_;
 
-    // Enablement flags. Written via setters before run(); read inside run().
+    // Enablement flags. Written before enqueue and read by execution helpers.
     bool enable_chip_swimlane_{false};
     bool enable_dump_args_{false};
     DumpArgsLevel dump_args_level_{DumpArgsLevel::OFF};  // resolved from set_dump_args_enabled()
@@ -420,5 +430,3 @@ namespace simpler::common::sim_host {
 bool create_temp_so_file(const std::string &path_template, const uint8_t *data, size_t size, std::string *out_path);
 
 }  // namespace simpler::common::sim_host
-
-#endif  // SRC_COMMON_PLATFORM_SIM_HOST_DEVICE_RUNNER_BASE_H_

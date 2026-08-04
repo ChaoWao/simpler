@@ -130,7 +130,7 @@ physical_core_id [block_dim..3*block_dim-1] = AIV pairs
 
 ### Lifecycle
 
-- `DeviceRunner::run()` start: `clear_cpu_sim_shared_storage()` frees all
+- Device-runner enqueue start: `clear_cpu_sim_shared_storage()` frees all
   `SharedState` entries for the current device.
 - `DeviceRunner::finalize()`: same cleanup.
 - `pto_cpu_sim_release_device()`: destroys the entire device context including

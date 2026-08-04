@@ -700,7 +700,14 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
     }
-    return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
+    const int poll_rc = state->runner->poll_run();
+    if (state->execution_done.load(std::memory_order_acquire)) {
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    }
+    // The simulated kernel fence may precede host-side DFX and resource
+    // cleanup, so terminal publication remains at executor completion.
+    return poll_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE ? SIMPLER_NATIVE_RUN_POLL_NOT_READY : poll_rc;
 }
 
 int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {

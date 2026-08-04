@@ -90,9 +90,9 @@ nothing to capture-then-reconstruct.
   shared-memory ring, and the drain thread are all skipped
   (`dep_gen_host_graph_active()` tells the runner). Nothing is dropped under
   back-pressure because nothing is streamed.
-- **Output.** The same `deps.json`, written at run teardown. After prepare's
-  host orchestration builds the graph, the phased runtime moves it into
-  run-owned storage and the executor adopts it before execution.
+- **Output.** The same `deps.json`, written during the device-runner drain.
+  After prepare's host orchestration builds the graph, the phased runtime moves
+  it into run-owned storage and the executor adopts it before enqueue.
 
 ---
 

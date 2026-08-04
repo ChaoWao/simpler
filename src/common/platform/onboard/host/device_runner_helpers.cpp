@@ -20,7 +20,42 @@
 
 #include <runtime/rt.h>
 
+#include "acl/error_codes/rt_error_codes.h"
 #include "common/unified_log.h"
+#include "host/acl_error_log.h"
+
+namespace {
+
+int query_stream_nonblocking(rtStream_t stream, const char *name) {
+    if (stream == nullptr) {
+        LOG_ERROR("rtStreamQuery (%s) received a null stream", name);
+        return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    }
+
+    const rtError_t rc = rtStreamQuery(stream);
+    if (rc == RT_ERROR_NONE) return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    if (rc == ACL_ERROR_RT_STREAM_NOT_COMPLETE) return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
+
+    LOG_ERROR("rtStreamQuery (%s) failed: %d", name, static_cast<int>(rc));
+    ACL_LOG_ERROR_DETAIL(rc);
+    return SIMPLER_NATIVE_RUN_POLL_ERROR;
+}
+
+}  // namespace
+
+int query_stream_pair_nonblocking(rtStream_t aicpu_stream, rtStream_t aicore_stream) {
+    // Query both even when the first is pending. Besides making completion a
+    // true pair fence, this preserves an error from either device queue.
+    const int aicpu_rc = query_stream_nonblocking(aicpu_stream, "AICPU");
+    const int aicore_rc = query_stream_nonblocking(aicore_stream, "AICore");
+    if (aicpu_rc == SIMPLER_NATIVE_RUN_POLL_ERROR || aicore_rc == SIMPLER_NATIVE_RUN_POLL_ERROR) {
+        return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    }
+    if (aicpu_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE && aicore_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE) {
+        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    }
+    return SIMPLER_NATIVE_RUN_POLL_NOT_READY;
+}
 
 int KernelArgsHelper::init_runtime_args(const Runtime &host_runtime, MemoryAllocator &allocator) {
     allocator_ = &allocator;

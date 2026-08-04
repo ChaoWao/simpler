@@ -419,6 +419,19 @@ target_link_libraries(test_native_run_launch_signal PRIVATE ${GTEST_MAIN_LIB} ${
 add_test(NAME test_native_run_launch_signal COMMAND test_native_run_launch_signal)
 set_tests_properties(test_native_run_launch_signal PROPERTIES LABELS "no_hardware")
 
+# Sim kernel threads publish one sticky completion state. A gated unit test
+# proves submission and completion are separate without relying on kernel
+# duration or host scheduling.
+add_executable(test_sim_run_completion common/test_sim_run_completion.cpp)
+target_include_directories(test_sim_run_completion PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/host
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_sim_run_completion PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_sim_run_completion COMMAND test_sim_run_completion)
+set_tests_properties(test_sim_run_completion PROPERTIES LABELS "no_hardware")
+
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@
  *
  * The graph is per-thread state while it is being built. After bind, prepare
  * moves the completed graph into run-owned storage; launch adopts that snapshot
- * into the executor's thread-local state before DeviceRunner::run emits it.
+ * into the executor's thread-local state before enqueue, and drain emits it.
  * This keeps capture lock-free while allowing serialized lifecycle calls to
  * use different host threads and preventing two prepared contexts on one
  * thread from overwriting one another.

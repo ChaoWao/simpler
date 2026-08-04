@@ -13,35 +13,41 @@
  * execution model. The shared base (`SimDeviceRunnerBase`) hosts the arena /
  * tensor-copy / callable-registry / chip-callable-buffer pool. This subclass
  * adds the a5-specific dlsym'd function-pointer table (different aicore_execute
- * signature than a2a3 — extra aicore_pmu_ring_addrs arg) and the run() /
- * init_* / ensure_binaries_loaded sequence wired to a5's contract.
+ * signature than a2a3 — extra aicore_pmu_ring_addrs arg) and the
+ * enqueue/poll/drain sequence wired to a5's contract.
  */
 
-#ifndef SRC_A5_PLATFORM_SIM_HOST_DEVICE_RUNNER_H_
-#define SRC_A5_PLATFORM_SIM_HOST_DEVICE_RUNNER_H_
+#pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "common/core_type.h"
 #include "device_runner_base.h"
 #include "host/dep_gen_collector.h"
+#include "sim_run_completion.h"
 
 class DeviceRunner : public SimDeviceRunnerBase {
 public:
-    DeviceRunner() = default;
+    DeviceRunner();
     ~DeviceRunner() override;
 
-    int run(Runtime &runtime, const CallConfig &config) override;
+    int enqueue_run(Runtime &runtime, const CallConfig &config) override;
+    int poll_run() override;
+    int drain_run() override;
     int finalize() override;
     // a5 dep_gen enablement setter, overriding the base no-op (the c_api
     // unconditionally calls it).
     void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
 
 private:
+    struct ActiveRun;
+
     int ensure_binaries_loaded() override;
     int invoke_device_register(const RegisterCallableArgs &reg_args) override;
     void unload_executor_binaries();
+    void cleanup_active_run() noexcept;
 
     int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
     int init_args_dump(Runtime &runtime, int device_id);
@@ -50,7 +56,7 @@ private:
     int init_dep_gen(int num_threads, int device_id);
 
     // Per-run collector teardown: stop + release shm so a session-scoped Worker
-    // can re-init collectors on the next run(). Matches a2a3 sim.
+    // can re-init collectors on the next enqueue. Matches a2a3 sim.
     void finalize_collectors();
 
     // a5 sim's dlsym'd function-pointer table. Loaded once via
@@ -79,6 +85,6 @@ private:
     // dep_gen collector — captures orchestrator submit_task inputs for offline replay.
     DepGenCollector dep_gen_collector_;
     bool enable_dep_gen_{false};
+    std::unique_ptr<ActiveRun> active_run_;
+    simpler::common::sim_host::SimRunCompletion run_completion_;
 };
-
-#endif  // SRC_A5_PLATFORM_SIM_HOST_DEVICE_RUNNER_H_

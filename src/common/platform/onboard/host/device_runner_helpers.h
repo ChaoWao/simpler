@@ -25,14 +25,25 @@
  *   - C-API common shims.
  */
 
-#ifndef SIMPLER_COMMON_PLATFORM_ONBOARD_HOST_DEVICE_RUNNER_HELPERS_H
-#define SIMPLER_COMMON_PLATFORM_ONBOARD_HOST_DEVICE_RUNNER_HELPERS_H
+#pragma once
+
+#include <runtime/rt.h>
 
 #include <cstdint>
 
 #include "common/kernel_args.h"  // arch-specific KernelArgs layout
 #include "host/memory_allocator.h"
+#include "pto_runtime_c_api.h"
 #include "runtime.h"
+
+/**
+ * Query both streams that form one onboard run without waiting.
+ *
+ * Completion is reported only after rtStreamQuery reports both the AICPU and
+ * AICore streams complete. The return value is one of the
+ * SIMPLER_NATIVE_RUN_POLL_* constants.
+ */
+int query_stream_pair_nonblocking(rtStream_t aicpu_stream, rtStream_t aicore_stream);
 
 /**
  * Helper class for managing `KernelArgs` with device memory.
@@ -86,5 +97,3 @@ struct KernelArgsHelper {
     operator KernelArgs *() { return &args; }
     KernelArgs *operator&() { return &args; }
 };
-
-#endif  // SIMPLER_COMMON_PLATFORM_ONBOARD_HOST_DEVICE_RUNNER_HELPERS_H

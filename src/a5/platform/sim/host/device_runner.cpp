@@ -22,7 +22,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -71,7 +70,43 @@ static int prof_free_cb(void *dev_ptr) {
     return 0;
 }
 
+struct DeviceRunner::ActiveRun {
+    Runtime *runtime{nullptr};
+    void *reg_blocks{nullptr};
+    std::vector<std::thread> aicpu_threads;
+    std::vector<std::thread> aicore_threads;
+    std::vector<AicpuPhaseRecord> phase_buf;
+
+    void join() noexcept {
+        for (auto &thread : aicpu_threads) {
+            if (thread.joinable()) thread.join();
+        }
+        for (auto &thread : aicore_threads) {
+            if (thread.joinable()) thread.join();
+        }
+    }
+
+    ~ActiveRun() { join(); }
+};
+
+DeviceRunner::DeviceRunner() = default;
 DeviceRunner::~DeviceRunner() { finalize(); }
+
+void DeviceRunner::cleanup_active_run() noexcept {
+    if (active_run_ == nullptr) return;
+    active_run_->join();
+
+    if (kernel_args_.regs != 0) {
+        mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.regs));
+        kernel_args_.regs = 0;
+    }
+    if (active_run_->reg_blocks != nullptr) {
+        mem_alloc_.free(active_run_->reg_blocks);
+        active_run_->reg_blocks = nullptr;
+    }
+    finalize_collectors();
+    active_run_.reset();
+}
 
 int DeviceRunner::ensure_binaries_loaded() {
     // AICPU .so: load-once, matching onboard's binaries_loaded_ pattern.
@@ -216,7 +251,19 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
     return aicpu_register_callable_func_(const_cast<RegisterCallableArgs *>(&reg_args));
 }
 
-int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
+int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config) {
+    if (active_run_ != nullptr) {
+        LOG_ERROR("enqueue_run called while another simulated run still owns execution state");
+        return -1;
+    }
+    active_run_ = std::make_unique<ActiveRun>();
+    active_run_->runtime = &runtime;
+    run_completion_.reset(1);
+    auto enqueue_cleanup = RAIIScopeGuard([this]() {
+        run_completion_.abandon();
+        cleanup_active_run();
+    });
+
     apply_call_config(config);
     // prepare_launch_shape() resolved block_dim before the graph was built, so
     // the geometry this run launches with is already on the runner.
@@ -229,7 +276,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (launch_aicpu_num == 0) launch_aicpu_num = PLATFORM_DEFAULT_AICPU_THREAD_NUM;
     runtime.set_aicpu_thread_num(launch_aicpu_num);
     if (block_dim < 1) {
-        LOG_ERROR("run() reached with unresolved block_dim; prepare_launch_shape must run first");
+        LOG_ERROR("enqueue_run reached with unresolved block_dim; prepare_launch_shape must run first");
         return -1;
     }
 
@@ -333,27 +380,16 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    // Cleanup guard for early returns: stops all started collectors so their
-    // mgmt + poll threads exit cleanly. stop() is idempotent and a no-op on
-    // collectors that never started.
-    auto perf_cleanup = RAIIScopeGuard([this]() {
-        finalize_collectors();
-    });
-
     // Allocate simulated register blocks for all AICore cores. Uses sparse
     // mapping: 3 x 4KB pages per core (SIM_REG_TOTAL_SIZE) instead of a
     // contiguous block.
     size_t total_reg_size = num_aicore * SIM_REG_TOTAL_SIZE;
-    void *reg_blocks = mem_alloc_.alloc(total_reg_size);
-    if (reg_blocks == nullptr) {
+    active_run_->reg_blocks = mem_alloc_.alloc(total_reg_size);
+    if (active_run_->reg_blocks == nullptr) {
         LOG_ERROR("Failed to allocate simulated register memory (%zu bytes)", total_reg_size);
         return -1;
     }
-    std::memset(reg_blocks, 0, total_reg_size);
-
-    auto reg_blocks_cleanup = RAIIScopeGuard([this, reg_blocks]() {
-        mem_alloc_.free(reg_blocks);
-    });
+    std::memset(active_run_->reg_blocks, 0, total_reg_size);
 
     size_t regs_array_size = num_aicore * sizeof(uint64_t);
     uint64_t *regs_array = reinterpret_cast<uint64_t *>(mem_alloc_.alloc(regs_array_size));
@@ -362,16 +398,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return -1;
     }
     for (int i = 0; i < num_aicore; i++) {
-        regs_array[i] = reinterpret_cast<uint64_t>(static_cast<uint8_t *>(reg_blocks) + i * SIM_REG_TOTAL_SIZE);
+        regs_array[i] =
+            reinterpret_cast<uint64_t>(static_cast<uint8_t *>(active_run_->reg_blocks) + i * SIM_REG_TOTAL_SIZE);
     }
     kernel_args_.regs = reinterpret_cast<uint64_t>(regs_array);
-
-    auto regs_array_cleanup = RAIIScopeGuard([this]() {
-        if (kernel_args_.regs != 0) {
-            mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.regs));
-            kernel_args_.regs = 0;
-        }
-    });
 
     if (aicpu_execute_func_ == nullptr || aicore_execute_func_ == nullptr || set_platform_regs_func_ == nullptr ||
         set_platform_dump_base_func_ == nullptr || set_platform_phase_base_func_ == nullptr ||
@@ -423,9 +453,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
     LOG_INFO("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
-    std::vector<std::thread> aicpu_threads;
-    aicpu_threads.reserve(over_launch);
-    std::atomic<int> aicpu_rc{0};
+    active_run_->aicpu_threads.reserve(over_launch);
+    active_run_->aicore_threads.reserve(num_aicore);
 
     if (kernel_args_.device_wall_data_base != 0) {
         *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
@@ -437,8 +466,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // buffer base is published into the dlopen'd runtime SO via the dlsym'd
     // set_platform_phase_base (crossing the host↔SO boundary like the dump base),
     // and each thread resolves its slot from platform_aicpu_affinity_thread_idx()
-    // — no C++ thread_local. Local buffer: sim runs in-process so its lifetime
-    // spans the join below; reduced into device_phase_ns_ after.
+    // — no C++ thread_local. The active run owns the buffer until drain reduces
+    // it into device_phase_ns_.
     constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
     constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
     constexpr size_t kTailRecs = static_cast<size_t>(task_timing_buffer_slots(kPhaseThreads));
@@ -448,50 +477,58 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // resolves the tail at base + task_timing_tail_offset(), so it must be part of
     // the same published buffer.
     static_assert(sizeof(AicpuPhaseRecord) == sizeof(TaskTimingRecord), "phase/tail records must share size");
-    std::vector<AicpuPhaseRecord> phase_buf(kPhaseRecs + kTailRecs, AicpuPhaseRecord{kPhaseUnset, 0});
-    set_platform_phase_base_func_(reinterpret_cast<uint64_t>(phase_buf.data()));
+    active_run_->phase_buf.assign(kPhaseRecs + kTailRecs, AicpuPhaseRecord{kPhaseUnset, 0});
+    set_platform_phase_base_func_(reinterpret_cast<uint64_t>(active_run_->phase_buf.data()));
+    run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
+    ActiveRun *run = active_run_.get();
 
     for (int i = 0; i < over_launch; i++) {
-        aicpu_threads.push_back(create_thread([this, &runtime, launch_aicpu_num, over_launch, &aicpu_rc, sim_t0]() {
+        run->aicpu_threads.push_back(create_thread([this, run, launch_aicpu_num, over_launch, sim_t0]() {
             if (!platform_aicpu_affinity_gate(launch_aicpu_num, over_launch)) {
+                run_completion_.task_finished();
                 return;
             }
-            int rc = aicpu_execute_func_(&runtime);
-            if (rc != 0) {
-                int expected = 0;
-                aicpu_rc.compare_exchange_strong(expected, rc, std::memory_order_acq_rel);
-            }
+            int rc = aicpu_execute_func_(run->runtime);
             if (kernel_args_.device_wall_data_base != 0) {
                 const auto t1 = std::chrono::steady_clock::now();
                 *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) =
                     static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - sim_t0).count());
             }
+            run_completion_.task_finished(rc);
         }));
     }
 
     LOG_INFO("Launching %d AICore thread(s)", num_aicore);
-    std::vector<std::thread> aicore_threads;
     for (int i = 0; i < num_aicore; i++) {
         CoreType core_type = runtime.get_workers()[i].core_type;
         uint32_t physical_core_id = static_cast<uint32_t>(i);
-        aicore_threads.push_back(create_thread([this, &runtime, i, core_type, physical_core_id]() {
+        run->aicore_threads.push_back(create_thread([this, run, i, core_type, physical_core_id]() {
             aicore_execute_func_(
-                &runtime, i, core_type, physical_core_id, kernel_args_.regs, kernel_args_.enable_profiling_flag,
+                run->runtime, i, core_type, physical_core_id, kernel_args_.regs, kernel_args_.enable_profiling_flag,
                 kernel_args_.chip_swimlane_aicore_rotation_table, kernel_args_.aicore_pmu_ring_addrs
             );
+            run_completion_.task_finished();
         }));
     }
 
     // Both simulated kernel thread groups now exist. This is the sim's real
-    // launch boundary: publish before joining either group.
+    // launch boundary. Their state remains owned until drain_run().
     publish_task_accepted();
+    enqueue_cleanup.dismiss();
+    return 0;
+}
 
-    for (auto &t : aicpu_threads) {
-        t.join();
+int DeviceRunner::poll_run() { return run_completion_.poll(); }
+
+int DeviceRunner::drain_run() {
+    if (active_run_ == nullptr) {
+        LOG_ERROR("drain_run called without an enqueued simulated run");
+        return -1;
     }
-    for (auto &t : aicore_threads) {
-        t.join();
-    }
+    auto run_cleanup = RAIIScopeGuard([this]() {
+        cleanup_active_run();
+    });
+    active_run_->join();
 
     LOG_INFO("All threads completed");
 
@@ -507,7 +544,9 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // is computable and the sub-phases nest correctly.
     uint64_t phase_start[NUM_AICPU_PHASES];
     uint64_t phase_cycles[NUM_AICPU_PHASES];
-    reduce_aicpu_phase_windows(phase_buf.data(), kPhaseThreads, phase_start, phase_cycles);
+    constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
+    reduce_aicpu_phase_windows(active_run_->phase_buf.data(), kPhaseThreads, phase_start, phase_cycles);
     auto cyc_to_ns = [](uint64_t c) {
         return static_cast<uint64_t>(c * 1'000'000'000.0 / static_cast<double>(PLATFORM_PROF_SYS_CNT_FREQ));
     };
@@ -528,10 +567,11 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Resolve the task-timing tail on the phase `origin` timeline (shared logic
     // in device_phase.h). Sim-specific here: the tail lives inline in phase_buf
     // (in-process, no D2H) and `cyc_to_ns` uses the sim sys-counter frequency.
-    const TaskTimingRecord *tail = reinterpret_cast<const TaskTimingRecord *>(phase_buf.data() + kPhaseRecs);
+    const TaskTimingRecord *tail =
+        reinterpret_cast<const TaskTimingRecord *>(active_run_->phase_buf.data() + kPhaseRecs);
     resolve_task_timing_slots_ns(tail, kPhaseThreads, origin, cyc_to_ns, task_slot_dispatch_ns_, task_slot_finish_ns_);
 
-    int runtime_rc = aicpu_rc.load(std::memory_order_acquire);
+    int runtime_rc = run_completion_.first_error();
     if (runtime_rc != 0) {
         LOG_ERROR("AICPU execution failed with rc=%d", runtime_rc);
         return runtime_rc;
@@ -628,12 +668,13 @@ void DeviceRunner::unload_executor_binaries() {
 }
 
 int DeviceRunner::finalize() {
+    cleanup_active_run();
     if (device_id_ == -1 && aicpu_so_handle_ == nullptr && aicore_so_handle_ == nullptr) {
         return 0;
     }
 
-    // Cleanup performance profiling. Normally already done by run()'s
-    // perf_cleanup guard; this is the backstop for the no-run-since-init case.
+    // cleanup_active_run() normally stops active collectors; this is the
+    // backstop for the initialized-but-never-enqueued case.
     finalize_collectors();
 
     release_callable_state();

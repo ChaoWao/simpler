@@ -137,12 +137,27 @@ int DeviceRunner::destroy_comm_stream(void *stream) {
     return 0;
 }
 
-int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
+int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config) {
+    if (run_resources_owned_) {
+        LOG_ERROR(
+            "enqueue_run entered while slot %u still owns resources", run_poll_slot_.load(std::memory_order_relaxed)
+        );
+        return -1;
+    }
+    const uint32_t selected_pipeline_slot = pipeline_slot();
+    run_poll_slot_.store(selected_pipeline_slot, std::memory_order_relaxed);
+    run_poll_state_.store(RunPollState::Enqueuing, std::memory_order_release);
+    run_resources_owned_ = true;
+    // Before the real AICPU launch marker, enqueue owns rollback. A successful
+    // enqueue dismisses this guard and transfers every resource to drain_run().
+    auto enqueue_rollback = RAIIScopeGuard([this]() {
+        cleanup_active_run();
+    });
     // Latch this run's diagnostic enables onto the runner before the collector
     // paths below read them; block_dim/aicpu_thread_num are consumed locally.
     apply_call_config(config);
     // activate_launch_shape() latches this run's geometry onto the runner on the
-    // executor thread immediately before run(), so block_dim_ is this run's.
+    // executor thread immediately before enqueue, so block_dim_ is this run's.
     const int block_dim = block_dim_;
     int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
@@ -154,9 +169,9 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // turns the rest of an xdist worker session's tests from a slow, confusing
     // failure cascade into a single fast, self-explanatory error; the runner is
     // then recovered at finalize.
-    if (device_unusable_) {
+    if (device_unusable_.load(std::memory_order_acquire)) {
         LOG_ERROR(
-            "DeviceRunner marked unusable by a prior AICore failure; refusing to run. "
+            "DeviceRunner marked unusable by a prior AICore failure; refusing to enqueue. "
             "A soft reset does not clear the poison on a5; finalize() will force-reset "
             "the card so the next Worker on it inits clean."
         );
@@ -175,7 +190,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     ensure_device_wall_buffer();
 
     if (block_dim < 1) {
-        LOG_ERROR("run() reached with unresolved block_dim; activate_launch_shape must run first");
+        LOG_ERROR("enqueue_run reached with unresolved block_dim; activate_launch_shape must run first");
         return -1;
     }
     int num_aicore = block_dim * cores_per_blockdim_;
@@ -251,19 +266,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    // Scope guards for cleanup on all exit paths
-    auto regs_cleanup = RAIIScopeGuard([this]() {
-        if (kernel_args_.args.regs != 0) {
-            mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.args.regs));
-            kernel_args_.args.regs = 0;
-        }
-    });
-
-    auto runtime_args_cleanup = RAIIScopeGuard([this]() {
-        kernel_args_.finalize_device_kernel_args();
-        kernel_args_.finalize_runtime_args();
-    });
-
     // Initialize per-subsystem shared memory.
     if (enable_chip_swimlane_) {
         rc = init_chip_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
@@ -305,13 +307,6 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
             return rc;
         }
     }
-
-    // Cleanup guard for early returns: stops all started collectors so
-    // their mgmt + poll threads exit cleanly. stop() is idempotent and a
-    // no-op on collectors that never started.
-    auto perf_cleanup = RAIIScopeGuard([this]() {
-        finalize_collectors();
-    });
 
     rc = prepare_orch_so(runtime);
     if (rc != 0) {
@@ -379,6 +374,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         LOG_ERROR("init_device_kernel_args failed: %d", rc);
         return rc;
     }
+    // Publish query/drain ownership before either kernel launch. The real
+    // launch marker is notified inside launch_aicpu_kernel(), so no state that
+    // poll or drain needs may be committed after that call succeeds.
+    run_poll_state_.store(RunPollState::Submitted, std::memory_order_release);
     rc = launch_aicore_kernel(stream_aicore_, kernel_args_.device_k_args_);
     if (rc != 0) {
         LOG_ERROR("launch_aicore_kernel failed: %d", rc);
@@ -405,28 +404,56 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         return rc;
     }
 
-    rc = sync_run_streams();
+    enqueue_rollback.dismiss();
+    return 0;
+}
+
+int DeviceRunner::poll_run(uint32_t pipeline_slot) {
+    const RunPollState state = run_poll_state_.load(std::memory_order_acquire);
+    if (run_poll_slot_.load(std::memory_order_relaxed) != pipeline_slot) {
+        return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    }
+    if (state == RunPollState::DeviceComplete || state == RunPollState::Drained) {
+        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+    }
+    if (state != RunPollState::Submitted) return SIMPLER_NATIVE_RUN_POLL_ERROR;
+
+    const int rc = query_stream_pair_nonblocking(stream_aicpu_, stream_aicore_);
+    if (rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE) {
+        RunPollState expected = RunPollState::Submitted;
+        (void)run_poll_state_.compare_exchange_strong(
+            expected, RunPollState::DeviceComplete, std::memory_order_acq_rel, std::memory_order_acquire
+        );
+    }
+    return rc;
+}
+
+int DeviceRunner::drain_run(uint32_t pipeline_slot) {
+    if (!run_resources_owned_ || run_poll_slot_.load(std::memory_order_relaxed) != pipeline_slot) {
+        LOG_ERROR(
+            "drain_run slot mismatch: requested=%u active=%u owns=%d", pipeline_slot,
+            run_poll_slot_.load(std::memory_order_relaxed), static_cast<int>(run_resources_owned_)
+        );
+        return -1;
+    }
+    auto drain_cleanup = RAIIScopeGuard([this]() {
+        cleanup_active_run();
+    });
+
+    int rc = sync_run_streams();
     if (rc != 0) {
         // sync_run_streams surfaces the AICore op-timeout (STARS-reaped op ->
         // 507000/507018/507046 at AICPU/AICore stream sync). The op-timeout
-        // leaves the device context poisoned for the SAME DeviceRunner's next
-        // run, so attempt recovery / mark-unusable here too, not only on the
-        // launch-error path above.
+        // leaves the context poisoned, so recovery remains the drain owner's
+        // responsibility and its error remains authoritative over cleanup.
         recover_device_or_mark_unusable(rc);
-        // On an AICPU-detected scheduler hang the device flushed its diagnostic
-        // buffers during emergency_shutdown before returning the timeout rc.
-        // Export them here too — otherwise the success-only teardown below is
-        // skipped and the dumped tensors (the stuck task's inputs plus every
-        // completed task's in/out) are streamed to .bin but left without the
-        // JSON manifest, i.e. unusable for triage. reconcile/export are not
-        // idempotent, so this runs only on the error return; the success path
-        // still exports exactly once below.
+        // Emergency shutdown may already have flushed diagnostics. Export the
+        // manifest on the error path exactly once.
         teardown_shared_collectors_after_run();
         return rc;
     }
 
     read_device_wall_ns();
-
     teardown_shared_collectors_after_run();
 
     // a5-specific dep_gen teardown: stop + reconcile + replay emit.
@@ -442,17 +469,31 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         }
     }
 
-    // Print handshake results (reads from device memory, must be before free)
+    // Reads device memory, so it must precede KernelArgs/runtime cleanup.
     print_handshake_results();
-
     return 0;
+}
+
+void DeviceRunner::cleanup_active_run() noexcept {
+    if (!run_resources_owned_) return;
+
+    // Collectors stop before device/runtime arguments and register buffers.
+    finalize_collectors();
+    (void)kernel_args_.finalize_device_kernel_args();
+    (void)kernel_args_.finalize_runtime_args();
+    if (kernel_args_.args.regs != 0) {
+        (void)mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.args.regs));
+        kernel_args_.args.regs = 0;
+    }
+    run_resources_owned_ = false;
+    run_poll_state_.store(RunPollState::Drained, std::memory_order_release);
 }
 
 void DeviceRunner::recover_device_or_mark_unusable(int aicore_rc) {
     // An AICore launch failure (207001) or an op-timeout reaped by STARS
     // (surfaced as 507000/507018/507046 at stream sync) leaves the device
     // context in a sticky-error state: the streams stay poisoned and the
-    // SAME DeviceRunner's next run() fails early — observed on a5 as
+    // SAME DeviceRunner's next enqueue fails early — observed on a5 as
     // `halResMap failed (rc=62)` in init_aicore_register_addresses, and on
     // a2a3 as `rtMalloc failed: 507899`. Reused across a session (the L2
     // st_worker pool hands one ChipWorker to every test class on a device),
@@ -466,8 +507,8 @@ void DeviceRunner::recover_device_or_mark_unusable(int aicore_rc) {
     // untriggered (observed cascading into skipped L2 cases on a2a3 CI run
     // 27742754024; the same gate exists here). The op-timeout sticky-error is
     // only cleared by a force reset (a soft reset/drain does not), so always mark
-    // the runner unusable here: run() fails fast and finalize() force-resets the
-    // card, so the next Worker.init lands clean regardless of the drain result.
+    // the runner unusable here: admission fails fast and finalize() force-resets
+    // the card, so the next Worker.init lands clean regardless of the drain result.
     int sync_rc = aclrtSynchronizeDeviceWithTimeout(timeout_config_.stream_sync_timeout_ms);
     if (sync_rc != ACL_SUCCESS) {
         LOG_ERROR(
@@ -480,7 +521,7 @@ void DeviceRunner::recover_device_or_mark_unusable(int aicore_rc) {
             aicore_rc
         );
     }
-    device_unusable_ = true;
+    device_unusable_.store(true, std::memory_order_release);
 }
 
 namespace {
@@ -649,7 +690,7 @@ int DeviceRunner::finalize() {
     }
 
     // Cleanup all profiling subsystems (free shm + per-buffer dev/host
-    // shadows). Normally already done by run()'s exit path; this is the
+    // shadows). Normally already done by drain or enqueue rollback; this is the
     // backstop for the no-run-since-init case.
     finalize_collectors();
 
@@ -693,7 +734,7 @@ int DeviceRunner::finalize() {
     // .claude/rules/running-onboard.md), and the reset is verified to scope to
     // this card alone, so it cannot disturb other devices/users.
     int reset_rc = 0;
-    if (device_unusable_) {
+    if (device_unusable_.load(std::memory_order_acquire)) {
         // Bounded retry: a single force reset normally clears the op-timeout
         // sticky-error, but the poison occasionally needs a drain-then-reset
         // cycle, so retry up to kMaxResetAttempts. force_reset_device() drains
@@ -728,10 +769,10 @@ int DeviceRunner::finalize() {
     device_id_ = -1;
     // Clear the poison flag only if the force reset actually recovered the card,
     // so a still-poisoned card stays flagged: a reused DeviceRunner then fails
-    // run() fast instead of being treated as clean. On the normal (not unusable)
-    // path reset_rc stays 0 and the flag is already false.
+    // admission instead of being treated as clean. On the normal (not
+    // unusable) path reset_rc stays 0 and the flag is already false.
     if (reset_rc == 0) {
-        device_unusable_ = false;
+        device_unusable_.store(false, std::memory_order_release);
     }
     return rc != 0 ? rc : reset_rc;
 }
@@ -739,8 +780,8 @@ int DeviceRunner::finalize() {
 // `launch_aicpu_kernel` and `launch_aicore_kernel` live on `DeviceRunnerBase`.
 
 void DeviceRunner::finalize_collectors() {
-    // On any exit from run() — success or early error — release the diagnostics
-    // collectors' shared memory. They are only re-initialized per run(), so a
+    // On drain or enqueue rollback, release the diagnostics collectors' shared
+    // memory. They are only re-initialized per run, so a
     // Worker reused across runs (e.g. a pytest session-scoped worker pool) would
     // otherwise re-enter init_chip_swimlane() with stale state still allocated.
     // Matches a2a3's finalize_collectors().
