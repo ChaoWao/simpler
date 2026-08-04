@@ -141,6 +141,14 @@ static constexpr ptrdiff_t MAILBOX_OFF_FRAME_RUN_ID = MAILBOX_OFF_ACCEPTED - 32;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_SLOT_ID = MAILBOX_OFF_ACCEPTED - 24;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_GENERATION = MAILBOX_OFF_ACCEPTED - 16;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_DISPATCH_ID = MAILBOX_OFF_ACCEPTED - 8;
+// Termination is a sticky one-way word on the control frame, not a MailboxState:
+// MAILBOX_OFF_STATE has three writers (the parent's CONTROL_REQUEST, the child's
+// CONTROL_DONE, and this endpoint's return-to-IDLE), any of which overwrites a
+// SHUTDOWN store. Only a terminating parent writes this word, 0 -> 1, and
+// nothing ever clears it, so a child that observes it exits its serve loop no
+// matter what state word a concurrent control command leaves behind.
+static constexpr ptrdiff_t MAILBOX_OFF_SHUTDOWN = MAILBOX_OFF_FRAME_PROTOCOL - 8;
+static constexpr int32_t MAILBOX_SHUTDOWN_REQUESTED = 1;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_CALLABLE_HASH = MAILBOX_OFF_ARGS;
 static constexpr ptrdiff_t MAILBOX_OFF_TASK_ARGS_BLOB =
     MAILBOX_OFF_TASK_CALLABLE_HASH + static_cast<ptrdiff_t>(CALLABLE_HASH_DIGEST_SIZE);
@@ -148,11 +156,13 @@ static constexpr size_t CTRL_SHM_NAME_BYTES = 32;
 static constexpr ptrdiff_t MAILBOX_OFF_CONTROL_CALLABLE_HASH =
     MAILBOX_OFF_ARGS + static_cast<ptrdiff_t>(CTRL_SHM_NAME_BYTES);
 static_assert(
-    MAILBOX_OFF_TASK_ARGS_BLOB < MAILBOX_OFF_FRAME_PROTOCOL,
-    "mailbox task-args region must precede the frame protocol trailer"
+    MAILBOX_OFF_TASK_ARGS_BLOB < MAILBOX_OFF_SHUTDOWN,
+    "mailbox task-args region must precede the shutdown word and the frame protocol trailer"
 );
+// The shutdown word is reserved on every frame, not just the control frame, so
+// the args region a task frame accepts can never reach it.
 static constexpr size_t MAILBOX_ARGS_CAPACITY =
-    static_cast<size_t>(MAILBOX_OFF_FRAME_PROTOCOL) - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB);
+    static_cast<size_t>(MAILBOX_OFF_SHUTDOWN) - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB);
 static_assert(
     MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),

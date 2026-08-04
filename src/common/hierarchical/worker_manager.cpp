@@ -256,7 +256,14 @@ void LocalMailboxEndpoint::clear_task_accepted(char *frame) {
     __atomic_store(ptr, &v, __ATOMIC_RELEASE);
 }
 
-void LocalMailboxEndpoint::shutdown_child() { write_mailbox_state(MailboxState::SHUTDOWN); }
+void LocalMailboxEndpoint::shutdown_child() {
+    // Sticky word first: a child that samples it between the two stores leaves
+    // by the shutdown path even though the state word still reads IDLE.
+    int32_t *ptr = reinterpret_cast<int32_t *>(mbox() + MAILBOX_OFF_SHUTDOWN);
+    int32_t requested = MAILBOX_SHUTDOWN_REQUESTED;
+    __atomic_store(ptr, &requested, __ATOMIC_RELEASE);
+    write_mailbox_state(MailboxState::SHUTDOWN);
+}
 
 char *LocalMailboxEndpoint::task_frame(size_t index) const {
     return mbox() +
