@@ -47,8 +47,7 @@
  * strong definitions from `host/host_tensor_access.cpp`.
  */
 
-#ifndef SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_HOST_TENSOR_ACCESS_H_
-#define SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_HOST_TENSOR_ACCESS_H_
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -87,5 +86,3 @@ void host_tensor_access_reset(int (*copy_to_device)(void *dev_ptr, const void *h
  * @return false for an empty region or a null `host_view`.
  */
 bool host_tensor_access_add(uint64_t dev_base, uint64_t size, void *host_view);
-
-#endif  // SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_HOST_TENSOR_ACCESS_H_

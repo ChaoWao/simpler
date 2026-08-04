@@ -197,3 +197,24 @@
     comments for no functional gain. If the tree is ever to be unified in one
     go, it needs its own decision plus a lint rule to hold the line — not a
     hand-edited PR.
+
+12. **Use `#pragma once` for header guards, not `#ifndef`/`#define`/`#endif`.**
+
+    ```cpp
+    // Good
+    #pragma once
+
+    // Bad
+    #ifndef SRC_A5_RUNTIME_FOO_H_
+    #define SRC_A5_RUNTIME_FOO_H_
+    ...
+    #endif  // SRC_A5_RUNTIME_FOO_H_
+    ```
+
+    There is no compiler this project targets (gcc, clang, ccec, all C++17)
+    that does not support it.  `#pragma once` is one line rather than three,
+    cannot have the guard name disagree with the file's actual path, and does
+    not leave a trailing `#endif` that can detach from its `#if` when the
+    convertor ojects the `#ifndef` but misses the `#endif`.  Existing files
+    are converted on sight during routine edits; a dedicated sweep is not
+    required.

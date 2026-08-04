@@ -26,8 +26,7 @@
  * signals AICore via DATA_MAIN_BASE.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_
+#pragma once
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -315,5 +314,3 @@ public:
 // object); trb returns sizeof(DeviceRuntimeLaunchDesc). Defined per-runtime so
 // the shared device_runner_helpers.cpp copy path stays runtime-agnostic.
 size_t runtime_device_copy_size(const Runtime &rt);
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_RUNTIME_H_

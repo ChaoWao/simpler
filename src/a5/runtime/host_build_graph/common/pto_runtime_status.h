@@ -15,8 +15,7 @@
  * Shared error-code contract used inside the tensormap_and_ringbuffer runtime.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_COMMON_PTO_RUNTIME_STATUS_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_COMMON_PTO_RUNTIME_STATUS_H_
+#pragma once
 
 #include <stdint.h>
 
@@ -49,5 +48,3 @@ static inline int32_t runtime_status_from_error_codes(int32_t orch_error_code, i
     }
     return 0;
 }
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_COMMON_PTO_RUNTIME_STATUS_H_
