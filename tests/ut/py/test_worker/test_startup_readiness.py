@@ -636,10 +636,10 @@ class TestApiLinearizationDuringInit:
             proceed.set()
             it.join(10.0)
 
-    def test_close_during_initializing_fails_fast(self, monkeypatch):
-        # close() does not cancel an in-progress init: it fails fast so the
-        # INITIALIZING epoch is never torn down under its owner. The owner
-        # completes init and closes the READY tree itself.
+    def test_close_during_initializing_cancels_init(self, monkeypatch):
+        # close() on a non-owner thread during INITIALIZING cooperatively
+        # cancels the in-progress init and reaches CLOSED. Run close() in
+        # a thread so release.set() can fire while close() awaits init unwind.
         import simpler.worker as worker_mod  # noqa: PLC0415
 
         entered = threading.Event()
@@ -648,26 +648,29 @@ class TestApiLinearizationDuringInit:
 
         w = Worker(level=3, num_sub_workers=1, startup_timeout_s=30.0)
         w.register(lambda args: None)
-        proceed = threading.Event()
 
         def owner_body():
             _run_catch(w.init)
-            proceed.wait(10.0)
-            _run_catch(w.close)  # owner closes the READY tree
 
         it = threading.Thread(target=owner_body)
         it.start()
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 assert entered.wait(3.0)
-                # A concurrent close() while INITIALIZING is rejected outright.
-                with pytest.raises(RuntimeError, match="in progress"):
-                    w.close()
-                assert w._lifecycle is worker_mod._Lifecycle.INITIALIZING
-                release.set()  # let init finish -> READY
+
+                close_result: list = []
+                ct = threading.Thread(target=lambda: close_result.append(_run_catch(w.close)))
+                ct.start()
+                # Wait for cancel token to latch, then release the init thread.
+                while not w._cancel_token:
+                    time.sleep(0.001)
+                release.set()
+                ct.join(10.0)
+                it.join(10.0)
+                assert close_result == [None]
+                assert w._lifecycle is worker_mod._Lifecycle.CLOSED
         finally:
             release.set()
-            proceed.set()
             it.join(10.0)
 
 
@@ -1343,16 +1346,16 @@ class TestLevel2Lifecycle:
             proceed.set()
             t1.join(5.0)
 
-    def test_l2_close_during_initializing_fails_fast(self, monkeypatch):
-        # close() cannot cancel an in-progress L2 init: it fails fast, the owner
-        # finishes init to READY, and the owner then finalizes the device
-        # same-thread. No cross-thread finalize, no resurrected epoch.
+    def test_l2_close_during_initializing_cancels_init(self, monkeypatch):
+        # close() on a non-owner thread during an L2 INITIALIZING cooperatively
+        # cancels the in-progress ChipWorker.init. The device is finalized by
+        # init's cleanup, and close reaches CLOSED. Run close() in a thread so
+        # release.set() fires while close() awaits init unwind.
         import simpler.worker as worker_mod  # noqa: PLC0415
 
         entered = threading.Event()
         release = threading.Event()
         finalized = {"n": 0}
-        proceed = threading.Event()
 
         class _PausingChip:
             def init(self, *_a, **_k):
@@ -1370,26 +1373,27 @@ class TestLevel2Lifecycle:
 
         def owner_body():
             init_err.append(_run_catch(w.init))
-            proceed.wait(10.0)
-            _run_catch(w.close)  # owner finalizes the device same-thread
 
         t1 = threading.Thread(target=owner_body)
         t1.start()
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 assert entered.wait(3.0)
-                with pytest.raises(RuntimeError, match="in progress"):
-                    w.close()
-                assert w._lifecycle is worker_mod._Lifecycle.INITIALIZING
-                release.set()  # init completes -> READY
-                proceed.set()  # owner then closes
+
+                close_result: list = []
+                ct = threading.Thread(target=lambda: close_result.append(_run_catch(w.close)))
+                ct.start()
+                # Wait for cancel token to latch, then release init.
+                while not w._cancel_token:
+                    time.sleep(0.001)
+                release.set()
+                ct.join(10.0)
                 t1.join(10.0)
-                assert init_err[0] is None
+                assert close_result == [None]
                 assert w._lifecycle is worker_mod._Lifecycle.CLOSED
-                assert finalized["n"] == 1  # device finalized once, same-thread
+                assert finalized["n"] == 1  # device finalized by init cleanup
         finally:
             release.set()
-            proceed.set()
             t1.join(5.0)
 
 
