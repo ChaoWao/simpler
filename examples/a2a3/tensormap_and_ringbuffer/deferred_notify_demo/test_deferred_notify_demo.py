@@ -7,185 +7,115 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""L2 deferred completion + two-chip comm smoke test for a2a3, onboard and sim."""
+"""Deferred-completion and two-chip communication smoke test for a2a3."""
 
-from __future__ import annotations
-
-import argparse
-import os
-
-import pytest
 import torch
-from simpler.task_interface import (
-    ArgDirection,
-    CallConfig,
-    ChipCallable,
-    CommBufferSpec,
-    CoreCallable,
-    DataType,
-    TaskArgs,
-    Tensor,
-    TensorArgType,
-)
-from simpler.worker import Worker
+from simpler.task_interface import ArgDirection as D
+from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
+from simpler.task_interface import Tensor as DeviceTensor
 
-from simpler_setup.elf_parser import extract_text_section
-from simpler_setup.kernel_compiler import KernelCompiler
-from simpler_setup.pto_isa import ensure_pto_isa_root
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 from simpler_setup.torch_interop import make_tensor_arg
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 N = 128 * 128
+NRANKS = 2
 DTYPE_NBYTES = 4
 
 
-def parse_device_range(spec: str) -> list[int]:
-    if "," in spec:
-        return [int(x) for x in spec.split(",") if x]
-    if "-" in spec:
-        lo, hi = (int(x) for x in spec.split("-"))
-        return list(range(lo, hi + 1))
-    return [int(spec)]
-
-
-def build_chip_callable(platform: str) -> ChipCallable:
-    kc = KernelCompiler(platform=platform)
-    runtime = "tensormap_and_ringbuffer"
-    pto_isa_root = ensure_pto_isa_root()
-    include_dirs = kc.get_orchestration_include_dirs(runtime)
-    extra_includes = list(include_dirs) + [str(kc.project_root / "src" / "common")]
-
-    children = []
-    for func_id, rel in [
-        (0, "kernels/aiv/kernel_producer.cpp"),
-        (1, "kernels/aiv/kernel_consumer.cpp"),
-        (2, "kernels/aiv/kernel_notify_wait.cpp"),
-    ]:
-        kernel = kc.compile_incore(
-            source_path=os.path.join(HERE, rel),
-            core_type="aiv",
-            pto_isa_root=pto_isa_root,
-            extra_include_dirs=extra_includes,
-        )
-        if not platform.endswith("sim"):
-            kernel = extract_text_section(kernel)
-        children.append(
-            (
-                func_id,
-                CoreCallable.build(
-                    signature=[ArgDirection.IN, ArgDirection.INOUT, ArgDirection.OUT, ArgDirection.IN],
-                    binary=kernel,
-                ),
-            )
-        )
-
-    orch = kc.compile_orchestration(
-        runtime_name=runtime,
-        source_path=os.path.join(HERE, "kernels/orchestration/deferred_notify_orch.cpp"),
-        extra_include_dirs=[str(kc.project_root / "src" / "common")],
-    )
-    return ChipCallable.build(
-        signature=[ArgDirection.IN, ArgDirection.INOUT, ArgDirection.OUT, ArgDirection.IN],
-        func_name="deferred_notify_orchestration",
-        binary=orch,
-        children=children,
-    )
-
-
-def run(
-    platform: str = "a2a3sim",
-    device_ids: list[int] | None = None,
-) -> int:
-    if device_ids is None:
-        device_ids = [0, 1]
-    nranks = len(device_ids)
-    if nranks != 2:
-        raise ValueError(f"deferred_notify_demo needs exactly 2 devices, got {device_ids}")
-
+def deferred_notify_orch_fn(orch, callables, task_args, config):
     mailbox_nbytes = N * DTYPE_NBYTES
-    counter_nbytes = 4
-    window_size = max(mailbox_nbytes + counter_nbytes, 4 * 1024)
+    with orch.allocate_domain(
+        name="default",
+        workers=list(range(NRANKS)),
+        window_size=max(mailbox_nbytes + DTYPE_NBYTES, 4 * 1024),
+        buffers=[
+            CommBufferSpec(name="mailbox", dtype="float32", count=N, nbytes=mailbox_nbytes),
+            CommBufferSpec(name="notify_counter", dtype="int32", count=1, nbytes=DTYPE_NBYTES),
+        ],
+    ) as handle:
+        for rank in range(NRANKS):
+            domain = handle[rank]
+            args = TaskArgs()
+            args.add_tensor(make_tensor_arg(getattr(task_args, f"partial_{rank}")), TensorArgType.INPUT)
+            args.add_tensor(
+                DeviceTensor.make(
+                    data=domain.buffer_ptrs["mailbox"],
+                    shapes=(N,),
+                    dtype=DataType.FLOAT32,
+                    child_memory=True,
+                ),
+                TensorArgType.INOUT,
+            )
+            args.add_tensor(make_tensor_arg(getattr(task_args, f"result_{rank}")), TensorArgType.OUTPUT_EXISTING)
+            args.add_tensor(
+                DeviceTensor.make(
+                    data=domain.buffer_ptrs["notify_counter"],
+                    shapes=(1,),
+                    dtype=DataType.INT32,
+                    child_memory=True,
+                ),
+                TensorArgType.INPUT,
+            )
+            args.add_scalar(domain.device_ctx)
+            orch.submit_next_level(callables.deferred_notify, args, config, worker=rank)
 
-    partial = [torch.full((N,), float(rank + 1), dtype=torch.float32).share_memory_() for rank in range(nranks)]
-    result = [torch.zeros(N, dtype=torch.float32).share_memory_() for _ in range(nranks)]
 
-    chip_callable = build_chip_callable(platform)
-    worker = Worker(
-        level=3,
-        platform=platform,
-        runtime="tensormap_and_ringbuffer",
-        device_ids=device_ids,
-        num_sub_workers=0,
-    )
-    chip_handle = worker.register(chip_callable)
-    try:
-        worker.init()
-
-        def orch_fn(orch, _args, cfg):
-            # `notify_counter` must start at 0; allocate_domain zero-initializes
-            # the whole window, so no explicit host seed is needed.
-            with orch.allocate_domain(
-                name="default",
-                workers=list(range(nranks)),
-                window_size=window_size,
-                buffers=[
-                    CommBufferSpec(name="mailbox", dtype="float32", count=N, nbytes=mailbox_nbytes),
-                    CommBufferSpec(name="notify_counter", dtype="int32", count=1, nbytes=counter_nbytes),
+@scene_test(level=3, runtime="tensormap_and_ringbuffer")
+class TestDeferredNotifyDemo(SceneTestCase):
+    CALLABLE = {
+        "orchestration": deferred_notify_orch_fn,
+        "callables": [
+            {
+                "name": "deferred_notify",
+                "orchestration": {
+                    "source": "kernels/orchestration/deferred_notify_orch.cpp",
+                    "function_name": "deferred_notify_orchestration",
+                    "signature": [D.IN, D.INOUT, D.OUT, D.IN],
+                },
+                "incores": [
+                    {
+                        "func_id": func_id,
+                        "source": source,
+                        "core_type": "aiv",
+                        "signature": [D.IN, D.INOUT, D.OUT, D.IN],
+                    }
+                    for func_id, source in enumerate(
+                        [
+                            "kernels/aiv/kernel_producer.cpp",
+                            "kernels/aiv/kernel_consumer.cpp",
+                            "kernels/aiv/kernel_notify_wait.cpp",
+                        ]
+                    )
                 ],
-            ) as handle:
-                for rank in range(nranks):
-                    domain = handle[rank]
-                    args = TaskArgs()
-                    args.add_tensor(make_tensor_arg(partial[rank]), TensorArgType.INPUT)
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["mailbox"],
-                            shapes=(N,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
-                    args.add_tensor(make_tensor_arg(result[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["notify_counter"],
-                            shapes=(1,),
-                            dtype=DataType.INT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INPUT,
-                    )
-                    args.add_scalar(domain.device_ctx)
-                    orch.submit_next_level(chip_handle, args, cfg, worker=rank)
+            }
+        ],
+    }
+    CASES = [
+        {
+            "name": "peer_notification",
+            "platforms": ["a2a3", "a2a3sim"],
+            "config": {"device_count": NRANKS, "num_sub_workers": 0},
+            "params": {},
+        }
+    ]
+    RTOL = 0.0
+    ATOL = 1e-6
 
-        worker.run(orch_fn, args=None, config=CallConfig())
+    def generate_args(self, params):
+        specs = []
+        for rank in range(NRANKS):
+            specs.extend(
+                [
+                    Tensor(f"partial_{rank}", torch.full((N,), float(rank + 1), dtype=torch.float32)),
+                    Tensor(f"result_{rank}", torch.zeros(N, dtype=torch.float32)),
+                ]
+            )
+        return TaskArgsBuilder(*specs)
 
-        ok = True
-        for rank in range(nranks):
-            expected = partial[(rank + 1) % nranks]
-            max_diff = float(torch.max(torch.abs(result[rank] - expected)))
-            print(f"[deferred_notify_demo] rank {rank}: max_diff={max_diff:.3e}")
-            ok = ok and max_diff <= 1e-6
-        return 0 if ok else 1
-    finally:
-        worker.close()
-
-
-@pytest.mark.platforms(["a2a3", "a2a3sim"])
-@pytest.mark.runtime("tensormap_and_ringbuffer")
-@pytest.mark.device_count(2)
-def test_deferred_notify_demo(st_device_ids, st_platform) -> None:
-    assert run(st_platform, [int(d) for d in st_device_ids]) == 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--platform", default="a2a3sim")
-    parser.add_argument("-d", "--device", default="0-1")
-    args = parser.parse_args()
-    return run(args.platform, parse_device_range(args.device))
+    def compute_golden(self, args, params):
+        for rank in range(NRANKS):
+            getattr(args, f"result_{rank}").copy_(getattr(args, f"partial_{(rank + 1) % NRANKS}"))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    SceneTestCase.run_module(__name__)

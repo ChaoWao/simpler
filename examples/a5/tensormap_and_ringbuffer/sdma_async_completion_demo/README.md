@@ -25,8 +25,8 @@ compiled into the host runtime:
 
 | Gate | Effect |
 | ---- | ------ |
-| `@pytest.mark.platforms(["a5"])` | deselected on any other `--platform` |
-| `@pytest.mark.device_count(2)` | needs two dies |
+| `CASES[*]["platforms"] = ["a5"]` | deselected on any other `--platform` |
+| `CASES[*]["config"]["device_count"] = 2` | needs two dies |
 | `@pytest.mark.skipif(...)` | skipped unless `SIMPLER_ENABLE_PTO_SDMA_WORKSPACE` is `1` / `ON` / `TRUE` / `YES` |
 
 The CMake option defaults `OFF`, so a stock build skips this test even on a5

@@ -31,6 +31,10 @@ For the `Worker` API underneath the framework, see
 Each registers an async event and lets the consumer wait on deferred completion
 rather than on task end. All need two dies.
 
+These mechanism-focused examples use the scene-test lifecycle. For a complete
+direct `Worker` communication-domain walkthrough from construction through
+`close()`, see [`examples/workers/l3/allreduce/`](../../workers/l3/allreduce/).
+
 | Example | Mechanism |
 | ------- | --------- |
 | [`sdma_async_completion_demo/`](sdma_async_completion_demo/) | `TGET_ASYNC` from a peer's window slot over SDMA, completion registered via `defer_pto_async_event`. Needs `SIMPLER_ENABLE_PTO_SDMA_WORKSPACE=ON` at build **and** run time; skipped otherwise. |

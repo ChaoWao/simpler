@@ -39,6 +39,10 @@ completion rather than on task end. All but `deferred_notify_demo`, which runs
 the simulator path, are **onboard-only**; every one except `prefetch_async_demo`
 needs two dies.
 
+These mechanism-focused examples use the scene-test lifecycle. For a complete
+direct `Worker` communication-domain walkthrough from construction through
+`close()`, see [`examples/workers/l3/allreduce/`](../../workers/l3/allreduce/).
+
 | Example | Mechanism | Devices |
 | ------- | --------- | ------- |
 | [`prefetch_async_demo/`](prefetch_async_demo/) | `TPREFETCH_ASYNC` over the runtime-injected SDMA workspace, provisioned once by `Worker(enable_sdma=True)` and injected into every kernel's `GlobalContext`. | 1 |
