@@ -125,12 +125,12 @@ def test_task_statistics_level_one_hides_aicpu_metrics(capsys):
         }
     ]
 
-    sc.print_task_statistics(tasks, {"0": "kernel"}, l2_swimlane_level=1)
+    sc.print_task_statistics(tasks, {"0": "kernel"}, chip_swimlane_level=1)
 
     output = capsys.readouterr().out
     row = next(line for line in output.splitlines() if line.startswith("0        kernel"))
     total = next(line for line in output.splitlines() if line.startswith("TOTAL"))
-    assert "Source l2_swimlane_level: 1 (AICore timing only; recorded in l2_swimlane_records.json)" in output
+    assert "Source chip_swimlane_level: 1 (AICore timing only; recorded in chip_swimlane_records.json)" in output
     assert row.split() == ["0", "kernel", "1", "5.00", "-", "-", "-", "-", "-", "0.50"]
     assert total.split() == ["TOTAL", "1", "5.00", "-"]
     assert "AICore Observed Span: 5.50 us (from earliest AICore receive to latest AICore end)" in output
@@ -138,7 +138,7 @@ def test_task_statistics_level_one_hides_aicpu_metrics(capsys):
 
 
 def test_load_func_names_auto_discovery_and_explicit_precedence(tmp_path):
-    input_path = tmp_path / "l2_swimlane_records.json"
+    input_path = tmp_path / "chip_swimlane_records.json"
     name_map_path = tmp_path / "name_map_case.json"
     name_map_path.write_text(
         json.dumps(

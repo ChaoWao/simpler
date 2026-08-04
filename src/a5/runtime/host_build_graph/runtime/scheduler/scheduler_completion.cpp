@@ -15,7 +15,7 @@
 #include "common/unified_log.h"
 #include "aicpu/device_time.h"
 #include "aicpu/platform_regs.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "pto_runtime2.h"
@@ -23,7 +23,7 @@
 #include "spin_hint.h"
 
 // Performance profiling headers
-#include "aicpu/l2_swimlane_collector_aicpu.h"
+#include "aicpu/chip_swimlane_collector_aicpu.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
 
@@ -89,7 +89,7 @@ void SchedulerContext::complete_slot_task(
 #endif
 ) {
 #if SIMPLER_DFX
-    auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
+    auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
 #else
     (void)hank;
 #endif
@@ -154,8 +154,8 @@ void SchedulerContext::complete_slot_task(
 #if SIMPLER_DFX
     // Sub-block retire that did not finish the slot: record it so the poll
     // iteration becomes visible on the scheduler lane (the SPMD harvest tail).
-    if (!task_complete && l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) {
-        l2_swimlane.phase_subretire_count++;
+    if (!task_complete && chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) {
+        chip_swimlane.phase_subretire_count++;
     }
 #endif
 
@@ -190,7 +190,7 @@ void SchedulerContext::complete_slot_task(
         // emitted by P, not here.)
         sp_queues_[thread_idx].push(&slot_state);
 #if SIMPLER_DFX
-        l2_swimlane.phase_complete_count++;
+        chip_swimlane.phase_complete_count++;
 #endif
     }
 
@@ -202,21 +202,21 @@ void SchedulerContext::complete_slot_task(
     // timestamps via complete_task. Bypassing here saves the per-completion
     // hot-path cost (counter inc + ring lookup + record store + wmb + buffer
     // rotation bookkeeping) for runs that only want AICore timing.
-    if (l2_swimlane.l2_swimlane_enabled && l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING) {
+    if (chip_swimlane.chip_swimlane_enabled && chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING) {
 #if SIMPLER_SCHED_PROFILING
         uint64_t t_perf_start = get_sys_cnt_aicpu();
 #endif
 
-        if (l2_swimlane_aicpu_complete_task(
+        if (chip_swimlane_aicpu_complete_task(
                 core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id), dispatch_ts, finish_ts
             ) != 0) {
             LOG_ERROR(
-                "Core %d: l2_swimlane_aicpu_complete_task failed for task 0x%" PRIx64, core_id,
+                "Core %d: chip_swimlane_aicpu_complete_task failed for task 0x%" PRIx64, core_id,
                 static_cast<uint64_t>(slot_state.task->task_id.raw)
             );
         }
 #if SIMPLER_SCHED_PROFILING
-        l2_swimlane.sched_complete_perf_cycle += (get_sys_cnt_aicpu() - t_perf_start);
+        chip_swimlane.sched_complete_perf_cycle += (get_sys_cnt_aicpu() - t_perf_start);
 #endif
     }
 
@@ -257,7 +257,7 @@ void SchedulerContext::check_running_cores_for_completion(
     bool &made_progress
 ) {
 #if SIMPLER_SCHED_PROFILING
-    auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
+    auto &chip_swimlane = sched_chip_swimlane_[thread_idx];
 #endif
     CoreTracker &tracker = core_trackers_[thread_idx];
     auto running_core_states = tracker.get_all_running_cores();
@@ -294,8 +294,8 @@ void SchedulerContext::check_running_cores_for_completion(
         int32_t reg_state = EXTRACT_TASK_STATE(reg_val);
 
 #if SIMPLER_SCHED_PROFILING
-        if (l2_swimlane.l2_swimlane_enabled) {
-            l2_swimlane.complete_probe_count++;
+        if (chip_swimlane.chip_swimlane_enabled) {
+            chip_swimlane.complete_probe_count++;
         }
 #endif
 
@@ -328,8 +328,8 @@ void SchedulerContext::check_running_cores_for_completion(
         if (!t.matched) continue;
 
 #if SIMPLER_SCHED_PROFILING
-        if (l2_swimlane.l2_swimlane_enabled && (t.running_done || t.pending_done)) {
-            l2_swimlane.complete_hit_count++;
+        if (chip_swimlane.chip_swimlane_enabled && (t.running_done || t.pending_done)) {
+            chip_swimlane.complete_hit_count++;
         }
 #endif
 
@@ -341,7 +341,7 @@ void SchedulerContext::check_running_cores_for_completion(
         // charge AICPU completion-processing cost to the (end → finish)
         // span, masking the actual FIN-delivery latency.
         uint64_t finish_ts = 0;
-        if (l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING && (t.pending_done || t.running_done)) {
+        if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING && (t.pending_done || t.running_done)) {
             finish_ts = get_sys_cnt_aicpu();
         }
 #endif
@@ -353,7 +353,7 @@ void SchedulerContext::check_running_cores_for_completion(
             // Task-timing finish: latest FIN observation for a tagged task, folded
             // as max. Sampled after the rmb above and before complete_slot_task runs
             // fanin / deferred-completion (which may also clear pending_slot_state),
-            // matching L2's finish_time point. Independent of L2 swimlane level, so
+            // matching L2's finish_time point. Independent of chip swimlane level, so
             // it works in SIMPLER_DFX=0 builds; untagged tasks pay only the compare.
             if (core.pending_slot_state->task_attrs.is_timed()) {
                 aicpu_task_timing_finish(core.pending_slot_state->task_attrs.timing_slot(), thread_idx);
@@ -512,7 +512,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
             if (claim == 0) return;
             result.staged_blocks += claim;
 #if SIMPLER_DFX
-            bool sub_prof = record_drain_phases && l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES;
+            bool sub_prof = record_drain_phases && chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES;
             uint64_t prep_t0 = sub_prof ? get_sys_cnt_aicpu() : 0;
 #endif
             PublishHandle handles[CoreTracker::MAX_CLUSTERS * 3];
@@ -540,12 +540,12 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
                 pub_t0 = get_sys_cnt_aicpu();
                 // DrainPrepare bar: cluster scan happened before this lambda, so this covers the
                 // build_payload work for `claim` blocks (handle_count subtasks).
-                l2_swimlane_aicpu_record_sched_phase(
-                    thread_idx, L2SwimlaneSchedPhaseKind::DrainPrepare, prep_t0, pub_t0,
-                    sched_l2_swimlane_[thread_idx].sched_loop_count, static_cast<uint32_t>(handle_count)
+                chip_swimlane_aicpu_record_sched_phase(
+                    thread_idx, ChipSwimlaneSchedPhaseKind::DrainPrepare, prep_t0, pub_t0,
+                    sched_chip_swimlane_[thread_idx].sched_loop_count, static_cast<uint32_t>(handle_count)
                 );
             }
-            if (l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING) {
+            if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING) {
                 dispatch_ts = pub_t0 != 0 ? pub_t0 : get_sys_cnt_aicpu();
             }
 #endif
@@ -574,9 +574,9 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
 #if SIMPLER_DFX
             if (sub_prof) {
                 // DrainPublish bar: the MMIO write_reg per subtask (+ gated doorbell/mask record).
-                l2_swimlane_aicpu_record_sched_phase(
-                    thread_idx, L2SwimlaneSchedPhaseKind::DrainPublish, pub_t0, get_sys_cnt_aicpu(),
-                    sched_l2_swimlane_[thread_idx].sched_loop_count, static_cast<uint32_t>(handle_count)
+                chip_swimlane_aicpu_record_sched_phase(
+                    thread_idx, ChipSwimlaneSchedPhaseKind::DrainPublish, pub_t0, get_sys_cnt_aicpu(),
+                    sched_chip_swimlane_[thread_idx].sched_loop_count, static_cast<uint32_t>(handle_count)
                 );
             }
 #endif
@@ -619,7 +619,7 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
 //      completion promotes a pending block). Followers spin until the gate reopens.
 void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] uint64_t *out_stage_wall_cycles) {
 #if SIMPLER_DFX
-    bool drain_prof = (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES && out_stage_wall_cycles != nullptr);
+    bool drain_prof = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && out_stage_wall_cycles != nullptr);
     uint64_t drain_acked_ts = 0;  // set immediately before staging; used to measure the stage wall
 #endif
     // Every spin in this function honors is_completed(): once the run latches

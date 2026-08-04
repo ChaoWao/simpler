@@ -116,9 +116,9 @@ class TestSyncStartEarlyLocalOwner(SceneTestCase):
 
     def _build_config(self, config_dict, *args, **kwargs):
         config = super()._build_config(config_dict, *args, **kwargs)
-        self._trace_perf_level = int(kwargs.get("enable_l2_swimlane", args[0] if args else 0))
+        self._trace_perf_level = int(kwargs.get("enable_chip_swimlane", args[0] if args else 0))
         output_prefix = kwargs.get("output_prefix", "")
-        self._trace_perf_path = Path(output_prefix) / "l2_swimlane_records.json" if output_prefix else None
+        self._trace_perf_path = Path(output_prefix) / "chip_swimlane_records.json" if output_prefix else None
         return config
 
     def compare_outputs(self, test_args, golden_args, output_names, params):
@@ -127,11 +127,11 @@ class TestSyncStartEarlyLocalOwner(SceneTestCase):
             return
 
         perf_path = self._trace_perf_path
-        assert perf_path is not None, "L2 swimlane enabled without an output prefix"
-        assert perf_path.exists(), f"l2_swimlane_records.json missing under {perf_path.parent}"
+        assert perf_path is not None, "chip swimlane enabled without an output prefix"
+        assert perf_path.exists(), f"chip_swimlane_records.json missing under {perf_path.parent}"
 
         perf = read_perf_data(perf_path)
-        assert int(perf.get("l2_swimlane_level", 0)) >= 3, f"scheduler phases missing from {perf_path}"
+        assert int(perf.get("chip_swimlane_level", 0)) >= 3, f"scheduler phases missing from {perf_path}"
         phase_records = [record for thread in perf.get("aicpu_scheduler_phases", []) for record in thread]
         assert phase_records, f"scheduler phase capture is empty under {perf_path}"
         phase_counts = Counter(record.get("phase") for record in phase_records)

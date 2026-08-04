@@ -11,7 +11,7 @@
 
 /**
  * @file profiler_base.h
- * @brief CRTP scaffolding shared by L2Swimlane, PMU, DepGen, ArgsDump,
+ * @brief CRTP scaffolding shared by ChipSwimlane, PMU, DepGen, ArgsDump,
  *        and ScopeStats collectors.
  *
  * Owns the BufferPoolManager<Module>, drain/replenish mgmt thread(s) that
@@ -21,12 +21,12 @@
  * Module concept contract
  * -----------------------
  *
- * Each profiling subsystem provides a `Module` struct (e.g., L2SwimlaneModule,
+ * Each profiling subsystem provides a `Module` struct (e.g., ChipSwimlaneModule,
  * DumpModule, PmuModule) that supplies the data-layout traits the unified
  * mgmt-loop algorithms (ProfilerAlgorithms<Module>) need. Required members:
  *
  *   // Types
- *   using DataHeader      = ...;   // Shared-memory header (e.g. L2SwimlaneDataHeader).
+ *   using DataHeader      = ...;   // Shared-memory header (e.g. ChipSwimlaneDataHeader).
  *   using ReadyEntry      = ...;   // Per-AICPU-thread ready-queue entry.
  *   using ReadyBufferInfo = ...;   // Hand-off struct to collector thread(s)
  *                                  // (carries dev/host ptrs, optional kind
@@ -36,7 +36,7 @@
  *                                  // `buffer_ptrs[kSlotCount]`.
  *
  *   // Constants
- *   static constexpr int      kBufferKinds;    // L2Swimlane=4, Dump=1, PMU=1.
+ *   static constexpr int      kBufferKinds;    // ChipSwimlane=4, Dump=1, PMU=1.
  *   static constexpr uint32_t kReadyQueueSize; // Per-thread ready-queue depth.
  *   // Optional: host-side done ring depth (defaults to 1024).
  *   static constexpr uint32_t kHostPoolQueueSize;
@@ -44,7 +44,7 @@
  *   // Defaults to kHostPoolQueueSize.
  *   static constexpr uint32_t kHostRecycledQueueSize;
  *   static constexpr uint32_t kSlotCount;      // FreeQueue::buffer_ptrs[] length.
- *   static constexpr const char* kSubsystemName; // "PMU" / "L2Swimlane" / "Dump".
+ *   static constexpr const char* kSubsystemName; // "PMU" / "ChipSwimlane" / "Dump".
  *   // Optional: CAPACITY of the drain / collector shard arrays (defaults to
  *   // 1). Bounds the shard arrays at compile time; the number of threads
  *   // actually started is the runtime min(aicpu_thread_num,
@@ -150,7 +150,7 @@
  *     intentionally avoided: it would race with AICPU writes to
  *     device-only fields (current_buf_ptr, total/dropped/mismatch
  *     counters, queue_tails, free_queue.head, and on a5
- *     L2SwimlaneAicpuPhaseHeader::magic) and roll them back to the
+ *     ChipSwimlaneAicpuPhaseHeader::magic) and roll them back to the
  *     host-shadow values mirrored in at the top of the tick. Buffer
  *     contents are mirrored on demand inside ProfilerAlgorithms.
  *   - On these platforms `reg` always allocates a paired host shadow; the
@@ -181,7 +181,7 @@
  *       (use the subsystem's PLATFORM_*_TIMEOUT_SECONDS).
  *
  *   static constexpr const char*  kSubsystemName;
- *       Used in the idle-timeout log line (e.g. "L2Swimlane", "PMU", "ArgsDump").
+ *       Used in the idle-timeout log line (e.g. "ChipSwimlane", "PMU", "ArgsDump").
  */
 
 #ifndef SRC_COMMON_PLATFORM_INCLUDE_HOST_PROFILER_BASE_H_
@@ -223,7 +223,7 @@ struct ProfilerDerivedShardAwareCollector<
 };
 
 // Common subsystem callback signatures. All four collectors (PMU / ArgsDump
-// / L2Swimlane / DepGen) used to declare their own typedefs with identical
+// / ChipSwimlane / DepGen) used to declare their own typedefs with identical
 // shapes; these are the canonical types stashed in ProfilerBase via
 // set_memory_context().
 //
@@ -785,7 +785,7 @@ public:
      *                  the whole job.
      *
      * The two are equal for the subsystems whose producers are the scheduler
-     * threads (L2Swimlane, ArgsDump, PMU).
+     * threads (ChipSwimlane, ArgsDump, PMU).
      */
     void set_aicpu_thread_num(int aicpu_thread_num) {
         queue_count_ = aicpu_thread_num;

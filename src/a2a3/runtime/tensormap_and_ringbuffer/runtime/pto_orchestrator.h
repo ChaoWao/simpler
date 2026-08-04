@@ -28,7 +28,7 @@
 #ifndef PTO_ORCHESTRATOR_H
 #define PTO_ORCHESTRATOR_H
 
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "utils/device_arena.h"
 #include "pto_ring_buffer.h"
 #include "pto_runtime2_types.h"
@@ -96,8 +96,8 @@ struct PTO2OrchestratorState {
     int32_t total_cluster_count{0};  // AIC cores = MIX clusters
     int32_t total_aiv_count{0};      // AIV cores (= 2 × clusters on standard hardware)
 #if SIMPLER_DFX
-    // L2 swimlane_level copied from get_l2_swimlane_level().
-    L2SwimlaneLevel l2_swimlane_level{L2SwimlaneLevel::DISABLED};
+    // chip swimlane_level copied from get_chip_swimlane_level().
+    ChipSwimlaneLevel chip_swimlane_level{ChipSwimlaneLevel::DISABLED};
 #endif
 
     // === GM HEAP (for output buffers) ===

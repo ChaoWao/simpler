@@ -8,7 +8,7 @@ the scheduler hasn't placed — vs. legitimately busy or dependency-limited?**
 Both tools need two artifacts, captured in **separate** runs (co-running them
 perturbs the swimlane timing):
 
-1. `l2_swimlane_records.json` — per-task timing, from `--enable-l2-swimlane`
+1. `chip_swimlane_records.json` — per-task timing, from `--enable-chip-swimlane`
    (level ≥ 3 for the scheduler-loop parts).
 2. `deps.json` — the task DAG, from a separate `--enable-dep-gen` run.
 
@@ -108,5 +108,5 @@ python -m simpler_setup.tools.swimlane_converter <perf>.json \
 
 ```bash
 python -m simpler_setup.tools.sched_overhead_analysis \
-    --l2-swimlane-records-json <perf>.json --deps-json <deps>.json
+    --chip-swimlane-records-json <perf>.json --deps-json <deps>.json
 ```

@@ -11,29 +11,29 @@
 
 #include "inner_kernel.h"
 #undef OUT_OF_ORDER_STORE_BARRIER
-#include "aicore/l2_swimlane_collector_aicore.h"
+#include "aicore/chip_swimlane_collector_aicore.h"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 
-TEST(L2SwimlaneAicoreTest, CommitUsesReservedBufferGeneration) {
-    L2SwimlaneAicoreTaskBuffer first{};
-    L2SwimlaneAicoreTaskBuffer second{};
-    L2SwimlaneActiveHead head{};
+TEST(ChipSwimlaneAicoreTest, CommitUsesReservedBufferGeneration) {
+    ChipSwimlaneAicoreTaskBuffer first{};
+    ChipSwimlaneAicoreTaskBuffer second{};
+    ChipSwimlaneActiveHead head{};
     head.current_buf_ptr = reinterpret_cast<uint64_t>(&first);
     head.current_buf_seq = 0;
 
-    L2SwimlaneAicoreLocalState local{};
+    ChipSwimlaneAicoreLocalState local{};
     local.cached_buf_seq = UINT32_MAX;
 
-    L2SwimlaneAicoreTaskRecord *reserved = l2_swimlane_aicore_reserve_task_record(&head, &local);
+    ChipSwimlaneAicoreTaskRecord *reserved = chip_swimlane_aicore_reserve_task_record(&head, &local);
     ASSERT_EQ(reserved, &first.records[0]);
 
     head.current_buf_ptr = reinterpret_cast<uint64_t>(&second);
     head.current_buf_seq = 1;
 
-    l2_swimlane_aicore_commit_task_record(reserved, 0x1234, 17, 100, 120, 180);
+    chip_swimlane_aicore_commit_task_record(reserved, 0x1234, 17, 100, 120, 180);
 
     EXPECT_EQ(first.records[0].task_token_raw, 0x1234u);
     EXPECT_EQ(first.records[0].reg_task_id, 17u);
@@ -42,6 +42,6 @@ TEST(L2SwimlaneAicoreTest, CommitUsesReservedBufferGeneration) {
     EXPECT_EQ(first.records[0].receive_to_start_cycles, 20u);
     EXPECT_EQ(second.records[0].task_token_raw, 0u);
 
-    L2SwimlaneAicoreTaskRecord *next = l2_swimlane_aicore_reserve_task_record(&head, &local);
+    ChipSwimlaneAicoreTaskRecord *next = chip_swimlane_aicore_reserve_task_record(&head, &local);
     EXPECT_EQ(next, &second.records[0]);
 }

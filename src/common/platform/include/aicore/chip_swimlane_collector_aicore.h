@@ -9,17 +9,16 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * @file l2_swimlane_collector_aicore.h
+ * @file chip_swimlane_collector_aicore.h
  * @brief AICore performance data collection interface
  *
  * Provides lightweight performance recording interface for AICore kernels.
  * Uses dcci for efficient cache management instead of memory barriers.
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_AICORE_L2_SWIMLANE_COLLECTOR_AICORE_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_AICORE_L2_SWIMLANE_COLLECTOR_AICORE_H_
+#pragma once
 
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "aicore/aicore.h"
 
 // Include platform-specific timestamp implementation
@@ -33,12 +32,12 @@
 
 /**
  * AICore-local rotation state. Tracks which buffer this core is currently
- * writing into and which slot is next. Reset by `l2_swimlane_aicore_reserve_task_record`
- * when it observes a `current_buf_seq` bump on the shared `L2SwimlaneActiveHead`
+ * writing into and which slot is next. Reset by `chip_swimlane_aicore_reserve_task_record`
+ * when it observes a `current_buf_seq` bump on the shared `ChipSwimlaneActiveHead`
  * cache line.
  */
-struct L2SwimlaneAicoreLocalState {
-    __gm__ L2SwimlaneAicoreTaskBuffer *cached_buf = nullptr;
+struct ChipSwimlaneAicoreLocalState {
+    __gm__ ChipSwimlaneAicoreTaskBuffer *cached_buf = nullptr;
     // Must start != AICPU's initial head.current_buf_seq (0) so the first
     // reservation observes a mismatch and loads the buffer pointer.
     uint32_t cached_buf_seq = UINT32_MAX;
@@ -52,12 +51,12 @@ struct L2SwimlaneAicoreLocalState {
  * The returned record pointer remains the task's write target after FIN even
  * if AICPU has published the next buffer by then.
  */
-__aicore__ __attribute__((always_inline)) static inline __gm__ L2SwimlaneAicoreTaskRecord *
-l2_swimlane_aicore_reserve_task_record(__gm__ L2SwimlaneActiveHead *head, L2SwimlaneAicoreLocalState *local) {
+__aicore__ __attribute__((always_inline)) static inline __gm__ ChipSwimlaneAicoreTaskRecord *
+chip_swimlane_aicore_reserve_task_record(__gm__ ChipSwimlaneActiveHead *head, ChipSwimlaneAicoreLocalState *local) {
     dcci(head, SINGLE_CACHE_LINE);
     if (head->current_buf_seq != local->cached_buf_seq) {
         local->cached_buf_seq = head->current_buf_seq;
-        local->cached_buf = reinterpret_cast<__gm__ L2SwimlaneAicoreTaskBuffer *>(head->current_buf_ptr);
+        local->cached_buf = reinterpret_cast<__gm__ ChipSwimlaneAicoreTaskBuffer *>(head->current_buf_ptr);
         local->slot_within_buf = 0;
     }
     if (local->cached_buf == nullptr) {
@@ -80,8 +79,8 @@ l2_swimlane_aicore_reserve_task_record(__gm__ L2SwimlaneActiveHead *head, L2Swim
  * `end_time` is captured immediately after execute_task and before FIN. The
  * commit itself runs after FIN and never reads the possibly-rotated head.
  */
-__aicore__ __attribute__((always_inline)) static inline void l2_swimlane_aicore_commit_task_record(
-    __gm__ L2SwimlaneAicoreTaskRecord *record, uint64_t task_token_raw, uint32_t reg_task_id, uint64_t receive_time,
+__aicore__ __attribute__((always_inline)) static inline void chip_swimlane_aicore_commit_task_record(
+    __gm__ ChipSwimlaneAicoreTaskRecord *record, uint64_t task_token_raw, uint32_t reg_task_id, uint64_t receive_time,
     uint64_t start_time, uint64_t end_time
 ) {
     if (record == nullptr) {
@@ -102,12 +101,10 @@ __aicore__ __attribute__((always_inline)) static inline void l2_swimlane_aicore_
 /**
  * Compatibility wrapper for platforms that have not moved reservation before ACK.
  */
-__aicore__ __attribute__((always_inline)) static inline void l2_swimlane_aicore_record_task(
-    __gm__ L2SwimlaneActiveHead *head, L2SwimlaneAicoreLocalState *local, uint64_t task_token_raw, uint32_t reg_task_id,
-    uint64_t receive_time, uint64_t start_time, uint64_t end_time
+__aicore__ __attribute__((always_inline)) static inline void chip_swimlane_aicore_record_task(
+    __gm__ ChipSwimlaneActiveHead *head, ChipSwimlaneAicoreLocalState *local, uint64_t task_token_raw,
+    uint32_t reg_task_id, uint64_t receive_time, uint64_t start_time, uint64_t end_time
 ) {
-    __gm__ L2SwimlaneAicoreTaskRecord *record = l2_swimlane_aicore_reserve_task_record(head, local);
-    l2_swimlane_aicore_commit_task_record(record, task_token_raw, reg_task_id, receive_time, start_time, end_time);
+    __gm__ ChipSwimlaneAicoreTaskRecord *record = chip_swimlane_aicore_reserve_task_record(head, local);
+    chip_swimlane_aicore_commit_task_record(record, task_token_raw, reg_task_id, receive_time, start_time, end_time);
 }
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_AICORE_L2_SWIMLANE_COLLECTOR_AICORE_H_

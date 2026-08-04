@@ -1,15 +1,15 @@
 ---
-name: l0-swimlane
-description: Produce an L0 (intra-core AICore pipeline) swimlane for one task — a single kernel or a mix — via the dump-driven `simpler_setup.tools.l0_swimlane` tool. Use when the user asks to "run/produce an l0 swimlane", "trace a task's intra-core pipeline", profile why one AICore task is slow inside the core(s), or needs help choosing the tool's manual flags (`--func-id`, `--set-arg`, `--spmd-block-num`, `--case`). The tool captures real per-task args from an args dump and auto-generates the `msprof op simulator` replay — no hand-authored workspace. For a hand-authored single-`kernel_entry` replay use [insight-trace](../insight-trace/SKILL.md); for cross-task / scheduler / dependency timing use the L2 swimlane.
+name: core-swimlane
+description: Produce an L0 (intra-core AICore pipeline) swimlane for one task — a single kernel or a mix — via the dump-driven `simpler_setup.tools.core_swimlane` tool. Use when the user asks to "run/produce a core swimlane", "trace a task's intra-core pipeline", profile why one AICore task is slow inside the core(s), or needs help choosing the tool's manual flags (`--func-id`, `--set-arg`, `--spmd-block-num`, `--case`). The tool captures real per-task args from an args dump and auto-generates the `msprof op simulator` replay — no hand-authored workspace. For a hand-authored single-`kernel_entry` replay use [insight-trace](../insight-trace/SKILL.md); for cross-task / scheduler / dependency timing use the chip swimlane.
 ---
 
-# L0 Swimlane — Intra-core Pipeline Trace for a Task
+# Core Swimlane — Intra-core Pipeline Trace for a Task
 
-`python -m simpler_setup.tools.l0_swimlane` dumps a task's real `args[]`,
+`python -m simpler_setup.tools.core_swimlane` dumps a task's real `args[]`,
 reconstructs them, generates a combined `msprof op simulator` replay of the
 **whole task** (a mix runs AIC + AIV0 + AIV1 in one op), and exports an
 Insight `trace.json` whose lanes are the cluster's pipes. Full reference:
-[docs/dfx/l0-swimlane-profiling.md](../../../docs/dfx/l0-swimlane-profiling.md).
+[docs/dfx/core-swimlane-profiling.md](../../../docs/dfx/core-swimlane-profiling.md).
 This skill is the **operating procedure** — above all the one genuinely
 manual decision: the slot/value for `--set-arg`.
 
@@ -19,10 +19,10 @@ manual decision: the slot/value for `--set-arg`.
   per-pipe (`MTE2` / `MTE1` / `CUBE` / `FIXP` / `SCALAR` / `VECTOR`)
   intra-core picture, or to confirm AIC↔AIV overlap inside a mix.
 - **Not** for cross-task dependencies / scheduler / dispatch / finish
-  timing — that is the **L2 swimlane**. L0 traces ONE task in isolation
+  timing — that is the **chip swimlane**. L0 traces ONE task in isolation
   with no AICPU, so inter-task ordering is out of scope (doc §9, tier C).
 - **vs `insight-trace`**: that skill hand-authors a wrapper around one
-  `kernel_entry`; `l0_swimlane` automates the whole thing from a real dump
+  `kernel_entry`; `core_swimlane` automates the whole thing from a real dump
   (real args, mix-together, SPMD context synthesised). Reach for
   `insight-trace` only when there is no test/dump to drive the capture.
 
@@ -33,7 +33,7 @@ source .venv/bin/activate
 source "$ASCEND_HOME_PATH/set_env.sh"          # CANN env (msprof on PATH)
 # Sim dump (no NPU); task-submit locks a device for the step-5 collect.
 task-submit --device auto --max-time 1800 --run \
-  "python -m simpler_setup.tools.l0_swimlane --platform a2a3sim \
+  "python -m simpler_setup.tools.core_swimlane --platform a2a3sim \
      --func-id <set> --test <test_file.py>"
 ```
 

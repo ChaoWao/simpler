@@ -154,10 +154,10 @@ DFX is opt-in via the existing flags — no kernel changes needed:
 
 ```bash
 pytest .../qwen3_14b_decode --platform a2a3 --device ${DEVICE} \
-    --enable-l2-swimlane 1 --enable-dep-gen
+    --enable-chip-swimlane 1 --enable-dep-gen
 ```
 
-Note that `--enable-dep-gen` / `--enable-l2-swimlane` on the full 40-layer graph
+Note that `--enable-dep-gen` / `--enable-chip-swimlane` on the full 40-layer graph
 can overflow the per-run SHM record buffer ("records dropped"); pypto-lib warns
 about the same thing for `decode_fwd.py --fwd-layers`. Capture on a smaller
 harvest if you need a clean trace.

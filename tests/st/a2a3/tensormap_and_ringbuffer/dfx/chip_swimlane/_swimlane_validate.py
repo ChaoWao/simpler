@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Shared l2_swimlane post-case validation.
+"""Shared chip_swimlane post-case validation.
 
 The vector_example and paged_attention swimlane tests run the same capture →
 tool smoke → differential gate sequence; the only difference between them is
@@ -66,16 +66,16 @@ def validate_perf_artifact(case_label: str, *, since: float, expected_task_count
     matches = [p for p in _outputs_dir().glob(f"{safe_label}_*") if p.stat().st_mtime >= since]
     assert matches, f"no output dir for {safe_label!r} created this run — swimlane capture failed?"
     out_dir = max(matches, key=lambda p: p.stat().st_mtime)
-    perf = out_dir / "l2_swimlane_records.json"
-    assert perf.exists(), f"l2_swimlane_records.json missing under {out_dir} — swimlane capture failed?"
+    perf = out_dir / "chip_swimlane_records.json"
+    assert perf.exists(), f"chip_swimlane_records.json missing under {out_dir} — swimlane capture failed?"
 
     # Read via the swimlane_converter loader so v2 host JSON gets joined into
     # the v1-shaped dict the rest of this validator (and the differential
     # oracle below) expects. Direct json.load(perf) would see only raw
     # aicore_tasks / aicpu_tasks arrays under v2.
     data = read_perf_data(perf)
-    assert data.get("l2_swimlane_level") in (1, 2, 3, 4), (
-        f"unexpected l2_swimlane_level: {data.get('l2_swimlane_level')}"
+    assert data.get("chip_swimlane_level") in (1, 2, 3, 4), (
+        f"unexpected chip_swimlane_level: {data.get('chip_swimlane_level')}"
     )
     tasks = data.get("tasks")
     assert isinstance(tasks, list), "tasks field missing or not a list"
@@ -109,12 +109,12 @@ def validate_perf_artifact(case_label: str, *, since: float, expected_task_count
 
     # ---- Tool smoke: sched_overhead_analysis ----
     # pop_hit / pop_miss come from the dispatch-phase extras the runtime writes
-    # (l2_swimlane_collector.cpp). The differential block below cross-validates
+    # (chip_swimlane_collector.cpp). The differential block below cross-validates
     # the script's printed numbers against an independent oracle computed
     # straight from the raw artifacts — any regression in either the runtime
     # capture path or the parser arithmetic fails here in the same CI step
     # that produced the data.
-    # sched_overhead_analysis now REQUIRES the DAG (deps.json). The l2_swimlane
+    # sched_overhead_analysis now REQUIRES the DAG (deps.json). The chip_swimlane
     # CI smoke captures it alongside the perf JSON (--enable-dep-gen), so pass it
     # explicitly. (For accurate user-facing timing, deps must be a SEPARATE
     # capture — dep_gen perturbs timing — but the count-based differential below
@@ -123,7 +123,7 @@ def validate_perf_artifact(case_label: str, *, since: float, expected_task_count
         sys.executable,
         "-m",
         "simpler_setup.tools.sched_overhead_analysis",
-        "--l2-swimlane-records-json",
+        "--chip-swimlane-records-json",
         str(perf),
     ]
     deps_sibling = Path(perf).parent / "deps.json"
@@ -154,7 +154,7 @@ def verify_sched_overhead_differential(stdout: str, perf: dict, artifact_dir: Pa
 
     Args:
         stdout: captured ``sched_overhead_analysis`` stdout.
-        perf: parsed ``l2_swimlane_records.json`` dict — passed in by the caller
+        perf: parsed ``chip_swimlane_records.json`` dict — passed in by the caller
             so we don't re-read multi-MB profiling artifacts here.
         artifact_dir: per-case output directory. ``deps.json`` is looked up
             beside the perf JSON; absent → fanout / fanin half is skipped.

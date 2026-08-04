@@ -309,7 +309,7 @@ HelloPayload decode_hello(const uint8_t *data, size_t size) {
 std::vector<uint8_t> encode_call_config(const CallConfig &config) {
     std::vector<uint8_t> out;
     put_i32(out, config.aicpu_thread_num);
-    put_i32(out, config.enable_l2_swimlane);
+    put_i32(out, config.enable_chip_swimlane);
     put_i32(out, config.enable_dump_args);
     put_i32(out, config.enable_pmu);
     put_i32(out, config.enable_dep_gen);
@@ -321,7 +321,7 @@ std::vector<uint8_t> encode_call_config(const CallConfig &config) {
 CallConfig decode_call_config(const uint8_t *data, size_t size, size_t &offset) {
     CallConfig config{};
     config.aicpu_thread_num = get_i32(data, size, offset);
-    config.enable_l2_swimlane = get_i32(data, size, offset);
+    config.enable_chip_swimlane = get_i32(data, size, offset);
     config.enable_dump_args = get_i32(data, size, offset);
     config.enable_pmu = get_i32(data, size, offset);
     config.enable_dep_gen = get_i32(data, size, offset);

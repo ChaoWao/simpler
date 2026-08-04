@@ -140,7 +140,7 @@ Divide each thread's phase times by its `completed` count to get per-task schedu
 
 ## Cross-Referencing with Host Profiling
 
-When `--enable-l2-swimlane` is used, the host terminal prints a **Task Statistics by Function** table with `Total_Exec` (total AICore kernel execution time). Combined with device log data:
+When `--enable-chip-swimlane` is used, the host terminal prints a **Task Statistics by Function** table with `Total_Exec` (total AICore kernel execution time). Combined with device log data:
 
 | Metric | Source | Description |
 | ------ | ------ | ----------- |

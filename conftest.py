@@ -139,13 +139,13 @@ def pytest_addoption(parser):
         "--skip-golden", action="store_true", default=False, help="Skip golden comparison (benchmark mode)"
     )
     parser.addoption(
-        "--enable-l2-swimlane",
+        "--enable-chip-swimlane",
         nargs="?",
         const=4,
         default=0,
         type=int,
         metavar="PERF_LEVEL",
-        help="Enable L2 swimlane. Bare flag=level 4 (full). "
+        help="Enable chip swimlane. Bare flag=level 4 (full). "
         "1=AICore timing, 2=+dispatch/fanout, 3=+sched phases, 4=+orch phases",
     )
     parser.addoption(
@@ -186,7 +186,7 @@ def pytest_addoption(parser):
         default=False,
         help="Add the 8 Overhead Analysis counter tracks (per-engine "
         "idle/ready/overhead + system all/has overhead) to the swimlane JSON. "
-        "Requires --enable-l2-swimlane + deps.json (re-run with --enable-dep-gen if absent).",
+        "Requires --enable-chip-swimlane + deps.json (re-run with --enable-dep-gen if absent).",
     )
     parser.addoption(
         "--sanitizer",
@@ -611,10 +611,10 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     items.sort(key=sort_key)
 
     # L3 perf collection is not supported yet: a single L3 case forks N chip-processes
-    # that all write l2_swimlane_records_<ts>.json to the same directory with
+    # that all write chip_swimlane_records_<ts>.json to the same directory with
     # second-precision timestamps, so they trample each other. Block the
     # combination up front; waiting for a proper device-id-in-filename fix.
-    if config.getoption("--enable-l2-swimlane", default=0):
+    if config.getoption("--enable-chip-swimlane", default=0):
         l3_items = [
             i
             for i in items
@@ -625,10 +625,10 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
             sample = ", ".join(sorted({i.nodeid for i in l3_items})[:3])
             more = "" if len(l3_items) <= 3 else f" (+{len(l3_items) - 3} more)"
             raise pytest.UsageError(
-                f"--enable-l2-swimlane is not supported for L3 tests yet — "
+                f"--enable-chip-swimlane is not supported for L3 tests yet — "
                 f"multi-chip-process filename collision unresolved. "
                 f"L3 items in this session: {sample}{more}. "
-                f"Either drop --enable-l2-swimlane or scope to L2 with --level 2."
+                f"Either drop --enable-chip-swimlane or scope to L2 with --level 2."
             )
 
 

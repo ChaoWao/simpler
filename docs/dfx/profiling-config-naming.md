@@ -39,7 +39,7 @@ Do not use "PROFILING" as a catch-all.
 
 - `SIMPLER_DFX` is the **device DFX instrumentation build switch** (the
   umbrella). It gates a broad set of device instrumentation infrastructure
-  (cycle counters, L2 swimlane, scope stats, PMU, device-phase timing), not
+  (cycle counters, chip swimlane, scope stats, PMU, device-phase timing), not
   just "profiling logs."
 - The device **sub-tier** macros keep `PROFILING` because they gate actual
   profiling counters: `SIMPLER_ORCH_PROFILING` (orchestrator task/cycle
@@ -77,7 +77,7 @@ by **independent layers**:
 | Compile-time (does the code exist?) | macros (`SIMPLER_DFX`, `SIMPLER_HOST_STRACE`, `SIMPLER_*_PROFILING`) | umbrella on, sub-tiers off |
 | Per-run (does this run collect X?) | `SIMPLER_DFX_FLAG_*` bitmask via `CallConfig` | none selected |
 | Runtime emission (does it actually emit?) | env (`SIMPLER_DEVICE_STRACE_ENABLE`, log level) | on |
-| Runtime detail tier | `get_l2_swimlane_level()` | AICPU_TIMING |
+| Runtime detail tier | `get_chip_swimlane_level()` | AICPU_TIMING |
 
 `SIMPLER_HOST_STRACE` (compile) gates whether the host `[STRACE]` macros
 exist at all; `SIMPLER_DEVICE_STRACE_ENABLE` (runtime env) gates whether the
@@ -114,7 +114,7 @@ on runtime timing (natural runtime gate).
 The `SIMPLER_DFX_FLAG_*` constants select which DFX collectors a given run
 collects; accessed via `SIMPLER_GET/SET/CLEAR_DFX_FLAG`:
 
-`SIMPLER_DFX_FLAG_NONE`, `_DUMP_ARGS`, `_L2_SWIMLANE`, `_PMU`, `_DEP_GEN`,
+`SIMPLER_DFX_FLAG_NONE`, `_DUMP_ARGS`, `_CHIP_SWIMLANE`, `_PMU`, `_DEP_GEN`,
 `_SCOPE_STATS`.
 
 Platform collectors carry no subsystem qualifier. Future runtime-specific

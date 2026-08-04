@@ -1,14 +1,14 @@
-# L2 swimlane: defer per-task `wmb()` to buffer publication
+# chip swimlane: defer per-task `wmb()` to buffer publication
 
 **Date**: 2026-06-01 (investigated), 2026-07-08 (landed)
-**Verdict**: **landed** — the per-task `wmb()` in `l2_swimlane_aicpu_complete_task`
+**Verdict**: **landed** — the per-task `wmb()` in `chip_swimlane_aicpu_complete_task`
 is removed. Correctness verified onboard a2a3. The speed benefit is below the
 hardware noise floor; the change is kept for **uniformity**, not measured speed.
 
 ## Change
 
-`l2_swimlane_aicpu_complete_task` used to issue one `wmb()` (ARM64 `dsb st`) per
-AICPU task record, right after `l2_swimlane_buf->count = new_count`. It was the
+`chip_swimlane_aicpu_complete_task` used to issue one `wmb()` (ARM64 `dsb st`) per
+AICPU task record, right after `chip_swimlane_buf->count = new_count`. It was the
 only record-writer on the AICPU collector still doing a per-record barrier; the
 phase-record and `aicore_rotate` paths already defer their barrier to
 publication. The per-record `wmb()` is removed; nothing is added.
@@ -17,9 +17,9 @@ publication. The per-record `wmb()` is removed; nothing is added.
 
 The host reads an `AicpuTask` buffer only after the AICPU publishes it to the
 per-thread ready queue. Both publication paths — full-buffer rotation
-(`switch_task_buffer` → `L2SwimlaneTaskEngine::switch_buffer`) and end-of-run
-flush (`l2_swimlane_aicpu_flush`) — go through
-`L2SwimlaneTaskEngine::enqueue_ready` (`profiler_device_engine.h`), which issues
+(`switch_task_buffer` → `ChipSwimlaneTaskEngine::switch_buffer`) and end-of-run
+flush (`chip_swimlane_aicpu_flush`) — go through
+`ChipSwimlaneTaskEngine::enqueue_ready` (`profiler_device_engine.h`), which issues
 `wmb()` (`dsb st`) before advancing `queue_tails`. A `dsb st` drains every prior
 store on that thread, so this single barrier covers the whole buffer's record +
 `count` stores before the tail the host polls (with `rmb()`).
@@ -30,7 +30,7 @@ owns a separate pool keyed on its own `current_buf_seq`. So there is no
 concurrent observer between `complete_task` returning and publication.
 
 Because the collector was unified into
-`src/common/platform/shared/aicpu/l2_swimlane_collector_aicpu.cpp` (#1262) with
+`src/common/platform/shared/aicpu/chip_swimlane_collector_aicpu.cpp` (#1262) with
 publication funneled through `enqueue_ready`'s barrier, the landed change is a
 single-line removal — unlike the 2026-06 exploration, which predated that engine
 and had to add `wmb()` at each publication site.
@@ -39,11 +39,11 @@ and had to add `wmb()` at each publication site.
 
 a2a3 via `task-submit`:
 
-- 2026-07-08: `tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane` at
+- 2026-07-08: `tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane` at
   `@scene_test(level=2)` (the level where `complete_task` runs and writes the
   AICPU task record) — 2 passed. The DFX suite validates record-count
   reconciliation (no silent loss), the failure mode a missing barrier produces.
-- 2026-06-01: `l2_swimlane` STs (`--enable-l2-swimlane --enable-dep-gen`) and
+- 2026-06-01: `chip_swimlane` STs (`--enable-chip-swimlane --enable-dep-gen`) and
   `paged_attention_unroll` Case1 at level 4 — pass.
 
 ## Measured benefit: below noise
@@ -93,6 +93,6 @@ the signal clears the noise floor:
 
 - Landed in PR [#1301](https://github.com/hw-native-sys/simpler/pull/1301).
 - `aicore_rotate` and `acquire_phase_slot` use the same publication-point barrier
-  shape, in `src/common/platform/shared/aicpu/l2_swimlane_collector_aicpu.cpp`.
+  shape, in `src/common/platform/shared/aicpu/chip_swimlane_collector_aicpu.cpp`.
 - DFX path prioritizes accuracy and simplicity over performance; per-record
   barrier micro-optimizations on the swimlane path are otherwise not pursued.

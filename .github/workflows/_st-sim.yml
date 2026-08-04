@@ -118,12 +118,12 @@ jobs:
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
-      - name: l2_swimlane smoke (a2a3)
+      - name: chip_swimlane smoke (a2a3)
         if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-l2-swimlane --enable-dep-gen
+            --require-pto-isa --enable-chip-swimlane --enable-dep-gen
 
       - name: PMU smoke (a2a3)
         if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
@@ -146,12 +146,12 @@ jobs:
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
-      - name: l2_swimlane smoke (a5)
+      - name: chip_swimlane smoke (a5)
         if: inputs.include_dfx_smokes && inputs.platform == 'a5sim'
         run: |
-          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+          pytest tests/st/a5/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-l2-swimlane --enable-dep-gen
+            --require-pto-isa --enable-chip-swimlane --enable-dep-gen
 
       - name: PMU smoke (a5)
         if: inputs.include_dfx_smokes && inputs.platform == 'a5sim'

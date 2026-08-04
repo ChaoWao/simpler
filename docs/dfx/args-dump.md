@@ -551,7 +551,7 @@ allocates and pre-fills free queues, an `on_buffer_collected`
 callback that gathers payload bytes and appends metadata to a shard-local
 record list, plus `reconcile_counters` / `export_dump_files` /
 `finalize`. The mgmt/collector threading, buffer pooling, and `Module`
-trait pattern are shared with PMU and L2Swimlane — see
+trait pattern are shared with PMU and ChipSwimlane — see
 [profiling-framework.md](profiling-framework.md) for the
 framework reference.
 

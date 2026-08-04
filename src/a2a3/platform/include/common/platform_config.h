@@ -122,7 +122,7 @@ constexpr int PLATFORM_MAX_CORES = PLATFORM_MAX_BLOCKDIM * PLATFORM_CORES_PER_BL
 
 /**
  * Performance buffer capacity per buffer
- * Number of L2SwimlaneAicpuTaskRecord entries per dynamically allocated L2SwimlaneAicpuTaskBuffer
+ * Number of ChipSwimlaneAicpuTaskRecord entries per dynamically allocated ChipSwimlaneAicpuTaskBuffer
  */
 constexpr int PLATFORM_PROF_BUFFER_SIZE = 1000;
 
@@ -137,13 +137,13 @@ constexpr int PLATFORM_PROF_BUFFER_SIZE = 1000;
 constexpr int PLATFORM_PROF_SLOT_COUNT = 4;
 
 /**
- * L2SwimlaneAicpuTaskBuffer pre-allocation count per AICore.
+ * ChipSwimlaneAicpuTaskBuffer pre-allocation count per AICore.
  * Up to PLATFORM_PROF_SLOT_COUNT go into the free_queue at init, the rest into the recycled pool.
  */
 constexpr int PLATFORM_PROF_BUFFERS_PER_CORE = 8;
 
 /**
- * L2SwimlaneAicoreTaskBuffer pre-allocation count per AICore (AICore-as-producer pool).
+ * ChipSwimlaneAicoreTaskBuffer pre-allocation count per AICore (AICore-as-producer pool).
  * Up to PLATFORM_PROF_SLOT_COUNT go into the free_queue at init, the rest into the recycled pool.
  * Mirrors PLATFORM_PROF_BUFFERS_PER_CORE in role; smaller because AICore records
  * are slim (32 B each) and the buffer is also smaller per the rotation design.
@@ -168,13 +168,13 @@ constexpr int PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD = 8;
  * Ready queue capacity for performance data collection.
  * Queue holds ReadyQueueEntry structs for buffers ready to be read by Host.
  * Sized to match pre-allocation total across all cores and threads, summed
- * over the four buffer kinds (L2SwimlaneAicpuTaskBuffer per core,
- * L2SwimlaneAicpuSchedPhaseBuffer + L2SwimlaneAicpuOrchPhaseBuffer per
- * AICPU thread, L2SwimlaneAicoreTaskBuffer per core).
+ * over the four buffer kinds (ChipSwimlaneAicpuTaskBuffer per core,
+ * ChipSwimlaneAicpuSchedPhaseBuffer + ChipSwimlaneAicpuOrchPhaseBuffer per
+ * AICPU thread, ChipSwimlaneAicoreTaskBuffer per core).
  *
  * The phase term is sized to the ORIGINAL per-thread count (16), decoupled from
  * PLATFORM_PROF_{SCHED,ORCH}_BUFFERS_PER_THREAD, on purpose: this array sizes the
- * device-visible L2SwimlaneDataHeader::queues[], so shrinking the host
+ * device-visible ChipSwimlaneDataHeader::queues[], so shrinking the host
  * preallocation must NOT shrink it (that would change the shm layout = ABI).
  * 992 is far above the observed peak backlog (~40); the slack is harmless.
  */
@@ -211,7 +211,7 @@ inline double cycles_to_us(uint64_t cycles) {
 // "Profiling" is the umbrella; each bit is a parallel diagnostics sub-feature.
 #define SIMPLER_DFX_FLAG_NONE 0u
 #define SIMPLER_DFX_FLAG_DUMP_ARGS (1u << 0)
-#define SIMPLER_DFX_FLAG_L2_SWIMLANE (1u << 1)
+#define SIMPLER_DFX_FLAG_CHIP_SWIMLANE (1u << 1)
 #define SIMPLER_DFX_FLAG_PMU (1u << 2)
 #define SIMPLER_DFX_FLAG_DEP_GEN (1u << 3)
 #define SIMPLER_DFX_FLAG_SCOPE_STATS (1u << 4)

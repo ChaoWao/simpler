@@ -307,7 +307,7 @@ render `used/cap` without a second device→host query.
 | Feature | Layer | Runtime scope | Why |
 | ------- | ----- | ------------- | --- |
 | PMU | platform only | all runtimes | reads hardware registers |
-| L2 swimlane | platform only | all runtimes | reads AICore ring buffers |
+| chip swimlane | platform only | all runtimes | reads AICore ring buffers |
 | dep_gen | platform only | all runtimes | traces `submit_task` |
 | args dump | platform only | all runtimes | dumps argument data |
 | **scope stats** | **platform API + runtime call sites** | **T&R only** | runtime extracts values, platform tracks peaks |

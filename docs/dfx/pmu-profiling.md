@@ -315,7 +315,7 @@ reconciliation removes the temporary files. An abrupt process exit can leave
 them in the CSV directory; the next `start()` for the same output path removes
 those stale run-scoped files before collector threads launch. The
 mgmt/collector threading, buffer pooling, and `Module` trait pattern are shared
-with ArgsDump and L2Swimlane — see
+with ArgsDump and ChipSwimlane — see
 [profiling-framework.md](profiling-framework.md) for the framework reference.
 
 ### 5.3 a5 — same framework, host-shadow transport (DAV_3510, 10 counters)

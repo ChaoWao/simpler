@@ -9,7 +9,7 @@
 """End-to-end ST for selective task-timing slots (issue #1325).
 
 A two-task chain (`c = a + b` tagged slot 0, `out = c + b` tagged slot 1) is
-run with L2 swimlane OFF. The contract being verified:
+run with chip swimlane OFF. The contract being verified:
 
     * both `simpler_run.runner_run.device_wall.task_slot_0` and `..._1`
       [STRACE] markers are present with strictly positive duration — proving
@@ -139,7 +139,7 @@ def _drive(
         args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
 
         config = CallConfig()
-        config.enable_l2_swimlane = False  # slots must work with swimlane OFF
+        config.enable_chip_swimlane = False  # slots must work with swimlane OFF
 
         assert worker.run(chip_handle, args, config) is None
 
@@ -330,7 +330,7 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
             args.add_tensor(Tensor.make(bufs[n], (_TILE_ELEMS,), DataType.FLOAT32))
 
         config = CallConfig()
-        config.enable_l2_swimlane = False
+        config.enable_chip_swimlane = False
         assert worker.run(chip_handle, args, config) is None
 
         out_C = torch.zeros(_TILE_ELEMS, dtype=torch.float32)

@@ -47,7 +47,7 @@ def _strace_durs(captured: str, name: str) -> list:
     return out
 
 
-def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = False):
+def _drive_one_run(platform: str, device_id: int, *, enable_chip_swimlane: bool = False):
     import torch  # noqa: PLC0415
 
     worker = Worker(
@@ -77,7 +77,7 @@ def _drive_one_run(platform: str, device_id: int, *, enable_l2_swimlane: bool = 
         args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
 
         config = CallConfig()
-        config.enable_l2_swimlane = enable_l2_swimlane
+        config.enable_chip_swimlane = enable_chip_swimlane
 
         # run() returns None; timing is emitted as [STRACE] markers on stderr.
         assert worker.run(chip_handle, args, config) is None

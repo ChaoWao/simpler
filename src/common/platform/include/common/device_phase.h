@@ -26,7 +26,7 @@
  *
  * Variable-cardinality phases (per-submit, per-scheduler-loop, arbitrary
  * nesting) do NOT belong here — they need a rotating ring and live in the
- * L2 swimlane orch/sched pools instead.
+ * chip swimlane orch/sched pools instead.
  *
  * Layout per AICPU thread: AicpuPhaseRecord[NUM_AICPU_PHASES]. The buffer is
  * thread-major: thread t occupies records [t*NUM_AICPU_PHASES, (t+1)*N).
@@ -42,7 +42,7 @@
 // is the whole-run wall preserved from the original device_wall buffer; the
 // rest subdivide the on-NPU portion of simpler_run's blocking wait. Append new
 // fixed phases before Count (this is a small, closed set by design — variable
-// phases go to the L2 swimlane ring, not here).
+// phases go to the chip swimlane ring, not here).
 enum class AicpuPhase : uint32_t {
     RunWall = 0,  // whole-run AICPU wall (legacy device_wall pair)
     Preamble,     // init + affinity gate before orchestration

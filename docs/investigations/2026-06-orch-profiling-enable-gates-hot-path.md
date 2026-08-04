@@ -41,7 +41,7 @@ proposed wrapping them in a compile macro so production inference can drop them.
 
 Swept every `is_*_enabled()` call site across both arches
 (`is_pmu_enabled`, `is_dep_gen_enabled`, `is_dump_args_enabled`,
-`is_scope_stats_enabled`, `is_l2_swimlane_enabled`) and classified each as
+`is_scope_stats_enabled`, `is_chip_swimlane_enabled`) and classified each as
 gated/ungated by `SIMPLER_DFX`. Findings:
 
 - The existing `SIMPLER_DFX` compile macro

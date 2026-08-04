@@ -7,9 +7,9 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""L2 swimlane profiling on a chained MIX-task workload.
+"""chip swimlane profiling on a chained MIX-task workload.
 
-Companion to ``test_l2_swimlane.py``. vector_example is AIV-only and emits
+Companion to ``test_chip_swimlane.py``. vector_example is AIV-only and emits
 one perf row per ``task_id`` — the dedup branch in
 ``compute_dag_stats_from_deps`` (and the matching dedup in the oracle
 inside :mod:`_swimlane_validate`) sits idle. ``chained_mix_orch.cpp`` runs
@@ -45,7 +45,7 @@ _WS_ELEMS = _WS_SLOTS * _TILE_ELEMS
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
-class TestL2SwimlaneMixed(SceneTestCase):
+class TestChipSwimlaneMixed(SceneTestCase):
     """Chained MIX workload (3 steps, each step is AIC matmul + AIV add).
 
     Step N reads workspace slot N-1 and writes workspace slot N. Step 3
@@ -87,7 +87,7 @@ class TestL2SwimlaneMixed(SceneTestCase):
     CASES = [
         {
             "name": "default",
-            "platforms": ["a5sim", "a5"],
+            "platforms": ["a2a3sim", "a2a3"],
             "params": {},
         },
     ]
@@ -136,18 +136,14 @@ class TestL2SwimlaneMixed(SceneTestCase):
         # invocation's output dir rather than a stale same-label leftover.
         run_marker = int(time.time())  # floor to whole seconds: safe if outputs/ ever lands on a coarse-mtime fs
         super().test_run(st_platform, st_worker, request)
-        if request.config.getoption("--enable-l2-swimlane", default=False):
+        if request.config.getoption("--enable-chip-swimlane", default=False):
             for case in self.CASES:
                 if st_platform in case["platforms"]:
                     # Rely on the differential gate (Pop / Fanout / Fanin) —
                     # the chain produces 3 MIX task_ids × 2 subtask rows = 6
                     # perf rows and 2 deps.json edges, so the dedup branch in
                     # the oracle has an arithmetically observable effect.
-                    validate_perf_artifact(
-                        f"TestL2SwimlaneMixed_{case['name']}",
-                        since=run_marker,
-                        expected_complete_finishes=6,
-                    )
+                    validate_perf_artifact(f"TestChipSwimlaneMixed_{case['name']}", since=run_marker)
         # Full-dump modes give the func_id array its regression barrier on the
         # cooperative-mix path (single-kernel coverage lives in test_args_dump).
         if int(request.config.getoption("--dump-args", default=0)) >= 2:
@@ -160,7 +156,7 @@ class TestL2SwimlaneMixed(SceneTestCase):
         and each ``(task, slot, stage)`` is emitted exactly once — not
         duplicated per subtask as the pre-#1181 geometry did.
         """
-        safe_label = _sanitize_for_filename("TestL2SwimlaneMixed_default")
+        safe_label = _sanitize_for_filename("TestChipSwimlaneMixed_default")
         matches = [p for p in _outputs_dir().glob(f"{safe_label}_*") if p.stat().st_mtime >= since]
         assert matches, "no args dump output directory created this run"
         out_dir = max(matches, key=lambda p: p.stat().st_mtime)

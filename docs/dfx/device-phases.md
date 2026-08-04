@@ -52,7 +52,7 @@ deep-dive — see [l2-timing.md](l2-timing.md).
 * Host allocates one `AicpuPhaseRecord[NUM_AICPU_PHASES]` per launched AICPU
   thread (**thread-major**), resets it each run, and publishes its address into
   the AICPU SO via `set_platform_phase_base()` — a plain global + `extern "C"`
-  setter, exactly like `set_platform_dump_base` / `set_platform_l2_swimlane_base`
+  setter, exactly like `set_platform_dump_base` / `set_platform_chip_swimlane_base`
   (onboard: `kernel.cpp` from `KernelArgs::device_wall_data_base`; sim: the host
   dlsym's the setter). **No C++ `thread_local`** (per
   [dynamic-linking.md](../dynamic-linking.md)); the per-thread slot is resolved
@@ -161,7 +161,7 @@ trivial example) is simply not emitted.
 ## Selective task-timing slots (implemented)
 
 A lightweight way to measure a specific task's (or an interval's) AICPU
-dispatch→finish window **without** enabling the L2 swimlane — no collector
+dispatch→finish window **without** enabling the chip swimlane — no collector
 threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
 [l2-timing.md](l2-timing.md) for how it relates to the swimlane's `finish_time`.
 
@@ -180,7 +180,7 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
   and post-sync D2H readback. It is a distinct record type (dispatch/finish, not
   start/end) reduced by **min(dispatch) / max(finish)**, not an `AicpuPhase`
   (those fire once per run/thread; a slot takes many block/subtask events).
-* **Boundaries (match the L2 swimlane).** `dispatch` = the earliest Scheduler
+* **Boundaries (match the chip swimlane).** `dispatch` = the earliest Scheduler
   publication of `DATA_MAIN_BASE` (after payload publish, immediately before the
   register write; the initial gated publication for early/speculative dispatch,
   not the doorbell release). `finish` = the latest Scheduler FIN observation
@@ -223,16 +223,16 @@ host reset/readback/emit in the onboard + sim runners and `c_api_shared`.
 Phases entered an **unknown number of times** — per-submit, per-scheduler-loop,
 arbitrary nesting — cannot use the fixed-slot buffer: there is no slot count
 that bounds them, and the fixed buffer has **no rotation** (nobody recycles a
-full buffer). These already have a home: the **L2 swimlane orch/sched pools**
-(`L2SwimlaneAicpuOrchPhasePool` / `SchedPhasePool`), which carry a
+full buffer). These already have a home: the **chip swimlane orch/sched pools**
+(`ChipSwimlaneAicpuOrchPhasePool` / `SchedPhasePool`), which carry a
 `head + free_queue` ring that the host drains continuously. That is where
-`l2_swimlane_aicpu_record_orch_phase` / `record_sched_phase` already write.
+`chip_swimlane_aicpu_record_orch_phase` / `record_sched_phase` already write.
 
 The two tracks split cleanly by **cardinality**, and that split also resolves
 how each phase is tagged:
 
-| aspect | fixed (this buffer) | variable (L2 swimlane pool) |
-| ------ | ------------------- | --------------------------- |
+| aspect | fixed (this buffer) | variable (chip swimlane pool) |
+| ------ | ------------------- | ----------------------------- |
 | cardinality | once per run per thread | many per run (loops / nesting) |
 | storage | indexed slot, no rotation | ring with `head + free_queue` rotation |
 | tag | a stable slot index → a small closed `AicpuPhase` enum is fine | append-only → no slot needed; use a compile-time `FNV-1a` hash of the call-site name literal so adding a phase is a one-line change with no central registry |

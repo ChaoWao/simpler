@@ -85,15 +85,15 @@ struct KernelArgs {
     // no interior alignment padding. Order among these is free (device reads by
     // field name, not offset); only runtime_args/regs are offset-locked.
     uint64_t dump_data_base{0};  // Dump shared memory base address; use explicit flags to detect enablement
-    // L2 swimlane shared memory base address; use explicit flags to detect enablement
-    uint64_t l2_swimlane_data_base{0};
+    // chip swimlane shared memory base address; use explicit flags to detect enablement
+    uint64_t chip_swimlane_data_base{0};
     uint64_t pmu_data_base{0};      // PMU buffer base address (device memory); 0 = PMU disabled
     uint64_t dep_gen_data_base{0};  // dep_gen shared memory base address; use explicit flags to detect enablement
     // Profiling per-core address arrays (moved out of Handshake). Each *_addrs
     // field is a device pointer to uint64_t[num_aicore]. AICore KERNEL_ENTRY
     // indexes by block_idx and forwards into per-core platform state.
-    // L2SwimlaneActiveHead* per core (rotation channel); 0 when L2 swimlane is off
-    uint64_t l2_swimlane_aicore_rotation_table{0};
+    // ChipSwimlaneActiveHead* per core (rotation channel); 0 when chip swimlane is off
+    uint64_t chip_swimlane_aicore_rotation_table{0};
     uint64_t aicore_pmu_ring_addrs{0};  // PmuAicoreRing* per core; 0 when PMU is off
     uint64_t scope_stats_data_base{0};  // ScopeStatsBuffer device pointer; 0 when scope_stats is off.
                                         // a5 has no halHostRegister — host keeps a separate shadow and
@@ -104,7 +104,7 @@ struct KernelArgs {
     // AICPU args copy makes inline fields write-only).
     uint64_t device_wall_data_base{0};
     // 32-bit tail (two adjacent uint32_t — no interior padding).
-    uint32_t enable_profiling_flag{0};  // Profiling umbrella bitmask; dump_args|l2_swimlane|pmu|dep_gen|scope_stats
+    uint32_t enable_profiling_flag{0};  // Profiling umbrella bitmask; dump_args|chip_swimlane|pmu|dep_gen|scope_stats
     // Opaque always-false guard read by the AICore SIMT meta anchor (AIV
     // KERNEL_ENTRY). The host never sets it non-zero; its only purpose is to be
     // a runtime-valued condition the compiler cannot constant-fold, so the

@@ -24,8 +24,8 @@
  * device run completes, so going through the filesystem would just be
  * extra I/O and an extra file in the output directory.
  *
- * deps.json is the sole source of truth for fanout: the L2 swimlane hot
- * path no longer records ``L2SwimlaneAicpuTaskRecord::fanout[]`` (taking the per-task
+ * deps.json is the sole source of truth for fanout: the chip swimlane hot
+ * path no longer records ``ChipSwimlaneAicpuTaskRecord::fanout[]`` (taking the per-task
  * 1 KB GM store off the scheduler critical path). Replay sees every
  * submit and reconstructs the complete dependency graph.
  *

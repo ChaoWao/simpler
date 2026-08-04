@@ -1591,19 +1591,19 @@ NB_MODULE(_task_interface, m) {
             nb::rv_policy::reference_internal
         )
         .def_prop_rw(
-            "enable_l2_swimlane",
+            "enable_chip_swimlane",
             [](const CallConfig &c) {
-                return c.enable_l2_swimlane;
+                return c.enable_chip_swimlane;
             },
             // Accept either an int perf_level (0-4) or a Python bool. `True` maps to
             // level 4 (full collection) to preserve the pre-perf_level semantics for
             // callers that still pass a boolean; `False` maps to 0.
             [](CallConfig &c, nb::object v) {
                 if (PyBool_Check(v.ptr())) {
-                    c.enable_l2_swimlane = nb::cast<bool>(v) ? 4 : 0;
+                    c.enable_chip_swimlane = nb::cast<bool>(v) ? 4 : 0;
                 } else {
                     int level = nb::cast<int>(v);
-                    c.enable_l2_swimlane = (level < 0) ? 0 : (level > 4) ? 4 : level;
+                    c.enable_chip_swimlane = (level < 0) ? 0 : (level > 4) ? 4 : level;
                 }
             }
         )
@@ -1664,8 +1664,9 @@ NB_MODULE(_task_interface, m) {
         .def("__repr__", [append_ring_values](const CallConfig &self) -> std::string {
             std::ostringstream os;
             os << "CallConfig(aicpu_thread_num=" << self.aicpu_thread_num
-               << ", enable_l2_swimlane=" << self.enable_l2_swimlane << ", enable_dump_args=" << self.enable_dump_args
-               << ", enable_pmu=" << self.enable_pmu << ", enable_dep_gen=" << (self.enable_dep_gen ? "True" : "False")
+               << ", enable_chip_swimlane=" << self.enable_chip_swimlane
+               << ", enable_dump_args=" << self.enable_dump_args << ", enable_pmu=" << self.enable_pmu
+               << ", enable_dep_gen=" << (self.enable_dep_gen ? "True" : "False")
                << ", enable_scope_stats=" << (self.enable_scope_stats ? "True" : "False");
             if (self.runtime_env.any()) {
                 append_ring_values(os, "runtime_env.ring_task_window", true, self.runtime_env.ring_task_window);

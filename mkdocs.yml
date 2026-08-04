@@ -144,8 +144,8 @@ nav:
       - Host trace: dfx/host-trace.md
       - Device phases: dfx/device-phases.md
       - Scheduler-overhead model: dfx/sched-overhead-model.md
-      - L2 Swimlane: dfx/l2-swimlane-profiling.md
-      - L0 Swimlane: dfx/l0-swimlane-profiling.md
+      - Chip Swimlane: dfx/chip-swimlane-profiling.md
+      - Core Swimlane: dfx/core-swimlane-profiling.md
       - PMU: dfx/pmu-profiling.md
       - Args dump: dfx/args-dump.md
       - dep_gen: dfx/dep-gen.md

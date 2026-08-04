@@ -4,7 +4,7 @@ This document describes the profiling macro hierarchy and logging control in the
 
 ## Overview
 
-The runtime uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_l2_swimlane` runtime flag (integer perf_level 0–4) controls data collection granularity (performance buffers, shared memory writes) but does NOT control log output.
+The runtime uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_chip_swimlane` runtime flag (integer perf_level 0–4) controls data collection granularity (performance buffers, shared memory writes) but does NOT control log output.
 
 ## Profiling Macro Hierarchy
 
@@ -18,7 +18,7 @@ SIMPLER_DFX (base level, default=1)
 ├── SIMPLER_ORCH_PROFILING (orchestrator, default=0, requires SIMPLER_DFX=1)
 |   └──SIMPLER_TENSORMAP_PROFILING (tensormap, default=0, requires SIMPLER_ORCH_PROFILING=1)
 ├── SIMPLER_SCHED_PROFILING (scheduler, default=0, requires SIMPLER_DFX=1)
-└── --enable-l2-swimlane [PERF_LEVEL] (L2 swimlane data collection, 0-4, bare=4, requires SIMPLER_DFX=1)
+└── --enable-chip-swimlane [PERF_LEVEL] (chip swimlane data collection, 0-4, bare=4, requires SIMPLER_DFX=1)
 
 ```
 
@@ -55,7 +55,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 
 - All `CYCLE_COUNT_*` timing counters (`sched_*_cycle`, orchestrator cost counters)
 - Scheduler/Orchestrator profiling summary logs guarded by `#if SIMPLER_DFX`
-- Performance data collection paths (`enable_l2_swimlane` runtime flag becomes ineffective because profiling code is not compiled)
+- Performance data collection paths (`enable_chip_swimlane` runtime flag becomes ineffective because profiling code is not compiled)
 
 **Log output (normal run, no stall):**
 
@@ -98,8 +98,8 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 **Note:**
 
 - The host-side `[STRACE]` phase windows are controlled by compile-time macro
-  `SIMPLER_DFX`, not by `enable_l2_swimlane`.
-- `enable_l2_swimlane` only controls shared-memory data collection / swimlane export.
+  `SIMPLER_DFX`, not by `enable_chip_swimlane`.
+- `enable_chip_swimlane` only controls shared-memory data collection / swimlane export.
 
 ---
 
@@ -142,8 +142,8 @@ Thread X: Scheduler summary: total_time=XXXus, loops=XXX, tasks_scheduled=XXX
 ```
 
 Per-thread fanout / fanin edge counts and ready-queue pop hit / miss
-stats live in `aicpu_scheduler_phases[]` (in `l2_swimlane_records.json`
-captured at l2_swimlane_level >= 3) and `deps.json`; consume them via
+stats live in `aicpu_scheduler_phases[]` (in `chip_swimlane_records.json`
+captured at chip_swimlane_level >= 3) and `deps.json`; consume them via
 `simpler_setup/tools/sched_overhead_analysis.py`.
 
 ---
@@ -184,7 +184,7 @@ Thread X: orch_start=XXX orch_end=XXX orch_cost=XXXus
 PTO2 total submitted tasks = XXX, already executed XXX tasks
 ```
 
-**Note:** Orchestrator logs always print when `SIMPLER_ORCH_PROFILING=1`, regardless of `enable_l2_swimlane` flag.
+**Note:** Orchestrator logs always print when `SIMPLER_ORCH_PROFILING=1`, regardless of `enable_chip_swimlane` flag.
 
 ---
 
@@ -214,22 +214,22 @@ Thread X:   overlap checks : XXX, hits=XXX (XX.X%)
 
 ---
 
-## Runtime Flag: enable_l2_swimlane (perf_level)
+## Runtime Flag: enable_chip_swimlane (perf_level)
 
-`--enable-l2-swimlane` accepts an integer perf_level (0–4). Transport
+`--enable-chip-swimlane` accepts an integer perf_level (0–4). Transport
 mirrors the PMU pattern — two independent channels (one binary, one int):
 
 - **Binary on/off** — `KernelArgs::enable_profiling_flag` bit1
-  (`SIMPLER_DFX_FLAG_L2_SWIMLANE`). Set by the host whenever level > 0; read
+  (`SIMPLER_DFX_FLAG_CHIP_SWIMLANE`). Set by the host whenever level > 0; read
   by AICore (which only needs on/off to decide whether to write timing) and
-  by AICPU kernel entry via `set_l2_swimlane_enabled(bool)`.
-- **Granular level (0–4)** — `L2SwimlaneDataHeader::l2_swimlane_level`
-  (shared memory). Host writes it in `L2SwimlaneCollector::initialize`; AICPU
-  promotes it from the header in `l2_swimlane_aicpu_init` and exposes it via
-  `get_l2_swimlane_level()` (typed `L2SwimlaneLevel`) for
+  by AICPU kernel entry via `set_chip_swimlane_enabled(bool)`.
+- **Granular level (0–4)** — `ChipSwimlaneDataHeader::chip_swimlane_level`
+  (shared memory). Host writes it in `ChipSwimlaneCollector::initialize`; AICPU
+  promotes it from the header in `chip_swimlane_aicpu_init` and exposes it via
+  `get_chip_swimlane_level()` (typed `ChipSwimlaneLevel`) for
   `>= AICPU_TIMING / SCHED_PHASES / ORCH_PHASES` gates.
 
-On sim, the binary on/off travels via the dlsym'd `set_l2_swimlane_enabled`
+On sim, the binary on/off travels via the dlsym'd `set_chip_swimlane_enabled`
 entry point; the granular level still goes through the shared-memory
 header just like on onboard.
 
@@ -252,7 +252,7 @@ Identity fields the AICPU side used to write at level 1 (`func_id`,
   `task_id` at post-process by `swimlane_converter.py`. Same model
   `fanout` already uses.
 - `core_type` ← per-core static table published by the host into the
-  collector (`L2SwimlaneCollector::set_core_types`).
+  collector (`ChipSwimlaneCollector::set_core_types`).
 
 AICore buffer rotation no longer piggy-backs on `complete_task`. AICPU
 counts dispatches per core in the dispatch path (scheduler_dispatch in
@@ -260,7 +260,7 @@ tensormap_and_ringbuffer; aicpu_executor in host_build_graph) and rotates
 the AICore buffer when the count is about to cross a
 `PLATFORM_AICORE_BUFFER_SIZE` boundary — strictly before
 `write_reg(DATA_MAIN_BASE)` for the first task of the new batch. The
-hook is `l2_swimlane_aicpu_on_aicore_dispatch`. No AICore-side signal is
+hook is `chip_swimlane_aicpu_on_aicore_dispatch`. No AICore-side signal is
 needed: AICPU has full dispatch visibility on its own. Race safety comes
 from the completion-before-dispatch invariant (AICore per core is
 single-threaded and AICPU does not dispatch task K+1 until K FIN'd), which
@@ -271,32 +271,32 @@ buffer by rotation time. This decoupling is what lets level 1 skip
 Fanout edges are no longer carried on the device hot path — `swimlane_converter.py`
 joins them from the sibling `deps.json` (produced by dep_gen) at post-process time.
 
-Bare `--enable-l2-swimlane` = level 4 (backward compatible).
+Bare `--enable-chip-swimlane` = level 4 (backward compatible).
 
 ### Level gating in AICPU code
 
-Use the strongly-typed `L2SwimlaneLevel` enum so each gate names the
+Use the strongly-typed `ChipSwimlaneLevel` enum so each gate names the
 content it depends on instead of relying on magic numbers:
 
 ```cpp
 // Any level > 0: AICPU task record buffer init / flush.
 // Cheap binary check, available immediately after kernel entry.
-if (is_l2_swimlane_enabled()) { ... }
+if (is_chip_swimlane_enabled()) { ... }
 
 // AICPU dispatch/finish timestamps.
-// Granular checks below require l2_swimlane_aicpu_init to have already run
+// Granular checks below require chip_swimlane_aicpu_init to have already run
 // (so the level has been promoted from the shared-memory header).
-if (get_l2_swimlane_level() >= L2SwimlaneLevel::AICPU_TIMING) { ... }
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::AICPU_TIMING) { ... }
 
 // Scheduler main-loop phase records (SCHED_*)
-if (get_l2_swimlane_level() >= L2SwimlaneLevel::SCHED_PHASES) { ... }
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::SCHED_PHASES) { ... }
 
 // Orchestrator phase records
-if (get_l2_swimlane_level() >= L2SwimlaneLevel::ORCH_PHASES) { ... }
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::ORCH_PHASES) { ... }
 ```
 
-`L2SwimlaneLevel` is defined in `common/l2_swimlane_profiling.h` with
-underlying type `uint32_t` (matches the `L2SwimlaneDataHeader::l2_swimlane_level`
+`ChipSwimlaneLevel` is defined in `common/chip_swimlane_profiling.h` with
+underlying type `uint32_t` (matches the `ChipSwimlaneDataHeader::chip_swimlane_level`
 shared-memory field and mirrors `PmuEventType : uint32_t`):
 
 | Enumerator | Underlying value |
@@ -307,7 +307,7 @@ shared-memory field and mirrors `PmuEventType : uint32_t`):
 | `SCHED_PHASES` | 3 |
 | `ORCH_PHASES` | 4 |
 
-### When enable_l2_swimlane=0
+### When enable_chip_swimlane=0
 
 - No performance data collection
 - No shared memory writes
@@ -416,7 +416,7 @@ definitions to runtime headers.
    - Logs print when macro is enabled, regardless of runtime flag
 
 2. **Runtime flag controls data collection**
-   - `enable_l2_swimlane` controls performance buffer allocation
+   - `enable_chip_swimlane` controls performance buffer allocation
    - Controls shared memory writes for host-side export
    - Does NOT control log output
 
@@ -445,7 +445,7 @@ definitions to runtime headers.
 ### Runtime overhead
 
 - Logging: Negligible (device logs are asynchronous)
-- Data collection (`enable_l2_swimlane>0`): Low to moderate
+- Data collection (`enable_chip_swimlane>0`): Low to moderate
   - Performance buffer writes
   - Shared memory updates
   - Per-task timing measurements

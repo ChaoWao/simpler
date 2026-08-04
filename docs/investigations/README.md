@@ -33,7 +33,7 @@ don't open a parallel doc.
 
 ## File naming
 
-`YYYY-MM-<short-slug>.md` — e.g. `2026-06-l2-swimlane-defer-wmb.md`.
+`YYYY-MM-<short-slug>.md` — e.g. `2026-06-chip-swimlane-defer-wmb.md`.
 The date is the month the investigation was done so entries sort
 chronologically and stale ones are easy to spot.
 
@@ -89,7 +89,7 @@ Newest first.
 - [2026-07 — Host worker dispatch latency: where the remaining ~50 µs goes](2026-07-host-dispatch-latency-budget.md) — measured & dropped: after #1499 a `Worker.run()` costs **43.3 µs fixed + 8.08 µs per task**, so the "94% of latency is our runtime, not the IPC" headline is an artifact of benchmarking a *single* task — at 256 tasks/run the fixed cost is 2%. Also settles #1498 against itself for latency: a pipe wake measures 4.4 µs one way against a 3.5 µs bare fork+shm round trip, so blocking *adds* more than the whole IPC floor to every dispatch; only the CPU-while-idle argument survives
 - [2026-07 — Containing A2/A3 SDMA stream teardown after an AICore fault](2026-07-a2a3-sdma-fault-teardown.md) — CANN exposes no remote-channel retirement fence: even device-confirmed stream frees followed by a soft-reset success that did not complete context teardown can add minutes to a later ordinary fault. Contained by making SDMA an explicit per-Worker opt-in (`enable_sdma`) so only opt-in Workers carry the slow teardown and ordinary Workers keep fast recovery; full closure needs CANN runtime + driver changes (#1425)
 - [2026-07 — AICore-side arg fill for ALL dispatches (not just the gated path)](2026-07-aicore-fills-all-args-ready-path.md) — measured & rejected for the ready path: making the AICore fill its own `args[]` for every task adds ~1.0 µs to each task's `receive→start` setup (paged_attention_unroll: 349 ns → 1356 ns), because a ready task has no idle doorbell gate to hide the fill. Offload is a win only on `not_ready` (early-dispatch), where the AICore already spins at the gate; shipped design keeps the AICPU filling ready tasks (#1328)
-- [2026-07 — L2 swimlane AICore: switch-overhead source + FIN-early reorder & ACK-gate](2026-07-aicore-swimlane-switch-overhead-and-ack-gate.md) — measured: the ~0.8 µs inter-task switch is the record write-back `dcci(record,OUT)+dsb` (~0.5 µs) + payload setup (~0.28 µs), inherent and not reducible by moving FIN; the WAIT gap (p99 ~700 µs) dominates decode. Shipped: sample `end_time` after an early FIN, and an AICPU ACK-gate on buffer rotation (release the old buffer only when AICore ACKs the new buffer's first task) to close the FIN-before-record boundary race the reorder introduced
+- [2026-07 — chip swimlane AICore: switch-overhead source + FIN-early reorder & ACK-gate](2026-07-aicore-swimlane-switch-overhead-and-ack-gate.md) — measured: the ~0.8 µs inter-task switch is the record write-back `dcci(record,OUT)+dsb` (~0.5 µs) + payload setup (~0.28 µs), inherent and not reducible by moving FIN; the WAIT gap (p99 ~700 µs) dominates decode. Shipped: sample `end_time` after an early FIN, and an AICPU ACK-gate on buffer rotation (release the old buffer only when AICore ACKs the new buffer's first task) to close the FIN-before-record boundary race the reorder introduced
 - [2026-07 — Removing PTO2LocalReadyBuffer exposed a missing dcci in EP dispatch](2026-07-local-buffer-removal-ep-combine-regression.md) — RESOLVED in #1245: local-buffer removal changed dispatch timing and unmasked a latent kernel bug (dispatch never dcci'd `recv_count_out` to HBM → local_expert read count=0 → all-zero output); fixed with a one-line dcci in the example kernel
 - [2026-06 — Gating the two residual profiling enable() calls on the orch/scheduler hot path](2026-06-orch-profiling-enable-gates-hot-path.md) — gated under existing `SIMPLER_DFX`; magnitude unmeasured, no new macro
 - [2026-06 — Replacing COND with GM+dcci for AICore→AICPU notification](2026-06-cond-vs-gm-notification.md)
@@ -100,4 +100,4 @@ Newest first.
 - [2026-06 — a5 AICore op-timeout poisons the shared L2 worker (cascade)](2026-06-a5-aicore-op-timeout-cascade.md)
 - [2026-06 — a5 AICPU filter gate: Scenario B fail-fast guard not added](2026-06-a5-aicpu-filter-gate-scenario-b-validation.md)
 - [2026-06 — Sanitizer rollout scope: macOS, TSAN gating, LSan](2026-06-sanitizer-scope.md)
-- [2026-06 — L2 swimlane: defer per-task wmb to rotation](2026-06-l2-swimlane-defer-wmb.md)
+- [2026-06 — chip swimlane: defer per-task wmb to rotation](2026-06-chip-swimlane-defer-wmb.md)

@@ -134,14 +134,17 @@ int DeviceRunner::ensure_binaries_loaded() {
         if (!load_sym("set_platform_dump_base", reinterpret_cast<void **>(&set_platform_dump_base_func_))) return -1;
         if (!load_sym("set_platform_phase_base", reinterpret_cast<void **>(&set_platform_phase_base_func_))) return -1;
         if (!load_sym("set_dump_args_enabled", reinterpret_cast<void **>(&set_dump_args_enabled_func_))) return -1;
-        if (!load_sym("set_platform_l2_swimlane_base", reinterpret_cast<void **>(&set_platform_l2_swimlane_base_func_)))
-            return -1;
         if (!load_sym(
-                "set_platform_l2_swimlane_aicore_rotation_table",
-                reinterpret_cast<void **>(&set_platform_l2_swimlane_aicore_rotation_table_func_)
+                "set_platform_chip_swimlane_base", reinterpret_cast<void **>(&set_platform_chip_swimlane_base_func_)
             ))
             return -1;
-        if (!load_sym("set_l2_swimlane_enabled", reinterpret_cast<void **>(&set_l2_swimlane_enabled_func_))) return -1;
+        if (!load_sym(
+                "set_platform_chip_swimlane_aicore_rotation_table",
+                reinterpret_cast<void **>(&set_platform_chip_swimlane_aicore_rotation_table_func_)
+            ))
+            return -1;
+        if (!load_sym("set_chip_swimlane_enabled", reinterpret_cast<void **>(&set_chip_swimlane_enabled_func_)))
+            return -1;
         if (!load_sym("set_platform_pmu_base", reinterpret_cast<void **>(&set_platform_pmu_base_func_))) return -1;
         if (!load_sym("set_platform_pmu_reg_addrs", reinterpret_cast<void **>(&set_platform_pmu_reg_addrs_func_)))
             return -1;
@@ -288,8 +291,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     if (enable_dump_args_) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     }
-    if (enable_l2_swimlane_) {
-        SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_L2_SWIMLANE);
+    if (enable_chip_swimlane_) {
+        SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE);
     }
     if (enable_pmu_) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
@@ -322,10 +325,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     last_runtime_ = &runtime;
 
-    if (enable_l2_swimlane_) {
-        rc = init_l2_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
+    if (enable_chip_swimlane_) {
+        rc = init_chip_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
         if (rc != 0) {
-            LOG_ERROR("init_l2_swimlane failed: %d", rc);
+            LOG_ERROR("init_chip_swimlane failed: %d", rc);
             return rc;
         }
         // Publish per-core core_type to the collector so the level=1 host
@@ -335,7 +338,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         for (int i = 0; i < num_aicore; i++) {
             core_types[i] = runtime.get_workers()[i].core_type;
         }
-        l2_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
+        chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
     }
 
     if (enable_dump_args_) {
@@ -449,8 +452,9 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         set_platform_pmu_reg_addrs_func_ == nullptr || set_pmu_enabled_func_ == nullptr ||
         set_platform_dep_gen_base_func_ == nullptr || set_dep_gen_enabled_func_ == nullptr ||
         set_scope_stats_enabled_func_ == nullptr || set_platform_scope_stats_base_func_ == nullptr ||
-        set_platform_l2_swimlane_base_func_ == nullptr ||
-        set_platform_l2_swimlane_aicore_rotation_table_func_ == nullptr || set_l2_swimlane_enabled_func_ == nullptr) {
+        set_platform_chip_swimlane_base_func_ == nullptr ||
+        set_platform_chip_swimlane_aicore_rotation_table_func_ == nullptr ||
+        set_chip_swimlane_enabled_func_ == nullptr) {
         LOG_ERROR("Executor functions not loaded. Call ensure_binaries_loaded first.");
         return -1;
     }
@@ -461,9 +465,9 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     }
     set_platform_dump_base_func_(kernel_args_.dump_data_base);
     set_dump_args_enabled_func_(enable_dump_args_);
-    set_platform_l2_swimlane_base_func_(kernel_args_.l2_swimlane_data_base);
-    set_platform_l2_swimlane_aicore_rotation_table_func_(kernel_args_.l2_swimlane_aicore_rotation_table);
-    set_l2_swimlane_enabled_func_(enable_l2_swimlane_);
+    set_platform_chip_swimlane_base_func_(kernel_args_.chip_swimlane_data_base);
+    set_platform_chip_swimlane_aicore_rotation_table_func_(kernel_args_.chip_swimlane_aicore_rotation_table);
+    set_chip_swimlane_enabled_func_(enable_chip_swimlane_);
     set_platform_pmu_base_func_(kernel_args_.pmu_data_base);
     set_platform_pmu_reg_addrs_func_(kernel_args_.pmu_reg_addrs);
     set_pmu_enabled_func_(enable_pmu_);
@@ -476,8 +480,8 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     auto thread_factory = [this](std::function<void()> fn) {
         return create_thread(std::move(fn));
     };
-    if (enable_l2_swimlane_) {
-        l2_swimlane_collector_.start(thread_factory);
+    if (enable_chip_swimlane_) {
+        chip_swimlane_collector_.start(thread_factory);
     }
     if (enable_dump_args_) {
         dump_collector_.start(thread_factory);
@@ -548,7 +552,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
         aicore_threads.push_back(create_thread([this, &runtime, i, core_type, physical_core_id]() {
             aicore_execute_func_(
                 &runtime, i, core_type, physical_core_id, kernel_args_.regs, kernel_args_.enable_profiling_flag,
-                kernel_args_.l2_swimlane_aicore_rotation_table
+                kernel_args_.chip_swimlane_aicore_rotation_table
             );
         }));
     }
@@ -610,11 +614,11 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
 
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
-    if (enable_l2_swimlane_) {
-        l2_swimlane_collector_.stop();
-        l2_swimlane_collector_.read_phase_header_metadata();
-        l2_swimlane_collector_.reconcile_counters();
-        l2_swimlane_collector_.export_swimlane_json();
+    if (enable_chip_swimlane_) {
+        chip_swimlane_collector_.stop();
+        chip_swimlane_collector_.read_phase_header_metadata();
+        chip_swimlane_collector_.reconcile_counters();
+        chip_swimlane_collector_.export_swimlane_json();
     }
 
     if (enable_dump_args_) {
@@ -683,9 +687,9 @@ void DeviceRunner::unload_executor_binaries() {
         set_orch_device_id_func_ = nullptr;
         set_platform_dump_base_func_ = nullptr;
         set_dump_args_enabled_func_ = nullptr;
-        set_platform_l2_swimlane_base_func_ = nullptr;
-        set_platform_l2_swimlane_aicore_rotation_table_func_ = nullptr;
-        set_l2_swimlane_enabled_func_ = nullptr;
+        set_platform_chip_swimlane_base_func_ = nullptr;
+        set_platform_chip_swimlane_aicore_rotation_table_func_ = nullptr;
+        set_chip_swimlane_enabled_func_ = nullptr;
         set_platform_pmu_base_func_ = nullptr;
         set_platform_pmu_reg_addrs_func_ = nullptr;
         set_pmu_enabled_func_ = nullptr;
@@ -767,7 +771,7 @@ int DeviceRunner::finalize() {
 // Performance Profiling Implementation
 // =============================================================================
 
-int DeviceRunner::init_l2_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
+int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
     auto alloc_cb = [this](size_t size) -> void * {
         return mem_alloc_.alloc(size);
     };
@@ -775,17 +779,17 @@ int DeviceRunner::init_l2_swimlane(int num_aicore, int aicpu_thread_num, int dev
         return mem_alloc_.free(dev_ptr);
     };
 
-    int rc = l2_swimlane_collector_.initialize(
-        num_aicore, aicpu_thread_num, device_id, l2_swimlane_level_, alloc_cb, nullptr, free_cb, output_prefix_
+    int rc = chip_swimlane_collector_.initialize(
+        num_aicore, aicpu_thread_num, device_id, chip_swimlane_level_, alloc_cb, nullptr, free_cb, output_prefix_
     );
     if (rc != 0) {
         return rc;
     }
 
-    kernel_args_.l2_swimlane_data_base =
-        reinterpret_cast<uint64_t>(l2_swimlane_collector_.get_l2_swimlane_setup_device_ptr());
-    kernel_args_.l2_swimlane_aicore_rotation_table =
-        reinterpret_cast<uint64_t>(l2_swimlane_collector_.get_aicore_ring_addr_table_device_ptr());
+    kernel_args_.chip_swimlane_data_base =
+        reinterpret_cast<uint64_t>(chip_swimlane_collector_.get_chip_swimlane_setup_device_ptr());
+    kernel_args_.chip_swimlane_aicore_rotation_table =
+        reinterpret_cast<uint64_t>(chip_swimlane_collector_.get_aicore_ring_addr_table_device_ptr());
     return 0;
 }
 
@@ -869,8 +873,8 @@ void DeviceRunner::finalize_collectors() {
         return mem_alloc_.free(dev_ptr);
     };
 
-    if (l2_swimlane_collector_.is_initialized()) {
-        l2_swimlane_collector_.finalize(nullptr, free_cb);
+    if (chip_swimlane_collector_.is_initialized()) {
+        chip_swimlane_collector_.finalize(nullptr, free_cb);
     }
     if (dump_collector_.is_initialized()) {
         dump_collector_.finalize(nullptr, free_cb);

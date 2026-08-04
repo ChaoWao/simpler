@@ -140,7 +140,7 @@ struct WarmRecycledModule {
     static int batch_size(int /*kind*/) { return 1; }
 
     // Two-arg form: the watermark scales with the number of live shards, the
-    // way L2Swimlane/PMU size theirs against ceil(cores / shard_count).
+    // way ChipSwimlane/PMU size theirs against ceil(cores / shard_count).
     static int recycled_warm_target(int /*kind*/, int shard_count) { return shard_count; }
 
     static std::optional<profiling_common::EntrySite<WarmRecycledModule>>

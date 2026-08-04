@@ -55,7 +55,7 @@ static constexpr uint64_t kDumpQueueBackpressureWaitCycles = PLATFORM_DFX_BACKPR
 static bool g_enable_dump_args = false;
 // Dump level latched from the header in dump_args_init(). The selective
 // (PARTIAL) and json-only (FULL_JSON_ONLY) modes are derived from it rather
-// than tracked as separate flags — mirrors g_l2_swimlane_level.
+// than tracked as separate flags — mirrors g_chip_swimlane_level.
 static DumpArgsLevel g_dump_args_level = DumpArgsLevel::OFF;
 
 extern "C" void set_platform_dump_base(uint64_t dump_data_base) { g_platform_dump_base = dump_data_base; }

@@ -79,7 +79,7 @@ extern "C" {
  * enable_profiling_flag bit definitions (umbrella bitmask — "profiling" is
  * the umbrella, each bit is a parallel diagnostics sub-feature):
  * - bit0: args dump enabled
- * - bit1: L2 swimlane enabled
+ * - bit1: chip swimlane enabled
  * - bit2: PMU enabled
  * - bit3: dep_gen capture enabled
  *
@@ -99,8 +99,8 @@ struct KernelArgs {
     // offset); only runtime_args/regs are offset-locked.
     uint64_t ffts_base_addr{0};  // FFTS base address for AICore
     uint64_t dump_data_base{0};  // Dump shared memory base address; use explicit flags to detect enablement
-    // L2 swimlane shared memory base address; use explicit flags to detect enablement
-    uint64_t l2_swimlane_data_base{0};
+    // chip swimlane shared memory base address; use explicit flags to detect enablement
+    uint64_t chip_swimlane_data_base{0};
     uint64_t pmu_data_base{0};          // PMU shared memory base address; use explicit flags to detect enablement
     uint64_t pmu_reg_addrs{0};          // Per-core PMU MMIO register base address array (onboard only; 0 on sim)
     uint64_t dep_gen_data_base{0};      // dep_gen shared memory base address; use explicit flags to detect enablement
@@ -108,9 +108,9 @@ struct KernelArgs {
                                         // Allocated by host's ScopeStatsCollector, read+written by AICPU's
                                         // scope_stats_collector via set_platform_scope_stats_base.
     // Device ptr to a uint64_t[num_aicore] table holding each core's
-    // L2SwimlaneAicoreTaskBuffer address. AICore kernel entry indexes by block_idx
-    // and forwards into platform set/get state. 0 when L2 swimlane is off.
-    uint64_t l2_swimlane_aicore_rotation_table{0};
+    // ChipSwimlaneAicoreTaskBuffer address. AICore kernel entry indexes by block_idx
+    // and forwards into platform set/get state. 0 when chip swimlane is off.
+    uint64_t chip_swimlane_aicore_rotation_table{0};
     // Device pointer to the run-wall buffer the platform AICPU entry writes.
     // Allocated once and kept resident, reset each run. Onboard AICPU receives
     // KernelArgs as a CANN-private copy (see launch_aicpu_kernel), so an
@@ -125,7 +125,7 @@ struct KernelArgs {
     // Zero when the buffer was not allocated.
     uint64_t device_wall_data_base{0};
     // 32-bit tail.
-    uint32_t enable_profiling_flag{0};  // Profiling umbrella bitmask; dump_args|l2_swimlane|pmu|dep_gen|scope_stats
+    uint32_t enable_profiling_flag{0};  // Profiling umbrella bitmask; dump_args|chip_swimlane|pmu|dep_gen|scope_stats
 };
 
 static_assert(offsetof(KernelArgs, runtime_args) == 0, "KernelArgs::runtime_args offset drift");

@@ -32,8 +32,8 @@ programs — see the [Python API reference](python-api.md).
 
 | Flag | Meaning |
 | ---- | ------- |
-| `--enable-l2-swimlane` | Per-task timing. Bare flag = level 4 (full); `1` AICore timing, `2` + dispatch/fanout, `3` + scheduler phases, `4` + orchestration. **L2 only** |
-| `--enable-swimlane-overhead` | Adds the 8 Overhead Analysis counter tracks. Requires `--enable-l2-swimlane` **and** a `deps.json` — add `--enable-dep-gen` if absent |
+| `--enable-chip-swimlane` | Per-task timing. Bare flag = level 4 (full); `1` AICore timing, `2` + dispatch/fanout, `3` + scheduler phases, `4` + orchestration. **L2 only** |
+| `--enable-swimlane-overhead` | Adds the 8 Overhead Analysis counter tracks. Requires `--enable-chip-swimlane` **and** a `deps.json` — add `--enable-dep-gen` if absent |
 | `--enable-pmu` | AICore hardware counters. Bare flag = `PIPE_UTILIZATION` (2); pass an event type to override, e.g. `--enable-pmu 4` |
 | `--dump-args` | Capture per-task arguments. `0` off, `1` partial (only args marked via `Arg::dump(...)`) |
 | `--enable-dep-gen` | Capture the dependency graph (first round only) |
@@ -50,9 +50,9 @@ flags in [`simpler_setup/tools/README.md`](../../../simpler_setup/tools/README.m
 | Tool | Input | Output |
 | ---- | ----- | ------ |
 | `strace_timing` | run log | host/device wall-clock breakdown; `--rounds-table` for per-round |
-| `swimlane_converter` | `l2_swimlane_records_*.json` | Perfetto trace + per-function task summary; `--overhead` adds the scheduler-overhead counters (needs `deps.json`) |
+| `swimlane_converter` | `chip_swimlane_records_*.json` | Perfetto trace + per-function task summary; `--overhead` adds the scheduler-overhead counters (needs `deps.json`) |
 | `sched_overhead_analysis` | swimlane + deps | scheduler bottleneck vs starvation verdict |
-| `l0_swimlane` | args dump | intra-core pipeline trace for one task |
+| `core_swimlane` | args dump | intra-core pipeline trace for one task |
 | `deps_viewer` | `deps.json` | the dependency graph |
 | `critical_path` | `deps.json` | critical path through the graph |
 | `dump_viewer` | args dump | captured per-task arguments |
@@ -60,7 +60,7 @@ flags in [`simpler_setup/tools/README.md`](../../../simpler_setup/tools/README.m
 
 ```bash
 python -m simpler_setup.tools.strace_timing <run.log> --rounds-table
-python -m simpler_setup.tools.swimlane_converter <l2_swimlane_records_*.json>
+python -m simpler_setup.tools.swimlane_converter <chip_swimlane_records_*.json>
 ```
 
 ## Environment variables

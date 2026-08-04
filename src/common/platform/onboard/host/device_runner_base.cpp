@@ -1063,7 +1063,7 @@ extern "C" __attribute__((weak)) int prewarm_config_impl(
 }
 
 void DeviceRunnerBase::apply_call_config(const CallConfig &config) {
-    set_l2_swimlane_enabled(config.enable_l2_swimlane);
+    set_chip_swimlane_enabled(config.enable_chip_swimlane);
     set_dump_args_enabled(config.enable_dump_args);
     set_pmu_enabled(config.enable_pmu);
     // Virtual: a2a3 and a5 wire through to their enable_dep_gen_; an arch
@@ -1534,8 +1534,8 @@ void DeviceRunnerBase::start_shared_collectors_for_run() {
     auto thread_factory = [this](std::function<void()> fn) {
         return create_thread(std::move(fn));
     };
-    if (enable_l2_swimlane_) {
-        l2_swimlane_collector_.start(thread_factory);
+    if (enable_chip_swimlane_) {
+        chip_swimlane_collector_.start(thread_factory);
     }
     if (enable_dump_args_) {
         dump_collector_.start(thread_factory);
@@ -1553,11 +1553,11 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run() {
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     // Diagnostic exports use the per-task `output_prefix_` directory the user
     // set on CallConfig (CallConfig::validate() enforces non-empty upstream).
-    if (enable_l2_swimlane_) {
-        l2_swimlane_collector_.stop();
-        l2_swimlane_collector_.read_phase_header_metadata();
-        l2_swimlane_collector_.reconcile_counters();
-        l2_swimlane_collector_.export_swimlane_json();
+    if (enable_chip_swimlane_) {
+        chip_swimlane_collector_.stop();
+        chip_swimlane_collector_.read_phase_header_metadata();
+        chip_swimlane_collector_.reconcile_counters();
+        chip_swimlane_collector_.export_swimlane_json();
     }
 
     if (enable_dump_args_) {

@@ -175,7 +175,7 @@ _OFF_ERROR = 4
 _OFF_CALLABLE = 8
 _OFF_CONFIG = 16
 # Packed CallConfig wire layout — must match call_config.h byte for byte:
-# 6 int32 (aicpu_thread_num, enable_l2_swimlane, enable_dump_args,
+# 6 int32 (aicpu_thread_num, enable_chip_swimlane, enable_dump_args,
 # enable_pmu, enable_dep_gen, enable_scope_stats) + uint64 ring sizing
 # overrides (3 per-ring arrays of RUNTIME_ENV_RING_COUNT: ring_task_window,
 # ring_heap, ring_dep_pool) + 1024-byte NUL-terminated output_prefix. Log config
@@ -2454,7 +2454,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # Mirrors CallConfig::diagnostics_any(); these modes share native
             # diagnostic state and therefore use the serial prepare fallback.
             return bool(
-                config.enable_l2_swimlane
+                config.enable_chip_swimlane
                 or config.enable_dump_args
                 or config.enable_pmu
                 or config.enable_dep_gen
@@ -2951,7 +2951,7 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     ring_dep_pool = list(ring_values[2 * RUNTIME_ENV_RING_COUNT : 3 * RUNTIME_ENV_RING_COUNT])
     cfg = CallConfig()
     cfg.aicpu_thread_num = aicpu_tn
-    cfg.enable_l2_swimlane = swl
+    cfg.enable_chip_swimlane = swl
     cfg.enable_dump_args = int(dt)
     cfg.enable_pmu = pmu
     cfg.enable_dep_gen = bool(dep_gen)

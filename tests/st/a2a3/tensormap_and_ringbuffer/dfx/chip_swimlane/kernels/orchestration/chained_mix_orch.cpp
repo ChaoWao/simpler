@@ -10,7 +10,7 @@
  */
 /**
  * Chained MIX orchestration — three MIX tasks where each step reads the
- * previous step's output. Purpose-built for the l2_swimlane differential
+ * previous step's output. Purpose-built for the chip_swimlane differential
  * gate: produces MIX tasks (multiple perf rows per task_id) AND non-zero
  * deps.json edges, so the ``seen_tids`` dedup in
  * ``compute_dag_stats_from_deps`` has an arithmetically observable effect.

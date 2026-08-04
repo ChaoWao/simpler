@@ -7,17 +7,17 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""L2 swimlane profiling smoke — capture pipeline produces a usable
-``l2_swimlane_records.json``.
+"""chip swimlane profiling smoke — capture pipeline produces a usable
+``chip_swimlane_records.json``.
 
 Re-uses ``vector_example`` as a known-good 5-task AIV-only workload. When the
-``--enable-l2-swimlane`` flag is on, the helper in :mod:`_swimlane_validate`
+``--enable-chip-swimlane`` flag is on, the helper in :mod:`_swimlane_validate`
 asserts schema, runs the converter / sched_overhead tool smokes, and fires a
 differential gate over Pop / Fanout / Fanin. Without the flag the assertions
 are skipped — the test still runs the case so the default ``pytest tests/st``
 invocation doesn't pay an extra step.
 
-A mixed AIC+AIV companion lives in ``test_l2_swimlane_mixed.py`` —
+A mixed AIC+AIV companion lives in ``test_chip_swimlane_mixed.py`` —
 that variant exercises the per-task dedup branch in
 ``compute_dag_stats_from_deps`` which this AIV-only workload doesn't.
 """
@@ -31,14 +31,14 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 from ._swimlane_validate import validate_perf_artifact
 
-KERNELS_BASE = "../../../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
+KERNELS_BASE = "../../../../../../examples/a5/tensormap_and_ringbuffer/vector_example/kernels"
 # example_orchestration.cpp issues 5 submit_task calls.
 _EXPECTED_TASK_COUNT = 5
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
-class TestL2Swimlane(SceneTestCase):
-    """Vector example with --enable-l2-swimlane, then assert l2_swimlane_records.json."""
+class TestChipSwimlane(SceneTestCase):
+    """Vector example with --enable-chip-swimlane, then assert chip_swimlane_records.json."""
 
     CALLABLE = {
         "orchestration": {
@@ -75,12 +75,12 @@ class TestL2Swimlane(SceneTestCase):
     CASES = [
         {
             "name": "default",
-            "platforms": ["a2a3sim", "a2a3"],
+            "platforms": ["a5sim", "a5"],
             "params": {},
         },
         {
             "name": "aicpu_threads_2",
-            "platforms": ["a2a3sim", "a2a3"],
+            "platforms": ["a5sim", "a5"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
         },
@@ -102,12 +102,12 @@ class TestL2Swimlane(SceneTestCase):
         # invocation's output dir rather than a stale same-label leftover.
         run_marker = int(time.time())  # floor to whole seconds: safe if outputs/ ever lands on a coarse-mtime fs
         super().test_run(st_platform, st_worker, request)
-        if not request.config.getoption("--enable-l2-swimlane", default=0):
+        if not request.config.getoption("--enable-chip-swimlane", default=0):
             return
         for case in self.CASES:
             if st_platform in case["platforms"]:
                 validate_perf_artifact(
-                    f"TestL2Swimlane_{case['name']}", since=run_marker, expected_task_count=_EXPECTED_TASK_COUNT
+                    f"TestChipSwimlane_{case['name']}", since=run_marker, expected_task_count=_EXPECTED_TASK_COUNT
                 )
 
 

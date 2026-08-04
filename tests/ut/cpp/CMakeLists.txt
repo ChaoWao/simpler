@@ -601,22 +601,22 @@ target_link_libraries(test_scope_stats_collector PRIVATE
 add_test(NAME test_scope_stats_collector COMMAND test_scope_stats_collector)
 set_tests_properties(test_scope_stats_collector PROPERTIES LABELS "no_hardware")
 
-add_executable(test_l2_swimlane_aicore
-    common/test_l2_swimlane_aicore.cpp
+add_executable(test_chip_swimlane_aicore
+    common/test_chip_swimlane_aicore.cpp
 )
-target_include_directories(test_l2_swimlane_aicore PRIVATE
+target_include_directories(test_chip_swimlane_aicore PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/sim/aicore
     ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
 )
-target_link_libraries(test_l2_swimlane_aicore PRIVATE
+target_link_libraries(test_chip_swimlane_aicore PRIVATE
     ${GTEST_MAIN_LIB}
     ${GTEST_LIB}
     pthread
 )
-add_test(NAME test_l2_swimlane_aicore COMMAND test_l2_swimlane_aicore)
-set_tests_properties(test_l2_swimlane_aicore PROPERTIES LABELS "no_hardware")
+add_test(NAME test_chip_swimlane_aicore COMMAND test_chip_swimlane_aicore)
+set_tests_properties(test_chip_swimlane_aicore PROPERTIES LABELS "no_hardware")
 
 # AICPU-side dep_gen writer. The shared-memory layout is byte-identical across
 # platforms, so compiling against a2a3's platform_config covers a5 too.

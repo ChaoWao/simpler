@@ -12,7 +12,7 @@
  * @file aicore_profiling_state.h
  * @brief AICore-side per-core profiling state set/get interface.
  *
- * Mirrors the AICPU-side `set_l2_swimlane_enabled` / `set_pmu_enabled` /
+ * Mirrors the AICPU-side `set_chip_swimlane_enabled` / `set_pmu_enabled` /
  * etc. setters: the platform owns a per-core slot for profiling state,
  * populated once by the AICore kernel entry from `KernelArgs`, and read by
  * `aicore_execute` via getters. Runtime never touches the underlying
@@ -25,19 +25,19 @@
  *
  * Lifecycle:
  *   1. Host fills `KernelArgs::enable_profiling_flag`,
- *      `KernelArgs::l2_swimlane_aicore_rotation_table` (an array of per-core
- *      slots, each holding a device address of an `L2SwimlaneActiveHead`),
+ *      `KernelArgs::chip_swimlane_aicore_rotation_table` (an array of per-core
+ *      slots, each holding a device address of an `ChipSwimlaneActiveHead`),
  *      `KernelArgs::aicore_pmu_ring_addrs` (a5-only — PMU staging slots),
  *      and `regs` (the per-physical-core register-base array).
- *      Host allocates the table bytes; AICPU populates the L2 swimlane slot
- *      entries inside `l2_swimlane_aicpu_init` with `&pool.head` for each
+ *      Host allocates the table bytes; AICPU populates the chip swimlane slot
+ *      entries inside `chip_swimlane_aicpu_init` with `&pool.head` for each
  *      AicoreTask pool.
- *   2. AICore kernel entry stashes `&l2_swimlane_aicore_rotation_table[block_idx]`
+ *   2. AICore kernel entry stashes `&chip_swimlane_aicore_rotation_table[block_idx]`
  *      (the slot pointer — NOT the dereferenced head pointer yet) via
- *      `set_l2_swimlane_aicore_head_slot()`, resolves its own PMU MMIO base
+ *      `set_chip_swimlane_aicore_head_slot()`, resolves its own PMU MMIO base
  *      from `regs[physical_core_id]`, and calls the PMU setters, before
  *      invoking `aicore_execute`.
- *   3. `get_l2_swimlane_aicore_head()` lazily dereferences the slot the
+ *   3. `get_chip_swimlane_aicore_head()` lazily dereferences the slot the
  *      first time it is called. Callers must defer the call until AFTER
  *      AICPU has dispatched the first task (so AICPU init has had a chance
  *      to populate the table). The executor handles this by calling it
@@ -54,11 +54,11 @@
 #include <cstdint>
 
 #include "aicore/aicore.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/pmu_profiling.h"
 
 /**
- * Profiling enable bitmask (umbrella over dump_args / l2_swimlane / pmu).
+ * Profiling enable bitmask (umbrella over dump_args / chip_swimlane / pmu).
  * Same layout as `KernelArgs::enable_profiling_flag`. AICore reads via
  * `SIMPLER_GET_DFX_FLAG(get_aicore_profiling_flag(), SIMPLER_DFX_FLAG_*)`.
  */
@@ -68,23 +68,23 @@ __aicore__ uint32_t get_aicore_profiling_flag();
 /**
  * Per-core AICore head channel.
  *
- * `set_l2_swimlane_aicore_head_slot(slot)` stashes the address of THIS core's
+ * `set_chip_swimlane_aicore_head_slot(slot)` stashes the address of THIS core's
  * slot in the head-address table —
- * `&((uint64_t*)k_args->l2_swimlane_aicore_rotation_table)[block_idx]`. No
+ * `&((uint64_t*)k_args->chip_swimlane_aicore_rotation_table)[block_idx]`. No
  * dereference happens here, because at kernel entry the AICPU side may not
  * yet have populated the table (the host launches both kernels and AICPU's
  * init runs concurrently with AICore's entry).
  *
- * `get_l2_swimlane_aicore_head()` lazily dereferences the stashed slot on
+ * `get_chip_swimlane_aicore_head()` lazily dereferences the stashed slot on
  * first use, caches the result, and returns it on subsequent calls. Callers
  * MUST defer the first call until after AICPU has dispatched the first task —
  * by then AICPU's init has completed and the slot holds a valid device
- * address pointing at the AICore pool's `head` (an `L2SwimlaneActiveHead`).
+ * address pointing at the AICore pool's `head` (an `ChipSwimlaneActiveHead`).
  * The executor's main loop honours this by reading the head only inside the
  * first-task branch of the dispatch poll.
  */
-__aicore__ void set_l2_swimlane_aicore_head_slot(__gm__ uint64_t *slot_ptr);
-__aicore__ __gm__ L2SwimlaneActiveHead *get_l2_swimlane_aicore_head();
+__aicore__ void set_chip_swimlane_aicore_head_slot(__gm__ uint64_t *slot_ptr);
+__aicore__ __gm__ ChipSwimlaneActiveHead *get_chip_swimlane_aicore_head();
 
 /**
  * Per-core PMU staging ring (a5-only — AICore writes the snapshot).

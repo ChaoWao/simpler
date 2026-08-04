@@ -10,15 +10,15 @@
  */
 
 /**
- * @file l2_swimlane_collector.cpp
+ * @file chip_swimlane_collector.cpp
  * @brief Performance data collector implementation. The mgmt-thread + buffer-pool
  *        machinery lives in profiling_common::BufferPoolManager parameterized by
- *        L2SwimlaneModule (host/l2_swimlane_collector.h); the poll loop lives in
+ *        ChipSwimlaneModule (host/chip_swimlane_collector.h); the poll loop lives in
  *        profiling_common::ProfilerBase. This file owns the per-buffer
  *        on_buffer_collected callback and the export logic.
  */
 
-#include "host/l2_swimlane_collector.h"
+#include "host/chip_swimlane_collector.h"
 
 #include <array>
 #include <cassert>
@@ -37,7 +37,7 @@
 #include "host/profiling_copy.h"
 
 // =============================================================================
-// L2SwimlaneCollector Implementation
+// ChipSwimlaneCollector Implementation
 // =============================================================================
 
 // Sched / orch phase records route through separate BufferKinds; no
@@ -75,27 +75,27 @@ bool recycled_seed_capacity_is_sufficient(
 
 }  // namespace
 
-L2SwimlaneCollector::~L2SwimlaneCollector() {
+ChipSwimlaneCollector::~ChipSwimlaneCollector() {
     stop();
     if (shm_host_ != nullptr) {
-        LOG_WARN("L2SwimlaneCollector destroyed without finalize()");
+        LOG_WARN("ChipSwimlaneCollector destroyed without finalize()");
     }
 }
 
-int L2SwimlaneCollector::initialize(
-    int num_aicore, int aicpu_thread_num, int device_id, L2SwimlaneLevel l2_swimlane_level,
-    const L2SwimlaneAllocCallback &alloc_cb, L2SwimlaneRegisterCallback register_cb,
-    const L2SwimlaneFreeCallback &free_cb, const std::string &output_prefix
+int ChipSwimlaneCollector::initialize(
+    int num_aicore, int aicpu_thread_num, int device_id, ChipSwimlaneLevel chip_swimlane_level,
+    const ChipSwimlaneAllocCallback &alloc_cb, ChipSwimlaneRegisterCallback register_cb,
+    const ChipSwimlaneFreeCallback &free_cb, const std::string &output_prefix
 ) {
     if (shm_host_ != nullptr) {
-        LOG_ERROR("L2SwimlaneCollector already initialized");
+        LOG_ERROR("ChipSwimlaneCollector already initialized");
         return -1;
     }
 
     // register_cb may legitimately be null on simulation / non-SVM platforms;
     // alloc and free callbacks are mandatory. Matches dep_gen / pmu / scope_stats.
     if (alloc_cb == nullptr || free_cb == nullptr) {
-        LOG_ERROR("L2SwimlaneCollector::initialize: alloc_cb/free_cb must be non-null");
+        LOG_ERROR("ChipSwimlaneCollector::initialize: alloc_cb/free_cb must be non-null");
         return -1;
     }
 
@@ -118,7 +118,7 @@ int L2SwimlaneCollector::initialize(
 
     num_aicore_ = num_aicore;
     aicpu_thread_num_ = aicpu_thread_num;
-    l2_swimlane_level_ = l2_swimlane_level;
+    chip_swimlane_level_ = chip_swimlane_level;
     output_prefix_ = output_prefix;
     total_perf_collected_ = 0;
     total_sched_phase_collected_ = 0;
@@ -152,10 +152,10 @@ int L2SwimlaneCollector::initialize(
 
     LOG_DEBUG("Shared memory allocation plan:");
     LOG_DEBUG("  Number of cores:      %d", num_aicore);
-    LOG_DEBUG("  Header size:          %zu bytes", sizeof(L2SwimlaneDataHeader));
-    LOG_DEBUG("  L2SwimlaneAicpuTaskPool size: %zu bytes each", sizeof(L2SwimlaneAicpuTaskPool));
-    LOG_DEBUG("  L2SwimlaneAicpuSchedPhasePool size: %zu bytes each", sizeof(L2SwimlaneAicpuSchedPhasePool));
-    LOG_DEBUG("  L2SwimlaneAicpuOrchPhasePool size:  %zu bytes each", sizeof(L2SwimlaneAicpuOrchPhasePool));
+    LOG_DEBUG("  Header size:          %zu bytes", sizeof(ChipSwimlaneDataHeader));
+    LOG_DEBUG("  ChipSwimlaneAicpuTaskPool size: %zu bytes each", sizeof(ChipSwimlaneAicpuTaskPool));
+    LOG_DEBUG("  ChipSwimlaneAicpuSchedPhasePool size: %zu bytes each", sizeof(ChipSwimlaneAicpuSchedPhasePool));
+    LOG_DEBUG("  ChipSwimlaneAicpuOrchPhasePool size:  %zu bytes each", sizeof(ChipSwimlaneAicpuOrchPhasePool));
     LOG_DEBUG("  Total shared memory:  %zu bytes (%zu KB)", total_size, total_size / 1024);
 
     // Step 2: Allocate the shared-memory region (header + SPSC slot arrays)
@@ -187,7 +187,7 @@ int L2SwimlaneCollector::initialize(
     memset(perf_host_ptr, 0, total_size);
 
     // Step 4: Initialize header
-    L2SwimlaneDataHeader *header = get_l2_swimlane_header(perf_host_ptr);
+    ChipSwimlaneDataHeader *header = get_chip_swimlane_header(perf_host_ptr);
 
     for (int t = 0; t < PLATFORM_MAX_AICPU_THREADS; t++) {
         memset(header->queues[t], 0, sizeof(header->queues[t]));
@@ -196,7 +196,7 @@ int L2SwimlaneCollector::initialize(
     }
 
     header->num_cores = num_aicore;
-    header->l2_swimlane_level = static_cast<uint32_t>(l2_swimlane_level_);
+    header->chip_swimlane_level = static_cast<uint32_t>(chip_swimlane_level_);
     // Phase metadata: must be zero-initialized here. alloc_cb returns
     // uninitialized device memory; AICPU only writes these fields when
     // phase init runs (level >= SCHED_PHASES). Without zeroing, lower
@@ -211,13 +211,13 @@ int L2SwimlaneCollector::initialize(
     header->num_phase_cores = 0;
     memset(header->core_to_thread, -1, sizeof(header->core_to_thread));
 
-    LOG_DEBUG("Initialized L2SwimlaneDataHeader:");
+    LOG_DEBUG("Initialized ChipSwimlaneDataHeader:");
     LOG_DEBUG("  num_cores:              %d", header->num_cores);
-    LOG_DEBUG("  l2_swimlane_level: %u", header->l2_swimlane_level);
+    LOG_DEBUG("  chip_swimlane_level: %u", header->chip_swimlane_level);
     LOG_DEBUG("  buffer_capacity:        %d", PLATFORM_PROF_BUFFER_SIZE);
     LOG_DEBUG("  queue capacity:         %d", PLATFORM_PROF_READYQUEUE_SIZE);
 
-    // Step 5: Initialize L2SwimlaneAicpuTaskPools. Seed as many buffers as
+    // Step 5: Initialize ChipSwimlaneAicpuTaskPools. Seed as many buffers as
     // the device-side free_queue can hold; any remaining buffers stay in the
     // host recycled pool.
     constexpr int kAicpuInitialFreeCount = (PLATFORM_PROF_BUFFERS_PER_CORE < PLATFORM_PROF_SLOT_COUNT) ?
@@ -225,14 +225,14 @@ int L2SwimlaneCollector::initialize(
                                                PLATFORM_PROF_SLOT_COUNT;
     constexpr int kAicpuSurplusPerCore = PLATFORM_PROF_BUFFERS_PER_CORE - kAicpuInitialFreeCount;
     if (!recycled_seed_capacity_is_sufficient(
-            "L2SwimlaneAicpuTask", num_aicore, aicpu_thread_num, kAicpuSurplusPerCore,
+            "ChipSwimlaneAicpuTask", num_aicore, aicpu_thread_num, kAicpuSurplusPerCore,
             decltype(manager_)::kRecycledQueueCapacity
         )) {
         return -1;
     }
     for (int i = 0; i < num_aicore; i++) {
-        L2SwimlaneAicpuTaskPool *state = get_perf_buffer_state(perf_host_ptr, i);
-        memset(state, 0, sizeof(L2SwimlaneAicpuTaskPool));
+        ChipSwimlaneAicpuTaskPool *state = get_perf_buffer_state(perf_host_ptr, i);
+        memset(state, 0, sizeof(ChipSwimlaneAicpuTaskPool));
 
         state->free_queue.head = 0;
         state->free_queue.tail = 0;
@@ -242,13 +242,13 @@ int L2SwimlaneCollector::initialize(
         const int initial_free_count = kAicpuInitialFreeCount;
         for (int s = 0; s < PLATFORM_PROF_BUFFERS_PER_CORE; s++) {
             void *host_buf_ptr = nullptr;
-            void *dev_buf_ptr = alloc_paired_buffer(sizeof(L2SwimlaneAicpuTaskBuffer), &host_buf_ptr);
+            void *dev_buf_ptr = alloc_paired_buffer(sizeof(ChipSwimlaneAicpuTaskBuffer), &host_buf_ptr);
             if (dev_buf_ptr == nullptr) {
-                LOG_ERROR("Failed to allocate L2SwimlaneAicpuTaskBuffer for core %d, buffer %d", i, s);
+                LOG_ERROR("Failed to allocate ChipSwimlaneAicpuTaskBuffer for core %d, buffer %d", i, s);
                 return -1;
             }
-            L2SwimlaneAicpuTaskBuffer *buf = reinterpret_cast<L2SwimlaneAicpuTaskBuffer *>(host_buf_ptr);
-            memset(buf, 0, sizeof(L2SwimlaneAicpuTaskBuffer));
+            ChipSwimlaneAicpuTaskBuffer *buf = reinterpret_cast<ChipSwimlaneAicpuTaskBuffer *>(host_buf_ptr);
+            memset(buf, 0, sizeof(ChipSwimlaneAicpuTaskBuffer));
             buf->count = 0;
 
             if (s < initial_free_count) {
@@ -266,32 +266,32 @@ int L2SwimlaneCollector::initialize(
         wmb();
     }
 
-    // Step 5b: Initialize L2SwimlaneAicoreTaskPools — per-core AICore rotation
+    // Step 5b: Initialize ChipSwimlaneAicoreTaskPools — per-core AICore rotation
     // channel + buffer pool. Same SPSC pattern as the AICPU pool above.
     constexpr int kAicoreInitialFreeCount = (PLATFORM_AICORE_BUFFERS_PER_CORE < PLATFORM_PROF_SLOT_COUNT) ?
                                                 PLATFORM_AICORE_BUFFERS_PER_CORE :
                                                 PLATFORM_PROF_SLOT_COUNT;
     constexpr int kAicoreSurplusPerCore = PLATFORM_AICORE_BUFFERS_PER_CORE - kAicoreInitialFreeCount;
     if (!recycled_seed_capacity_is_sufficient(
-            "L2SwimlaneAicoreTask", num_aicore, aicpu_thread_num, kAicoreSurplusPerCore,
+            "ChipSwimlaneAicoreTask", num_aicore, aicpu_thread_num, kAicoreSurplusPerCore,
             decltype(manager_)::kRecycledQueueCapacity
         )) {
         return -1;
     }
     for (int i = 0; i < num_aicore; i++) {
-        L2SwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(perf_host_ptr, num_aicore, i);
-        memset(ac_state, 0, sizeof(L2SwimlaneAicoreTaskPool));
+        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(perf_host_ptr, num_aicore, i);
+        memset(ac_state, 0, sizeof(ChipSwimlaneAicoreTaskPool));
 
         const int initial_free_count = kAicoreInitialFreeCount;
         for (int s = 0; s < PLATFORM_AICORE_BUFFERS_PER_CORE; s++) {
             void *host_buf_ptr = nullptr;
-            void *dev_buf_ptr = alloc_paired_buffer(sizeof(L2SwimlaneAicoreTaskBuffer), &host_buf_ptr);
+            void *dev_buf_ptr = alloc_paired_buffer(sizeof(ChipSwimlaneAicoreTaskBuffer), &host_buf_ptr);
             if (dev_buf_ptr == nullptr) {
-                LOG_ERROR("Failed to allocate L2SwimlaneAicoreTaskBuffer for core %d, buffer %d", i, s);
+                LOG_ERROR("Failed to allocate ChipSwimlaneAicoreTaskBuffer for core %d, buffer %d", i, s);
                 return -1;
             }
-            L2SwimlaneAicoreTaskBuffer *buf = reinterpret_cast<L2SwimlaneAicoreTaskBuffer *>(host_buf_ptr);
-            memset(buf, 0, sizeof(L2SwimlaneAicoreTaskBuffer));
+            ChipSwimlaneAicoreTaskBuffer *buf = reinterpret_cast<ChipSwimlaneAicoreTaskBuffer *>(host_buf_ptr);
+            memset(buf, 0, sizeof(ChipSwimlaneAicoreTaskBuffer));
             buf->count = 0;
 
             if (s < initial_free_count) {
@@ -309,15 +309,15 @@ int L2SwimlaneCollector::initialize(
         wmb();
     }
     LOG_DEBUG(
-        "Initialized buffer pools: %d L2SwimlaneAicpuTaskBuffers/core + %d L2SwimlaneAicoreTaskBuffers/core "
+        "Initialized buffer pools: %d ChipSwimlaneAicpuTaskBuffers/core + %d ChipSwimlaneAicoreTaskBuffers/core "
         "(seeded up to PLATFORM_PROF_SLOT_COUNT free_queue slots, rest in recycled pool)",
         PLATFORM_PROF_BUFFERS_PER_CORE, PLATFORM_AICORE_BUFFERS_PER_CORE
     );
 
     // Step 5c: Standalone uint64_t[num_aicore] table that will hold per-core
-    // L2SwimlaneActiveHead device addresses. Host only allocates the bytes and
-    // hands the device pointer to AICPU via KernelArgs::l2_swimlane_aicore_rotation_table;
-    // AICPU itself fills the entries inside `l2_swimlane_aicpu_init` (it has
+    // ChipSwimlaneActiveHead device addresses. Host only allocates the bytes and
+    // hands the device pointer to AICPU via KernelArgs::chip_swimlane_aicore_rotation_table;
+    // AICPU itself fills the entries inside `chip_swimlane_aicpu_init` (it has
     // direct access to `&ac_state->head` device addresses, no
     // host-to-device translation needed). AICore reads
     // rotation_table[block_idx] at kernel entry.
@@ -331,7 +331,9 @@ int L2SwimlaneCollector::initialize(
         void *rotation_table_host = nullptr;
         rotation_table_dev = alloc_paired_buffer(table_bytes, &rotation_table_host);
         if (rotation_table_dev == nullptr) {
-            LOG_ERROR("Failed to allocate l2_swimlane_aicore_rotation_table (rotation) table (%zu bytes)", table_bytes);
+            LOG_ERROR(
+                "Failed to allocate chip_swimlane_aicore_rotation_table (rotation) table (%zu bytes)", table_bytes
+            );
             return -1;
         }
     }
@@ -349,14 +351,14 @@ int L2SwimlaneCollector::initialize(
     // allocated only for the first buffer_count pools. For sched the two are
     // equal; orch is a single instance (pool 0), so it zeroes all slots but
     // allocates buffers for just pool 0 — no buffers wasted on unused slots.
-    auto init_phase_pools = [&](auto *buffer_tag, L2SwimlaneAicpuTaskPool *(*get_state)(void *, int, int),
+    auto init_phase_pools = [&](auto *buffer_tag, ChipSwimlaneAicpuTaskPool *(*get_state)(void *, int, int),
                                 int state_count, int buffer_count, int buffers_per_thread, ProfBufferType recycle_kind,
                                 const char *kind_label) -> int {
         using Buffer = std::remove_pointer_t<decltype(buffer_tag)>;
         constexpr size_t buffer_bytes = sizeof(Buffer);
         for (int t = 0; t < state_count; t++) {
             auto *state = get_state(perf_host_ptr, num_aicore, t);
-            memset(state, 0, sizeof(L2SwimlaneAicpuTaskPool));
+            memset(state, 0, sizeof(ChipSwimlaneAicpuTaskPool));
             if (t >= buffer_count) continue;  // zeroed state only; no buffers (unused slot)
             const int initial_free_count =
                 (buffers_per_thread < PLATFORM_PROF_SLOT_COUNT) ? buffers_per_thread : PLATFORM_PROF_SLOT_COUNT;
@@ -399,7 +401,7 @@ int L2SwimlaneCollector::initialize(
     // Orch: a single instance (pool 0), so allocate buffers for just one pool
     // while still zeroing all MAX states.
     if (init_phase_pools(
-            static_cast<L2SwimlaneAicpuSchedPhaseBuffer *>(nullptr), get_sched_phase_buffer_state,
+            static_cast<ChipSwimlaneAicpuSchedPhaseBuffer *>(nullptr), get_sched_phase_buffer_state,
             /*state_count=*/num_phase_threads, /*buffer_count=*/aicpu_thread_num,
             /*buffers_per_thread=*/PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD, ProfBufferType::AICPU_SCHED_PHASE, "sched"
         ) != 0) {
@@ -409,7 +411,7 @@ int L2SwimlaneCollector::initialize(
         return get_orch_phase_buffer_state(base, n_cores, t);
     };
     if (init_phase_pools(
-            static_cast<L2SwimlaneAicpuOrchPhaseBuffer *>(nullptr), orch_get_state,
+            static_cast<ChipSwimlaneAicpuOrchPhaseBuffer *>(nullptr), orch_get_state,
             /*state_count=*/num_phase_threads, /*buffer_count=*/1,
             /*buffers_per_thread=*/PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD, ProfBufferType::AICPU_ORCH_PHASE, "orch"
         ) != 0) {
@@ -431,8 +433,8 @@ int L2SwimlaneCollector::initialize(
     profiling_copy_to_device(perf_dev_ptr, perf_host_ptr, total_size);
 
     // Step 7: Stash device pointer for the caller to publish via
-    // kernel_args.l2_swimlane_data_base (read back via get_l2_swimlane_setup_device_ptr()).
-    LOG_DEBUG("L2 swimlane device base = 0x%lx", reinterpret_cast<uint64_t>(perf_dev_ptr));
+    // kernel_args.chip_swimlane_data_base (read back via get_chip_swimlane_setup_device_ptr()).
+    LOG_DEBUG("chip swimlane device base = 0x%lx", reinterpret_cast<uint64_t>(perf_dev_ptr));
 
     // Reserve the per-core / per-thread record vectors while the rollback guard
     // is still armed, so a std::bad_alloc here unwinds through the guard and
@@ -462,7 +464,7 @@ int L2SwimlaneCollector::initialize(
 // ProfilerBase callbacks
 // ---------------------------------------------------------------------------
 
-size_t L2SwimlaneCollector::normalize_collector_shard(int collector_shard) const {
+size_t ChipSwimlaneCollector::normalize_collector_shard(int collector_shard) const {
     const size_t shard_count = collector_counters_.size();
     const bool valid_shard = collector_shard >= 0 && static_cast<size_t>(collector_shard) < shard_count;
     if (!valid_shard) {
@@ -472,7 +474,7 @@ size_t L2SwimlaneCollector::normalize_collector_shard(int collector_shard) const
     return static_cast<size_t>(collector_shard);
 }
 
-void L2SwimlaneCollector::reset_collector_shards() {
+void ChipSwimlaneCollector::reset_collector_shards() {
     const size_t shard_count = static_cast<size_t>(manager_.shard_count());
 
     collected_perf_records_.assign(num_aicore_, {});
@@ -521,7 +523,7 @@ static void merge_record_shards(
     }
 }
 
-void L2SwimlaneCollector::merge_collector_shards() {
+void ChipSwimlaneCollector::merge_collector_shards() {
     if (collector_shards_merged_) {
         return;
     }
@@ -549,8 +551,8 @@ void L2SwimlaneCollector::merge_collector_shards() {
     collector_shards_merged_ = true;
 }
 
-void L2SwimlaneCollector::copy_perf_buffer(const ReadyBufferInfo &info, int collector_shard) {
-    L2SwimlaneAicpuTaskBuffer *buf = reinterpret_cast<L2SwimlaneAicpuTaskBuffer *>(info.host_buffer_ptr);
+void ChipSwimlaneCollector::copy_perf_buffer(const ReadyBufferInfo &info, int collector_shard) {
+    ChipSwimlaneAicpuTaskBuffer *buf = reinterpret_cast<ChipSwimlaneAicpuTaskBuffer *>(info.host_buffer_ptr);
     rmb();
     uint32_t count = buf->count;
     if (count > PLATFORM_PROF_BUFFER_SIZE) {
@@ -568,8 +570,8 @@ void L2SwimlaneCollector::copy_perf_buffer(const ReadyBufferInfo &info, int coll
     }
 }
 
-void L2SwimlaneCollector::copy_sched_phase_buffer(const ReadyBufferInfo &info, int collector_shard) {
-    auto *buf = reinterpret_cast<L2SwimlaneAicpuSchedPhaseBuffer *>(info.host_buffer_ptr);
+void ChipSwimlaneCollector::copy_sched_phase_buffer(const ReadyBufferInfo &info, int collector_shard) {
+    auto *buf = reinterpret_cast<ChipSwimlaneAicpuSchedPhaseBuffer *>(info.host_buffer_ptr);
     rmb();
     uint32_t count = buf->count;
     if (count > static_cast<uint32_t>(PLATFORM_PHASE_RECORDS_PER_THREAD)) {
@@ -590,8 +592,8 @@ void L2SwimlaneCollector::copy_sched_phase_buffer(const ReadyBufferInfo &info, i
     }
 }
 
-void L2SwimlaneCollector::copy_orch_phase_buffer(const ReadyBufferInfo &info, int collector_shard) {
-    auto *buf = reinterpret_cast<L2SwimlaneAicpuOrchPhaseBuffer *>(info.host_buffer_ptr);
+void ChipSwimlaneCollector::copy_orch_phase_buffer(const ReadyBufferInfo &info, int collector_shard) {
+    auto *buf = reinterpret_cast<ChipSwimlaneAicpuOrchPhaseBuffer *>(info.host_buffer_ptr);
     rmb();
     uint32_t count = buf->count;
     if (count > static_cast<uint32_t>(PLATFORM_PHASE_RECORDS_PER_THREAD)) {
@@ -631,8 +633,8 @@ void L2SwimlaneCollector::copy_orch_phase_buffer(const ReadyBufferInfo &info, in
 //     propagated). The "missing" slot's previous contents are zero because
 //     allocate_single_buffer memsets at allocation.
 //   - Flush-path partial buffer whose tail wasn't reached.
-void L2SwimlaneCollector::copy_aicore_buffer(const ReadyBufferInfo &info, int collector_shard) {
-    L2SwimlaneAicoreTaskBuffer *buf = reinterpret_cast<L2SwimlaneAicoreTaskBuffer *>(info.host_buffer_ptr);
+void ChipSwimlaneCollector::copy_aicore_buffer(const ReadyBufferInfo &info, int collector_shard) {
+    ChipSwimlaneAicoreTaskBuffer *buf = reinterpret_cast<ChipSwimlaneAicoreTaskBuffer *>(info.host_buffer_ptr);
     rmb();
     uint32_t core_index = info.index;
     if (core_index >= static_cast<uint32_t>(num_aicore_)) {
@@ -648,7 +650,7 @@ void L2SwimlaneCollector::copy_aicore_buffer(const ReadyBufferInfo &info, int co
         auto &dst = aicore_records_by_collector_[shard][core_index];
         dst.reserve(dst.size() + count);
         for (uint32_t i = 0; i < count; i++) {
-            const L2SwimlaneAicoreTaskRecord &r = buf->records[i];
+            const ChipSwimlaneAicoreTaskRecord &r = buf->records[i];
             if (r.start_time == 0) {
                 skipped++;
                 continue;
@@ -665,7 +667,7 @@ void L2SwimlaneCollector::copy_aicore_buffer(const ReadyBufferInfo &info, int co
     }
 }
 
-void L2SwimlaneCollector::on_buffer_collected(const ReadyBufferInfo &info, int collector_shard) {
+void ChipSwimlaneCollector::on_buffer_collected(const ReadyBufferInfo &info, int collector_shard) {
     switch (info.type) {
     case ProfBufferType::AICPU_TASK:
         copy_perf_buffer(info, collector_shard);
@@ -691,7 +693,7 @@ void L2SwimlaneCollector::on_buffer_collected(const ReadyBufferInfo &info, int c
 // clear current_buf_ptr on the device side. Host's job here is purely
 // accounting + sanity check.
 
-void L2SwimlaneCollector::reconcile_counters() {
+void ChipSwimlaneCollector::reconcile_counters() {
     if (shm_host_ == nullptr) {
         return;
     }
@@ -724,7 +726,7 @@ void L2SwimlaneCollector::reconcile_counters() {
                              auto read_buf_count, size_t buf_size, uint64_t collected, bool optional) {
         int leftover_active = 0;
         for (int i = 0; i < unit_count; i++) {
-            L2SwimlaneAicpuTaskPool *state = get_state(i);
+            ChipSwimlaneAicpuTaskPool *state = get_state(i);
             uint64_t buf_ptr = state->head.current_buf_ptr;
             if (buf_ptr == 0) continue;
             void *host_ptr = manager_.resolve_host_ptr(reinterpret_cast<void *>(buf_ptr));
@@ -736,7 +738,7 @@ void L2SwimlaneCollector::reconcile_counters() {
             uint32_t count = read_buf_count(host_ptr);
             if (count == 0) continue;
             LOG_ERROR(
-                "L2Swimlane reconcile: %s %d has un-flushed %s buffer (current_buf_ptr=0x%lx, count=%u) "
+                "ChipSwimlane reconcile: %s %d has un-flushed %s buffer (current_buf_ptr=0x%lx, count=%u) "
                 "after stop() — device flush failed",
                 unit_name, i, kind, static_cast<unsigned long>(buf_ptr), count
             );
@@ -746,7 +748,7 @@ void L2SwimlaneCollector::reconcile_counters() {
         uint64_t total_device = 0;
         uint64_t dropped_device = 0;
         for (int i = 0; i < unit_count; i++) {
-            L2SwimlaneAicpuTaskPool *state = get_state(i);
+            ChipSwimlaneAicpuTaskPool *state = get_state(i);
             total_device += state->head.total_record_count;
             dropped_device += state->head.dropped_record_count;
         }
@@ -759,21 +761,21 @@ void L2SwimlaneCollector::reconcile_counters() {
 
         if (dropped_device > 0) {
             LOG_WARN(
-                "L2Swimlane reconcile: %lu %s records dropped on device side.",
+                "ChipSwimlane reconcile: %lu %s records dropped on device side.",
                 static_cast<unsigned long>(dropped_device), kind
             );
         }
         uint64_t accounted = collected + dropped_device;
         if (accounted != total_device) {
             LOG_WARN(
-                "L2Swimlane reconcile: %s count mismatch (collected=%lu + dropped=%lu != "
+                "ChipSwimlane reconcile: %s count mismatch (collected=%lu + dropped=%lu != "
                 "device_total=%lu, silent_loss=%ld)",
                 kind, static_cast<unsigned long>(collected), static_cast<unsigned long>(dropped_device),
                 static_cast<unsigned long>(total_device), static_cast<long>(total_device) - static_cast<long>(accounted)
             );
         } else {
             LOG_INFO(
-                "L2Swimlane reconcile: %s counts match (collected=%lu, dropped=%lu, device_total=%lu)", kind,
+                "ChipSwimlane reconcile: %s counts match (collected=%lu, dropped=%lu, device_total=%lu)", kind,
                 static_cast<unsigned long>(collected), static_cast<unsigned long>(dropped_device),
                 static_cast<unsigned long>(total_device)
             );
@@ -781,8 +783,8 @@ void L2SwimlaneCollector::reconcile_counters() {
 
         if (leftover_active > 0) {
             LOG_ERROR(
-                "L2Swimlane reconcile: %d %s(s) had un-cleared %s current_buf_ptr — see prior errors", leftover_active,
-                unit_name, kind
+                "ChipSwimlane reconcile: %d %s(s) had un-cleared %s current_buf_ptr — see prior errors",
+                leftover_active, unit_name, kind
             );
         }
     };
@@ -793,9 +795,9 @@ void L2SwimlaneCollector::reconcile_counters() {
             return get_perf_buffer_state(shm_host_, core_index);
         },
         [](void *host_ptr) {
-            return reinterpret_cast<L2SwimlaneAicpuTaskBuffer *>(host_ptr)->count;
+            return reinterpret_cast<ChipSwimlaneAicpuTaskBuffer *>(host_ptr)->count;
         },
-        sizeof(L2SwimlaneAicpuTaskBuffer), total_perf_collected_, /*optional=*/false
+        sizeof(ChipSwimlaneAicpuTaskBuffer), total_perf_collected_, /*optional=*/false
     );
 
     reconcile_one(
@@ -804,9 +806,9 @@ void L2SwimlaneCollector::reconcile_counters() {
             return get_sched_phase_buffer_state(shm_host_, num_aicore_, thread_index);
         },
         [](void *host_ptr) {
-            return reinterpret_cast<L2SwimlaneAicpuSchedPhaseBuffer *>(host_ptr)->count;
+            return reinterpret_cast<ChipSwimlaneAicpuSchedPhaseBuffer *>(host_ptr)->count;
         },
-        sizeof(L2SwimlaneAicpuSchedPhaseBuffer), total_sched_phase_collected_, /*optional=*/true
+        sizeof(ChipSwimlaneAicpuSchedPhaseBuffer), total_sched_phase_collected_, /*optional=*/true
     );
 
     reconcile_one(
@@ -815,13 +817,13 @@ void L2SwimlaneCollector::reconcile_counters() {
             return get_orch_phase_buffer_state(shm_host_, num_aicore_, thread_index);
         },
         [](void *host_ptr) {
-            return reinterpret_cast<L2SwimlaneAicpuOrchPhaseBuffer *>(host_ptr)->count;
+            return reinterpret_cast<ChipSwimlaneAicpuOrchPhaseBuffer *>(host_ptr)->count;
         },
-        sizeof(L2SwimlaneAicpuOrchPhaseBuffer), total_orch_phase_collected_, /*optional=*/true
+        sizeof(ChipSwimlaneAicpuOrchPhaseBuffer), total_orch_phase_collected_, /*optional=*/true
     );
 }
 
-void L2SwimlaneCollector::read_phase_header_metadata() {
+void ChipSwimlaneCollector::read_phase_header_metadata() {
     if (shm_host_ == nullptr) {
         return;
     }
@@ -835,7 +837,7 @@ void L2SwimlaneCollector::read_phase_header_metadata() {
     }
     rmb();
 
-    L2SwimlaneDataHeader *header = get_l2_swimlane_header(shm_host_);
+    ChipSwimlaneDataHeader *header = get_chip_swimlane_header(shm_host_);
 
     int num_sched = static_cast<int>(header->num_sched_phase_threads);
     int num_orch = static_cast<int>(header->num_orch_phase_threads);
@@ -885,7 +887,7 @@ void L2SwimlaneCollector::read_phase_header_metadata() {
     LOG_INFO("Phase metadata collection complete: has_phase_data=%s", has_phase_data_ ? "yes" : "no");
 }
 
-void L2SwimlaneCollector::set_core_types(const CoreType *types, int n) {
+void ChipSwimlaneCollector::set_core_types(const CoreType *types, int n) {
     if (types == nullptr || n <= 0) {
         core_types_.clear();
         return;
@@ -899,7 +901,7 @@ void L2SwimlaneCollector::set_core_types(const CoreType *types, int n) {
 // lookup, func_id resolution against deps.json). Moving the join into Python
 // makes the schema easy to evolve without round-tripping through C++ + a
 // rebuild, and shrinks this file to a pure dump.
-int L2SwimlaneCollector::export_swimlane_json() {
+int ChipSwimlaneCollector::export_swimlane_json() {
     if (shm_host_ == nullptr) {
         return -1;
     }
@@ -935,17 +937,17 @@ int L2SwimlaneCollector::export_swimlane_json() {
         return -1;
     }
 
-    std::string filepath = output_prefix_ + "/l2_swimlane_records.json";
+    std::string filepath = output_prefix_ + "/chip_swimlane_records.json";
     std::ofstream outfile(filepath);
     if (!outfile.is_open()) {
         LOG_ERROR("Error: Failed to open file: %s", filepath.c_str());
         return -1;
     }
 
-    int l2_swimlane_level = static_cast<int>(l2_swimlane_level_);
+    int chip_swimlane_level = static_cast<int>(chip_swimlane_level_);
 
     outfile << "{\n";
-    outfile << "  \"l2_swimlane_level\": " << l2_swimlane_level << ",\n";
+    outfile << "  \"chip_swimlane_level\": " << chip_swimlane_level << ",\n";
 
     // metadata: everything python needs that isn't in a per-record stream.
     // clock_freq_hz drives the cycles→µs conversion (a2a3 = 50 MHz, a5 =
@@ -1017,38 +1019,38 @@ int L2SwimlaneCollector::export_swimlane_json() {
     // Phase records keep their per-thread sub-array shape so the python
     // consumer's existing iteration pattern (one thread per inner list) stays
     // unchanged; only the field names move from *_us to *_cycles.
-    if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) {
-        auto sched_phase_name = [](L2SwimlaneSchedPhaseKind kind) -> const char * {
+    if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) {
+        auto sched_phase_name = [](ChipSwimlaneSchedPhaseKind kind) -> const char * {
             switch (kind) {
-            case L2SwimlaneSchedPhaseKind::Complete:
+            case ChipSwimlaneSchedPhaseKind::Complete:
                 return "complete";
-            case L2SwimlaneSchedPhaseKind::Dispatch:
+            case ChipSwimlaneSchedPhaseKind::Dispatch:
                 return "dispatch";
-            case L2SwimlaneSchedPhaseKind::Release:
+            case ChipSwimlaneSchedPhaseKind::Release:
                 return "release";
-            case L2SwimlaneSchedPhaseKind::Dummy:
+            case ChipSwimlaneSchedPhaseKind::Dummy:
                 return "dummy";
-            case L2SwimlaneSchedPhaseKind::EarlyDispatch:
+            case ChipSwimlaneSchedPhaseKind::EarlyDispatch:
                 return "early_dispatch";
-            case L2SwimlaneSchedPhaseKind::Resolve:
+            case ChipSwimlaneSchedPhaseKind::Resolve:
                 return "resolve";
-            case L2SwimlaneSchedPhaseKind::DummyTask:
+            case ChipSwimlaneSchedPhaseKind::DummyTask:
                 return "dummy_task";
-            case L2SwimlaneSchedPhaseKind::PredicatedSkip:
+            case ChipSwimlaneSchedPhaseKind::PredicatedSkip:
                 return "predicated_skip";
-            case L2SwimlaneSchedPhaseKind::Drain:
+            case ChipSwimlaneSchedPhaseKind::Drain:
                 return "drain";
-            case L2SwimlaneSchedPhaseKind::DrainPrepare:
+            case ChipSwimlaneSchedPhaseKind::DrainPrepare:
                 return "drain_prepare";
-            case L2SwimlaneSchedPhaseKind::DrainPublish:
+            case ChipSwimlaneSchedPhaseKind::DrainPublish:
                 return "drain_publish";
-            case L2SwimlaneSchedPhaseKind::AsyncPoll:
+            case ChipSwimlaneSchedPhaseKind::AsyncPoll:
                 return "async_poll";
             }
             return "unknown";
         };
 
-        auto emit_depth_array = [&outfile](const char *key, const int16_t arr[L2SWIMLANE_NUM_QUEUE_SHAPES]) {
+        auto emit_depth_array = [&outfile](const char *key, const int16_t arr[CHIP_SWIMLANE_NUM_QUEUE_SHAPES]) {
             outfile << ", \"" << key << "\": [" << arr[0] << "," << arr[1] << "," << arr[2] << "]";
         };
         outfile << ",\n  \"aicpu_scheduler_phases\": [\n";
@@ -1060,17 +1062,17 @@ int L2SwimlaneCollector::export_swimlane_json() {
                 outfile << "\n      {\"kind\": \"" << sched_phase_name(pr.kind) << "\""
                         << ", \"start_cycles\": " << pr.start_time << ", \"end_cycles\": " << pr.end_time
                         << ", \"loop_iter\": " << pr.loop_iter << ", \"tasks_processed\": " << pr.tasks_processed;
-                if (pr.kind == L2SwimlaneSchedPhaseKind::Dispatch) {
+                if (pr.kind == ChipSwimlaneSchedPhaseKind::Dispatch) {
                     outfile << ", \"pop_hit\": " << pr.phase_data.dispatch.pop_hit
                             << ", \"pop_miss\": " << pr.phase_data.dispatch.pop_miss;
                 }
-                if (pr.kind == L2SwimlaneSchedPhaseKind::DummyTask ||
-                    pr.kind == L2SwimlaneSchedPhaseKind::PredicatedSkip) {
+                if (pr.kind == ChipSwimlaneSchedPhaseKind::DummyTask ||
+                    pr.kind == ChipSwimlaneSchedPhaseKind::PredicatedSkip) {
                     uint64_t task_id = (static_cast<uint64_t>(pr.phase_data.dummy_task.ring_id) << 32) |
                                        pr.phase_data.dummy_task.local_id;
                     outfile << ", \"task_id\": " << task_id;
                 }
-                // Queue-depth snapshots — [AIC, AIV, MIX] per L2SwimlaneAicpuSchedPhaseRecord docstring.
+                // Queue-depth snapshots — [AIC, AIV, MIX] per ChipSwimlaneAicpuSchedPhaseRecord docstring.
                 emit_depth_array("shared_at_start", pr.shared_depth_at_start);
                 emit_depth_array("shared_at_end", pr.shared_depth_at_end);
                 outfile << "}";
@@ -1084,7 +1086,7 @@ int L2SwimlaneCollector::export_swimlane_json() {
         outfile << "  ]";
 
         bool has_orch_phases = false;
-        if (l2_swimlane_level_ >= L2SwimlaneLevel::ORCH_PHASES) {
+        if (chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES) {
             for (const auto &v : collected_orch_phase_records_) {
                 if (!v.empty()) {
                     has_orch_phases = true;
@@ -1093,7 +1095,7 @@ int L2SwimlaneCollector::export_swimlane_json() {
             }
         }
         if (has_orch_phases) {
-            size_t orch_lanes = static_cast<size_t>(get_l2_swimlane_header(shm_host_)->num_orch_phase_threads);
+            size_t orch_lanes = static_cast<size_t>(get_chip_swimlane_header(shm_host_)->num_orch_phase_threads);
             if (orch_lanes == 0 || orch_lanes > collected_orch_phase_records_.size()) {
                 orch_lanes = collected_orch_phase_records_.size();
             }
@@ -1130,7 +1132,9 @@ int L2SwimlaneCollector::export_swimlane_json() {
     return 0;
 }
 
-int L2SwimlaneCollector::finalize(L2SwimlaneUnregisterCallback unregister_cb, const L2SwimlaneFreeCallback &free_cb) {
+int ChipSwimlaneCollector::finalize(
+    ChipSwimlaneUnregisterCallback unregister_cb, const ChipSwimlaneFreeCallback &free_cb
+) {
     if (shm_host_ == nullptr) {
         return 0;
     }
@@ -1147,10 +1151,10 @@ int L2SwimlaneCollector::finalize(L2SwimlaneUnregisterCallback unregister_cb, co
     // unregister branch is a no-op and only the device free runs; the paired
     // host shadows are reclaimed separately by clear_mappings() below.
     // The pairing matters on a2a3, where leaking HAL registrations across
-    // init_l2_swimlane() invocations makes back-to-back tests on a reused
+    // init_chip_swimlane() invocations makes back-to-back tests on a reused
     // Worker fail at rc=8 from halHostRegister.
 
-    // Free standalone l2_swimlane_aicore_rotation_table table
+    // Free standalone chip_swimlane_aicore_rotation_table table
     release_one_buffer(aicore_ring_addr_table_dev_, unregister_cb, free_cb);
     aicore_ring_addr_table_dev_ = nullptr;
 
@@ -1161,8 +1165,8 @@ int L2SwimlaneCollector::finalize(L2SwimlaneUnregisterCallback unregister_cb, co
 
     // Per-core: current buffer + free_queue slots — these were owned by
     // the AICPU side, not the framework. Same drain pattern for both the
-    // L2SwimlaneAicpuTaskBuffer pool and the L2SwimlaneAicoreTaskBuffer pool.
-    auto drain_free_queue = [&](L2SwimlaneFreeQueue &fq) {
+    // ChipSwimlaneAicpuTaskBuffer pool and the ChipSwimlaneAicoreTaskBuffer pool.
+    auto drain_free_queue = [&](ChipSwimlaneFreeQueue &fq) {
         rmb();
         uint32_t head = fq.head;
         uint32_t tail = fq.tail;
@@ -1179,18 +1183,18 @@ int L2SwimlaneCollector::finalize(L2SwimlaneUnregisterCallback unregister_cb, co
     };
 
     for (int i = 0; i < num_aicore_; i++) {
-        L2SwimlaneAicpuTaskPool *state = get_perf_buffer_state(shm_host_, i);
+        ChipSwimlaneAicpuTaskPool *state = get_perf_buffer_state(shm_host_, i);
         release_one_buffer(reinterpret_cast<void *>(state->head.current_buf_ptr), unregister_cb, free_cb);
         state->head.current_buf_ptr = 0;
         drain_free_queue(state->free_queue);
 
-        L2SwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(shm_host_, num_aicore_, i);
+        ChipSwimlaneAicoreTaskPool *ac_state = get_aicore_buffer_state(shm_host_, num_aicore_, i);
         release_one_buffer(reinterpret_cast<void *>(ac_state->head.current_buf_ptr), unregister_cb, free_cb);
         ac_state->head.current_buf_ptr = 0;
         drain_free_queue(ac_state->free_queue);
     }
 
-    auto release_phase_pool = [&](L2SwimlaneAicpuTaskPool *state) {
+    auto release_phase_pool = [&](ChipSwimlaneAicpuTaskPool *state) {
         release_one_buffer(reinterpret_cast<void *>(state->head.current_buf_ptr), unregister_cb, free_cb);
         state->head.current_buf_ptr = 0;
 

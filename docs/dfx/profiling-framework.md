@@ -1,6 +1,6 @@
 # Profiling Framework
 
-Shared profiling infrastructure that the PMU, L2Swimlane, DepGen,
+Shared profiling infrastructure that the PMU, ChipSwimlane, DepGen,
 ArgsDump, and ScopeStats collectors are built on. The host-side framework
 headers live in
 [`src/common/platform/include/host/`](../../src/common/platform/include/host/)
@@ -14,7 +14,7 @@ transport deviations that the collectors themselves still carry.
 
 The per-collector pages
 ([pmu-profiling.md](pmu-profiling.md),
-[l2-swimlane-profiling.md](l2-swimlane-profiling.md),
+[chip-swimlane-profiling.md](chip-swimlane-profiling.md),
 [dep-gen.md](dep-gen.md),
 [args-dump.md](args-dump.md),
 [scope-stats.md](scope-stats.md))
@@ -41,7 +41,7 @@ Each profiling subsystem needs the same plumbing on the host:
   records out of each ready buffer.
 - A pool of pre-registered device buffers (allocated up-front, refilled on
   demand from host-side watermarks) keyed by "kind". PMU, DepGen,
-  ArgsDump, and ScopeStats have one kind; L2Swimlane has four.
+  ArgsDump, and ScopeStats have one kind; ChipSwimlane has four.
 - A dev↔host pointer map so the management thread can resolve a device
   pointer popped off a ready queue to the host-mapped pointer the collector
   thread will read.
@@ -64,7 +64,7 @@ parameterized on a small per-subsystem trait, and the device side to
 
 ```text
                 ┌──────────────────────────────────────────┐
-                │  Pmu / L2Swimlane / DepGen / Dump / Scope │  Derived (CRTP)
+                │  Pmu / ChipSwimlane / DepGen / Dump / Scope │  Derived (CRTP)
                 │  collectors                               │  ─ on_buffer_collected
                 └─────────────┬────────────────────────────┘  ─ kIdleTimeoutSec / kSubsystemName
                               │ public ProfilerBase<Derived, Module>
@@ -82,7 +82,7 @@ parameterized on a small per-subsystem trait, and the device side to
                               ▲
                               │ Module trait wires layout into algorithms
               ┌───────────────┴────────────────┐
-              │  Pmu / L2Swimlane / DepGen /      │  Pure static trait (no state)
+              │  Pmu / ChipSwimlane / DepGen /      │  Pure static trait (no state)
               │  Dump / Scope modules             │  ─ DataHeader / ReadyEntry / FreeQueue
               └────────────────────────────────┘  ─ kBufferKinds / kReadyQueueSize
                                                   ─ kHostPoolQueueSize / kHostRecycledQueueSize
@@ -206,7 +206,7 @@ is where the unified algorithms live:
 
 ### 3.3 `Module` — trait layer
 
-A stateless `struct` per subsystem (`PmuModule`, `L2SwimlaneModule`,
+A stateless `struct` per subsystem (`PmuModule`, `ChipSwimlaneModule`,
 `DepGenModule`, `DumpModule`, `ScopeStatsModule`) that tells the generic
 algorithms what the shared-memory layout looks like. The contract lives in the
 docblock at the top of
@@ -232,7 +232,7 @@ the required members are:
 
 The Module structs are defined alongside their collectors in
 [pmu_collector.h](../../src/a2a3/platform/include/host/pmu_collector.h),
-[l2_swimlane_collector.h](../../src/common/platform/include/host/l2_swimlane_collector.h),
+[chip_swimlane_collector.h](../../src/common/platform/include/host/chip_swimlane_collector.h),
 [dep_gen_collector.h](../../src/common/platform/include/host/dep_gen_collector.h),
 [args_dump_collector.h](../../src/common/platform/include/host/args_dump_collector.h),
 and
@@ -258,7 +258,7 @@ and only has to provide:
   the collector loop. Use the subsystem's `PLATFORM_*_TIMEOUT_SECONDS`
   constant.
 - `static constexpr const char* kSubsystemName` — appears in the idle
-  timeout log line (e.g. `"PMU"`, `"L2Swimlane"`, `"ArgsDump"`).
+  timeout log line (e.g. `"PMU"`, `"ChipSwimlane"`, `"ArgsDump"`).
 - `init(...)` and `finalize(...)` — domain-specific setup/teardown.
   `init` must call `set_memory_context()` on the success path so
   `start(tf)` is not a no-op. `finalize` must release framework-owned
@@ -309,9 +309,9 @@ Current users:
 
 - ScopeStats, DepGen, ArgsDump, and PMU use the engine for
   ready/free/switch.
-- L2Swimlane uses the engine for ready enqueue / free wait primitives and
+- ChipSwimlane uses the engine for ready enqueue / free wait primitives and
   AICPU task-buffer pop/switch.
-- L2Swimlane scheduler/orchestrator phase pools and AICore rotation remain
+- ChipSwimlane scheduler/orchestrator phase pools and AICore rotation remain
   local special cases. Their seq recovery, retry, and AICore-visible head
   publishing rules differ from standard `switch_buffer`.
 
@@ -468,10 +468,10 @@ Existing collectors are the canonical examples:
   — single kind, per-AICPU-thread instances. See [args-dump.md](args-dump.md).
 - [`ScopeStatsCollector`](../../src/common/platform/include/host/scope_stats_collector.h)
   — single kind, one instance. See [scope-stats.md](scope-stats.md).
-- [`L2SwimlaneCollector`](../../src/common/platform/include/host/l2_swimlane_collector.h)
+- [`ChipSwimlaneCollector`](../../src/common/platform/include/host/chip_swimlane_collector.h)
   — four kinds (AICPU task, scheduler phase, orchestrator phase, AICore
   task), per-core / per-thread instances; the canonical multi-kind example. See
-  [l2-swimlane-profiling.md](l2-swimlane-profiling.md).
+  [chip-swimlane-profiling.md](chip-swimlane-profiling.md).
 
 ## 8. a5 specifics — host-shadow transport
 
@@ -503,9 +503,9 @@ changes capture that:
    **not** called from the mgmt loop — it would race with AICPU writes
    to device-only fields (`current_buf_ptr`, `total/dropped/mismatch`
    counters, `queue_tails`, `free_queue.head`,
-   `L2SwimlaneAicpuPhaseHeader::magic`, `core_to_thread[]`), rolling them
+   `ChipSwimlaneAicpuPhaseHeader::magic`, `core_to_thread[]`), rolling them
    back to whatever the host shadow had at the start of the tick. Per-buffer
-   payloads (`L2SwimlaneAicpuTaskBuffer` / `PmuBuffer` /
+   payloads (`ChipSwimlaneAicpuTaskBuffer` / `PmuBuffer` /
    `DumpMetaBuffer`) are still pulled on demand inside
    `ProfilerAlgorithms::process_entry` after resolving the host pointer
    for a popped ready entry. The bulk `mirror_shm_to_device` is kept
@@ -535,8 +535,8 @@ per-core ring/reg addresses travel through `KernelArgs`:
 
 | `KernelArgs` field | Producer | Consumer |
 | ------------------ | -------- | -------- |
-| `enable_profiling_flag` (bitmask) | host (DeviceRunner) | AICPU `kernel.cpp` → `set_l2_swimlane_enabled` / `set_pmu_enabled` / `set_dump_args_enabled`; AICore `KERNEL_ENTRY` → `set_aicore_profiling_flag` |
-| `aicore_l2_swimlane_ring_addrs` (table) | host (`L2SwimlaneCollector::initialize`) | AICore `KERNEL_ENTRY` indexes `table[block_idx]` → `set_aicore_l2_swimlane_ring` |
+| `enable_profiling_flag` (bitmask) | host (DeviceRunner) | AICPU `kernel.cpp` → `set_chip_swimlane_enabled` / `set_pmu_enabled` / `set_dump_args_enabled`; AICore `KERNEL_ENTRY` → `set_aicore_profiling_flag` |
+| `aicore_chip_swimlane_ring_addrs` (table) | host (`ChipSwimlaneCollector::initialize`) | AICore `KERNEL_ENTRY` indexes `table[block_idx]` → `set_aicore_chip_swimlane_ring` |
 | `aicore_pmu_ring_addrs` (table) | host (`PmuCollector::init`) | AICore `KERNEL_ENTRY` → `set_aicore_pmu_ring` |
 | `regs` (per-physical-core register-base table) | host (already required for AICPU MMIO) | AICore `KERNEL_ENTRY` resolves `regs[get_physical_core_id()]` → `set_aicore_pmu_reg_base`; AICore `aicore_execute` caches the value at Phase-3 |
 
@@ -549,16 +549,16 @@ state surface, never the runtime protocol.
 
 ### 8.2 Stable AICore staging ring (decouples AICore write from AICPU buffer rotation)
 
-L2Swimlane and PMU on a5 both use the "AICore writes, AICPU commits" model.
+ChipSwimlane and PMU on a5 both use the "AICore writes, AICPU commits" model.
 The AICore-side write target is a per-core
-[`L2SwimlaneAicoreRing`](../../src/common/platform/include/common/l2_swimlane_profiling.h) /
+[`ChipSwimlaneAicoreRing`](../../src/common/platform/include/common/chip_swimlane_profiling.h) /
 [`PmuAicoreRing`](../../src/a5/platform/include/common/pmu_profiling.h) of
 `PLATFORM_{L2,PMU}_AICORE_RING_SIZE` (= 2, dual-issue) slots, allocated
 once by the host and addressed by
 `BufferState::aicore_ring_ptr` (AICPU-visible) and the per-core
 `aicore_*_ring_addrs[block_idx]` (AICore-visible). The address is
 never reassigned, so AICore's write target is stable across AICPU's
-rotating `L2SwimlaneAicpuTaskBuffer` / `PmuBuffer` flips — flipping is now
+rotating `ChipSwimlaneAicpuTaskBuffer` / `PmuBuffer` flips — flipping is now
 fully internal to `*_complete_record` and never crosses into Handshake.
 
 Everything else — Module concept contract, alloc policy

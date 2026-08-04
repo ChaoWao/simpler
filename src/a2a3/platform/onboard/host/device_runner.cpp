@@ -336,7 +336,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // Build the profiling-flag bitfield (a2a3 carries an extra dep_gen bit).
     uint32_t enable_profiling_flag = SIMPLER_DFX_FLAG_NONE;
     if (enable_dump_args_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
-    if (enable_l2_swimlane_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_L2_SWIMLANE);
+    if (enable_chip_swimlane_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE);
     if (enable_pmu_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
     // The device flag drives the AICPU writer only; a host-orch runtime has no
     // device-side dep_gen to switch on.
@@ -406,10 +406,10 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     });
 
     // Initialize per-subsystem shared memory.
-    if (enable_l2_swimlane_) {
-        rc = init_l2_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
+    if (enable_chip_swimlane_) {
+        rc = init_chip_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
         if (rc != 0) {
-            LOG_ERROR("init_l2_swimlane failed: %d", rc);
+            LOG_ERROR("init_chip_swimlane failed: %d", rc);
             return rc;
         }
     }
@@ -453,7 +453,7 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // On any exit from run() — success or early error — release the diagnostics
     // collectors' shared memory. They are only re-initialized per run(), so a
     // Worker reused across runs (e.g. a pytest session-scoped worker pool) would
-    // otherwise re-enter init_l2_swimlane() with stale state still allocated.
+    // otherwise re-enter init_chip_swimlane() with stale state still allocated.
     auto perf_cleanup = RAIIScopeGuard([this]() {
         finalize_collectors();
     });
@@ -495,16 +495,16 @@ int DeviceRunner::run(Runtime &runtime, const CallConfig &config) {
     // AICPU<->AICore handshake (aicore_executor.cpp). That kernel is launched
     // further below, so the values read here reflect the most recent prior
     // run's handshake still resident in device memory (unset on the first run
-    // of a freshly-loaded runtime). We publish them to the L2 swimlane
+    // of a freshly-loaded runtime). We publish them to the chip swimlane
     // collector so the AICORE_TIMING (level=1) host emit path can label lanes
     // ("aic" / "aiv"). Sim sets workers[].core_type via the rule-based path in
-    // its own device_runner before init_l2_swimlane.
-    if (enable_l2_swimlane_ && l2_swimlane_collector_.is_initialized()) {
+    // its own device_runner before init_chip_swimlane.
+    if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
         std::vector<CoreType> core_types(num_aicore);
         for (int i = 0; i < num_aicore; i++) {
             core_types[i] = runtime.get_workers()[i].core_type;
         }
-        l2_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
+        chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
     }
 
     rc = launch_run(runtime, num_aicore, launch_aicpu_num, selected_pipeline_slot);
@@ -1034,7 +1034,7 @@ int DeviceRunner::finalize() {
 
 // `launch_aicpu_kernel` and `launch_aicore_kernel` live on `DeviceRunnerBase`.
 
-int DeviceRunner::init_l2_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
+int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
     auto alloc_cb = [this](size_t size) -> void * {
         return mem_alloc_.alloc(size);
     };
@@ -1056,17 +1056,17 @@ int DeviceRunner::init_l2_swimlane(int num_aicore, int aicpu_thread_num, int dev
         return mem_alloc_.free(dev_ptr);
     };
 
-    int rc = l2_swimlane_collector_.initialize(
-        num_aicore, aicpu_thread_num, device_id, l2_swimlane_level_, alloc_cb, register_cb, free_cb, output_prefix_
+    int rc = chip_swimlane_collector_.initialize(
+        num_aicore, aicpu_thread_num, device_id, chip_swimlane_level_, alloc_cb, register_cb, free_cb, output_prefix_
     );
     if (rc != 0) {
         return rc;
     }
 
-    kernel_args_.args.l2_swimlane_data_base =
-        reinterpret_cast<uint64_t>(l2_swimlane_collector_.get_l2_swimlane_setup_device_ptr());
-    kernel_args_.args.l2_swimlane_aicore_rotation_table =
-        reinterpret_cast<uint64_t>(l2_swimlane_collector_.get_aicore_ring_addr_table_device_ptr());
+    kernel_args_.args.chip_swimlane_data_base =
+        reinterpret_cast<uint64_t>(chip_swimlane_collector_.get_chip_swimlane_setup_device_ptr());
+    kernel_args_.args.chip_swimlane_aicore_rotation_table =
+        reinterpret_cast<uint64_t>(chip_swimlane_collector_.get_aicore_ring_addr_table_device_ptr());
     return 0;
 }
 
@@ -1214,8 +1214,8 @@ void DeviceRunner::finalize_collectors() {
         return mem_alloc_.free(dev_ptr);
     };
 
-    if (l2_swimlane_collector_.is_initialized()) {
-        l2_swimlane_collector_.finalize(unregister_cb, free_cb);
+    if (chip_swimlane_collector_.is_initialized()) {
+        chip_swimlane_collector_.finalize(unregister_cb, free_cb);
     }
     if (dump_collector_.is_initialized()) {
         dump_collector_.finalize(unregister_cb, free_cb);

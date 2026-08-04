@@ -1,8 +1,8 @@
-# L0 Swimlane Profiling — Intra-core Pipeline Trace for a Task
+# Core Swimlane Profiling — Intra-core Pipeline Trace for a Task
 
 ## 1. Background & Motivation
 
-[L2 swimlane](l2-swimlane-profiling.md) answers *where each task ran on
+[chip swimlane](chip-swimlane-profiling.md) answers *where each task ran on
 the wall clock and how the scheduler spent its loop*. It stops at the
 AICore task boundary — one task is one opaque `[start, end]` block. When
 a single task is slow, the next question is **why inside the core(s)**:
@@ -10,7 +10,7 @@ which pipe (`MTE2` GM→L1, `MTE1` L1→L0, `CUBE` matmul, `FIXP` write-back,
 `SCALAR`, `VECTOR`) is the bottleneck, and how the per-instruction issue
 overlaps across the cluster's sub-cores.
 
-L0 swimlane captures exactly that — the **intra-core pipeline** of a
+core swimlane captures exactly that — the **intra-core pipeline** of a
 task. It runs the task in isolation under `msprof op simulator` (the
 AICore camodel) and exports a MindStudio Insight `trace.json` whose lanes
 are the cluster's pipes, not the chip's cores. It deliberately
@@ -28,7 +28,7 @@ sub-cores side by side, not one kernel in isolation.
 The hard part of an isolated replay is rebuilding the task's exact
 `args[]` — Tensor descriptors (shape / dtype / strides / start_offset)
 plus scalar values — which orchestration normally computes on the fly.
-Hand-authoring them is error-prone. L0 swimlane removes the guesswork:
+Hand-authoring them is error-prone. core swimlane removes the guesswork:
 it captures the **real** per-task args from an [args
 dump](args-dump.md), uses the dump's `func_id` array to identify the
 task's mix members, and generates the whole replay workspace from those
@@ -72,7 +72,7 @@ captured args — zero hand-written shapes or scalars.
 Drive it in one line (`--func-id` is the task's member set):
 
 ```bash
-python -m simpler_setup.tools.l0_swimlane \
+python -m simpler_setup.tools.core_swimlane \
     --test tests/st/<case>/test_<name>.py --func-id 0,1,2 --platform a2a3sim
 ```
 
@@ -80,7 +80,7 @@ python -m simpler_setup.tools.l0_swimlane \
 
 ### 3.1 Prerequisites (one-time per test case)
 
-L0 swimlane reuses the args-dump pipeline to recover args, so the target
+core swimlane reuses the args-dump pipeline to recover args, so the target
 case must satisfy what the dump needs (see
 [args-dump.md](args-dump.md)):
 
@@ -107,7 +107,7 @@ export ASCEND_HOME_PATH=<your CANN install>     # e.g. .../cann-9.0.0
 source "$ASCEND_HOME_PATH/set_env.sh"
 
 # Sim capture (no NPU dump) — the default.
-python -m simpler_setup.tools.l0_swimlane \
+python -m simpler_setup.tools.core_swimlane \
     --test tests/st/a2a3/tensormap_and_ringbuffer/mixed_example/test_mixed_example.py \
     --func-id 0,1,2 --platform a2a3sim
 
@@ -115,7 +115,7 @@ python -m simpler_setup.tools.l0_swimlane \
 # the collect share the locked $TASK_DEVICE (no nested lock). Only needed for
 # a kernel whose sync idiom compiles only for the device.
 task-submit --device auto --device-num 1 --run \
-    "python -m simpler_setup.tools.l0_swimlane \
+    "python -m simpler_setup.tools.core_swimlane \
         --test tests/st/<case>/test_<name>.py --func-id 0 --platform a2a3"
 ```
 
@@ -135,9 +135,9 @@ reading the kernel source — names are not in the dump (only kind / shape
 / value), so cross-reference the kernel's `args:` header for those:
 
 ```text
-[l0_swimlane] func_id=0 task=0x... mix=[0, 1, 2] mode=mix block_num=3
+[core_swimlane] func_id=0 task=0x... mix=[0, 1, 2] mode=mix block_num=3
               members=[MATMUL(aic,func 0), ADD(aiv,func 1), MUL(aiv,func 2)]
-[l0_swimlane] arg slots (override with --set-arg SLOT=VALUE):
+[core_swimlane] arg slots (override with --set-arg SLOT=VALUE):
     slot 0  tensor  FLOAT32  [16384]
     ...
 ```
@@ -173,7 +173,7 @@ Per-arch build parameters are fixed in the tool's `ARCH_CONFIG`:
 ### 3.4 Viewing: Insight vs Perfetto
 
 The workspace lands at
-`outputs/l0_swimlane_<label>_<ts>/`, where
+`outputs/core_swimlane_<label>_<ts>/`, where
 `<label>` = `<TestClass>_<Case>_<platform>_<kernel>_mix<members>` (the
 `mix<members>` segment is the task's func_id set, e.g. `mix0_1_2` for a
 3-way mix or `mix0` for a single-kernel task). Two final
@@ -240,10 +240,10 @@ same case, capture once and reuse:
 
 ```bash
 # First: runs the dump, traces one task (the 3-way mix).
-python -m simpler_setup.tools.l0_swimlane --test <file> --func-id 0,1,2 --platform a2a3sim
+python -m simpler_setup.tools.core_swimlane --test <file> --func-id 0,1,2 --platform a2a3sim
 
 # Subsequent: another task from the same case, reusing the manifest.
-python -m simpler_setup.tools.l0_swimlane --test <file> --func-id 3,4 --platform a2a3sim \
+python -m simpler_setup.tools.core_swimlane --test <file> --func-id 3,4 --platform a2a3sim \
     --dump-json outputs/<ClassName>_<Case>_<ts>/args_dump/args_dump.json
 ```
 
@@ -279,7 +279,7 @@ T=tests/st/a2a3/tensormap_and_ringbuffer        # most representatives
 E=examples/a2a3/tensormap_and_ringbuffer        # vector_example / qwen3
 
 # --- a2a3sim cases (case declares a2a3sim; dump takes no NPU) ---
-L0="python -m simpler_setup.tools.l0_swimlane --platform a2a3sim -g"  # -g: source-line attribution
+L0="python -m simpler_setup.tools.core_swimlane --platform a2a3sim -g"  # -g: source-line attribution
 # Single AIV — vector_example kernel_add
 task-submit --device auto --max-time 1800 --run "$L0 --func-id 0     --test $E/vector_example/test_vector_example.py"
 # Mix 2 AIV (per-lane) — ADD_STD + MUL_STD
@@ -296,7 +296,7 @@ task-submit --device auto --max-time 1800 --run "$L0 --func-id 1 --set-arg 1=512
 # --- a2a3-ONLY cases (CASES declare no a2a3sim) ---
 # Onboard: run arch-precheck once, then --platform a2a3 (the dump runs on the locked device).
 .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
-L0a="python -m simpler_setup.tools.l0_swimlane --platform a2a3 -g"
+L0a="python -m simpler_setup.tools.core_swimlane --platform a2a3 -g"
 # Single AIC — standalone matmul (genuine single-AIC task)
 task-submit --device auto --max-time 1800 --run "$L0a --func-id 0 --test $T/alternating_matmul_add/test_alternating_matmul_add.py"
 # Paged-attn, loop = scalar (shrink n_blocks to 4)
@@ -330,13 +330,13 @@ here.
 `worker_chip_orch_comm`, `aicore_op_timeout`, `scope_stats`); comm / notify
 demos (`async_notify_demo`, `deferred_notify_demo`,
 `sdma_async_completion_demo`); DFX wrappers that reuse other kernels
-(`dep_gen`, `pmu`, `args_dump`, `l2_swimlane` — they trace `vector_example`
+(`dep_gen`, `pmu`, `args_dump`, `chip_swimlane` — they trace `vector_example`
 / `mixed_example`); `host_build_graph/*` (a different runtime whose dump
 stamps `func_id=[-1]`); `spmd_paged_attention` (`pytest.mark.skip` — a known a2a3 507018 flake, #1156; its `[0,1,1]` same-source collapse is covered by `spmd_multiblock_mix`); and the `ut/py/test_task_interface.py` unit test.
 
 ## 4. Capabilities
 
-What the L0 swimlane shows:
+What the core swimlane shows:
 
 - **Per-pipe occupancy** per sub-core for one task, so a memory-bound vs
   compute-bound diagnosis is direct.
@@ -349,7 +349,7 @@ What the L0 swimlane shows:
 - **Cross-arch comparison** (`a2a3sim` vs `a5sim`) surfaces real ISA
   differences (see [§7](#7-findings)).
 
-What it does **not** show (use [L2 swimlane](l2-swimlane-profiling.md)):
+What it does **not** show (use [chip swimlane](chip-swimlane-profiling.md)):
 
 - AICPU dispatch / finish latency, scheduler phases, dependency arrows.
 - **Cross-core synchronization timing.** The isolated replay has no
@@ -359,7 +359,7 @@ What it does **not** show (use [L2 swimlane](l2-swimlane-profiling.md)):
 
 ## 5. How It Works
 
-L0 swimlane is **tooling-only** — there is no dedicated device-side data
+core swimlane is **tooling-only** — there is no dedicated device-side data
 path. It composes three existing pieces: args dump (for args), `msprof
 op simulator` (for the pipeline trace), and a generated replay workspace
 (for the isolated build).
@@ -530,7 +530,7 @@ real).
 
 Each platform runs the kernel under a different msprof SoC config (a2a3 =
 `dav_2201` / `dav-c220`, a5 = `dav_3510` / `dav-c310`), so the same kernel
-produces a different L0 swimlane — both in **lane export** (a2a3 shows
+produces a different core swimlane — both in **lane export** (a2a3 shows
 `cubecore0 + veccore0/1`; a5 exports only the sub-cores that ran real
 code, so an AIC-only kernel shows just `cubecore0`) and in **instructions
 / per-pipe timing** (real ISA). Both are expected, not tool bugs. Read
@@ -569,7 +569,7 @@ do not draw timing conclusions; retry with a different `n_blocks`.
 
 - **AICPU orchestration is out of scope.** L0 sees only the AICore
   pipeline of one task. For dispatch / finish / scheduler / dependency
-  data use [L2 swimlane](l2-swimlane-profiling.md).
+  data use [chip swimlane](chip-swimlane-profiling.md).
 - **Orchestration-driven sync is not modeled (tier C).** Two kinds of
   cross-core sync: **(a) in-kernel** — cross-core flags / L2 FIFOs written
   in the kernel (the AIC↔AIV producer/consumer handshake of a cooperative
@@ -579,7 +579,7 @@ do not draw timing conclusions; retry with a different `n_blocks`.
   **absent**, the isolated replay has no AICPU. So a mix's own in-kernel
   AIC↔AIV coordination is faithful; what's lost is mainly **inter-task**
   ordering (task A → task B), which is out of L0's single-task scope
-  anyway — that is [L2 swimlane](l2-swimlane-profiling.md)'s view. Edge
+  anyway — that is [chip swimlane](chip-swimlane-profiling.md)'s view. Edge
   case: if a mix's sub-core ordering relied on the AICPU rather than
   in-kernel flags, the replay shows those cores more parallel than
   reality.
@@ -628,10 +628,10 @@ Trace each AIV kernel as its own single-kernel task instead (e.g.
 
 ## 11. Related docs
 
-- [`.claude/skills/l0-swimlane/SKILL.md`](../../.claude/skills/l0-swimlane/SKILL.md)
+- [`.claude/skills/core-swimlane/SKILL.md`](../../.claude/skills/core-swimlane/SKILL.md)
   — the operating procedure for this tool (picking `--func-id` /
   `--set-arg` / `--spmd-block-num`).
-- [l2-swimlane-profiling.md](l2-swimlane-profiling.md) — the
+- [chip-swimlane-profiling.md](chip-swimlane-profiling.md) — the
   per-task / scheduler swimlane one level up.
 - [args-dump.md](args-dump.md) — the `func_id`-array-tagged per-task arg
   capture L0 reconstructs from.

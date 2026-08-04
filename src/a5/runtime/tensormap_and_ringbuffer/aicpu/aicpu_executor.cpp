@@ -39,10 +39,10 @@
 
 // Performance profiling headers
 #include "aicpu/dep_gen_collector_aicpu.h"
-#include "aicpu/l2_swimlane_collector_aicpu.h"
+#include "aicpu/chip_swimlane_collector_aicpu.h"
 #include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
-#include "common/l2_swimlane_profiling.h"
+#include "common/chip_swimlane_profiling.h"
 #include "common/unified_log.h"
 
 // Register-based communication
@@ -638,7 +638,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 runtime_finalize_after_wire(rt, sched_ctx_.aic_count(), sched_ctx_.aiv_count());
 
 #if SIMPLER_DFX
-                rt->orchestrator.l2_swimlane_level = get_l2_swimlane_level();
+                rt->orchestrator.chip_swimlane_level = get_chip_swimlane_level();
                 {
                     auto &orch = rt->orchestrator;
                     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -660,8 +660,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             runtime_init_ready_.store(true, std::memory_order_release);
 
 #if SIMPLER_DFX
-            if (get_l2_swimlane_level() >= L2SwimlaneLevel::ORCH_PHASES) {
-                l2_swimlane_aicpu_set_orch_thread_idx(thread_idx);
+            if (get_chip_swimlane_level() >= ChipSwimlaneLevel::ORCH_PHASES) {
+                chip_swimlane_aicpu_set_orch_thread_idx(thread_idx);
             }
             // scope_stats streams scope_end records off the orchestrator thread:
             // record the per-thread ready_queue index. No-op (writer shared
@@ -783,7 +783,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // device LOG_INFO "orch_start=… orch_end=… orch_cost=…" line
             // below carries the same envelope info for debugging, and
             // host-side swimlane derives per-phase timing from the per-event
-            // L2SwimlaneAicpuOrchPhaseRecord[] stream that already covers everything inside
+            // ChipSwimlaneAicpuOrchPhaseRecord[] stream that already covers everything inside
             // submit_task().
             int32_t total_tasks = 0;
             if (rt->orchestrator.sm_header) {

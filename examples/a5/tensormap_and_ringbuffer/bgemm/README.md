@@ -33,7 +33,7 @@ accumulate is the canonical case where a GM round trip for the intermediate is
 pure cost.
 
 `"mix"` is a recognised sentinel elsewhere too — `deps_viewer` and
-`l0_swimlane` collapse a multi-core-type task to it, and
+`core_swimlane` collapse a multi-core-type task to it, and
 `sched_overhead_analysis` labels it `MIX`.
 
 ## `C` is INOUT, not OUT

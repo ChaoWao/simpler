@@ -75,7 +75,7 @@ whole-device):
 
 ```text
 aicpu_thread_num: int32
-enable_l2_swimlane: int32
+enable_chip_swimlane: int32
 enable_dump_args: int32
 enable_pmu: int32
 enable_dep_gen: int32

@@ -16,10 +16,10 @@
  * Captures the inputs to every Orchestrator::submit_task call into a streaming
  * ring of DepGenRecord. The host side replays these records offline to
  * reconstruct the full task dependency graph (deps.json). deps.json is the
- * sole source of truth for fanout edges; the L2 swimlane hot path no longer
+ * sole source of truth for fanout edges; the chip swimlane hot path no longer
  * carries fanout to keep AICPU off the per-task GM-store critical path.
  *
- * Streaming buffer design mirrors PMU / L2Swimlane / ArgsDump (single source of
+ * Streaming buffer design mirrors PMU / ChipSwimlane / ArgsDump (single source of
  * algorithmic truth in src/common/platform/include/host/profiler_base.h):
  *
  *   DepGenFreeQueue    — SPSC: Host pushes free DepGenBuffers, AICPU pops them.
@@ -29,7 +29,7 @@
  *
  * Single-instance: the orchestrator is one AICPU thread, so the BufferState
  * array has length 1. Kept array-shaped (vs scalar) for symmetry with PMU /
- * L2Swimlane and to match ProfilerBase<DepGenModule>::for_each_instance.
+ * ChipSwimlane and to match ProfilerBase<DepGenModule>::for_each_instance.
  *
  * Tensor data is captured as opaque 128-byte blobs (`DEP_GEN_TENSOR_SIZE`)
  * matching the runtime Tensor struct size. The AICPU writer

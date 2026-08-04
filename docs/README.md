@@ -80,7 +80,7 @@ changing simpler's own internals.
 
 | Document | What it covers |
 | -------- | -------------- |
-| **[dfx/](dfx/README.md)** | **Every profiling and diagnostics reference**, indexed: framework and naming rules, L2/L0 swimlanes, PMU, host trace, device phases, scheduler-overhead model, args dump, dep_gen, scope stats, backpressure, buffer-capacity audit |
+| **[dfx/](dfx/README.md)** | **Every profiling and diagnostics reference**, indexed: framework and naming rules, L2/core swimlanes, PMU, host trace, device phases, scheduler-overhead model, args dump, dep_gen, scope stats, backpressure, buffer-capacity audit |
 | [Log System](logging.md) | Log levels, sinks, and the host/device logging split |
 
 ## Building, testing, and packaging

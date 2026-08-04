@@ -12,7 +12,7 @@
  * @file device_phase_aicpu.cpp
  * @brief Published phase-buffer base for the AICPU device-phase stamps.
  *
- * Mirrors the dump / l2_swimlane / pmu / scope_stats base setters: a plain
+ * Mirrors the dump / chip_swimlane / pmu / scope_stats base setters: a plain
  * global living inside the AICPU SO, written once by the host before the inner
  * threads run (onboard: kernel.cpp from KernelArgs; sim: dlsym'd setter), read
  * by the stamp helpers in device_phase_aicpu.h. Deliberately NOT a C++

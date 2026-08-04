@@ -173,7 +173,7 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
         case,
         rounds=1,
         skip_golden=False,
-        enable_l2_swimlane=0,
+        enable_chip_swimlane=0,
         enable_dump_args=False,
         enable_pmu=0,
         enable_dep_gen=False,
@@ -189,7 +189,7 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
         del (
             rounds,
             skip_golden,
-            enable_l2_swimlane,
+            enable_chip_swimlane,
             enable_dump_args,
             enable_pmu,
             enable_dep_gen,
