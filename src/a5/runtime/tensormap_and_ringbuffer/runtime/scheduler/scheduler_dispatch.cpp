@@ -1018,13 +1018,15 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             continue;
         }
 
-        // Phase 3: Drain dummy ready queue (thread 0 only).
+        // Phase 3: Drain dummy ready queue (S0/S1/S2/S3).
         //
         // Dependency-only tasks bypass AICore dispatch: they go through the
         // scheduler so fanin/fanout edges stay consistent, but completion is
-        // signalled inline here. Pinned to thread 0 to avoid cross-thread races.
-        if (thread_idx == 0) {
-            constexpr int DUMMY_DRAIN_BATCH = 16;
+        // signalled inline here. The ready queue is MPMC, and the fanout path
+        // uses per-slot locks/atomics, so multiple scheduler threads can share
+        // the dependency-only resolve work.
+        if (thread_idx < 4) {
+            constexpr int DUMMY_DRAIN_BATCH = 8;
             PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
             int dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH);
 #if SIMPLER_DFX
