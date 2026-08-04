@@ -32,7 +32,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t inter_shapes[1] = {size};
     TensorCreateInfo inter_ci(inter_shapes, 1, DataType::FLOAT32);
 
-    L0TaskArgs params_t0;
+    CoreTaskArgs params_t0;
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
     params_t0.add_output(inter_ci);
@@ -40,7 +40,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const Tensor &c = outs_t0.get_ref(0);
 
     PTO2_SCOPE() {
-        L0TaskArgs params_t1;
+        CoreTaskArgs params_t1;
         params_t1.add_input(c);
         params_t1.add_output(inter_ci);
         float t1_addend = 1.0f;
@@ -52,7 +52,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskOutputTensors outs_t1 = rt_submit_aiv_task(1, params_t1);
         const Tensor &d = outs_t1.get_ref(0);
 
-        L0TaskArgs params_t2;
+        CoreTaskArgs params_t2;
         params_t2.add_input(c);
         params_t2.add_output(inter_ci);
         float t2_addend = 2.0f;
@@ -64,7 +64,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskOutputTensors outs_t2 = rt_submit_aiv_task(1, params_t2);
         const Tensor &e = outs_t2.get_ref(0);
 
-        L0TaskArgs params_t3;
+        CoreTaskArgs params_t3;
         params_t3.add_input(d);
         params_t3.add_input(e);
         params_t3.add_output(inter_ci);
@@ -78,7 +78,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         TaskOutputTensors outs_t3 = rt_submit_aiv_task(2, params_t3);
         const Tensor &g = outs_t3.get_ref(0);
 
-        L0TaskArgs params_t4;
+        CoreTaskArgs params_t4;
         params_t4.add_input(g);
         params_t4.add_input(c);
         params_t4.add_output(ext_f);

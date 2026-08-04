@@ -55,7 +55,7 @@ static int16_t cohort(int32_t total, int32_t divisor, int32_t delta) {
 }
 
 static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_core_num(block_num);

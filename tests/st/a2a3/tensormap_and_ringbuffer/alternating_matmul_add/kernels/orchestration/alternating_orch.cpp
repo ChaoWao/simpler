@@ -92,7 +92,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             Tensor B_view = ext_B.view(matmul_group_shapes, view_offsets);
             Tensor C_view = ext_C.view(matmul_group_shapes, view_offsets);
 
-            L0TaskArgs params_matmul;
+            CoreTaskArgs params_matmul;
             params_matmul.add_input(A_view);
             params_matmul.add_input(B_view);
             params_matmul.add_output(C_view);
@@ -112,7 +112,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             Tensor Y_view = ext_Y.view(add_group_shapes, view_offsets);
             Tensor Z_view = ext_Z.view(add_group_shapes, view_offsets);
 
-            L0TaskArgs params_add;
+            CoreTaskArgs params_add;
             params_add.add_input(X_view);
             params_add.add_input(Y_view);
             params_add.add_output(Z_view);

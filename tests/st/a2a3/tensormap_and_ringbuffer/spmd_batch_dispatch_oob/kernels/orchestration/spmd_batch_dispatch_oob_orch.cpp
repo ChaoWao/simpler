@@ -43,7 +43,7 @@ static void submit_spmd_mix(const Tensor &out, int16_t block_num, int64_t base_c
     mk.aiv0_kernel_id = FUNC_AIV0;
     mk.aiv1_kernel_id = FUNC_AIV1;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_block_num(block_num);

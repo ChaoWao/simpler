@@ -52,12 +52,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     PTO2_SCOPE() {
         PTO2TaskId producers[PRODUCER_COUNT];
         for (int32_t i = 0; i < PRODUCER_COUNT; i++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_output(ci);
             producers[i] = rt_submit_dummy_task(args).task_id();
         }
 
-        L0TaskArgs consumer;
+        CoreTaskArgs consumer;
         consumer.set_dependencies(producers, PRODUCER_COUNT);
         rt_submit_dummy_task(consumer);
     }

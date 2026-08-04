@@ -462,7 +462,7 @@ struct PTO2PreparedTask {
     PTO2TaskSlotState *slot_state = nullptr;
 };
 
-static PTO2OutputLayout calculate_output_layout(const L0TaskArgs &args) {
+static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
     PTO2OutputLayout layout;
     for (int32_t i = 0; i < args.tensor_count(); i++) {
         if (args.tag(i) != TensorArgType::OUTPUT) {
@@ -523,7 +523,7 @@ static void prefetch_payload(PTO2TaskPayload *payload, int32_t tensor_count, int
 }
 
 static bool prepare_task(
-    PTO2OrchestratorState *orch, const L0TaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
+    PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
     TaskAttrs task_attrs, PTO2PreparedTask *out
 ) {
     uint8_t ring_id = orch->current_ring_id();
@@ -806,7 +806,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
 // computation (explicit_deps + auto), output registration, slot init, and
 // Orch-side wiring/ready publication.
 static TaskOutputTensors submit_task_common(
-    PTO2OrchestratorState *orch, const L0TaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     CYCLE_COUNT_START();
@@ -978,7 +978,7 @@ static TaskOutputTensors submit_task_common(
     // no Arg/Tensor access. Both branches write predicate.op explicitly because
     // payload slots are ring-reused; op == NONE means "always dispatch".
     {
-        const L0TaskPredicate &pred = args.predicate();
+        const CoreTaskPredicate &pred = args.predicate();
         if (pred.op != PredicateOp::NONE && pred.operand.tensor != nullptr && pred.operand.tensor->buffer.addr != 0) {
             uint64_t elem_size = get_element_size(pred.operand.tensor->dtype);
             uint64_t flat_offset = pred.operand.tensor->compute_flat_offset(pred.operand.indices, pred.operand.ndims);
@@ -1047,7 +1047,7 @@ static TaskOutputTensors submit_task_common(
     return result;
 }
 
-TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const L0TaskArgs &args) {
+TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     auto *orch = this;
 
     // Orchestration API should short-circuit after fatal, but keep this entry
@@ -1127,7 +1127,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
 // AICore dispatch. Empty active_mask routes the slot to the DUMMY ready
 // bucket; dispatch loop short-circuits to completion. Accepts the same Arg
 // shape as submit_task; scalars are permitted but never consumed.
-TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const L0TaskArgs &args) {
+TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &args) {
     auto *orch = this;
 
     if (orch->fatal) {
@@ -1157,7 +1157,7 @@ TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const L0TaskArgs &arg
     );
 }
 
-TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const L0TaskArgs &args) {
+TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args) {
     auto *orch = this;
     // Orchestration API should short-circuit after fatal, but keep this entry
     // robust as a no-op in case a caller reaches it directly.

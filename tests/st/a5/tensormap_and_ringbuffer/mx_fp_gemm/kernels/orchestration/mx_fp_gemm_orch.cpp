@@ -47,7 +47,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     );
 
     PTO2_SCOPE() {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ext_a);
         args.add_input(ext_as);
         args.add_input(ext_b);

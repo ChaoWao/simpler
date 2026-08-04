@@ -64,7 +64,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // =========================================================
     // Step 1: c = a + b (runtime-created tensor, kernel_add)
     // =========================================================
-    L0TaskArgs params_c;
+    CoreTaskArgs params_c;
     params_c.add_input(ext_a);
     params_c.add_input(ext_b);
     params_c.add_output(inter_ci);
@@ -119,7 +119,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     //   Buffer already exists, so the noop just registers dependency
     // =========================================================
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_inout(scalar_tensor);
         rt_submit_aiv_task(FUNC_NOOP, args);
     }
@@ -170,7 +170,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     idx[0] = 0;
     set_tensor_data(d, 1, idx, 10.0f);
 
-    L0TaskArgs params_e;
+    CoreTaskArgs params_e;
     params_e.add_input(d);
     params_e.add_input(ext_a);
     params_e.add_output(inter_ci);
@@ -199,7 +199,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     //   instead of add_input() so TensorMap tracks the access chain.
     // =========================================================
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(c);
         args.add_input(ext_b);
         args.add_output(inter_ci);
@@ -231,7 +231,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     //   set_tensor_data auto-waits for the noop to complete.
     // =========================================================
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_output(ext_b);  // write-only: creates TensorMap entry (not add_input!)
         rt_submit_aiv_task(FUNC_NOOP, args);
     }
@@ -253,7 +253,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // Step 13: result = a + b (external output via add_output, kernel_add)
     // =========================================================
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ext_a);
         args.add_input(ext_b);
         args.add_output(ext_result);

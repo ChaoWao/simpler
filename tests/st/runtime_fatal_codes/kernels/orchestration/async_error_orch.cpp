@@ -39,7 +39,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t shape[1] = {1};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_output(ci);
     rt_submit_aiv_task(FUNC_ASYNC_KERNEL, args);
 }

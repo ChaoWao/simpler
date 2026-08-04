@@ -35,7 +35,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t shape[1] = {a.shapes[0]};
     TensorCreateInfo temporary(shape, 1, DataType::FLOAT32);
 
-    L0TaskArgs add_args;
+    CoreTaskArgs add_args;
     add_args.add_input(a);
     add_args.add_input(b);
     add_args.add_output(temporary);
@@ -48,7 +48,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     } scalar{};
     scalar.f32 = 1.0F;
     for (int i = 0; i < kChainLength; ++i) {
-        L0TaskArgs step_args;
+        CoreTaskArgs step_args;
         step_args.add_input(current);
         if (i + 1 == kChainLength) {
             step_args.add_output(out);

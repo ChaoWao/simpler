@@ -81,7 +81,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         MixedKernels mk;
         mk.aic_kernel_id = FUNC_MATMUL;
         mk.aiv0_kernel_id = FUNC_ADD;
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ext_A);
         args.add_input(ext_B);
         args.add_output(ws_aic_slot0);
@@ -98,7 +98,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         MixedKernels mk;
         mk.aic_kernel_id = FUNC_MATMUL;
         mk.aiv0_kernel_id = FUNC_ADD;
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ws_aic_slot0);
         args.add_input(ext_B);
         args.add_output(ws_aic_slot1);
@@ -113,7 +113,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         MixedKernels mk;
         mk.aic_kernel_id = FUNC_MATMUL;
         mk.aiv0_kernel_id = FUNC_ADD;
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ws_aic_slot1);
         args.add_input(ext_B);
         args.add_output(ext_aic_out);

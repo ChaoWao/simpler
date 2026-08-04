@@ -55,14 +55,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TensorCreateInfo cd_ci(shapes, 1, DataType::FLOAT32);
 
     // task0: b = sqrt(log(a))
-    L0TaskArgs p0;
+    CoreTaskArgs p0;
     p0.add_input(a);
     p0.add_output(b_ci);
     TaskOutputTensors b_out = rt_submit_aiv_task(FUNC_LOG_SQRT, p0);
     Tensor b = b_out.get_ref(0);
 
     // task1: c = b @ w1
-    L0TaskArgs p1;
+    CoreTaskArgs p1;
     p1.add_input(b);
     p1.add_input(w1);
     p1.add_output(cd_ci);
@@ -70,7 +70,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     Tensor c = c_out.get_ref(0);
 
     // task2: d = b @ w2
-    L0TaskArgs p2;
+    CoreTaskArgs p2;
     p2.add_input(b);
     p2.add_input(w2);
     p2.add_output(cd_ci);
@@ -78,7 +78,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     Tensor d = d_out.get_ref(0);
 
     // task3: f = exp(c + d)
-    L0TaskArgs p3;
+    CoreTaskArgs p3;
     p3.add_input(c);
     p3.add_input(d);
     p3.add_output(f);

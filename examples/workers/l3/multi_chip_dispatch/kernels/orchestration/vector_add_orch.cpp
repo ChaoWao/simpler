@@ -37,7 +37,7 @@ __attribute__((visibility("default"))) void vector_add_orchestration(const ChipT
     const Tensor &b = orch_args.tensor(1).ref();
     const Tensor &out = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(a);
     params.add_input(b);
     params.add_output(out);

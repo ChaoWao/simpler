@@ -33,7 +33,7 @@ __attribute__((visibility("default"))) void ffn_local_orchestration(const ChipTa
     const Tensor &w_shard = orch_args.tensor(1).ref();
     const Tensor &partial_local = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(x_shard);
     params.add_input(w_shard);
     params.add_output(partial_local);

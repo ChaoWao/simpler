@@ -35,18 +35,18 @@ Validate `arg_count` in `aicpu_orchestration_config` and interpret pointers as d
 1. Wrap orchestration in scopes with `PTO2_SCOPE()` to control tensor lifetimes.
 2. Use `make_tensor_external` for existing device buffers and `TensorCreateInfo` + `add_output(...)` for runtime-created intermediates.
 3. Use `add_inout(...)` for existing tensors that a kernel writes.
-4. Build `L0TaskArgs` with `add_input`, `add_output`, `add_inout` for tensors and `add_scalar` for scalars.
+4. Build `CoreTaskArgs` with `add_input`, `add_output`, `add_inout` for tensors and `add_scalar` for scalars.
    > **Constraint**: All tensor parameters (`add_input` / `add_output` / `add_inout`) **must** be added before any scalar parameters (`add_scalar` / `add_scalars`). Violating this order will trigger an assertion failure. This is because the runtime dispatches tensor arguments first in kernel args, followed by scalars, and the layout must match.
 
    ```cpp
    // Correct
-   L0TaskArgs p;
+   CoreTaskArgs p;
    p.add_input(a);
    p.add_inout(b);
    p.add_scalar(val);    // scalars after all tensors
 
    // Wrong — triggers assertion
-   L0TaskArgs p;
+   CoreTaskArgs p;
    p.add_scalar(val);    // scalar added too early
    p.add_input(a);       // assertion: "scalar must add after all tensor added"
    ```

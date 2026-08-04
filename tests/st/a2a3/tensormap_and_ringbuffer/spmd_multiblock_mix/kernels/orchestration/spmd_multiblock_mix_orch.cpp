@@ -50,7 +50,7 @@ static void submit_spmd_mix(
     mk.aiv0_kernel_id = aiv0_id;
     mk.aiv1_kernel_id = aiv1_id;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_block_num(block_num);

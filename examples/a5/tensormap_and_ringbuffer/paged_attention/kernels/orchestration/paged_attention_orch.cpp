@@ -183,7 +183,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     prof_view_count += 2;
                     CYCLE_COUNT_LAP(prof_tensor_view);
 
-                    L0TaskArgs params_qk;
+                    CoreTaskArgs params_qk;
                     params_qk.add_input(qi);
                     params_qk.add_input(kj);
                     params_qk.add_output(sij_ci);
@@ -199,7 +199,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     prof_view_count += 1;
                     CYCLE_COUNT_LAP(prof_tensor_view);
 
-                    L0TaskArgs params_sf;
+                    CoreTaskArgs params_sf;
                     params_sf.add_input(sij_valid);
                     params_sf.add_output(pij_f16_ci);
                     params_sf.add_output(scalar_ci);
@@ -213,7 +213,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     prof_submit_count++;
                     CYCLE_COUNT_LAP(prof_submit_task);
 
-                    L0TaskArgs params_pv;
+                    CoreTaskArgs params_pv;
                     params_pv.add_input(pij_f16);
                     params_pv.add_input(vj);
                     params_pv.add_output(tile2d_ci);
@@ -227,7 +227,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                     uint64_t is_last = (bn == bn_this_batch - 1) ? 1 : 0;
                     CYCLE_COUNT_LAP(prof_param_extract);
 
-                    L0TaskArgs params_up;
+                    CoreTaskArgs params_up;
                     params_up.add_input(mi);
                     params_up.add_input(li);
                     params_up.add_input(oi_tmp);

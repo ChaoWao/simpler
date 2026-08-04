@@ -73,7 +73,7 @@ __attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(co
 
     // child 0: dispatch
     {
-        L0TaskArgs p;
+        CoreTaskArgs p;
         p.add_input(indices);
         p.add_input(x_norm);
         p.add_input(w_padded);
@@ -90,7 +90,7 @@ __attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(co
 
     // child 1: local_expert (pure local, host-backed I/O only — no scratch)
     {
-        L0TaskArgs p;
+        CoreTaskArgs p;
         p.add_input(recv_x_out);
         p.add_input(recv_w_out);
         p.add_input(recv_count_out);
@@ -101,7 +101,7 @@ __attribute__((visibility("default"))) void ep_dispatch_combine_orchestration(co
 
     // child 2: combine (push to routed_y_buf in scratch, barrier, reduce_sum)
     {
-        L0TaskArgs p;
+        CoreTaskArgs p;
         p.add_input(recv_y);
         p.add_input(recv_idx_out);
         p.add_output(routed_y);

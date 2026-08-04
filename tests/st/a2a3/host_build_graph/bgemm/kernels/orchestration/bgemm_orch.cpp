@@ -80,7 +80,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     Tensor c_view = c.view(tile_shape, c_off);
 
                     // P_k = A[m,k] @ B[k,n]
-                    L0TaskArgs p_gemm;
+                    CoreTaskArgs p_gemm;
                     p_gemm.add_input(a_view);
                     p_gemm.add_input(b_view);
                     p_gemm.add_output(p_ci);
@@ -88,7 +88,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     Tensor p = p_out.get_ref(0);
 
                     // C[m,n] += P_k
-                    L0TaskArgs p_add;
+                    CoreTaskArgs p_add;
                     p_add.add_inout(c_view);
                     p_add.add_input(p);
                     rt_submit_aiv_task(FUNC_TILE_ADD, p_add);

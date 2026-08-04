@@ -44,7 +44,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // Exercise API short-circuit after fatal: these must become no-ops, not fall
     // through into runtime-side asserts or extra reporting.
-    L0TaskArgs alloc_args;
+    CoreTaskArgs alloc_args;
     (void)alloc_tensors(alloc_args);
 
     Tensor dummy = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);

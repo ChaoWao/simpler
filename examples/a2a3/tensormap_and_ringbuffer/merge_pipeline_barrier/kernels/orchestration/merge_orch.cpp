@@ -37,7 +37,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t sh[1] = {SIZE};
     TensorCreateInfo ci(sh, 1, DataType::FLOAT32);
 
-    L0TaskArgs p;
+    CoreTaskArgs p;
     p.add_input(ext_x);        // args[0]
     p.add_input(ext_sync);     // args[1]
     p.add_output(ci);          // args[2] s1 scratch

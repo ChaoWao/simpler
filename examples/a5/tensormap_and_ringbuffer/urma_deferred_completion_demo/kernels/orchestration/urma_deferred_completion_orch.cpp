@@ -38,13 +38,13 @@ __attribute__((visibility("default"))) void urma_deferred_completion_orchestrati
     const Tensor &result = orch_args.tensor(2).ref();
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
 
-    L0TaskArgs producer_args;
+    CoreTaskArgs producer_args;
     producer_args.add_input(input);
     producer_args.add_output(out);
     producer_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     rt_submit_aiv_task(0, producer_args);
 
-    L0TaskArgs consumer_args;
+    CoreTaskArgs consumer_args;
     consumer_args.add_input(out);
     consumer_args.add_output(result);
     rt_submit_aiv_task(1, consumer_args);

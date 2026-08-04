@@ -35,7 +35,7 @@
 // (a5: set_core_num, a2a3: set_block_num) for the same field. Bridge it so this
 // one fixture compiles on both; keyed off the arch's pto_types.h include guard,
 // which pto_orchestration_api.h pulls in transitively.
-static inline void set_block_count(L0TaskArgs &args, int16_t n) {
+static inline void set_block_count(CoreTaskArgs &args, int16_t n) {
 #if defined(SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_)
     args.launch_spec.set_core_num(n);
 #else
@@ -66,7 +66,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     mk.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
     mk.aiv1_kernel_id = FUNC_SPMD_MIX_AIV1;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(blocks);
     args.add_scalar(static_cast<int64_t>(0));  // base cache line
     set_block_count(args, static_cast<int16_t>(cluster_count));

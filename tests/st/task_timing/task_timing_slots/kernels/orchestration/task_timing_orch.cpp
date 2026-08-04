@@ -62,7 +62,7 @@ __attribute__((visibility("default"))) void task_timing_orchestration(const Chip
     TensorCreateInfo inter_ci(shapes, 2, DataType::FLOAT32);
 
     // t0: c = a + b, tagged slot 0 (interval start).
-    L0TaskArgs params_t0;
+    CoreTaskArgs params_t0;
     params_t0.add_input(a);
     params_t0.add_input(b);
     params_t0.add_output(inter_ci);
@@ -71,7 +71,7 @@ __attribute__((visibility("default"))) void task_timing_orchestration(const Chip
     const Tensor &c = outs_t0.get_ref(0);
 
     // t1: out = c + b, tagged slot 1 (interval end). Depends on c -> runs after t0.
-    L0TaskArgs params_t1;
+    CoreTaskArgs params_t1;
     params_t1.add_input(c);
     params_t1.add_input(b);
     params_t1.add_output(out);
@@ -91,7 +91,7 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
     uint32_t shapes[2] = {a.shapes[0], a.shapes[1]};
     TensorCreateInfo inter_ci(shapes, 2, DataType::FLOAT32);
 
-    L0TaskArgs p0;
+    CoreTaskArgs p0;
     p0.add_input(a);
     p0.add_input(b);
     p0.add_output(inter_ci);
@@ -99,7 +99,7 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
     TaskOutputTensors o0 = rt_submit_aiv_task(0, p0);
     const Tensor &c = o0.get_ref(0);
 
-    L0TaskArgs p1;
+    CoreTaskArgs p1;
     p1.add_input(c);
     p1.add_input(b);
     p1.add_output(inter_ci);
@@ -107,7 +107,7 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
     TaskOutputTensors o1 = rt_submit_aiv_task(0, p1);
     const Tensor &d = o1.get_ref(0);
 
-    L0TaskArgs p2;
+    CoreTaskArgs p2;
     p2.add_input(d);
     p2.add_input(b);
     p2.add_output(out);
@@ -125,7 +125,7 @@ __attribute__((visibility("default"))) void task_timing_spmd_orchestration(const
     const Tensor &b = orch_args.tensor(1).ref();
     const Tensor &out = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(a);
     params.add_input(b);
     params.add_output(out);
@@ -145,7 +145,7 @@ __attribute__((visibility("default"))) void task_timing_mix_orchestration(const 
     mk.aiv0_kernel_id = 1;  // add
     mk.aiv1_kernel_id = 2;  // mul
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_input(orch_args.tensor(0).ref());   // A
     args.add_input(orch_args.tensor(1).ref());   // B
     args.add_output(orch_args.tensor(2).ref());  // C = A @ B

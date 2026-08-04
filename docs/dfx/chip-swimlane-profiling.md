@@ -3,7 +3,7 @@
 > **Lighter alternative for a single interval.** If you only need the
 > dispatch→finish window of one or two specific tasks (not a full per-task
 > timeline), prefer the selective **task-timing slots**: tag the task with
-> `L0TaskArgs::set_task_timing_slot(0..15)` and read the
+> `CoreTaskArgs::set_task_timing_slot(0..15)` and read the
 > `…device_wall.task_slot_<N>` `[STRACE]` span. It reuses the fixed device-phase
 > buffer — no collector threads, no per-task AICore records, works in
 > `SIMPLER_DFX=0`, and avoids the ~0.8 µs/switch observer effect below. See

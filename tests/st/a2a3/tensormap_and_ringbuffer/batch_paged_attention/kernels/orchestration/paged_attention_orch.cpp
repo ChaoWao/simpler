@@ -142,7 +142,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                 for (uint64_t bn = 0; bn < max_bn; bn++) {
                     PTO2_SCOPE() {
-                        L0TaskArgs params_qk;
+                        CoreTaskArgs params_qk;
                         params_qk.add_input(query);
                         params_qk.add_input(key_cache);
                         params_qk.add_input(block_table);
@@ -156,7 +156,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params_qk);
                         const Tensor &sij_b = qk_outs.get_ref(0);
 
-                        L0TaskArgs params_sf;
+                        CoreTaskArgs params_sf;
                         params_sf.add_input(sij_b);
                         params_sf.add_input(context_lens);
                         params_sf.add_output(pij_ci);
@@ -171,7 +171,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         const Tensor &mij_b = sf_outs.get_ref(1);
                         const Tensor &lij_b = sf_outs.get_ref(2);
 
-                        L0TaskArgs params_pv;
+                        CoreTaskArgs params_pv;
                         params_pv.add_input(pij_b);
                         params_pv.add_input(value_cache);
                         params_pv.add_input(block_table);
@@ -185,7 +185,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
                         uint64_t is_first = (bn == 0) ? 1 : 0;
                         uint64_t is_last = (bn == max_bn - 1) ? 1 : 0;
-                        L0TaskArgs params_up;
+                        CoreTaskArgs params_up;
                         params_up.add_input(mij_b);
                         params_up.add_input(lij_b);
                         params_up.add_input(oi_new_b);

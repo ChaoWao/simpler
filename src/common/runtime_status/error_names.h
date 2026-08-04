@@ -93,7 +93,7 @@ static inline const char *error_desc(int32_t code) {
         return "a task's explicit fanin edges overflowed the ring's dependency spill pool";
     case PTO2_ERROR_INVALID_ARGS:
         return "an orchestration API rejected its arguments (bad alloc_tensors info, illegal nested "
-               "scope, unknown task id in set_dependencies, or an L0TaskArgs carrying an error flag)";
+               "scope, unknown task id in set_dependencies, or an CoreTaskArgs carrying an error flag)";
 #ifdef PTO2_ERROR_DEPENDENCY_OVERFLOW
     case PTO2_ERROR_DEPENDENCY_OVERFLOW:
         return "retired code: per-task fanin overflow is now reported as DEP_POOL_OVERFLOW";

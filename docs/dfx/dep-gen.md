@@ -380,7 +380,7 @@ base via `task_id`.
 budget (`PLATFORM_DEP_GEN_RECORDS_PER_BUFFER = 1024` slots → roughly
 `64 + 1023 × 582 = 595450` deps max in the best case) is logged via
 `LOG_ERROR` and truncated to the largest dc that fits. Runtime
-correctness is unaffected — `L0TaskArgs::set_dependencies` keeps the full dep
+correctness is unaffected — `CoreTaskArgs::set_dependencies` keeps the full dep
 list; only the dep_gen replay graph loses the tail.
 
 ---

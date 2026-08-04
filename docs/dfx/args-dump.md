@@ -49,7 +49,7 @@ python tests/st/<case>/test_<name>.py -p a5sim --dump-args 2
 | Level | Meaning |
 | ----- | ------- |
 | `0` (or flag absent) | off — zero overhead |
-| `1` (bare `--dump-args`) | **partial** — only args marked with `L0TaskArgs::dump(...)` (see §3.2) |
+| `1` (bare `--dump-args`) | **partial** — only args marked with `CoreTaskArgs::dump(...)` (see §3.2) |
 | `2` (`--dump-args 2`) | **full** — every task's tensor inputs/outputs and scalar args |
 | `3` (`--dump-args 3`) | **full, JSON only** — every task's tensor/scalar metadata (shape, dtype, strides, scalar values) to `args_dump.json`; no payload captured, no `.bin` file |
 
@@ -91,13 +91,13 @@ bit to insert a `pipe_barrier(PIPE_ALL)` before FIN when dump is on, so
 
 ### 3.2 Partial Dump — Select Specific Args
 
-Partial dump (level 1) captures only the tasks whose `L0TaskArgs` is marked
+Partial dump (level 1) captures only the tasks whose `CoreTaskArgs` is marked
 with `dump(...)`; every unmarked task is skipped. Within a marked task,
 only the selected tensor/scalar args are recorded. Mark the arguments on
-the relevant `L0TaskArgs` before submission:
+the relevant `CoreTaskArgs` before submission:
 
 ```cpp
-L0TaskArgs args;
+CoreTaskArgs args;
 args.add_input(x);
 args.add_input(y);
 args.add_output(z);
@@ -107,9 +107,9 @@ args.dump(x, z, scale);
 rt_submit_aiv_task(FUNC_ADD, args);
 ```
 
-`dump(...)` selects arguments from the current `L0TaskArgs`; it does not execute
+`dump(...)` selects arguments from the current `CoreTaskArgs`; it does not execute
 a dump immediately. The selected tensors and scalar lvalues must already
-belong to that `L0TaskArgs`. Scalar selection is by the lvalue passed to
+belong to that `CoreTaskArgs`. Scalar selection is by the lvalue passed to
 `add_scalar(...)`, not by scalar value. Temporaries such as
 `args.dump(1.0f)` are rejected because they do not identify a previously
 added scalar slot. If the same scalar lvalue is added more than once,
@@ -132,16 +132,16 @@ Selective dump comes at two granularities, both expressed with the same
 - **Arg granularity** — `dump(x, z, scale)` selects specific tensor and
   scalar arguments of the task (the example above).
 - **Task granularity** — `dump()` with no arguments selects the whole
-  task (every tensor and scalar argument on the `L0TaskArgs`), without
+  task (every tensor and scalar argument on the `CoreTaskArgs`), without
   enumerating them:
 
   ```cpp
-  L0TaskArgs args;
+  CoreTaskArgs args;
   args.add_input(x);
   args.add_input(y);
   args.add_output(z);
   args.add_scalar(scale);
-  args.dump();        // whole task: every tensor/scalar arg on this L0TaskArgs
+  args.dump();        // whole task: every tensor/scalar arg on this CoreTaskArgs
   rt_submit_aiv_task(FUNC_ADD, args);
   ```
 
@@ -346,9 +346,9 @@ What you can read out of `args_dump.json` + `args.bin`:
 
 ## 5. Design Highlights
 
-`L0TaskArgs::dump(...)` selection state is compiled only when
+`CoreTaskArgs::dump(...)` selection state is compiled only when
 `SIMPLER_DFX=1`. With `SIMPLER_DFX=0`, the public API remains
-available but acts as a no-op: no dump-only `L0TaskArgs` state is stored and
+available but acts as a no-op: no dump-only `CoreTaskArgs` state is stored and
 submit does not propagate dump metadata.
 
 ### 5.1 Common device-side structures
@@ -868,7 +868,7 @@ manifest).
 
 **`args_dump/` exists but the manifest captured nothing.** You are
 most likely at the default partial level (`--dump-args` = level 1)
-with no `L0TaskArgs::dump(...)` markers in the orchestration, so every task is
+with no `CoreTaskArgs::dump(...)` markers in the orchestration, so every task is
 skipped. Add markers (§3.2), or pass `--dump-args 2` for a full dump.
 
 **Manifest has tasks but expected tensor records are missing.** A

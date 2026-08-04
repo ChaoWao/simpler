@@ -40,24 +40,24 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TensorCreateInfo scratch_ci(scratch_shapes, 2, DataType::FLOAT32);
 
     PTO2_SCOPE() {
-        L0TaskArgs fill1;
+        CoreTaskArgs fill1;
         fill1.add_output(scratch_ci);
         TaskOutputTensors t1_outs = rt_submit_aic_task(FUNC_FILL_CONST, fill1);
         const Tensor &t1 = t1_outs.get_ref(0);
 
-        L0TaskArgs copy1;
+        CoreTaskArgs copy1;
         copy1.add_input(t1);
         copy1.add_inout(ext_Y1);
         rt_submit_aic_task(FUNC_COPY_FIRST, copy1);
     }
 
     PTO2_SCOPE() {
-        L0TaskArgs fill2;
+        CoreTaskArgs fill2;
         fill2.add_output(scratch_ci);
         TaskOutputTensors t2_outs = rt_submit_aic_task(FUNC_FILL_CONST, fill2);
         const Tensor &t2 = t2_outs.get_ref(0);
 
-        L0TaskArgs copy2;
+        CoreTaskArgs copy2;
         copy2.add_input(t2);
         copy2.add_inout(ext_Y2);
         rt_submit_aic_task(FUNC_COPY_FIRST, copy2);

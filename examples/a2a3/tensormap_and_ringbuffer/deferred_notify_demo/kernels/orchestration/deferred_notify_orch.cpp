@@ -41,7 +41,7 @@ __attribute__((visibility("default"))) void deferred_notify_orchestration(const 
 
     uint32_t shapes[1] = {128 * 128};
     TensorCreateInfo producer_output_info(shapes, 1, DataType::FLOAT32);
-    L0TaskArgs params_producer;
+    CoreTaskArgs params_producer;
     params_producer.add_input(partial);
     params_producer.add_inout(mailbox);
     params_producer.add_output(producer_output_info);
@@ -51,14 +51,14 @@ __attribute__((visibility("default"))) void deferred_notify_orchestration(const 
 
     uint32_t notify_token_shape[1] = {1};
     TensorCreateInfo notify_token_info(notify_token_shape, 1, DataType::INT32);
-    L0TaskArgs params_notify;
+    CoreTaskArgs params_notify;
     params_notify.add_output(notify_token_info);
     params_notify.add_scalar(notify_counter.buffer.addr);
     params_notify.add_scalar(static_cast<uint64_t>(1));
     TaskOutputTensors notify_outputs = rt_submit_aiv_task(2, params_notify);
     Tensor notify_token = notify_outputs.get_ref(0);
 
-    L0TaskArgs params_consumer;
+    CoreTaskArgs params_consumer;
     params_consumer.add_input(notify_token);
     params_consumer.add_input(mailbox);
     params_consumer.add_output(result);

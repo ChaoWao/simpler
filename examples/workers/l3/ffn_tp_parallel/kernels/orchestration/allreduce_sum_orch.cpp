@@ -35,7 +35,7 @@ __attribute__((visibility("default"))) void allreduce_sum_orchestration(const Ch
     const Tensor &y = orch_args.tensor(1).ref();
     const Tensor &scratch = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(partial_local);
     params.add_output(y);
     params.add_inout(scratch);

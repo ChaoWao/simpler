@@ -95,7 +95,7 @@ static ProfCounters g_prof;
  * Must run inside a PTO2_SCOPE: the alloc'd / submitted tensors it references
  * do not outlive that scope.
  */
-static void process_qtile_scope(const L0TaskArgs &ctx) {
+static void process_qtile_scope(const CoreTaskArgs &ctx) {
     const Tensor &query = ctx.tensor(0).ref();
     const Tensor &key_cache = ctx.tensor(1).ref();
     const Tensor &value_cache = ctx.tensor(2).ref();
@@ -151,7 +151,7 @@ static void process_qtile_scope(const L0TaskArgs &ctx) {
 
     // Reusable Arg objects — reset() before each use avoids
     // repeated stack-frame construction in the inner loop.
-    L0TaskArgs params_qk, params_sf, params_pv, params_up;
+    CoreTaskArgs params_qk, params_sf, params_pv, params_up;
 
     for (uint64_t bn = 0; bn < bn_this_batch; bn += N_UNROLL) {
         uint64_t n_blocks = std::min(static_cast<uint64_t>(N_UNROLL), bn_this_batch - bn);
@@ -309,7 +309,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // process_qtile_scope(); see that function for the positional slot layout.
     // It carries only materialized Tensors (no TensorCreateInfo); the scope's
     // create-infos are rebuilt inside the helper from the q_tile/head_dim scalars.
-    L0TaskArgs ctx;
+    CoreTaskArgs ctx;
 
     for (uint64_t b_idx = 0; b_idx < batch; b_idx++) {
         uint32_t cl_idx[1] = {static_cast<uint32_t>(b_idx)};

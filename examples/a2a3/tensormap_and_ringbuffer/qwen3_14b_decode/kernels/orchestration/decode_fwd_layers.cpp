@@ -78,7 +78,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         int32_t pa_max_blocks_i32 = static_cast<int32_t>(pa_max_blocks);
 
         // Spmd pa_tiling: paged_attention_tiling_cce
-        L0TaskArgs params_t0;
+        CoreTaskArgs params_t0;
         params_t0.add_input(ext_seq_lens);
         params_t0.add_output(pa_metadata);
         params_t0.add_scalar(pa_max_blocks_i32);
@@ -93,14 +93,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             prev_out_tid[__init_i] = PTO2TaskId::invalid();
 
         // Phase-fence barrier 0: dependency-only dummy task
-        L0TaskArgs params_phase_fence_barrier_0;
+        CoreTaskArgs params_phase_fence_barrier_0;
         TaskOutputTensors phase_fence_barrier_0_outs = rt_submit_dummy_task(params_phase_fence_barrier_0);
         PTO2TaskId t = phase_fence_barrier_0_outs.task_id();
         prev_out_tid[0] = t;
         for (int64_t cb0 = 0; cb0 < 16; cb0 += 16) {
             PTO2_SCOPE() {
                 // Task 1: copy_hidden
-                L0TaskArgs params_t1;
+                CoreTaskArgs params_t1;
                 params_t1.add_output(cur);
                 params_t1.add_input(ext_hidden_states);
                 params_t1.add_scalar(cb0);
@@ -120,7 +120,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             _submit_deps_buf[0] = t__tmp_v3;
 
             // Spmd x_gamma0_spmd: x_gamma0
-            L0TaskArgs params_t2;
+            CoreTaskArgs params_t2;
             params_t2.add_output(normed);
             params_t2.add_input(cur);
             params_t2.add_input(ext_input_rms_weight);
@@ -231,7 +231,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 const Tensor &mlp_tile_inline149 = alloc_2.get_ref(7);
                 PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
                     // Phase-fence barrier 1: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_1;
+                    CoreTaskArgs params_phase_fence_barrier_1;
                     TaskOutputTensors phase_fence_barrier_1_outs = rt_submit_dummy_task(params_phase_fence_barrier_1);
                     PTO2TaskId seed_dummy_inline49 = phase_fence_barrier_1_outs.task_id();
                     PTO2TaskId prev_normed_seed_deps_inline120[2];
@@ -242,7 +242,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     prev_normed_seed_deps_inline120[1] = seed_dummy_inline49;
 
                     // Task 3: attn_out_seed
-                    L0TaskArgs params_t3;
+                    CoreTaskArgs params_t3;
                     params_t3.add_input(attn_out_inline282);
                     params_t3.set_allow_early_resolve(true);
                     TaskOutputTensors task_3_outs = rt_submit_aiv_task(3, params_t3);
@@ -256,7 +256,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline42[1] = t__tmp_v9;
 
                     // Task 4: rms_recip
-                    L0TaskArgs params_t4;
+                    CoreTaskArgs params_t4;
                     params_t4.add_input(cur__rv_v7);
                     params_t4.add_inout(inv_rms_states_inline176);
                     PTO2TaskId params_t4_deps[2];
@@ -271,7 +271,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     PTO2TaskId rms_tid_inline148 = task_4_outs.task_id();
 
                     // Task 5: q_seed
-                    L0TaskArgs params_t5;
+                    CoreTaskArgs params_t5;
                     params_t5.add_inout(q_proj_inline139);
                     params_t5.set_allow_early_resolve(true);
                     TaskOutputTensors task_5_outs = rt_submit_aiv_task(5, params_t5);
@@ -291,7 +291,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline182[1] = t__tmp_v19;
 
                     // Spmd q_proj_spmd: q_proj
-                    L0TaskArgs params_t6;
+                    CoreTaskArgs params_t6;
                     params_t6.add_inout(q_proj_inline139);
                     params_t6.add_input(normed__rv_v5);
                     params_t6.add_input(ext_wq);
@@ -316,7 +316,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline261[1] = t__tmp_v25;
 
                     // Task 7: kv_seed
-                    L0TaskArgs params_t7;
+                    CoreTaskArgs params_t7;
                     params_t7.add_inout(k_proj_inline135);
                     params_t7.add_inout(v_proj_inline255);
                     PTO2TaskId params_t7_deps[2];
@@ -337,7 +337,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline267[1] = t__tmp_v29;
 
                     // Task 8: mlp_out_seed
-                    L0TaskArgs params_t8;
+                    CoreTaskArgs params_t8;
                     params_t8.add_inout(down_acc_all_inline168);
                     params_t8.add_inout(gate_acc_all_inline203);
                     params_t8.add_inout(up_acc_all_inline303);
@@ -354,7 +354,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     PTO2TaskId mlp_out_seed_tid_inline206 = task_8_outs.task_id();
 
                     // Spmd k_proj_spmd: k_proj
-                    L0TaskArgs params_t9;
+                    CoreTaskArgs params_t9;
                     params_t9.add_inout(k_proj_inline135);
                     params_t9.add_input(normed__rv_v5);
                     params_t9.add_input(ext_wk);
@@ -369,7 +369,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     PTO2TaskId k_proj_tid_inline136 = task_9_outs.task_id();
 
                     // Spmd v_proj_spmd: v_proj
-                    L0TaskArgs params_t10;
+                    CoreTaskArgs params_t10;
                     params_t10.add_inout(v_proj_inline255);
                     params_t10.add_input(normed__rv_v5);
                     params_t10.add_input(ext_wv);
@@ -389,7 +389,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     int64_t attention_core_num_inline188 = 24;
 
                     // Group paged_attention_rope_cce: MixedKernels (AIC + AIV lanes)
-                    L0TaskArgs params_t11;
+                    CoreTaskArgs params_t11;
                     params_t11.add_inout(attn_out_tnd_inline79);
                     params_t11.add_inout(q_tnd_inline191);
                     params_t11.add_inout(ext_k_cache);
@@ -451,7 +451,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         out_tids_inline271[__init_i] = PTO2TaskId::invalid();
 
                     // Phase-fence barrier 2: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_2;
+                    CoreTaskArgs params_phase_fence_barrier_2;
                     PTO2TaskId params_phase_fence_barrier_2_deps[1];
                     uint32_t params_phase_fence_barrier_2_deps_count = 0;
                     params_phase_fence_barrier_2_deps[params_phase_fence_barrier_2_deps_count++] =
@@ -474,7 +474,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         int64_t k_op_inline266 = (k_split_out_inline66 * 1024);
 
                         // Task 12: out_proj
-                        L0TaskArgs params_t12;
+                        CoreTaskArgs params_t12;
                         params_t12.add_input(attn_out_inline282__ssa_v4);
                         params_t12.add_input(ext_wo);
                         params_t12.add_inout(attn_proj_fp32_inline220);
@@ -492,7 +492,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     }
 
                     // Spmd out_proj_spmd: out_proj_0
-                    L0TaskArgs params_t13;
+                    CoreTaskArgs params_t13;
                     params_t13.add_input(attn_out_inline282__ssa_v4);
                     params_t13.add_input(ext_wo);
                     params_t13.add_inout(attn_proj_fp32_inline220);
@@ -556,7 +556,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline165[9] = t__tmp_v48;
 
                     // Task 14: residual_rms_cast
-                    L0TaskArgs params_t14;
+                    CoreTaskArgs params_t14;
                     params_t14.add_inout(mlp_norm_in_inline71);
                     params_t14.add_inout(post_norm_partial_inline118);
                     params_t14.add_input(attn_proj_fp32_inline220);
@@ -618,7 +618,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline165__ssa_v1[9] = t__tmp_v60;
 
                     // Task 15: residual_rms_cast_0
-                    L0TaskArgs params_t15;
+                    CoreTaskArgs params_t15;
                     params_t15.add_inout(mlp_norm_in_inline71);
                     params_t15.add_inout(post_norm_partial_inline118);
                     params_t15.add_input(attn_proj_fp32_inline220);
@@ -680,7 +680,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline165__ssa_v2[9] = t__tmp_v72;
 
                     // Task 16: residual_rms_cast_1
-                    L0TaskArgs params_t16;
+                    CoreTaskArgs params_t16;
                     params_t16.add_inout(mlp_norm_in_inline71);
                     params_t16.add_inout(post_norm_partial_inline118);
                     params_t16.add_input(attn_proj_fp32_inline220);
@@ -742,7 +742,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline165__ssa_v3[9] = t__tmp_v84;
 
                     // Task 17: residual_rms_cast_2
-                    L0TaskArgs params_t17;
+                    CoreTaskArgs params_t17;
                     params_t17.add_inout(mlp_norm_in_inline71);
                     params_t17.add_inout(post_norm_partial_inline118);
                     params_t17.add_input(attn_proj_fp32_inline220);
@@ -804,7 +804,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline165__ssa_v4[9] = t__tmp_v96;
 
                     // Task 18: residual_rms_cast_3
-                    L0TaskArgs params_t18;
+                    CoreTaskArgs params_t18;
                     params_t18.add_inout(mlp_norm_in_inline71);
                     params_t18.add_inout(post_norm_partial_inline118);
                     params_t18.add_input(attn_proj_fp32_inline220);
@@ -841,7 +841,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     cast_tids_inline88[4] = cast_tid_k_inline76__ssa_v4;
 
                     // Task 19: post_rms_reduce
-                    L0TaskArgs params_t19;
+                    CoreTaskArgs params_t19;
                     params_t19.add_input(attn_proj_fp32_inline220);
                     params_t19.add_input(cur__rv_v7);
                     params_t19.add_inout(inv_rms_tile_inline126);
@@ -958,7 +958,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline236[0] = t__tmp_v105;
 
                     // Phase-fence barrier 3: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_3;
+                    CoreTaskArgs params_phase_fence_barrier_3;
                     PTO2TaskId params_phase_fence_barrier_3_deps[1];
                     uint32_t params_phase_fence_barrier_3_deps_count = 0;
                     if (_submit_deps_buf_inline236[0].is_valid())
@@ -981,7 +981,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline225[0] = t__tmp_v107;
 
                     // Phase-fence barrier 4: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_4;
+                    CoreTaskArgs params_phase_fence_barrier_4;
                     PTO2TaskId params_phase_fence_barrier_4_deps[1];
                     uint32_t params_phase_fence_barrier_4_deps_count = 0;
                     if (_submit_deps_buf_inline225[0].is_valid())
@@ -1004,7 +1004,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline237[0] = t__tmp_v109;
 
                     // Spmd gate_proj_spmd: gate_proj
-                    L0TaskArgs params_t20;
+                    CoreTaskArgs params_t20;
                     params_t20.add_input(mlp_norm_in_inline71);
                     params_t20.add_input(ext_w_gate);
                     params_t20.add_inout(gate_acc_all_inline203);
@@ -1031,7 +1031,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline260[0] = t__tmp_v110;
 
                     // Spmd up_proj_spmd: up_proj
-                    L0TaskArgs params_t21;
+                    CoreTaskArgs params_t21;
                     params_t21.add_input(mlp_norm_in_inline71);
                     params_t21.add_input(ext_w_up);
                     params_t21.add_inout(up_acc_all_inline303);
@@ -1059,7 +1059,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline236__ssa_v1[0] = t__tmp_v111;
 
                     // Phase-fence barrier 5: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_5;
+                    CoreTaskArgs params_phase_fence_barrier_5;
                     PTO2TaskId params_phase_fence_barrier_5_deps[1];
                     uint32_t params_phase_fence_barrier_5_deps_count = 0;
                     if (_submit_deps_buf_inline236__ssa_v1[0].is_valid())
@@ -1082,7 +1082,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline225__ssa_v1[0] = t__tmp_v113;
 
                     // Phase-fence barrier 6: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_6;
+                    CoreTaskArgs params_phase_fence_barrier_6;
                     PTO2TaskId params_phase_fence_barrier_6_deps[1];
                     uint32_t params_phase_fence_barrier_6_deps_count = 0;
                     if (_submit_deps_buf_inline225__ssa_v1[0].is_valid())
@@ -1105,7 +1105,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline237__ssa_v1[0] = t__tmp_v115;
 
                     // Spmd gate_proj_spmd_0: gate_proj_0
-                    L0TaskArgs params_t22;
+                    CoreTaskArgs params_t22;
                     params_t22.add_input(mlp_norm_in_inline71);
                     params_t22.add_input(ext_w_gate);
                     params_t22.add_inout(gate_acc_all_inline203);
@@ -1132,7 +1132,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline260__ssa_v1[0] = t__tmp_v116;
 
                     // Spmd up_proj_spmd_0: up_proj_0
-                    L0TaskArgs params_t23;
+                    CoreTaskArgs params_t23;
                     params_t23.add_input(mlp_norm_in_inline71);
                     params_t23.add_input(ext_w_up);
                     params_t23.add_inout(up_acc_all_inline303);
@@ -1160,7 +1160,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline236__ssa_v2[0] = t__tmp_v117;
 
                     // Phase-fence barrier 7: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_7;
+                    CoreTaskArgs params_phase_fence_barrier_7;
                     PTO2TaskId params_phase_fence_barrier_7_deps[1];
                     uint32_t params_phase_fence_barrier_7_deps_count = 0;
                     if (_submit_deps_buf_inline236__ssa_v2[0].is_valid())
@@ -1183,7 +1183,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline225__ssa_v2[0] = t__tmp_v119;
 
                     // Phase-fence barrier 8: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_8;
+                    CoreTaskArgs params_phase_fence_barrier_8;
                     PTO2TaskId params_phase_fence_barrier_8_deps[1];
                     uint32_t params_phase_fence_barrier_8_deps_count = 0;
                     if (_submit_deps_buf_inline225__ssa_v2[0].is_valid())
@@ -1206,7 +1206,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline237__ssa_v2[0] = t__tmp_v121;
 
                     // Spmd gate_proj_spmd_1: gate_proj_1
-                    L0TaskArgs params_t24;
+                    CoreTaskArgs params_t24;
                     params_t24.add_input(mlp_norm_in_inline71);
                     params_t24.add_input(ext_w_gate);
                     params_t24.add_inout(gate_acc_all_inline203);
@@ -1233,7 +1233,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline260__ssa_v2[0] = t__tmp_v122;
 
                     // Spmd up_proj_spmd_1: up_proj_1
-                    L0TaskArgs params_t25;
+                    CoreTaskArgs params_t25;
                     params_t25.add_input(mlp_norm_in_inline71);
                     params_t25.add_input(ext_w_up);
                     params_t25.add_inout(up_acc_all_inline303);
@@ -1261,7 +1261,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline236__ssa_v3[0] = t__tmp_v123;
 
                     // Phase-fence barrier 9: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_9;
+                    CoreTaskArgs params_phase_fence_barrier_9;
                     PTO2TaskId params_phase_fence_barrier_9_deps[1];
                     uint32_t params_phase_fence_barrier_9_deps_count = 0;
                     if (_submit_deps_buf_inline236__ssa_v3[0].is_valid())
@@ -1284,7 +1284,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline225__ssa_v3[0] = t__tmp_v125;
 
                     // Phase-fence barrier 10: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_10;
+                    CoreTaskArgs params_phase_fence_barrier_10;
                     PTO2TaskId params_phase_fence_barrier_10_deps[1];
                     uint32_t params_phase_fence_barrier_10_deps_count = 0;
                     if (_submit_deps_buf_inline225__ssa_v3[0].is_valid())
@@ -1307,7 +1307,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline237__ssa_v3[0] = t__tmp_v127;
 
                     // Spmd gate_proj_spmd_2: gate_proj_2
-                    L0TaskArgs params_t26;
+                    CoreTaskArgs params_t26;
                     params_t26.add_input(mlp_norm_in_inline71);
                     params_t26.add_input(ext_w_gate);
                     params_t26.add_inout(gate_acc_all_inline203);
@@ -1334,7 +1334,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline260__ssa_v3[0] = t__tmp_v128;
 
                     // Spmd up_proj_spmd_2: up_proj_2
-                    L0TaskArgs params_t27;
+                    CoreTaskArgs params_t27;
                     params_t27.add_input(mlp_norm_in_inline71);
                     params_t27.add_input(ext_w_up);
                     params_t27.add_inout(up_acc_all_inline303);
@@ -1362,7 +1362,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline236__ssa_v4[0] = t__tmp_v129;
 
                     // Phase-fence barrier 11: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_11;
+                    CoreTaskArgs params_phase_fence_barrier_11;
                     PTO2TaskId params_phase_fence_barrier_11_deps[1];
                     uint32_t params_phase_fence_barrier_11_deps_count = 0;
                     if (_submit_deps_buf_inline236__ssa_v4[0].is_valid())
@@ -1385,7 +1385,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline225__ssa_v4[0] = t__tmp_v131;
 
                     // Phase-fence barrier 12: dependency-only dummy task
-                    L0TaskArgs params_phase_fence_barrier_12;
+                    CoreTaskArgs params_phase_fence_barrier_12;
                     PTO2TaskId params_phase_fence_barrier_12_deps[1];
                     uint32_t params_phase_fence_barrier_12_deps_count = 0;
                     if (_submit_deps_buf_inline225__ssa_v4[0].is_valid())
@@ -1408,7 +1408,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline237__ssa_v4[0] = t__tmp_v133;
 
                     // Spmd gate_proj_spmd_3: gate_proj_3
-                    L0TaskArgs params_t28;
+                    CoreTaskArgs params_t28;
                     params_t28.add_input(mlp_norm_in_inline71);
                     params_t28.add_input(ext_w_gate);
                     params_t28.add_inout(gate_acc_all_inline203);
@@ -1435,7 +1435,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     _submit_deps_buf_inline260__ssa_v4[0] = t__tmp_v134;
 
                     // Spmd up_proj_spmd_3: up_proj_3
-                    L0TaskArgs params_t29;
+                    CoreTaskArgs params_t29;
                     params_t29.add_input(mlp_norm_in_inline71);
                     params_t29.add_input(ext_w_up);
                     params_t29.add_inout(up_acc_all_inline303);
@@ -1466,7 +1466,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             _submit_deps_buf_inline102[0] = t__tmp_v135;
 
                             // Task 30: gate_proj_4
-                            L0TaskArgs params_t30;
+                            CoreTaskArgs params_t30;
                             params_t30.add_input(mlp_norm_in_inline71);
                             params_t30.add_input(ext_w_gate);
                             params_t30.add_inout(gate_acc_all_inline203);
@@ -1488,7 +1488,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             _submit_deps_buf_inline246[0] = t__tmp_v136;
 
                             // Task 31: up_proj_4
-                            L0TaskArgs params_t31;
+                            CoreTaskArgs params_t31;
                             params_t31.add_input(mlp_norm_in_inline71);
                             params_t31.add_input(ext_w_up);
                             params_t31.add_inout(up_acc_all_inline303);
@@ -1533,7 +1533,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         _submit_deps_buf_inline167[10] = t__tmp_v146;
 
                         // Task 32: silu
-                        L0TaskArgs params_t32;
+                        CoreTaskArgs params_t32;
                         params_t32.add_input(inv_rms_tile_inline126);
                         params_t32.add_inout(mlp_tile_inline149);
                         params_t32.add_input(gate_acc_all_inline203);
@@ -1579,7 +1579,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                             _submit_deps_buf_inline229[0] = t__tmp_v152;
 
                             // Task 33: down_proj
-                            L0TaskArgs params_t33;
+                            CoreTaskArgs params_t33;
                             params_t33.add_input(mlp_tile_inline149);
                             params_t33.add_input(ext_w_down);
                             params_t33.add_inout(down_acc_all_inline168);
@@ -1773,7 +1773,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 _submit_deps_buf_inline123[84] = t__tmp_v237;
 
                 // Spmd dcr_xgamma_spmd: dcr_xgamma
-                L0TaskArgs params_t34;
+                CoreTaskArgs params_t34;
                 params_t34.add_input(down_acc_all_inline168);
                 params_t34.add_input(post_norm_partial_inline118);
                 params_t34.add_inout(next_hidden);
@@ -1968,7 +1968,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         for (int64_t ob0 = 0; ob0 < 16; ob0 += 16) {
             PTO2_SCOPE() {
                 // Task 35: copy_out
-                L0TaskArgs params_t35;
+                CoreTaskArgs params_t35;
                 params_t35.add_output(ext_out);
                 params_t35.add_input(cur__rv_v7);
                 params_t35.add_scalar(ob0);

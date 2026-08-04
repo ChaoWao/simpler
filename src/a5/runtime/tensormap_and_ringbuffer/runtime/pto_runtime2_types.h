@@ -306,7 +306,7 @@ struct PTO2TaskPayload {
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
     void init(
-        const L0TaskArgs &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout
+        const CoreTaskArgs &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout
     ) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();

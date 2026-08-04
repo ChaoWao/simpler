@@ -52,7 +52,7 @@ static MixedKernels mix_kernels() {
 }
 
 static PTO2TaskId submit_aiv_producer(const Tensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.add_scalar(PRODUCER_SPIN_ITERS);
@@ -62,7 +62,7 @@ static PTO2TaskId submit_aiv_producer(const Tensor &out, int16_t core_num, int64
 }
 
 static void submit_mix_sync_consumer(const Tensor &out, int16_t core_num, int64_t base_cl, PTO2TaskId dep) {
-    L0TaskArgsWithDeps<4> args;
+    CoreTaskArgsWithDeps<4> args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.add_scalar(0);  // consumer does not spin

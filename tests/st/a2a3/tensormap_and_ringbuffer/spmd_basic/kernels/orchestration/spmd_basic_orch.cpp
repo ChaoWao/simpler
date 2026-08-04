@@ -46,7 +46,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     mk.aiv0_kernel_id = FUNC_SPMD_READ_AIV0;
     mk.aiv1_kernel_id = FUNC_SPMD_READ_AIV1;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(ext_output);
 
     rt_submit_task(mk, args);

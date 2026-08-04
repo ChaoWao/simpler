@@ -42,7 +42,7 @@ __attribute__((visibility("default"))) void prefetch_async_orchestration(const C
     const Tensor &in = orch_args.tensor(0).ref();
     const Tensor &out = orch_args.tensor(1).ref();
 
-    L0TaskArgs task_args;
+    CoreTaskArgs task_args;
     task_args.add_input(in);
     task_args.add_output(out);
     rt_submit_aiv_task(0, task_args);

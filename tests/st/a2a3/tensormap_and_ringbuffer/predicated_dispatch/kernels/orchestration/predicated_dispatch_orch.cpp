@@ -69,7 +69,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // gate producer: gate[0] = gate_value
     PTO2TaskId gate_tid;
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_inout(ext_gate);
         args.add_scalar(gate_value);
         gate_tid = rt_submit_aic_task(FUNC_WRITE_GATE, args).task_id();
@@ -77,7 +77,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // x producer: X[0] = 42.0
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_inout(ext_X);
         rt_submit_aic_task(FUNC_WRITE_CONST, args);
     }
@@ -86,12 +86,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // gate producer so gate[0] is written by the time this task is ready; the
     // scheduler reads gate[0] at the dispatch point and dispatches only if > 0.
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_inout(ext_X);
         PTO2TaskId deps[] = {gate_tid};
         args.set_dependencies(deps, 1);
         // predicate: gate[0] > 0  (operand op target), built level by level.
-        L0TaskPredicate pred;
+        CoreTaskPredicate pred;
         pred.operand.tensor = &ext_gate;
         pred.operand.ndims = 1;
         pred.operand.indices[0] = 0;
@@ -103,7 +103,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // consumer: Y[0] = X[0]
     {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(ext_X);
         args.add_inout(ext_Y);
         rt_submit_aic_task(FUNC_COPY_FIRST, args);

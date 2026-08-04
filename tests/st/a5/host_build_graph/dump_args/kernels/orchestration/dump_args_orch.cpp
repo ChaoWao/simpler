@@ -45,7 +45,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const Tensor &f = orch_args.tensor(2).ref();
 
     // t0: f = a + b
-    L0TaskArgs p0;
+    CoreTaskArgs p0;
     p0.add_input(a);
     p0.add_input(b);
     p0.add_output(f);
@@ -57,7 +57,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         uint64_t u64;
     } sconv;
     sconv.f32 = 1.0f;
-    L0TaskArgs p1;
+    CoreTaskArgs p1;
     p1.add_inout(f);
     p1.add_scalar(sconv.u64);
     rt_submit_aiv_task(FUNC_ADD_SCALAR_INPLACE, p1);

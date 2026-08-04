@@ -137,7 +137,7 @@ __attribute__((visibility("default"))) void worker_chip_orch_comm_orchestration(
         Tensor output = make_tensor_external(
             reinterpret_cast<void *>(static_cast<uintptr_t>(output_view.gm_addr)), shape, 1, dtype
         );
-        L0TaskArgs params;
+        CoreTaskArgs params;
         params.add_input(input);
         params.add_output(output);
         params.add_scalar(scalar);

@@ -41,7 +41,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // ringbuffer before the entry returns. No set_core_num — let the
     // runtime use the config's block_dim.
     PTO2_SCOPE() {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(src);
         args.add_input(indices);
         args.add_output(out);

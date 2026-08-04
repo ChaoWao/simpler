@@ -95,7 +95,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             Tensor A_view = ext_A.view(group_shapes, a_view_offsets);
             uint32_t b_view_offsets[1] = {static_cast<uint32_t>(ab_offset)};
             Tensor B_view = ext_B.view(group_shapes, b_view_offsets);
-            L0TaskArgs params_gemm;
+            CoreTaskArgs params_gemm;
             params_gemm.add_input(A_view);
             params_gemm.add_input(B_view);
             params_gemm.add_output(group_ci);
@@ -103,7 +103,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             TaskOutputTensors gemm_outs = rt_submit_aic_task(FUNC_GEMM_TILE, params_gemm);
             total_gemm++;
 
-            L0TaskArgs params_add;
+            CoreTaskArgs params_add;
             params_add.add_inout(C_view);
             params_add.add_input(gemm_outs.get_ref(0));
             params_add.add_input(ext_config);

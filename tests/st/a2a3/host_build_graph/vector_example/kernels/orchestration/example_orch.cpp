@@ -54,7 +54,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     } sconv;
 
     // task0: c = a + b
-    L0TaskArgs p_add;
+    CoreTaskArgs p_add;
     p_add.add_input(a);
     p_add.add_input(b);
     p_add.add_output(inter_ci);
@@ -62,7 +62,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     Tensor c = c_out.get_ref(0);
 
     // task1: d = c + 1
-    L0TaskArgs p_d;
+    CoreTaskArgs p_d;
     p_d.add_input(c);
     p_d.add_output(inter_ci);
     sconv.f32 = 1.0f;
@@ -71,7 +71,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     Tensor d = d_out.get_ref(0);
 
     // task2: e = c + 2
-    L0TaskArgs p_e;
+    CoreTaskArgs p_e;
     p_e.add_input(c);
     p_e.add_output(inter_ci);
     sconv.f32 = 2.0f;
@@ -80,7 +80,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     Tensor e = e_out.get_ref(0);
 
     // task3: f = d * e  (write into the external output tensor)
-    L0TaskArgs p_mul;
+    CoreTaskArgs p_mul;
     p_mul.add_input(d);
     p_mul.add_input(e);
     p_mul.add_output(f);

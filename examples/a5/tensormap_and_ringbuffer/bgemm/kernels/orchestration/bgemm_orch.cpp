@@ -97,7 +97,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                         Tensor B_view = ext_B.view(tile_shapes, b_view_offsets);
 
                         // P = A[m,k] @ B[k,n], then C[m,n] += P
-                        L0TaskArgs args;
+                        CoreTaskArgs args;
                         args.add_input(A_view);
                         args.add_input(B_view);
                         args.add_inout(C_view);

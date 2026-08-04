@@ -49,15 +49,16 @@ static constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_CYCLES =
 // Orchestration Ops Table (function-pointer dispatch for orchestration .so)
 // =============================================================================
 
-static TaskOutputTensors submit_task_impl(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const L0TaskArgs &args) {
+static TaskOutputTensors
+submit_task_impl(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
     return rt->orchestrator.submit_task(mixed_kernels, args);
 }
 
-static TaskOutputTensors alloc_tensors_impl(PTO2Runtime *rt, const L0TaskArgs &args) {
+static TaskOutputTensors alloc_tensors_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
     return rt->orchestrator.alloc_tensors(args);
 }
 
-static TaskOutputTensors submit_dummy_task_impl(PTO2Runtime *rt, const L0TaskArgs &args) {
+static TaskOutputTensors submit_dummy_task_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
     return rt->orchestrator.submit_dummy_task(args);
 }
 

@@ -208,7 +208,7 @@ public:
 // tensor + ndims + indices, mirroring get_tensor_data. The tensor is borrowed and
 // must outlive submit; its buffer must be allocated by then, and its producer must
 // be a dependency of the predicated task so the value is current at dispatch.
-struct L0PredicateOperand {
+struct CorePredicateOperand {
     const Tensor *tensor{nullptr};
     uint32_t ndims{0};
     uint32_t indices[MAX_TENSOR_DIMS]{};
@@ -218,8 +218,8 @@ struct L0PredicateOperand {
 // op == NONE means "no predicate — always dispatch". Submit resolves the operand
 // into the payload's DispatchPredicate (an absolute GM address). Read in-process;
 // never crosses the wire.
-struct L0TaskPredicate {
-    L0PredicateOperand operand;
+struct CoreTaskPredicate {
+    CorePredicateOperand operand;
     PredicateOp op{PredicateOp::NONE};
     int64_t target{0};
 };
@@ -263,9 +263,9 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
     // resolving fanin/fanout so consumers unlock. The predicate tensor's producer
     // MUST be a dependency of this task so the value is current when the task
     // becomes ready. Read in-process; never crosses the wire.
-    L0TaskPredicate predicate_;
-    void set_predicate(const L0TaskPredicate &pred) { predicate_ = pred; }
-    const L0TaskPredicate &predicate() const { return predicate_; }
+    CoreTaskPredicate predicate_;
+    void set_predicate(const CoreTaskPredicate &pred) { predicate_ = pred; }
+    const CoreTaskPredicate &predicate() const { return predicate_; }
 
     // Selective task-timing slot: tag this task to have the scheduler record its
     // AICPU dispatch/finish cycles into fixed slot `slot` (0..15). Untagged by
@@ -290,7 +290,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         explicit_dep_count_ = 0;
         allow_early_resolve_ = false;
         task_timing_slot_ = TASK_TIMING_SLOT_NONE;
-        predicate_ = L0TaskPredicate{};
+        predicate_ = CoreTaskPredicate{};
     }
 
     void reset() {
@@ -636,9 +636,9 @@ private:
 // Task-args layer aliases
 // =============================================================================
 //
-// L0TaskArgs — core-level container used to build and submit tasks inside
+// CoreTaskArgs — core-level container used to build and submit tasks inside
 //   orchestration (small, stack-friendly).
-using L0TaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
+using CoreTaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
 
 // ChipTaskArgs — chip-level entry-arg holding the orchestration entry's
 // already-allocated inputs (capacity matches ChipStorageTaskArgs).

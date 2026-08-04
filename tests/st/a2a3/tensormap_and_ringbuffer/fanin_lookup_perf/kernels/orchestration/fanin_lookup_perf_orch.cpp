@@ -66,7 +66,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     PTO2TaskId producer_ids[MAX_PRODUCERS];
     uint32_t slot_shape[1] = {SLOT_ELEMS};
     for (int32_t i = 0; i < producer_count; i++) {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         if (use_real_kernels) {
             uint32_t offset[1] = {static_cast<uint32_t>(i) * SLOT_ELEMS};
             Tensor producer_out = producer_outputs.view(slot_shape, offset);
@@ -78,7 +78,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     }
 
     for (int32_t c = 0; c < consumer_count; c++) {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.set_dependencies(producer_ids, static_cast<uint32_t>(producer_count));
         if (use_real_kernels) {
             uint32_t offset[1] = {static_cast<uint32_t>(c) * SLOT_ELEMS};

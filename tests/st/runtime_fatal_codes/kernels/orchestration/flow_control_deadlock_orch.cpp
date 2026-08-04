@@ -50,7 +50,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     for (int32_t d = 0; d < DEPTH; d++) {
         rt_scope_begin();
         for (int32_t t = 0; t < PER_LEVEL; t++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_output(ci);
             rt_submit_dummy_task(args);
         }

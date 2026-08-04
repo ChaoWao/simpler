@@ -166,8 +166,8 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
 [l2-timing.md](l2-timing.md) for how it relates to the swimlane's `finish_time`.
 
 * **Opt-in is per task, by tagging.** Orchestration calls
-  `L0TaskArgs::set_task_timing_slot(id)` (`id` in `0..15`; forwarded by
-  `L0TaskArgsWithDeps`). Untagged is the default sentinel
+  `CoreTaskArgs::set_task_timing_slot(id)` (`id` in `0..15`; forwarded by
+  `CoreTaskArgsWithDeps`). Untagged is the default sentinel
   (`TASK_TIMING_SLOT_NONE = -1`); an out-of-range id fails through the standard
   invalid-arg path. **No env var and no compile gate** — tagging is the only
   switch. An untagged task's only added hot-path cost is one cache-hot sentinel

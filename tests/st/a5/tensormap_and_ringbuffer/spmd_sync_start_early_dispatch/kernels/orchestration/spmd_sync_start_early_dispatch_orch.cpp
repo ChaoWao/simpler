@@ -50,7 +50,7 @@ static constexpr int64_t PRODUCER_SPIN_ITERS = 10000000;
 static constexpr int32_t PRODUCER_BLOCKS = 50;
 
 static PTO2TaskId submit_producer(const Tensor &out, int16_t core_num, int64_t base_cl, bool early_on) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.add_scalar(PRODUCER_SPIN_ITERS);
@@ -64,7 +64,7 @@ static void submit_sync_consumer(const Tensor &out, int16_t core_num, int64_t ba
     kernels.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     kernels.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
     kernels.aiv1_kernel_id = FUNC_SPMD_MIX_AIV1;
-    L0TaskArgsWithDeps<4> args;
+    CoreTaskArgsWithDeps<4> args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_core_num(core_num);

@@ -124,7 +124,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     TensorCreateInfo oi_fifo_ci(oi_fifo_shapes, 1, DataType::INT32);
 
     PTO2_SCOPE() {
-        L0TaskArgs args;
+        CoreTaskArgs args;
         args.add_input(query);
         args.add_input(key_cache);
         args.add_input(value_cache);

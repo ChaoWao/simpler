@@ -95,7 +95,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 mk.aic_kernel_id = FUNC_MATMUL;
                 mk.aiv0_kernel_id = FUNC_ADD;
                 mk.aiv1_kernel_id = FUNC_MUL;
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_A);
                 args.add_input(ext_B);
                 args.add_output(C_view);
@@ -110,7 +110,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
             // 2. AIC_ONLY: standalone matmul
             {
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_A);
                 args.add_input(ext_B);
                 args.add_output(J_view);
@@ -119,7 +119,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
             // 3. AIV_X1: standalone add
             {
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_D);
                 args.add_input(ext_E);
                 args.add_output(K_view);
@@ -131,7 +131,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 MixedKernels mk;
                 mk.aiv0_kernel_id = FUNC_ADD_STANDALONE;
                 mk.aiv1_kernel_id = FUNC_MUL_STANDALONE;
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_D);
                 args.add_input(ext_E);
                 args.add_output(L_view);
@@ -146,7 +146,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 MixedKernels mk;
                 mk.aic_kernel_id = FUNC_MATMUL;
                 mk.aiv0_kernel_id = FUNC_ADD;
-                L0TaskArgs args;
+                CoreTaskArgs args;
                 args.add_input(ext_A);
                 args.add_input(ext_B);
                 args.add_output(N_view);

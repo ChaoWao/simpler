@@ -47,7 +47,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const Tensor &tiling = orch_args.tensor(13).ref();
     const Tensor &null_tensor = orch_args.tensor(14).ref();
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_input(query);
     args.add_input(key_cache);
     args.add_input(value_cache);

@@ -100,7 +100,7 @@ bool publish_aiv_output(
     uint32_t output_shape[2] = {kTileRows, kTileCols};
     Tensor output_tensor = make_tensor_external(dst + kOutputHeaderBytes, output_shape, 2, DataType::FLOAT32);
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(first_tensor);
     params.add_input(second_tensor);
     params.add_output(output_tensor);

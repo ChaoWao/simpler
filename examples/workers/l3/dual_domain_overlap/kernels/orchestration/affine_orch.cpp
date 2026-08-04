@@ -27,7 +27,7 @@ __attribute__((visibility("default"))) void affine_orchestration(const ChipTaskA
     const Tensor &bias = orch_args.tensor(2).ref();
     const Tensor &out = orch_args.tensor(3).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(reduce_out);
     params.add_input(scale);
     params.add_input(bias);

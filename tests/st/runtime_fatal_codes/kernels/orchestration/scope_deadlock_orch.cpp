@@ -51,7 +51,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     // post-emergency_shutdown teardown state (which destabilises a5 cleanup).
     PTO2_SCOPE() {
         for (int32_t i = 0; i < 8; i++) {
-            L0TaskArgs args;
+            CoreTaskArgs args;
             args.add_output(ci);
             rt_submit_dummy_task(args);
         }

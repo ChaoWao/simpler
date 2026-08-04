@@ -41,7 +41,7 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 static void submit_spmd_aiv(int32_t kernel_id, const Tensor &out, int16_t block_num, int64_t base_cl) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
     args.launch_spec.set_core_num(block_num);

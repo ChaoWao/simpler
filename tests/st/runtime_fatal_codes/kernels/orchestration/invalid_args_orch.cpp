@@ -38,7 +38,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t shape[1] = {1};
     TensorCreateInfo ci(shape, 1, DataType::INT32);
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_output(ci);
     args.set_dependencies(nullptr, 4);  // null deps with count > 0 -> Arg records has_error
     rt_submit_dummy_task(args);

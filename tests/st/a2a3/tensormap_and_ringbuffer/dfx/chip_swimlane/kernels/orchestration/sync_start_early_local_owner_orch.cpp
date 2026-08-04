@@ -76,12 +76,12 @@ static bool wait_for_blockers_started(const Tensor &out, int32_t blocker_count) 
 }
 
 static bool wait_for_scheduler_loop_fence() {
-    L0TaskArgs first_args;
+    CoreTaskArgs first_args;
     PTO2TaskId first = rt_submit_dummy_task(first_args).task_id();
 
     uint32_t fence_shape[1] = {1};
     TensorCreateInfo fence_info(fence_shape, 1, DataType::INT32);
-    L0TaskArgs second_args;
+    CoreTaskArgs second_args;
     second_args.add_output(fence_info);
     PTO2TaskId deps[1] = {first};
     second_args.set_dependencies(deps, 1);
@@ -97,7 +97,7 @@ static bool wait_for_scheduler_loop_fence() {
 }
 
 static PTO2TaskId submit_producer(const Tensor &out) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(0);  // base cache line
     args.add_scalar(PRODUCER_SPIN_ITERS);
@@ -107,7 +107,7 @@ static PTO2TaskId submit_producer(const Tensor &out) {
 }
 
 static PTO2TaskId submit_aiv_blocker(const Tensor &out, int32_t blocker_count) {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(BLOCKER_STATUS_BASE_CL);
     args.add_scalar(blocker_count);
@@ -117,7 +117,7 @@ static PTO2TaskId submit_aiv_blocker(const Tensor &out, int32_t blocker_count) {
 }
 
 static void submit_consumer(const Tensor &out, PTO2TaskId producer, int16_t consumer_blocks) {
-    L0TaskArgsWithDeps<1> args;
+    CoreTaskArgsWithDeps<1> args;
     args.add_inout(out);
     args.add_scalar(PRODUCER_BLOCKS);  // base cache line
     args.launch_spec.set_block_num(consumer_blocks);

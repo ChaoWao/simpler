@@ -43,7 +43,7 @@ __attribute__((visibility("default"))) void allreduce_twophase_orchestration(con
     const Tensor &output = orch_args.tensor(1).ref();
     const Tensor &scratch = orch_args.tensor(2).ref();
 
-    L0TaskArgs params;
+    CoreTaskArgs params;
     params.add_input(input);
     params.add_output(output);
     params.add_inout(scratch);

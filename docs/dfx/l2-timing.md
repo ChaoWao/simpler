@@ -131,7 +131,7 @@ instead (see Related docs).
 
 When you only need the dispatch→finish window of a specific task (or the
 interval between two tasks) and not a full timeline, tag the task with
-`L0TaskArgs::set_task_timing_slot(0..15)`. The Scheduler folds that task's AICPU
+`CoreTaskArgs::set_task_timing_slot(0..15)`. The Scheduler folds that task's AICPU
 dispatch/finish (same points as the swimlane's `finish_time`) into one of 16
 fixed slots and the host emits `…device_wall.task_slot_<N>` `[STRACE]` spans —
 with the chip swimlane **off**, no collector threads, and in `SIMPLER_DFX=0`

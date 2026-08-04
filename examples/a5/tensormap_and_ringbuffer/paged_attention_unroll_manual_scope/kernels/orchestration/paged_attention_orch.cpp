@@ -179,7 +179,7 @@ __attribute__((visibility("default"))) void build_paged_attention_graph(const Ch
                 CYCLE_COUNT_LAP(prof_submit_task);
 #endif
 
-                L0TaskArgs params_qk, params_sf, params_pv, params_up;
+                CoreTaskArgs params_qk, params_sf, params_pv, params_up;
 
                 for (uint64_t bn = 0; bn < bn_this_batch; bn += N_UNROLL) {
                     uint64_t n_blocks = std::min(static_cast<uint64_t>(N_UNROLL), bn_this_batch - bn);
