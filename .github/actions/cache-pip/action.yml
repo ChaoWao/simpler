@@ -1,0 +1,13 @@
+name: Cache pip packages
+description: Restore and save the per-runner pip cache.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache pip packages
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-

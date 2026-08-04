@@ -1,12 +1,12 @@
 name: CI Self CPU
 run-name: CI Self CPU / PR ${{ inputs.pr_number || inputs.ref }}
 
-# Emergency lane: run T1 (no-hardware Linux) on the repo-level self-hosted cpu
-# runner plus T3 (NPU) on the a2a3/a5 runners, when GitHub-hosted runners are
-# congested. Triggered manually (workflow_dispatch) or by the /run-cpu button
-# (ci-self-cpu-button.yml via workflow_call). T2 (macOS) is intentionally absent.
-# Jobs gate on a lane-local detect-changes (same NON_CODE vocabulary as ci.yml)
-# so only the diff-affected jobs run; keep the two detect-changes in sync.
+# Emergency lane: T1 no-hardware Linux runs on [self-hosted, cpu], while T3
+# NPU jobs run on the a2a3/a5 pools. The lane stays callable from /run-cpu via
+# workflow_call and from manual workflow_dispatch. T2 (macOS) is intentionally
+# absent. Job bodies live in reusable workflows shared with ci.yml, and only the
+# runner/setup inputs differ here; gate outputs come from the canonical reusable
+# detect-changes workflow, executed on [self-hosted, cpu] in this lane.
 #
 # Provisioning contract for the cpu runner (out-of-repo, dnf): every cpu agent
 # needs the same set — cmake ninja-build gcc-c++ clang-tools-extra graphviz
@@ -60,555 +60,119 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------- Change detection: same NON_CODE vocabulary as ci.yml ----------
   detect-changes:
-    runs-on: [self-hosted, cpu]
-    outputs:
-      a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
-      a5_changed: ${{ steps.check.outputs.a5_changed }}
-      non_code_only: ${{ steps.check.outputs.non_code_only }}
-      st_affected: ${{ steps.check.outputs.st_affected }}
-      ut_affected: ${{ steps.check.outputs.ut_affected }}
-      examples_only: ${{ steps.check.outputs.examples_only }}
-      tests_only: ${{ steps.check.outputs.tests_only }}
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-          fetch-depth: 0
-      - name: Check file changes
-        id: check
-        run: |
-          BASE=$(git merge-base origin/main HEAD)
-          if ! FILES=$(git diff --name-only "$BASE"...HEAD); then
-            echo "git diff failed (unresolved base/head SHA?); treating as unattributable"
-            FILES=""
-          fi
+    uses: ./.github/workflows/_detect-changes.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      base_repository: ${{ github.repository }}
+      base_ref: main
+      runs_on: '["self-hosted","cpu"]'
 
-          # Fail open, in ONE place: no usable file list means every flag runs.
-          if [ -z "$FILES" ]; then
-            echo "No usable file list: cannot attribute changes, running everything"
-            echo "non_code_only=false" >> "$GITHUB_OUTPUT"
-            echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
-            echo "a5_changed=true" >> "$GITHUB_OUTPUT"
-            echo "st_affected=true" >> "$GITHUB_OUTPUT"
-            echo "ut_affected=true" >> "$GITHUB_OUTPUT"
-            echo "examples_only=false" >> "$GITHUB_OUTPUT"
-            echo "tests_only=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          NON_CODE='^(docs/|\.docs/|\.claude/|mkdocs\.yml$|\.github/workflows/docs\.yml$|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
-
-          CODE=$(echo "$FILES" | grep -vE "$NON_CODE" || true)
-          if [ -z "$CODE" ]; then
-            echo "non_code_only=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "non_code_only=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          A5_ONLY='^(src/a5/|examples/a5/|tests/(st|ut/cpp)/a5/)'
-          A2A3_REMAINING=$(echo "$FILES" | grep -vE "$A5_ONLY" | grep -vE "$NON_CODE" || true)
-          if [ -n "$A2A3_REMAINING" ]; then
-            echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "a2a3_changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          A2A3_ONLY='^(src/a2a3/|examples/a2a3/|tests/(st|ut/cpp)/a2a3/)'
-          A5_REMAINING=$(echo "$FILES" | grep -vE "$A2A3_ONLY" | grep -vE "$NON_CODE" || true)
-          if [ -n "$A5_REMAINING" ]; then
-            echo "a5_changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "a5_changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          ST_ONLY='^(tests/st/|examples/)'
-          UT_ONLY='^tests/ut/'
-
-          ST_REMAINING=$(echo "$FILES" | grep -vE "$UT_ONLY" | grep -vE "$NON_CODE" || true)
-          if [ -n "$ST_REMAINING" ]; then
-            echo "st_affected=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "st_affected=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          UT_REMAINING=$(echo "$FILES" | grep -vE "$ST_ONLY" | grep -vE "$NON_CODE" || true)
-          if [ -n "$UT_REMAINING" ]; then
-            echo "ut_affected=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ut_affected=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # Corpus axis, mirroring ci.yml: a diff confined to examples/ or to
-          # tests/ cannot reach the product jobs, whose payload files live in
-          # those partitions but are exercised by the scene-test job instead.
-          EXAMPLES_ONLY='^examples/'
-          NON_EXAMPLE=$(echo "$FILES" | grep -vE "$EXAMPLES_ONLY" | grep -vE "$NON_CODE" || true)
-          if [ -n "$NON_EXAMPLE" ]; then
-            echo "examples_only=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "examples_only=true" >> "$GITHUB_OUTPUT"
-          fi
-
-          TESTS_ONLY='^(tests/)'
-          NON_TEST=$(echo "$FILES" | grep -vE "$TESTS_ONLY" | grep -vE "$NON_CODE" || true)
-          if [ -n "$NON_TEST" ]; then
-            echo "tests_only=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "tests_only=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  # ---------- T1: no-hardware Linux, on the cpu runner ----------
   pre-commit:
-    runs-on: [self-hosted, cpu]
-    timeout-minutes: 30
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-          fetch-depth: 0
-      - name: Verify provisioned toolchain
-        run: |
-          command -v cmake
-          command -v ninja
-          command -v g++
-          command -v clang-tidy
-          if ! command -v g++-15 >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
-          if command -v clang-tidy-18 >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -sf "$(command -v clang-tidy-18)" "$RUNNER_TEMP/bin/clang-tidy"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
-          PATH="$RUNNER_TEMP/bin:$PATH" command -v clang-tidy
-          PATH="$RUNNER_TEMP/bin:$PATH" clang-tidy --version
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: venv + deps
-        run: |
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install .
-      - name: Build sim runtimes (per-target compile_commands.json for clang-tidy)
-        run: |
-          source .venv/bin/activate
-          python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
-      - name: Resolve base SHA (merge-base with canonical main)
-        id: base
-        run: |
-          # The checkout is the PR head of the input repository (a fork), whose
-          # main lags; pre-commit's diff must span the PR head against the
-          # canonical repo's main, so fetch it (the runner's github extraheader
-          # authenticates the fetch).
-          git fetch --no-tags https://github.com/${{ github.repository }}.git main
-          echo "base_sha=$(git merge-base FETCH_HEAD HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Run pre-commit
-        uses: pre-commit/action@v3.0.0
-        with:
-          extra_args: --from-ref ${{ steps.base.outputs.base_sha }} --to-ref ${{ inputs.ref || github.sha }}
+    uses: ./.github/workflows/_pre-commit.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      base_repository: ${{ github.repository }}
+      runs_on: '["self-hosted","cpu"]'
+      setup_variant: self-cpu
 
   ut:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    runs-on: [self-hosted, cpu]
-    timeout-minutes: 20
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-          fetch-depth: 0
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: venv + deps
-        run: |
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install '.[test]'
-      - name: Run Python unit tests
-        run: |
-          source .venv/bin/activate
-          python -m pytest tests/ut -m "not requires_hardware" -v
-      - name: Build and run C++ unit tests
-        run: |
-          cmake -B tests/ut/cpp/build -S tests/ut/cpp
-          cmake --build tests/ut/cpp/build
-          ctest --test-dir tests/ut/cpp/build -LE requires_hardware --output-on-failure
+    uses: ./.github/workflows/_ut-no-hardware.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      runs_on: '["self-hosted","cpu"]'
+      setup_variant: self-cpu
 
   packaging:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.examples_only != 'true' && needs.detect-changes.outputs.tests_only != 'true'
-    runs-on: [self-hosted, cpu]
-    timeout-minutes: 60
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      # verify_packaging.sh requires an activated venv, created from the
-      # runner's python3.
-      - name: Install build + runtime deps in venv
-        run: |
-          python3 -m venv .venv
-          . .venv/bin/activate
-          pip install --upgrade pip
-          pip install scikit-build-core nanobind cmake pytest
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Run packaging matrix (5 modes x 4 entry points, fully isolated)
-        run: |
-          . .venv/bin/activate
-          bash tools/verify_packaging.sh
+    uses: ./.github/workflows/_packaging.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      runs_on: '["self-hosted","cpu"]'
+      setup_variant: self-cpu
 
   profiling-flags-smoke:
     needs: [detect-changes]
     if: (needs.detect-changes.outputs.a2a3_changed == 'true' || needs.detect-changes.outputs.a5_changed == 'true') && needs.detect-changes.outputs.examples_only != 'true' && needs.detect-changes.outputs.tests_only != 'true'
-    runs-on: [self-hosted, cpu]
-    timeout-minutes: 30
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: venv + editable install
-        run: |
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e '.[test]'
-      - name: Run all profiling flag combos x 2 arches
-        run: |
-          source .venv/bin/activate
-          COMBO_NAMES=(dfx-off orch orch-tensormap sched orch-sched all-on)
-          COMBO_DEFS=(
-            "-DSIMPLER_DFX=0"
-            "-DSIMPLER_ORCH_PROFILING=1"
-            "-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_TENSORMAP_PROFILING=1"
-            "-DSIMPLER_SCHED_PROFILING=1"
-            "-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_SCHED_PROFILING=1"
-            "-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_SCHED_PROFILING=1 -DSIMPLER_TENSORMAP_PROFILING=1"
-          )
-          ARCHES=(a2a3sim a5sim)
-          FAIL=()
-          for ARCH in "${ARCHES[@]}"; do
-            ARCH_DIR=${ARCH%sim}
-            for i in "${!COMBO_NAMES[@]}"; do
-              NAME=${COMBO_NAMES[$i]}
-              DEFS=${COMBO_DEFS[$i]}
-              echo "::group::$ARCH / $NAME — CXX defines: $DEFS"
-              if ! CXX="g++ $DEFS" python simpler_setup/build_runtimes.py --platforms "$ARCH"; then
-                echo "::error::Build failed: $ARCH / $NAME"; FAIL+=("$ARCH/$NAME (build)")
-                echo "::endgroup::"; continue
-              fi
-              if ! python -m pytest \
-                   "examples/${ARCH_DIR}/tensormap_and_ringbuffer/vector_example/test_vector_example.py" \
-                   --platform "$ARCH" --device 0-1 -p no:xdist --pto-session-timeout 600; then
-                echo "::error::Smoke failed: $ARCH / $NAME"; FAIL+=("$ARCH/$NAME (pytest)")
-              fi
-              echo "::endgroup::"
-            done
-          done
-          if [ ${#FAIL[@]} -gt 0 ]; then
-            printf 'FAILED: %s\n' "${FAIL[@]}"; exit 1
-          fi
+    uses: ./.github/workflows/_profiling-flags-smoke.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      runs_on: '["self-hosted","cpu"]'
+      setup_variant: self-cpu
 
   st-sim-a2a3:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    runs-on: [self-hosted, cpu]
-    timeout-minutes: 30
-    env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Verify provisioned toolchain
-        run: |
-          command -v ninja
-          command -v g++
-          command -v dot
-          if ! command -v g++-15 >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: venv + deps
-        run: |
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install '.[test]'
-      - name: Run pytest scene tests (a2a3sim)
-        run: |
-          source .venv/bin/activate
-          python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
-            --pto-session-timeout 600 --require-pto-isa
-      # DFX per-feature smokes (dep_gen / l2_swimlane / pmu / args_dump) mirror
-      # ci.yml's st-sim-a2a3; append here if emergency coverage needs them.
+    uses: ./.github/workflows/_st-sim.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      runs_on: '["self-hosted","cpu"]'
+      setup_variant: self-cpu
+      platform: a2a3sim
+      include_dfx_smokes: false
 
   st-sim-a5:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    runs-on: [self-hosted, cpu]
-    timeout-minutes: 30
-    env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Verify provisioned toolchain
-        run: |
-          command -v ninja
-          command -v g++
-          command -v dot
-          if ! command -v g++-15 >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
-      - name: Cache pip packages
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/*.py') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    uses: ./.github/workflows/_st-sim.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      runs_on: '["self-hosted","cpu"]'
+      setup_variant: self-cpu
+      platform: a5sim
+      include_dfx_smokes: false
 
-      - name: venv + deps
-        run: |
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install '.[test]'
-      - name: Run pytest scene tests (a5sim)
-        run: |
-          source .venv/bin/activate
-          python -m pytest examples tests/st --platform a5sim --device 0-15 -v \
-            --pto-session-timeout 600 --require-pto-isa
-
-  # ---------- T3: NPU, on the a2a3/a5 runners (never github-hosted) ----------
   ut-a2a3:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    runs-on: [self-hosted, a2a3]
-    timeout-minutes: 30
-    env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
-      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
-      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Set up environment
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          python3 -m venv --system-site-packages .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install '.[test]'
-      - name: Run Python hardware unit tests
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests -m requires_hardware --platform a2a3 --device ${DEVICE_RANGE} -v
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests -m requires_hardware --platform a2a3 --device \$TASK_DEVICE -v"
-          fi
-      - name: Build and run C++ hardware unit tests
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          python -c "from simpler_setup.runtime_builder import RuntimeBuilder; RuntimeBuilder('a2a3').get_binaries('tensormap_and_ringbuffer', build=True)"
-          cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
-          cmake --build tests/ut/cpp/build
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python3 -c "
-          import json, os
-          p = os.environ['DEVICE_RANGE'].split('-'); s, e = p[0], p[-1]
-          npus = [{'id': str(i), 'slots': 1} for i in range(int(s), int(e)+1)]
-          json.dump({'version': {'major': 1, 'minor': 0}, 'local': [{'npus': npus}]},
-                    open('tests/ut/cpp/build/resources.json', 'w'))
-          "
-            ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python3 -c \"import json,os; ids=os.environ['TASK_DEVICE'].split(','); json.dump({'version':{'major':1,'minor':0},'local':[{'npus':[{'id':i,'slots':1} for i in ids]}]}, open('tests/ut/cpp/build/resources.json','w'))\" && ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure"
-          fi
+    uses: ./.github/workflows/_ut-npu.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      platform: a2a3
+      runs_on: '["self-hosted","a2a3"]'
+      include_cann_examples: false
 
   st-onboard-a2a3:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    runs-on: [self-hosted, a2a3]
-    timeout-minutes: 60
-    env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
-      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
-      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Set up environment
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          python3 -m venv --system-site-packages .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install '.[test]'
-      - name: Run pytest scene tests (a2a3)
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
-          fi
-      - name: SDMA pytest (a2a3, dedicated device, issue #1425)
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          SDMA_TESTS="examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
-              --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
-          fi
+    uses: ./.github/workflows/_st-npu.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      platform: a2a3
+      runs_on: '["self-hosted","a2a3"]'
+      include_dfx_smokes: false
+      a2a3_sdma_mode: legacy-paths
 
   ut-a5:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    runs-on: [self-hosted, a5]
-    timeout-minutes: 30
-    env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
-      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
-      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Set up environment
-        run: |
-          python3 -m venv --system-site-packages .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install '.[test]'
-      - name: Run Python hardware unit tests (a5)
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "python -m pytest tests -m requires_hardware --platform a5 --device ${DEVICE_RANGE} -v"
-      - name: Build and run C++ hardware unit tests (a5)
-        run: |
-          source .venv/bin/activate
-          cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
-          cmake --build tests/ut/cpp/build
-          python3 -c "
-          import json, os
-          p = os.environ['DEVICE_RANGE'].split('-'); s, e = p[0], p[-1]
-          npus = [{'id': str(i), 'slots': 1} for i in range(int(s), int(e)+1)]
-          json.dump({'version': {'major': 1, 'minor': 0}, 'local': [{'npus': npus}]},
-                    open('tests/ut/cpp/build/resources.json', 'w'))
-          "
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a5)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure"
+    uses: ./.github/workflows/_ut-npu.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      platform: a5
+      runs_on: '["self-hosted","a5"]'
+      include_cann_examples: false
 
   st-onboard-a5:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    runs-on: [self-hosted, a5]
-    timeout-minutes: 60
-    env:
-      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
-      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
-      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
-    steps:
-      - name: Checkout target PR head
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref || github.sha }}
-      - name: Set up environment
-        run: |
-          python3 -m venv --system-site-packages .venv
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install '.[test]'
-      - name: Run pytest scene tests (a5)
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"
+    uses: ./.github/workflows/_st-npu.yml
+    with:
+      repository: ${{ inputs.repository || github.repository }}
+      ref: ${{ inputs.ref || github.sha }}
+      platform: a5
+      runs_on: '["self-hosted","a5"]'
+      include_dfx_smokes: false

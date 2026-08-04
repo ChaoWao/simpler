@@ -1,0 +1,228 @@
+name: Detect Changes
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: "Repository containing the head ref to classify."
+        required: false
+        type: string
+      ref:
+        description: "Head ref or SHA to classify."
+        required: false
+        type: string
+      base_repository:
+        description: "Canonical base repository used for merge-base calculation."
+        required: false
+        type: string
+      base_ref:
+        description: "Canonical base branch to fetch when base_sha is not enough or not provided."
+        required: false
+        default: main
+        type: string
+      base_sha:
+        description: "Exact base SHA, usually github.event.pull_request.base.sha."
+        required: false
+        type: string
+      head_sha:
+        description: "Exact head SHA, usually github.event.pull_request.head.sha."
+        required: false
+        type: string
+      runs_on:
+        description: "JSON-encoded runs-on value for the detector job."
+        required: false
+        default: '["ubuntu-latest"]'
+        type: string
+    outputs:
+      a2a3_changed:
+        description: "Whether the diff can affect a2a3."
+        value: ${{ jobs.detect.outputs.a2a3_changed }}
+      a5_changed:
+        description: "Whether the diff can affect a5."
+        value: ${{ jobs.detect.outputs.a5_changed }}
+      non_code_only:
+        description: "Whether every changed file is non-code."
+        value: ${{ jobs.detect.outputs.non_code_only }}
+      st_affected:
+        description: "Whether scene tests can be affected."
+        value: ${{ jobs.detect.outputs.st_affected }}
+      ut_affected:
+        description: "Whether unit tests can be affected."
+        value: ${{ jobs.detect.outputs.ut_affected }}
+      examples_only:
+        description: "Whether every code change is under examples/."
+        value: ${{ jobs.detect.outputs.examples_only }}
+      tests_only:
+        description: "Whether every code change is under tests/."
+        value: ${{ jobs.detect.outputs.tests_only }}
+
+jobs:
+  detect:
+    name: detect-changes
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    outputs:
+      a2a3_changed: ${{ steps.check.outputs.a2a3_changed }}
+      a5_changed: ${{ steps.check.outputs.a5_changed }}
+      non_code_only: ${{ steps.check.outputs.non_code_only }}
+      st_affected: ${{ steps.check.outputs.st_affected }}
+      ut_affected: ${{ steps.check.outputs.ut_affected }}
+      examples_only: ${{ steps.check.outputs.examples_only }}
+      tests_only: ${{ steps.check.outputs.tests_only }}
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || inputs.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check file changes
+        id: check
+        env:
+          BASE_REPOSITORY: ${{ inputs.base_repository || github.repository }}
+          BASE_REF: ${{ inputs.base_ref || 'main' }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          HEAD_REV=HEAD
+          if [ -n "$HEAD_SHA" ]; then
+            if git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+              HEAD_REV="$HEAD_SHA"
+            else
+              echo "head_sha $HEAD_SHA is not present after checkout; using HEAD"
+            fi
+          fi
+
+          BASE_URL="https://github.com/${BASE_REPOSITORY}.git"
+          BASE_REMOTE="refs/remotes/base/${BASE_REF}"
+          BASE_FETCHED=false
+          if git fetch --no-tags "$BASE_URL" "+refs/heads/${BASE_REF}:${BASE_REMOTE}"; then
+            BASE_FETCHED=true
+          else
+            echo "base fetch failed for ${BASE_REPOSITORY}/${BASE_REF}; treating diff as unattributable"
+          fi
+
+          BASE=""
+          if [ -n "$BASE_SHA" ]; then
+            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              git fetch --no-tags "$BASE_URL" "$BASE_SHA" || true
+            fi
+            BASE="$BASE_SHA"
+          elif [ "$BASE_FETCHED" = "true" ]; then
+            if ! BASE=$(git merge-base "$BASE_REMOTE" "$HEAD_REV"); then
+              echo "merge-base failed for $BASE_REMOTE...$HEAD_REV; treating diff as unattributable"
+              BASE=""
+            fi
+          fi
+
+          # `run:` is `bash -e`, so a failing git diff would abort the step
+          # before the guard below and take every output with it. Let only the
+          # exit status decide, and turn a failure into an empty list so the
+          # fail-open guard handles both cases identically.
+          if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "No usable base commit: cannot attribute changes"
+            FILES=""
+          elif ! FILES=$(git diff --name-only "${BASE}...${HEAD_REV}"); then
+            echo "git diff failed (unresolved base/head SHA?); treating as unattributable"
+            FILES=""
+          fi
+
+          # Fail open, in ONE place. No usable file list means attribution is
+          # impossible, so every affected flag must say "run".
+          if [ -z "$FILES" ]; then
+            echo "No usable file list: cannot attribute changes, running everything"
+            echo "non_code_only=false" >> "$GITHUB_OUTPUT"
+            echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
+            echo "a5_changed=true" >> "$GITHUB_OUTPUT"
+            echo "st_affected=true" >> "$GITHUB_OUTPUT"
+            echo "ut_affected=true" >> "$GITHUB_OUTPUT"
+            echo "examples_only=false" >> "$GITHUB_OUTPUT"
+            echo "tests_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$FILES"
+
+          # ONE definition of "changing this cannot change what the code does".
+          # Every gate below derives from this set. CI implementation workflows
+          # are deliberately absent: a change to gates or job bodies must run
+          # everything.
+          NON_CODE='^(docs/|\.docs/|\.claude/|mkdocs\.yml$|\.github/workflows/docs\.yml$|\.gitignore$|\.pre-commit-config\.yaml$)|\.md$'
+
+          CODE=$(echo "$FILES" | grep -vE "$NON_CODE" || true)
+          if [ -z "$CODE" ]; then
+            echo "non_code_only=true" >> "$GITHUB_OUTPUT"
+            echo "No file here can change what the code does; pre-commit + docs are the whole gate"
+          else
+            echo "non_code_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Architecture axis: skip a partition only when every changed file is
+          # in the sibling partition or non-code.
+          A5_ONLY='^(src/a5/|examples/a5/|tests/(st|ut/cpp)/a5/)'
+          A2A3_REMAINING=$(echo "$FILES" | grep -vE "$A5_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$A2A3_REMAINING" ]; then
+            echo "a2a3_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Files affecting a2a3:"
+            echo "$A2A3_REMAINING"
+          else
+            echo "a2a3_changed=false" >> "$GITHUB_OUTPUT"
+            echo "All changes are a5-only or non-code; skipping a2a3"
+          fi
+
+          A2A3_ONLY='^(src/a2a3/|examples/a2a3/|tests/(st|ut/cpp)/a2a3/)'
+          A5_REMAINING=$(echo "$FILES" | grep -vE "$A2A3_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$A5_REMAINING" ]; then
+            echo "a5_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Files affecting a5:"
+            echo "$A5_REMAINING"
+          else
+            echo "a5_changed=false" >> "$GITHUB_OUTPUT"
+            echo "All changes are a2a3-only or non-code; skipping a5"
+          fi
+
+          # Test-category axis, same shape as the arch axis.
+          ST_ONLY='^(tests/st/|examples/)'
+          UT_ONLY='^tests/ut/'
+
+          ST_REMAINING=$(echo "$FILES" | grep -vE "$UT_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$ST_REMAINING" ]; then
+            echo "st_affected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "st_affected=false" >> "$GITHUB_OUTPUT"
+            echo "All changes are unit-test-only or non-code; skipping scene tests"
+          fi
+
+          UT_REMAINING=$(echo "$FILES" | grep -vE "$ST_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$UT_REMAINING" ]; then
+            echo "ut_affected=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ut_affected=false" >> "$GITHUB_OUTPUT"
+            echo "All changes are scene-test/example-only or non-code; skipping unit tests"
+          fi
+
+          # Corpus axis: product-build jobs read neither examples/ nor tests/
+          # as a corpus, so a diff confined to either partition cannot reach
+          # them and is covered by the scene-test job that reads the payload.
+          EXAMPLES_ONLY='^examples/'
+          NON_EXAMPLE=$(echo "$FILES" | grep -vE "$EXAMPLES_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$NON_EXAMPLE" ]; then
+            echo "examples_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "examples_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changes are under examples/ or non-code; skipping packaging and the profiling-flag smoke"
+          fi
+
+          TESTS_ONLY='^(tests/)'
+          NON_TEST=$(echo "$FILES" | grep -vE "$TESTS_ONLY" | grep -vE "$NON_CODE" || true)
+          if [ -n "$NON_TEST" ]; then
+            echo "tests_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changes are under tests/ or non-code; skipping packaging and the profiling-flag smoke"
+          fi

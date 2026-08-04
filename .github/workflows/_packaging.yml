@@ -1,0 +1,70 @@
+name: Packaging Matrix
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: false
+        type: string
+      ref:
+        required: false
+        type: string
+      runs_on:
+        required: true
+        type: string
+      setup_variant:
+        description: github or self-cpu.
+        required: true
+        type: string
+      python_version:
+        required: false
+        default: "3.10"
+        type: string
+
+jobs:
+  run:
+    name: packaging
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up C++ compiler (Linux)
+        if: inputs.setup_variant == 'github' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+
+      - name: Set up C++ compiler (macOS)
+        if: inputs.setup_variant == 'github' && runner.os == 'macOS'
+        run: |
+          brew install ninja cmake
+          brew install gcc@15 || brew install gcc
+
+      - name: Set up Python ${{ inputs.python_version }}
+        if: inputs.setup_variant == 'github'
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Cache pip packages
+        if: inputs.setup_variant == 'self-cpu'
+        uses: ./.github/actions/cache-pip
+
+      - name: Install build + runtime deps in venv
+        uses: ./.github/actions/setup-venv
+        with:
+          packages: "scikit-build-core nanobind cmake pytest"
+
+      - name: Run packaging matrix
+        run: |
+          . .venv/bin/activate
+          bash tools/verify_packaging.sh

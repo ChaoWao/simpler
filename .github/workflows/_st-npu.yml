@@ -1,0 +1,241 @@
+name: NPU Scene Tests
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: false
+        type: string
+      ref:
+        required: false
+        type: string
+      platform:
+        description: a2a3 or a5.
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      include_dfx_smokes:
+        required: false
+        default: false
+        type: boolean
+      a2a3_sdma_mode:
+        description: marker for main CI, legacy-paths for the CPU emergency lane.
+        required: false
+        default: marker
+        type: string
+
+jobs:
+  run:
+    name: st-onboard-${{ inputs.platform }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 60
+    env:
+      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
+      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
+      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up environment
+        uses: ./.github/actions/setup-venv
+        with:
+          packages: ".[test]"
+          install-torch: "false"
+          system-site-packages: "true"
+          source-cann: ${{ inputs.platform == 'a2a3' && 'true' || 'false' }}
+
+      - name: Warn when graphviz is missing
+        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        run: |
+          if ! command -v dot >/dev/null 2>&1; then
+            echo "::warning::graphviz 'dot' not found on PATH; deps_viewer tool smoke will skip. Install graphviz on this self-hosted runner to restore coverage."
+          fi
+
+      - name: Run pytest scene tests (a2a3)
+        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'marker'
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest examples tests/st -m "not sdma" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+          fi
+
+      - name: Run pytest scene tests (a2a3 legacy SDMA paths)
+        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'legacy-paths'
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+          fi
+
+      - name: SDMA pytest (a2a3)
+        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'marker'
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          SDMA_TESTS="examples tests/st -m sdma"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
+              --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+          fi
+
+      - name: SDMA pytest (a2a3 legacy paths)
+        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'legacy-paths'
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          SDMA_TESTS="examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
+              --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+          fi
+
+      - name: Run pytest scene tests (a5)
+        if: inputs.platform == 'a5'
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"
+
+      - name: dep_gen smoke (a2a3)
+        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-dep-gen
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-dep-gen"
+          fi
+
+      - name: dep_gen smoke (a2a3 host_build_graph)
+        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-dep-gen
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-dep-gen"
+          fi
+
+      - name: l2_swimlane smoke (a2a3)
+        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-l2-swimlane --enable-dep-gen
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-l2-swimlane --enable-dep-gen"
+          fi
+
+      - name: PMU smoke (a2a3)
+        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-pmu 2
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --enable-pmu 2"
+          fi
+
+      - name: args_dump smoke (a2a3)
+        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          if [ "$(uname -m)" = "x86_64" ]; then
+            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --dump-args
+          else
+            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
+              --require-pto-isa --dump-args"
+          fi
+
+      - name: dep_gen smoke (a5)
+        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-dep-gen"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
+
+      - name: l2_swimlane smoke (a5)
+        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/l2_swimlane/ \
+            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-l2-swimlane --enable-dep-gen"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
+
+      - name: PMU smoke (a5)
+        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-pmu 2"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
+
+      - name: args_dump smoke (a5)
+        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
+        run: |
+          source .venv/bin/activate
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --dump-args"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"

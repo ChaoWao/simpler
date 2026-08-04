@@ -1,0 +1,132 @@
+name: Pre-commit
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: Repository to checkout.
+        required: false
+        type: string
+      ref:
+        description: Ref or SHA to checkout.
+        required: false
+        type: string
+      base_repository:
+        description: Canonical base repository for self-cpu diff resolution.
+        required: false
+        type: string
+      base_sha:
+        description: Exact base SHA for GitHub-hosted PR runs.
+        required: false
+        type: string
+      head_sha:
+        description: Exact head SHA for GitHub-hosted PR runs.
+        required: false
+        type: string
+      runs_on:
+        description: JSON-encoded runs-on value.
+        required: true
+        type: string
+      setup_variant:
+        description: github or self-cpu.
+        required: true
+        type: string
+
+jobs:
+  run:
+    name: pre-commit
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install build and lint tools
+        if: inputs.setup_variant == 'github'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ clang-tidy
+
+      - name: Verify provisioned toolchain
+        if: inputs.setup_variant == 'self-cpu'
+        run: |
+          command -v cmake
+          command -v ninja
+          command -v g++
+          command -v clang-tidy
+          if ! command -v g++-15 >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/bin"
+            ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
+            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          fi
+          if command -v clang-tidy-18 >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/bin"
+            ln -sf "$(command -v clang-tidy-18)" "$RUNNER_TEMP/bin/clang-tidy"
+            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          fi
+          PATH="$RUNNER_TEMP/bin:$PATH" command -v clang-tidy
+          PATH="$RUNNER_TEMP/bin:$PATH" clang-tidy --version
+
+      - name: Set up Python 3.10
+        if: inputs.setup_variant == 'github'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip packages
+        if: inputs.setup_variant == 'self-cpu'
+        uses: ./.github/actions/cache-pip
+
+      - name: Install Python dependencies
+        if: inputs.setup_variant == 'github'
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package (for pyright C extension symbol resolution)
+        if: inputs.setup_variant == 'github'
+        run: pip install .
+
+      - name: venv + deps
+        if: inputs.setup_variant == 'self-cpu'
+        uses: ./.github/actions/setup-venv
+        with:
+          packages: "."
+
+      - name: Cache cmake build directories
+        if: inputs.setup_variant == 'github'
+        uses: actions/cache@v5
+        with:
+          path: build/cache
+          key: cmake-sim-${{ runner.os }}-${{ hashFiles('src/**/CMakeLists.txt', 'src/**/build_config.py', 'simpler_setup/runtime_compiler.py', 'simpler_setup/kernel_compiler.py', 'simpler_setup/toolchain.py') }}
+          restore-keys: |
+            cmake-sim-${{ runner.os }}-
+
+      - name: Build sim runtimes
+        run: |
+          if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
+            source .venv/bin/activate
+          fi
+          python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
+
+      - name: Resolve base SHA
+        id: base
+        if: inputs.setup_variant == 'self-cpu'
+        env:
+          BASE_REPOSITORY: ${{ inputs.base_repository || github.repository }}
+        run: |
+          git fetch --no-tags "https://github.com/${BASE_REPOSITORY}.git" main
+          echo "base_sha=$(git merge-base FETCH_HEAD HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.0
+        with:
+          extra_args: >-
+            --from-ref ${{ inputs.setup_variant == 'self-cpu' && steps.base.outputs.base_sha || inputs.base_sha }}
+            --to-ref ${{ inputs.setup_variant == 'self-cpu' && (inputs.ref || github.sha) || inputs.head_sha }}
