@@ -8,12 +8,15 @@
 # -----------------------------------------------------------------------------------------------------------
 """P0.2-c cooperative init cancellation and retryable resource cleanup journal."""
 
+import contextlib
+import os
 import threading
 import time
+import uuid
 
 import pytest
 import simpler.worker as worker_mod
-from simpler.worker import CleanupJournal, Worker, _Lifecycle, _shm_name
+from simpler.worker import CleanupJournal, Worker, _journal_child_survivors, _Lifecycle, _shm_name
 
 from ._harness import TEST_WALL_BUDGET_S, hard_timeout
 
@@ -96,7 +99,7 @@ class TestCleanupJournal:
         assert err is not None
         assert called == ["ok", "also_ok"]
         assert not j.empty
-        assert len(j._entries) == 1
+        assert len(j) == 1
 
     def test_errors_accumulated(self):
         j = CleanupJournal()
@@ -225,6 +228,46 @@ class TestClosedAbsorption:
 
 
 class TestJournalInAbortHierarchical:
+    class _FakeShm:
+        def __init__(self):
+            self.buf = bytearray(worker_mod.MAILBOX_SIZE)
+            self.close_count = 0
+            self.unlink_count = 0
+
+        def close(self):
+            self.close_count += 1
+
+        def unlink(self):
+            self.unlink_count += 1
+
+    def test_unreaped_sigkill_survivor_is_journaled_with_live_shm(self, monkeypatch):
+        """Signal delivery is not reap: abort must retain the pid/shm pair."""
+        w = Worker(level=3, num_sub_workers=0)
+        shm = self._FakeShm()
+        w._chip_pids = [12345]
+        w._chip_shms = [shm]
+        monkeypatch.setattr(os, "kill", lambda *_args: None)
+        monkeypatch.setattr(os, "killpg", lambda *_args: None)
+        monkeypatch.setattr(os, "waitpid", lambda *_args: (0, 0))
+
+        w._abort_hierarchical(deadline=time.monotonic() - 1.0)
+
+        assert not w._cleanup_journal.empty
+        assert shm.close_count == 0
+        assert shm.unlink_count == 0
+
+    def test_journal_reclaims_child_already_reaped_elsewhere(self, monkeypatch):
+        """ECHILD proves the pid is gone and permits release of its mailbox."""
+        journal = CleanupJournal()
+        shm = self._FakeShm()
+        monkeypatch.setattr(os, "waitpid", lambda *_args: (_ for _ in ()).throw(ChildProcessError()))
+        _journal_child_survivors(journal, [], [], [shm], [12345], [], [], set())
+
+        assert journal.drive() is None
+        assert journal.empty
+        assert shm.close_count == 1
+        assert shm.unlink_count == 1
+
     def test_journal_persists_after_close_failure(self):
         """A journal entry added before close() persists through a failed
         close() and is retried by a second close()."""
@@ -271,16 +314,16 @@ class TestJournalInAbortHierarchical:
 
 
 class TestJournalRetryOnClose:
-    def test_journal_driven_before_teardown(self):
-        """When the journal has entries, _teardown_ready_tree drives them
-        and they are removed on success."""
+    def test_child_journal_driven_after_shutdown_phase(self, monkeypatch):
+        """A retained child cannot fence the SHUTDOWN that lets it converge."""
         w = Worker(level=3, num_sub_workers=1)
         w.register(lambda args: None)
-        driven = []
-        w._cleanup_journal.add("child", "test", lambda: driven.append("journal"))
-        # close() invokes _teardown_ready_tree which drives the journal.
+        events = []
+        w._cleanup_journal.add("child", "test", lambda: events.append("journal"))
+        monkeypatch.setattr(w, "_broadcast_child_shutdown", lambda _shms: events.append("shutdown"))
         w.close()
-        assert driven == ["journal"], f"journal entry was not driven: {driven}"
+        assert events[-1] == "journal"
+        assert "shutdown" in events[:-1]
         assert w._cleanup_journal.empty
 
     def test_journal_retry_on_close(self):
@@ -308,6 +351,34 @@ class TestJournalRetryOnClose:
         assert w._cleanup_journal.empty
         assert attempts == [1, 1]
 
+    @pytest.mark.parametrize("startup_abort", [False, True])
+    @pytest.mark.parametrize(
+        ("method_name", "kind"),
+        [
+            ("_cleanup_worker_chip_regions", "region"),
+            ("_release_all_live_domains", "domain"),
+            ("_flush_pending_remote_frees", "remote"),
+            ("_release_all_host_buffers", "host-buffer"),
+        ],
+    )
+    def test_both_teardown_paths_retry_each_resource_class(self, monkeypatch, startup_abort, method_name, kind):
+        w = Worker(level=3, num_sub_workers=0)
+        attempts = []
+
+        def fail_then_ok():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError(f"injected {kind} cleanup failure")
+
+        monkeypatch.setattr(w, method_name, fail_then_ok)
+        with pytest.raises(RuntimeError, match=f"injected {kind}"):
+            w._teardown_worker_tree(startup_abort=startup_abort)
+        assert len(w._cleanup_journal) == 1
+
+        w._teardown_worker_tree(startup_abort=startup_abort)
+        assert w._cleanup_journal.empty
+        assert attempts == [1, 1]
+
 
 class TestShmNames:
     def test_shm_name_with_token(self):
@@ -315,6 +386,47 @@ class TestShmNames:
 
     def test_shm_name_without_token(self):
         assert _shm_name("", "sub-0") is None
+
+    def test_root_assigns_unique_tokens_to_the_whole_nested_tree(self):
+        l3a = Worker(level=3, num_sub_workers=0)
+        l3b = Worker(level=3, num_sub_workers=0)
+        l4 = Worker(level=4, num_sub_workers=0)
+        l4.add_worker(l3a)
+        l4.add_worker(l3b)
+        l5 = Worker(level=5, num_sub_workers=0)
+        l5.add_worker(l4)
+
+        l5._assign_shm_namespace()
+
+        tokens = {l5._shm_token, l4._shm_token, l3a._shm_token, l3b._shm_token}
+        assert len(tokens) == 4
+        assert l5._shm_tree_tokens == tokens
+        assert l4._shm_tree_tokens == {l4._shm_token, l3a._shm_token, l3b._shm_token}
+
+    def test_root_namespace_scan_reclaims_nested_only(self):
+        if not os.path.isdir("/dev/shm"):
+            pytest.skip("namespace scanning requires Linux /dev/shm")
+        nested = Worker(level=3, num_sub_workers=0)
+        root = Worker(level=4, num_sub_workers=0)
+        root.add_worker(nested)
+        root._assign_shm_namespace()
+        nested_name = _shm_name(nested._shm_token, "sub-99")
+        foreign_name = _shm_name(uuid.uuid4().hex, "sub-99")
+        nested_shm = worker_mod.SharedMemory(create=True, size=8, name=nested_name)
+        foreign_shm = worker_mod.SharedMemory(create=True, size=8, name=foreign_name)
+        nested_shm.close()
+        foreign_shm.close()
+        try:
+            root._unlink_shm_namespace(set())
+            with pytest.raises(FileNotFoundError):
+                worker_mod.SharedMemory(name=nested_name)
+            reopened = worker_mod.SharedMemory(name=foreign_name)
+            reopened.close()
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                nested_shm.unlink()
+            with contextlib.suppress(FileNotFoundError):
+                foreign_shm.unlink()
 
 
 class TestNewWorkerClose:

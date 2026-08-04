@@ -8,6 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for CallConfig and ChipWorker state machine."""
 
+import threading
+
 import pytest
 from _task_interface import CallConfig, RuntimeEnv, _ChipWorker  # pyright: ignore[reportMissingImports]
 
@@ -296,6 +298,50 @@ class TestChipWorkerPython:
         worker = ChipWorker()
         with pytest.raises(TypeError, match="CallableHandle returned by ChipWorker.register_callable"):
             worker.run(0, ChipStorageTaskArgs(), CallConfig())  # pyright: ignore[reportArgumentType]
+
+    def test_public_wrapper_rejects_cross_thread_finalize(self):
+        from simpler.task_interface import ChipWorker  # noqa: PLC0415  # pyright: ignore[reportAttributeAccessIssue]
+
+        class FakeImpl:
+            initialized = True
+            device_id = 0
+
+            def finalize(self):
+                raise AssertionError("foreign thread reached native finalize")
+
+        worker = ChipWorker()
+        worker._impl = FakeImpl()
+        worker._init_owner_thread = threading.current_thread()
+        result = []
+
+        def finalize_from_foreign_thread():
+            try:
+                worker.finalize()
+            except BaseException as exc:  # noqa: BLE001
+                result.append(exc)
+
+        thread = threading.Thread(target=finalize_from_foreign_thread)
+        thread.start()
+        thread.join()
+
+        assert len(result) == 1 and isinstance(result[0], RuntimeError)
+        assert "thread that called ChipWorker.init" in str(result[0])
+
+    def test_public_wrapper_rejects_finalize_during_init(self):
+        from simpler.task_interface import ChipWorker  # noqa: PLC0415  # pyright: ignore[reportAttributeAccessIssue]
+
+        class FakeImpl:
+            initialized = False
+            device_id = 0
+
+            def finalize(self):
+                raise AssertionError("finalize ran while init was in progress")
+
+        worker = ChipWorker()
+        worker._impl = FakeImpl()
+        worker._init_in_progress = True
+        with pytest.raises(RuntimeError, match=r"while ChipWorker\.init\(\) is in progress"):
+            worker.finalize()
 
 
 # ============================================================================
