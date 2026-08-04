@@ -21,7 +21,7 @@
 namespace {
 
 void submit_zero_block_task() {
-    L0TaskArgs args;
+    CoreTaskArgs args;
     args.launch_spec.set_block_num(0);
     rt_submit_aiv_task(FUNC_NOOP_AIV0, args);
 }
@@ -32,14 +32,14 @@ void submit_overflowing_mix_task() {
     kernels.aiv0_kernel_id = FUNC_NOOP_AIV0;
     kernels.aiv1_kernel_id = FUNC_NOOP_AIV1;
 
-    L0TaskArgs args;
+    CoreTaskArgs args;
     constexpr int16_t kOverflowingBlockCount = std::numeric_limits<int16_t>::max() / 3 + 1;
     args.launch_spec.set_block_num(kOverflowingBlockCount);
     rt_submit_task(kernels, args);
 }
 
-Tensor tensor_with_unbound_owner(const Tensor &external) {
-    Tensor forged = external;
+ChipTensor tensor_with_unbound_owner(const ChipTensor &external) {
+    ChipTensor forged = external;
     forged.owner_task_id = PTO2TaskId::make(0, 17);
     return forged;
 }
@@ -48,13 +48,14 @@ Tensor tensor_with_unbound_owner(const Tensor &external) {
 
 extern "C" {
 
-__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 2};
 }
 
-__attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
-    const Tensor &external = orch_args.tensor(0).ref();
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const ChipTensor &external = orch_args.tensor(0).ref();
     uint64_t case_id = orch_args.scalar(0);
     uint32_t index[1] = {0};
 
