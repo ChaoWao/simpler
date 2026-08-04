@@ -148,6 +148,14 @@ class _NamedOnboardRegionExport:
 
 
 class _FakeChipWorkerForRegionCreate:
+    """Collaborator double for the in-process L3-L2 region-create handlers.
+
+    Distinct from ``_harness.FakeChipWorker``, which stands in for the class the
+    forked chip child instantiates: this one is never bound as
+    ``worker.ChipWorker``, so it implements only the device-memory surface a
+    region create touches.
+    """
+
     device_id = 2
 
     def __init__(self) -> None:

@@ -30,42 +30,27 @@ instead of hanging CI.
 """
 
 import os
-import signal
 import struct
 import threading
 import time
-from contextlib import contextmanager
 from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 from simpler.task_interface import CallConfig, TaskArgs
-from simpler.worker import RunHandle, Worker
+from simpler.worker import RemoteCallable, RemoteWorkerSpec, RunHandle, Worker
 
-# Hard wall budget for a single failure scenario — comfortably above the
-# injected startup_timeout_s values below, well under any real hang.
-_TEST_WALL_BUDGET_S = 30.0
+from ._harness import (
+    CHIP_INIT_FAILURE,
+    TEST_WALL_BUDGET_S,
+    chip_callable,
+    fake_chip_l3,
+    hard_timeout,
+    install_fake_chip,
+    requires_sim_binaries,
+)
 
-
-@contextmanager
-def _hard_timeout(seconds: float, msg: str = "startup did not return within the hard test budget"):
-    """Abort the body with TimeoutError if it runs longer than ``seconds``.
-
-    A backstop against a regression that reintroduces an unbounded startup
-    spin: instead of hanging CI, the test fails with TimeoutError. Uses SIGALRM
-    (pytest runs on the main thread), which interrupts the barrier's
-    ``time.sleep`` poll.
-    """
-
-    def _handler(_signum, _frame):
-        raise TimeoutError(msg)
-
-    old = signal.signal(signal.SIGALRM, _handler)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
+_TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
+_hard_timeout = hard_timeout
 
 
 def _run_catch(fn):
@@ -686,22 +671,6 @@ class TestApiLinearizationDuringInit:
             it.join(10.0)
 
 
-class _FakeChipOk:
-    """Stand-in for a ChipWorker whose init succeeds — no NPU touched."""
-
-    def init(self, *_a, **_k):
-        pass
-
-    def _register_callable_at_slot(self, *_a, **_k):  # pragma: no cover
-        pass
-
-    def _run_slot(self, *_a, **_k):
-        pass
-
-    def finalize(self):
-        pass
-
-
 # Module-level (picklable-by-reference) probe for the callable-__del__-reenters-
 # close regression: the callable must not hold a Worker ref (register pickles it),
 # so it reaches the worker via this module global at __del__ time only.
@@ -734,8 +703,6 @@ class TestLevel2Lifecycle:
     """
 
     def _make_l2(self, monkeypatch):
-        import simpler.worker as worker_mod  # noqa: PLC0415
-
         import simpler_setup.runtime_builder as rb_mod  # noqa: PLC0415
 
         class _FakeBuilder:
@@ -747,7 +714,7 @@ class TestLevel2Lifecycle:
 
         # Mock the device/runtime layer so this stays device-free (no sim
         # binaries required) — the regression is purely the lifecycle state.
-        monkeypatch.setattr(worker_mod, "ChipWorker", _FakeChipOk)
+        install_fake_chip(monkeypatch)
         monkeypatch.setattr(rb_mod, "RuntimeBuilder", _FakeBuilder)
         return Worker(level=2, device_id=0, platform="a2a3sim", runtime="tensormap_and_ringbuffer")
 
@@ -1426,35 +1393,7 @@ class TestLevel2Lifecycle:
             t1.join(5.0)
 
 
-class _FakeChipRaises:
-    """Stand-in for ChipWorker whose init raises — no NPU touched."""
-
-    def init(self, *_a, **_k):
-        raise RuntimeError("injected chip init failure")
-
-    def finalize(self):  # pragma: no cover - never reached (init raises)
-        pass
-
-
-class _FakeChipHangs:
-    def init(self, *_a, **_k):
-        time.sleep(3600)
-
-    def finalize(self):  # pragma: no cover
-        pass
-
-
-def _sim_binaries_available() -> bool:
-    try:
-        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
-
-        RuntimeBuilder("a2a3sim").get_binaries("tensormap_and_ringbuffer")
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-@pytest.mark.skipif(not _sim_binaries_available(), reason="a2a3sim runtime binaries not built")
+@requires_sim_binaries
 class TestChipStartupFailure:
     """Chip (L2) startup failure — device-free via a faked ChipWorker on a2a3sim.
 
@@ -1466,41 +1405,18 @@ class TestChipStartupFailure:
     the former ``while ... != INIT_DONE`` was on this chip path).
     """
 
-    def _make_l3(self, timeout_s):
-        return Worker(
-            level=3,
-            device_ids=[0],
-            platform="a2a3sim",
-            runtime="tensormap_and_ringbuffer",
-            num_sub_workers=0,
-            startup_timeout_s=timeout_s,
-        )
-
     def test_chip_init_failure_raises_bounded(self, monkeypatch):
-        import simpler.worker as worker_mod  # noqa: PLC0415
-
-        monkeypatch.setattr(worker_mod, "ChipWorker", _FakeChipRaises)
-        l3 = self._make_l3(timeout_s=10.0)  # chip-only; the chip forks from device_ids
-        try:
-            with _hard_timeout(_TEST_WALL_BUDGET_S):
-                with pytest.raises(RuntimeError, match="injected chip init failure"):
-                    l3.init()
-        finally:
-            l3.close()
+        # chip-only L3; the chip forks from device_ids
+        with fake_chip_l3(monkeypatch, script="raises", init=False, startup_timeout_s=10.0) as l3:
+            with pytest.raises(RuntimeError, match=CHIP_INIT_FAILURE):
+                l3.init()
 
     def test_chip_init_hang_trips_deadline(self, monkeypatch):
-        import simpler.worker as worker_mod  # noqa: PLC0415
-
-        monkeypatch.setattr(worker_mod, "ChipWorker", _FakeChipHangs)
-        l3 = self._make_l3(timeout_s=1.5)  # chip-only; the chip forks from device_ids
         start = time.monotonic()
-        try:
-            with _hard_timeout(_TEST_WALL_BUDGET_S):
-                with pytest.raises(RuntimeError, match="deadline"):
-                    l3.init()
+        with fake_chip_l3(monkeypatch, script="hangs", init=False, startup_timeout_s=1.5) as l3:
+            with pytest.raises(RuntimeError, match="deadline"):
+                l3.init()
             assert 1.5 <= time.monotonic() - start < _TEST_WALL_BUDGET_S
-        finally:
-            l3.close()
 
 
 class TestEligibleTargetPrecheck:
@@ -1559,6 +1475,87 @@ class TestEligibleTargetPrecheck:
         with _hard_timeout(_TEST_WALL_BUDGET_S):
             w.init()
             assert w._initialized is True
+            w.close()
+
+    @requires_sim_binaries
+    def test_chip_backed_l3_with_chip_callable_inits(self, monkeypatch):
+        # LOCAL_CHIP positive: the chip child resolves the ChipCallable and
+        # prepares it before publishing INIT_READY, so the tree comes up READY.
+        with fake_chip_l3(monkeypatch, init=False) as w:
+            w.register(chip_callable())
+            w.init()
+            assert w._initialized is True
+
+    def test_chipless_l3_with_chip_callable_rejected_at_init(self):
+        # LOCAL_CHIP negative: a ChipCallable is installed only into chip child
+        # loops, so a sub-backed but chipless L3 has no resolver for it.
+        w = Worker(level=3, num_sub_workers=1)
+        w.register(chip_callable())
+        try:
+            with _hard_timeout(_TEST_WALL_BUDGET_S):
+                with pytest.raises(
+                    RuntimeError, match=r"LOCAL_CHIP callable .* \(needs a chip device \(device_ids\)\)"
+                ):
+                    w.init()
+                assert w._chip_pids == []
+        finally:
+            w.close()
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="P0.2-b2: post-init register does not re-apply the startup eligibility rule",
+    )
+    def test_post_init_chip_callable_on_chipless_l3_rejected(self):
+        # The same LOCAL_CHIP rule, one epoch later: an L3 that came up without
+        # a chip child cannot resolve a ChipCallable handed to it post-init
+        # either, so register() must reject it instead of returning an inert
+        # handle.
+        w = Worker(level=3, num_sub_workers=1)
+        try:
+            with _hard_timeout(_TEST_WALL_BUDGET_S):
+                w.init()
+                with pytest.raises(RuntimeError, match=r"\(needs a chip device \(device_ids\)\)"):
+                    w.register(chip_callable())
+        finally:
+            w.close()
+
+    def test_remote_callable_naming_its_own_remote_passes_init_gate(self):
+        # REMOTE_TASK_DISPATCHER positive: the callable names a worker id that
+        # add_remote_worker returned, so the gate init() runs over the startup
+        # snapshot accepts it. Driven directly rather than through init(), which
+        # would additionally attach a live remote L3 session.
+        w = Worker(level=4, num_sub_workers=0)
+        worker_id = w.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+        handle = w.register(RemoteCallable("pkg.remote:orch"), workers=[worker_id])
+        try:
+            assert w._resolve_handle(handle).target_namespace == "REMOTE_TASK_DISPATCHER"
+            w._validate_eligible_targets()
+        finally:
+            w.close()
+
+    def test_remote_callable_naming_unknown_worker_is_rejected(self):
+        # REMOTE_TASK_DISPATCHER negative: naming an id that add_remote_worker
+        # never returned is refused at register, i.e. before the registration
+        # can reach the startup snapshot that _validate_eligible_targets scans.
+        w = Worker(level=4, num_sub_workers=0)
+        worker_id = w.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+        try:
+            with pytest.raises(ValueError, match="workers must name remote worker ids"):
+                w.register(RemoteCallable("pkg.remote:orch"), workers=[worker_id + 1])
+        finally:
+            w.close()
+
+    def test_remote_need_is_the_unmet_named_workers(self):
+        # The init-time rule behind both cases above: a REMOTE_TASK_DISPATCHER
+        # registration is eligible exactly when every id it names is a live
+        # remote worker. Driven directly because register() refuses to build the
+        # ineligible registration in the first place.
+        w = Worker(level=4, num_sub_workers=0)
+        worker_id = w.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+        try:
+            assert w._eligible_target_need("REMOTE_TASK_DISPATCHER", (worker_id,)) is None
+            assert "add_remote_worker" in w._eligible_target_need("REMOTE_TASK_DISPATCHER", (worker_id + 1,))
+        finally:
             w.close()
 
 
