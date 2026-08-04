@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_COMPLETION_TOKEN_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_COMPLETION_TOKEN_H_
+#pragma once
 
 #include <stdint.h>
 
@@ -41,5 +40,3 @@ struct CompletionPollResult {
     CompletionPollState state{CompletionPollState::PENDING};
     int32_t error_code{PTO2_ERROR_NONE};
 };
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_COMPLETION_TOKEN_H_

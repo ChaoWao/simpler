@@ -22,8 +22,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
+#pragma once
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -548,5 +547,3 @@ static_assert(sizeof(PTO2TaskSlotState) == 64);
 // Sentinel marking a wake list as "owner already completed; no more
 // registrations accepted". Distinct from any real slot_state pointer.
 inline PTO2TaskSlotState *const WAKE_LIST_SENTINEL = reinterpret_cast<PTO2TaskSlotState *>(static_cast<uintptr_t>(0x1));
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_

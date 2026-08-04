@@ -67,7 +67,8 @@ python tests/st/<case>/test_<name>.py -p a2a3 -d 0 --dump-args   # partial (leve
 
 # pytest
 pytest tests/st/<case> --platform a5sim --dump-args 2
-pytest examples/a5/host_build_graph/vector_example --platform a5sim --dump-args 2
+# a5 host_build_graph has no examples — use the scene test
+pytest tests/st/a5/host_build_graph/dump_args --platform a5sim --dump-args 2
 ```
 
 The level sets `CallConfig::enable_dump_args` (0/1/2/3). The host then
@@ -305,24 +306,14 @@ independent (added via `add_scalar`) and are typically omitted. If a
 `SCALAR` direction *is* listed it must come after every tensor entry; the
 dump skips `SCALAR` entries (they do not consume a positional tensor slot).
 
-`host_build_graph` has no incore signatures, so it needs explicit
-`TensorInfo` wiring instead (geometry is still automatic):
-
-```cpp
-// In orchestration C++ (host_build_graph only)
-TensorInfo info_a = make_tensor_info_from_tensor_arg(orch_args.tensor(0));
-TensorInfo info_b = make_tensor_info_from_tensor_arg(orch_args.tensor(1));
-TensorInfo info_f = make_tensor_info_from_tensor_arg(orch_args.tensor(2));
-
-int t0 = add_task(runtime, args_t0, 4, /*func_id=*/0, CoreType::AIV);
-TensorInfo t0_info[] = {info_a, info_b, info_f};
-set_tensor_info_to_task(runtime, t0, t0_info, 3);
-
-// Or in one call
-int t1 = add_task_with_tensor_info(
-    runtime, args_t1, /*num_args=*/3, /*func_id=*/1, CoreType::AIV,
-    t1_info, /*tensor_count=*/1);
-```
+Both `host_build_graph` and `tensormap_and_ringbuffer` share the
+same code path: the AICPU dump-collector reads geometry directly from
+`PTO2TaskPayload::tensors[]`, which carries shape and offset info
+alongside the device-packed arguments. For allocated output tensors,
+`alloc_tensors` supplies a `TensorCreateInfo` at orchestration time
+that is embedded in the payload by submit. For tensors that already
+exist (inputs passed by the caller), the geometry travels directly on
+the Tensor object and needs no explicit per-task registration.
 
 Full template:
 [`tests/st/a5/host_build_graph/dump_args`](../../tests/st/a5/host_build_graph/dump_args/)
@@ -460,22 +451,15 @@ non-dump runs keep the original cheaper completion path.
 ### 5.3 Tensor metadata registration
 
 AICPU has device addresses and sizes — the logical shape, dtype,
-and view geometry come from the runtime. Each runtime exposes
-metadata through a slightly different path, but they all converge
-on `TensorInfo` (see
-[`tensor_info.h`](../../src/a5/runtime/host_build_graph/runtime/tensor_info.h)):
-
-- **`host_build_graph`** — two orchestration-side APIs:
-  - `add_task()` → `set_tensor_info_to_task(task_id, info[], count)`
-  - `add_task_with_tensor_info()` (single-call convenience wrapper)
-
-  See
-  [`dump_args_orch.cpp`](../../tests/st/a5/host_build_graph/dump_args/kernels/orchestration/dump_args_orch.cpp)
-  for both styles in one file.
-- **`tensormap_and_ringbuffer`** — runtime layer fills `TensorInfo`
-  from `PTO2TaskPayload::tensors[]` directly. The ring buffer
-  carries `PTO2TaskPayload` which already contains shape/offset
-  arrays, so no orchestration API is needed.
+and view geometry come from the runtime. Both `host_build_graph`
+and `tensormap_and_ringbuffer` share the same code path: the
+AICPU dump-collector reads geometry directly from
+`PTO2TaskPayload::tensors[]`, which carries shape and offset info
+alongside the device-packed arguments. For allocated output tensors,
+`alloc_tensors` supplies a `TensorCreateInfo` at orchestration time
+that is embedded in the payload by submit. For tensors that already
+exist (inputs passed by the caller), the geometry travels directly
+on the Tensor object and needs no explicit per-task registration.
 
 When metadata is missing or inconsistent, the task is skipped for
 dump and a single `LOG_WARN` is emitted (guarded by
@@ -887,13 +871,15 @@ most likely at the default partial level (`--dump-args` = level 1)
 with no `L0TaskArgs::dump(...)` markers in the orchestration, so every task is
 skipped. Add markers (§3.2), or pass `--dump-args 2` for a full dump.
 
-**Manifest has tasks but `tensors[]` is empty.** AICPU received a
-task whose `TensorInfo` was missing or inconsistent. Look for a
+**Manifest has tasks but expected tensor records are missing.** A
+AICPU received a payload whose tensor count or metadata did not
+match what the orchestrator registered. A scalar-only task will
+have zero tensors and is intentionally empty. Look for a
 `LOG_WARN` from `try_log_dump_args_layout_mismatch` — it
 identifies the first mismatched task, then is suppressed to avoid
-log flooding. For `host_build_graph`, ensure
-`set_tensor_info_to_task` (or
-`add_task_with_tensor_info`) was called for every task.
+log flooding. Ensure every task that expects a tensor output calls
+`alloc_tensors` with a `TensorCreateInfo`, and every input tensor
+is added via `add_input` / `add_output` / `add_inout`.
 
 **`AFTER_COMPLETION` data looks stale or partially written.** This
 should not happen with the runtime barrier in place — AICore

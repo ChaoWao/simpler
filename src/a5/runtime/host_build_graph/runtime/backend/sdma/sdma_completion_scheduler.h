@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_SDMA_SDMA_COMPLETION_SCHEDULER_H_
-#define SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_SDMA_SDMA_COMPLETION_SCHEDULER_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -57,5 +56,3 @@ inline void retire_sdma_event_record(uint64_t record_addr) {
     volatile uint64_t *channel_info = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(channel_info_addr));
     __atomic_store_n(channel_info, packed, __ATOMIC_RELEASE);
 }
-
-#endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_SDMA_SDMA_COMPLETION_SCHEDULER_H_

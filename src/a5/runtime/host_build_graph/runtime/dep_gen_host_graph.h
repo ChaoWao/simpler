@@ -54,8 +54,7 @@
  * consumer (deps viewer, swimlane join) reads both runtimes' output the same way.
  */
 
-#ifndef SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_DEP_GEN_HOST_GRAPH_H_
-#define SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_DEP_GEN_HOST_GRAPH_H_
+#pragma once
 
 #include <cstdint>
 
@@ -139,5 +138,3 @@ void dep_gen_host_graph_destroy_capture(void *capture) noexcept;
  */
 int dep_gen_host_graph_emit(const char *deps_json_path);
 }
-
-#endif  // SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_DEP_GEN_HOST_GRAPH_H_
