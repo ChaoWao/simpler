@@ -7,7 +7,18 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Wide host-build-graph dispatch across the high half of the 128-bit core mask."""
+"""Wide host-build-graph dispatch: AIV cohort plus sync-start and normal MIX placement.
+
+Sizes every cohort from ``rt_available_cluster_count`` / ``rt_available_aiv_count``, so
+coverage follows the device the case runs on. On the sim platforms this file is marked
+for, that is ``SIM_AUTO_BLOCKDIM`` (8) clusters — 24 core-state bits, entirely within the
+low 64 of ``CoreTracker::BitStates``. **This case therefore does not reach a cluster
+offset above bit 63**; the >63-bit MIX selection path is covered by the arch-parity unit
+test ``tests/ut/cpp/common/test_hbg_core_tracker.cpp``, which drives ``CoreTracker``
+directly at ``MAX_CLUSTERS``. What this case does cover is that MIX placement, sync-start
+drain, and the AIV cohort agree on block-to-core mapping when a single scheduler thread
+(``aicpu_thread_num=2`` leaves one scheduler plus one resolution thread) owns every cluster.
+"""
 
 import torch
 from simpler.task_interface import ArgDirection as D
@@ -16,6 +27,9 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_MIX_BLOCK = 3
+# Buffer capacity ceiling, not an expected count: the orchestration sizes cohorts from the
+# runtime and writes back the actual geometry, which compare_outputs reads. a5 has the
+# larger PLATFORM_MAX_BLOCKDIM of the two arches, so it bounds both.
 MAX_CLUSTERS = 36
 MAX_AIV = MAX_CLUSTERS * 2
 MAX_TOTAL_CL = MAX_AIV + 2 * MAX_CLUSTERS * SLOTS_PER_MIX_BLOCK

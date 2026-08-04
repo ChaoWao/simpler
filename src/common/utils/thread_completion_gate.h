@@ -16,6 +16,22 @@
 
 namespace simpler {
 
+// Rendezvous for N threads that must run a one-shot finalizer after the last
+// arrival, then hand exactly one thread the right to tear down what the
+// finalizer released.
+//
+// The release store on cleanup_ready_ happens after finalize() returns and
+// pairs with the acquire on a successful claim_cleanup() CAS: a thread that
+// wins the claim is guaranteed to observe every write the finalizer made.
+// Publishing eligibility before running the finalizer would let a peer tear
+// down state the last thread is still using.
+//
+// thread_count must be the same on every arrival of a given round; it is the
+// round's participant count, not a property of one arrival.
+//
+// reset() is NOT synchronized against the other two operations. It may only be
+// called when no thread is between its arrive and the end of its finalizer —
+// i.e. from a single thread outside the round (a run's setup or teardown).
 class ThreadCompletionGate {
 public:
     template <typename Finalize>

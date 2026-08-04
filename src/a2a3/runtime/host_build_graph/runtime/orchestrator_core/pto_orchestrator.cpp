@@ -899,7 +899,13 @@ TaskOutputTensors PTO2OrchestratorState::submit_task(const MixedKernels &mixed_k
     always_assert(orch->scheduler != nullptr);
     // === Validate submit inputs ===
     ActiveMask active_mask = mixed_kernels.to_active_mask();
-    always_assert(static_cast<bool>(active_mask) && "MixedKernels must have at least one active slot");
+    if (!static_cast<bool>(active_mask)) {
+        report_fatal(
+            PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
+            "MixedKernels names no active slot; set at least one of aic/aiv0/aiv1 kernel_id"
+        );
+        return TaskOutputTensors{};
+    }
 
     int16_t block_num = args.launch_spec.block_num();
 
