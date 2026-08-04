@@ -1196,14 +1196,9 @@ class TestLifecycle:
 
     def test_close_releases_registered_callables(self):
         # close() must drop every Worker-held reference to registered callables.
-        # A ChipCallable is a nanobind instance; if close() leaves it in one of
-        # the registries, a closed Worker kept alive past interpreter exit (e.g.
-        # a failing test's traceback pinning the frame's `worker` local) keeps
-        # the instance live, which blocks nanobind's module unload and prints a
-        # leak dump at shutdown.
-        hw = Worker(level=3, num_sub_workers=0)
+        hw = Worker(level=3, num_sub_workers=1)
         hw.init()
-        handle = hw.register(_unique_chip_callable(1))
+        handle = hw.register(lambda args: None)
         assert _slot_for(hw, handle) in hw._callable_registry
         assert hw._identity_registry and hw._live_handles
         hw.close()
@@ -1245,7 +1240,7 @@ class TestLifecycle:
         hw.init()
         try:
             hw.run(lambda orch, args, cfg: None)
-            with pytest.raises(RuntimeError, match="no Python-capable child"):
+            with pytest.raises(ValueError, match=r"\(needs a SUB or next-level child\)"):
                 hw.register(lambda args: None)
         finally:
             hw.close()
@@ -1428,23 +1423,20 @@ class TestLifecycle:
             assert hw._callable_registry == {}
 
     def test_prepare_chip_callable_at_cid_overflow_raises(self):
-        # cid budget is enforced under the new dynamic-prepare path too:
-        # pre-fill registry with lambdas pre-init, init, then attempt one
-        # post-init ChipCallable prepare and observe the existing
-        # MAX_REGISTERED_CALLABLE_IDS RuntimeError. A sub child gives the
-        # pre-registered python callables an eligible dispatch target.
+        # cid budget is enforced under the new dynamic-prepare path.
+        # Pre-fill registry with lambdas pre-init, init, then attempt one
+        # post-init ChipCallable prepare. A sub child gives the pre-registered
+        # python callables an eligible dispatch target.
         #
-        # This worker is chipless, so the ChipCallable is over the cid budget
-        # AND ineligible under the startup dispatch-target rule. Only the cid
-        # budget is asserted; the relative order of the two checks is unpinned
-        # here (see the b2 xfail in
-        # test_startup_readiness.py::TestEligibleTargetPrecheck).
+        # This worker is chipless, so the post-init ChipCallable fails the
+        # eligibility re-check before reaching the cid budget — eligibility
+        # fires first by design (more actionable than "out of slots").
         hw = Worker(level=3, num_sub_workers=1)
         try:
             for i in range(MAX_REGISTERED_CALLABLE_IDS):
                 hw.register(_unique_py_callable(i))
             hw.init()
-            with pytest.raises(RuntimeError, match="MAX_REGISTERED_CALLABLE_IDS"):
+            with pytest.raises(ValueError, match=r"\(needs a chip device \(device_ids\)\)"):
                 hw.register(chip_callable())
         finally:
             hw.close()
@@ -1478,7 +1470,7 @@ class TestLifecycle:
             assert _slot_for(hw, handle_b) == slot_a, "smallest-unused-cid policy should reuse the freed slot"
 
     def test_prepare_chip_callable_broadcast_runs_without_registry_lock(self):
-        hw = Worker(level=3, num_sub_workers=0)
+        hw = Worker(level=3, num_sub_workers=0, device_ids=[0])
         hw._lifecycle = worker_mod._Lifecycle.READY
         callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
         observed = {}
@@ -1500,7 +1492,7 @@ class TestLifecycle:
     def test_register_child_chip_broadcast_runs_without_registry_lock(self):
         from simpler.worker import _build_callable_registration  # noqa: PLC0415
 
-        hw = Worker(level=3, num_sub_workers=0)
+        hw = Worker(level=3, num_sub_workers=0, device_ids=[0])
         hw._lifecycle = worker_mod._Lifecycle.READY
         callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
         digest = _build_callable_registration(hw, callable_obj).digest
@@ -2211,7 +2203,7 @@ class TestLifecycle:
                 calls.append(("binary_register", blob_size, digest))
                 return [_FakeControlResult("NEXT_LEVEL", 0, True)]
 
-        hw = Worker(level=3, num_sub_workers=1)
+        hw = Worker(level=3, num_sub_workers=1, device_ids=[0])
         hw._lifecycle = worker_mod._Lifecycle.READY
         hw._worker = FakeWorker()
         callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
@@ -2246,7 +2238,7 @@ class TestLifecycle:
                 calls.append(("cleanup_one", worker_type, worker_id, sub_cmd, digest))
                 return _FakeControlResult("NEXT_LEVEL", worker_id, True)
 
-        hw = Worker(level=3, num_sub_workers=1)
+        hw = Worker(level=3, num_sub_workers=1, device_ids=[0])
         hw._lifecycle = worker_mod._Lifecycle.READY
         hw._worker = FakeWorker()
         callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
@@ -2277,7 +2269,7 @@ class TestLifecycle:
                 calls.append(("cleanup", digest))
                 return ["cleanup failed"]
 
-        hw = Worker(level=3, num_sub_workers=1)
+        hw = Worker(level=3, num_sub_workers=1, device_ids=[0])
         hw._lifecycle = worker_mod._Lifecycle.READY
         hw._worker = FakeWorker()
         callable_obj = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
@@ -2296,13 +2288,13 @@ class TestLifecycle:
         # len(registry). The bug it guards against: fill slots 0/1/2,
         # unregister slot 1, next register would silently overwrite the
         # existing cid=2 under a `len(registry)` policy.
-        hw = Worker(level=3, num_sub_workers=0)
+        hw = Worker(level=3, num_sub_workers=1)
         hw.init()
         try:
-            cb0 = _unique_chip_callable(0)
-            cb1 = _unique_chip_callable(1)
-            cb2 = _unique_chip_callable(2)
-            cb3 = _unique_chip_callable(3)
+            cb0 = _unique_py_callable(0)
+            cb1 = _unique_py_callable(1)
+            cb2 = _unique_py_callable(2)
+            cb3 = _unique_py_callable(3)
             handle0 = hw.register(cb0)
             handle1 = hw.register(cb1)
             handle2 = hw.register(cb2)
@@ -2316,7 +2308,7 @@ class TestLifecycle:
             # cid=2 entry must still be the original callable, not silently overwritten.
             assert hw._callable_registry[slot2] is cb2
             # Next register fills cid=3 since 0..2 are all occupied.
-            next_handle = hw.register(_unique_chip_callable(4))
+            next_handle = hw.register(_unique_py_callable(4))
             assert _slot_for(hw, next_handle) == 3
         finally:
             hw.close()

@@ -1501,10 +1501,6 @@ class TestEligibleTargetPrecheck:
         finally:
             w.close()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="P0.2-b2: post-init register does not re-apply the startup eligibility rule",
-    )
     def test_post_init_chip_callable_on_chipless_l3_rejected(self):
         # The same LOCAL_CHIP rule, one epoch later: an L3 that came up without
         # a chip child cannot resolve a ChipCallable handed to it post-init
@@ -1514,7 +1510,7 @@ class TestEligibleTargetPrecheck:
         try:
             with _hard_timeout(_TEST_WALL_BUDGET_S):
                 w.init()
-                with pytest.raises(RuntimeError, match=r"\(needs a chip device \(device_ids\)\)"):
+                with pytest.raises(ValueError, match=r"\(needs a chip device \(device_ids\)\)"):
                     w.register(chip_callable())
         finally:
             w.close()
