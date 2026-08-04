@@ -5141,13 +5141,8 @@ class Worker:
         Submit APIs consume the returned handle and dispatch by its stable
         SHA-256 callable identity.
 
-        Target eligibility (a callable's kind having a resolving child) is
-        checked only at init(), over the pre-init registrations
-        (``_validate_eligible_targets``). A post-init dynamic register does NOT
-        re-validate against the frozen topology, so registering e.g. a
-        ChipCallable on a chipless worker yields a handle that never dispatches.
-        Unifying the two paths is a follow-up (needs a device-free chip-child
-        test harness).
+        A post-init dynamic register re-validates eligibility against the
+        frozen topology (``_eligible_target_need``), same as init().
         """
         if isinstance(target, RemoteCallable) and self.level < 4:
             raise TypeError("Worker.register(RemoteCallable): remote L3 dispatch requires a level >= 4 parent")
@@ -5171,6 +5166,11 @@ class Worker:
             handle = self._register_into_snapshot_or_wait(reg)
             if handle is not None:
                 return handle
+            need = self._eligible_target_need(reg.target_namespace, reg.eligible_worker_ids)
+            if need is not None:
+                raise ValueError(
+                    f"Worker.register(): {reg.target_namespace} callable has no eligible dispatch target (needs {need})"
+                )
             # Post-start broadcast touches the live tree; hold a lease so close()
             # drains it before teardown (re-checks READY, closing the
             # gate-then-teardown race).
@@ -5180,6 +5180,11 @@ class Worker:
             handle = self._register_into_snapshot_or_wait(reg)
             if handle is not None:
                 return handle
+            need = self._eligible_target_need(reg.target_namespace, reg.eligible_worker_ids)
+            if need is not None:
+                raise ValueError(
+                    f"Worker.register(): {reg.target_namespace} callable has no eligible dispatch target (needs {need})"
+                )
             # Post-start publication touches the live tree; hold a lease across
             # the whole transaction, publication included, so close() drains it
             # before teardown (re-checks READY, closing the gate-then-teardown
@@ -6009,9 +6014,8 @@ class Worker:
           - ``REMOTE_TASK_DISPATCHER`` only onto its named remote worker(s).
         An L2 worker (or any non-dispatch namespace) is always eligible.
 
-        Used only by ``_validate_eligible_targets`` at init (the *startup*
-        eligibility gate). The post-init dynamic ``register`` path does NOT yet
-        apply this rule — see that method for the deferred inconsistency.
+        Applied at init by ``_validate_eligible_targets`` and on every
+        post-init dynamic ``register`` path.
         """
         if self.level < 3:
             return None
@@ -6019,7 +6023,8 @@ class Worker:
             has_python_child = self._config.get("num_sub_workers", 0) > 0 or bool(self._next_level_workers)
             return None if has_python_child else "a SUB or next-level child"
         if namespace == "LOCAL_CHIP":
-            return None if bool(self._config.get("device_ids")) else "a chip device (device_ids)"
+            has_chip_child = bool(self._config.get("device_ids")) or bool(self._next_level_workers)
+            return None if has_chip_child else "a chip device (device_ids)"
         if namespace == "REMOTE_TASK_DISPATCHER":
             has_remote_workers = set(self._remote_worker_ids)
             ok = bool(has_remote_workers) and set(eligible_worker_ids) <= has_remote_workers

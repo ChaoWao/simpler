@@ -40,6 +40,8 @@ import simpler.worker as worker_mod
 from _task_interface import ChipCallable  # pyright: ignore[reportMissingImports]
 from simpler.worker import Worker
 
+from ._harness import SIM_PLATFORM, SIM_RUNTIME, install_fake_chip
+
 # Comfortably above every wait these tests actually take, well under any hang.
 _TEST_WALL_BUDGET_S = 30.0
 # How long close() must be observed NOT to return while a fenced operation is
@@ -53,9 +55,17 @@ def _chip_callable(func_name: str = "admission_fence") -> ChipCallable:
 
 
 @pytest.fixture
-def ready_worker():
-    """A READY L3 worker with one SUB child and no chips — no NPU required."""
-    w = Worker(level=3, num_sub_workers=1, startup_timeout_s=_TEST_WALL_BUDGET_S)
+def ready_worker(monkeypatch):
+    """A READY L3 worker with one SUB child and a fake chip — no NPU required."""
+    install_fake_chip(monkeypatch)
+    w = Worker(
+        level=3,
+        device_ids=[0],
+        platform=SIM_PLATFORM,
+        runtime=SIM_RUNTIME,
+        num_sub_workers=1,
+        startup_timeout_s=_TEST_WALL_BUDGET_S,
+    )
     w.init()
     try:
         yield w
