@@ -21,9 +21,9 @@ polling a mailbox whose request has been erased. The sticky ``_OFF_SHUTDOWN``
 word is written only by a terminating parent and never cleared, so it survives
 that overwrite.
 
-Every test here is device-free (an L3 worker with one SUB child and no chips)
-and carries its own hard timeout, so a regression that reintroduces an unbounded
-wait fails promptly instead of hanging CI.
+Every test here is device-free. Live-tree races use an L3 worker with one SUB
+child; lifecycle crossover cases use inert L2/L3/L4 workers. A module-wide hard
+timeout turns any reintroduced unbounded wait into a prompt failure.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from multiprocessing.shared_memory import SharedMemory
 import pytest
 import simpler.worker as worker_mod
 from _task_interface import ChipCallable  # pyright: ignore[reportMissingImports]
-from simpler.worker import Worker
+from simpler.worker import RemoteCallable, RemoteWorkerSpec, Worker
 
 # Comfortably above every wait these tests actually take, well under any hang.
 _TEST_WALL_BUDGET_S = 30.0
@@ -46,6 +46,28 @@ _TEST_WALL_BUDGET_S = 30.0
 # parked mid-transaction. Only has to outlast the scheduling noise of handing
 # the GIL to the close() thread.
 _FENCE_OBSERVATION_S = 1.0
+
+
+@contextlib.contextmanager
+def _hard_timeout(seconds: float):
+    """Bound the whole test, including Worker init/close and fixture teardown."""
+
+    def _handler(_signum, _frame):
+        raise TimeoutError("admission-fence test exceeded its hard wall budget")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+@pytest.fixture(autouse=True)
+def _test_wall_timeout():
+    with _hard_timeout(_TEST_WALL_BUDGET_S):
+        yield
 
 
 def _chip_callable(func_name: str = "admission_fence") -> ChipCallable:
@@ -163,9 +185,37 @@ class TestRegisterAdmissionFence:
         assert ready_worker._identity_registry == {}
         assert ready_worker._live_handles == {}
 
+    def test_l2_ready_registration_cannot_fall_back_to_new_after_close(self, monkeypatch):
+        worker = Worker(level=2)
+        worker._lifecycle = worker_mod._Lifecycle.READY
+        original_wait = worker._wait_out_init_locked
+
+        def close_after_ready_check(api: str) -> None:
+            original_wait(api)
+            worker._lifecycle = worker_mod._Lifecycle.CLOSED
+
+        monkeypatch.setattr(worker, "_wait_out_init_locked", close_after_ready_check)
+        try:
+            with pytest.raises(RuntimeError):
+                worker.register(_chip_callable("l2_close_crossover"))
+            assert worker._identity_registry == {}
+            assert worker._live_handles == {}
+        finally:
+            worker.close()
+
+    def test_l2_pre_start_register_unregister_stays_registry_only(self):
+        worker = Worker(level=2)
+        try:
+            handle = worker.register(_chip_callable("l2_pre_start"))
+            worker.unregister(handle)
+            assert worker._identity_registry == {}
+            assert worker._live_handles == {}
+        finally:
+            worker.close()
+
 
 class TestUnregisterAdmissionFence:
-    """unregister() is symmetric to register() — it held no lease at all."""
+    """Every READY unregister path holds one lease across mutation and cleanup."""
 
     def test_broadcast_holds_the_lease(self, ready_worker):
         handle = ready_worker.register(_chip_callable())
@@ -187,6 +237,55 @@ class TestUnregisterAdmissionFence:
         assert "error" not in unregister_box, f"unregister() failed: {unregister_box.get('error')}"
         assert ready_worker._identity_registry == {}
         assert ready_worker._live_handles == {}
+
+    def test_ready_unregister_cannot_fall_back_to_registry_only_after_close(self, monkeypatch):
+        worker = Worker(level=3, num_sub_workers=0)
+        handle = worker.register(_chip_callable("unregister_close_crossover"))
+        worker._lifecycle = worker_mod._Lifecycle.READY
+        original_wait = worker._wait_out_init_locked
+
+        def close_after_ready_check(api: str) -> None:
+            original_wait(api)
+            worker._lifecycle = worker_mod._Lifecycle.CLOSED
+
+        monkeypatch.setattr(worker, "_wait_out_init_locked", close_after_ready_check)
+        try:
+            with pytest.raises(RuntimeError):
+                worker.unregister(handle)
+            assert handle._handle_id in worker._live_handles
+            assert handle.digest in worker._identity_registry
+        finally:
+            worker.close()
+
+    def test_remote_unregister_holds_the_lease(self):
+        class RemoteWorker:
+            def remote_unregister(self, worker_id, *_args):
+                return type("RemoteResult", (), {"ok": True, "worker_id": worker_id})()
+
+        worker = Worker(level=4, num_sub_workers=0)
+        worker_id = worker.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+        handle = worker.register(RemoteCallable("builtins:len"), workers=[worker_id])
+        worker._lifecycle = worker_mod._Lifecycle.READY
+        worker._worker = RemoteWorker()  # type: ignore[assignment]
+        try:
+            with _ParkedTransaction(worker, "_unregister_remote_handle") as parked:
+                parked.release.set()
+                worker.unregister(handle)
+            assert parked.lease_held is True
+        finally:
+            worker._worker = None
+            worker.close()
+
+    def test_remote_pre_start_unregister_stays_registry_only(self):
+        worker = Worker(level=4, num_sub_workers=0)
+        worker_id = worker.add_remote_worker(RemoteWorkerSpec(endpoint="127.0.0.1:19073", platform="a2a3sim"))
+        try:
+            handle = worker.register(RemoteCallable("builtins:len"), workers=[worker_id])
+            worker.unregister(handle)
+            assert worker._identity_registry == {}
+            assert worker._live_handles == {}
+        finally:
+            worker.close()
 
 
 # ---------------------------------------------------------------------------
