@@ -419,8 +419,8 @@ static bool prepare_task(
     // single payload-init point, which runs before Orch-side wiring publish.
 
     // Fields already zeroed by reset_for_reuse() at slot init:
-    //   fanout_lock=0, fanout_count=PTO2_FANOUT_SCOPE_BIT, fanout_head=nullptr,
-    //   fanin_refcount=0, fanout_refcount=0, completed_subtasks=0, next_block_idx=0
+    //   wake_list_head=nullptr, next_in_wake_list=nullptr,
+    //   any_subtask_deferred=false, completed_subtasks=0, next_block_idx=0
     // Fields immutable after RingSchedState::init():
     //   ring_id
     // task_state is set to PENDING here as the orchestrator populates the slot

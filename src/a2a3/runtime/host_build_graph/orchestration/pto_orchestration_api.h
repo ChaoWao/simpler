@@ -310,7 +310,7 @@ static inline T get_tensor_data(const Tensor &tensor, uint32_t ndims, const uint
  * To ensure WAR safety for all access patterns, use add_inout() instead of
  * add_input() for kernel parameters that may later be written via
  * set_tensor_data. INOUT creates a TensorMap entry that enables automatic
- * consumer tracking via fanout_refcount.
+ * consumer tracking via the ring's completed_watermark.
  *
  * The tensor must already have an allocated buffer (addr != 0).
  * For runtime-created outputs, call this only on the Tensor returned by

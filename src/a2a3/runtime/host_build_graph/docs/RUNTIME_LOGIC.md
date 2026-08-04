@@ -260,44 +260,34 @@ This back-pressure is essential for correctness with small ring sizes — for ex
 
 ### 4.5 Deadlock Detection
 
-A ring that is **too small** can cause a **deadlock**. The root cause is the scope mechanism: each task's `fanout_count` includes a reference from its owning scope. The scope reference is only released when `scope_end()` runs — but `scope_end()` is called by the orchestrator, which is blocked waiting for ring space. This creates a circular dependency:
+A ring that is **too small** stalls the allocator permanently. host_build_graph is whole-graph-resident: the orchestrator runs to completion on the host and there is no on-device slot reclaim, so `last_task_alive` is never advanced at runtime (see Section 8.4). The task-ring gate is `local_task_id - last_alive + 1 < window_size`; with `last_alive` pinned at 0 it reduces to `local_task_id + 1 < window_size`, so the ring commits `window_size - 1` tasks (one slot is reserved to tell full from empty) and blocks on the next. The window must therefore hold the **whole graph's task count**, not just one scope — e.g. with `task_window=16` the allocator commits 15 tasks and blocks on the 16th, and because `last_alive` stays 0 the reclaim it waits on never comes.
+
+`PTO2TaskAllocator::alloc` spins on this condition and backstops it two ways (cold path, checked every 1024 spins):
+
+- **Structural head-of-line test** (`head_blocked_on_scope_end`) — inert for host_build_graph, since tasks cannot complete during host-side graph construction.
+- **Wall-clock backstop** — `PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES` (500 ms). After 500 ms with no reclaim progress it calls `report_deadlock()`, latches a fatal, and the failed alloc unwinds.
+
+While blocked it emits periodic warnings (every `PTO2_BLOCK_NOTIFY_INTERVAL` = 10000 spins):
 
 ```text
-Orchestrator blocked on task_ring_alloc (ring full)
-    → needs scheduler to advance last_task_alive
-    → needs tasks to reach CONSUMED state (fanout_count == 0)
-    → needs scope_end() to release scope reference
-    → needs orchestrator to continue
-    → DEADLOCK
+[TaskAllocator] BLOCKED: tasks=15/16, heap=65536/65536, on=task, spins=100000
 ```
 
-The runtime detects this automatically by counting spin iterations in the allocation functions:
-
-**Periodic BLOCKED warnings** (every 10,000 spins):
+and on the backstop logs to the device log:
 
 ```text
-[TaskRing] BLOCKED (Flow Control): current=208, last_alive=192, active=16/16 (100.0%), spins=10000
-[HeapRing] BLOCKED: requesting 4096 bytes, available=0, top=65536, tail=0, spins=10000
+========================================
+FATAL: Task Allocator Deadlock - Task Ring Full!
+========================================
+No reclaim progress for ~500 ms (<N> cycles wall clock).
+  Task ring:  current=15, last_alive=0, active=15/16 (93.8%)
+  Heap ring:  top=..., tail=..., size=..., available=...
+  Head task 0: state=0, last_consumer=...
 ```
 
-**Deadlock detection** (after 100,000 spins with no progress):
+(`... - Heap Exhausted!` plus a `Requested: N bytes` line when the heap ring, not the task ring, is the blocked resource.)
 
-```text
-FATAL: Flow Control Deadlock Detected!
-Task Ring is FULL and no progress after 100000 spins.
-  - Active tasks:  16
-  - Window size:   16
-Root Cause:
-  Tasks cannot transition to CONSUMED state because fanout_count
-  includes 1 for the owning scope, and scope_end() requires the
-  orchestrator to continue — creating a circular dependency.
-Solution:
-  Recommended: 32 (at least 2x current active tasks)
-```
-
-The FATAL message is logged to the device log and the process exits. The solution is to increase the ring size so that it can hold at least all tasks within the largest parallel scope. For example, if a scope submits 13 tasks, `task_window >= 14` is required (13 + 1 to distinguish full from empty).
-
-**Sizing guideline**: `task_window_size` must be larger than the maximum number of tasks in any single `PTO2_SCOPE`. A safe choice is `2 × max_tasks_per_scope` or simply the default 65536 for production.
+**Sizing guideline**: because the whole graph is resident, `task_window_size` must exceed the graph's **total task count** — `task_window_size > total_tasks` (the `+1` distinguishes full from empty). The default `#define PTO2_TASK_WINDOW_SIZE 16384` covers up to ~16k tasks per ring; raise it for larger graphs. Sizing by a single scope's task count under-sizes the window for any multi-scope graph and trips the backstop above.
 
 ---
 
@@ -359,7 +349,7 @@ This forms a back-pressure mechanism analogous to the Task Ring's flow control.
 | Periodic Cleanup | Every 64 retired tasks | Walk per-task chains, free entries | Pool capacity reclaimed in bounded time |
 | Pool Back-Pressure | Pool exhausted | Block until scheduler advances watermark | Hard capacity bound, no OOM |
 
-In steady state, the number of valid TensorMap entries ≈ `active_tasks × avg_outputs_per_task`. With the default `task_window=65536` and `pool_size=65536`, this is well within bounds. With small windows (e.g., `task_window=16`), active entries are even fewer (~16 × a few), and cleanup runs frequently.
+Because host_build_graph is whole-graph-resident and `last_task_alive` never advances, no TensorMap entry is reclaimed during the run: the valid-entry count grows to `total_tasks × avg_outputs_per_task` and stays there. The default `pool_size=65536` bounds that; a graph whose total output-entry count exceeds the pool trips the pool back-pressure backstop (Section 5.4) rather than being reclaimed.
 
 ### 5.5 Dependency Discovery Flow
 
