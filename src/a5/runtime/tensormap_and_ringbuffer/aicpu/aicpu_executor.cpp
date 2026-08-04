@@ -484,6 +484,17 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // its own stub; the fallback covers any path that bypassed the gate).
     int32_t affinity_exec_idx = platform_aicpu_affinity_thread_idx();
     int32_t thread_idx = (affinity_exec_idx >= 0) ? affinity_exec_idx : (thread_idx_++);
+    if (thread_idx < 0 || thread_idx >= aicpu_thread_num_ || thread_idx >= MAX_AICPU_THREADS) {
+        LOG_ERROR(
+            "Thread index %d out of bounds (active=%d max=%d exec_idx=%d)", thread_idx, aicpu_thread_num_,
+            MAX_AICPU_THREADS, affinity_exec_idx
+        );
+        // Reachable before the orchestrator split: this thread may be the
+        // would-be orchestrator, so release the scheduler threads waiting on
+        // runtime_init_ready_ (the orchestrator block is the only other publisher).
+        runtime_init_ready_.store(true, std::memory_order_release);
+        return -1;
+    }
     int32_t run_rc = 0;
     // Publish the resolved index so per-thread readers in this `.so` (notably
     // the AICPU phase-record slot) agree with the executor. On sim the basic

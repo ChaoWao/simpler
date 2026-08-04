@@ -485,6 +485,10 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             "Thread index %d out of bounds (active=%d max=%d exec_idx=%d)", thread_idx, aicpu_thread_num_,
             MAX_AICPU_THREADS, affinity_exec_idx
         );
+        // Reachable before the orchestrator split: this thread may be the
+        // would-be orchestrator, so release the scheduler threads waiting on
+        // runtime_init_ready_ (the orchestrator block is the only other publisher).
+        runtime_init_ready_.store(true, std::memory_order_release);
         return -1;
     }
     int32_t run_rc = 0;
