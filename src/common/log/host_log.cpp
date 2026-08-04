@@ -15,14 +15,58 @@
 
 #include "host_log.h"
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <pthread.h>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <unistd.h>
 
 using simpler::log::LogLevel;
+
+namespace {
+
+std::string format_message(const char *fmt, va_list args) {
+    va_list sizing_args;
+    va_copy(sizing_args, args);
+    const int required = vsnprintf(nullptr, 0, fmt, sizing_args);
+    va_end(sizing_args);
+    if (required < 0) {
+        return {};
+    }
+
+    std::vector<char> buffer(static_cast<size_t>(required) + 1);
+    va_list formatting_args;
+    va_copy(formatting_args, args);
+    const int written = vsnprintf(buffer.data(), buffer.size(), fmt, formatting_args);
+    va_end(formatting_args);
+    if (written < 0) {
+        return {};
+    }
+    return std::string(buffer.data(), static_cast<size_t>(written));
+}
+
+void write_stderr(const std::string &record) {
+    size_t offset = 0;
+    while (offset < record.size()) {
+        const ssize_t written = ::write(STDERR_FILENO, record.data() + offset, record.size() - offset);
+        if (written > 0) {
+            offset += static_cast<size_t>(written);
+        } else if (written < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+}
+
+}  // namespace
 
 HostLogger &HostLogger::get_instance() {
     static HostLogger instance;
@@ -83,13 +127,18 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
 
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
-    std::scoped_lock lock(mutex_);
-    fprintf(stderr, "[%s][T0x%lx][%s] %s: ", ts, tid, level_tag, func);
-    vfprintf(stderr, fmt, args);
+    std::ostringstream stream;
+    stream << '[' << ts << "][T0x" << std::hex << tid << "][" << level_tag << "] " << func << ": "
+           << format_message(fmt, args);
+    std::string record = stream.str();
     if (fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n') {
-        fputc('\n', stderr);
+        record.push_back('\n');
     }
-    fflush(stderr);
+
+    std::scoped_lock lock(mutex_);
+    // STRACE records fit within PIPE_BUF, so one write keeps each record
+    // indivisible when forked workers share a captured stderr pipe.
+    write_stderr(record);
 }
 
 void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list args) {

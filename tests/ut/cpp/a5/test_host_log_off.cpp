@@ -15,7 +15,13 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cerrno>
+#include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <gtest/gtest.h>
@@ -197,4 +203,109 @@ TEST(HostLogTest, AllOutputGoesToStderr) {
     EXPECT_NE(captured.err.find("timing-output-marker"), std::string::npos);
     EXPECT_NE(captured.err.find("info-output-marker"), std::string::npos);
     EXPECT_NE(captured.err.find("debug-output-marker"), std::string::npos);
+}
+
+TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
+    int log_pipe[2];
+    int start_pipe[2];
+    ASSERT_EQ(pipe(log_pipe), 0);
+    ASSERT_EQ(pipe(start_pipe), 0);
+
+    const long pipe_buf = fpathconf(log_pipe[1], _PC_PIPE_BUF);
+    ASSERT_GT(pipe_buf, 256);
+    const size_t payload_size = static_cast<size_t>(std::min<long>(pipe_buf - 256, 2048));
+    constexpr int child_count = 16;
+    constexpr int records_per_child = 128;
+
+    std::vector<pid_t> children;
+    for (int child = 0; child < child_count; ++child) {
+        const pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            close(log_pipe[0]);
+            close(start_pipe[1]);
+            char start;
+            if (read(start_pipe[0], &start, 1) != 1 || dup2(log_pipe[1], STDERR_FILENO) < 0) {
+                _exit(2);
+            }
+            close(start_pipe[0]);
+            close(log_pipe[1]);
+
+            HostLogger::get_instance().set_level(LogLevel::DEBUG);
+            const std::string payload(payload_size, static_cast<char>('a' + child));
+            for (int seq = 0; seq < records_per_child; ++seq) {
+                HostLogger::get_instance().log(
+                    LogLevel::ERROR, "fork_writer", "child=%d seq=%d payload=%s", child, seq, payload.c_str()
+                );
+            }
+            _exit(0);
+        }
+        children.push_back(pid);
+    }
+
+    close(log_pipe[1]);
+    close(start_pipe[0]);
+    std::string captured;
+    std::thread reader([&] {
+        char buffer[8192];
+        while (true) {
+            const ssize_t count = read(log_pipe[0], buffer, sizeof(buffer));
+            if (count > 0) {
+                captured.append(buffer, static_cast<size_t>(count));
+            } else if (count < 0 && errno == EINTR) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        close(log_pipe[0]);
+    });
+
+    const std::string starts(child_count, 'x');
+    EXPECT_EQ(write(start_pipe[1], starts.data(), starts.size()), static_cast<ssize_t>(starts.size()));
+    close(start_pipe[1]);
+
+    for (pid_t child : children) {
+        int status = 0;
+        const pid_t waited = waitpid(child, &status, 0);
+        EXPECT_EQ(waited, child);
+        if (waited == child) {
+            EXPECT_TRUE(WIFEXITED(status));
+            if (WIFEXITED(status)) {
+                EXPECT_EQ(WEXITSTATUS(status), 0);
+            }
+        }
+    }
+    reader.join();
+
+    std::vector<std::vector<bool>> seen(child_count, std::vector<bool>(records_per_child, false));
+    std::istringstream lines(captured);
+    std::string line;
+    int line_count = 0;
+    constexpr char payload_marker[] = " payload=";
+    while (std::getline(lines, line)) {
+        const size_t record_pos = line.find("child=");
+        const size_t payload_pos = line.find(payload_marker);
+        ASSERT_NE(record_pos, std::string::npos);
+        ASSERT_NE(payload_pos, std::string::npos);
+        ASSERT_EQ(line.find("child=", record_pos + 1), std::string::npos);
+
+        int child = -1;
+        int seq = -1;
+        ASSERT_EQ(sscanf(line.c_str() + record_pos, "child=%d seq=%d", &child, &seq), 2);
+        ASSERT_GE(child, 0);
+        ASSERT_LT(child, child_count);
+        ASSERT_GE(seq, 0);
+        ASSERT_LT(seq, records_per_child);
+        ASSERT_FALSE(seen[child][seq]);
+        seen[child][seq] = true;
+
+        const std::string payload = line.substr(payload_pos + sizeof(payload_marker) - 1);
+        ASSERT_EQ(payload.size(), payload_size);
+        EXPECT_TRUE(std::all_of(payload.begin(), payload.end(), [child](char value) {
+            return value == static_cast<char>('a' + child);
+        }));
+        ++line_count;
+    }
+    EXPECT_EQ(line_count, child_count * records_per_child);
 }

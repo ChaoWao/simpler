@@ -48,10 +48,15 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+_HOST_LOG_PREFIX = (
+    r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\]"
+    r"\[T0x[0-9a-fA-F]+\]\[[A-Z]+\]\s+[^:\r\n]+:\s+"
+)
 _STRACE_RE = re.compile(
     r"\[STRACE\]\s+v=(?P<v>\d+)\s+pid=(?P<pid>\d+)\s+tid=(?P<tid>\d+)\s+"
     r"inv=(?P<inv>\d+)\s+hid=(?P<hid>[0-9a-fA-F]+)\s+depth=(?P<depth>\d+)\s+"
-    r"name=(?P<name>\S+)\s+ts=(?P<ts>\d+)\s+dur=(?P<dur>\d+)(?P<attrs>.*)"
+    r"name=(?P<name>\S+)\s+ts=(?P<ts>\d+)\s+dur=(?P<dur>\d+)(?P<attrs>.*?)"
+    rf"(?={_HOST_LOG_PREFIX}|\[STRACE\]|\r?$)"
 )
 
 
@@ -96,22 +101,20 @@ class Invocation:
 
 
 def parse_spans(lines):
-    """Yield Span for every matching [STRACE] line."""
+    """Yield every complete span, including adjacent records on one line."""
     for line in lines:
-        m = _STRACE_RE.search(line)
-        if not m:
-            continue
-        yield Span(
-            pid=int(m["pid"]),
-            tid=int(m["tid"]),
-            inv=int(m["inv"]),
-            hid=m["hid"].lower(),
-            depth=int(m["depth"]),
-            name=m["name"],
-            ts=int(m["ts"]),
-            dur=int(m["dur"]),
-            attrs=m["attrs"].strip(),
-        )
+        for m in _STRACE_RE.finditer(line):
+            yield Span(
+                pid=int(m["pid"]),
+                tid=int(m["tid"]),
+                inv=int(m["inv"]),
+                hid=m["hid"].lower(),
+                depth=int(m["depth"]),
+                name=m["name"],
+                ts=int(m["ts"]),
+                dur=int(m["dur"]),
+                attrs=m["attrs"].strip(),
+            )
 
 
 def group_invocations(spans):
