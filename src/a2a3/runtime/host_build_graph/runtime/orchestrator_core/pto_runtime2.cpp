@@ -142,6 +142,9 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
     int seg_count = 0;
     bool failed = false;
 
+    // Returns nullptr for every rejected producer, having latched the fatal.
+    // Callers branch on the returned pointer, not on `failed`: the slot is
+    // dereferenced immediately and a null return is the only safe signal.
     auto resolve_producer = [&](PTO2TaskId producer) -> const PTO2TaskSlotState * {
         if (!producer.is_valid() || producer.ring() != 0) {
             orch.report_fatal(
@@ -254,7 +257,7 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
         // Step A: creator retention — read owner directly from tensor metadata
         if (owner.is_valid()) {
             const auto *slot = resolve_producer(owner);
-            if (failed) return;
+            if (slot == nullptr) return;
             try_push(*slot);
         }
 
@@ -262,7 +265,7 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
         orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
             PTO2TaskId pid = entry.producer_task_id;
             const auto *slot = resolve_producer(pid);
-            if (failed) return false;
+            if (slot == nullptr) return false;
             try_push(*slot);
             return !failed;
         });
