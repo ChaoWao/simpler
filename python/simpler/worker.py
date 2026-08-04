@@ -1666,10 +1666,10 @@ def _buffer_field_addr(buf, offset: int) -> int:
 def _request_child_shutdown(buf) -> None:
     """Ask the child owning this mailbox to leave its serve loop.
 
-    Sole writer of the termination request. The sticky ``_OFF_SHUTDOWN`` word
-    goes first so a child sampling it between the two stores already leaves by
-    the shutdown path; the ``_SHUTDOWN`` state word follows for a child parked
-    on the state word alone.
+    Sole Python writer of the termination request; the C++ local endpoint is
+    the other writer. The sticky ``_OFF_SHUTDOWN`` word goes first so a child
+    sampling it between the two stores already leaves by the shutdown path;
+    the ``_SHUTDOWN`` state word follows for a child parked on that word alone.
     """
     _mailbox_store_i32(_buffer_field_addr(buf, _OFF_SHUTDOWN), _SHUTDOWN_REQUESTED)
     _mailbox_store_i32(_buffer_field_addr(buf, _OFF_STATE), _SHUTDOWN)
@@ -5093,7 +5093,7 @@ class Worker:
         per the state/API matrix for dispatch/buffer). The lease is
         released on exit and wakes a close() that is draining. Use around any API
         that touches the live tree and can run past its admission check (run /
-        host-buffer / remote-memory)."""
+        callable registration / host-buffer / remote-memory)."""
         tid = threading.get_ident()
         with self._hierarchical_start_cv:
             self._consume_l3_host_mapped_cleanup_error_locked(api)
@@ -5189,19 +5189,19 @@ class Worker:
                     return self._post_start_register_python(reg)
                 return self._post_start_register_chip(reg, target)
 
-        # L2 has no pre-start snapshot, but still linearizes against the
-        # epoch: reject a terminal (CLOSED/FAILED) worker and wait out an
-        # in-progress init so the callable is installed and its device slot
-        # prepared after READY — never left registered-but-not-prepared, and
-        # never accepted onto a closed worker as an inert handle.
+        # L2 installs a NEW registration while holding the lifecycle lock, so
+        # init cannot start and finish its pre-warm snapshot between the epoch
+        # check and registry publication. A post-start registration always goes
+        # through the READY-only lease; it never falls back to NEW semantics if
+        # close claims the epoch after this check.
         with self._hierarchical_start_cv:
             self._wait_out_init_locked("register")
-        if self.level == 2 and self._initialized:
-            with self._operation_lease("register"):
-                return self._post_start_register_l2(reg, target)
-        with self._registry_lock:
-            handle, _is_new = self._install_registration_locked(reg)
-        return handle
+            if self._lifecycle is _Lifecycle.NEW:
+                with self._registry_lock:
+                    handle, _is_new = self._install_registration_locked(reg)
+                return handle
+        with self._operation_lease("register"):
+            return self._post_start_register_l2(reg, target)
 
     def _post_start_register_chip(self, reg: _CallableRegistration, target: ChipCallable) -> CallableHandle:
         """Publish a post-READY L3+ ChipCallable and broadcast it to the chip /
@@ -5696,12 +5696,6 @@ class Worker:
         raise TypeError("Worker.unregister expects a CallableHandle returned by Worker.register")
 
     def _pre_start_unregister_if_needed(self, handle_or_slot) -> bool:
-        if self.level < 3:
-            # L2 has no pre-start snapshot, but still linearizes against the
-            # epoch: reject a terminal worker and wait out an in-progress init.
-            with self._hierarchical_start_cv:
-                self._wait_out_init_locked("unregister")
-            return False
         with self._hierarchical_start_cv:
             self._wait_out_init_locked("unregister")
             if self._lifecycle is not _Lifecycle.NEW:
@@ -5709,7 +5703,10 @@ class Worker:
             with self._registry_lock:
                 handle_id, digest, state = self._coerce_handle_state(handle_or_slot)
                 if state.target_namespace == "REMOTE_TASK_DISPATCHER":
-                    return False
+                    if digest in self._pending_remote_unregister_hashids:
+                        raise KeyError("UNREGISTER_TOMBSTONE_ACTIVE: remote callable handle already pending unregister")
+                    self._rollback_handle_locked(handle_or_slot)
+                    return True
                 cid = state.slot_id
                 if cid in self._pending_unregister_cids:
                     raise KeyError("UNREGISTER_TOMBSTONE_ACTIVE: callable handle already pending unregister")
@@ -5740,37 +5737,26 @@ class Worker:
         Raises:
           KeyError: handle was never registered.
         """
-        if isinstance(handle_or_slot, CallableHandle) and handle_or_slot.target_namespace == "REMOTE_TASK_DISPATCHER":
-            # Linearize against the epoch before dispatching: wait out an
-            # in-progress init so the remote cleanup is actually sent once READY
-            # (an INITIALIZING worker has _initialized False and would drop local
-            # state while skipping the remote send, leaving a dangling remote
-            # dispatcher); reject a terminal worker.
-            with self._hierarchical_start_cv:
-                self._wait_out_init_locked("unregister")
-            self._unregister_remote_handle(handle_or_slot)
-            return
         if self._pre_start_unregister_if_needed(handle_or_slot):
             return
-        # Symmetric with register: a path that drives the live tree — the L3+
-        # child broadcast, and the L2 device-slot release — makes its registry
-        # mutation and its child-facing call one transaction under a lease, so
-        # a concurrent close() drains it before teardown instead of racing it.
-        # A registry-only decrement takes no lease: it must still work on a
-        # worker that was never initialized, which the lease rejects outright.
-        if self._initialized and self.level >= 2:
-            with self._operation_lease("unregister"):
-                self._unregister_handle(handle_or_slot, live=True)
-            return
-        self._unregister_handle(handle_or_slot, live=False)
+        # Every post-start path takes the READY-only lease before touching the
+        # registry. The lease rechecks lifecycle after the pre-start decision,
+        # so a close claim in between rejects the operation rather than changing
+        # it into a registry-only mutation on a CLOSED worker.
+        with self._operation_lease("unregister"):
+            if (
+                isinstance(handle_or_slot, CallableHandle)
+                and handle_or_slot.target_namespace == "REMOTE_TASK_DISPATCHER"
+            ):
+                self._unregister_remote_handle(handle_or_slot)
+            else:
+                self._unregister_handle(handle_or_slot)
 
-    def _unregister_handle(self, handle_or_slot, *, live: bool) -> None:
-        """Pop a handle from the registry and propagate cleanup to its target.
+    def _unregister_handle(self, handle_or_slot) -> None:
+        """Pop a READY worker's handle and propagate cleanup to its target.
 
-        ``live`` says whether the target is reachable — an L3+ child subtree or
-        an L2 device slot. It is decided once by the caller, under the lease
-        that pins the worker in READY for the whole transaction, rather than
-        re-read from the lifecycle across the broadcast.
+        Caller holds an operation lease that pins the worker in READY for the
+        registry mutation and the complete child-facing cleanup.
         """
         target = None
         digest = b""
@@ -5784,7 +5770,7 @@ class Worker:
                 raise KeyError("UNREGISTER_TOMBSTONE_ACTIVE: callable handle already pending unregister")
             self._live_handles.pop(handle_id, None)
             state.ref_count -= 1
-            should_broadcast_decrement = live and self.level >= 3
+            should_broadcast_decrement = self.level >= 3
             if state.ref_count > 0 and not should_broadcast_decrement:
                 return
             target = self._callable_registry[cid]
@@ -5793,13 +5779,9 @@ class Worker:
                 self._pending_unregister_cids.add(cid)
                 if state.ref_count > 0:
                     remove_target = False
-            elif live and self.level == 2:
+            elif self.level == 2:
                 assert self._chip_worker is not None
                 self._chip_worker._unregister_slot(cid)
-                self._callable_registry.pop(cid, None)
-                self._identity_registry.pop(digest, None)
-                return
-            else:
                 self._callable_registry.pop(cid, None)
                 self._identity_registry.pop(digest, None)
                 return
@@ -5830,6 +5812,11 @@ class Worker:
                 self._pending_unregister_cids.discard(cid)
 
     def _unregister_remote_handle(self, handle: CallableHandle) -> None:
+        """Drop a READY worker's remote handle and release its dispatcher.
+
+        Caller holds an operation lease, so the registry mutation and every
+        remote cleanup RPC finish before close can tear down the transport.
+        """
         worker_ids: tuple[int, ...]
         kind: str
         digest: bytes
@@ -5849,29 +5836,28 @@ class Worker:
 
         errors: list[str] = []
         try:
-            if self._initialized:
-                assert self._worker is not None
-                for worker_id in worker_ids:
-                    try:
-                        result = self._worker.remote_unregister(
-                            worker_id,
-                            "REMOTE_TASK_DISPATCHER",
-                            kind,
-                            digest,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(self._format_remote_control_exception(worker_id, exc))
-                        continue
-                    if not result.ok:
-                        errors.append(f"{result.worker_type}[{result.worker_id}]: {result.error_message}")
-                if errors:
-                    with self._registry_lock:
-                        self._uncertain_hashids.add(digest)
-                    sys.stderr.write(
-                        f"Worker.unregister(hash={_format_digest(digest)}): remote cleanup uncertain on "
-                        f"{len(errors)} remote workers. First error: {errors[0]}\n"
+            assert self._worker is not None
+            for worker_id in worker_ids:
+                try:
+                    result = self._worker.remote_unregister(
+                        worker_id,
+                        "REMOTE_TASK_DISPATCHER",
+                        kind,
+                        digest,
                     )
-                    sys.stderr.flush()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(self._format_remote_control_exception(worker_id, exc))
+                    continue
+                if not result.ok:
+                    errors.append(f"{result.worker_type}[{result.worker_id}]: {result.error_message}")
+            if errors:
+                with self._registry_lock:
+                    self._uncertain_hashids.add(digest)
+                sys.stderr.write(
+                    f"Worker.unregister(hash={_format_digest(digest)}): remote cleanup uncertain on "
+                    f"{len(errors)} remote workers. First error: {errors[0]}\n"
+                )
+                sys.stderr.flush()
         finally:
             with self._registry_lock:
                 if remove_state:
@@ -8722,8 +8708,8 @@ class Worker:
             with self._hierarchical_start_cv:
                 if threading.get_ident() in self._lease_depth:
                     raise RuntimeError(
-                        "Worker.close(): cannot be called from within a run() / submit() / create_host_buffer() "
-                        "operation on this thread"
+                        "Worker.close(): cannot be called from within a run() / submit() / create_host_buffer() / "
+                        "register() / unregister() or other leased Worker operation on this thread"
                     )
                 if self._lifecycle is _Lifecycle.INITIALIZING:
                     raise RuntimeError(
@@ -9016,9 +9002,8 @@ class Worker:
     def _teardown_ready_tree(self) -> None:
         """Tear down the worker's live tree. Called only from close() after it
         has published CLOSED and drained the leased ops, so no leased operation
-        is in flight. (register / unregister are not yet lease-fenced against
-        close — see the deferred admission item — so a racing register broadcast
-        is possible; that gap is out of this PR's scope.)
+        is in flight. Register and unregister hold the same lease from their
+        READY gate through registry publication and child-facing cleanup.
 
         Best-effort and error-accumulating: every step runs even if an earlier
         one raised, so one failing resource never strands the rest. Teardown is
