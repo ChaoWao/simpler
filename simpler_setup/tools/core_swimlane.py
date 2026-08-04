@@ -11,8 +11,9 @@
 
 Given a SceneTest test file + platform + a comma-list of func_ids (the mix
 member set), this tool:
-  1. runs (or reuses) a JSON-only args dump (`--dump-args 3`) to capture the
-     task's real per-arg metadata,
+  1. runs (or reuses) an args dump to capture the task's real per-arg
+     metadata with `--dump-args 3`; tensors marked by orchestration's
+     `CoreTaskArgs::dump(...)` also contribute payload bytes,
   2. picks the task whose active-subtask set == `--func-id` and reconstructs its
      FULL positional args[] (shapes / dtypes / strides / start_offset / scalar
      values) from the #1181 dump; the task's func_id ARRAY is its mix membership,
@@ -152,10 +153,11 @@ ARCH_CONFIG = {
 #                   one source. Detected by load_kernel_meta; everything else
 #                   (incl. independent kernels packed into a mix dispatch, like
 #                   mixed_example) goes through the AIC/AIV-only path.
-#   * hw_block_dim / block_num — the SPMD grid width, from `--spmd-block-num`
-#                   (defaults to 1). Cohorts size themselves from
-#                   rt_available_cluster_count() at run time, so the width is
-#                   not statically known from the test file.
+#   * block_num   — the selected SPMD task's logical grid width, from
+#                   `--spmd-block-num` (defaults to 1). The args dump does not
+#                   carry slot-48 context; read the real value from the
+#                   orchestration, where it may be task-specific or derived
+#                   from rt_available_cluster_count().
 #   * aiv_lanes_per_block      — the arch's hardware subblockdim (ARCH_CONFIG).
 # The mix path additionally needs ONE incore to declare the full tensor
 # `signature` (so the dump captures the shared args) — a standard CALLABLE
@@ -189,6 +191,7 @@ def load_kernel_meta(test_path: Path, func_id: int, platform: str):
     spec.loader.exec_module(module)
 
     from simpler_setup import SceneTestCase  # noqa: PLC0415
+    from simpler_setup.scene_test import _resolve_incore_include_dirs  # noqa: PLC0415
 
     classes = [
         v
@@ -213,11 +216,15 @@ def load_kernel_meta(test_path: Path, func_id: int, platform: str):
     for cls in classes:
         for inc in cls.CALLABLE.get("incores", []):
             fid = inc["func_id"]
+            extra_include_dirs = inc.get("extra_include_dirs", [])
             by_func[fid] = {
                 "func_id": fid,
                 "source": (test_path.parent / inc["source"]).resolve(),
                 "core_type": inc["core_type"],
                 "name": inc.get("name") or Path(inc["source"]).stem,
+                "extra_include_dirs": (
+                    _resolve_incore_include_dirs(extra_include_dirs, inc) if extra_include_dirs else []
+                ),
             }
             owner_cls[fid] = cls
     if func_id not in by_func:
@@ -247,7 +254,14 @@ def _case_from_manifest(manifest: Path, class_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Step 2: obtain an args_dump.json (run the test in sim, or reuse one)
 # ---------------------------------------------------------------------------
-def get_or_run_dump(test_path: Path, platform: str, variant: str, dump_json, case=None, device=None):
+def get_or_run_dump(
+    test_path: Path,
+    platform: str,
+    variant: str,
+    dump_json,
+    case=None,
+    device=None,
+):
     if dump_json:
         p = Path(dump_json)
         if not p.is_file():
@@ -256,11 +270,8 @@ def get_or_run_dump(test_path: Path, platform: str, variant: str, dump_json, cas
 
     outputs = PROJECT_ROOT / "outputs"
     before = set(outputs.glob("*/args_dump")) if outputs.is_dir() else set()
-    # Level 3 (full, JSON-only): every task's tensor *metadata* (shape/dtype/
-    # strides) + scalar values, no .bin payload copy. That is exactly what arg
-    # reconstruction consumes (it never reads the payload), and it skips the
-    # device->host arena copy entirely — cheaper, and avoids the large-shape
-    # copy failing onboard.
+    # Level 3 captures complete task/argument metadata and reuses the existing
+    # Arg::dump() task mask for any tensor payload requested by orchestration.
     cmd = [sys.executable, str(test_path), "-p", platform, "--dump-args", "3"]
     # Pin the dump to exactly one case, allowing it to be `manual` (core_swimlane
     # tracing targets are often manual to stay out of CI). `case` is main's
@@ -391,6 +402,12 @@ def reconstruct_task_args(manifest: Path, func_id_list, task_id=None):
                 "shape": shape,
                 "strides": strides,
                 "start_offset": int(t.get("start_offset", 0)),
+                "role": t.get("role"),
+                "stage": t.get("stage"),
+                "bin_offset": int(t.get("bin_offset", 0)),
+                "bin_size": int(t.get("bin_size", 0)),
+                "truncated": bool(t.get("truncated", False)),
+                "overwritten": bool(t.get("overwritten", False)),
             }
         )
     for s in scalars:
@@ -422,6 +439,123 @@ def _is_contiguous(shape, strides, start_offset):
             return False
         exp *= s
     return start_offset == 0
+
+
+def _logical_numel(shape):
+    numel = 1
+    for dim in shape:
+        if dim < 0:
+            raise ValueError(f"negative tensor dimension {dim}")
+        numel *= dim
+    return numel
+
+
+def _materialize_physical_payload(logical_data, shape, strides, start_offset, elem_size):
+    """Scatter row-major logical dump bytes into the tensor's physical view."""
+    if len(shape) != len(strides):
+        raise ValueError(f"shape/strides rank mismatch: {shape} vs {strides}")
+    if start_offset < 0 or any(stride < 0 for stride in strides):
+        raise ValueError(f"negative start_offset/stride is unsupported: start={start_offset}, strides={strides}")
+
+    numel = _logical_numel(shape)
+    expected = numel * elem_size
+    if len(logical_data) != expected:
+        raise ValueError(f"logical payload size {len(logical_data)} does not match expected {expected}")
+    if expected == 0:
+        raise ValueError("zero-sized tensor payload cannot be restored")
+
+    physical = bytearray((start_offset + _extent_elem(shape, strides)) * elem_size)
+    for linear_idx in range(numel):
+        rem = linear_idx
+        physical_elem = start_offset
+        for dim, stride in zip(reversed(shape), reversed(strides)):
+            coord = rem % dim
+            rem //= dim
+            physical_elem += coord * stride
+        src = linear_idx * elem_size
+        dst = physical_elem * elem_size
+        physical[dst : dst + elem_size] = logical_data[src : src + elem_size]
+    return bytes(physical)
+
+
+def restore_arg_payloads(manifest: Path, kargs: list[dict], restore_slots):
+    """Load and materialize payloads for explicitly selected tensor slots."""
+    if not restore_slots:
+        return
+
+    data = json.loads(manifest.read_text())
+    bin_format = data.get("bin_format") or {}
+    if bin_format.get("type") != "logical_contiguous" or bin_format.get("byte_order") != "little_endian":
+        raise ValueError("--restore-arg requires bin_format type=logical_contiguous and byte_order=little_endian")
+
+    bin_name = data.get("bin_file")
+    if not bin_name:
+        raise ValueError(
+            "--restore-arg requires a payload-carrying dump; this manifest has no bin_file "
+            "(mark the tensor with CoreTaskArgs::dump(...) in orchestration and recapture with --dump-args 3)"
+        )
+    bin_path = manifest.parent / bin_name
+    if not bin_path.is_file():
+        raise ValueError(f"--restore-arg payload file not found: {bin_path}")
+
+    by_slot = {a["slot"]: a for a in kargs}
+    file_size = bin_path.stat().st_size
+    with open(bin_path, "rb") as payload_file:
+        for slot in restore_slots:
+            arg = by_slot.get(slot)
+            if arg is None:
+                raise ValueError(f"--restore-arg slot {slot} is not an arg of this task")
+            if arg["kind"] != "tensor":
+                raise ValueError(f"--restore-arg slot {slot} is a scalar; only tensor payloads can be restored")
+            if arg.get("stage") != "before_dispatch":
+                raise ValueError(
+                    f"--restore-arg slot {slot} has no before_dispatch payload; output-only tensors "
+                    "cannot initialize a replay"
+                )
+            if arg.get("truncated"):
+                raise ValueError(f"--restore-arg slot {slot} payload is truncated")
+            if arg.get("overwritten"):
+                raise ValueError(f"--restore-arg slot {slot} payload was overwritten before export")
+
+            dtype = arg["dtype"]
+            if dtype not in DTYPE_SIZE:
+                raise ValueError(f"--restore-arg slot {slot} has unsupported dtype {dtype}")
+            expected_size = _logical_numel(arg["shape"]) * DTYPE_SIZE[dtype]
+            bin_offset = arg["bin_offset"]
+            bin_size = arg["bin_size"]
+            if bin_size == 0:
+                raise ValueError(
+                    f"--restore-arg slot {slot} has no captured payload; mark that tensor with "
+                    "CoreTaskArgs::dump(...) in orchestration and capture a fresh level-3 dump"
+                )
+            if bin_size != expected_size:
+                raise ValueError(
+                    f"--restore-arg slot {slot} bin_size {bin_size} does not match logical tensor size {expected_size}"
+                )
+            if bin_offset < 0 or bin_offset + bin_size > file_size:
+                raise ValueError(
+                    f"--restore-arg slot {slot} payload range [{bin_offset}, {bin_offset + bin_size}) "
+                    f"exceeds {bin_path} size {file_size}"
+                )
+
+            payload_file.seek(bin_offset)
+            logical_data = payload_file.read(bin_size)
+            if len(logical_data) != bin_size:
+                raise ValueError(
+                    f"--restore-arg slot {slot} short read: expected {bin_size} bytes, got {len(logical_data)}"
+                )
+            arg["restore_data"] = _materialize_physical_payload(
+                logical_data,
+                arg["shape"],
+                arg["strides"],
+                arg["start_offset"],
+                DTYPE_SIZE[dtype],
+            )
+            print(
+                f"[core_swimlane] restoring tensor slot {slot} "
+                f"({dtype} {arg['shape']}): {bin_size} logical bytes -> "
+                f"{len(arg['restore_data'])} physical bytes"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -639,14 +773,27 @@ def _emit_tensor_alloc_descs(args):
         ndims = len(shape)
         shp = ", ".join(str(x) for x in shape)
         strd = ", ".join(str(x) for x in strides)
-        # Default: data memset to 0 (only descriptor metadata is real). When
-        # --set-arg fills this tensor, write VALUE into every element instead —
-        # for control tensors whose CONTENT drives the kernel (e.g. paged
-        # attention reads n_blocks from the context_lens tensor). The low `esz`
-        # bytes of the int64 VALUE are copied per element (correct for any
-        # integer width, little-endian).
+        # Tensor initialization has three exclusive modes: restored dump bytes,
+        # a --set-arg uniform integer fill, or zero.
         fill = a.get("fill")
-        if fill is None:
+        restore_data = a.get("restore_data")
+        if fill is not None and restore_data is not None:
+            raise ValueError(f"tensor slot {slot} cannot be both restored and uniformly filled")
+        if restore_data is not None:
+            byte_rows = []
+            for off in range(0, len(restore_data), 16):
+                byte_rows.append("            " + ", ".join(f"0x{b:02x}" for b in restore_data[off : off + 16]))
+            byte_literal = ",\n".join(byte_rows)
+            init = (
+                f"    {{\n"
+                f"        static const unsigned char hbuf{ti}[] = {{\n"
+                f"{byte_literal}\n"
+                f"        }};\n"
+                f"        ACL_CHECK(aclrtMemcpy(d_t{ti}, t{ti}Bytes, hbuf{ti}, sizeof(hbuf{ti}),\n"
+                f"                              ACL_MEMCPY_HOST_TO_DEVICE));\n"
+                f"    }}"
+            )
+        elif fill is None:
             init = f"    ACL_CHECK(aclrtMemset(d_t{ti}, t{ti}Bytes, 0, t{ti}Bytes));"
         else:
             init = (
@@ -758,8 +905,9 @@ int main() {{
     // positional kernels (they ignore 48/49); required for SPMD kernels that
     // read get_block_idx / get_block_num / get_sub_block_id, which would
     // otherwise dereference a null context. block_idx=0 traces a representative
-    // block; block_num={block_num} (from --spmd-block-num) keeps steady-state
-    // branches (e.g. `block_idx+1 < block_num`) on their normal path.
+    // block. block_num={block_num} comes from --spmd-block-num; 1 models a
+    // single-block path, while SPMD branch/grid-stride fidelity requires the
+    // real grid width.
     uint8_t h_local[64] = {{0}};   // LocalContext: block_idx@0, block_num@4
     *reinterpret_cast<int32_t *>(h_local + 0) = 0;
     *reinterpret_cast<int32_t *>(h_local + 4) = {block_num};
@@ -794,11 +942,12 @@ int main() {{
 """
 
 
-def emit_cmakelists(arch: str, name: str, cfg, debug: bool = False) -> str:
+def emit_cmakelists(arch: str, name: str, cfg, debug: bool = False, extra_include_dirs=None) -> str:
     # With -g, also drop the linker `-s` (strip) so the device kernel's
     # debug_line survives -> Insight can map instructions to source lines.
     link_opts = "-Wl,-z,relro -Wl,-z,now" if debug else "-s -Wl,-z,relro -Wl,-z,now"
     dbg_flag = "\n    -g" if debug else ""
+    extra_includes = "\n".join(f'    "{include_dir}"' for include_dir in (extra_include_dirs or []))
     return f"""\
 cmake_minimum_required(VERSION 3.16)
 
@@ -850,6 +999,7 @@ set(COMMON_INCLUDES
     ${{PTO_ISA_ROOT}}/include/pto
     ${{REPO_ROOT}}/src/{arch}/runtime/tensormap_and_ringbuffer/runtime
     ${{REPO_ROOT}}/src/{arch}/runtime/tensormap_and_ringbuffer/common
+    ${{REPO_ROOT}}/src/common/platform/include
     ${{REPO_ROOT}}/src/common/task_interface
     ${{REPO_ROOT}}/src/{arch}/platform/include
     ${{REPO_ROOT}}/simpler_setup/incore
@@ -857,6 +1007,7 @@ set(COMMON_INCLUDES
     ${{ASCEND_HOME_PATH}}/pkg_inc/profiling
     ${{ASCEND_HOME_PATH}}/pkg_inc/runtime/runtime
     ${{ASCEND_HOME_PATH}}/include
+{extra_includes}
 )
 
 add_library(replay_kernel SHARED replay_kernel.cpp replay_launch.cpp)
@@ -882,10 +1033,14 @@ target_link_libraries(replay_host PRIVATE
 """
 
 
-def emit_run_collect(cfg, pto_isa_root: str) -> str:
+def emit_run_collect(cfg, pto_isa_root: str, msprof_timeout: int = 120) -> str:
     # Plain string (bash uses ${} braces) — bake SoC default and the
     # pin-resolved pto-isa path via tokens (no ambient PTO_ISA_ROOT env #1403).
-    return _RUN_COLLECT_TEMPLATE.replace("__SOC_DEFAULT__", cfg["soc"]).replace("__PTO_ISA_ROOT__", pto_isa_root)
+    return (
+        _RUN_COLLECT_TEMPLATE.replace("__SOC_DEFAULT__", cfg["soc"])
+        .replace("__PTO_ISA_ROOT__", pto_isa_root)
+        .replace("__MSPROF_TIMEOUT__", str(msprof_timeout))
+    )
 
 
 _RUN_COLLECT_TEMPLATE = """\
@@ -917,7 +1072,7 @@ cmake --build "$BUILD_DIR" --target replay_host
 
 msprof op simulator \\
     --application="$BUILD_DIR/replay_host" --kernel-name="replay_entry" \\
-    --launch-count=1 --soc-version="$SOC_VERSION" --timeout=120 \\
+    --launch-count=1 --soc-version="$SOC_VERSION" --timeout=__MSPROF_TIMEOUT__ \\
     --output="$COLLECT_DIR/out" 2>&1 | tee "$COLLECT_DIR/msprof_collect.log"
 
 OPPROF_DIR="$(find "$COLLECT_DIR/out" -maxdepth 1 -mindepth 1 -type d -name 'OPPROF_*' | sort | tail -n 1)"
@@ -944,6 +1099,7 @@ def generate_workspace(  # noqa: PLR0913
     pto_isa_root: str,
     debug: bool = False,
     block_num: int = 1,
+    msprof_timeout: int = 120,
 ):
     ws.mkdir(parents=True, exist_ok=True)
     # One combined replay_entry for the whole mix task (cube=AIC member, vec=AIV
@@ -953,9 +1109,12 @@ def generate_workspace(  # noqa: PLR0913
     (ws / "replay_kernel.cpp").write_text(emit_replay_kernel_combined(members, cfg))
     (ws / "replay_launch.cpp").write_text(emit_replay_launch())
     (ws / "replay_host.cpp").write_text(emit_replay_host(tensor_count, args, block_num))
-    (ws / "CMakeLists.txt").write_text(emit_cmakelists(arch, name, cfg, debug))
+    extra_include_dirs = list(
+        dict.fromkeys(include_dir for member in members for include_dir in member.get("extra_include_dirs", []))
+    )
+    (ws / "CMakeLists.txt").write_text(emit_cmakelists(arch, name, cfg, debug, extra_include_dirs=extra_include_dirs))
     rc = ws / "run_collect.sh"
-    rc.write_text(emit_run_collect(cfg, pto_isa_root))
+    rc.write_text(emit_run_collect(cfg, pto_isa_root, msprof_timeout))
     rc.chmod(0o755)
 
 
@@ -1197,6 +1356,20 @@ def collect(ws: Path, env, max_time: int, device=None, dest_name: str = "trace.j
 
 
 # ---------------------------------------------------------------------------
+def parse_arg_overrides(set_arg, ap: argparse.ArgumentParser):
+    parsed = []
+    for spec in set_arg:
+        if "=" not in spec:
+            ap.error(f"--set-arg must be SLOT=VALUE (got {spec!r})")
+        slot_s, val_s = spec.split("=", 1)
+        try:
+            slot, value = int(slot_s), int(val_s)
+        except ValueError:
+            ap.error(f"--set-arg SLOT and VALUE must be integers (got {spec!r})")
+        parsed.append((slot, value))
+    return parsed
+
+
 def apply_arg_overrides(kargs: list[dict], set_arg, ap: argparse.ArgumentParser):
     """Apply --set-arg SLOT=VALUE overrides to reconstructed args.
 
@@ -1210,15 +1383,10 @@ def apply_arg_overrides(kargs: list[dict], set_arg, ap: argparse.ArgumentParser)
     """
     if not set_arg:
         return
+    if isinstance(set_arg[0], str):
+        set_arg = parse_arg_overrides(set_arg, ap)
     by_slot = {a["slot"]: a for a in kargs}
-    for spec in set_arg:
-        if "=" not in spec:
-            ap.error(f"--set-arg must be SLOT=VALUE (got {spec!r})")
-        slot_s, val_s = spec.split("=", 1)
-        try:
-            slot, value = int(slot_s), int(val_s)
-        except ValueError:
-            ap.error(f"--set-arg SLOT and VALUE must be integers (got {spec!r})")
+    for slot, value in set_arg:
         a = by_slot.get(slot)
         if a is None:
             ap.error(f"--set-arg slot {slot} is not an arg of this task")
@@ -1290,8 +1458,24 @@ def main():
         "the camodel replay — name the small one instead. Accepts "
         "ClassName::Case too.",
     )
-    ap.add_argument("--dump-json", default=None, help="reuse an existing args_dump.json")
+    ap.add_argument(
+        "--dump-json",
+        default=None,
+        help="reuse an existing args_dump.json. --restore-arg additionally "
+        "requires the selected payload in the manifest's args.bin.",
+    )
     # ----- replay tuning -----
+    ap.add_argument(
+        "--restore-arg",
+        action="append",
+        default=[],
+        type=int,
+        metavar="SLOT",
+        help="initialize a tensor slot from its captured before_dispatch payload. "
+        "Repeatable. The tensor must already be marked with CoreTaskArgs::dump(...) "
+        "in orchestration; a reused --dump-json must reference args.bin. Intended "
+        "for structured control tensors that --set-arg cannot represent.",
+    )
     ap.add_argument(
         "--set-arg",
         action="append",
@@ -1305,7 +1489,8 @@ def main():
         "(--set-arg 4=4); mix paged-attention derives n_blocks "
         "from the context_lens tensor (--set-arg 4=512 -> "
         "n_blocks=ceil(512/block_size)). Only real arg slots are "
-        "settable. Repeatable. Default: real dump values.",
+        "settable. Repeatable. By default scalars retain dump values and "
+        "tensor payloads are zero-filled.",
     )
     ap.add_argument(
         "--spmd-block-num",
@@ -1313,10 +1498,9 @@ def main():
         default=None,
         metavar="N",
         help="block_num written into the synthesized SPMD LocalContext "
-        "(slot 48). Default: 1. Required to replay an SPMD cohort, whose "
-        "width is resolved on device. Only matters for "
-        "kernels that branch/stride on block_num; set the real grid "
-        "width for those.",
+        "(slot 48). Default: 1. The args dump does not carry this context. "
+        "For kernels that branch/stride on block_num, pass the selected "
+        "task's real logical grid width from its orchestration.",
     )
     ap.add_argument(
         "--debug-line",
@@ -1329,13 +1513,33 @@ def main():
     # ----- run control -----
     ap.add_argument("--no-collect", action="store_true", help="smoke build only")
     ap.add_argument("--max-time", type=int, default=1800, help="task-submit budget (sec)")
+    ap.add_argument(
+        "--msprof-timeout",
+        type=int,
+        default=120,
+        metavar="MINUTES",
+        help="msprof op simulator application timeout in minutes (default: 120; valid range: 1-2880)",
+    )
     args = ap.parse_args()
+
+    if not 1 <= args.msprof_timeout <= 2880:
+        ap.error("--msprof-timeout MINUTES must be in [1, 2880]")
+    set_arg = parse_arg_overrides(args.set_arg, ap)
+    restore_slots = list(dict.fromkeys(args.restore_arg))
+    invalid_restore_slots = [slot for slot in restore_slots if slot < 0 or slot >= KARGS_SLOTS]
+    if invalid_restore_slots:
+        ap.error(f"--restore-arg SLOT must be in [0, {KARGS_SLOTS - 1}] (got {invalid_restore_slots})")
+    conflicts = sorted(set(restore_slots) & {slot for slot, _ in set_arg})
+    if conflicts:
+        ap.error(f"arg slot(s) {conflicts} cannot use both --restore-arg and --set-arg")
 
     test_path = Path(args.test).resolve()
     arch, variant = parse_platform(args.platform)
     cfg = ARCH_CONFIG.get(arch)
     if cfg is None:
         ap.error(f"unsupported arch {arch} (from {args.platform}); supported: {', '.join(ARCH_CONFIG)}")
+    if restore_slots and arch == "a5":
+        ap.error("--restore-arg does not support a5/a5sim tensor payload while #1560 is open")
 
     func_id_list = [int(x) for x in args.func_id.split(",")]
     meta = load_kernel_meta(test_path, func_id_list[0], args.platform)
@@ -1367,6 +1571,10 @@ def main():
     # positional payload. mix_func_ids is the dump's array (slot order
     # AIC,AIV0,AIV1), NOT the typed order, so lane assignment stays correct.
     chosen, tensor_count, kargs, mix_func_ids = reconstruct_task_args(manifest, func_id_list, args.task_id)
+    try:
+        restore_arg_payloads(manifest, kargs, restore_slots)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     # Resolve the mix members (slot order) to their sources/core_types.
     missing = [f for f in mix_func_ids if f not in by_func]
@@ -1388,13 +1596,14 @@ def main():
     # Full arg-slot map so the caller can pick a slot for --set-arg without
     # cross-referencing the kernel source. Names are not in the dump (only
     # kind/shape/value) — read the kernel's `args:` header for those.
-    print("[core_swimlane] arg slots (override with --set-arg SLOT=VALUE):")
+    print("[core_swimlane] arg slots (override with --set-arg SLOT=VALUE or --restore-arg SLOT):")
     for a in sorted(kargs, key=lambda x: x["slot"]):
         if a["kind"] == "tensor":
-            print(f"    slot {a['slot']:<2} tensor  {a['dtype']:<8} {a['shape']}")
+            restored = " [restored payload]" if "restore_data" in a else ""
+            print(f"    slot {a['slot']:<2} tensor  {a['dtype']:<8} {a['shape']}{restored}")
         else:
             print(f"    slot {a['slot']:<2} scalar  = {a['value']}")
-    apply_arg_overrides(kargs, args.set_arg, ap)
+    apply_arg_overrides(kargs, set_arg, ap)
 
     # Self-describing label: <TestClass>_<Case>_<platform>_<kernel>_<mix>, so the
     # workspace dir and the trace.json filename say which case/kernel/mix they are.
@@ -1418,6 +1627,7 @@ def main():
         pto_isa_root,
         debug=args.debug_line,
         block_num=block_num,
+        msprof_timeout=args.msprof_timeout,
     )
     print(f"[core_swimlane] workspace: {ws}")
 

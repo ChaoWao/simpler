@@ -18,6 +18,7 @@ use the unified schema, and no legacy args-only manifest is emitted.
 """
 
 import json
+import struct
 import subprocess
 import sys
 import time
@@ -46,6 +47,9 @@ class TestArgsDump(SceneTestCase):
       Mode is latched host-side before dispatch, so it is race-free regardless
       of submission order.
     - ``--dump-args 2`` (full): markers are ignored, every task is dumped.
+    - ``--dump-args 3`` (full_json_only): every task is present in JSON, while
+      only tensors selected by those same ``dump(...)`` markers contribute
+      payload bytes to ``args.bin``.
 
     The dump level comes straight from the CLI ``--dump-args`` value
     (no per-case override).
@@ -119,16 +123,12 @@ class TestArgsDump(SceneTestCase):
         bin_name = data.get("bin_file")
         tensors = data.get("args", [])
         assert tensors, f"args_dump.json has no entries: {data}"
-        if level == 3:
-            # full_json_only: metadata only, no payload and no .bin file.
-            assert bin_name is None, f"level 3 manifest should have bin_file=null: {data}"
-            assert not (dump_dir / "args.bin").exists(), "level 3 must not write args.bin"
-            assert all(t.get("bin_size") == 0 for t in tensors), tensors
-        else:
-            assert bin_name, f"manifest missing bin_file field: {data}"
-            bin_path = dump_dir / bin_name
-            assert bin_path.exists(), f"manifest names bin_file={bin_name!r} but {bin_path} not found"
-            assert bin_path.stat().st_size > 0, "args.bin is empty"
+        assert data.get("dump_args_level") == level
+        assert "payload_filter" not in data
+        assert bin_name, f"manifest missing bin_file field: {data}"
+        bin_path = dump_dir / bin_name
+        assert bin_path.exists(), f"manifest names bin_file={bin_name!r} but {bin_path} not found"
+        assert bin_path.stat().st_size > 0, "args.bin is empty"
 
         # Unified manifest (#792): tensors and scalar args share one
         # args_dump.json keyed by a "kind" field; no separate legacy sidecar files.
@@ -198,6 +198,31 @@ class TestArgsDump(SceneTestCase):
         else:
             # Full (level 2 or 3): markers ignored — every one of the 5 tasks is dumped.
             assert len(task_ids) >= 5, f"full dump should cover all 5 tasks, got {sorted(task_ids)}"
+            if level == 3:
+                selected_tensor_slots = {
+                    ("0x0000000100000000", 0),
+                    ("0x0000000100000000", 1),
+                    ("0x0000000100000002", 0),
+                    ("0x0000000100000002", 2),
+                    ("0x0000000100000003", 0),
+                    ("0x0000000100000003", 1),
+                    ("0x0000000100000003", 2),
+                }
+                for entry in tensor_entries:
+                    selected = (entry["task_id"], entry["arg_index"]) in selected_tensor_slots
+                    assert (entry.get("bin_size", 0) > 0) == selected, entry
+
+                restored_input = next(
+                    entry
+                    for entry in tensor_entries
+                    if entry["task_id"] == "0x0000000100000000"
+                    and entry["arg_index"] == 0
+                    and entry["stage"] == "before_dispatch"
+                )
+                with bin_path.open("rb") as payload_file:
+                    payload_file.seek(restored_input["bin_offset"])
+                    payload = payload_file.read(restored_input["bin_size"])
+                assert payload == struct.pack("<f", 5.0) * (128 * 128)
 
         # ---- Tool smoke: dump_viewer ----
         # Exit-code-only check; the no-filter default lists every captured

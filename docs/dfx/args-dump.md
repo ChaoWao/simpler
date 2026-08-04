@@ -23,21 +23,24 @@ saw, without the timing distortion of inline printing.
 - **Logical shape preserved.** Records carry dtype, shape,
   `strides`, `start_offset`, and `is_contiguous` so logical views are
   reconstructable.
-- **Manifest + binary payload.** `--dump-args` writes a JSON
-  manifest plus one `.bin` payload per run; tensor entries carry
-  `bin_offset` / `bin_size`, while scalar entries stay manifest-only.
+- **Manifest + optional binary payload.** `--dump-args` always writes a JSON
+  manifest and writes one `.bin` payload when tensor bytes were captured;
+  tensor entries carry `bin_offset` / `bin_size`, while scalar entries stay
+  manifest-only.
 - **Unified scalar args.** Scalar values are emitted as
   `kind: scalar`, `stage: before_dispatch`, zero-dim records in
   `args_dump.json`; there is no separate args-only manifest. Their
   final `dtype` is registered at submit time in a dump-only per-task side table
   and resolved by AICPU when writing each scalar dump record.
-- **Cross-architecture.** Same flags and on-disk layout family on
-  `a2a3` and `a5`. Both runtimes are wired through.
+- **Cross-architecture metadata.** The flags, manifest schema, and scalar
+  metadata are wired through both runtime variants on `a2a3` and `a5`.
+  Real tensor-payload consumption is currently supported only on the
+  `a2a3` platform family; see the platform scope below.
 
 Enable in one line (`2` = full dump, every task):
 
 ```bash
-python tests/st/<case>/test_<name>.py -p a5sim --dump-args 2
+python tests/st/<case>/test_<name>.py -p a2a3sim --dump-args 2
 ```
 
 ## 3. How to Use
@@ -51,24 +54,45 @@ python tests/st/<case>/test_<name>.py -p a5sim --dump-args 2
 | `0` (or flag absent) | off — zero overhead |
 | `1` (bare `--dump-args`) | **partial** — only args marked with `CoreTaskArgs::dump(...)` (see §3.2) |
 | `2` (`--dump-args 2`) | **full** — every task's tensor inputs/outputs and scalar args |
-| `3` (`--dump-args 3`) | **full, JSON only** — every task's tensor/scalar metadata (shape, dtype, strides, scalar values) to `args_dump.json`; no payload captured, no `.bin` file |
+| `3` (`--dump-args 3`) | **full metadata + partial payload** — every task's tensor/scalar metadata goes to `args_dump.json`; tensors marked with `CoreTaskArgs::dump(...)` also contribute payload to `args.bin` |
 
-Level 3 exists for consumers that need only the per-task argument metadata,
-not the tensor element data — e.g. feeding the manifest into tooling. The AICPU
-skips the arena payload copy entirely (treating every tensor like a scalar
-for payload purposes), so it incurs none of full mode's device→host
-bandwidth or arena pressure, and the manifest's `bin_file` is `null` with
-every `bin_size` at `0`.
+> **Tensor-payload platform scope:** levels 1/2 and marked level 3 are
+> currently supported for payload consumers only on `a2a3` / `a2a3sim`.
+> On `a5` / `a5sim`, the manifest and `.bin` sizes can look valid while tensor
+> payload bytes are zero because of
+> [#1560](https://github.com/hw-native-sys/simpler/issues/1560). Do not use an
+> a5 dump as a source of tensor truth until that issue is fixed. A marked
+> level-3 payload still produces `args.bin` on that platform family, but it is
+> not trustworthy for tensor restoration or an L0 swimlane that restores it.
+> Plain level-3 metadata, including inline scalar values, does not consume
+> tensor payload and remains available.
+
+Level 3 exists for consumers that need complete per-task argument metadata
+without dumping every tensor's element data. It reuses the exact task/argument
+mask produced by `CoreTaskArgs::dump(...)` for Level 1: every argument still gets
+a JSON record, while only marked tensors contribute bytes to `args.bin`.
+Scalar values already live inline in the manifest and never need payload copy.
+With no `dump(...)` markers, the AICPU skips all arena payload copies, the
+manifest's `bin_file` is `null`, and every `bin_size` is `0`.
+
+Level 3 deliberately inherits Level 1's existing mask-propagation scope; it
+does not add a second selector path. Both runtime variants on `a2a3` and `a5`
+already propagate the `CoreTaskArgs::dump(...)` mask. Level 3 consumes that same
+mask without changing Level 1 behavior. On `a5`, however, the resulting tensor
+bytes remain untrusted under #1560, so payload restoration stays outside this
+change until that issue is fixed.
 
 ```bash
 # Standalone runner
-python tests/st/<case>/test_<name>.py -p a5sim --dump-args 2     # full
+python tests/st/<case>/test_<name>.py -p a2a3sim --dump-args 2  # full
 python tests/st/<case>/test_<name>.py -p a2a3 -d 0 --dump-args   # partial (level 1)
 
 # pytest
 pytest tests/st/<case> --platform a5sim --dump-args 2
 # a5 host_build_graph has no examples — use the scene test
 pytest tests/st/a5/host_build_graph/dump_args --platform a5sim --dump-args 2
+pytest tests/st/<case> --platform a2a3sim --dump-args 2
+pytest examples/a2a3/host_build_graph/vector_example --platform a2a3sim --dump-args 2
 ```
 
 The level sets `CallConfig::enable_dump_args` (0/1/2/3). The host then
@@ -81,8 +105,9 @@ distinction is carried as a `DumpArgsLevel` in the dump shared-memory header
 than in the profiling-flag bitmask. The on-device AICPU reads the storage base
 via `set_platform_dump_base()`, the enable bit via
 `set_dump_args_enabled(SIMPLER_GET_DFX_FLAG(...))`, and latches the mode
-in `dump_args_init()` from the header level (`PARTIAL` → selective,
-`FULL_JSON_ONLY` → metadata-only, payload copy suppressed). Because the
+from the header level before task dispatch (`PARTIAL` → selective,
+`FULL_JSON_ONLY` → all metadata, payload copy controlled by the same
+per-task mask as `PARTIAL`). Because the
 level is decided host-side **before any task is
 dispatched**, it is latched up front — there is no dependence on task
 submission order. AICore executors read the same `SIMPLER_DFX_FLAG_DUMP_ARGS`
@@ -150,9 +175,10 @@ before any dispatch — not inferred from the markers, so it never depends
 on task submission order. At level 1, tasks without a marker are skipped
 and marked tasks dump only their selected arguments. At level 2, the
 markers are ignored and every task's tensors/scalars are dumped. At level
-3, every task's tensors/scalars are dumped as metadata only (no payload,
-no `.bin`). With no
-`--dump-args` (level 0) dump is off entirely.
+3, every task's tensors/scalars are dumped as metadata and the same markers
+control which tensor records carry payload. A5 tensor payload remains
+unsupported under [#1560](https://github.com/hw-native-sys/simpler/issues/1560).
+With no `--dump-args` (level 0) dump is off entirely.
 
 If you run at level 1 but place no `dump(...)` markers anywhere, the
 manifest is empty — that is the deliberate "only what I marked" contract.
@@ -169,19 +195,23 @@ The dump artifacts land under the per-task output prefix
 <output_prefix>/
 └── args_dump/
     ├── args_dump.json  # unified argument manifest (`--dump-args`)
-    └── args.bin   # raw tensor payload (`--dump-args`)
+    └── args.bin   # raw tensor payload (levels 1/2, or marked level 3)
 ```
 
 Filenames are fixed (no per-file timestamp) — the directory is the
-per-task uniqueness boundary. `--dump-args` emits both files in the
-same `args_dump/` directory.
+per-task uniqueness boundary. Level 3 with no `dump(...)` markers emits only
+`args_dump.json`; levels 1/2 and marked level 3 also emit `args.bin`.
+On a5, a present and correctly sized `args.bin` does not establish payload
+truth while [#1560](https://github.com/hw-native-sys/simpler/issues/1560) is
+open.
 
 #### `args_dump.json` — Unified manifest
 
 `args_dump.json` is the manifest; its `bin_file` field points at
-the sibling binary payload. At level 3 (full, JSON only) no payload is
-captured: `bin_file` is `null`, no `.bin` is written, and every entry's
-`bin_size` is `0`.
+the sibling binary payload. A plain level-3 capture has `bin_file: null`, no
+`.bin`, and `bin_size: 0` for every entry. A level-3 capture with marked tensors
+has `bin_file: "args.bin"`; only the `CoreTaskArgs::dump(...)`-marked tensor
+records have a non-zero `bin_size`.
 
 Example manifest (one input tensor captured before dispatch):
 
@@ -192,6 +222,7 @@ Example manifest (one input tensor captured before dispatch):
     "type": "logical_contiguous",
     "byte_order": "little_endian"
   },
+  "dump_args_level": 2,
   "total_args": 1,
   "before_dispatch": 1,
   "after_completion": 0,
@@ -226,6 +257,7 @@ Example manifest (one input tensor captured before dispatch):
 
 Key fields:
 
+- `dump_args_level` — the capture mode (`0` / `1` / `2` / `3`).
 - `task_id` — runtime task identity. Use to correlate with swimlane / PMU
   output.
 - `func_id` — **array** of the task's active-subtask kernel ids (its mix
@@ -363,7 +395,7 @@ DumpDataHeader                                  (host init, AICPU reads)
 ├── num_dump_threads
 ├── records_per_buffer
 ├── magic = 0x44554D50 ("DUMP")
-└── dump_args_level  (DumpArgsLevel: 0=off, 1=partial, 2=full, 3=full_json_only; AICPU latches in dump_args_init)
+└── dump_args_level  (DumpArgsLevel: 0=off, 1=partial, 2=full, 3=full_json_only; AICPU latches before dispatch)
 
 DumpBufferState[num_dump_threads]               (per-thread)
 ├── free_queue {buffer_ptrs[SLOT_COUNT], head, tail}
@@ -559,27 +591,26 @@ framework reference.
 
 a5's `ArgsDumpCollector` derives from
 `ProfilerBase<ArgsDumpCollector, DumpModule>` and shares the
-split mgmt + collector shard structure with a2a3. The single behavioral
+split mgmt + collector shard structure with a2a3. The architectural
 deviation from §5.4 is the **transport channel**: a5 has no
 `halHostRegister`, so each device buffer is paired with a
-host-shadow `malloc()` and the mgmt loop synchronizes the two via
+host-shadow `malloc()` and the framework synchronizes selected fields via
 `profiling_copy.h` (`rtMemcpy` onboard, `memcpy` in sim).
 `MemoryOps` therefore carries five callbacks (`alloc` / `reg` /
-`free_` / `copy_to_device` / `copy_from_device`); the mgmt loop
-mirrors the entire shm region (`DumpDataHeader` + per-thread
-`DumpBufferState`) device → host at the top of every tick, then
-pushes back only the fields host modified (advanced
+`free_` / `copy_to_device` / `copy_from_device`). The mgmt loop refreshes
+ready-queue indices and entries individually, pulls each popped
+`DumpMetaBuffer` on demand, and pushes back only the fields host modified
+(advanced
 `queue_heads[q]`, refilled `free_queue.tail` and
 `buffer_ptrs[slot]`) via `BufferPoolManager::write_range_to_device`.
-The bulk `mirror_shm_to_device` is **not** called from the mgmt
-loop: it would race with AICPU writes to device-only fields
-(`current_buf_ptr`, `total/dropped` counters, `queue_tails`,
-`free_queue.head`) and roll them back. Each popped
-`DumpMetaBuffer` is still pulled on demand inside
-`ProfilerAlgorithms::process_entry`. The per-thread arena lives
-outside the shm region, so `on_buffer_collected` issues an
-additional `copy_from_device` for the arena bytes referenced by
-the buffer's records.
+It does not bulk-refresh the entire shared-memory region each tick.
+
+The current args collector still reads `arena_write_offset` from the
+zero-initialized host shadow without first refreshing that field. It therefore
+skips the arena copy and can serialize correctly sized zero payloads on both
+`a5sim` and a5 onboard. This is tracked by
+[#1560](https://github.com/hw-native-sys/simpler/issues/1560); until it is
+fixed, a5 tensor payload is outside the supported args-dump contract.
 
 ```text
         HOST                                         DEVICE
@@ -599,7 +630,7 @@ the buffer's records.
 │   collector shards start │               │   AFTER_COMPLETION       │
 │                          │               │     dump_arg_record()    │
 │ mgmt every 10us tick:    │               │   if buffer full:        │
-│   copy_from_device(shm)  │<──memcpy─────<│     push ready entry,    │
+│   refresh queue fields   │<──memcpy─────<│     push ready entry,    │
 │   for each ready entry:  │               │     pop next from free_q │
 │     copy buf from device │<──memcpy─────<│                          │
 │     resolve host ptr     │               │ dump_args_flush():       │
@@ -652,8 +683,9 @@ on a5 inherits the same CRTP base
 as a2a3 and parameterizes
 [`BufferPoolManager`](../../src/common/platform/include/host/buffer_pool_manager.h)
 with `DumpModule`. The only a5-specific glue is the 5-callback
-`MemoryOps`, the per-tick shm mirror, and the on-demand arena copy
-inside `on_buffer_collected`.
+`MemoryOps`, targeted shared-field refreshes, and the intended on-demand arena
+copy inside `on_buffer_collected`. The current arena-offset refresh defect is
+the unsupported-payload limitation described above.
 
 a5 normally relies on per-thread AICPU flush (`dump_args_flush`) to move
 the current buffer into the ready queue. If a hang/op-timeout reaps AICPU
@@ -670,9 +702,10 @@ before that flush runs, `reconcile_counters` recovers a non-empty
 | Buffer model | rotating pool (free + ready queues per thread) | identical |
 | Host threads | split mgmt + collector shards, streams during execution | identical |
 | Host-class shape | `ProfilerBase<ArgsDumpCollector, DumpModule>` | identical |
-| Host transport | `halHostRegister` shared memory | host-shadow `malloc` + per-tick `rtMemcpy`/`memcpy` |
+| Host transport | `halHostRegister` shared memory | host-shadow `malloc` + targeted `rtMemcpy`/`memcpy` |
 | `MemoryOps` callbacks | 3 (`alloc`, `reg`, `free_`) | 5 (+ `copy_to_device`, `copy_from_device`) |
-| Arena access | direct via SVM | `copy_from_device` inside `on_buffer_collected` |
+| Arena access | direct via SVM | Intended `copy_from_device` inside `on_buffer_collected`; currently blocked by #1560 |
+| Tensor-payload support | Supported | Unsupported until #1560 is fixed |
 | `reconcile_counters` | recover leftover current buffers + dropped accounting | identical |
 | Lifecycle | `initialize` → `start` → `stop` → `reconcile_counters` → `export_dump_files` → `finalize` | identical |
 
@@ -707,6 +740,8 @@ device.
 Three failure modes exist when dump buffers run out of space. All
 three surface in the JSON manifest plus the `dump_args_flush`
 log line so users can detect and diagnose them.
+These payload-space rules describe the supported a2a3 path and the intended
+a5 behavior; the current a5 tensor-payload defect in #1560 takes precedence.
 
 ### 7.1 Truncation (`truncated = true`)
 
@@ -871,13 +906,22 @@ most likely at the default partial level (`--dump-args` = level 1)
 with no `CoreTaskArgs::dump(...)` markers in the orchestration, so every task is
 skipped. Add markers (§3.2), or pass `--dump-args 2` for a full dump.
 
-**Manifest has tasks but expected tensor records are missing.** A
-AICPU received a payload whose tensor count or metadata did not
-match what the orchestrator registered. A scalar-only task will
-have zero tensors and is intentionally empty. Look for a
+**a5 `args.bin` is non-empty but tensor values are zero.** This is the current
+host-shadow synchronization defect tracked by
+[#1560](https://github.com/hw-native-sys/simpler/issues/1560), not evidence
+that the recorded tensors were actually zero. Use `a2a3` / `a2a3sim` for any
+payload consumer. Plain level-3 metadata remains usable on a5 because it does
+not read tensor bytes.
+
+**Manifest has tasks but expected tensor records are missing.** AICPU received
+a payload whose tensor count or metadata did not match what the orchestrator
+registered. A scalar-only task will have zero tensors and is intentionally
+empty. Look for a
 `LOG_WARN` from `try_log_dump_args_layout_mismatch` — it
 identifies the first mismatched task, then is suppressed to avoid
-log flooding. Ensure every task that expects a tensor output calls
+log flooding. For `host_build_graph`, ensure `set_tensor_info_to_task` (or
+`add_task_with_tensor_info`) was called for every task. For
+`tensormap_and_ringbuffer`, ensure every task that expects a tensor output calls
 `alloc_tensors` with a `TensorCreateInfo`, and every input tensor
 is added via `add_input` / `add_output` / `add_inout`.
 

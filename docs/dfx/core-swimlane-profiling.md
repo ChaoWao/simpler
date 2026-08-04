@@ -44,15 +44,17 @@ captured args — zero hand-written shapes or scalars.
   `msprof op simulator` op. The cube sub-core runs the AIC member, the
   vec sub-cores run the AIV member(s) → a combined AIC+AIV swimlane.
 - **Zero-guess args** — the task's real Tensor descriptors and scalars
-  come from a JSON-only `--dump-args 3` capture (metadata + scalar
-  values, no `.bin` payload — all reconstruction needs). The dump's
+  come from a `--dump-args 3` metadata capture. When a structured
+  control tensor also needs its real contents, repeatable
+  `--restore-arg SLOT` restores payload already selected in orchestration by
+  `CoreTaskArgs::dump(...)` into the replay on `a2a3` / `a2a3sim`. The dump's
   `func_id` array gives the task's mix membership directly.
 - **Loop-count control (`--set-arg SLOT=VALUE`)** — when a kernel's loop
   trip count comes from a scalar or a control tensor, override it to
   shrink a runaway loop (so the camodel doesn't hang) or to fix a
   "fake-fast" zero-filled control tensor — without distorting the
-  per-iteration pipeline structure. Repeatable; default uses the real
-  dump values. See
+  per-iteration pipeline structure. Repeatable; scalars keep their real
+  dump values, while unselected tensor payloads default to zero. See
   [§7.2](#72-arg-floor-for-a-loop-count-without-distortion).
 - **Source-line attribution (`--debug-line` / `-g`)** — compile the
   kernel with `-g` (skipping the link strip) so the trace carries
@@ -65,6 +67,8 @@ captured args — zero hand-written shapes or scalars.
   replay is camodel either way — so `a2a3sim` is the default and needs
   no NPU and no arch-precheck. Use onboard only for a kernel whose sync
   idiom (e.g. a manual `prod.record()`) compiles only for the device.
+  Tensor restoration is currently an a2a3-only capability; a5 metadata-only
+  and zero-filled replays remain available.
 - **Two trace outputs** — a native Insight `trace.json` and an
   auto-generated Perfetto-friendly variant (sub-laned + atomic flags;
   see [§3.4](#34-viewing-insight-vs-perfetto)).
@@ -125,7 +129,7 @@ onboard `--platform`; a sim `--platform` uses no NPU until step 5):
 | Step | Action | Uses NPU |
 | ---- | ------ | -------- |
 | 1 | Read the test's `CALLABLE`; build a `func_id → (source, core_type)` table | No |
-| 2 | Run `--dump-args 3` (JSON-only) → `args_dump.json` (or reuse via `--dump-json`) | Onboard only |
+| 2 | Run `--dump-args 3` → full `args_dump.json` plus `args.bin` for tensors marked with `CoreTaskArgs::dump(...)` (or reuse via `--dump-json`) | Onboard only |
 | 3 | Select the task whose member set == `--func-id`, reconstruct its full positional args, **print the arg-slot table** (slot / kind / shape / value) | No |
 | 4 | Emit the replay workspace and smoke-build it locally | No |
 | 5 | `msprof op simulator` collect + export → `trace.json`, then auto-converts a Perfetto variant | **Yes** |
@@ -137,7 +141,7 @@ reading the kernel source — names are not in the dump (only kind / shape
 ```text
 [core_swimlane] func_id=0 task=0x... mix=[0, 1, 2] mode=mix block_num=3
               members=[MATMUL(aic,func 0), ADD(aiv,func 1), MUL(aiv,func 2)]
-[core_swimlane] arg slots (override with --set-arg SLOT=VALUE):
+[core_swimlane] arg slots (override with --set-arg SLOT=VALUE or --restore-arg SLOT):
     slot 0  tensor  FLOAT32  [16384]
     ...
 ```
@@ -145,6 +149,8 @@ reading the kernel source — names are not in the dump (only kind / shape
 A scalar slot holds the value directly (`--set-arg 4=4`); a tensor slot
 holds a pointer, so `--set-arg` fills its buffer (`--set-arg 4=512`). See
 [§7.2](#72-arg-floor-for-a-loop-count-without-distortion).
+Use `--restore-arg 6` instead when a tensor contains a non-uniform
+structure or lookup table that a single fill value cannot represent.
 
 ### 3.3 Key flags
 
@@ -153,15 +159,26 @@ holds a pointer, so `--set-arg` fills its buffer (`--set-arg 4=512`). See
 | `--test <file.py>` | SceneTest test file (required) |
 | `--func-id A[,B,C]` | The task's **member set** (comma-separated func_ids), required. `--func-id 0` traces the single-kernel task `{0}`; `--func-id 0,1,2` traces that 3-way mix. The set must exactly match a dispatched task's `func_id` array (you wrote the orchestration, so you know the members) |
 | `--task-id <hex>` | Which task instance to replay (default: lowest). Instances of the same mix shape are structurally identical |
-| `--platform <p>` | Dump platform → arch / compile / SoC params (default `a2a3sim`). Sim (`a2a3sim` / `a5sim`) dumps with no NPU; onboard (`a2a3` / `a5`) dumps on `$TASK_DEVICE` (wrap the tool in `task-submit`). The replay is camodel regardless; geometry is identical, so prefer sim |
+| `--platform <p>` | Dump platform → arch / compile / SoC params (default `a2a3sim`). Sim (`a2a3sim` / `a5sim`) dumps with no NPU; onboard (`a2a3` / `a5`) dumps on `$TASK_DEVICE` (wrap the tool in `task-submit`). The replay is camodel regardless; geometry is identical, so prefer sim. Tensor restoration is supported only on `a2a3` / `a2a3sim` |
 | `--device <ID>` | NPU device for an onboard dump + collect. **Auto-supplied** — `task-submit` appends `--device <id>` (also `$TASK_DEVICE`). Sim platforms ignore it |
 | `--case <NAME>` | Pin the dump to one `CASES[*].name`. Omitting it auto-pins the first case that lists `--platform`; pass it to target a smaller case when that first one overflows the camodel. Accepts `ClassName::Case` |
-| `--dump-json <path>` | Reuse an existing `args_dump.json`, skipping the dump re-run |
-| `--set-arg SLOT=VALUE` | Override an arg by `args[]` slot. Scalar slot → rewrite value; tensor slot → fill its buffer (integer dtypes). Shrinks a loop count without distortion. Repeatable. Default: real dump values |
-| `--spmd-block-num N` | `block_num` written into the synthesized SPMD context (slot 48). Default: the **selected** case's `block_dim` |
+| `--dump-json <path>` | Reuse an existing `args_dump.json`, skipping the dump re-run. `--restore-arg` requires its selected record payload and sibling `args.bin` |
+| `--restore-arg SLOT` | Restore one tensor's captured `before_dispatch` payload on `a2a3` / `a2a3sim`. Repeatable. The tensor must already be marked with `CoreTaskArgs::dump(...)` in orchestration; scalar/output-only/unmarked/truncated/overwritten slots are rejected. Cannot target the same slot as `--set-arg`. Do not use with a5 payloads while #1560 is open |
+| `--set-arg SLOT=VALUE` | Override an arg by `args[]` slot. Scalar slot → rewrite value; tensor slot → fill its buffer (integer dtypes). Shrinks a loop count without distortion. Repeatable. By default scalars retain dump values and tensor payloads are zero-filled |
+| `--spmd-block-num N` | `block_num` written into the synthesized SPMD context (slot 48). Default: 1 |
 | `--debug-line` / `-g` | Compile with `-g` (skip strip) so the trace carries `debug_line` → Insight maps instructions to source lines |
-| `--no-collect` | Generate + smoke-build only; do not take an NPU |
+| `--no-collect` | Stop after workspace generation and smoke build; an onboard dump still uses its locked NPU |
 | `--max-time <sec>` | `task-submit` budget (default 1800) |
+| `--msprof-timeout <minutes>` | `msprof op simulator --timeout` application-run limit in **minutes**. The Core swimlane tool always passes it; default 120, valid range 1–2880. Use a shorter value deliberately for large, repetitive workloads that only need a partial pipeline |
+
+Payload restoration currently targets the a2a3 platform family. The target
+tensor must be marked in the task's orchestration before capture. a5/a5sim
+tensor payload is not trustworthy because of
+[#1560](https://github.com/hw-native-sys/simpler/issues/1560), so it is outside
+the current restore contract. An a5/a5sim Level-3 run with marked tensors may
+produce `args.bin`, but a Core swimlane that restores its tensor payload is
+untrustworthy; this does not prevent a5 metadata-only or zero-filled Core
+replays.
 
 Per-arch build parameters are fixed in the tool's `ARCH_CONFIG`:
 
@@ -200,7 +217,7 @@ The raw export is under `<ws>/insight_export/OPPROF_*/simulator/`.
   [`.claude/skills/insight-trace/SKILL.md`](../../.claude/skills/insight-trace/SKILL.md);
   here it is built into the tool.
 
-### 3.5 Selecting a task / mix, and what to `--set-arg`
+### 3.5 Selecting a task / mix, and what to initialize
 
 `--func-id` **is** the task's member set — you name the exact func_ids the
 task is made of, and the tool picks the task whose `func_id` array matches.
@@ -226,14 +243,92 @@ the tensor **shape** (`shapes[0]`), which the dump captures truthfully,
 so **no `--set-arg` is needed** — the real count (one 128×128 tile) is
 already small.
 
+Use `--restore-arg` only when the kernel reads non-uniform tensor contents
+that affect control flow or addressing — for example a runtime-built tiling
+structure. Mark the tensor in the task's `CoreTaskArgs::dump(...)`; a fresh run
+then uses dump level 3 for full metadata and reuses that Level-1 mask for
+payload. Restoration is currently supported only with `--platform a2a3` or
+`a2a3sim`; do not consume a5 tensor payload while #1560 is open. Do not mark
+weight, activation, or KV-pool tensors merely for replay.
+Slots restored from their `before_dispatch` snapshot cannot also use
+`--set-arg`.
+
 Omitting `--case` auto-pins the **first** `CASES[*]` that lists your
 `--platform`, so the dump always targets exactly one case (deterministic —
 no "run every case, reconstruct from the newest dump dir" ambiguity). Pass
 `--case` explicitly when that first case is not the smallest — a full-size
-production case's shapes overflow the camodel replay (§3.4). The synthesized
-slot-48 `block_num` comes from `--spmd-block-num` (default 1); an SPMD cohort sizes itself on device, so it is not readable from the test file.
+production case's shapes can make the camodel impractical (§3.6). The
+synthesized slot-48 `block_num` comes from `--spmd-block-num` (default 1);
+the args dump does not carry that context, so consult the selected task's
+orchestration for its real logical width.
 
-### 3.6 Reusing a dump across kernels
+### 3.6 Oversized CAModel cases
+
+CAModel is a cycle-accurate, whole-chip simulator. The replay allocates every
+tensor at the shape recorded in `args_dump.json`, including tensors whose
+payload is left zero. Marking only the required tensors with
+`CoreTaskArgs::dump(...)` reduces the level-3 `args.bin` size and onboard dump
+pressure; it does **not** reduce replay allocation, zero-initialization, or
+kernel loop work. A large KV pool or weight tensor can therefore remain
+expensive even when only a small metadata slot is restored.
+
+Use this order:
+
+1. **Smoke-build before collecting.** Reuse the dump when available and pass
+   `--no-collect`. Step 3 prints every slot and shape, and the generated
+   workspace proves the sources and argument layout compile without spending
+   time in CAModel.
+2. **Shrink shapes with `--case`.** Choose a bounded case that preserves the
+   target kernel's compile-time batch/head/tile geometry and mix membership,
+   while reducing shape-driving quantities such as layer count, page count,
+   cache rows, or sequence blocks. Changing only a runtime `seq_len` does not
+   help when allocation still uses a fixed `MAX_SEQ`, layer count, or cache
+   extent.
+3. **Shrink only the loop when shapes are already acceptable.** Use
+   `--set-arg SLOT=VALUE` for scalar or uniform integer control inputs. It does
+   not resize tensor descriptors. Keep at least 3–4 iterations when the goal
+   is steady-state pipeline analysis.
+4. **Restore only structured control inputs on a2a3/a2a3sim.** Use
+   `--restore-arg` for tiling structs or lookup tables; do not restore weights,
+   activations, or KV pools. Restoration preserves control truth but is not a
+   scaling mechanism. Do not consume A5 tensor payload while
+   [#1560](https://github.com/hw-native-sys/simpler/issues/1560) is open.
+5. **Use a shorter timeout only when partial simulation is useful.** The
+   default is 120 minutes, so ordinary cases normally finish in full without
+   changing this option. For a large, repetitive case,
+   `--msprof-timeout 4` asks msProf to stop after four minutes and parse the
+   simulation data produced so far. This follows the
+   [Ascend CANN official QA/parameter guidance for msProf `--timeout`](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha001/devaids/optool/atlasopdev_16_0082.html):
+   the option is intended for data-heavy, repeatedly computed operators whose
+   full simulation takes a long time, when a partial pipeline is enough to
+   obtain the necessary information. The official range is 1–2880 minutes.
+
+A timeout-generated trace is intentionally partial. It can answer questions
+about an observed steady-state pipeline segment, but it cannot establish total
+kernel duration or complete tail behavior, and the normal MMAD/FIX tail-count
+self-check does not apply to a deliberately truncated run. If the timeout
+fires before the target kernel produces any profiler data, msProf may have
+nothing to parse and no `trace.json` will be available.
+
+Typical two-stage invocation:
+
+```bash
+# Validate task selection, restored slots, shapes, and compilation.
+python -m simpler_setup.tools.core_swimlane ... \
+    --case <bounded-case> --dump-json <args_dump.json> --no-collect
+
+# Request a four-minute partial simulation for a large, repetitive case.
+python -m simpler_setup.tools.core_swimlane ... \
+    --case <bounded-case> --dump-json <args_dump.json> --msprof-timeout 4
+```
+
+If the workload has no bounded case, create a focused workload-local case that
+submits the same target task with the same func-id set, argument order, tiling
+path, and tile geometry, but smaller shape-driving extents. A one-off
+diagnostic case should not be committed unless it provides durable regression
+coverage.
+
+### 3.7 Reusing a dump across kernels
 
 The dump in step 2 is the slow part. When tracing several tasks from the
 same case, capture once and reuse:
@@ -247,12 +342,16 @@ python -m simpler_setup.tools.core_swimlane --test <file> --func-id 3,4 --platfo
     --dump-json outputs/<ClassName>_<Case>_<ts>/args_dump/args_dump.json
 ```
 
-The manifest holds every task's args for the whole case.
+The manifest holds every task's args for the whole case. The default level-3
+manifest is sufficient for descriptor/scalar reconstruction. Reusing it with
+`--restore-arg` is rejected if the requested tensor was not marked with
+`CoreTaskArgs::dump(...)`. Add the marker and capture a fresh Level-3 run, or
+reuse a payload-carrying manifest together with its sibling `args.bin`.
 
-### 3.7 Coverage across the #1181 test suite
+### 3.8 Coverage across the #1181 test suite
 
 Commit `b1e4bd23` (#1181) touched ~70 test files. The
-`tensormap_and_ringbuffer` kernels among them fall into these l0
+`tensormap_and_ringbuffer` kernels among them fall into these Core swimlane
 categories — one representative each, with its verified `--func-id`. The
 runnable commands follow the table, wrapped in `task-submit` (the step-5
 `msprof` collect takes a device on the shared box). Most use
@@ -267,8 +366,8 @@ arch-precheck (the case must declare the `--platform` you pass — §3.1).
 | Single AIV | `vector_example` | `--func-id 0` | `kernel_add`, dispatched `rt_submit_aiv_task(0)` (vec only) |
 | Mix 2 AIV (per-lane) | `mixed_example` | `--func-id 3,4` | ADD_STD@AIV0 + MUL_STD@AIV1 (`get_subblockid` routing) |
 | Mix 3-way 1C2V | `mixed_example` | `--func-id 0,1,2` | MATMUL@AIC + ADD@AIV0 + MUL@AIV1 |
-| SPMD single-source | `spmd_multiblock_aiv` | `--func-id 0` | single AIV reading `get_block_idx` (pass `--spmd-block-num`; replay traces block 0) |
-| SPMD mix, 2 AIV share a source | `spmd_multiblock_mix` | `--func-id 0,1,2` | func 1 & 2 are distinct ids but **both `kernel_spmd_mix.cpp`** → the 2 AIV collapse to one (both lanes run it). Routes by `get_sub_block_id` (slot 49) → in replay both lanes read `sub_block_id=0`; AIV0/AIV1 differ only by write offset, so the pipeline stays representative. (The same-source collapse also covers the duplicate-func_id `[0,1,1]` shape an SPMD mix produces when `aiv0 = aiv1`.) |
+| SPMD single-source | `spmd_multiblock_aiv` | `--func-id 0 --spmd-block-num 4` | single AIV reading `get_block_idx`; the default lowest task-id is orchestration task T0 with logical `block_num=4` |
+| SPMD mix, 2 AIV share a source | `spmd_multiblock_mix` | `--func-id 0,1,2 --spmd-block-num 2` | the default lowest task-id is orchestration task T0 with logical `block_num=2`. Func 1 & 2 are distinct ids but **both `kernel_spmd_mix.cpp`** → the 2 AIV collapse to one (both lanes run it). Routes by `get_sub_block_id` (slot 49) → in replay both lanes read `sub_block_id=0`; AIV0/AIV1 differ only by write offset, so the pipeline stays representative. (The same-source collapse also covers the duplicate-func_id `[0,1,1]` shape an SPMD mix produces when `aiv0 = aiv1`.) |
 | Paged-attn, loop = scalar | `paged_attention_unroll` | `--func-id 0 --set-arg 4=4` | QK stage; `n_blocks` scalar (slot 4) → shrink to 4 ([§7.2](#72-arg-floor-for-a-loop-count-without-distortion)) |
 | Paged-attn, loop = control tensor | `batch_paged_attention` | `--func-id 1 --set-arg 1=512 --case CaseSmall1` | SF reads `context_lens` (**slot 1**) content (`aiv_softmax_prepare.cpp`); `--set-arg 1=512` fills it uniformly → shrinks the derived per-batch block count |
 
@@ -276,7 +375,7 @@ Runnable commands (one per category):
 
 ```bash
 T=tests/st/a2a3/tensormap_and_ringbuffer        # most representatives
-E=examples/a2a3/tensormap_and_ringbuffer        # vector_example / qwen3
+E=examples/a2a3/tensormap_and_ringbuffer        # vector_example
 
 # --- a2a3sim cases (case declares a2a3sim; dump takes no NPU) ---
 L0="python -m simpler_setup.tools.core_swimlane --platform a2a3sim -g"  # -g: source-line attribution
@@ -287,9 +386,9 @@ task-submit --device auto --max-time 1800 --run "$L0 --func-id 3,4   --test $T/m
 # Mix 3-way 1C2V — MATMUL + ADD + MUL
 task-submit --device auto --max-time 1800 --run "$L0 --func-id 0,1,2 --test $T/mixed_example/test_mixed_example.py"
 # SPMD single-source
-task-submit --device auto --max-time 1800 --run "$L0 --func-id 0     --test $T/spmd_multiblock_aiv/test_spmd_multiblock_aiv.py"
+task-submit --device auto --max-time 1800 --run "$L0 --func-id 0 --spmd-block-num 4 --test $T/spmd_multiblock_aiv/test_spmd_multiblock_aiv.py"
 # SPMD mix, 2 AIV share a source
-task-submit --device auto --max-time 1800 --run "$L0 --func-id 0,1,2 --test $T/spmd_multiblock_mix/test_spmd_multiblock_mix.py"
+task-submit --device auto --max-time 1800 --run "$L0 --func-id 0,1,2 --spmd-block-num 2 --test $T/spmd_multiblock_mix/test_spmd_multiblock_mix.py"
 # Paged-attn, loop = control tensor (context_lens = slot 1; fill it to shrink the per-batch block count)
 task-submit --device auto --max-time 1800 --run "$L0 --func-id 1 --set-arg 1=512 --case CaseSmall1 --test $T/batch_paged_attention/test_batch_paged_attention.py"
 
@@ -306,26 +405,16 @@ task-submit --device auto --max-time 1800 --run "$L0a --func-id 0 --set-arg 4=4 
 `qwen3_14b_decode` used to serve as the "real SPMD workload" row here, driving
 its generated `fa_fused` mix with `--set-arg 0=96` on the `fa_total` work-item
 count. That kernel is gone: its attention is now a CANN
-`FusedInferAttentionScore` extern, so the row was dropped.
+`FusedInferAttentionScore` extern. Being an extern is not a blocker — the replay
+still feeds `kernel_entry`. Its work distribution now comes from a
+`FAInferTilingData` struct in the slot-6 `UINT8 metadata` buffer that
+`paged_attention_tiling_cce` fills at runtime. After that slot is marked with
+`CoreTaskArgs::dump(...)` in orchestration, `--restore-arg 6` can restore its real
+bytes without trying to synthesize a struct through uniform `--set-arg` filling.
+The committed production case is too large for a practical
+cycle-accurate replay, so it is not listed as a runnable coverage case here.
 
-Being an extern is not what blocks it — the replay feeds `kernel_entry` and does
-not care whether the source was generated or hand-written. The blocker is that
-this one takes its work distribution from a `FAInferTilingData` **struct**, in a
-`UINT8 metadata` buffer that `paged_attention_tiling_cce` fills at runtime.
-`--set-arg` writes one integer into *every* element, so it cannot synthesize a
-coherent struct (it is not even refused — `UINT8` passes the integer-dtype
-check), and this tool dumps at level 3, which captures metadata but no payload
-([args-dump](args-dump.md) §levels). With a zeroed `metadata`,
-`fai_body.hpp` reads `tiling->needCoreNum == 0` and takes the degenerate branch,
-so the trace would be unrepresentative rather than absent.
-
-That gap is in the tooling, not the kernel: `--dump-args 2` does capture the
-buffer's real bytes. Restoring payloads for control tensors — rather than only
-uniform-filling them — would make this and any other metadata-driven extern
-replayable. Until then the "real SPMD workload" category has no representative
-here.
-
-**Not l0 targets (excluded).** Runtime-mechanics tests (`orch_so_cache`,
+**Not Core swimlane targets (excluded).** Runtime-mechanics tests (`orch_so_cache`,
 `prepared_callable`, `dynamic_register`, `l3_group`, `l3_dependency`,
 `worker_chip_orch_comm`, `aicore_op_timeout`, `scope_stats`); comm / notify
 demos (`async_notify_demo`, `deferred_notify_demo`,
@@ -399,9 +488,11 @@ correctness-critical details:
 - **Buffer size uses the extent formula**
   `(start_offset + 1 + Σ(shape[i]-1)*stride[i]) * elem_size`, not
   `numel` — strided / offset views read past `numel`.
-- Replay data is **memset to 0**; only the descriptor metadata is real.
-  Data-dependent branches / addresses can distort while pure pipeline
-  structure stays faithful (see [§8](#8-fidelity-rules)).
+- Tensor payloads default to **memset 0**. `--restore-arg` reads the selected
+  logical-contiguous payload from `args.bin`, scatters it through the original
+  shape/strides/start-offset view, embeds the physical bytes in
+  `replay_host.cpp`, and initializes that device buffer with `aclrtMemcpy`.
+  `--set-arg` remains the uniform-fill alternative.
 
 ### 5.3 Build & collect
 
@@ -462,12 +553,17 @@ orchestration, so `replay_host.cpp` **synthesizes** it: one
 pointed at slots 48/49. This is harmless for positional kernels (they
 ignore 48/49) and required for SPMD kernels that read `get_block_idx` /
 `get_block_num` (which would otherwise dereference null). `block_idx=0`
-traces a representative block; `block_num` (from `--spmd-block-num`, default
-
-1) keeps steady-state branches (`block_idx+1 < block_num`) on their normal
-path — see [§8](#8-fidelity-rules). An SPMD cohort sizes itself from
-`rt_available_cluster_count()` on device, so the width is not readable from
-the test file and must be passed.
+traces a representative block. The default `block_num=1` models a single-block
+replay and does **not** take multi-block branches such as
+`block_idx+1 < block_num`. That default is sufficient only when the kernel
+ignores `block_num`. The args dump does not record the synthesized slot-48
+context, so read the selected task's logical grid width from its orchestration
+and supply it with `--spmd-block-num`. Some workloads derive that value from
+`rt_available_cluster_count()`; others set an explicit task-specific value.
+Pass the selected task's real value for faithful branch and grid-stride
+behavior. A value of at least 2 can exercise the next-block branch as a bounded
+approximation when the real value is unavailable, but it is not a substitute
+for that value.
 Note the per-AIV-lane routing for a mix uses the hardware
 `get_subblockid()` (§5.4), not the synthesized slot-49 value.
 
@@ -558,9 +654,9 @@ do not draw timing conclusions; retry with a different `n_blocks`.
 | Case selection (`--case`) | Pick a *scaled-down* case | Faithful if it keeps the tile geometry (just fewer blocks / shorter sequence); a case that changes tile M/K/N / head_dim traces only itself, not production |
 | Scalar values (`scale` / offsets …) | Use real dump values | Wrong value → wrong branch → distorted |
 | Loop count (`n_blocks`, via `--set-arg`) | Shrinkable to ≥ 3–4 | Faithful at ≥ 3–4; `= 1` distorts (§7.2) |
-| Data filled to 0 | Default (memset 0) | Data-dependent branches / addresses distort; pure pipeline structure is fine |
+| Tensor contents | Zero by default; on a2a3/a2a3sim, `--restore-arg` selected control tensors | Unrestored data-dependent branches/addresses can distort; supported restored slots use their real `before_dispatch` bytes. A5 restoration is excluded by #1560 |
 | SPMD `block_idx` (slot 48) | Fixed 0 | Traces a real block 0 — representative for uniform SPMD |
-| SPMD `block_num` (slot 48) | Default `block_dim`; `--spmd-block-num` | Any value ≥ 2 keeps steady-state branches |
+| SPMD `block_num` (slot 48) | Default 1; pass the selected task's real logical width with `--spmd-block-num` when the kernel reads it | `1` is a single-block path; ≥ 2 only approximates a multi-block branch, while the selected task's real value preserves branch and grid-stride behavior |
 | Per-AIV-lane routing (`get_subblockid`) | Automatic | Faithful — lanes run their real kernels (§6) |
 | Cross-core sync timing | Not modeled | **Optimistic** — sub-cores appear freely parallel (§9 tier C) |
 | Cross-platform (a2a3 vs a5) | Set by target | Instructions / timing genuinely differ (real silicon — §7.3) |
@@ -585,8 +681,15 @@ do not draw timing conclusions; retry with a different `n_blocks`.
   reality.
 - **Simulation clock, not silicon.** Use it for *relative* per-pipe /
   per-arch structure, not absolute-latency claims.
-- **Replay data is zero.** Only descriptor metadata is real; data-driven
-  control flow can diverge (§8).
+- **Unselected tensor payloads are zero.** On a2a3/a2a3sim, restore structured
+  control inputs with `--restore-arg`; other data-driven control flow can
+  still diverge (§8).
+- **A5 restored-payload L0 traces are untrustworthy.** While
+  [#1560](https://github.com/hw-native-sys/simpler/issues/1560) is open, do
+  not treat A5 args-dump payload as tensor truth or use it with
+  `--restore-arg`. A5 may still write level-3 `args.bin` for marked tensors, but an L0
+  swimlane restored from it is untrustworthy; metadata-only and zero-filled L0
+  replays remain usable.
 - **Tail-truncation collection bug.** Validate `MMAD`/`FIX` counts every
   run (§7.4).
 - **1C2V only.** The mix path assumes 1 AIC + up to 2 AIV (the only
@@ -607,6 +710,17 @@ one of those (a shape it printed, not an arbitrary combination of func_ids).
 disagrees with the dispatched payload, so the dump skipped it — see
 [§3.1](#31-prerequisites-one-time-per-test-case) and
 [args-dump.md](args-dump.md).
+
+**`--restore-arg` says the manifest has no `bin_file`.** The reused dump
+was captured without a matching `CoreTaskArgs::dump(...)` marker. Mark the target
+tensor in orchestration and capture a fresh Level-3 run, or reuse a
+payload-carrying manifest together with its sibling `args.bin`.
+
+**A5 `--restore-arg` is rejected.** A5 tensor payload restoration is outside
+the supported contract while
+[#1560](https://github.com/hw-native-sys/simpler/issues/1560) is open. Use
+`a2a3` / `a2a3sim` for tensor truth; A5 metadata-only or zero-filled replay
+remains available.
 
 **Smoke build fails on a missing symbol.** `replay_entry` /
 `launch_replay` must appear in `libreplay_kernel.so`. A wrong
@@ -630,7 +744,7 @@ Trace each AIV kernel as its own single-kernel task instead (e.g.
 
 - [`.claude/skills/core-swimlane/SKILL.md`](../../.claude/skills/core-swimlane/SKILL.md)
   — the operating procedure for this tool (picking `--func-id` /
-  `--set-arg` / `--spmd-block-num`).
+  `--restore-arg` / `--set-arg` / `--spmd-block-num`).
 - [chip-swimlane-profiling.md](chip-swimlane-profiling.md) — the
   per-task / scheduler swimlane one level up.
 - [args-dump.md](args-dump.md) — the `func_id`-array-tagged per-task arg

@@ -73,6 +73,7 @@ void set_dump_args_enabled(bool enable);
  */
 bool is_dump_args_enabled();
 bool is_dump_args_selective_mode();
+bool is_dump_args_full_json_only();
 void set_dump_args_task_mask(uint64_t task_id, ArgsDumpArgMask mask, ArgsDumpArgMask flags);
 void get_dump_args_task_masks(uint64_t task_id, ArgsDumpArgMask *mask, ArgsDumpArgMask *flags);
 void set_dump_args_task_scalar_dtypes(uint64_t task_id, uint32_t scalar_count, const uint8_t *scalar_dtypes);
@@ -104,7 +105,11 @@ inline void dump_args_for_task(
     const auto &pl = *slot_state.payload;
     ArgsDumpArgMask dump_arg_mask = ARGS_DUMP_ARG_MASK_NONE;
     ArgsDumpArgMask dump_arg_flags = ARGS_DUMP_ARG_MASK_NONE;
-    if (is_dump_args_selective_mode()) {
+    // Only PARTIAL and FULL_JSON_ONLY consume the per-task mask; leaving mask/flags
+    // NONE in the other levels keeps FULL (level 2) records byte-identical to a
+    // non-selective dump — should_dump_task/should_dump_arg short-circuit to true
+    // and the scalar ambiguity flag (a raw bit test, no mode short-circuit) stays off.
+    if (is_dump_args_selective_mode() || is_dump_args_full_json_only()) {
         get_dump_args_task_masks(slot_state.task->task_id.raw, &dump_arg_mask, &dump_arg_flags);
     }
     if (!should_dump_task(dump_arg_mask)) {

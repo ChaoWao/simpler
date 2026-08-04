@@ -54,7 +54,7 @@ static constexpr uint64_t kDumpQueueBackpressureWaitCycles = PLATFORM_DFX_BACKPR
 
 static bool g_enable_dump_args = false;
 // Dump level latched from the header in dump_args_init(). The selective
-// (PARTIAL) and json-only (FULL_JSON_ONLY) modes are derived from it rather
+// (PARTIAL) and metadata-first (FULL_JSON_ONLY) modes are derived from it rather
 // than tracked as separate flags — mirrors g_chip_swimlane_level.
 static DumpArgsLevel g_dump_args_level = DumpArgsLevel::OFF;
 
@@ -209,6 +209,8 @@ extern "C" void set_dump_args_enabled(bool enable) {
 extern "C" bool is_dump_args_enabled() { return g_enable_dump_args; }
 
 extern "C" bool is_dump_args_selective_mode() { return g_dump_args_level == DumpArgsLevel::PARTIAL; }
+
+extern "C" bool is_dump_args_full_json_only() { return g_dump_args_level == DumpArgsLevel::FULL_JSON_ONLY; }
 
 extern "C" void set_dump_args_task_mask(uint64_t task_id, ArgsDumpArgMask mask, ArgsDumpArgMask flags) {
     if (mask == ARGS_DUMP_ARG_MASK_NONE) {
@@ -543,7 +545,8 @@ void dump_args_init(int num_dump_threads) {
 
     // Latch dump level from the host-written header before any task is dumped.
     // PARTIAL → selective (only Arg::dump()-marked args); FULL → every task;
-    // FULL_JSON_ONLY → every task, metadata only (no payload copied into arena).
+    // FULL_JSON_ONLY → every task's metadata; payload is copied only for
+    // arguments selected through the same per-task mask as PARTIAL.
     g_dump_args_level = static_cast<DumpArgsLevel>(s_dump_header->dump_args_level);
 
     LOG_INFO("Initializing args dump for %d threads", num_dump_threads);
@@ -617,10 +620,13 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info) {
     bool truncated = false;
     bool is_contiguous = dump_arg_is_contiguous(info);
     bool is_scalar = kind == ArgsDumpKind::SCALAR;
+    ArgsDumpArgMask task_dump_arg_mask = ARGS_DUMP_ARG_MASK_NONE;
+    if (g_dump_args_level == DumpArgsLevel::FULL_JSON_ONLY) {
+        get_dump_args_task_masks(info.task_id, &task_dump_arg_mask, nullptr);
+    }
+    bool capture_payload = has_dump_arg_flag(task_dump_arg_mask, static_cast<int32_t>(info.arg_index));
 
-    if (is_scalar || g_dump_args_level == DumpArgsLevel::FULL_JSON_ONLY) {
-        // JSON-only level captures full metadata but no payload, so the
-        // record carries shape/dtype/strides with payload_size == 0.
+    if (is_scalar || (g_dump_args_level == DumpArgsLevel::FULL_JSON_ONLY && !capture_payload)) {
         copy_bytes = 0;
     } else if (bytes > state->arena_size) {
         // ChipTensor larger than entire arena — copy a partial sample

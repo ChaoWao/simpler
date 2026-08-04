@@ -116,7 +116,15 @@ class TestPreparedCallable(SceneTestCase):
         config_dict = case.get("config", {})
         orch_sig = self.CALLABLE.get("orchestration", {}).get("signature", [])
 
-        config = self._build_config(config_dict)
+        config = self._build_config(
+            config_dict,
+            enable_chip_swimlane=enable_chip_swimlane,
+            enable_dump_args=enable_dump_args,
+            enable_pmu=enable_pmu,
+            enable_dep_gen=enable_dep_gen,
+            enable_scope_stats=enable_scope_stats,
+            output_prefix=output_prefix,
+        )
         chip_worker = self._chip_worker(worker)
 
         # 1) prepare two private slots with the SAME callable.

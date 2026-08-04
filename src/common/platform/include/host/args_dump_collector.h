@@ -218,9 +218,9 @@ public:
      * @param user_data         Opaque pointer forwarded to callbacks
      * @param output_prefix     Per-task directory; args_dump/ subdir lands here
      * @param dump_args_level OFF / PARTIAL (only Arg::dump()-marked args) /
-     *                          FULL / FULL_JSON_ONLY (every task's metadata to
-     *                          JSON, no payload or .bin). Written to
-     *                          DumpDataHeader so the AICPU latches the mode
+     *                          FULL / FULL_JSON_ONLY (every task's metadata,
+     *                          with Arg::dump()-marked tensor payload). Written
+     *                          to DumpDataHeader so the AICPU latches the mode
      *                          before any dispatch.
      * @return 0 on success, error code on failure
      */
@@ -334,7 +334,8 @@ private:
     std::queue<DumpedArg> write_queue_;
     std::atomic<bool> writer_done_{false};
 
-    // Resolved dump level; FULL_JSON_ONLY suppresses the .bin file entirely.
+    // Resolved dump level; FULL_JSON_ONLY creates .bin lazily when an
+    // Arg::dump()-selected tensor contributes payload.
     DumpArgsLevel dump_args_level_{DumpArgsLevel::OFF};
 
     // Output directory and single binary file

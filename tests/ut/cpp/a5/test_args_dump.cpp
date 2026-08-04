@@ -22,7 +22,10 @@
 class ArgsDumpTest : public ::testing::Test {
 protected:
     void SetUp() override { set_dump_args_enabled(true); }
-    void TearDown() override { set_dump_args_enabled(false); }
+    void TearDown() override {
+        set_dump_args_enabled(false);
+        set_platform_dump_base(0);
+    }
 };
 
 // Basic enable/disable toggle and dump-base propagation — the foundation the
@@ -42,6 +45,30 @@ TEST_F(ArgsDumpTest, EnableDisableAndDumpBaseRoundTrip) {
 
     set_platform_dump_base(0);
     EXPECT_EQ(get_platform_dump_base(), 0ULL);
+}
+
+// The dump level is latched from the host-written header in dump_args_init();
+// set_dump_args_enabled() only allocates the mask tables. Nothing reads the
+// level between the two, so PARTIAL becomes selective mode only after init.
+TEST_F(ArgsDumpTest, LatchesSelectiveModeFromHeader) {
+    constexpr size_t kDumpMemSize = sizeof(DumpDataHeader) + sizeof(DumpBufferState);
+    alignas(64) uint8_t dump_mem[kDumpMemSize] = {};
+    alignas(64) DumpMetaBuffer meta_buf{};
+
+    DumpDataHeader *header = get_dump_header(dump_mem);
+    header->magic = ARGS_DUMP_MAGIC;
+    header->dump_args_level = static_cast<uint32_t>(DumpArgsLevel::PARTIAL);
+    header->num_dump_threads = 1;
+
+    DumpBufferState *state = get_dump_buffer_state(dump_mem, 0);
+    state->free_queue.buffer_ptrs[0] = reinterpret_cast<uint64_t>(&meta_buf);
+    state->free_queue.tail = 1;
+
+    set_platform_dump_base(reinterpret_cast<uint64_t>(dump_mem));
+    set_dump_args_enabled(true);
+    dump_args_init(1);
+
+    EXPECT_TRUE(is_dump_args_selective_mode());
 }
 
 // A task_id whose high 32 bits exceed any runtime's ring depth must still round
