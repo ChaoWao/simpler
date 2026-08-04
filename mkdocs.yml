@@ -35,6 +35,9 @@ validation:
     omitted_files: warn
     not_found: warn
   links:
+    # A directory link needs a README.md or index.md landing page. Otherwise
+    # MkDocs leaves the URL unchanged and the published site serves a 404.
+    unrecognized_links: warn
     # Defaults to `info`, which --strict ignores, so a link to a heading that
     # was renamed or never existed builds clean and 404s in the reader's
     # browser. Note the two slug dialects differ: GitHub keeps the doubled
@@ -106,6 +109,7 @@ nav:
       - A5 AICPU core selection: design/a5-fg-pg-core-selection.en.md
       - Worker Manager: worker-manager.md
       - Hardware:
+          - Overview: hardware/README.md
           - Chip architecture: hardware/chip-architecture.md
           - Cache coherency: hardware/cache-coherency.md
           - MMIO performance: hardware/mmio-performance.md
@@ -127,7 +131,9 @@ nav:
       - L3-L2 Orchestrator Comm: l3-l2-orch-comm.md
       - L3-L2 Message Queue: l3-l2-message-queue.md
       - Directed NEXT_LEVEL Scheduling: directed-next-level-scheduling.md
-      - Remote L3 Worker Design: remote-l3-worker-design.md
+      - Remote L3 Worker Design:
+          - Overview: remote-l3-worker-design.md
+          - Design document index: remote-l3-worker-design/README.md
   - Profiling and DFX:
       - Overview: dfx/README.md
       - Profiling Framework: dfx/profiling-framework.md
@@ -154,7 +160,10 @@ nav:
       - Sanitizers: sanitizers.md
       - Sim Multi-Device Isolation: sim-multi-device-isolation.md
   - Troubleshooting:
-      - Device error codes: troubleshooting/device-error-codes.md
+      - Overview: troubleshooting/README.md
+      - Device error codes:
+          - Overview and code reference: troubleshooting/device-error-codes.md
+          - Diagnostic guide index: troubleshooting/device-error-codes/README.md
       - Local timeout defaults: troubleshooting/local-timeout-defaults.md
       - a2a3 507899 AICPU shared-SO fault: troubleshooting/a2a3-507899-aicpu-shared-so-fault.md
       - Sim oversubscription hang: troubleshooting/sim-oversubscription-hang.md

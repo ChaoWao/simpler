@@ -43,7 +43,7 @@ changing simpler's own internals.
 | [Orchestrator](orchestrator.md) | DAG submission: TensorMap, Scope, Ring, task state machine |
 | [Scheduler](scheduler.md) | DAG dispatch: wiring / ready / completion queues, dispatch loop |
 | [Worker Manager](worker-manager.md) | Worker pool, THREAD/PROCESS modes, fork + mailbox mechanics |
-| [hardware/](hardware/) | Hardware substrate: chip architecture, cache coherency, MMIO performance, CANN source references |
+| [hardware/](hardware/README.md) | Hardware substrate: chip architecture, cache coherency, MMIO performance, CANN source references |
 
 ## Kernels and task authoring
 
@@ -74,7 +74,7 @@ changing simpler's own internals.
 | [L3-L2 Message Queue](l3-l2-message-queue.md) | The queue channel between an L3 host and L2 |
 | [Directed NEXT_LEVEL Scheduling](directed-next-level-scheduling.md) | Targeting a specific next-level child instead of any free one |
 | [Remote L3 Worker Design](remote-l3-worker-design.md) | L4 host-to-host workers — protocol, transports, status |
-| [remote-l3-worker-design/](remote-l3-worker-design/) | Full design set: protocol, buffers and transports, implementation plan and record |
+| [remote-l3-worker-design/](remote-l3-worker-design/README.md) | Full design set: protocol, buffers and transports, implementation plan and record |
 
 ## Profiling, logging, and DFX
 
@@ -97,5 +97,5 @@ changing simpler's own internals.
 
 | Document | What it covers |
 | -------- | -------------- |
-| [troubleshooting/](troubleshooting/) | Device error codes, local timeout defaults, AICPU shared-SO faults, sim oversubscription hangs, macOS build issues, cpput ABI issues |
+| [troubleshooting/](troubleshooting/README.md) | Device error codes, local timeout defaults, AICPU shared-SO faults, sim oversubscription hangs, macOS build issues, cpput ABI issues |
 | [investigations/](investigations/README.md) | Considered-and-dropped proposals and measured dead ends. **Check here before proposing an optimization or refactor** |

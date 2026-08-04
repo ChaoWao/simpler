@@ -47,4 +47,4 @@ Analysis CLIs that consume these outputs are documented in
 | Document | What it covers |
 | -------- | -------------- |
 | [Log System](../logging.md) | Log levels and sinks — the host/device logging path, distinct from profiling collectors |
-| [troubleshooting/](../troubleshooting/) | Device error codes and timeout defaults, for when a run fails rather than runs slowly |
+| [troubleshooting/](../troubleshooting/README.md) | Device error codes and timeout defaults, for when a run fails rather than runs slowly |
