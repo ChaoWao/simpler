@@ -1,4 +1,4 @@
-name: Simulation Scene Tests
+name: Simulation Scene Tests (a5sim)
 
 permissions:
   contents: read
@@ -19,10 +19,6 @@ on:
         description: github or self-cpu.
         required: true
         type: string
-      platform:
-        description: a2a3sim or a5sim.
-        required: true
-        type: string
       include_dfx_smokes:
         required: false
         default: false
@@ -34,7 +30,7 @@ on:
 
 jobs:
   run:
-    name: st-sim-${{ inputs.platform }}
+    name: st-sim-a5sim
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 30
     env:
@@ -101,67 +97,32 @@ jobs:
           if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
             source .venv/bin/activate
           fi
-          python -m pytest examples tests/st --platform "${{ inputs.platform }}" --device 0-15 -v \
+          python -m pytest examples tests/st --platform a5sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
-      - name: dep_gen smoke (a2a3)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
-        run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
-            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-dep-gen
-
-      - name: dep_gen smoke (a2a3 host_build_graph)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
-        run: |
-          pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
-            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-dep-gen
-
-      - name: chip_swimlane smoke (a2a3)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
-        run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
-            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-chip-swimlane --enable-dep-gen
-
-      - name: PMU smoke (a2a3)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
-        run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
-            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-pmu 2
-
-      - name: args_dump smoke (a2a3)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a2a3sim'
-        run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
-            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --dump-args
-
       - name: dep_gen smoke (a5)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a5sim'
+        if: inputs.include_dfx_smokes
         run: |
           pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: chip_swimlane smoke (a5)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a5sim'
+        if: inputs.include_dfx_smokes
         run: |
           pytest tests/st/a5/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-chip-swimlane --enable-dep-gen
 
       - name: PMU smoke (a5)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a5sim'
+        if: inputs.include_dfx_smokes
         run: |
           pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-pmu 2
 
       - name: args_dump smoke (a5)
-        if: inputs.include_dfx_smokes && inputs.platform == 'a5sim'
+        if: inputs.include_dfx_smokes
         run: |
           pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \

@@ -1,4 +1,4 @@
-name: NPU Unit Tests
+name: NPU Unit Tests (a5)
 
 permissions:
   contents: read
@@ -12,10 +12,6 @@ on:
       ref:
         required: false
         type: string
-      platform:
-        description: a2a3 or a5.
-        required: true
-        type: string
       runs_on:
         required: true
         type: string
@@ -26,7 +22,7 @@ on:
 
 jobs:
   run:
-    name: ut-${{ inputs.platform }}
+    name: ut-a5
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 30
     env:
@@ -47,51 +43,15 @@ jobs:
           packages: ".[test]"
           install-torch: "false"
           system-site-packages: "true"
-          source-cann: ${{ inputs.platform == 'a2a3' && 'true' || 'false' }}
-
-      - name: Run Python hardware unit tests (a2a3)
-        if: inputs.platform == 'a2a3'
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests -m requires_hardware --platform a2a3 --device ${DEVICE_RANGE} -v
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests -m requires_hardware --platform a2a3 --device \$TASK_DEVICE -v"
-          fi
-
-      - name: Build and run C++ hardware unit tests (a2a3)
-        if: inputs.platform == 'a2a3'
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          python -c "from simpler_setup.runtime_builder import RuntimeBuilder; RuntimeBuilder('a2a3').get_binaries('tensormap_and_ringbuffer', build=True)"
-          cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
-          cmake --build tests/ut/cpp/build
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python3 -c "
-          import json, os
-          p = os.environ['DEVICE_RANGE'].split('-'); s, e = p[0], p[-1]
-          npus = [{'id': str(i), 'slots': 1} for i in range(int(s), int(e)+1)]
-          json.dump({'version': {'major': 1, 'minor': 0}, 'local': [{'npus': npus}]},
-                    open('tests/ut/cpp/build/resources.json', 'w'))
-          "
-            ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python3 -c \"import json,os; ids=os.environ['TASK_DEVICE'].split(','); json.dump({'version':{'major':1,'minor':0},'local':[{'npus':[{'id':i,'slots':1} for i in ids]}]}, open('tests/ut/cpp/build/resources.json','w'))\" && ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure"
-          fi
+          source-cann: "false"
 
       - name: Run Python hardware unit tests (a5)
-        if: inputs.platform == 'a5'
         run: |
           source .venv/bin/activate
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "python -m pytest tests -m requires_hardware --platform a5 --device ${DEVICE_RANGE} -v"
 
       - name: Build and run C++ hardware unit tests (a5)
-        if: inputs.platform == 'a5'
         run: |
           source .venv/bin/activate
           cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
@@ -109,9 +69,6 @@ jobs:
       - name: Build cann-examples/query
         if: inputs.include_cann_examples
         run: |
-          if [ "${{ inputs.platform }}" = "a2a3" ]; then
-            source /usr/local/Ascend/cann/set_env.sh
-          fi
           cd tools/cann-examples/query
           cmake -B build .
           cmake --build build
@@ -120,9 +77,6 @@ jobs:
       - name: Build cann-examples/aicpu-device-query
         if: inputs.include_cann_examples
         run: |
-          if [ "${{ inputs.platform }}" = "a2a3" ]; then
-            source /usr/local/Ascend/cann/set_env.sh
-          fi
           export CROSS=${ASCEND_HOME_PATH}/tools/hcc/bin/aarch64-target-linux-gnu
           cd tools/cann-examples/aicpu-device-query/device
           cmake -B build . -DCMAKE_C_COMPILER=${CROSS}-gcc -DCMAKE_CXX_COMPILER=${CROSS}-g++
@@ -134,9 +88,6 @@ jobs:
       - name: Build cann-examples/aicpu-kernel-launch
         if: inputs.include_cann_examples
         run: |
-          if [ "${{ inputs.platform }}" = "a2a3" ]; then
-            source /usr/local/Ascend/cann/set_env.sh
-          fi
           export CROSS=${ASCEND_HOME_PATH}/tools/hcc/bin/aarch64-target-linux-gnu
           cd tools/cann-examples/aicpu-kernel-launch/device
           cmake -B build . -DCMAKE_C_COMPILER=${CROSS}-gcc -DCMAKE_CXX_COMPILER=${CROSS}-g++

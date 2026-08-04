@@ -44,19 +44,19 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
-      - name: Install GoogleTest (Linux)
-        if: inputs.setup_variant == 'github' && runner.os == 'Linux'
+      - name: Install GoogleTest
+        if: inputs.setup_variant == 'github'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake libgtest-dev
-          cd /usr/src/googletest
-          sudo cmake -B build
-          sudo cmake --build build
-          sudo cmake --install build
-
-      - name: Install GoogleTest (macOS)
-        if: inputs.setup_variant == 'github' && runner.os == 'macOS'
-        run: brew install googletest
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake libgtest-dev
+            cd /usr/src/googletest
+            sudo cmake -B build
+            sudo cmake --build build
+            sudo cmake --install build
+          else
+            brew install googletest
+          fi
 
       - name: Cache pip packages
         uses: ./.github/actions/cache-pip

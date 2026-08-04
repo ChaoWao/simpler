@@ -66,11 +66,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.10"]
-    uses: ./.github/workflows/_st-sim.yml
+    uses: ./.github/workflows/_st-sim-a2a3.yml
     with:
       runs_on: ${{ toJSON(matrix.os) }}
       setup_variant: github
-      platform: a2a3sim
       include_dfx_smokes: true
       python_version: ${{ matrix.python-version }}
 
@@ -81,11 +80,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.10"]
-    uses: ./.github/workflows/_st-sim.yml
+    uses: ./.github/workflows/_st-sim-a5.yml
     with:
       runs_on: ${{ toJSON(matrix.os) }}
       setup_variant: github
-      platform: a5sim
       include_dfx_smokes: true
       python_version: ${{ matrix.python-version }}
 
@@ -100,18 +98,16 @@ jobs:
   ut-a2a3:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    uses: ./.github/workflows/_ut-npu.yml
+    uses: ./.github/workflows/_ut-npu-a2a3.yml
     with:
-      platform: a2a3
       runs_on: '["self-hosted","a2a3"]'
       include_cann_examples: true
 
   st-onboard-a2a3:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    uses: ./.github/workflows/_st-npu.yml
+    uses: ./.github/workflows/_st-npu-a2a3.yml
     with:
-      platform: a2a3
       runs_on: '["self-hosted","a2a3"]'
       include_dfx_smokes: true
       a2a3_sdma_mode: marker
@@ -119,17 +115,15 @@ jobs:
   ut-a5:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    uses: ./.github/workflows/_ut-npu.yml
+    uses: ./.github/workflows/_ut-npu-a5.yml
     with:
-      platform: a5
       runs_on: '["self-hosted","a5"]'
       include_cann_examples: true
 
   st-onboard-a5:
     needs: [detect-changes, pre-commit]
     if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    uses: ./.github/workflows/_st-npu.yml
+    uses: ./.github/workflows/_st-npu-a5.yml
     with:
-      platform: a5
       runs_on: '["self-hosted","a5"]'
       include_dfx_smokes: true

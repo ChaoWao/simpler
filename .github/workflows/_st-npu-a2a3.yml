@@ -1,4 +1,4 @@
-name: NPU Scene Tests
+name: NPU Scene Tests (a2a3)
 
 permissions:
   contents: read
@@ -11,10 +11,6 @@ on:
         type: string
       ref:
         required: false
-        type: string
-      platform:
-        description: a2a3 or a5.
-        required: true
         type: string
       runs_on:
         required: true
@@ -31,7 +27,7 @@ on:
 
 jobs:
   run:
-    name: st-onboard-${{ inputs.platform }}
+    name: st-onboard-a2a3
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 60
     env:
@@ -52,17 +48,17 @@ jobs:
           packages: ".[test]"
           install-torch: "false"
           system-site-packages: "true"
-          source-cann: ${{ inputs.platform == 'a2a3' && 'true' || 'false' }}
+          source-cann: "true"
 
       - name: Warn when graphviz is missing
-        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes
         run: |
           if ! command -v dot >/dev/null 2>&1; then
             echo "::warning::graphviz 'dot' not found on PATH; deps_viewer tool smoke will skip. Install graphviz on this self-hosted runner to restore coverage."
           fi
 
       - name: Run pytest scene tests (a2a3)
-        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'marker'
+        if: inputs.a2a3_sdma_mode == 'marker'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -74,7 +70,7 @@ jobs:
           fi
 
       - name: Run pytest scene tests (a2a3 legacy SDMA paths)
-        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'legacy-paths'
+        if: inputs.a2a3_sdma_mode == 'legacy-paths'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -87,7 +83,7 @@ jobs:
           fi
 
       - name: SDMA pytest (a2a3)
-        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'marker'
+        if: inputs.a2a3_sdma_mode == 'marker'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -100,7 +96,7 @@ jobs:
           fi
 
       - name: SDMA pytest (a2a3 legacy paths)
-        if: inputs.platform == 'a2a3' && inputs.a2a3_sdma_mode == 'legacy-paths'
+        if: inputs.a2a3_sdma_mode == 'legacy-paths'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -112,16 +108,8 @@ jobs:
               --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
-      - name: Run pytest scene tests (a5)
-        if: inputs.platform == 'a5'
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"
-
       - name: dep_gen smoke (a2a3)
-        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -137,7 +125,7 @@ jobs:
           fi
 
       - name: dep_gen smoke (a2a3 host_build_graph)
-        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -153,7 +141,7 @@ jobs:
           fi
 
       - name: chip_swimlane smoke (a2a3)
-        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -169,7 +157,7 @@ jobs:
           fi
 
       - name: PMU smoke (a2a3)
-        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -185,7 +173,7 @@ jobs:
           fi
 
       - name: args_dump smoke (a2a3)
-        if: inputs.platform == 'a2a3' && inputs.include_dfx_smokes
+        if: inputs.include_dfx_smokes
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
@@ -199,43 +187,3 @@ jobs:
               --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
               --require-pto-isa --dump-args"
           fi
-
-      - name: dep_gen smoke (a5)
-        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
-            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-dep-gen"
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
-
-      - name: chip_swimlane smoke (a5)
-        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
-            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-chip-swimlane --enable-dep-gen"
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
-
-      - name: PMU smoke (a5)
-        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
-            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-pmu 2"
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
-
-      - name: args_dump smoke (a5)
-        if: inputs.platform == 'a5' && inputs.include_dfx_smokes
-        run: |
-          source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          PYTEST="python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
-            --platform a5 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --dump-args"
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST"
