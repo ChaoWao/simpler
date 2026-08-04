@@ -918,23 +918,25 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             CYCLE_COUNT_LAP(l2_swimlane.sched_idle_cycle);
         } else {
             CYCLE_COUNT_LAP(l2_swimlane.sched_complete_cycle);
-            if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES && l2_swimlane.phase_complete_count > 0) {
+            if (l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES &&
+                (l2_swimlane.phase_complete_count > 0 || l2_swimlane.phase_subretire_count > 0)) {
                 // Complete's release_fanin pushes newly-ready consumers into the
                 // shared ready_queues[], so the end depth differs from the start.
                 int16_t phase_end_shared[L2SWIMLANE_NUM_QUEUE_SHAPES];
                 capture_phase_end_fresh(phase_end_shared);
                 l2_swimlane_aicpu_record_sched_phase(
                     thread_idx, L2SwimlaneSchedPhaseKind::Complete, _t0_phase, _t1, l2_swimlane.sched_loop_count,
-                    l2_swimlane.phase_complete_count, /*pop_hit=*/0, /*pop_miss=*/0, phase_start_shared,
-                    phase_end_shared
+                    l2_swimlane.phase_complete_count + l2_swimlane.phase_subretire_count,
+                    /*pop_hit=*/0, /*pop_miss=*/0, phase_start_shared, phase_end_shared
                 );
                 for (int s = 0; s < L2SWIMLANE_NUM_QUEUE_SHAPES; s++)
                     phase_start_shared[s] = phase_end_shared[s];
                 l2_swimlane.phase_complete_count = 0;
+                l2_swimlane.phase_subretire_count = 0;
             }
             // Advance past the completion check even when no Complete bar was
-            // emitted (count 0). Otherwise its wall time folds into the next
-            // bar (AsyncPoll, or Dispatch when the poll is skipped).
+            // emitted (both counts 0). Otherwise its wall time folds into the
+            // next bar (AsyncPoll, or Dispatch when the poll is skipped).
             _t0_phase = _t1;
         }
 #endif

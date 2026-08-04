@@ -1439,11 +1439,10 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             "dummy_task": "grey",
         }
 
-        # Per-complete subtask-finish counts surface "how many AICore FINs
-        # did the AICPU poll in this phase" — useful context that
-        # tasks_processed (logical task count) doesn't convey. Computed
-        # with "phase contains finish_us" semantics so it matches how the
-        # AICPU actually attributes finishes to its polling windows.
+        # Per-complete task-finish rows are retained as an attribution check.
+        # The runtime's Complete `tasks_processed` field is the authoritative
+        # number of AICore FIN/retire events in the phase (including non-final
+        # SPMD sub-block retires), not necessarily a logical-task count.
         complete_phases_by_thread_pre = []
         complete_starts_by_thread_pre = []
         for thread_records in scheduler_phases:
@@ -1632,11 +1631,18 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         }
                     )
                 if phase == "complete":
-                    # finishes_processed kept in args (hover) for forensics —
-                    # SPMD cases where one logical task has N subtask FINs
-                    # observed in the phase. Label stays minimal.
-                    finishes_count = finishes_per_complete.get(id(record), 0)
-                    phase_args["finishes_processed"] = finishes_count
+                    matched_finish_rows = finishes_per_complete.get(id(record), 0)
+                    if "tasks_processed" in record:
+                        # Preserve the raw runtime count for trace consumers;
+                        # it includes both final and non-final SPMD FINs.
+                        phase_args["finishes_processed"] = tasks_processed
+                        phase_args["finish_rows_attributed"] = matched_finish_rows
+                    else:
+                        # Older/synthetic records have no raw count. Keep the
+                        # converter useful by falling back to row attribution.
+                        phase_args["finishes_processed"] = matched_finish_rows
+                        tasks_processed = matched_finish_rows
+                        phase_args["tasks_processed"] = tasks_processed
                 display_name = f"{phase}({tasks_processed})"
                 event_tid = resolve_tid if phase == "resolve" else tid
                 events.append(

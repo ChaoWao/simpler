@@ -424,6 +424,42 @@ def test_complete_flow_uses_independent_view_anchors(tmp_path):
     assert len({(e["pid"], e["tid"], e["ts"]) for e in finishes}) == 1
 
 
+def test_complete_phase_preserves_runtime_fin_count(tmp_path):
+    task_id = 101
+    tasks = [
+        _task_row(task_id, 0, start=1.0, end=2.0),
+        _task_row(task_id, 1, start=1.5, end=2.5),
+    ]
+    scheduler_phases = [
+        [
+            {
+                "phase": "complete",
+                "start_time_us": 2.5,
+                "end_time_us": 3.5,
+                # A5/a2a3 runtime count: two AICore FINs, one of which may
+                # be a non-final SPMD sub-block retire.
+                "tasks_processed": 2,
+            }
+        ]
+    ]
+
+    out = tmp_path / "trace.json"
+    sc.generate_chrome_trace_json(
+        tasks,
+        str(out),
+        scheduler_phases=scheduler_phases,
+        core_to_thread=[0, 0],
+        deps_edges={},
+        deps_block_map={task_id: 2},
+    )
+
+    with out.open() as f:
+        events = json.load(f)["traceEvents"]
+    complete = next(e for e in events if e.get("cat") == "scheduler" and e.get("name") == "complete(2)")
+    assert complete["args"]["finishes_processed"] == 2
+    assert complete["args"]["finish_rows_attributed"] == 2
+
+
 def test_complete_flow_worker_view_only_without_scheduler_phases(tmp_path):
     # Without scheduler_phases the complete-flow block is skipped entirely:
     # neither view gets a complete arrow (regression guard on the gate).

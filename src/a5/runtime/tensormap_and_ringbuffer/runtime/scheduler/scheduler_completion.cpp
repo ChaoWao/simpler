@@ -141,6 +141,15 @@ void SchedulerContext::complete_slot_task(
 
     bool task_complete = sched_->on_subtask_complete(slot_state);
 
+#if SIMPLER_DFX
+    // A multi-block task can retire several subtasks before its final block
+    // arrives. Count those non-final FINs so the scheduler lane does not hide
+    // the serial-harvest tail between two logical task completions.
+    if (!task_complete && l2_swimlane_level_ >= L2SwimlaneLevel::SCHED_PHASES) {
+        l2_swimlane.phase_subretire_count++;
+    }
+#endif
+
     if (task_complete && slot_state.payload != nullptr && slot_state.has_any_subtask_deferred()) {
         while (!mailbox->try_push_normal_done(slot_state.task->task_id, reinterpret_cast<uint64_t>(&slot_state))) {
             sched_->async_wait_list.mpsc_skipped_count.fetch_add(1, std::memory_order_relaxed);

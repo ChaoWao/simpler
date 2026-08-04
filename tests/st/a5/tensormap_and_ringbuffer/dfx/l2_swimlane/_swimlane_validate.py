@@ -46,7 +46,13 @@ _REQUIRED_TASK_FIELDS = (
 )
 
 
-def validate_perf_artifact(case_label: str, *, since: float, expected_task_count: int | None = None) -> None:
+def validate_perf_artifact(
+    case_label: str,
+    *,
+    since: float,
+    expected_task_count: int | None = None,
+    expected_complete_finishes: int | None = None,
+) -> None:
     """Locate this invocation's output dir for ``case_label`` and run the full
     capture-→-tools-→-differential sequence.
 
@@ -61,6 +67,9 @@ def validate_perf_artifact(case_label: str, *, since: float, expected_task_count
         expected_task_count: when provided, assert ``len(tasks) == N``.
             Workloads whose task count varies with sim/onboard timing should
             leave this ``None`` and rely on the differential gate.
+        expected_complete_finishes: when provided, assert the sum of
+            Complete-phase ``tasks_processed`` values. This is a FIN/retire
+            count, so an SPMD workload can exceed its logical task count.
     """
     safe_label = _sanitize_for_filename(case_label)
     matches = [p for p in _outputs_dir().glob(f"{safe_label}_*") if p.stat().st_mtime >= since]
@@ -83,6 +92,16 @@ def validate_perf_artifact(case_label: str, *, since: float, expected_task_count
     if expected_task_count is not None:
         assert len(tasks) == expected_task_count, (
             f"got {len(tasks)} perf records, expected {expected_task_count} under {perf}"
+        )
+    if expected_complete_finishes is not None:
+        complete_finishes = sum(
+            int(record.get("tasks_processed", 0))
+            for thread_records in data.get("aicpu_scheduler_phases", [])
+            for record in thread_records
+            if record.get("phase") == "complete"
+        )
+        assert complete_finishes == expected_complete_finishes, (
+            f"got {complete_finishes} Complete FINs, expected {expected_complete_finishes} under {perf}"
         )
     # Spot-check a single record's required fields — guards against drift in
     # the swimlane schema that swimlane_converter.py / deps_viewer.py rely on.

@@ -143,7 +143,11 @@ class TestL2SwimlaneMixed(SceneTestCase):
                     # the chain produces 3 MIX task_ids × 2 subtask rows = 6
                     # perf rows and 2 deps.json edges, so the dedup branch in
                     # the oracle has an arithmetically observable effect.
-                    validate_perf_artifact(f"TestL2SwimlaneMixed_{case['name']}", since=run_marker)
+                    validate_perf_artifact(
+                        f"TestL2SwimlaneMixed_{case['name']}",
+                        since=run_marker,
+                        expected_complete_finishes=6,
+                    )
         # Full-dump modes give the func_id array its regression barrier on the
         # cooperative-mix path (single-kernel coverage lives in test_args_dump).
         if int(request.config.getoption("--dump-args", default=0)) >= 2:

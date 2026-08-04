@@ -14,6 +14,7 @@ from simpler_setup.tools.sched_overhead_analysis import (
     compute_critical_path,
     compute_head_tail,
     compute_overhead,
+    parse_scheduler_from_json_phases,
     per_id_timing,
     print_distribution,
 )
@@ -144,3 +145,77 @@ def test_print_distribution(capsys):
 
     print_distribution("Head OH", [])
     assert "(no tasks)" in capsys.readouterr().out
+
+
+def test_parse_scheduler_distinguishes_logical_tasks_from_finishes():
+    task_id = (1 << 32) | 7
+    data = {
+        "core_to_thread": [0, 0],
+        "tasks": [
+            {"task_id": task_id, "core_id": 0, "finish_time_us": 1.25},
+            {"task_id": task_id, "core_id": 1, "finish_time_us": 1.75},
+        ],
+        "aicpu_scheduler_phases": [
+            [
+                {
+                    "phase": "complete",
+                    "start_time_us": 1.0,
+                    "end_time_us": 2.0,
+                    "loop_iter": 1,
+                    "tasks_processed": 2,
+                }
+            ]
+        ],
+    }
+
+    threads = parse_scheduler_from_json_phases(data)
+
+    assert threads[0]["completed"] == 1
+    assert threads[0]["logical_tasks"] == 1
+    assert threads[0]["finishes"] == 2
+    assert threads[0]["tasks_per_loop"] == 1
+    assert threads[0]["finishes_per_loop"] == 2
+
+
+def test_parse_scheduler_attributes_spmd_task_to_final_finish_thread():
+    task_id = (1 << 32) | 7
+    data = {
+        "core_to_thread": [0, 1],
+        "tasks": [
+            {"task_id": task_id, "core_id": 0, "finish_time_us": 1.25},
+            {"task_id": task_id, "core_id": 1, "finish_time_us": 1.75},
+        ],
+        "aicpu_scheduler_phases": [
+            [
+                {
+                    "phase": "complete",
+                    "start_time_us": 1.0,
+                    "end_time_us": 2.0,
+                    "loop_iter": 1,
+                    "tasks_processed": 1,
+                }
+            ],
+            [
+                {
+                    "phase": "complete",
+                    "start_time_us": 1.0,
+                    "end_time_us": 2.0,
+                    "loop_iter": 1,
+                    "tasks_processed": 1,
+                }
+            ],
+        ],
+    }
+
+    threads = parse_scheduler_from_json_phases(data)
+
+    assert threads[0]["completed"] == 0
+    assert threads[0]["logical_tasks"] == 0
+    assert threads[0]["finishes"] == 1
+    assert threads[0]["tasks_per_loop"] == 0
+    assert threads[0]["finishes_per_loop"] == 1
+    assert threads[1]["completed"] == 1
+    assert threads[1]["logical_tasks"] == 1
+    assert threads[1]["finishes"] == 1
+    assert threads[1]["tasks_per_loop"] == 1
+    assert threads[1]["finishes_per_loop"] == 1

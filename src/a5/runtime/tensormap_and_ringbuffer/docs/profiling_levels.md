@@ -243,6 +243,10 @@ header just like on onboard.
 
 Bare `--enable-l2-swimlane` = level 4 (backward compatible).
 
+The Complete phase's `tasks_processed` value is the number of AICore FIN/retire
+events observed by the scheduler poll. For SPMD tasks this includes non-final
+sub-block retires; it is therefore not always the number of logical tasks.
+
 ### Level gating in AICPU code
 
 Use the strongly-typed `L2SwimlaneLevel` enum so each gate names the

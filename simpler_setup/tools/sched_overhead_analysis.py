@@ -161,20 +161,48 @@ def auto_select_l2_swimlane_records_json():
     return files[0]
 
 
-def parse_scheduler_from_json_phases(data):
+def parse_scheduler_from_json_phases(data):  # noqa: PLR0912
     """Extract scheduler Phase breakdown from l2_swimlane_records JSON.
 
-    Computes per-thread loop counts, task counts, and phase totals
-    from aicpu_scheduler_phases records (present at l2_swimlane_level >= 3).
+    Computes per-thread loop counts, logical task counts, FIN/retire counts,
+    and phase totals from aicpu_scheduler_phases records (present at
+    l2_swimlane_level >= 3). Complete.tasks_processed is a FIN/retire count;
+    logical task counts are reconstructed from the final finish row per task.
 
     Returns:
         dict: Thread data keyed by thread index, with per-phase us / pct,
-              pop_hit / pop_miss, loops, completed, tasks_per_loop. Returns
+              pop_hit / pop_miss, loops, completed, finishes, tasks_per_loop,
+              and finishes_per_loop. Returns
               empty dict if phase data is not available.
     """
     phases_by_thread = data.get("aicpu_scheduler_phases", [])
     if not phases_by_thread:
         return {}
+
+    # A logical task may emit one perf row per SPMD subtask/core. Select its
+    # final finish row across all cores before attributing it to a scheduler
+    # thread; otherwise a task whose subtasks finish on different threads is
+    # counted once by every thread that observed one of its rows.
+    core_to_thread = data.get("core_to_thread") or []
+    final_finish_thread_by_task = {}
+    for task in data.get("tasks", []):
+        task_id = _to_uint64(task.get("task_id"))
+        core_id = task.get("core_id")
+        finish_us = task.get("finish_time_us")
+        if task_id is None or not isinstance(core_id, int) or not isinstance(finish_us, (int, float)):
+            continue
+        if not (0 <= core_id < len(core_to_thread)):
+            continue
+        thread_idx = core_to_thread[core_id]
+        if not isinstance(thread_idx, int) or thread_idx < 0:
+            continue
+        previous = final_finish_thread_by_task.get(task_id)
+        if previous is None or finish_us > previous[0]:
+            final_finish_thread_by_task[task_id] = (float(finish_us), thread_idx)
+
+    logical_tasks_by_thread = defaultdict(int)
+    for _finish_us, thread_idx in final_finish_thread_by_task.values():
+        logical_tasks_by_thread[thread_idx] += 1
 
     threads = {}
     for tid, records in enumerate(phases_by_thread):
@@ -197,7 +225,7 @@ def parse_scheduler_from_json_phases(data):
             continue
 
         phase_us = {"complete": 0.0, "async_poll": 0.0, "dispatch": 0.0, "idle": 0.0}
-        total_tasks = 0
+        total_finishes = 0
         max_loop_iter = 0
         pop_hit = 0
         pop_miss = 0
@@ -217,7 +245,7 @@ def parse_scheduler_from_json_phases(data):
             if dur > 0:
                 phase_us[phase] += dur
             if phase == "complete":
-                total_tasks += rec.get("tasks_processed", 0)
+                total_finishes += int(rec.get("tasks_processed") or 0)
             # Per-emit queue-health deltas; only present on dispatch records.
             # Summing across records gives the run-cumulative pop_hit /
             # pop_miss (the runtime's final-drain emit closes the tail).
@@ -228,17 +256,29 @@ def parse_scheduler_from_json_phases(data):
             if prev_end is None or end > prev_end:
                 prev_end = end
 
+        # Complete.tasks_processed is the per-thread FIN/retire count. When
+        # valid finish rows are available, logical tasks are attributed only
+        # to the thread that observed each task's final finish row. Fall back
+        # to the phase count only for artifacts without any valid finish rows.
+        logical_task_count = logical_tasks_by_thread.get(tid, 0) if final_finish_thread_by_task else total_finishes
+
         total_us = sum(phase_us.values())
         loops = max_loop_iter
-        tasks_per_loop = total_tasks / loops if loops > 0 else 0.0
+        tasks_per_loop = logical_task_count / loops if loops > 0 else 0.0
+        finishes_per_loop = total_finishes / loops if loops > 0 else 0.0
         pop_total = pop_hit + pop_miss
         pop_hit_rate = pop_hit / pop_total * 100 if pop_total > 0 else 0.0
 
         t = {
-            "completed": total_tasks,
+            # `completed` remains the legacy logical-task field used by the
+            # report; `finishes` exposes the raw Complete FIN/retire count.
+            "completed": logical_task_count,
+            "logical_tasks": logical_task_count,
+            "finishes": total_finishes,
             "total_us": total_us,
             "loops": loops,
             "tasks_per_loop": tasks_per_loop,
+            "finishes_per_loop": finishes_per_loop,
             "pop_hit": pop_hit,
             "pop_miss": pop_miss,
             "pop_hit_rate": pop_hit_rate,
@@ -825,7 +865,7 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     print()
 
     fmt2 = "  {:<10} {:>7} {:>10} {:>12} {:>11}"
-    print(fmt2.format("Thread", "Loops", "Completed", "ns/loop", "Total (us)"))
+    print(fmt2.format("Thread", "Loops", "Tasks", "ns/loop", "Total (us)"))
     print("  " + "-" * 54)
     for tid in sorted(threads.keys()):
         t = threads[tid]
@@ -836,6 +876,8 @@ def run_analysis(  # noqa: PLR0912, PLR0915
     total_loops = sum(t["loops"] for t in threads.values())
     avg_ns_per_loop = total_us * 1000 / total_loops if total_loops > 0 else 0
     print(fmt2.format("SUM", total_loops, total_completed, f"{avg_ns_per_loop:.0f}", f"{total_us:.1f}"))
+    total_finishes = sum(t.get("finishes", 0) for t in threads.values())
+    print(f"  FINs observed (Complete phase): {total_finishes}")
     print()
 
     # Phase breakdown. Idle is reconstructed from gaps between work
