@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""End-to-end validation of the B3a prepare/launch/poll/wait/finalize seam."""
+"""End-to-end validation of the native prepare/launch/poll/wait/finalize seam."""
 
 import tempfile
 

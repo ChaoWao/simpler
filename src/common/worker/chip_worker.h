@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_COMMON_WORKER_CHIP_WORKER_H_
-#define SRC_COMMON_WORKER_CHIP_WORKER_H_
+#pragma once
 
 #include <array>
 #include <cstddef>
@@ -120,22 +119,22 @@ public:
      *
      * Onboard HBG may prepare one distinct-slot successor while another run
      * owns the execution claim. Diagnostics and backends without the explicit
-     * capability remain depth-one. The slot/lease-generation/process-unique-
-     * run-epoch token prevents a delayed phase call from touching reused
-     * storage, including another run under the same pipeline lease or on
-     * another ChipWorker.
+     * capability remain depth-one. Lease generation gates admission; after a
+     * successful prepare, the slot plus process-unique run epoch prevents a
+     * delayed phase call from touching reused storage, including another run
+     * under the same pipeline lease or on another ChipWorker.
      */
     ChipWorkerNativeRun prepare_native_run(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
-        uint64_t run_id = 0, uint64_t dispatch_id = 0
+        uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
+        int32_t accepted_value = 0
     );
     ChipWorkerNativeRun prepare_native_run(
         int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
-        uint64_t run_id = 0, uint64_t dispatch_id = 0
+        uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
+        int32_t accepted_value = 0
     );
-    void launch_native_run(
-        const ChipWorkerNativeRun &run, volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
-    );
+    void launch_native_run(const ChipWorkerNativeRun &run);
     bool poll_native_run(const ChipWorkerNativeRun &run);
     void wait_native_run(const ChipWorkerNativeRun &run);
     void finalize_native_run(const ChipWorkerNativeRun &run);
@@ -247,14 +246,10 @@ private:
         void *, int, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t, const CallConfig *
     );
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
-    using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
-    using SimplerPrepareRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
-    using SimplerNativeRunFn = int (*)(void *, void *);
+    using SimplerRunFn = decltype(&simpler_run);
+    using SimplerPrepareRunFn = decltype(&simpler_prepare_run);
+    using SimplerNativeRunFn = decltype(&simpler_launch_run);
     using SupportsConcurrentNativePrepareFn = int (*)(void *);
-    using SetTaskAcceptedStateFn = int (*)(void *, volatile int32_t *, int32_t);
-    using SelectPipelineSlotFn = int (*)(void *, uint32_t);
-    using SelectArenaBankFn = int (*)(void *, uint32_t);
-    using SetNativeRunIdentityFn = int (*)(void *, uint64_t, uint64_t, uint64_t, uint64_t);
     using GetArenaBankGmHeapBaseFn = uint64_t (*)(void *, uint32_t);
     using GetRetainedTempAddrFn = uint64_t (*)(void *, uint32_t);
     using GetPipelineContractFn = const PipelineContract *(*)();
@@ -312,10 +307,6 @@ private:
     SimplerNativeRunFn wait_run_fn_ = nullptr;
     SimplerNativeRunFn finalize_run_fn_ = nullptr;
     SupportsConcurrentNativePrepareFn supports_concurrent_native_prepare_fn_ = nullptr;
-    SetTaskAcceptedStateFn set_task_accepted_state_fn_ = nullptr;
-    SelectPipelineSlotFn select_pipeline_slot_fn_ = nullptr;
-    SelectArenaBankFn select_arena_bank_fn_ = nullptr;
-    SetNativeRunIdentityFn set_native_run_identity_fn_ = nullptr;
     GetArenaBankGmHeapBaseFn get_arena_bank_gm_heap_base_fn_ = nullptr;
     GetRetainedTempAddrFn get_retained_temp_addr_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;
@@ -349,7 +340,7 @@ private:
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
         volatile int32_t *accepted_state, int32_t accepted_value
     );
-    uint32_t select_slot_resources(uint32_t slot_id);
+    uint32_t arena_bank_for_slot(uint32_t slot_id) const;
 
     enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHING, LAUNCHED, REAPED, FINALIZING };
     struct NativeRunSlotState {
@@ -361,7 +352,8 @@ private:
     };
     ChipWorkerNativeRun prepare_native_run_on_slot(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-        uint64_t generation, uint64_t run_id, uint64_t dispatch_id
+        uint64_t generation, uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state,
+        int32_t accepted_value
     );
     void cleanup_native_runs_noexcept() noexcept;
 
@@ -399,5 +391,3 @@ private:
     bool initialized_ = false;
     bool finalized_ = false;
 };
-
-#endif  // SRC_COMMON_WORKER_CHIP_WORKER_H_

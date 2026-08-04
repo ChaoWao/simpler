@@ -37,7 +37,6 @@
 #include <vector>
 
 #include "common/core_type.h"
-#include "common/host_api.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
@@ -115,15 +114,6 @@ struct TensorPair {
     // keep the safe default of copying back.
     bool needs_copy_back = true;
 };
-
-/**
- * Host API function pointers for device memory operations live in the shared
- * common/host_api.h (included at the top of this header) so the field set
- * stays identical across runtime variants (tensormap_and_ringbuffer /
- * host_build_graph) and arches; the platform layer builds one const table and
- * passes it by address. hbg leaves the trb-only fields (prebuilt-arena cache)
- * unset — see host_api.h.
- */
 
 /**
  * Task structure - Compatibility stub for platform layer
@@ -304,9 +294,9 @@ public:
     // Host-side tensor ledger for D2H copy-back at finalize. Populated by
     // runtime_maker.cpp from orch_args at bind time, then iterated in
     // validate_runtime_impl. Not read by AICPU/AICore — the device-side
-    // Runtime image carries the std::vector control block as harmless
-    // garbage, identical to host_api above. No fixed cap — grows with the
-    // chip-level entry-tensor count.
+    // Runtime image also carries the host-only std::vector control block, which
+    // device code must not inspect. No fixed cap — grows with the chip-level
+    // entry-tensor count.
     std::vector<TensorPair> tensor_pairs_;
 };
 

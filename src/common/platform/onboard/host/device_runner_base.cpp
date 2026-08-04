@@ -15,11 +15,8 @@
  * the static trampolines declared in the header. Per-region commit is
  * still driven by the subclass's `setup_static_arena`.
  *
- * Each lifecycle method is a verbatim move of code that was identical
- * between `src/{a2a3,a5}/platform/onboard/host/device_runner.cpp` —
- * the implementations have already been validated by the production CI
- * for both arches. No behavioral changes here; this is a pure
- * deduplication pass.
+ * Shared lifecycle methods own runner-level resources; architecture-specific
+ * launch, completion, and reset behavior remains in each DeviceRunner.
  */
 
 #include "device_runner_base.h"
@@ -27,7 +24,6 @@
 #include <runtime/rt.h>
 #include <acl/acl.h>
 #include <dlfcn.h>
-#include <pthread.h>
 
 #include <algorithm>
 #include <cassert>
@@ -35,10 +31,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
-#include <new>
-#include <stdexcept>
-#include <type_traits>
 
 #include "callable.h"
 #include "callable_protocol.h"
@@ -68,50 +60,6 @@
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count);
 
 namespace {
-
-pthread_key_t g_run_selection_key;
-pthread_once_t g_run_selection_once = PTHREAD_ONCE_INIT;
-int g_run_selection_key_error = 0;
-
-using NativeRunThreadSelection = DeviceRunnerBase::NativeRunThreadSelection;
-static_assert(
-    std::is_trivially_destructible_v<NativeRunThreadSelection>,
-    "pthread TLS releases native-run selection storage without a DSO-local destructor"
-);
-
-void create_run_selection_key() {
-    // The pthread key can outlive this dlclosed host-runtime DSO. Point its
-    // destructor directly at process-lifetime libc instead of a DSO-local
-    // lambda, which would become an invalid callback when the thread exits.
-    g_run_selection_key_error = pthread_key_create(&g_run_selection_key, std::free);
-}
-
-/** This thread's selection storage, or nullptr when it cannot be installed. */
-NativeRunThreadSelection *try_run_selection() noexcept {
-    int once_rc = pthread_once(&g_run_selection_once, create_run_selection_key);
-    if (once_rc != 0 || g_run_selection_key_error != 0) return nullptr;
-    auto *selection = static_cast<NativeRunThreadSelection *>(pthread_getspecific(g_run_selection_key));
-    if (selection == nullptr) {
-        void *storage = std::malloc(sizeof(NativeRunThreadSelection));
-        if (storage == nullptr) return nullptr;
-        selection = new (storage) NativeRunThreadSelection{};
-        int set_rc = pthread_setspecific(g_run_selection_key, selection);
-        if (set_rc != 0) {
-            selection->~NativeRunThreadSelection();
-            std::free(storage);
-            return nullptr;
-        }
-    }
-    return selection;
-}
-
-DeviceRunnerBase::NativeRunThreadSelection &run_selection() {
-    NativeRunThreadSelection *selection = try_run_selection();
-    if (selection == nullptr) {
-        throw std::runtime_error("failed to install native-run pthread TLS state");
-    }
-    return *selection;
-}
 
 HostRuntimeTimeoutConfig resolve_onboard_timeout_config() {
     RuntimeTimeoutConfig order_defaults{
@@ -176,44 +124,6 @@ DeviceRunnerBase::DeviceRunnerBase() {
     }
 }
 
-int DeviceRunnerBase::select_pipeline_slot(uint32_t slot_id) {
-    if (slot_id >= PTO_PIPELINE_MAX_DEPTH) {
-        LOG_ERROR("pipeline slot %u is outside [0, %u)", slot_id, PTO_PIPELINE_MAX_DEPTH);
-        return -1;
-    }
-    run_selection().pipeline_slot = slot_id;
-    return 0;
-}
-
-int DeviceRunnerBase::select_arena_bank(uint32_t bank_id) {
-    if (bank_id >= PTO_PIPELINE_MAX_DEPTH) {
-        LOG_ERROR("arena bank %u is outside [0, %u)", bank_id, PTO_PIPELINE_MAX_DEPTH);
-        return -1;
-    }
-    run_selection().arena_bank = bank_id;
-    return 0;
-}
-
-uint32_t DeviceRunnerBase::pipeline_slot() const { return run_selection().pipeline_slot; }
-
-uint32_t DeviceRunnerBase::selected_arena_bank() const { return run_selection().arena_bank; }
-
-DeviceRunnerBase::NativeRunThreadSelection DeviceRunnerBase::capture_native_run_thread_selection() const {
-    return run_selection();
-}
-
-void DeviceRunnerBase::restore_native_run_thread_selection(const NativeRunThreadSelection &selection) noexcept {
-    NativeRunThreadSelection *target = try_run_selection();
-    if (target == nullptr) {
-        // Returning would leave this thread on the default slot and bank, so a
-        // run would address storage another run's lease owns. There is no
-        // caller-visible channel for the failure on a freshly started thread.
-        LOG_ERROR("native-run thread selection storage could not be installed");
-        std::abort();
-    }
-    *target = selection;
-}
-
 uint64_t DeviceRunnerBase::arena_bank_gm_heap_base(uint32_t bank_id) const {
     if (bank_id >= arena_banks_.size()) return 0;
     const ArenaBank &bank = *arena_banks_[bank_id];
@@ -245,14 +155,20 @@ int DeviceRunnerBase::device_memset(void *dev_ptr, int value, std::size_t bytes)
     return aclrtMemset(dev_ptr, bytes, value, bytes);
 }
 
-void DeviceRunnerBase::get_retained_temp_buffer(void **addr, size_t *size) {
-    if (addr != nullptr) *addr = retained_temp_addrs_[pipeline_slot()];
-    if (size != nullptr) *size = retained_temp_sizes_[pipeline_slot()];
+void DeviceRunnerBase::get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, size_t *size) {
+    if (pipeline_slot >= retained_temp_addrs_.size()) {
+        if (addr != nullptr) *addr = nullptr;
+        if (size != nullptr) *size = 0;
+        return;
+    }
+    if (addr != nullptr) *addr = retained_temp_addrs_[pipeline_slot];
+    if (size != nullptr) *size = retained_temp_sizes_[pipeline_slot];
 }
 
-void DeviceRunnerBase::set_retained_temp_buffer(void *addr, size_t size) {
-    retained_temp_addrs_[pipeline_slot()] = addr;
-    retained_temp_sizes_[pipeline_slot()] = size;
+void DeviceRunnerBase::set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, size_t size) {
+    if (pipeline_slot >= retained_temp_addrs_.size()) return;
+    retained_temp_addrs_[pipeline_slot] = addr;
+    retained_temp_sizes_[pipeline_slot] = size;
 }
 
 void DeviceRunnerBase::clear_temporary_buffer() {
@@ -264,33 +180,36 @@ void DeviceRunnerBase::clear_temporary_buffer() {
     }
 }
 
-void *DeviceRunnerBase::acquire_pooled_gm_heap() {
-    DeviceArena &arena = arena_bank().gm_heap;
+void *DeviceRunnerBase::acquire_pooled_gm_heap(uint32_t arena_bank) {
+    if (arena_bank >= arena_banks_.size()) return nullptr;
+    DeviceArena &arena = this->arena_bank(arena_bank).gm_heap;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
 }
 
-void *DeviceRunnerBase::acquire_pooled_gm_sm() {
-    DeviceArena &arena = arena_bank().gm_sm;
+void *DeviceRunnerBase::acquire_pooled_gm_sm(uint32_t arena_bank) {
+    if (arena_bank >= arena_banks_.size()) return nullptr;
+    DeviceArena &arena = this->arena_bank(arena_bank).gm_sm;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
 }
 
-void *DeviceRunnerBase::acquire_pooled_runtime_arena() {
+void *DeviceRunnerBase::acquire_pooled_runtime_arena(uint32_t arena_bank) {
+    if (arena_bank >= arena_banks_.size()) return nullptr;
     // hbg calls setup_static_arena(...,0) and leaves the runtime pool
     // uncommitted — fail loudly if a caller asks for it anyway.
-    DeviceArena &arena = arena_bank().runtime_pool;
+    DeviceArena &arena = this->arena_bank(arena_bank).runtime_pool;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
 }
 
 bool DeviceRunnerBase::lookup_prebuilt_runtime_arena_cache(
-    uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
+    uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
     void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
 ) const {
     // The cache holds one entry and its bases point into bank 0, so any other
     // bank must rebuild rather than be handed a region it does not own.
-    if (selected_arena_bank() != 0) return false;
+    if (arena_bank != 0) return false;
     if (!prebuilt_runtime_arena_cache_valid_ || prebuilt_runtime_arena_cache_hash_ != hash ||
         prebuilt_runtime_arena_cache_key_.size() != key_size || key_data == nullptr || gm_heap_base == nullptr ||
         sm_base == nullptr || runtime_arena_base == nullptr || runtime_off == nullptr || image_data == nullptr ||
@@ -310,11 +229,11 @@ bool DeviceRunnerBase::lookup_prebuilt_runtime_arena_cache(
 }
 
 void DeviceRunnerBase::mark_prebuilt_runtime_arena_cached(
-    uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base, void *runtime_arena_base,
-    size_t runtime_off, const void *image_data, size_t image_size
+    uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base,
+    void *runtime_arena_base, size_t runtime_off, const void *image_data, size_t image_size
 ) {
     // Single-entry cache owned by bank 0; see lookup_prebuilt_runtime_arena_cache.
-    if (selected_arena_bank() != 0) return;
+    if (arena_bank != 0) return;
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_hash_ = hash;
     prebuilt_runtime_arena_cache_key_.assign(
@@ -330,7 +249,13 @@ void DeviceRunnerBase::mark_prebuilt_runtime_arena_cached(
     prebuilt_runtime_arena_cache_valid_ = true;
 }
 
-int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) {
+int DeviceRunnerBase::setup_static_arena(
+    uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
+) {
+    if (arena_bank >= arena_banks_.size()) {
+        LOG_ERROR("arena bank %u is outside [0, %zu)", arena_bank, arena_banks_.size());
+        return -1;
+    }
     // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
@@ -341,7 +266,7 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
     // worker's lifetime). If a caller asks for a larger layout on any
     // region, redo just that region — already-committed peers stay alive
     // so their callers don't have to re-acquire.
-    ArenaBank &bank = arena_bank();
+    ArenaBank &bank = this->arena_bank(arena_bank);
 
     bool arena_changed = false;
     auto commit_region = [&arena_changed](DeviceArena &arena, size_t &cached_size, size_t requested_size) -> int {
@@ -390,7 +315,7 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
         bank.cached_gm_heap_size = 0;
         bank.cached_gm_sm_size = 0;
         bank.cached_runtime_arena_size = 0;
-        if (selected_arena_bank() == 0) {
+        if (arena_bank == 0) {
             prebuilt_runtime_arena_cache_valid_ = false;
             prebuilt_runtime_arena_cache_key_.clear();
             prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
@@ -400,7 +325,7 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
         }
         return -1;
     }
-    if (arena_changed && selected_arena_bank() == 0) {
+    if (arena_changed && arena_bank == 0) {
         prebuilt_runtime_arena_cache_valid_ = false;
         prebuilt_runtime_arena_cache_key_.clear();
         prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
@@ -413,10 +338,8 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
 
 std::thread DeviceRunnerBase::create_thread(std::function<void()> fn) {
     int dev_id = device_id_;
-    NativeRunThreadSelection selection = capture_native_run_thread_selection();
-    return std::thread([this, dev_id, selection, fn = std::move(fn)]() {
+    return std::thread([dev_id, fn = std::move(fn)]() {
         rtSetDevice(dev_id);
-        restore_native_run_thread_selection(selection);
         fn();
     });
 }
@@ -1578,23 +1501,6 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run() {
     }
 }
 
-int DeviceRunnerBase::set_task_accepted_state(volatile int32_t *state, int32_t accepted_value) {
-    run_selection().accepted_state = state;
-    run_selection().accepted_value = accepted_value;
-    return 0;
-}
-
-int DeviceRunnerBase::set_native_run_identity(
-    uint64_t run_id, uint64_t generation, uint64_t dispatch_id, uint64_t run_epoch
-) {
-    NativeRunThreadSelection &selection = run_selection();
-    selection.run_id = run_id;
-    selection.generation = generation;
-    selection.dispatch_id = dispatch_id;
-    selection.run_epoch = run_epoch;
-    return 0;
-}
-
 bool DeviceRunnerBase::try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal) {
     if (owner == nullptr || launch_signal == nullptr) return false;
     std::lock_guard<std::mutex> lk(native_run_mu_);
@@ -1690,9 +1596,6 @@ bool DeviceRunnerBase::native_runs_outstanding() const {
 }
 
 void DeviceRunnerBase::publish_task_accepted() const {
-    NativeRunThreadSelection &selection = run_selection();
-    if (selection.accepted_state != nullptr) {
-        __atomic_store_n(selection.accepted_state, selection.accepted_value, __ATOMIC_RELEASE);
-    }
-    if (native_launch_signal_ != nullptr) native_launch_signal_->notify();
+    std::lock_guard<std::mutex> lk(native_run_mu_);
+    if (native_launch_signal_ != nullptr) native_launch_signal_->publish_acceptance();
 }

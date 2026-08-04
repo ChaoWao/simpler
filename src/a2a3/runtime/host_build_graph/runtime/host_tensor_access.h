@@ -47,11 +47,12 @@
  * strong definitions from `host/host_tensor_access.cpp`.
  */
 
-#ifndef SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_HOST_TENSOR_ACCESS_H_
-#define SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_HOST_TENSOR_ACCESS_H_
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
+
+struct HostApi;  // common/host_api.h — fwd-declared so this header stays out of platform includes
 
 /**
  * Read `bytes` at device address `dev_addr` into `dst`.
@@ -71,14 +72,15 @@ bool host_tensor_read(uint64_t dev_addr, void *dst, uint64_t bytes);
 bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes);
 
 /**
- * Drop every registration and latch the hook used to push mirror-mode writes
- * to the device (`HostApi::copy_to_device`; null when no write can need one).
+ * Drop every registration and latch the host interface used to push
+ * mirror-mode writes to the device (its `copy_to_device`; null when no write
+ * can need one).
  *
  * Called around one orchestration run: before the first
  * `host_tensor_access_add`, and again once the run has finished, after which
  * every access fails until the next run registers its own tensors.
  */
-void host_tensor_access_reset(int (*copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size));
+void host_tensor_access_reset(const HostApi *api);
 
 /**
  * Register `[dev_base, dev_base + size)` as reachable from the host at
@@ -87,5 +89,3 @@ void host_tensor_access_reset(int (*copy_to_device)(void *dev_ptr, const void *h
  * @return false for an empty region or a null `host_view`.
  */
 bool host_tensor_access_add(uint64_t dev_base, uint64_t size, void *host_view);
-
-#endif  // SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_HOST_TENSOR_ACCESS_H_

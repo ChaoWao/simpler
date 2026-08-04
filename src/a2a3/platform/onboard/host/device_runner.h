@@ -94,7 +94,7 @@ public:
 
     // The blocking entry point composes these operations. enqueue owns rollback
     // until the AICPU launch marker; drain takes that ownership on success.
-    int enqueue_run(Runtime &runtime, const CallConfig &config) override;
+    int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) override;
     int poll_run(uint32_t pipeline_slot) override;
     int drain_run(uint32_t pipeline_slot) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }

@@ -34,7 +34,7 @@ public:
     DeviceRunner();
     ~DeviceRunner() override;
 
-    int enqueue_run(Runtime &runtime, const CallConfig &config) override;
+    int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) override;
     int poll_run() override;
     int drain_run() override;
     int finalize() override;

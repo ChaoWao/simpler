@@ -251,7 +251,7 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
     return aicpu_register_callable_func_(const_cast<RegisterCallableArgs *>(&reg_args));
 }
 
-int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config) {
+int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t /*pipeline_slot*/) {
     if (active_run_ != nullptr) {
         LOG_ERROR("enqueue_run called while another simulated run still owns execution state");
         return -1;
@@ -692,8 +692,6 @@ int DeviceRunner::finalize() {
         bank->cached_gm_sm_size = 0;
         bank->cached_runtime_arena_size = 0;
     }
-    pipeline_slot_ = 0;
-    arena_bank_ = 0;
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_key_.clear();
     prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;

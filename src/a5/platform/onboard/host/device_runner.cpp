@@ -137,14 +137,14 @@ int DeviceRunner::destroy_comm_stream(void *stream) {
     return 0;
 }
 
-int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config) {
+int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
     if (run_resources_owned_) {
         LOG_ERROR(
             "enqueue_run entered while slot %u still owns resources", run_poll_slot_.load(std::memory_order_relaxed)
         );
         return -1;
     }
-    const uint32_t selected_pipeline_slot = pipeline_slot();
+    const uint32_t selected_pipeline_slot = pipeline_slot;
     run_poll_slot_.store(selected_pipeline_slot, std::memory_order_relaxed);
     run_poll_state_.store(RunPollState::Enqueuing, std::memory_order_release);
     run_resources_owned_ = true;

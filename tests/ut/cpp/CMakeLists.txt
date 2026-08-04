@@ -419,6 +419,10 @@ target_link_libraries(test_native_run_launch_signal PRIVATE ${GTEST_MAIN_LIB} ${
 add_test(NAME test_native_run_launch_signal COMMAND test_native_run_launch_signal)
 set_tests_properties(test_native_run_launch_signal PROPERTIES LABELS "no_hardware")
 
+# A HostApi value keeps one runner and one run's resource selection even when
+# callers invoke it from different host threads.
+add_common_utils_test(test_host_api common/test_host_api.cpp)
+
 # Sim kernel threads publish one sticky completion state. A gated unit test
 # proves submission and completion are separate without relying on kernel
 # duration or host scheduling.

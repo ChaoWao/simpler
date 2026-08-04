@@ -62,6 +62,7 @@
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "host/raii_scope_guard.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
@@ -542,23 +543,21 @@ int32_t run_host_orchestration(
 
 /**
  * Stage the per-callable resources (kernel binaries + orchestration SO) into
- * the supplied runtime so a subsequent bind_callable_to_runtime_impl can use
- * them. This is the cacheable half of init_runtime_impl: nothing here depends
- * on per-run argument values, so the prepare_callable / run_prepared split
- * lets us run this once per callable_id and amortize across runs.
+ * CallableArtifacts for subsequent per-run binding. Nothing here depends on
+ * per-run argument values, so registration runs once per callable_id.
  *
- * @param runtime   Pointer to pre-constructed Runtime (host_api populated)
  * @param callable  ChipCallable carrying the orch SO + child kernel binaries
+ * @param api       Context-bound platform operations used during registration
+ * @param out       Callable-owned artifacts retained across runs
  * @return 0 on success, -1 on failure
  */
-extern "C" int
-register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out) {
+extern "C" int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out) {
     if (callable == nullptr) {
         LOG_ERROR("Callable pointer is null");
         return -1;
     }
-    if (upload_fn == nullptr || out == nullptr) {
-        LOG_ERROR("upload_fn or out is null");
+    if (api == nullptr || out == nullptr) {
+        LOG_ERROR("HostApi or out is null");
         return -1;
     }
     *out = CallableArtifacts{};
@@ -566,8 +565,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
 
     LOG_INFO("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(
-            callable, upload_fn, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash,
-            &out->aicore_image_hash
+            callable, api, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash, &out->aicore_image_hash
         ) != 0) {
         LOG_ERROR("Failed to upload ChipCallable buffer");
         return -1;
@@ -652,7 +650,8 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
  * design: register/run_prepared invokes this every call, while the prep
  * half runs only once per callable_id.
  *
- * @param runtime    Pointer to pre-constructed Runtime (host_api populated)
+ * @param runtime    Pointer to the per-run Runtime
+ * @param api        Context-bound platform operations for this run
  * @param orch_args  Separated tensor/scalar arguments for this run
  * @return 0 on success, -1 on failure
  */
@@ -697,7 +696,10 @@ extern "C" int bind_callable_to_runtime_impl(
     // Open this run's host-view window. It closes once the orchestrator has
     // finished, so no host view outlives the point at which a task could make
     // it stale.
-    host_tensor_access_reset(api->copy_to_device);
+    host_tensor_access_reset(api);
+    auto host_tensor_access_guard = RAIIScopeGuard([]() {
+        host_tensor_access_reset(nullptr);
+    });
 
     int64_t t_args_start = _now_ms();
     for (int i = 0; i < tensor_count; i++) {
@@ -769,8 +771,8 @@ extern "C" int bind_callable_to_runtime_impl(
     int64_t t_args_end = _now_ms();
 
     // Lay out the per-Worker static device arena. GM heap, PTO2 shared memory,
-    // and the prebuilt runtime arena all live in a single backing allocation;
-    // setup_static_arena reserves the three regions and commits in one shot.
+    // and the prebuilt runtime arena use three independent pooled device
+    // allocations committed together by setup_static_arena.
     // Owned by DeviceRunner across runs — do NOT record in tensor_pairs_; the
     // free is deferred to DeviceRunner::finalize(). The runtime-arena size is
     // determined by replaying the reserve sequence on a host-side arena.
@@ -864,6 +866,7 @@ extern "C" int bind_callable_to_runtime_impl(
         // The orchestrator is the only host-view reader; from here the device
         // owns these buffers, so drop the window on both exits.
         host_tensor_access_reset(nullptr);
+        host_tensor_access_guard.dismiss();
         if (total_tasks < 0) {
             LOG_ERROR("host-orch: orchestration run failed");
             return -1;

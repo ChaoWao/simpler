@@ -84,17 +84,6 @@ class NativeRunLaunchSignal;
  */
 class DeviceRunnerBase {
 public:
-    struct NativeRunThreadSelection {
-        uint32_t pipeline_slot{0};
-        uint32_t arena_bank{0};
-        volatile int32_t *accepted_state{nullptr};
-        int32_t accepted_value{0};
-        uint64_t run_id{0};
-        uint64_t generation{0};
-        uint64_t dispatch_id{0};
-        uint64_t run_epoch{0};
-    };
-
     // Public virtual dtor so the shared c_api can `delete` a polymorphic
     // `DeviceRunnerBase *` (the `destroy_device_context` entrypoint). Each
     // arch's `DeviceRunner` defaults this through the compiler-generated dtor.
@@ -103,10 +92,6 @@ public:
     DeviceRunnerBase &operator=(const DeviceRunnerBase &) = delete;
     DeviceRunnerBase(DeviceRunnerBase &&) = delete;
     DeviceRunnerBase &operator=(DeviceRunnerBase &&) = delete;
-
-    /** Bind this runner's launch-acceptance publication target. */
-    int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
-    int set_native_run_identity(uint64_t run_id, uint64_t generation, uint64_t dispatch_id, uint64_t run_epoch);
 
     /**
      * Claim the runner for one native execution. The opaque owner and
@@ -128,22 +113,6 @@ public:
     );
     void release_native_run_reservation(const void *owner);
     bool native_runs_outstanding() const;
-
-    /** Carry an already-validated run lease into resource selection. */
-    int select_pipeline_slot(uint32_t slot_id);
-    int select_arena_bank(uint32_t bank_id);
-
-    /** Slot selected by the current run lease. */
-    uint32_t pipeline_slot() const;
-    uint32_t selected_arena_bank() const;
-    NativeRunThreadSelection capture_native_run_thread_selection() const;
-    /**
-     * Install `selection` on the calling thread. Aborts if the per-thread
-     * storage cannot be created: every caller either runs inside a scope guard
-     * or on a thread that has not started its run yet, so proceeding on the
-     * default slot and bank would silently address another lease's storage.
-     */
-    void restore_native_run_thread_selection(const NativeRunThreadSelection &selection) noexcept;
 
     /**
      * Committed GM heap base of one arena bank, or 0 while that bank has never
@@ -168,8 +137,8 @@ public:
     int copy_to_device(void *dev_ptr, const void *host_ptr, std::size_t bytes);
     int copy_from_device(void *host_ptr, const void *dev_ptr, std::size_t bytes);
     int device_memset(void *dev_ptr, int value, std::size_t bytes);
-    void get_retained_temp_buffer(void **addr, std::size_t *size);
-    void set_retained_temp_buffer(void *addr, std::size_t size);
+    void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, std::size_t *size);
+    void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, std::size_t size);
     void clear_temporary_buffer();
     /**
      * Map a device buffer into the host address space and return a
@@ -207,7 +176,7 @@ public:
      *
      * @return 0 on success, -1 on failure.
      */
-    int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
+    int setup_static_arena(uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
     /**
      * Return the pooled GM heap / PTO2 SM / runtime arena base pointer of the
@@ -217,15 +186,15 @@ public:
      * `setup_static_arena(...,0)` leaves the runtime pool uncommitted and this
      * returns nullptr.
      */
-    void *acquire_pooled_gm_heap();
-    void *acquire_pooled_gm_sm();
-    void *acquire_pooled_runtime_arena();
+    void *acquire_pooled_gm_heap(uint32_t arena_bank);
+    void *acquire_pooled_gm_sm(uint32_t arena_bank);
+    void *acquire_pooled_runtime_arena(uint32_t arena_bank);
     bool lookup_prebuilt_runtime_arena_cache(
-        uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
+        uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
         void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
     ) const;
     void mark_prebuilt_runtime_arena_cached(
-        uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base,
+        uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base,
         void *runtime_arena_base, size_t runtime_off, const void *image_data, size_t image_size
     );
 
@@ -469,7 +438,7 @@ public:
      * with the CallableState-derived host_orch_func_ptr + signature (kept
      * internal to the runner rather than returned across the c_api boundary).
      *
-     * @param api               Platform device-memory hooks (g_host_api).
+     * @param api               Context-bound platform device-memory hooks.
      * @param orch_args         const ChipStorageTaskArgs* for this run (void* to
      *                          keep task_interface headers out of this header).
      * @param ring_task_window  Per-ring overrides (trb); ignored by hbg.
@@ -545,10 +514,9 @@ public:
     virtual int abandon_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
 
     /** Compatibility composition retained while the C API owns an executor. */
-    int run(Runtime &runtime, const CallConfig &config) {
-        const uint32_t slot = pipeline_slot();
-        const int rc = enqueue_run(runtime, config);
-        return rc == 0 ? drain_run(slot) : rc;
+    int run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
+        const int rc = enqueue_run(runtime, config, pipeline_slot);
+        return rc == 0 ? drain_run(pipeline_slot) : rc;
     }
 
     /**
@@ -557,7 +525,7 @@ public:
      * all state needed by poll_run() and drain_run() remains owned by the
      * runner until drain completes.
      */
-    virtual int enqueue_run(Runtime &runtime, const CallConfig &config) = 0;
+    virtual int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) = 0;
 
     /**
      * Query the active run without waiting. Returns one of the
@@ -596,7 +564,7 @@ public:
 
     /**
      * Launch an AICPU kernel. Internal helper used by the subclass's
-     * `run()`; thin wrapper that dispatches through `load_aicpu_op_`'s
+     * `enqueue_run()`; thin wrapper that dispatches through `load_aicpu_op_`'s
      * cached `rtFuncHandle` (resolved by `LoadAicpuOp::Init` at first
      * bootstrap).
      *
@@ -679,7 +647,7 @@ public:
     const std::string &output_prefix() const { return output_prefix_; }
 
 protected:
-    /** Publish launch acceptance for the currently bound target, if any. */
+    /** Publish acceptance through the active run's launch signal, if any. */
     void publish_task_accepted() const;
     // Ctor is protected: this class is for inheritance only — direct
     // instantiation (`new DeviceRunnerBase()`) is a compile error. The
@@ -1053,7 +1021,7 @@ protected:
     // Held by pointer because DeviceArena is non-copyable and non-movable, so
     // the array cannot be brace-initialised without naming every bank.
     std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
-    ArenaBank &arena_bank() { return *arena_banks_[selected_arena_bank()]; }
+    ArenaBank &arena_bank(uint32_t bank_id) { return *arena_banks_[bank_id]; }
 
     bool prebuilt_runtime_arena_cache_valid_{false};
     uint64_t prebuilt_runtime_arena_cache_hash_{0};

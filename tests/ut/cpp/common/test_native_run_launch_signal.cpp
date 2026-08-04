@@ -53,3 +53,30 @@ TEST(NativeRunLaunchSignalTest, NotificationBeforeWaitIsRemembered) {
     });
     EXPECT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
 }
+
+TEST(NativeRunLaunchSignalTest, PublishAcceptanceStoresOnceAndKeepsNotificationSticky) {
+    volatile int32_t accepted_state = 0;
+    NativeRunLaunchSignal signal(&accepted_state, 17);
+
+    signal.publish_acceptance();
+    EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 17);
+
+    __atomic_store_n(&accepted_state, 23, __ATOMIC_RELEASE);
+    signal.publish_acceptance();
+    EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 23);
+
+    auto waiter = std::async(std::launch::async, [&]() {
+        signal.wait();
+    });
+    EXPECT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+}
+
+TEST(NativeRunLaunchSignalTest, NotificationBeforeLaunchMarkerSuppressesAcceptance) {
+    volatile int32_t accepted_state = 5;
+    NativeRunLaunchSignal signal(&accepted_state, 17);
+
+    signal.notify();
+    signal.publish_acceptance();
+
+    EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 5);
+}

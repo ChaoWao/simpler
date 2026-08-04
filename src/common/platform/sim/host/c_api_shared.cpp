@@ -28,10 +28,9 @@
 #include "device_runner_base.h"
 #include "prepare_callable_common.h"
 #include "task_args.h"
-#include "native_run_state.h"
+#include "native_run_context.h"
 
 #include <dlfcn.h>
-#include <pthread.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -47,176 +46,184 @@
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
 
-using SimNativeRunState = NativeRunState<SimDeviceRunnerBase>;
+using SimNativeRunContext = NativeRunContext<SimDeviceRunnerBase>;
 // Phase entry points validate raw caller storage before beginning object
 // lifetime, so the on-storage magic must remain the leading bytes.
-static_assert(__builtin_offsetof(SimNativeRunState, magic) == 0, "native-run magic must lead runtime storage");
+static_assert(__builtin_offsetof(SimNativeRunContext, magic) == 0, "native-run magic must lead runtime storage");
 
 extern "C" {
 
 /* ===========================================================================
  * Runtime Implementation Functions (defined in runtime_maker.cpp)
  * =========================================================================== */
-int register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out);
+int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
 
 /* ===========================================================================
- * Per-thread DeviceRunner binding
+ * Context-bound HostApi functions passed to runtime implementations.
  * =========================================================================== */
 
-static pthread_key_t g_runner_key;
-static pthread_once_t g_runner_key_once = PTHREAD_ONCE_INIT;
-static void create_runner_key() { pthread_key_create(&g_runner_key, nullptr); }
-
-static SimDeviceRunnerBase *current_runner() {
-    return static_cast<SimDeviceRunnerBase *>(pthread_getspecific(g_runner_key));
-}
-
-/* ===========================================================================
- * Internal device-memory functions (wired into a HostApi and passed to the
- * runtime impls, NOT dlsym'd)
- * =========================================================================== */
-
-static void *device_malloc(size_t size) {
+static void *device_malloc(void *runner_ctx, size_t size) {
+    if (runner_ctx == nullptr) return nullptr;
     try {
-        return current_runner()->allocate_tensor(size);
-    } catch (...) {
-        return NULL;
-    }
-}
-
-static void device_free(void *dev_ptr) {
-    if (dev_ptr == NULL) return;
-    try {
-        current_runner()->free_tensor(dev_ptr);
-    } catch (...) {}
-}
-
-static int copy_to_device(void *dev_ptr, const void *host_ptr, size_t size) {
-    if (dev_ptr == NULL || host_ptr == NULL) return -1;
-    try {
-        return current_runner()->copy_to_device(dev_ptr, host_ptr, size);
-    } catch (...) {
-        return -1;
-    }
-}
-
-static int copy_from_device(void *host_ptr, const void *dev_ptr, size_t size) {
-    if (host_ptr == NULL || dev_ptr == NULL) return -1;
-    try {
-        return current_runner()->copy_from_device(host_ptr, dev_ptr, size);
-    } catch (...) {
-        return -1;
-    }
-}
-
-static void *register_device_memory_to_host(void *dev_ptr, size_t bytes) {
-    try {
-        return current_runner()->register_device_memory_to_host(dev_ptr, bytes);
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->allocate_tensor(size);
     } catch (...) {
         return nullptr;
     }
 }
 
-static void unregister_device_memory_from_host(void *dev_ptr) {
+static void device_free(void *runner_ctx, void *dev_ptr) {
+    if (runner_ctx == nullptr || dev_ptr == nullptr) return;
     try {
-        current_runner()->unregister_device_memory_from_host(dev_ptr);
+        static_cast<SimDeviceRunnerBase *>(runner_ctx)->free_tensor(dev_ptr);
     } catch (...) {}
 }
 
-static int device_memset(void *dev_ptr, int value, size_t size) {
-    if (dev_ptr == NULL) return -1;
+static int copy_to_device(void *runner_ctx, void *dev_ptr, const void *host_ptr, size_t size) {
+    if (runner_ctx == nullptr || dev_ptr == nullptr || host_ptr == nullptr) return -1;
     try {
-        return current_runner()->device_memset(dev_ptr, value, size);
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->copy_to_device(dev_ptr, host_ptr, size);
     } catch (...) {
         return -1;
     }
 }
 
-static void get_retained_temp_buffer(void **addr, size_t *size) {
+static int copy_from_device(void *runner_ctx, void *host_ptr, const void *dev_ptr, size_t size) {
+    if (runner_ctx == nullptr || host_ptr == nullptr || dev_ptr == nullptr) return -1;
     try {
-        current_runner()->get_retained_temp_buffer(addr, size);
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->copy_from_device(host_ptr, dev_ptr, size);
+    } catch (...) {
+        return -1;
+    }
+}
+
+static void *register_device_memory_to_host(void *runner_ctx, void *dev_ptr, size_t bytes) {
+    if (runner_ctx == nullptr) return nullptr;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->register_device_memory_to_host(dev_ptr, bytes);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+static void unregister_device_memory_from_host(void *runner_ctx, void *dev_ptr) {
+    if (runner_ctx == nullptr) return;
+    try {
+        static_cast<SimDeviceRunnerBase *>(runner_ctx)->unregister_device_memory_from_host(dev_ptr);
+    } catch (...) {}
+}
+
+static int device_memset(void *runner_ctx, void *dev_ptr, int value, size_t size) {
+    if (runner_ctx == nullptr || dev_ptr == nullptr) return -1;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->device_memset(dev_ptr, value, size);
+    } catch (...) {
+        return -1;
+    }
+}
+
+static void get_retained_temp_buffer(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size) {
+    if (runner_ctx == nullptr) {
+        if (addr != nullptr) *addr = nullptr;
+        if (size != nullptr) *size = 0;
+        return;
+    }
+    try {
+        static_cast<SimDeviceRunnerBase *>(runner_ctx)->get_retained_temp_buffer(pipeline_slot, addr, size);
     } catch (...) {
         if (addr != nullptr) *addr = nullptr;
         if (size != nullptr) *size = 0;
     }
 }
 
-static void set_retained_temp_buffer(void *addr, size_t size) {
+static void set_retained_temp_buffer(void *runner_ctx, uint32_t pipeline_slot, void *addr, size_t size) {
+    if (runner_ctx == nullptr) return;
     try {
-        current_runner()->set_retained_temp_buffer(addr, size);
+        static_cast<SimDeviceRunnerBase *>(runner_ctx)->set_retained_temp_buffer(pipeline_slot, addr, size);
     } catch (...) {}
 }
 
-static uint64_t upload_chip_callable_buffer_wrapper(const void *callable) {
+static uint64_t upload_chip_callable_buffer_wrapper(void *runner_ctx, const void *callable) {
+    if (runner_ctx == nullptr) return 0;
     try {
-        return current_runner()->upload_chip_callable_buffer(static_cast<const ChipCallable *>(callable));
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)
+            ->upload_chip_callable_buffer(static_cast<const ChipCallable *>(callable));
     } catch (...) {
         return 0;
     }
 }
 
-static int setup_static_arena_wrapper(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) {
+static int setup_static_arena_wrapper(
+    void *runner_ctx, uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
+) {
+    if (runner_ctx == nullptr) return -1;
     try {
-        return current_runner()->setup_static_arena(gm_heap_size, gm_sm_size, runtime_arena_size);
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)
+            ->setup_static_arena(arena_bank, gm_heap_size, gm_sm_size, runtime_arena_size);
     } catch (...) {
         return -1;
     }
 }
 
-static void *acquire_pooled_gm_heap_wrapper() {
+static void *acquire_pooled_gm_heap_wrapper(void *runner_ctx, uint32_t arena_bank) {
+    if (runner_ctx == nullptr) return nullptr;
     try {
-        return current_runner()->acquire_pooled_gm_heap();
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->acquire_pooled_gm_heap(arena_bank);
     } catch (...) {
         return nullptr;
     }
 }
 
-static void *acquire_pooled_gm_sm_wrapper() {
+static void *acquire_pooled_gm_sm_wrapper(void *runner_ctx, uint32_t arena_bank) {
+    if (runner_ctx == nullptr) return nullptr;
     try {
-        return current_runner()->acquire_pooled_gm_sm();
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->acquire_pooled_gm_sm(arena_bank);
     } catch (...) {
         return nullptr;
     }
 }
 
-static void *acquire_pooled_runtime_arena_wrapper() {
+static void *acquire_pooled_runtime_arena_wrapper(void *runner_ctx, uint32_t arena_bank) {
+    if (runner_ctx == nullptr) return nullptr;
     try {
-        return current_runner()->acquire_pooled_runtime_arena();
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)->acquire_pooled_runtime_arena(arena_bank);
     } catch (...) {
         return nullptr;
     }
 }
 
 static bool lookup_prebuilt_runtime_arena_cache_wrapper(
-    uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
-    void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
+    void *runner_ctx, uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base,
+    void **sm_base, void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
 ) {
+    if (runner_ctx == nullptr) return false;
     try {
-        return current_runner()->lookup_prebuilt_runtime_arena_cache(
-            hash, key_data, key_size, gm_heap_base, sm_base, runtime_arena_base, runtime_off, image_data, image_size
-        );
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)
+            ->lookup_prebuilt_runtime_arena_cache(
+                arena_bank, hash, key_data, key_size, gm_heap_base, sm_base, runtime_arena_base, runtime_off,
+                image_data, image_size
+            );
     } catch (...) {
         return false;
     }
 }
 
 static void mark_prebuilt_runtime_arena_cached_wrapper(
-    uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base, void *runtime_arena_base,
-    size_t runtime_off, const void *image_data, size_t image_size
+    void *runner_ctx, uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base,
+    void *sm_base, void *runtime_arena_base, size_t runtime_off, const void *image_data, size_t image_size
 ) {
+    if (runner_ctx == nullptr) return;
     try {
-        current_runner()->mark_prebuilt_runtime_arena_cached(
-            hash, key_data, key_size, gm_heap_base, sm_base, runtime_arena_base, runtime_off, image_data, image_size
-        );
+        static_cast<SimDeviceRunnerBase *>(runner_ctx)
+            ->mark_prebuilt_runtime_arena_cached(
+                arena_bank, hash, key_data, key_size, gm_heap_base, sm_base, runtime_arena_base, runtime_off,
+                image_data, image_size
+            );
     } catch (...) {}
 }
 
-// The HostApi is a set of context-free function pointers: each wrapper above
-// recovers its runner from the thread-local current_runner(), so a single
-// filled table is valid for every runner and every run. Build it once at load
-// time rather than reassembling the pointer table on each simpler_run. Passed by
-// address into bind_callable_to_runtime_impl / validate_runtime_impl.
+// One immutable function table is shared by all runners. Each HostApi value
+// binds it to a specific runner and immutable per-run slot/bank selection.
 
 // Weak no-op default lives in device_runner_base.cpp; tensormap_and_ringbuffer
 // links a strong override that builds + caches the prebuilt runtime-arena.
@@ -225,7 +232,7 @@ extern "C" int prewarm_config_impl(
     const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
 );
 
-static const HostApi g_host_api = {
+static const HostApiOps g_host_api_ops = {
     .device_malloc = device_malloc,
     .device_free = device_free,
     .copy_to_device = copy_to_device,
@@ -257,9 +264,9 @@ void destroy_device_context(DeviceContextHandle ctx) {
     delete runner;
 }
 
-size_t get_runtime_size(void) { return sizeof(SimNativeRunState); }
+size_t get_runtime_size(void) { return sizeof(SimNativeRunContext); }
 
-size_t get_runtime_alignment(void) { return alignof(SimNativeRunState); }
+size_t get_runtime_alignment(void) { return alignof(SimNativeRunContext); }
 
 void *device_malloc_ctx(DeviceContextHandle ctx, size_t size) {
     if (ctx == NULL) return NULL;
@@ -329,13 +336,6 @@ int simpler_init(
     if (ctx == NULL) return -1;
 
     SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
-    // HostApi callbacks, including the prewarm path below, recover their
-    // DeviceRunner from this thread-local binding.
-    pthread_once(&g_runner_key_once, create_runner_key);
-    pthread_setspecific(g_runner_key, ctx);
-    auto tsd_guard = RAIIScopeGuard([]() {
-        pthread_setspecific(g_runner_key, nullptr);
-    });
 
     int rc;
     try {
@@ -365,8 +365,9 @@ int simpler_init(
     // runtimes link the weak no-op. Only the ring sizing is read.
     if (prewarm_config != NULL) {
         try {
+            const HostApi prewarm_api(runner, 0, 0, &g_host_api_ops);
             rc = prewarm_config_impl(
-                &g_host_api, prewarm_config->runtime_env.ring_task_window, prewarm_config->runtime_env.ring_heap,
+                &prewarm_api, prewarm_config->runtime_env.ring_task_window, prewarm_config->runtime_env.ring_heap,
                 prewarm_config->runtime_env.ring_dep_pool
             );
         } catch (...) {
@@ -389,9 +390,6 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         return -1;
     }
 
-    pthread_once(&g_runner_key_once, create_runner_key);
-    pthread_setspecific(g_runner_key, ctx);
-
     try {
         CallableArtifacts artifacts;
         auto chip_buffer_guard = RAIIScopeGuard([runner, &artifacts]() {
@@ -399,11 +397,9 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
                 runner->release_chip_callable_buffer(artifacts.chip_buffer_hash);
             }
         });
-        int rc = register_callable_impl(
-            reinterpret_cast<const ChipCallable *>(callable), upload_chip_callable_buffer_wrapper, &artifacts
-        );
+        const HostApi host_api(runner, 0, 0, &g_host_api_ops);
+        int rc = register_callable_impl(reinterpret_cast<const ChipCallable *>(callable), &host_api, &artifacts);
         if (rc != 0) {
-            pthread_setspecific(g_runner_key, nullptr);
             return rc;
         }
         auto host_dlopen_guard = RAIIScopeGuard([&artifacts]() {
@@ -445,10 +441,8 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
                 runner->unregister_callable(callable_id);
             }
         }
-        pthread_setspecific(g_runner_key, nullptr);
         return rc;
     } catch (...) {
-        pthread_setspecific(g_runner_key, nullptr);
         return -1;
     }
 }
@@ -531,15 +525,15 @@ static void emit_device_phase_markers(SimDeviceRunnerBase *runner) {
     }
 }
 
-static SimNativeRunState *native_run_state(DeviceContextHandle ctx, RuntimeHandle runtime, const char *operation) {
+static SimNativeRunContext *native_run_context(DeviceContextHandle ctx, RuntimeHandle runtime, const char *operation) {
     if (ctx == nullptr || runtime == nullptr) return nullptr;
     uint64_t magic = 0;
     std::memcpy(&magic, runtime, sizeof(magic));
-    if (magic != SimNativeRunState::kMagic) {
+    if (magic != SimNativeRunContext::kMagic) {
         LOG_ERROR("%s: runtime does not contain a prepared native run", operation);
         return nullptr;
     }
-    auto *state = static_cast<SimNativeRunState *>(runtime);
+    auto *state = static_cast<SimNativeRunContext *>(runtime);
     if (state->runner != static_cast<SimDeviceRunnerBase *>(ctx)) {
         LOG_ERROR("%s: prepared run belongs to a different device context", operation);
         return nullptr;
@@ -553,14 +547,14 @@ static void emit_native_run_host_wall(unsigned trace_inv, uint64_t trace_hid, lo
     STRACE_HOST_SPAN_AT("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0);
 }
 
-static int cleanup_failed_prepare(SimNativeRunState *state, int execution_rc, bool clear_gm_sm) {
+static int cleanup_failed_prepare(SimNativeRunContext *state, int execution_rc, bool clear_gm_sm) {
     const unsigned trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
     int validation_rc = -1;
     try {
-        validation_rc = validate_runtime_impl(&state->runtime, &g_host_api, execution_rc);
+        validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, execution_rc);
     } catch (...) {
         validation_rc = -1;
     }
@@ -568,16 +562,24 @@ static int cleanup_failed_prepare(SimNativeRunState *state, int execution_rc, bo
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
-    destroy_native_run_state(state);
+    destroy_native_run_context(state);
     emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns);
     return validation_rc != 0 ? validation_rc : execution_rc;
 }
 
 int simpler_prepare_run(
-    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
+    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config,
+    const NativeRunDescriptor *descriptor
 ) {
-    if (ctx == nullptr || runtime == nullptr || config == nullptr) return -1;
-    if (reinterpret_cast<uintptr_t>(runtime) % alignof(SimNativeRunState) != 0) {
+    if (ctx == nullptr || runtime == nullptr || config == nullptr || descriptor == nullptr) return -1;
+    if (descriptor->pipeline_slot >= PTO_PIPELINE_MAX_DEPTH || descriptor->arena_bank >= PTO_PIPELINE_MAX_DEPTH) {
+        LOG_ERROR(
+            "simpler_prepare_run: descriptor selects slot=%u bank=%u outside [0, %u)", descriptor->pipeline_slot,
+            descriptor->arena_bank, PTO_PIPELINE_MAX_DEPTH
+        );
+        return -1;
+    }
+    if (reinterpret_cast<uintptr_t>(runtime) % alignof(SimNativeRunContext) != 0) {
         LOG_ERROR("simpler_prepare_run: runtime storage does not satisfy get_runtime_alignment()");
         return -1;
     }
@@ -588,7 +590,7 @@ int simpler_prepare_run(
     }
     uint64_t magic = 0;
     std::memcpy(&magic, runtime, sizeof(magic));
-    if (magic == SimNativeRunState::kMagic) {
+    if (magic == SimNativeRunContext::kMagic) {
         LOG_ERROR("simpler_prepare_run: runtime already contains a prepared run; finalize it before reuse");
         return -1;
     }
@@ -597,21 +599,15 @@ int simpler_prepare_run(
         return -1;
     }
 
-    pthread_once(&g_runner_key_once, create_runner_key);
-    pthread_setspecific(g_runner_key, ctx);
-    auto tsd_guard = RAIIScopeGuard([]() {
-        pthread_setspecific(g_runner_key, nullptr);
-    });
-
-    SimNativeRunState *state = nullptr;
+    SimNativeRunContext *state = nullptr;
     const uint64_t trace_hid = static_cast<uint64_t>(callable_id);
     const unsigned trace_inv = STRACE_ALLOC_INV();
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
-        state = new (runtime) SimNativeRunState(runner, *config, trace_hid);
+        state = new (runtime) SimNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
         if (!runner->try_acquire_native_run(state, &state->launch_signal)) {
             LOG_ERROR("simpler_prepare_run: another native run is active on this device context");
-            destroy_native_run_state(state);
+            destroy_native_run_context(state);
             return -1;
         }
         state->runner_claimed = true;
@@ -630,7 +626,7 @@ int simpler_prepare_run(
         {
             STRACE("simpler_run.bind");
             rc = runner->bind_callable_to_runtime(
-                state->runtime, callable_id, &g_host_api, args, state->config.runtime_env.ring_task_window,
+                state->runtime, callable_id, &state->host_api, args, state->config.runtime_env.ring_task_window,
                 state->config.runtime_env.ring_heap, state->config.runtime_env.ring_dep_pool
             );
         }
@@ -644,7 +640,7 @@ int simpler_prepare_run(
 }
 
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
-    SimNativeRunState *state = native_run_state(ctx, runtime, "simpler_launch_run");
+    SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_launch_run");
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
     if (!state->runner_claimed || !state->runner->native_run_owned_by(state)) return -1;
 
@@ -653,9 +649,7 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     try {
         // The compatibility backend uses one blocking executor per run. The
         // prepare-through-finalize runner claim limits it to one per context.
-        state->executor = state->runner->create_thread([state, ctx]() {
-            pthread_once(&g_runner_key_once, create_runner_key);
-            pthread_setspecific(g_runner_key, ctx);
+        state->executor = state->runner->create_thread([state]() {
             STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
             int rc = -1;
             try {
@@ -664,7 +658,7 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
                     state->adopt_host_thread_state();
                     {
                         STRACE("simpler_run.runner_run");
-                        rc = state->runner->run(state->runtime, state->config);
+                        rc = state->runner->run(state->runtime, state->config, state->descriptor.pipeline_slot);
                     }
                 } else {
                     rc = attach_rc;
@@ -672,7 +666,6 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
             } catch (...) {
                 rc = -1;
             }
-            pthread_setspecific(g_runner_key, nullptr);
             state->execution_rc.store(rc, std::memory_order_relaxed);
             state->execution_done.store(true, std::memory_order_release);
             state->launch_signal.notify();
@@ -692,7 +685,7 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 }
 
 int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
-    SimNativeRunState *state = native_run_state(ctx, runtime, "simpler_poll_run");
+    SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_poll_run");
     if (state == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Prepared) return SIMPLER_NATIVE_RUN_POLL_ERROR;
@@ -711,7 +704,7 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 }
 
 int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
-    SimNativeRunState *state = native_run_state(ctx, runtime, "simpler_wait_run");
+    SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_wait_run");
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Prepared || phase == NativeRunPhase::Launching) return -1;
@@ -721,7 +714,7 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 }
 
 int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
-    SimNativeRunState *state = native_run_state(ctx, runtime, "simpler_finalize_run");
+    SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_finalize_run");
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Launching) return -1;
@@ -729,11 +722,6 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
 
-    pthread_once(&g_runner_key_once, create_runner_key);
-    pthread_setspecific(g_runner_key, ctx);
-    auto tsd_guard = RAIIScopeGuard([]() {
-        pthread_setspecific(g_runner_key, nullptr);
-    });
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
 
     int execution_rc = -1;
@@ -750,7 +738,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         if (attach_rc == 0) {
             {
                 STRACE("simpler_run.validate");
-                validation_rc = validate_runtime_impl(&state->runtime, &g_host_api, launched ? execution_rc : -1);
+                validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, launched ? execution_rc : -1);
             }
             if (launched && execution_rc == 0) emit_device_phase_markers(state->runner);
         } else {
@@ -764,16 +752,17 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
-    destroy_native_run_state(state);
+    destroy_native_run_context(state);
     emit_native_run_host_wall(trace_inv, trace_hid, trace_start_ns);
     if (validation_rc != 0) return validation_rc;
     return launched ? execution_rc : 0;
 }
 
 int simpler_run(
-    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
+    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config,
+    const NativeRunDescriptor *descriptor
 ) {
-    int rc = simpler_prepare_run(ctx, runtime, callable_id, args, config);
+    int rc = simpler_prepare_run(ctx, runtime, callable_id, args, config, descriptor);
     if (rc != 0) return rc;
     rc = simpler_launch_run(ctx, runtime);
     if (rc == 0) rc = simpler_wait_run(ctx, runtime);
@@ -782,38 +771,6 @@ int simpler_run(
 }
 
 int supports_concurrent_native_prepare_ctx(DeviceContextHandle) { return 0; }
-
-int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value) {
-    if (ctx == NULL) return -1;
-    try {
-        return static_cast<SimDeviceRunnerBase *>(ctx)->set_task_accepted_state(state, accepted_value);
-    } catch (...) {
-        return -1;
-    }
-}
-
-/**
- * Simulation keeps no per-thread run selection, so the identity is carried only
- * by the onboard runner's trace attributes and is discarded here. Accepting it
- * keeps the pipeline symbol set uniform across every host runtime.
- */
-int set_native_run_identity_ctx(DeviceContextHandle ctx, uint64_t, uint64_t, uint64_t, uint64_t) {
-    return ctx == NULL ? -1 : 0;
-}
-
-int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id) {
-    if (ctx == NULL) return -1;
-    SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
-    if (runner->native_run_active()) return -1;
-    return runner->select_pipeline_slot(slot_id);
-}
-
-int select_arena_bank_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
-    if (ctx == NULL) return -1;
-    SimDeviceRunnerBase *runner = static_cast<SimDeviceRunnerBase *>(ctx);
-    if (runner->native_run_active()) return -1;
-    return runner->select_arena_bank(bank_id);
-}
 
 uint64_t get_arena_bank_gm_heap_base_ctx(DeviceContextHandle ctx, uint32_t bank_id) {
     if (ctx == NULL) return 0;

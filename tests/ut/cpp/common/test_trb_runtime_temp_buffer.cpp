@@ -86,7 +86,7 @@ struct FakeHostApi {
 
 FakeHostApi *g_fake = nullptr;
 
-void *fake_device_malloc(size_t size) {
+void *fake_device_malloc(void * /*runner_ctx*/, size_t size) {
     if (g_fake->fail_device_malloc_on_call != 0 &&
         g_fake->device_malloc_count + 1 == g_fake->fail_device_malloc_on_call) {
         ++g_fake->device_malloc_count;
@@ -103,7 +103,7 @@ void *fake_device_malloc(size_t size) {
     return ptr;
 }
 
-void fake_device_free(void *ptr) {
+void fake_device_free(void * /*runner_ctx*/, void *ptr) {
     if (ptr == nullptr) {
         return;
     }
@@ -113,7 +113,7 @@ void fake_device_free(void *ptr) {
     std::free(ptr);
 }
 
-int fake_copy_to_device(void *dev_ptr, const void *host_ptr, size_t size) {
+int fake_copy_to_device(void * /*runner_ctx*/, void *dev_ptr, const void *host_ptr, size_t size) {
     ++g_fake->copy_to_count;
     if (g_fake->fail_copy_to_on_call != 0 && g_fake->copy_to_count == g_fake->fail_copy_to_on_call) {
         return -7;
@@ -122,33 +122,35 @@ int fake_copy_to_device(void *dev_ptr, const void *host_ptr, size_t size) {
     return 0;
 }
 
-int fake_copy_from_device(void *host_ptr, const void *dev_ptr, size_t size) {
+int fake_copy_from_device(void * /*runner_ctx*/, void *host_ptr, const void *dev_ptr, size_t size) {
     ++g_fake->copy_from_count;
     std::memcpy(host_ptr, dev_ptr, size);
     return 0;
 }
 
-void *fake_register_device_memory_to_host(void *dev_ptr, size_t /* bytes */) { return dev_ptr; }
+void *fake_register_device_memory_to_host(void * /*runner_ctx*/, void *dev_ptr, size_t /* bytes */) { return dev_ptr; }
 
-void fake_unregister_device_memory_from_host(void * /* dev_ptr */) {}
+void fake_unregister_device_memory_from_host(void * /*runner_ctx*/, void * /* dev_ptr */) {}
 
-int fake_device_memset(void *dev_ptr, int value, size_t size) {
+int fake_device_memset(void * /*runner_ctx*/, void *dev_ptr, int value, size_t size) {
     ++g_fake->device_memset_count;
     std::memset(dev_ptr, value, size);
     return 0;
 }
 
-void fake_get_retained_temp_buffer(void **addr, size_t *size) {
+void fake_get_retained_temp_buffer(void * /*runner_ctx*/, uint32_t /*pipeline_slot*/, void **addr, size_t *size) {
     if (addr != nullptr) *addr = g_fake->retained_addr;
     if (size != nullptr) *size = g_fake->retained_size;
 }
 
-void fake_set_retained_temp_buffer(void *addr, size_t size) {
+void fake_set_retained_temp_buffer(void * /*runner_ctx*/, uint32_t /*pipeline_slot*/, void *addr, size_t size) {
     g_fake->retained_addr = addr;
     g_fake->retained_size = size;
 }
 
-int fake_setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) {
+int fake_setup_static_arena(
+    void * /*runner_ctx*/, uint32_t /*arena_bank*/, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
+) {
     ++g_fake->setup_static_arena_count;
     g_fake->gm_heap.assign(gm_heap_size, 0);
     g_fake->gm_sm.assign(gm_sm_size, 0);
@@ -156,46 +158,49 @@ int fake_setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runti
     return 0;
 }
 
-void *fake_acquire_pooled_gm_heap() { return g_fake->gm_heap.empty() ? nullptr : g_fake->gm_heap.data(); }
-void *fake_acquire_pooled_gm_sm() { return g_fake->gm_sm.empty() ? nullptr : g_fake->gm_sm.data(); }
-void *fake_acquire_pooled_runtime_arena() {
+void *fake_acquire_pooled_gm_heap(void * /*runner_ctx*/, uint32_t /*arena_bank*/) {
+    return g_fake->gm_heap.empty() ? nullptr : g_fake->gm_heap.data();
+}
+void *fake_acquire_pooled_gm_sm(void * /*runner_ctx*/, uint32_t /*arena_bank*/) {
+    return g_fake->gm_sm.empty() ? nullptr : g_fake->gm_sm.data();
+}
+void *fake_acquire_pooled_runtime_arena(void * /*runner_ctx*/, uint32_t /*arena_bank*/) {
     return g_fake->runtime_arena.empty() ? nullptr : g_fake->runtime_arena.data();
 }
 bool fake_lookup_prebuilt_runtime_arena_cache(
-    uint64_t /* hash */, const void * /* key_data */, size_t /* key_size */, void ** /* gm_heap_base */,
-    void ** /* sm_base */, void ** /* runtime_arena_base */, size_t * /* runtime_off */, const void ** /* image_data */,
-    size_t * /* image_size */
+    void * /*runner_ctx*/, uint32_t /*arena_bank*/, uint64_t /* hash */, const void * /* key_data */,
+    size_t /* key_size */, void ** /* gm_heap_base */, void ** /* sm_base */, void ** /* runtime_arena_base */,
+    size_t * /* runtime_off */, const void ** /* image_data */, size_t * /* image_size */
 ) {
     return false;
 }
 void fake_mark_prebuilt_runtime_arena_cached(
-    uint64_t /* hash */, const void * /* key_data */, size_t /* key_size */, void * /* gm_heap_base */,
-    void * /* sm_base */, void * /* runtime_arena_base */, size_t /* runtime_off */, const void * /* image_data */,
-    size_t /* image_size */
+    void * /*runner_ctx*/, uint32_t /*arena_bank*/, uint64_t /* hash */, const void * /* key_data */,
+    size_t /* key_size */, void * /* gm_heap_base */, void * /* sm_base */, void * /* runtime_arena_base */,
+    size_t /* runtime_off */, const void * /* image_data */, size_t /* image_size */
 ) {}
-uint64_t fake_upload_chip_callable_buffer(const void * /* callable */) { return 0; }
+uint64_t fake_upload_chip_callable_buffer(void * /*runner_ctx*/, const void * /* callable */) { return 0; }
 
-// with_temporary_buffer=false leaves the retained-slot callbacks null, which
-// makes trb bind fall back to a per-tensor device_malloc for each tensor.
-HostApi make_host_api(bool with_temporary_buffer = true) {
-    return HostApi{
-        fake_device_malloc,
-        fake_device_free,
-        fake_copy_to_device,
-        fake_copy_from_device,
-        fake_register_device_memory_to_host,
-        fake_unregister_device_memory_from_host,
-        fake_device_memset,
-        with_temporary_buffer ? fake_get_retained_temp_buffer : nullptr,
-        with_temporary_buffer ? fake_set_retained_temp_buffer : nullptr,
-        fake_setup_static_arena,
-        fake_acquire_pooled_gm_heap,
-        fake_acquire_pooled_gm_sm,
-        fake_acquire_pooled_runtime_arena,
-        fake_lookup_prebuilt_runtime_arena_cache,
-        fake_mark_prebuilt_runtime_arena_cached,
-        fake_upload_chip_callable_buffer,
+HostApi make_host_api() {
+    static const HostApiOps ops = {
+        .device_malloc = fake_device_malloc,
+        .device_free = fake_device_free,
+        .copy_to_device = fake_copy_to_device,
+        .copy_from_device = fake_copy_from_device,
+        .register_device_memory_to_host = fake_register_device_memory_to_host,
+        .unregister_device_memory_from_host = fake_unregister_device_memory_from_host,
+        .device_memset = fake_device_memset,
+        .get_retained_temp_buffer = fake_get_retained_temp_buffer,
+        .set_retained_temp_buffer = fake_set_retained_temp_buffer,
+        .setup_static_arena = fake_setup_static_arena,
+        .acquire_pooled_gm_heap = fake_acquire_pooled_gm_heap,
+        .acquire_pooled_gm_sm = fake_acquire_pooled_gm_sm,
+        .acquire_pooled_runtime_arena = fake_acquire_pooled_runtime_arena,
+        .lookup_prebuilt_runtime_arena_cache = fake_lookup_prebuilt_runtime_arena_cache,
+        .mark_prebuilt_runtime_arena_cached = fake_mark_prebuilt_runtime_arena_cached,
+        .upload_chip_callable_buffer = fake_upload_chip_callable_buffer,
     };
+    return HostApi(nullptr, 0, 0, &ops);
 }
 
 ChipTensor make_tensor(std::vector<uint8_t> &storage, bool child_memory = false) {
@@ -235,8 +240,6 @@ protected:
 
     FakeHostApi fake_;
     HostApi api_ = make_host_api();
-    // Temp-buffer slot callbacks left null: trb bind falls back to device_malloc.
-    HostApi malloc_api_ = make_host_api(false);
 };
 
 }  // namespace
@@ -298,26 +301,14 @@ TEST_F(TrbRuntimeTempBufferTest, FailedExecutionWithoutDeviceStatusSkipsTensorCo
     }));
 }
 
-// The retained buffer is malloc'd once for the run and sliced (not per-tensor
-// malloc'd); copies/memsets are unchanged from the fallback path.
+// The retained buffer is malloc'd once for the run and sliced, not per tensor.
 TEST_F(TrbRuntimeTempBufferTest, TemporaryBufferSlicesWithoutChangingCopies) {
     std::vector<uint8_t> input(64, 7);
     std::vector<uint8_t> output(64, 0);
     ChipStorageTaskArgs args = make_args(input, output);
     ArgDirection signature[2] = {ArgDirection::IN, ArgDirection::OUT};
 
-    // Fallback path (null slot callbacks): one device_malloc per tensor.
-    fake_.reset();
-    Runtime malloc_runtime = make_runtime();
-    ASSERT_EQ(bind_runtime(malloc_runtime, malloc_api_, args, signature, 2), 0);
-    EXPECT_EQ(fake_.device_malloc_count, 2);
-    EXPECT_EQ(fake_.copy_to_count, 2);
-    EXPECT_EQ(fake_.device_memset_count, 0);
-    ASSERT_EQ(validate_runtime_impl(&malloc_runtime, &malloc_api_, 0), 0);
-    EXPECT_EQ(fake_.device_free_count, 2);
-    EXPECT_EQ(fake_.copy_from_count, 1);
-
-    // Retained-buffer path: single device_malloc for the whole run (two
+    // A single device_malloc backs the whole run (two
     // 64-byte tensors pack to 2 * 1024-aligned = 2048 bytes), sliced in place.
     fake_.reset();
     Runtime buffer_runtime = make_runtime();
@@ -427,23 +418,6 @@ TEST_F(TrbRuntimeTempBufferTest, GrowAllocationFailureFailsBindWithoutLeak) {
     EXPECT_EQ(fake_.retained_addr, nullptr);
     EXPECT_EQ(fake_.retained_size, 0u);
     EXPECT_TRUE(fake_.live_mallocs.empty());
-    EXPECT_TRUE(runtime.tensor_leases_.empty());
-}
-
-TEST_F(TrbRuntimeTempBufferTest, FailedCopyReleasesRecordedFreeLease) {
-    fake_.reset();
-    fake_.fail_copy_to_on_call = 1;
-    Runtime runtime = make_runtime();
-    std::vector<uint8_t> input(64, 9);
-    ChipStorageTaskArgs args;
-    args.add_tensor(make_tensor(input));
-    ArgDirection signature[1] = {ArgDirection::IN};
-
-    // Fallback path: the per-tensor device_malloc is freed on the copy-failure
-    // error path, leaving no lease and no leak.
-    EXPECT_EQ(bind_runtime(runtime, malloc_api_, args, signature, 1), -1);
-    EXPECT_EQ(fake_.device_malloc_count, 1);
-    EXPECT_EQ(fake_.device_free_count, 1);
     EXPECT_TRUE(runtime.tensor_leases_.empty());
 }
 

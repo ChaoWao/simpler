@@ -31,13 +31,10 @@
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
  *                   get_run_stream_set_create_count,
  *                   simpler_provision_dma_workspace
- *   - pipeline:     get_pipeline_contract, select_pipeline_slot_ctx,
- *                   select_arena_bank_ctx,
+ *   - pipeline:     get_pipeline_contract,
  *                   supports_concurrent_native_prepare_ctx,
- *                   set_native_run_identity_ctx,
  *                   get_arena_bank_gm_heap_base_ctx,
- *                   get_retained_temp_addr_ctx,
- *                   set_task_accepted_state_ctx
+ *                   get_retained_temp_addr_ctx
  *   - ACL/stream:   ensure_acl_ready_ctx, create_comm_stream_ctx,
  *                   destroy_comm_stream_ctx
  *   - comm:         comm_init, comm_alloc_windows, comm_get_local_window_base,
@@ -53,8 +50,7 @@
  * Error codes: 0 = success, negative = error.
  */
 
-#ifndef SRC_COMMON_WORKER_PTO_RUNTIME_C_API_H_
-#define SRC_COMMON_WORKER_PTO_RUNTIME_C_API_H_
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -157,6 +153,26 @@ typedef struct PipelineSlotLease {
     uint32_t reserved;
     uint64_t generation;
 } PipelineSlotLease;
+
+/**
+ * Immutable resource and trace identity copied into one prepared run.
+ * `pipeline_slot` and `arena_bank` must be smaller than
+ * PTO_PIPELINE_MAX_DEPTH; they remain explicit because some runtimes map a
+ * leased slot to a different arena bank. `run_epoch` is the process-unique
+ * identity used by later phase calls; lease generation, run id, and dispatch
+ * id remain diagnostic after admission. A non-null acceptance sink is written
+ * only at the real kernel-launch marker.
+ */
+typedef struct NativeRunDescriptor {
+    uint32_t pipeline_slot;
+    uint32_t arena_bank;
+    uint64_t run_id;
+    uint64_t generation;
+    uint64_t dispatch_id;
+    uint64_t run_epoch;
+    volatile int32_t *accepted_state;
+    int32_t accepted_value;
+} NativeRunDescriptor;
 
 /* Per-stage run timing is no longer returned. The platform emits it as
  * `[STRACE]` log markers (host stages + the AICPU device-phase breakdown,
@@ -316,12 +332,18 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
  * precedence per ring: per-ring entry > PTO2_RING_* env var > compile-time
  * default). Ring overrides are consumed by tensormap_and_ringbuffer only; other
  * runtime variants accept and ignore them. Wire-compatible POD; prepare copies
- * it into the native-run state before returning.
+ * it into the native-run context before returning.
+ *
+ * `descriptor` carries this run's immutable resource selection, trace identity,
+ * and optional launch-acceptance sink. It is copied before prepare returns. The
+ * platform release-stores the acceptance value only after the real
+ * kernel-launch marker; the sink is not retained after this blocking call.
  *
  * @return 0 on success, negative on error (no prep state, NULL ctx/config, etc.).
  */
 int simpler_run(
-    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
+    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config,
+    const NativeRunDescriptor *descriptor
 );
 
 /**
@@ -331,10 +353,13 @@ int simpler_run(
  * prepare and need not remain alive afterward, but every tensor backing buffer
  * referenced by it must remain valid through finalize (which may copy results
  * back to those addresses). See the storage size/alignment/lifetime contract at
- * the top of this header.
+ * the top of this header. `descriptor` is required and copied before this
+ * function returns. A non-null acceptance sink in the descriptor must remain
+ * valid until launch returns or the prepared run is finalized without launch.
  */
 int simpler_prepare_run(
-    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config
+    DeviceContextHandle ctx, RuntimeHandle runtime, int32_t callable_id, const void *args, const CallConfig *config,
+    const NativeRunDescriptor *descriptor
 );
 
 /**
@@ -346,6 +371,8 @@ int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx);
 /**
  * Launch a prepared run. Returns only after the platform has published its
  * real kernel-launch marker, or after execution terminates before that marker.
+ * The acceptance sink captured by prepare is published at that marker; an
+ * execution failure before the marker leaves it unchanged.
  */
 int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime);
 
@@ -368,17 +395,6 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime);
  */
 int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime);
 
-/** Select the per-run/exec-handle slot used by the next synchronous run. */
-int select_pipeline_slot_ctx(DeviceContextHandle ctx, uint32_t slot_id);
-
-/** Select the HOST_PER_RUN arena bank used by the next synchronous run. */
-int select_arena_bank_ctx(DeviceContextHandle ctx, uint32_t bank_id);
-
-/** Attach optional L3 identity metadata to the current thread's next native prepare. */
-int set_native_run_identity_ctx(
-    DeviceContextHandle ctx, uint64_t run_id, uint64_t generation, uint64_t dispatch_id, uint64_t run_epoch
-);
-
 /**
  * Committed GM heap base of one arena bank, or 0 when that bank has never been
  * committed or the platform keeps a single shared arena set. Reports which
@@ -392,12 +408,6 @@ uint64_t get_arena_bank_gm_heap_base_ctx(DeviceContextHandle ctx, uint32_t bank_
  * nothing.
  */
 uint64_t get_retained_temp_addr_ctx(DeviceContextHandle ctx, uint32_t slot_id);
-
-/**
- * Bind an optional host state word that the runner publishes after both device
- * kernels have been enqueued. Passing NULL clears the binding.
- */
-int set_task_accepted_state_ctx(DeviceContextHandle ctx, volatile int32_t *state, int32_t accepted_value);
 
 /**
  * Drop the prepared state for `callable_id` and release the per-id share of
@@ -456,5 +466,3 @@ int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_m
 #ifdef __cplusplus
 }
 #endif
-
-#endif  // SRC_COMMON_WORKER_PTO_RUNTIME_C_API_H_

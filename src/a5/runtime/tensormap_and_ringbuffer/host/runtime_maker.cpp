@@ -375,23 +375,21 @@ private:
 
 /**
  * Stage the per-callable resources (kernel binaries + orchestration SO) into
- * the supplied runtime so a subsequent bind_callable_to_runtime_impl can use
- * them. This is the cacheable half of init_runtime_impl: nothing here depends
- * on per-run argument values, so the simpler_register_callable / simpler_run split
- * lets us run this once per callable_id and amortize across runs.
+ * CallableArtifacts for subsequent per-run binding. Nothing here depends on
+ * per-run argument values, so registration runs once per callable_id.
  *
- * @param runtime   Pointer to pre-constructed Runtime
  * @param callable  ChipCallable carrying the orch SO + child kernel binaries
+ * @param api       Context-bound platform operations used during registration
+ * @param out       Callable-owned artifacts retained across runs
  * @return 0 on success, -1 on failure
  */
-extern "C" int
-register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out) {
+extern "C" int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out) {
     if (callable == nullptr) {
         LOG_ERROR("Callable pointer is null");
         return -1;
     }
-    if (upload_fn == nullptr || out == nullptr) {
-        LOG_ERROR("upload_fn or out is null");
+    if (api == nullptr || out == nullptr) {
+        LOG_ERROR("HostApi or out is null");
         return -1;
     }
     *out = CallableArtifacts{};
@@ -399,8 +397,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
 
     LOG_INFO("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(
-            callable, upload_fn, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash,
-            &out->aicore_image_hash
+            callable, api, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash, &out->aicore_image_hash
         ) != 0) {
         LOG_ERROR("Failed to upload ChipCallable buffer");
         return -1;
@@ -712,10 +709,6 @@ static int bind_cached_runtime_image(
     Runtime *runtime, const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe,
     const ChipStorageTaskArgs &device_args
 ) {
-    if (api->lookup_prebuilt_runtime_arena_cache == nullptr) {
-        return 1;
-    }
-
     void *gm_heap = nullptr;
     void *sm_ptr = nullptr;
     void *runtime_arena_dev = nullptr;
@@ -742,9 +735,6 @@ static void store_prebuilt_runtime_image(
     const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe, const StaticArenaPtrs &ptrs,
     const PTO2RuntimeArenaLayout &layout, const DeviceArena &host_arena
 ) {
-    if (api->mark_prebuilt_runtime_arena_cached == nullptr) {
-        return;
-    }
     api->mark_prebuilt_runtime_arena_cached(
         probe.hash, probe.serialized_key.data(), probe.serialized_key.size(), ptrs.gm_heap, ptrs.gm_sm,
         ptrs.runtime_arena_dev, layout.offsets.off_runtime, host_arena.base(), layout.offsets.arena_size
@@ -853,14 +843,12 @@ extern "C" int bind_callable_to_runtime_impl(
     }
 
     // The retained temporary buffer is always used on the trb path — it is an
-    // internal allocation optimization, not user-facing config. Gate only on
-    // whether the platform wired the slot accessors (trb always does; a backend
-    // that leaves them null transparently falls back to per-tensor
-    // device_malloc). The buffer itself lives on the runner across runs; here we
-    // just grow it to this run's packed size and bump-slice from it.
+    // internal allocation optimization, not user-facing config. Every host
+    // runtime provides the uniform HostApiOps table. The buffer itself lives on
+    // the runner across runs; here we grow it to this run's packed size and
+    // bump-slice from it.
     RetainedTempBump bump;
-    bool use_temporary_buffer = api->get_retained_temp_buffer != nullptr && api->set_retained_temp_buffer != nullptr;
-    if (use_temporary_buffer && !bump.begin(api, orch_args)) {
+    if (!bump.begin(api, orch_args)) {
         return -1;
     }
 
@@ -869,9 +857,7 @@ extern "C" int bind_callable_to_runtime_impl(
     });
 
     ChipStorageTaskArgs device_args;
-    if (!stage_device_args(
-            runtime, api, orch_args, signature, sig_count, use_temporary_buffer ? &bump : nullptr, &device_args
-        )) {
+    if (!stage_device_args(runtime, api, orch_args, signature, sig_count, &bump, &device_args)) {
         return -1;
     }
 
