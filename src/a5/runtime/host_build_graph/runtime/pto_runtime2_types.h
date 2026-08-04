@@ -15,7 +15,7 @@
  * This header defines all fundamental types used by the PTO Runtime2 system:
  * - Configuration constants
  * - Worker types and task states
- * - Tensor regions and task parameters
+ * - ChipTensor regions and task parameters
  * - Task descriptors with fanin/fanout tracking
  * - Dependency list entries
  *
@@ -321,12 +321,12 @@ struct PTO2TaskPayload {
     // dispatch.
     alignas(64) DispatchPredicate predicate;
     // === Cache lines 10-73 (4096B) — tensors (alignas(64) forces alignment) ===
-    Tensor tensors[MAX_TENSOR_ARGS];
+    ChipTensor tensors[MAX_TENSOR_ARGS];
     // === Cache lines 74-75 (128B) — scalars ===
     uint64_t scalars[MAX_SCALAR_ARGS];
 
     // Layout verification (size checks that don't need offsetof).
-    static_assert(sizeof(Tensor) == 128, "Tensor must be 2 cache lines");
+    static_assert(sizeof(ChipTensor) == 128, "ChipTensor must be 2 cache lines");
     static_assert(MAX_SCALAR_ARGS * sizeof(uint64_t) == 128, "scalar region must be 128B (2 cache lines)");
 
     /**
@@ -419,11 +419,11 @@ static_assert(
     offsetof(PTO2TaskPayload, tensors) == 640, "tensors must start at byte 640 (cache line 10, after predicate)"
 );
 static_assert(
-    offsetof(PTO2TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(Tensor),
+    offsetof(PTO2TaskPayload, scalars) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor),
     "scalars must immediately follow tensors"
 );
 static_assert(
-    sizeof(PTO2TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(Tensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
+    sizeof(PTO2TaskPayload) == 640 + MAX_TENSOR_ARGS * sizeof(ChipTensor) + MAX_SCALAR_ARGS * sizeof(uint64_t),
     "PTO2TaskPayload size = metadata(576) + predicate cache line(64) + tensors + scalars"
 );
 

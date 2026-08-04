@@ -121,6 +121,7 @@ from .task_interface import (
     CallConfig,
     ChipCallable,
     ChipDomainContext,
+    ChipTensor,
     ChipWorker,
     CommBufferSpec,
     CommDomainHandle,
@@ -128,7 +129,6 @@ from .task_interface import (
     RemoteBufferExport,
     RemoteBufferHandle,
     TaskArgs,
-    Tensor,
     _Worker,
 )
 from .worker_chip_orch_comm import (
@@ -184,12 +184,12 @@ _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
 _CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # The generation-safe pipeline lease follows CONFIG. Args start after the
 # lease, rounded up to 8 bytes so the first
-# Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
+# ChipTensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
 # SIGBUS on strict-alignment platforms (aarch64 atomics, some ARM cores).
 _PIPELINE_LEASE_FMT = struct.Struct("=IIQ")
 _OFF_PIPELINE_LEASE = (_OFF_CONFIG + _CFG_FMT.size + 7) & ~7
 _OFF_ARGS = (_OFF_PIPELINE_LEASE + _PIPELINE_LEASE_FMT.size + 7) & ~7
-assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for Tensor.data"
+assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for ChipTensor.data"
 _OFF_TASK_CALLABLE_HASH = _OFF_ARGS
 _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # MAILBOX_ARGS_CAPACITY mirrors the C++ constexpr in worker_manager.h so the
@@ -364,9 +364,9 @@ _CTRL_OP_NAMES = {
 _HOST_BUF_MAP_HEADER = struct.Struct("<QQQ")
 _HOST_BUF_UNMAP = struct.Struct("<Q")
 
-# Wire layout of a Tensor inside a task-args blob, pinned by static_assert in
-# src/common/task_interface/tensor.h: each Tensor is 128 B and buffer.addr is its
-# first field (offset 0). The blob is [int32 T][int32 S][Tensor[T]][scalars], so
+# Wire layout of a ChipTensor inside a task-args blob, pinned by static_assert in
+# src/common/task_interface/tensor.h: each ChipTensor is 128 B and buffer.addr is its
+# first field (offset 0). The blob is [int32 T][int32 S][ChipTensor[T]][scalars], so
 # tensor i's host pointer lives at _OFF_TASK_ARGS_BLOB + 8 + i*128. The child
 # rewrites that u64 in place to redirect a registered host pointer at its own
 # mapping (the pure-Python blob-rewrite scheme, no runtime C++ change).
@@ -1231,7 +1231,7 @@ def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[
     child has mapped via _CTRL_MAP_HOST. For every host tensor whose
     ``buffer.addr`` (a parent VA) lands in a registered range, rewrite it in
     place to ``child_base + (addr - parent_lo)`` so the runtime dereferences the
-    child's own mapping. Tensors outside every range (fork-inherited or
+    child's own mapping. ChipTensors outside every range (fork-inherited or
     child-allocated) are left untouched. A ``child_memory`` tensor carries a
     child-owned device pointer, never a host VA, so it is skipped even when its
     address numerically falls inside a registered host range — rewriting it would
@@ -1737,7 +1737,7 @@ def _read_args_from_mailbox(buf) -> TaskArgs:
     to C++ run use the zero-copy `run_from_blob` path
     instead — see those loops for the matching comment.
 
-    Delegates to the nanobind helper so the Tensor layout is
+    Delegates to the nanobind helper so the ChipTensor layout is
     parsed by C++ `read_blob` (single source of truth) instead of being
     reimplemented in Python.  The Python re-implementation that lived
     here previously dropped the `child_memory` byte (offset 33), which
@@ -6953,8 +6953,8 @@ class Worker:
         return poisoned
 
     def _register_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, Tensor):
-            raise TypeError("L3-L2 host buffer registration expects a Tensor")
+        if not isinstance(tensor, ChipTensor):
+            raise TypeError("L3-L2 host buffer registration expects a ChipTensor")
         if tensor.child_memory:
             raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
         if not tensor.is_contiguous:
@@ -6975,8 +6975,8 @@ class Worker:
         )
 
     def _validate_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, Tensor):
-            raise ValueError("L3-L2 payload buffer must be a Tensor returned by orch.alloc(...)")
+        if not isinstance(tensor, ChipTensor):
+            raise ValueError("L3-L2 payload buffer must be a ChipTensor returned by orch.alloc(...)")
         if tensor.child_memory:
             raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
         if not tensor.is_contiguous:
@@ -6993,10 +6993,10 @@ class Worker:
         )
         registered_nbytes = buffers.get(base)
         if registered_nbytes is None:
-            raise ValueError("L3-L2 payload Tensor is not registered; use a tensor returned by orch.alloc(...)")
+            raise ValueError("L3-L2 payload ChipTensor is not registered; use a tensor returned by orch.alloc(...)")
         if nbytes > int(registered_nbytes):
             raise ValueError(
-                f"L3-L2 payload Tensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
+                f"L3-L2 payload ChipTensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
             )
 
     def _consume_worker_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
@@ -8292,7 +8292,7 @@ class Worker:
         found by bisecting the snapshot's sorted keys so this stays log-time on
         the per-submit hot path rather than scanning every buffer.
 
-        Sub-view matching assumes the blob's ``Tensor.buffer.addr`` is the
+        Sub-view matching assumes the blob's ``ChipTensor.buffer.addr`` is the
         contiguous base of the host buffer (``make_tensor_arg`` builds tensors with
         ``start_offset == 0``); a non-zero ``start_offset`` would shift ``addr``
         and is not modelled here.

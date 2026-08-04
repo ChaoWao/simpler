@@ -29,9 +29,9 @@ using namespace pto;
 #endif
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *src0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *src1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *src0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *src1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *src0 = reinterpret_cast<__gm__ float *>(src0_tensor->buffer.addr) + src0_tensor->start_offset;
     __gm__ float *src1 = reinterpret_cast<__gm__ float *>(src1_tensor->buffer.addr) + src1_tensor->start_offset;
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;

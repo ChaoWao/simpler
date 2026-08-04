@@ -264,10 +264,10 @@ static __aicore__ void softmax_prepare_n_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *sij_buf = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *pij_buf = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *mij = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *lij = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *sij_buf = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *pij_buf = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *mij = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *lij = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
     union {
         uint64_t u;
         float f;

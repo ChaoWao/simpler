@@ -46,12 +46,12 @@ from .callable_identity import CallableHandle
 from .task_interface import (
     CallConfig,
     ChipCallable,
+    ChipTensor,
     CommBufferSpec,
     CommDomainHandle,
     DataType,
     RemoteAddressSpace,
     TaskArgs,
-    Tensor,
     _empty_remote_sidecar_for,
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
@@ -667,10 +667,10 @@ class Orchestrator:
                 self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
                 self._o.copy_from(wid, int(dst), s, int(size))
 
-    def alloc(self, shape: Sequence[int], dtype: DataType) -> Tensor:
+    def alloc(self, shape: Sequence[int], dtype: DataType) -> ChipTensor:
         """Allocate a runtime-managed intermediate buffer.
 
-        Returns a ``Tensor`` whose backing memory comes from a
+        Returns a ``ChipTensor`` whose backing memory comes from a
         per-allocation MAP_SHARED mmap (visible to forked child workers).
         Lifetime is bound to a synthetic task slot that the Orchestrator
         treats as the buffer's producer; the buffer is freed when all

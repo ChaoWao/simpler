@@ -16,7 +16,7 @@
  *
  * Reads args[0..2] — for standalone AIV_X1 tasks or AIV0 slot in AIV_X2.
  *
- * Args (Tensor*):
+ * Args (ChipTensor*):
  *   args[0] = src0 (INPUT)  - 128 x 128
  *   args[1] = src1 (INPUT)  - 128 x 128
  *   args[2] = out (OUTPUT)  - 128 x 128
@@ -69,9 +69,9 @@ static __aicore__ void add_impl(__gm__ float *src0, __gm__ float *src1, __gm__ f
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *src0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *src1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *src0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *src1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
 
     __gm__ float *src0 = reinterpret_cast<__gm__ float *>(src0_tensor->buffer.addr) + src0_tensor->start_offset;
     __gm__ float *src1 = reinterpret_cast<__gm__ float *>(src1_tensor->buffer.addr) + src1_tensor->start_offset;

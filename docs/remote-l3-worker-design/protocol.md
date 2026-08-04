@@ -6,7 +6,7 @@ behind `LocalMailboxEndpoint`.
 
 The bootstrap socket carries only setup and HCOMM bring-up frames. After HCOMM
 RPC is ready, steady-state TASK, CONTROL, CONTROL_REPLY, COMPLETION, and
-SHUTDOWN frames travel through the HCOMM RPC adapter. Tensor data moves through
+SHUTDOWN frames travel through the HCOMM RPC adapter. ChipTensor data moves through
 the HCOMM data adapter and is referenced from TASK frames by descriptors, not
 by host pointers.
 
@@ -49,7 +49,7 @@ Rules:
 ## Wire Encoding
 
 Remote frames use canonical field encoding. They do not memcpy C++ POD structs
-such as `CallConfig` or `Tensor` onto the wire. The local fork/shm
+such as `CallConfig` or `ChipTensor` onto the wire. The local fork/shm
 mailbox may continue to use the raw POD layout because both endpoints are
 fork-related processes running the same binary; remote endpoints must treat the
 wire schema below as the compatibility contract.
@@ -103,13 +103,13 @@ reserved: uint8[7]
 The wire carries only the contiguous-defining fields; it does **not** carry
 `strides` / `start_offset`, and `decode_tensor` rebuilds them as row-major.
 The remote wire is therefore **contiguous-only**: strided views round-trip
-solely over the local fork/shm mailbox blob (full 128 B `Tensor` memcpy).
+solely over the local fork/shm mailbox blob (full 128 B `ChipTensor` memcpy).
 `encode_tensor` asserts `is_contiguous && start_offset == 0` so a strided
 tensor fails loudly rather than being silently flattened.
 
 The session runner decodes these wire records into local `CallConfig` and
-`Tensor` values before calling `inner_worker.run()`. For tensors with
-a remote descriptor, the runner fills the local `Tensor.data` from
+`ChipTensor` values before calling `inner_worker.run()`. For tensors with
+a remote descriptor, the runner fills the local `ChipTensor.data` from
 its buffer/import registry after validating the descriptor. Local ABI structs
 therefore remain the in-process execution ABI, not the remote transport ABI.
 
@@ -159,7 +159,7 @@ dispatcher registry. The dispatcher is not a Worker: it resolves the digest to
 its private orchestration callable slot, materializes the remote arguments, and
 then invokes the embedded `inner_worker = Worker(level=3)`. The endpoint uses
 the sidecar descriptors captured at submit time to materialize local
-`Tensor` values on the session runner.
+`ChipTensor` values on the session runner.
 
 The current `RemoteL3Endpoint` implementation builds this payload from
 `TaskSlotState`, zeros every tensor metadata `data` field, and submits the
@@ -218,8 +218,8 @@ RemoteTensorDescWire:
 
 Rules:
 
-- `Tensor` remains the L2 ABI. The session runner translates
-  descriptors into local `Tensor` values immediately before
+- `ChipTensor` remains the L2 ABI. The session runner translates
+  descriptors into local `ChipTensor` values immediately before
   `inner_worker.run()`.
 - When a descriptor is present, the incoming `TensorWire.data` is
   reserved and must be zero. The session runner derives the executable local

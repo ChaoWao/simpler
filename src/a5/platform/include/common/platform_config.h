@@ -347,7 +347,7 @@ constexpr int PLATFORM_PMU_TIMEOUT_SECONDS = 30;
 
 /**
  * Number of DepGenRecord entries per DepGenBuffer.
- * Each DepGenRecord is 4672 B (16 Tensor blobs + small header). At 4×1024 =
+ * Each DepGenRecord is 4672 B (16 ChipTensor blobs + small header). At 4×1024 =
  * 4096 in-flight records (~19 MB), aligning dep_gen's in-flight count with the
  * scope_stats / l2 AicoreTask pools (also 4096) per the #977 cross-subsystem
  * review. History: original 32 (dropped 50% on unroll Case1) → #977 commit

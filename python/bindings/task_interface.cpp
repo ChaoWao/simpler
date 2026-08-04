@@ -11,7 +11,7 @@
 /**
  * Nanobind Python extension for task_interface headers.
  *
- * Wraps DataType, Tensor, ChipStorageTaskArgs, TaskArgs (unified
+ * Wraps DataType, ChipTensor, ChipStorageTaskArgs, TaskArgs (unified
  * vector-backed builder with per-tensor TensorArgType tags), TensorArgType,
  * ArgDirection, CoreCallable, ChipCallable, and helper functions from
  * data_type.h / tensor.h / task_args.h / arg_direction.h / callable.h.
@@ -896,7 +896,7 @@ void append_cleanup_error(std::string &cleanup_error, const std::string &message
 #endif
 
 NB_MODULE(_task_interface, m) {
-    m.doc() = "Nanobind bindings for task_interface (DataType, Tensor, TaskArgs variants)";
+    m.doc() = "Nanobind bindings for task_interface (DataType, ChipTensor, TaskArgs variants)";
 
     // Source commit this extension was compiled from; "" when git was
     // unavailable at build time. simpler.task_interface compares it against the
@@ -939,29 +939,29 @@ NB_MODULE(_task_interface, m) {
     m.attr("MAX_TENSOR_DIMS") = MAX_TENSOR_DIMS;
     m.attr("MAX_REGISTERED_CALLABLE_IDS") = MAX_REGISTERED_CALLABLE_IDS;
     m.attr("RUNTIME_ENV_RING_COUNT") = RUNTIME_ENV_RING_COUNT;
-    // Byte size of a Tensor and the offset of its child_memory flag within it.
-    // A task-args blob stores Tensors as a raw memcpy array, so a Python-side
+    // Byte size of a ChipTensor and the offset of its child_memory flag within it.
+    // A task-args blob stores ChipTensors as a raw memcpy array, so a Python-side
     // blob walker locates tensor i's fields at i * TENSOR_STRIDE_BYTES without
     // reimplementing the struct layout.
-    m.attr("TENSOR_STRIDE_BYTES") = static_cast<int>(sizeof(Tensor));
-    m.attr("TENSOR_CHILD_MEMORY_OFFSET") = static_cast<int>(offsetof(Tensor, child_memory));
+    m.attr("TENSOR_STRIDE_BYTES") = static_cast<int>(sizeof(ChipTensor));
+    m.attr("TENSOR_CHILD_MEMORY_OFFSET") = static_cast<int>(offsetof(ChipTensor, child_memory));
 
-    // --- Tensor ---
+    // --- ChipTensor ---
     // The unified strided tensor descriptor. Constructed contiguous via make()
     // (row-major strides, start_offset == 0); see src/common/task_interface/tensor.h.
-    nb::class_<Tensor>(m, "Tensor")
+    nb::class_<ChipTensor>(m, "ChipTensor")
         .def(nb::init<>())
 
         .def_static(
             "make",
-            [](uint64_t data, nb::tuple shapes, DataType dtype, bool child_memory) -> Tensor {
+            [](uint64_t data, nb::tuple shapes, DataType dtype, bool child_memory) -> ChipTensor {
                 size_t n = nb::len(shapes);
                 if (n == 0 || n > MAX_TENSOR_DIMS)
-                    throw std::invalid_argument("Tensor.make: shapes length must be in [1, MAX_TENSOR_DIMS]");
+                    throw std::invalid_argument("ChipTensor.make: shapes length must be in [1, MAX_TENSOR_DIMS]");
                 uint32_t shp[MAX_TENSOR_DIMS];
                 for (size_t i = 0; i < n; ++i)
                     shp[i] = nb::cast<uint32_t>(shapes[i]);
-                // make_tensor_external yields a contiguous Tensor: row-major strides,
+                // make_tensor_external yields a contiguous ChipTensor: row-major strides,
                 // start_offset == 0, buffer.size == numel * element_size.
                 return make_tensor_external(
                     reinterpret_cast<void *>(static_cast<uintptr_t>(data)), shp, static_cast<uint32_t>(n), dtype,
@@ -969,25 +969,25 @@ NB_MODULE(_task_interface, m) {
                 );
             },
             nb::arg("data"), nb::arg("shapes"), nb::arg("dtype"), nb::arg("child_memory") = false,
-            "Create a contiguous Tensor over pre-allocated memory. Set child_memory=True when "
+            "Create a contiguous ChipTensor over pre-allocated memory. Set child_memory=True when "
             "data is a device pointer allocated by the child process (skips H2D copy in "
             "init_runtime_impl)."
         )
 
-        // `data` is the tensor's memory address — i.e. Tensor::buffer.addr.
+        // `data` is the tensor's memory address — i.e. ChipTensor::buffer.addr.
         .def_prop_rw(
             "data",
-            [](const Tensor &self) -> uint64_t {
+            [](const ChipTensor &self) -> uint64_t {
                 return self.buffer.addr;
             },
-            [](Tensor &self, uint64_t v) {
+            [](ChipTensor &self, uint64_t v) {
                 self.buffer.addr = v;
             }
         )
 
         .def_prop_rw(
             "shapes",
-            [](const Tensor &self) -> nb::tuple {
+            [](const ChipTensor &self) -> nb::tuple {
                 uint32_t n = self.ndims;
                 if (n > MAX_TENSOR_DIMS) n = MAX_TENSOR_DIMS;
                 nb::list lst;
@@ -995,7 +995,7 @@ NB_MODULE(_task_interface, m) {
                     lst.append(self.shapes[i]);
                 return nb::tuple(lst);
             },
-            [](Tensor &self, nb::tuple t) {
+            [](ChipTensor &self, nb::tuple t) {
                 size_t n = nb::len(t);
                 if (n == 0 || n > MAX_TENSOR_DIMS)
                     throw std::invalid_argument(
@@ -1020,17 +1020,17 @@ NB_MODULE(_task_interface, m) {
         // through the `shapes` setter, which rebuilds a valid contiguous layout.
         .def_prop_ro(
             "ndims",
-            [](const Tensor &self) -> uint32_t {
+            [](const ChipTensor &self) -> uint32_t {
                 return self.ndims;
             }
         )
 
         .def_prop_rw(
             "dtype",
-            [](const Tensor &self) -> DataType {
+            [](const ChipTensor &self) -> DataType {
                 return self.dtype;
             },
-            [](Tensor &self, DataType dt) {
+            [](ChipTensor &self, DataType dt) {
                 self.dtype = dt;
                 self.buffer.size = self.numel() * get_element_size(dt);
             }
@@ -1038,10 +1038,10 @@ NB_MODULE(_task_interface, m) {
 
         .def_prop_rw(
             "child_memory",
-            [](const Tensor &self) -> bool {
+            [](const ChipTensor &self) -> bool {
                 return self.is_child_memory();
             },
-            [](Tensor &self, bool v) {
+            [](ChipTensor &self, bool v) {
                 self.child_memory = v ? 1 : 0;
             }
         )
@@ -1049,7 +1049,7 @@ NB_MODULE(_task_interface, m) {
         // Read-only views of the strided metadata (always contiguous for make()).
         .def_prop_ro(
             "strides",
-            [](const Tensor &self) -> nb::tuple {
+            [](const ChipTensor &self) -> nb::tuple {
                 nb::list lst;
                 for (uint32_t i = 0; i < self.ndims && i < MAX_TENSOR_DIMS; ++i)
                     lst.append(self.strides[i]);
@@ -1058,28 +1058,28 @@ NB_MODULE(_task_interface, m) {
         )
         .def_prop_ro(
             "start_offset",
-            [](const Tensor &self) -> uint64_t {
+            [](const ChipTensor &self) -> uint64_t {
                 return self.start_offset;
             }
         )
         .def_prop_ro(
             "is_contiguous",
-            [](const Tensor &self) -> bool {
+            [](const ChipTensor &self) -> bool {
                 return self.is_contiguous;
             }
         )
 
         .def(
             "nbytes",
-            [](const Tensor &self) -> uint64_t {
+            [](const ChipTensor &self) -> uint64_t {
                 return self.nbytes();
             },
             "Compute total bytes (product of shapes * element_size)."
         )
 
-        .def("__repr__", [](const Tensor &self) -> std::string {
+        .def("__repr__", [](const ChipTensor &self) -> std::string {
             std::ostringstream os;
-            os << "Tensor(data=0x" << std::hex << self.buffer.addr << std::dec << ", shapes=(";
+            os << "ChipTensor(data=0x" << std::hex << self.buffer.addr << std::dec << ", shapes=(";
             for (uint32_t i = 0; i < self.ndims; ++i) {
                 if (i) os << ", ";
                 os << self.shapes[i];
@@ -1096,7 +1096,7 @@ NB_MODULE(_task_interface, m) {
 
         .def(
             "add_tensor", &ChipStorageTaskArgs::add_tensor, nb::arg("t"),
-            "Add a Tensor. Must be called before any add_scalar()."
+            "Add a ChipTensor. Must be called before any add_scalar()."
         )
 
         .def(
@@ -1106,12 +1106,12 @@ NB_MODULE(_task_interface, m) {
 
         .def(
             "tensor",
-            [](const ChipStorageTaskArgs &self, int32_t i) -> const Tensor & {
+            [](const ChipStorageTaskArgs &self, int32_t i) -> const ChipTensor & {
                 if (i < 0 || i >= self.tensor_count())
                     throw std::out_of_range("ChipStorageTaskArgs tensor index out of range");
                 return self.tensor(i);
             },
-            nb::arg("i"), nb::rv_policy::reference_internal, "Return the Tensor at index i."
+            nb::arg("i"), nb::rv_policy::reference_internal, "Return the ChipTensor at index i."
         )
 
         .def(
@@ -1167,11 +1167,11 @@ NB_MODULE(_task_interface, m) {
 
         .def(
             "add_tensor",
-            [](TaskArgs &self, const Tensor &t, TensorArgType tag) {
+            [](TaskArgs &self, const ChipTensor &t, TensorArgType tag) {
                 self.add_tensor(t, tag);
             },
             nb::arg("t"), nb::arg("tag") = TensorArgType::INPUT,
-            "Add a Tensor with an optional TensorArgType tag (default INPUT)."
+            "Add a ChipTensor with an optional TensorArgType tag (default INPUT)."
         )
 
         .def(
@@ -1181,11 +1181,11 @@ NB_MODULE(_task_interface, m) {
 
         .def(
             "tensor",
-            [](const TaskArgs &self, int32_t i) -> const Tensor & {
+            [](const TaskArgs &self, int32_t i) -> const ChipTensor & {
                 if (i < 0 || i >= self.tensor_count()) throw std::out_of_range("TaskArgs tensor index out of range");
                 return self.tensor(i);
             },
-            nb::arg("i"), nb::rv_policy::reference_internal, "Return the Tensor at index i."
+            nb::arg("i"), nb::rv_policy::reference_internal, "Return the ChipTensor at index i."
         )
 
         .def(

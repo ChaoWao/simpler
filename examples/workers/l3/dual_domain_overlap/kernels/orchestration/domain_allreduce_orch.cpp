@@ -22,9 +22,9 @@ domain_allreduce_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void domain_allreduce_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &input = orch_args.tensor(0).ref();
-    const Tensor &output = orch_args.tensor(1).ref();
-    const Tensor &scratch = orch_args.tensor(2).ref();
+    const ChipTensor &input = orch_args.tensor(0).ref();
+    const ChipTensor &output = orch_args.tensor(1).ref();
+    const ChipTensor &scratch = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(input);

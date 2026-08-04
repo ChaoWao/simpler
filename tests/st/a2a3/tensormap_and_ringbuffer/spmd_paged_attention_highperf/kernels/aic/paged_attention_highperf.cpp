@@ -79,11 +79,11 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     (void)args;
     return;
 #else
-    auto *query_t = reinterpret_cast<Tensor *>(args[0]);
-    auto *key_t = reinterpret_cast<Tensor *>(args[1]);
-    auto *value_t = reinterpret_cast<Tensor *>(args[2]);
-    auto *block_table_t = reinterpret_cast<Tensor *>(args[3]);
-    auto *out_t = reinterpret_cast<Tensor *>(args[4]);
+    auto *query_t = reinterpret_cast<ChipTensor *>(args[0]);
+    auto *key_t = reinterpret_cast<ChipTensor *>(args[1]);
+    auto *value_t = reinterpret_cast<ChipTensor *>(args[2]);
+    auto *block_table_t = reinterpret_cast<ChipTensor *>(args[3]);
+    auto *out_t = reinterpret_cast<ChipTensor *>(args[4]);
 
     auto *query = reinterpret_cast<uint16_t *>(query_t->buffer.addr) + query_t->start_offset;
     auto *key = reinterpret_cast<uint16_t *>(key_t->buffer.addr) + key_t->start_offset;
@@ -157,7 +157,7 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
 #undef PTO_PA_NO_GLOBAL_ENTRY
 
 static __aicore__ __attribute__((always_inline)) __gm__ uint8_t *tensor_data(__gm__ int64_t *args, int idx) {
-    __gm__ Tensor *tensor = reinterpret_cast<__gm__ Tensor *>(args[idx]);
+    __gm__ ChipTensor *tensor = reinterpret_cast<__gm__ ChipTensor *>(args[idx]);
     return reinterpret_cast<__gm__ uint8_t *>(tensor->buffer.addr);
 }
 

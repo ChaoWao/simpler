@@ -15,7 +15,7 @@
  * AIC writes float(block_idx) at cache line (base_cl + block_idx * 3 + 0).
  *
  * Args:
- *   args[0] = output Tensor* (INOUT)
+ *   args[0] = output ChipTensor* (INOUT)
  *   args[1] = scalar: base_cl (starting cache line index for this task)
  */
 
@@ -50,7 +50,7 @@ static constexpr int32_t SLOTS_PER_BLOCK = 3;
 #endif
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     int32_t base_cl = static_cast<int32_t>(args[1]);

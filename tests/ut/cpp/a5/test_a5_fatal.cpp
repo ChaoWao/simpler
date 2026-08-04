@@ -74,12 +74,12 @@ void fake_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, co
 
 void fake_log(const char *, const char *, ...) {}
 
-uint64_t fake_get_tensor_data(PTO2Runtime *rt, const Tensor &, uint32_t, const uint32_t[]) {
+uint64_t fake_get_tensor_data(PTO2Runtime *rt, const ChipTensor &, uint32_t, const uint32_t[]) {
     as_fake(rt)->get_calls++;
     return 0x1234ULL;
 }
 
-void fake_set_tensor_data(PTO2Runtime *rt, const Tensor &, uint32_t, const uint32_t[], uint64_t) {
+void fake_set_tensor_data(PTO2Runtime *rt, const ChipTensor &, uint32_t, const uint32_t[], uint64_t) {
     as_fake(rt)->set_calls++;
 }
 
@@ -132,7 +132,7 @@ TEST(A5Fatal, ApiShortCircuitsAfterFatal) {
     CoreTaskArgs args;
     uint32_t indices[1] = {0};
     uint32_t shape[1] = {1};
-    Tensor tensor = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
+    ChipTensor tensor = make_tensor_external(reinterpret_cast<void *>(0x1), shape, 1);
 
     EXPECT_TRUE(rt_submit_task(mixed, args).empty());
     EXPECT_TRUE(alloc_tensors(args).empty());

@@ -20,7 +20,7 @@ from typing import Any, Optional, cast
 import pytest
 from simpler import worker as worker_module
 from simpler import worker_chip_orch_comm
-from simpler.task_interface import DataType, Tensor
+from simpler.task_interface import ChipTensor, DataType
 from simpler.worker import (
     _IDLE,
     _OFF_STATE,
@@ -230,7 +230,7 @@ def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monke
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
-        payload = Tensor.make(0x1234_0000, (16,), DataType.UINT8)
+        payload = ChipTensor.make(0x1234_0000, (16,), DataType.UINT8)
         region.payload_write(0, payload, nbytes=8)
         region.payload_read(8, payload, nbytes=8)
         result = region.counter(64).test(7, WaitCmp.EQ)
@@ -1274,7 +1274,7 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
-        payload = Tensor.make(0x1234_0000, (16,), DataType.UINT8)
+        payload = ChipTensor.make(0x1234_0000, (16,), DataType.UINT8)
         with pytest.raises(RuntimeError, match="copy failed"):
             region.payload_write(0, payload, nbytes=8)
         with pytest.raises(RuntimeError, match="poisoned"):

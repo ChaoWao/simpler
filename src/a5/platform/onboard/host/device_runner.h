@@ -64,7 +64,7 @@
  * This class provides a unified interface for launching AICPU and AICore
  * kernels on Ascend devices. It handles:
  * - Device initialization and resource management
- * - Tensor memory allocation and data transfer
+ * - ChipTensor memory allocation and data transfer
  * - AICPU kernel launching with dynamic arguments
  * - AICore kernel registration and launching
  * - Coordinated execution of both kernel types

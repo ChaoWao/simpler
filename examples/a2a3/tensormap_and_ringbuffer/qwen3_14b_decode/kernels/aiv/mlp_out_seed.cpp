@@ -360,25 +360,25 @@ static __aicore__ void mlp_out_seed(__gm__ float *v1, __gm__ float *v2, __gm__ f
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: down_acc_all_inline168__ssa_v0
-    __gm__ Tensor *down_acc_all_inline168__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *down_acc_all_inline168__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *down_acc_all_inline168__ssa_v0 =
         reinterpret_cast<__gm__ float *>(down_acc_all_inline168__ssa_v0_tensor->buffer.addr) +
         down_acc_all_inline168__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: gate_acc_all_inline203__ssa_v0
-    __gm__ Tensor *gate_acc_all_inline203__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *gate_acc_all_inline203__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *gate_acc_all_inline203__ssa_v0 =
         reinterpret_cast<__gm__ float *>(gate_acc_all_inline203__ssa_v0_tensor->buffer.addr) +
         gate_acc_all_inline203__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: up_acc_all_inline303__ssa_v0
-    __gm__ Tensor *up_acc_all_inline303__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *up_acc_all_inline303__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *up_acc_all_inline303__ssa_v0 =
         reinterpret_cast<__gm__ float *>(up_acc_all_inline303__ssa_v0_tensor->buffer.addr) +
         up_acc_all_inline303__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: attn_proj_fp32_inline220__ssa_v0
-    __gm__ Tensor *attn_proj_fp32_inline220__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *attn_proj_fp32_inline220__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
     __gm__ float *attn_proj_fp32_inline220__ssa_v0 =
         reinterpret_cast<__gm__ float *>(attn_proj_fp32_inline220__ssa_v0_tensor->buffer.addr) +
         attn_proj_fp32_inline220__ssa_v0_tensor->start_offset;

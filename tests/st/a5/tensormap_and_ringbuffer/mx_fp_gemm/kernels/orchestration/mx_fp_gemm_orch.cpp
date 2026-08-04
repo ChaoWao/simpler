@@ -33,11 +33,11 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_a = orch_args.tensor(0).ref();
-    const Tensor &ext_as = orch_args.tensor(1).ref();
-    const Tensor &ext_b = orch_args.tensor(2).ref();
-    const Tensor &ext_bs = orch_args.tensor(3).ref();
-    const Tensor &ext_c = orch_args.tensor(4).ref();
+    const ChipTensor &ext_a = orch_args.tensor(0).ref();
+    const ChipTensor &ext_as = orch_args.tensor(1).ref();
+    const ChipTensor &ext_b = orch_args.tensor(2).ref();
+    const ChipTensor &ext_bs = orch_args.tensor(3).ref();
+    const ChipTensor &ext_c = orch_args.tensor(4).ref();
     const uint64_t mode = orch_args.scalar(0);
 
     LOG_INFO(

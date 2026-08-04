@@ -54,7 +54,7 @@ static int16_t cohort(int32_t total, int32_t divisor, int32_t delta) {
     return static_cast<int16_t>(n < 1 ? 1 : n);
 }
 
-static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
+static void submit_aiv(const ChipTensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -64,8 +64,8 @@ static void submit_aiv(const Tensor &out, int16_t block_num, int64_t base_cl, bo
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
-    const Tensor &layout = orch_args.tensor(1).ref();
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &layout = orch_args.tensor(1).ref();
 
     const int32_t aiv_cores = rt_available_aiv_count();
     const int16_t block_nums[4] = {

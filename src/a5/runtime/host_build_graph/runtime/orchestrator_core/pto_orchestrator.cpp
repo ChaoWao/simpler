@@ -57,9 +57,10 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_begin_task(
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_end_task() {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit_edge(uint64_t) {}
 __attribute__((weak, visibility("hidden"))) void
-dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const Tensor &) {}
-__attribute__((weak, visibility("hidden"))) void
-dep_gen_host_graph_add_tensormap_edge(uint64_t, int32_t, const Tensor &, const PTO2TensorMapEntry &, OverlapStatus) {}
+dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
+__attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
+    uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus
+) {}
 
 // Scope_stats enable gate, queried via the same predicate idiom as
 // dep_gen_host_graph_enabled above. The AICPU collector links the strong definition;
@@ -759,11 +760,11 @@ static TaskOutputTensors submit_task_common(
     // the plain branch keeps the un-annotated instantiation the hot path had.
     if (capture_dep_graph) {
         struct DepGraphAnnotate {
-            void creator(int32_t arg_idx, const Tensor &consumer, PTO2TaskId producer) const {
+            void creator(int32_t arg_idx, const ChipTensor &consumer, PTO2TaskId producer) const {
                 dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
             }
             void tensormap(
-                int32_t arg_idx, const Tensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
+                int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
             ) const {
                 dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
             }
@@ -815,7 +816,7 @@ static TaskOutputTensors submit_task_common(
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
-    // no Arg/Tensor access. Both branches write predicate.op explicitly because
+    // no Arg/ChipTensor access. Both branches write predicate.op explicitly because
     // payload slots are ring-reused; op == NONE means "always dispatch".
     {
         const CoreTaskPredicate &pred = args.predicate();

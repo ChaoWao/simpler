@@ -22,10 +22,10 @@ affine_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void affine_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &reduce_out = orch_args.tensor(0).ref();
-    const Tensor &scale = orch_args.tensor(1).ref();
-    const Tensor &bias = orch_args.tensor(2).ref();
-    const Tensor &out = orch_args.tensor(3).ref();
+    const ChipTensor &reduce_out = orch_args.tensor(0).ref();
+    const ChipTensor &scale = orch_args.tensor(1).ref();
+    const ChipTensor &bias = orch_args.tensor(2).ref();
+    const ChipTensor &out = orch_args.tensor(3).ref();
 
     CoreTaskArgs params;
     params.add_input(reduce_out);

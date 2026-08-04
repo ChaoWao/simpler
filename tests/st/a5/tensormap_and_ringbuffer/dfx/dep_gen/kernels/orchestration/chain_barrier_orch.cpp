@@ -51,8 +51,8 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_X = orch_args.tensor(0).ref();
-    const Tensor &ext_Y = orch_args.tensor(1).ref();
+    const ChipTensor &ext_X = orch_args.tensor(0).ref();
+    const ChipTensor &ext_Y = orch_args.tensor(1).ref();
 
     uint64_t n_raw = orch_args.scalar(0);
     int32_t n = static_cast<int32_t>(n_raw);

@@ -306,7 +306,7 @@ constexpr int PLATFORM_PMU_TIMEOUT_SECONDS = 30;
 
 /**
  * Number of DepGenRecord entries per DepGenBuffer.
- * Each DepGenRecord is 4672 B (16 Tensor blobs + small header), so a buffer
+ * Each DepGenRecord is 4672 B (16 ChipTensor blobs + small header), so a buffer
  * of 1024 records is ~4.6 MB; draining one copies that over SVM.
  * Guaranteed one-shot capacity = BUFFERS_PER_INSTANCE × RECORDS_PER_BUFFER
  * records — the size of a back-to-back submit flood the pool absorbs even if

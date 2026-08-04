@@ -27,7 +27,7 @@ import re
 
 import pytest
 from simpler._log import get_current_config
-from simpler.task_interface import CallConfig, ChipStorageTaskArgs, DataType, Tensor
+from simpler.task_interface import CallConfig, ChipStorageTaskArgs, ChipTensor, DataType
 from simpler.worker import Worker
 
 from simpler_setup.log_config import configure_logging
@@ -72,9 +72,9 @@ def _drive_one_run(platform: str, device_id: int, *, enable_chip_swimlane: bool 
         worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
 
         args = ChipStorageTaskArgs()
-        args.add_tensor(Tensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args.add_tensor(ChipTensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
 
         config = CallConfig()
         config.enable_chip_swimlane = enable_chip_swimlane

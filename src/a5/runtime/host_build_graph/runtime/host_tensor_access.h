@@ -11,9 +11,9 @@
 
 /**
  * @file host_tensor_access.h
- * @brief Tensor-byte access for the host orchestrator, over device buffers.
+ * @brief ChipTensor-byte access for the host orchestrator, over device buffers.
  *
- * `Tensor::buffer.addr` is a device address. host_build_graph runs the
+ * `ChipTensor::buffer.addr` is a device address. host_build_graph runs the
  * orchestrator on the host, so `get_tensor_data` / `set_tensor_data` cannot
  * assume the CPU executing them can load that address — whether it can is a
  * platform capability, not a property of the runtime. This is the seam where

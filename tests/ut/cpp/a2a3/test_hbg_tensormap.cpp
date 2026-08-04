@@ -35,7 +35,7 @@ struct TestLookupResult {
     int count = 0;
 };
 
-void run_lookup(PTO2TensorMap &tmap, const Tensor &tensor, TestLookupResult &out) {
+void run_lookup(PTO2TensorMap &tmap, const ChipTensor &tensor, TestLookupResult &out) {
     tmap.lookup(tensor, [&](PTO2TensorMapEntry &e, OverlapStatus s) -> bool {
         out.entries.push_back({&e, s});
         out.count++;
@@ -43,7 +43,7 @@ void run_lookup(PTO2TensorMap &tmap, const Tensor &tensor, TestLookupResult &out
     });
 }
 
-Tensor make_test_tensor(uint64_t addr, uint32_t shape0) {
+ChipTensor make_test_tensor(uint64_t addr, uint32_t shape0) {
     uint32_t shapes[MAX_TENSOR_DIMS] = {shape0};
     return make_tensor_external(reinterpret_cast<void *>(addr), shapes, 1, DataType::FLOAT32, false, 0);
 }
@@ -71,7 +71,7 @@ protected:
 };
 
 TEST_F(HbgTensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
-    Tensor t = make_test_tensor(0x1000, 256);
+    ChipTensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, PTO2TaskId::make(0, 0));
     tmap.insert(t, PTO2TaskId::make(0, 1));
     tmap.insert(t, PTO2TaskId::make(0, 2));
@@ -87,8 +87,8 @@ TEST_F(HbgTensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
 }
 
 TEST_F(HbgTensorMapTest, CleanupRetiredFreesEveryOutputOfOneTask) {
-    Tensor t1 = make_test_tensor(0x1000, 256);
-    Tensor t2 = make_test_tensor(0x2000, 128);
+    ChipTensor t1 = make_test_tensor(0x1000, 256);
+    ChipTensor t2 = make_test_tensor(0x2000, 128);
     PTO2TaskId tid = PTO2TaskId::make(0, 5);
 
     tmap.insert(t1, tid);
@@ -105,7 +105,7 @@ TEST_F(HbgTensorMapTest, CleanupRetiredFreesEveryOutputOfOneTask) {
 // cleanup_retired retiring only the earlier task must free that earlier task's
 // entries alone and leave the still-live (later) task's entries intact.
 TEST_F(HbgTensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
-    Tensor t = make_test_tensor(0x1000, 256);
+    ChipTensor t = make_test_tensor(0x1000, 256);
     // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
     tmap.insert(t, PTO2TaskId::make(0, 0));
     tmap.insert(t, PTO2TaskId::make(0, WINDOW_SIZE));

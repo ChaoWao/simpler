@@ -16,7 +16,7 @@
  * only handles:
  * - Handshake buffers for AICPU-AICore communication
  * - Execution parameters (block_dim, aicpu_thread_num)
- * - Tensor pair management for host-device memory tracking
+ * - ChipTensor pair management for host-device memory tracking
  * - Device orchestration state (gm_sm_ptr_, orch_args_)
  * - Function address mapping (func_id_to_addr_)
  *
@@ -116,7 +116,7 @@ enum class TensorReleaseKind {
 };
 
 /**
- * Tensor lease for tracking host-device memory mappings and release ownership.
+ * ChipTensor lease for tracking host-device memory mappings and release ownership.
  */
 struct TensorLease {
     void *host_ptr;

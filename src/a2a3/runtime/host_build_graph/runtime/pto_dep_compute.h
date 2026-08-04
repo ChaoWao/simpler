@@ -35,8 +35,8 @@
  *     - return false to signal fatal (e.g. fanin spill overflow); caller bails
  *
  * The Annotate callback contract (dep_gen graph capture):
- *   void annotate.creator(int32_t arg_idx, const Tensor &consumer, PTO2TaskId producer);
- *   void annotate.tensormap(int32_t arg_idx, const Tensor &consumer,
+ *   void annotate.creator(int32_t arg_idx, const ChipTensor &consumer, PTO2TaskId producer);
+ *   void annotate.tensormap(int32_t arg_idx, const ChipTensor &consumer,
  *                           const PTO2TensorMapEntry &entry, OverlapStatus overlap);
  * Both fire for exactly the producers `emit` saw, with the tensor-side context an
  * edge needs. `tensormap` runs before the INOUT/COVERED remove_entry(), so `entry`
@@ -79,8 +79,8 @@ struct DepInputs {
  * costs exactly what it did before the hooks existed.
  */
 struct NoDepAnnotate {
-    void creator(int32_t, const Tensor &, PTO2TaskId) const {}
-    void tensormap(int32_t, const Tensor &, const PTO2TensorMapEntry &, OverlapStatus) const {}
+    void creator(int32_t, const ChipTensor &, PTO2TaskId) const {}
+    void tensormap(int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus) const {}
 };
 
 /**
@@ -111,7 +111,7 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
             continue;
         }
 
-        const Tensor *tensor = &inputs.tensors[i].ref();
+        const ChipTensor *tensor = &inputs.tensors[i].ref();
 
         // Step A: creator retention — all existing tensors extend their creator lifetime.
         PTO2TaskId owner = tensor->owner_task_id;
@@ -165,7 +165,7 @@ register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap
     for (int32_t i = 0; i < inputs.tensor_count; i++) {
         TensorArgType ptype = inputs.arg_types[i];
         if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
-            const Tensor *tensor = &inputs.tensors[i].ref();
+            const ChipTensor *tensor = &inputs.tensors[i].ref();
             if (!tensor->manual_dep) {
                 tensor_map.insert(*tensor, task_id);
             }

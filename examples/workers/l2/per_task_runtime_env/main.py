@@ -45,9 +45,9 @@ from simpler.task_interface import (
     CallConfig,
     ChipCallable,
     ChipStorageTaskArgs,
+    ChipTensor,
     CoreCallable,
     DataType,
-    Tensor,
 )
 from simpler.worker import Worker
 
@@ -164,9 +164,9 @@ def _run_one(worker: Worker, chip_handle, label: str, ring: Optional[dict]) -> N
     worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
 
     args = ChipStorageTaskArgs()
-    args.add_tensor(Tensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-    args.add_tensor(Tensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-    args.add_tensor(Tensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+    args.add_tensor(ChipTensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
+    args.add_tensor(ChipTensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
+    args.add_tensor(ChipTensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
 
     config = _make_config(ring)
     print(f"[per_task_runtime_env] run '{label}': runtime_env={config.runtime_env!r}")

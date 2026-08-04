@@ -33,9 +33,9 @@ __attribute__((visibility("default"))) void urma_deferred_completion_orchestrati
         return;
     }
 
-    const Tensor &input = orch_args.tensor(0).ref();
-    const Tensor &out = orch_args.tensor(1).ref();
-    const Tensor &result = orch_args.tensor(2).ref();
+    const ChipTensor &input = orch_args.tensor(0).ref();
+    const ChipTensor &out = orch_args.tensor(1).ref();
+    const ChipTensor &result = orch_args.tensor(2).ref();
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
 
     CoreTaskArgs producer_args;

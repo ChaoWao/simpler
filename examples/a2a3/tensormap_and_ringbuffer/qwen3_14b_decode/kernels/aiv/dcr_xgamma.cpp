@@ -181,30 +181,30 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int32_t __pypto_spmd_block_num = get_block_num(args);
 
     // Unpack tensor: down_acc_all_inline168__rv_v5
-    __gm__ Tensor *down_acc_all_inline168__rv_v5_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *down_acc_all_inline168__rv_v5_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *down_acc_all_inline168__rv_v5 =
         reinterpret_cast<__gm__ float *>(down_acc_all_inline168__rv_v5_tensor->buffer.addr) +
         down_acc_all_inline168__rv_v5_tensor->start_offset;
 
     // Unpack tensor: post_norm_partial_inline118__rv_v14
-    __gm__ Tensor *post_norm_partial_inline118__rv_v14_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *post_norm_partial_inline118__rv_v14_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *post_norm_partial_inline118__rv_v14 =
         reinterpret_cast<__gm__ float *>(post_norm_partial_inline118__rv_v14_tensor->buffer.addr) +
         post_norm_partial_inline118__rv_v14_tensor->start_offset;
 
     // Unpack tensor: next_hidden__ssa_v0
-    __gm__ Tensor *next_hidden__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *next_hidden__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *next_hidden__ssa_v0 = reinterpret_cast<__gm__ float *>(next_hidden__ssa_v0_tensor->buffer.addr) +
                                         next_hidden__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: input_rms_weight__ssa_v0
-    __gm__ Tensor *input_rms_weight__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *input_rms_weight__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
     __gm__ float *input_rms_weight__ssa_v0 =
         reinterpret_cast<__gm__ float *>(input_rms_weight__ssa_v0_tensor->buffer.addr) +
         input_rms_weight__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: next_normed__ssa_v0
-    __gm__ Tensor *next_normed__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
+    __gm__ ChipTensor *next_normed__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
     __gm__ bfloat16_t *next_normed__ssa_v0 =
         reinterpret_cast<__gm__ bfloat16_t *>(next_normed__ssa_v0_tensor->buffer.addr) +
         next_normed__ssa_v0_tensor->start_offset;

@@ -100,11 +100,11 @@ void dep_gen_host_graph_end_task();
 void dep_gen_host_graph_add_explicit_edge(uint64_t producer_raw);
 
 /** STEP 3 Step A: the producer that created the tensor this task consumes. */
-void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx, const Tensor &consumer);
+void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer);
 
 /** STEP 3 Step B: a tensormap producer whose written slice this task reads. */
 void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t producer_raw, int32_t arg_idx, const Tensor &consumer, const PTO2TensorMapEntry &entry,
+    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
     OverlapStatus overlap
 );
 

@@ -37,7 +37,7 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     };
 }
 
-static void submit_spmd_mix(const Tensor &out, int16_t block_num, int64_t base_cl) {
+static void submit_spmd_mix(const ChipTensor &out, int16_t block_num, int64_t base_cl) {
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_AIC;
     mk.aiv0_kernel_id = FUNC_AIV0;
@@ -51,7 +51,7 @@ static void submit_spmd_mix(const Tensor &out, int16_t block_num, int64_t base_c
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
 
     // Two back-to-back tasks with block_num=48 (2x cluster count).
     // Both land in the ready queue simultaneously, triggering got=2 in

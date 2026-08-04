@@ -18,7 +18,7 @@
  *   0 = released, 1 = running.
  *
  * Args:
- *   args[0] = inout Tensor*
+ *   args[0] = inout ChipTensor*
  *   args[1] = scalar status base cache line
  *   args[2] = scalar status count
  */
@@ -80,7 +80,7 @@ static __aicore__ void publish_value(__gm__ float *value, float state) {
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
     int32_t status_base_cl = static_cast<int32_t>(args[1]);
     int32_t status_count = static_cast<int32_t>(args[2]);

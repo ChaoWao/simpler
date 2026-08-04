@@ -29,9 +29,9 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
-    const Tensor &a = args.tensor(0).ref();
-    const Tensor &b = args.tensor(1).ref();
-    const Tensor &out = args.tensor(2).ref();
+    const ChipTensor &a = args.tensor(0).ref();
+    const ChipTensor &b = args.tensor(1).ref();
+    const ChipTensor &out = args.tensor(2).ref();
     const uint64_t spin_iters = args.scalar(0);
     uint32_t shape[1] = {a.shapes[0]};
     TensorCreateInfo temporary(shape, 1, DataType::FLOAT32);
@@ -42,7 +42,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     add_args.add_output(temporary);
     add_args.add_scalar(spin_iters);
     TaskOutputTensors add_outputs = rt_submit_aiv_task(kDelayedAdd, add_args);
-    Tensor current = add_outputs.get_ref(0);
+    ChipTensor current = add_outputs.get_ref(0);
 
     union {
         float f32;

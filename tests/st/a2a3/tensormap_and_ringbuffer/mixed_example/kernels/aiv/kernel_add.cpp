@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Element-wise Tensor Addition Kernel (for mixed task)
+ * Element-wise ChipTensor Addition Kernel (for mixed task)
  *
  * Implements: out[i] = src0[i] + src1[i]
  * Tile size: 128 x 128
@@ -17,7 +17,7 @@
  * In the mixed task, this kernel shares the param list with the matmul kernel.
  * Matmul uses args[0..2], this kernel uses args[3..5].
  *
- * Args (Tensor*):
+ * Args (ChipTensor*):
  *   args[3] = src0 (INPUT)  - 128 x 128
  *   args[4] = src1 (INPUT)  - 128 x 128
  *   args[5] = out (OUTPUT)  - 128 x 128
@@ -40,7 +40,7 @@ using namespace pto;
 #define __aicore__ [aicore]
 #endif
 
-static __aicore__ inline int get_num_tiles(__gm__ Tensor *tensor, uint64_t tile_elems) {
+static __aicore__ inline int get_num_tiles(__gm__ ChipTensor *tensor, uint64_t tile_elems) {
     uint64_t total_elems = tensor->shapes[0];
     return static_cast<int>(total_elems / tile_elems);
 }
@@ -75,9 +75,9 @@ static __aicore__ void add_impl(__gm__ float *src0, __gm__ float *src1, __gm__ f
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *src0_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ Tensor *src1_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[5]);
+    __gm__ ChipTensor *src0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ ChipTensor *src1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[5]);
 
     constexpr uint64_t TILE_ELEMS = 128 * 128;
     int num_tiles = get_num_tiles(src0_tensor, TILE_ELEMS);

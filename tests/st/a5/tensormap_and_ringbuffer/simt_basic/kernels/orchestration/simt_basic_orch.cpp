@@ -33,9 +33,9 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &src = orch_args.tensor(0).ref();
-    const Tensor &indices = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+    const ChipTensor &src = orch_args.tensor(0).ref();
+    const ChipTensor &indices = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
     // PTO2_SCOPE ensures rt_submit_aiv_task flushes through the task
     // ringbuffer before the entry returns. No set_core_num — let the

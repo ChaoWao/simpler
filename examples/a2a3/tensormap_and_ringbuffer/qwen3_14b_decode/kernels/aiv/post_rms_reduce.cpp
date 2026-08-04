@@ -332,18 +332,18 @@ static __aicore__ void post_rms_reduce(__gm__ float *v1, __gm__ float *v2, __gm_
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: attn_proj_fp32_inline220__ssa_v7
-    __gm__ Tensor *attn_proj_fp32_inline220__ssa_v7_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *attn_proj_fp32_inline220__ssa_v7_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *attn_proj_fp32_inline220__ssa_v7 =
         reinterpret_cast<__gm__ float *>(attn_proj_fp32_inline220__ssa_v7_tensor->buffer.addr) +
         attn_proj_fp32_inline220__ssa_v7_tensor->start_offset;
 
     // Unpack tensor: cur__iter_v6
-    __gm__ Tensor *cur__iter_v6_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *cur__iter_v6_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *cur__iter_v6 =
         reinterpret_cast<__gm__ float *>(cur__iter_v6_tensor->buffer.addr) + cur__iter_v6_tensor->start_offset;
 
     // Unpack tensor: inv_rms_tile_inline126__ssa_v0
-    __gm__ Tensor *inv_rms_tile_inline126__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *inv_rms_tile_inline126__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *inv_rms_tile_inline126__ssa_v0 =
         reinterpret_cast<__gm__ float *>(inv_rms_tile_inline126__ssa_v0_tensor->buffer.addr) +
         inv_rms_tile_inline126__ssa_v0_tensor->start_offset;

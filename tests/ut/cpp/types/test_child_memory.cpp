@@ -17,20 +17,20 @@
 #include "task_args.h"
 
 // ---------------------------------------------------------------------------
-// Tensor layout
+// ChipTensor layout
 // ---------------------------------------------------------------------------
 
 // ABI contract: size must match the wire serialization format (2 cache lines).
-TEST(ChildMemory, TensorAbiSize) { EXPECT_EQ(sizeof(Tensor), 128u); }
+TEST(ChildMemory, TensorAbiSize) { EXPECT_EQ(sizeof(ChipTensor), 128u); }
 
 TEST(ChildMemory, DefaultIsZero) {
-    Tensor t{};
+    ChipTensor t{};
     EXPECT_EQ(t.child_memory, 0);
     EXPECT_FALSE(t.is_child_memory());
 }
 
 TEST(ChildMemory, SetChildMemory) {
-    Tensor t{};
+    ChipTensor t{};
     t.buffer.addr = 0xDEAD0000;
     t.shapes[0] = 16;
     t.ndims = 1;
@@ -49,7 +49,7 @@ TEST(ChildMemory, SetChildMemory) {
 TEST(ChildMemory, BlobRoundtripPreservesChildMemory) {
     TaskArgs args;
 
-    Tensor host_t{};
+    ChipTensor host_t{};
     host_t.buffer.addr = 0x1000;
     host_t.shapes[0] = 4;
     host_t.ndims = 1;
@@ -57,7 +57,7 @@ TEST(ChildMemory, BlobRoundtripPreservesChildMemory) {
     host_t.child_memory = 0;
     args.add_tensor(host_t, TensorArgType::INPUT);
 
-    Tensor dev_t{};
+    ChipTensor dev_t{};
     dev_t.buffer.addr = 0x2000;
     dev_t.shapes[0] = 8;
     dev_t.ndims = 1;
@@ -90,7 +90,7 @@ TEST(ChildMemory, BlobRoundtripPreservesChildMemory) {
 // ---------------------------------------------------------------------------
 
 TEST(ChildMemory, ViewToChipStoragePreservesChildMemory) {
-    Tensor tensors[2] = {};
+    ChipTensor tensors[2] = {};
     tensors[0].buffer.addr = 0xA000;
     tensors[0].shapes[0] = 1;
     tensors[0].ndims = 1;
@@ -124,7 +124,7 @@ TEST(ChildMemory, SkipLogicSimulation) {
     // malloc'd vs passed-through.
     ChipStorageTaskArgs args;
 
-    Tensor host_t{};
+    ChipTensor host_t{};
     host_t.buffer.addr = 0x1000;
     host_t.shapes[0] = 4;
     host_t.ndims = 1;
@@ -132,7 +132,7 @@ TEST(ChildMemory, SkipLogicSimulation) {
     host_t.child_memory = 0;
     args.add_tensor(host_t);
 
-    Tensor dev_t{};
+    ChipTensor dev_t{};
     dev_t.buffer.addr = 0x2000;
     dev_t.shapes[0] = 8;
     dev_t.ndims = 1;
@@ -144,7 +144,7 @@ TEST(ChildMemory, SkipLogicSimulation) {
     int passthrough_count = 0;
 
     for (int i = 0; i < args.tensor_count(); i++) {
-        Tensor t = args.tensor(i);
+        ChipTensor t = args.tensor(i);
         if (t.is_child_memory()) {
             passthrough_count++;
         } else {

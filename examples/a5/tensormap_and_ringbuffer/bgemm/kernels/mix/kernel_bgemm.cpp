@@ -89,9 +89,9 @@ using VecFifoTileT = Tile<TileType::Vec, float, VEC_M, N, BLayout::RowMajor, VEC
 using PipeT = TPipe<PP_FLAG_ID, Direction::DIR_C2V, sizeof(float) * VEC_M * N, PP_FIFO_DEPTH>;
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *input_a_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *input_b_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *c_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *input_a_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *input_b_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *c_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
 
     // Pipe and FIFO tile are declared in common scope (both sides reference the type)
     VecFifoTileT vecFifoTile;

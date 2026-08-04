@@ -54,9 +54,9 @@ task_timing_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void task_timing_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
     uint32_t shapes[2] = {a.shapes[0], a.shapes[1]};
     TensorCreateInfo inter_ci(shapes, 2, DataType::FLOAT32);
@@ -68,7 +68,7 @@ __attribute__((visibility("default"))) void task_timing_orchestration(const Chip
     params_t0.add_output(inter_ci);
     params_t0.set_task_timing_slot(0);
     TaskOutputTensors outs_t0 = rt_submit_aiv_task(0, params_t0);
-    const Tensor &c = outs_t0.get_ref(0);
+    const ChipTensor &c = outs_t0.get_ref(0);
 
     // t1: out = c + b, tagged slot 1 (interval end). Depends on c -> runs after t0.
     CoreTaskArgs params_t1;
@@ -84,9 +84,9 @@ __attribute__((visibility("default"))) void task_timing_orchestration(const Chip
 // so the single emitted task_slot_0 span must cover the whole chain
 // (dispatch of t0 .. finish of t2), not any single task's window.
 __attribute__((visibility("default"))) void task_timing_dup_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
     uint32_t shapes[2] = {a.shapes[0], a.shapes[1]};
     TensorCreateInfo inter_ci(shapes, 2, DataType::FLOAT32);
@@ -97,7 +97,7 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
     p0.add_output(inter_ci);
     p0.set_task_timing_slot(0);
     TaskOutputTensors o0 = rt_submit_aiv_task(0, p0);
-    const Tensor &c = o0.get_ref(0);
+    const ChipTensor &c = o0.get_ref(0);
 
     CoreTaskArgs p1;
     p1.add_input(c);
@@ -105,7 +105,7 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
     p1.add_output(inter_ci);
     p1.set_task_timing_slot(0);
     TaskOutputTensors o1 = rt_submit_aiv_task(0, p1);
-    const Tensor &d = o1.get_ref(0);
+    const ChipTensor &d = o1.get_ref(0);
 
     CoreTaskArgs p2;
     p2.add_input(d);
@@ -121,9 +121,9 @@ __attribute__((visibility("default"))) void task_timing_dup_orchestration(const 
 // block. (The vector_add kernel is not block-partitioned, so each block
 // recomputes out = a + b over the whole tile — redundant but golden-correct.)
 __attribute__((visibility("default"))) void task_timing_spmd_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &out = orch_args.tensor(2).ref();
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &out = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(a);

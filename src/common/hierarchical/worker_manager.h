@@ -106,7 +106,7 @@ static constexpr size_t MAILBOX_ERROR_MSG_SIZE = 256;
 //
 // The generation-safe run lease follows CallConfig. MAILBOX_OFF_ARGS is
 // derived by rounding up the lease's end so the
-// args blob's first Tensor field (buffer.addr, a uint64_t at OFF_ARGS+8) is
+// args blob's first ChipTensor field (buffer.addr, a uint64_t at OFF_ARGS+8) is
 // 8-byte aligned, avoiding SIGBUS on strict-alignment platforms (aarch64
 // atomics, some ARM cores). The base frame carries control commands; task
 // frames use the same relative layout without sharing those bytes.
@@ -118,7 +118,7 @@ static constexpr ptrdiff_t MAILBOX_OFF_PIPELINE_LEASE =
     (MAILBOX_OFF_CONFIG + static_cast<ptrdiff_t>(sizeof(CallConfig)) + 7) & ~ptrdiff_t{7};
 static constexpr ptrdiff_t MAILBOX_OFF_ARGS =
     (MAILBOX_OFF_PIPELINE_LEASE + static_cast<ptrdiff_t>(sizeof(PipelineSlotLease)) + 7) & ~ptrdiff_t{7};
-static_assert(MAILBOX_OFF_ARGS % 8 == 0, "MAILBOX_OFF_ARGS must be 8-aligned for Tensor.buffer.addr");
+static_assert(MAILBOX_OFF_ARGS % 8 == 0, "MAILBOX_OFF_ARGS must be 8-aligned for ChipTensor.buffer.addr");
 static_assert(
     MAILBOX_OFF_CONFIG + static_cast<ptrdiff_t>(sizeof(CallConfig)) <= MAILBOX_OFF_ARGS,
     "CallConfig overflows reserved config region"
@@ -164,7 +164,8 @@ static_assert(
 static constexpr size_t MAILBOX_ARGS_CAPACITY =
     static_cast<size_t>(MAILBOX_OFF_SHUTDOWN) - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB);
 static_assert(
-    MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
+    MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE +
+                                 static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(ChipTensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
     "mailbox args region must hold the largest TaskArgs blob the runtime accepts (issue #1024)"
 );

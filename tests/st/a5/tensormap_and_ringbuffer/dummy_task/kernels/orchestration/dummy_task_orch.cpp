@@ -64,9 +64,9 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_X = orch_args.tensor(0).ref();
-    const Tensor &ext_Y = orch_args.tensor(1).ref();
-    const Tensor &ext_W = orch_args.tensor(2).ref();
+    const ChipTensor &ext_X = orch_args.tensor(0).ref();
+    const ChipTensor &ext_Y = orch_args.tensor(1).ref();
+    const ChipTensor &ext_W = orch_args.tensor(2).ref();
 
     uint64_t case_id = orch_args.scalar(0);
     LOG_INFO("[dummy_task_orch] case_id=%llu", static_cast<unsigned long long>(case_id));

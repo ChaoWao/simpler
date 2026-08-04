@@ -40,9 +40,9 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &a = orch_args.tensor(0).ref();
-    const Tensor &b = orch_args.tensor(1).ref();
-    const Tensor &f = orch_args.tensor(2).ref();
+    const ChipTensor &a = orch_args.tensor(0).ref();
+    const ChipTensor &b = orch_args.tensor(1).ref();
+    const ChipTensor &f = orch_args.tensor(2).ref();
 
     // t0: f = a + b
     CoreTaskArgs p0;

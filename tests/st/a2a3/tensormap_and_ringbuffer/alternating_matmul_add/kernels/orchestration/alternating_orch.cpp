@@ -48,13 +48,13 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    // Tensor args
-    const Tensor &ext_A = orch_args.tensor(0).ref();
-    const Tensor &ext_B = orch_args.tensor(1).ref();
-    const Tensor &ext_C = orch_args.tensor(2).ref();
-    const Tensor &ext_X = orch_args.tensor(3).ref();
-    const Tensor &ext_Y = orch_args.tensor(4).ref();
-    const Tensor &ext_Z = orch_args.tensor(5).ref();
+    // ChipTensor args
+    const ChipTensor &ext_A = orch_args.tensor(0).ref();
+    const ChipTensor &ext_B = orch_args.tensor(1).ref();
+    const ChipTensor &ext_C = orch_args.tensor(2).ref();
+    const ChipTensor &ext_X = orch_args.tensor(3).ref();
+    const ChipTensor &ext_Y = orch_args.tensor(4).ref();
+    const ChipTensor &ext_Z = orch_args.tensor(5).ref();
 
     // Scalar config args
     int batch = static_cast<int>(orch_args.scalar(0));
@@ -88,9 +88,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             uint32_t matmul_group_shapes[1] = {static_cast<uint32_t>(group_size)};
             uint32_t view_offsets[1] = {static_cast<uint32_t>(offset)};
 
-            Tensor A_view = ext_A.view(matmul_group_shapes, view_offsets);
-            Tensor B_view = ext_B.view(matmul_group_shapes, view_offsets);
-            Tensor C_view = ext_C.view(matmul_group_shapes, view_offsets);
+            ChipTensor A_view = ext_A.view(matmul_group_shapes, view_offsets);
+            ChipTensor B_view = ext_B.view(matmul_group_shapes, view_offsets);
+            ChipTensor C_view = ext_C.view(matmul_group_shapes, view_offsets);
 
             CoreTaskArgs params_matmul;
             params_matmul.add_input(A_view);
@@ -108,9 +108,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             uint32_t add_group_shapes[1] = {static_cast<uint32_t>(group_size)};
             uint32_t view_offsets[1] = {static_cast<uint32_t>(offset)};
 
-            Tensor X_view = ext_X.view(add_group_shapes, view_offsets);
-            Tensor Y_view = ext_Y.view(add_group_shapes, view_offsets);
-            Tensor Z_view = ext_Z.view(add_group_shapes, view_offsets);
+            ChipTensor X_view = ext_X.view(add_group_shapes, view_offsets);
+            ChipTensor Y_view = ext_Y.view(add_group_shapes, view_offsets);
+            ChipTensor Z_view = ext_Z.view(add_group_shapes, view_offsets);
 
             CoreTaskArgs params_add;
             params_add.add_input(X_view);

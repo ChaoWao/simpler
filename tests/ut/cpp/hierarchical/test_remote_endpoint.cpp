@@ -350,7 +350,7 @@ TaskArgs scalar_args() {
 
 TaskArgs bare_pointer_args() {
     TaskArgs args;
-    Tensor tensor{};
+    ChipTensor tensor{};
     tensor.buffer.addr = 0x1234;
     tensor.ndims = 1;
     tensor.shapes[0] = 1;

@@ -107,13 +107,13 @@ static __aicore__ void kv_seed(__gm__ float *v1, __gm__ float *v2) {
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: k_proj_inline135__ssa_v0
-    __gm__ Tensor *k_proj_inline135__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *k_proj_inline135__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *k_proj_inline135__ssa_v0 =
         reinterpret_cast<__gm__ float *>(k_proj_inline135__ssa_v0_tensor->buffer.addr) +
         k_proj_inline135__ssa_v0_tensor->start_offset;
 
     // Unpack tensor: v_proj_inline255__ssa_v0
-    __gm__ Tensor *v_proj_inline255__ssa_v0_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *v_proj_inline255__ssa_v0_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ float *v_proj_inline255__ssa_v0 =
         reinterpret_cast<__gm__ float *>(v_proj_inline255__ssa_v0_tensor->buffer.addr) +
         v_proj_inline255__ssa_v0_tensor->start_offset;

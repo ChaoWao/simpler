@@ -18,7 +18,7 @@
  * overlapping with the AIC slot at cache line 0.
  *
  * Args:
- *   args[0] = output Tensor* (OUTPUT, 48 float32 elements)
+ *   args[0] = output ChipTensor* (OUTPUT, 48 float32 elements)
  */
 
 #include <cstdint>
@@ -53,7 +53,7 @@ static constexpr int32_t FLOATS_PER_CACHE_LINE = 16;
 #endif
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *out_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *out = reinterpret_cast<__gm__ float *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     int32_t sub_block_id = get_sub_block_id(args);

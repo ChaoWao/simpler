@@ -21,7 +21,7 @@
 
 namespace {
 
-Tensor metadata_tensor() {
+ChipTensor metadata_tensor() {
     // Build through the canonical factory so the tensor is a valid contiguous
     // descriptor (is_contiguous = true, start_offset = 0, row-major strides) —
     // encode_tensor enforces contiguity on the wire. addr = 0 keeps it a

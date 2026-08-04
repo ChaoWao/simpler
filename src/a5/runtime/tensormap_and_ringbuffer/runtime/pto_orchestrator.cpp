@@ -40,10 +40,12 @@
 #include "aicpu/args_dump_aicpu.h"
 #endif
 
-// Verify the captured Tensor blob size in DepGenRecord matches the runtime
-// Tensor layout. The platform header defines DEP_GEN_TENSOR_SIZE without
+// Verify the captured ChipTensor blob size in DepGenRecord matches the runtime
+// ChipTensor layout. The platform header defines DEP_GEN_TENSOR_SIZE without
 // including runtime/tensor.h, so this check lives at the orch callsite.
-static_assert(sizeof(Tensor) == DEP_GEN_TENSOR_SIZE, "DepGenRecord::tensors slot size out of sync with sizeof(Tensor)");
+static_assert(
+    sizeof(ChipTensor) == DEP_GEN_TENSOR_SIZE, "DepGenRecord::tensors slot size out of sync with sizeof(ChipTensor)"
+);
 // DEP_GEN_MAX_EXPLICIT_DEPS is a diagnostic-side capture cap only; the runtime
 // imposes no hard cap on explicit dep count. If a submit exceeds this cap,
 // dep_gen_aicpu_record_submit() logs and truncates — runtime correctness is
@@ -846,7 +848,7 @@ static TaskOutputTensors submit_task_common(
         const int tc_raw = args.tensor_count();
         const int tc = tc_raw > MAX_TENSOR_ARGS ? MAX_TENSOR_ARGS : tc_raw;
         for (int i = 0; i < tc; i++) {
-            // OUTPUT slots carry create_info (not yet a Tensor); skip them —
+            // OUTPUT slots carry create_info (not yet a ChipTensor); skip them —
             // they have no producer to look up and replay's per-tensor loop
             // also skips OUTPUT.
             tensor_ptrs[i] = (args.tag(i) == TensorArgType::OUTPUT) ? nullptr : &args.tensor(i).ref();
@@ -975,7 +977,7 @@ static TaskOutputTensors submit_task_common(
 
     // Dispatch predicate: resolve the (tensor, indices) to an absolute GM address
     // now so the scheduler can read it at the dispatch point with a single load,
-    // no Arg/Tensor access. Both branches write predicate.op explicitly because
+    // no Arg/ChipTensor access. Both branches write predicate.op explicitly because
     // payload slots are ring-reused; op == NONE means "always dispatch".
     {
         const CoreTaskPredicate &pred = args.predicate();

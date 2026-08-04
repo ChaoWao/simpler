@@ -768,7 +768,7 @@ WorkerCompletion LocalMailboxEndpoint::run_with_accept(
     std::memcpy(mbox() + MAILBOX_OFF_PIPELINE_LEASE, &s.pipeline_lease, sizeof(PipelineSlotLease));
 
     // Write length-prefixed TaskArgs blob: [T][S][tensors][scalars].
-    size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor) +
+    size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor) +
                         static_cast<size_t>(view.scalar_count) * sizeof(uint64_t);
     if (blob_bytes > MAILBOX_ARGS_CAPACITY) {
         completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
@@ -786,12 +786,13 @@ WorkerCompletion LocalMailboxEndpoint::run_with_accept(
     std::memcpy(d + 4, &view.scalar_count, sizeof(int32_t));
     if (view.tensor_count > 0) {
         std::memcpy(
-            d + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes, static_cast<size_t>(view.tensor_count) * sizeof(Tensor)
+            d + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes,
+            static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor)
         );
     }
     if (view.scalar_count > 0) {
         std::memcpy(
-            d + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor), view.scalars,
+            d + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor), view.scalars,
             static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
         );
     }
@@ -868,7 +869,7 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
         state.pipeline_lease.slot_id >= task_frame_count_) {
         throw std::runtime_error("task frame has an invalid pipeline lease identity");
     }
-    const size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor) +
+    const size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor) +
                               static_cast<size_t>(view.scalar_count) * sizeof(uint64_t);
     if (blob_bytes > MAILBOX_ARGS_CAPACITY) {
         throw std::runtime_error(
@@ -913,13 +914,13 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     if (view.tensor_count > 0) {
         std::memcpy(
             blob + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes,
-            static_cast<size_t>(view.tensor_count) * sizeof(Tensor)
+            static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor)
         );
     }
     if (view.scalar_count > 0) {
         std::memcpy(
-            blob + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(Tensor), view.scalars,
-            static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
+            blob + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor),
+            view.scalars, static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
         );
     }
 

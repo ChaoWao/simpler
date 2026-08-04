@@ -55,7 +55,7 @@ static constexpr int64_t PRODUCER_SPIN_ITERS = 10000000;
 
 static constexpr int32_t PRODUCER_BLOCKS = 50;
 
-static PTO2TaskId submit_producer(const Tensor &out, int16_t block_num, int64_t base_cl) {
+static PTO2TaskId submit_producer(const ChipTensor &out, int16_t block_num, int64_t base_cl) {
     CoreTaskArgs args;
     args.add_inout(out);
     args.add_scalar(base_cl);
@@ -65,7 +65,7 @@ static PTO2TaskId submit_producer(const Tensor &out, int16_t block_num, int64_t 
     return rt_submit_aic_task(FUNC_SPMD_WRITE_AIC, args).task_id();
 }
 
-static void submit_sync_consumer(const Tensor &out, int16_t block_num, int64_t base_cl, PTO2TaskId dep) {
+static void submit_sync_consumer(const ChipTensor &out, int16_t block_num, int64_t base_cl, PTO2TaskId dep) {
     MixedKernels kernels;
     kernels.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     kernels.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
@@ -80,8 +80,8 @@ static void submit_sync_consumer(const Tensor &out, int16_t block_num, int64_t b
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
-    const Tensor &layout = orch_args.tensor(1).ref();
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &layout = orch_args.tensor(1).ref();
 
     // The consumer must occupy every AIC slot for the strand this case looks
     // for, and require_sync_start needs every block of it co-resident — so its

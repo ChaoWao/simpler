@@ -52,7 +52,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // Reading the hung producer's output blocks until it completes (it never
     // does) -> TENSOR_WAIT_TIMEOUT after the fixed data-wait timeout.
-    const Tensor &out = outs.get_ref(0);
+    const ChipTensor &out = outs.get_ref(0);
     uint32_t idx[1] = {0};
     (void)get_tensor_data(out, 1, idx);
 }

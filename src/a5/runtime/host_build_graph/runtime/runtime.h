@@ -16,7 +16,7 @@
  * only handles:
  * - Handshake buffers for AICPU-AICore communication
  * - Execution parameters (block_dim, aicpu_thread_num)
- * - Tensor pair management for host-device memory tracking
+ * - ChipTensor pair management for host-device memory tracking
  * - Device orchestration state (gm_sm_ptr_, orch_args_)
  * - Function address mapping (func_id_to_addr_)
  *
@@ -102,7 +102,7 @@ struct Handshake {
 } __attribute__((aligned(64)));
 
 /**
- * Tensor pair for tracking host-device memory mappings.
+ * ChipTensor pair for tracking host-device memory mappings.
  * Used for copy-back during finalize.
  */
 struct TensorPair {

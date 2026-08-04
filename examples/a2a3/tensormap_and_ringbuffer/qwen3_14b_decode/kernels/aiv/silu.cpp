@@ -384,25 +384,25 @@ static __aicore__ void silu(__gm__ float *v1, __gm__ bfloat16_t *v2, __gm__ floa
 // --- Kernel entry point ---
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     // Unpack tensor: inv_rms_tile_inline126__ssa_v1
-    __gm__ Tensor *inv_rms_tile_inline126__ssa_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ ChipTensor *inv_rms_tile_inline126__ssa_v1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
     __gm__ float *inv_rms_tile_inline126__ssa_v1 =
         reinterpret_cast<__gm__ float *>(inv_rms_tile_inline126__ssa_v1_tensor->buffer.addr) +
         inv_rms_tile_inline126__ssa_v1_tensor->start_offset;
 
     // Unpack tensor: mlp_tile_inline149__iter_v1
-    __gm__ Tensor *mlp_tile_inline149__iter_v1_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ ChipTensor *mlp_tile_inline149__iter_v1_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
     __gm__ bfloat16_t *mlp_tile_inline149__iter_v1 =
         reinterpret_cast<__gm__ bfloat16_t *>(mlp_tile_inline149__iter_v1_tensor->buffer.addr) +
         mlp_tile_inline149__iter_v1_tensor->start_offset;
 
     // Unpack tensor: gate_acc_all_inline203__rv_v10
-    __gm__ Tensor *gate_acc_all_inline203__rv_v10_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ ChipTensor *gate_acc_all_inline203__rv_v10_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
     __gm__ float *gate_acc_all_inline203__rv_v10 =
         reinterpret_cast<__gm__ float *>(gate_acc_all_inline203__rv_v10_tensor->buffer.addr) +
         gate_acc_all_inline203__rv_v10_tensor->start_offset;
 
     // Unpack tensor: up_acc_all_inline303__rv_v10
-    __gm__ Tensor *up_acc_all_inline303__rv_v10_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ ChipTensor *up_acc_all_inline303__rv_v10_tensor = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
     __gm__ float *up_acc_all_inline303__rv_v10 =
         reinterpret_cast<__gm__ float *>(up_acc_all_inline303__rv_v10_tensor->buffer.addr) +
         up_acc_all_inline303__rv_v10_tensor->start_offset;

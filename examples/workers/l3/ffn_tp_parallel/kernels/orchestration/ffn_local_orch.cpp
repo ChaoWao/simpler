@@ -29,9 +29,9 @@ ffn_local_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void ffn_local_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &x_shard = orch_args.tensor(0).ref();
-    const Tensor &w_shard = orch_args.tensor(1).ref();
-    const Tensor &partial_local = orch_args.tensor(2).ref();
+    const ChipTensor &x_shard = orch_args.tensor(0).ref();
+    const ChipTensor &w_shard = orch_args.tensor(1).ref();
+    const ChipTensor &partial_local = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(x_shard);

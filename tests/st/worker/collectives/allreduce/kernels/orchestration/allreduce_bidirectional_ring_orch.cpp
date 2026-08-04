@@ -11,7 +11,7 @@
 /**
  * Bidirectional Ring AllReduce orchestration — kernel shim.
  *
- * Three Tensor args (the kernel reads ``Tensor->buffer.addr`` + start_offset
+ * Three ChipTensor args (the kernel reads ``ChipTensor->buffer.addr`` + start_offset
  * to get the real device pointer) plus two scalars:
  *
  *   tensor(0) input   INPUT           (plain device mem, staged in by bootstrap)
@@ -40,9 +40,9 @@ allreduce_bidirectional_ring_orchestration_config(const ChipTaskArgs &orch_args)
 }
 
 __attribute__((visibility("default"))) void allreduce_bidirectional_ring_orchestration(const ChipTaskArgs &orch_args) {
-    const Tensor &input = orch_args.tensor(0).ref();
-    const Tensor &output = orch_args.tensor(1).ref();
-    const Tensor &scratch = orch_args.tensor(2).ref();
+    const ChipTensor &input = orch_args.tensor(0).ref();
+    const ChipTensor &output = orch_args.tensor(1).ref();
+    const ChipTensor &scratch = orch_args.tensor(2).ref();
 
     CoreTaskArgs params;
     params.add_input(input);

@@ -44,8 +44,9 @@ using namespace pto;
 
 template <int M, int N>
 static __aicore__ void softmax_prepare_batch_impl(
-    __gm__ Tensor *sij_batch, __gm__ Tensor *context_lens_t, __gm__ Tensor *pij_batch, __gm__ Tensor *mij_batch,
-    __gm__ Tensor *lij_batch, float scale_value, uint64_t batch_count, uint64_t block_idx, uint64_t batch_start
+    __gm__ ChipTensor *sij_batch, __gm__ ChipTensor *context_lens_t, __gm__ ChipTensor *pij_batch,
+    __gm__ ChipTensor *mij_batch, __gm__ ChipTensor *lij_batch, float scale_value, uint64_t batch_count,
+    uint64_t block_idx, uint64_t batch_start
 ) {
     __gm__ float *sij_base = reinterpret_cast<__gm__ float *>(sij_batch->buffer.addr);
     __gm__ bfloat16_t *pij_base = reinterpret_cast<__gm__ bfloat16_t *>(pij_batch->buffer.addr);
@@ -166,11 +167,11 @@ static __aicore__ void softmax_prepare_batch_impl(
 }
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *sij_batch = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *context_lens_t = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *pij_batch = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *mij_batch = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ Tensor *lij_batch = reinterpret_cast<__gm__ Tensor *>(args[4]);
+    __gm__ ChipTensor *sij_batch = reinterpret_cast<__gm__ ChipTensor *>(args[0]);
+    __gm__ ChipTensor *context_lens_t = reinterpret_cast<__gm__ ChipTensor *>(args[1]);
+    __gm__ ChipTensor *pij_batch = reinterpret_cast<__gm__ ChipTensor *>(args[2]);
+    __gm__ ChipTensor *mij_batch = reinterpret_cast<__gm__ ChipTensor *>(args[3]);
+    __gm__ ChipTensor *lij_batch = reinterpret_cast<__gm__ ChipTensor *>(args[4]);
     union {
         uint64_t u;
         float f;

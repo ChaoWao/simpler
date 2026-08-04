@@ -94,13 +94,13 @@ public:
     );
 
     // Allocate an intermediate buffer from the Worker's HeapRing (MAP_SHARED,
-    // visible to forked child workers). Returns a contiguous Tensor whose
+    // visible to forked child workers). Returns a contiguous ChipTensor whose
     // `.buffer.addr` points into the ring.
     //
     // Lifetime: aligned with a synthetic task slot. The buffer is reclaimed
     // (FIFO, via last_alive) once every downstream consumer tagging the
     // pointer has reached CONSUMED and scope_end has released the scope ref.
-    Tensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
+    ChipTensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
 
     // Memory management on a specific next-level worker. Thread-safe:
     // can be called from the orch thread while the target worker is
@@ -273,7 +273,7 @@ private:
     );
 
     // Size, in aligned bytes, an OUTPUT tensor should occupy in the HeapRing.
-    static uint64_t output_alloc_bytes(const Tensor &t);
+    static uint64_t output_alloc_bytes(const ChipTensor &t);
 
     // Rewrite any OUTPUT tensors with a null data pointer to point into a
     // freshly-allocated HeapRing slab. Returns the total aligned byte span

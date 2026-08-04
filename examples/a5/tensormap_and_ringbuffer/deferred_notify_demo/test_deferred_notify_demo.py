@@ -20,11 +20,11 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
+    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker
@@ -138,7 +138,7 @@ def run(
                     args = TaskArgs()
                     args.add_tensor(make_tensor_arg(partial[rank]), TensorArgType.INPUT)
                     args.add_tensor(
-                        Tensor.make(
+                        ChipTensor.make(
                             data=domain.buffer_ptrs["mailbox"],
                             shapes=(N,),
                             dtype=DataType.FLOAT32,
@@ -148,7 +148,7 @@ def run(
                     )
                     args.add_tensor(make_tensor_arg(result[rank]), TensorArgType.OUTPUT_EXISTING)
                     args.add_tensor(
-                        Tensor.make(
+                        ChipTensor.make(
                             data=domain.buffer_ptrs["notify_counter"],
                             shapes=(1,),
                             dtype=DataType.INT32,

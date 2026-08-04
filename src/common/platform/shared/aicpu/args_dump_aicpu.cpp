@@ -623,7 +623,7 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info) {
         // record carries shape/dtype/strides with payload_size == 0.
         copy_bytes = 0;
     } else if (bytes > state->arena_size) {
-        // Tensor larger than entire arena — copy a partial sample
+        // ChipTensor larger than entire arena — copy a partial sample
         copy_bytes = state->arena_size / 2;
         truncated = true;
     }

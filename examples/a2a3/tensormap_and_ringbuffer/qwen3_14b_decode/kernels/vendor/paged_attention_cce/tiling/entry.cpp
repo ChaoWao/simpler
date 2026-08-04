@@ -34,12 +34,12 @@ namespace {
 
 template <typename T>
 static __aicore__ __attribute__((always_inline)) __gm__ T *tensor_data(__gm__ int64_t *args, int32_t index) {
-    __gm__ Tensor *tensor = reinterpret_cast<__gm__ Tensor *>(args[index]);
+    __gm__ ChipTensor *tensor = reinterpret_cast<__gm__ ChipTensor *>(args[index]);
     return reinterpret_cast<__gm__ T *>(tensor->buffer.addr) + tensor->start_offset;
 }
 
-static __aicore__ __attribute__((always_inline)) __gm__ Tensor *tensor_desc(__gm__ int64_t *args, int32_t index) {
-    return reinterpret_cast<__gm__ Tensor *>(args[index]);
+static __aicore__ __attribute__((always_inline)) __gm__ ChipTensor *tensor_desc(__gm__ int64_t *args, int32_t index) {
+    return reinterpret_cast<__gm__ ChipTensor *>(args[index]);
 }
 
 static __aicore__ __attribute__((always_inline)) __gm__ int32_t *barrier_data(__gm__ uint8_t *metadata) {
@@ -71,7 +71,7 @@ static __aicore__ void flush_metadata_prefix(__gm__ uint8_t *metadata) {
 }  // namespace
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    __gm__ Tensor *seq_lens_desc = tensor_desc(args, 0);
+    __gm__ ChipTensor *seq_lens_desc = tensor_desc(args, 0);
     __gm__ const int32_t *seq_lens = tensor_data<const int32_t>(args, 0);
     __gm__ uint8_t *metadata = tensor_data<uint8_t>(args, 1);
     __gm__ uint32_t *tiling_out = reinterpret_cast<__gm__ uint32_t *>(metadata + qwen_fai_metadata::kTilingOffset);

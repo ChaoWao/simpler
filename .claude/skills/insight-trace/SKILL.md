@@ -20,8 +20,8 @@ Three supported kernel shapes (Step 0 picks the right one):
 | Shape | Example | Wrapper branches | Args layout |
 | ----- | ------- | ---------------- | ----------- |
 | **SPMD mix** | `tests/.../spmd_paged_attention/kernels/mix/paged_attention_parallel.cpp` | both `__DAV_CUBE__` *and* `__DAV_VEC__` include the kernel | slot 0..15 tensor/scalar, **slot 48/49 = `LocalContext*`/`GlobalContext*`** (per `intrinsic.h`) |
-| **AIC-only task** | `tests/st/a2a3/.../paged_attention_unroll/kernels/aic/aic_pv_matmul.cpp`, `aic_qk_matmul.cpp` | only `__DAV_CUBE__` includes the kernel; `__DAV_VEC__` body is empty | positional Tensor pointers + scalars only; **no slot 48/49** |
-| **AIV-only task** | `tests/st/a2a3/.../paged_attention_unroll/kernels/aiv/aiv_softmax_prepare.cpp`, `aiv_online_update.cpp` | only `__DAV_VEC__` includes the kernel; `__DAV_CUBE__` body is empty | positional Tensor pointers + scalars only; **no slot 48/49** |
+| **AIC-only task** | `tests/st/a2a3/.../paged_attention_unroll/kernels/aic/aic_pv_matmul.cpp`, `aic_qk_matmul.cpp` | only `__DAV_CUBE__` includes the kernel; `__DAV_VEC__` body is empty | positional ChipTensor pointers + scalars only; **no slot 48/49** |
+| **AIV-only task** | `tests/st/a2a3/.../paged_attention_unroll/kernels/aiv/aiv_softmax_prepare.cpp`, `aiv_online_update.cpp` | only `__DAV_VEC__` includes the kernel; `__DAV_CUBE__` body is empty | positional ChipTensor pointers + scalars only; **no slot 48/49** |
 
 In all three shapes the kernel is launched via `<<<HW_BLOCK_NUM, ...>>>`.
 For SPMD mix, HW_BLOCK_NUM is the kernel's true hw block dim (typically
@@ -66,7 +66,7 @@ source):
 | ---- | ------------- |
 | Kernel source path | User input |
 | Kernel shape (mix / aic-only / aiv-only) | Step 0 above |
-| Tensor args (count, dtypes, shapes) | `args[0..N]` reads in `kernel_entry` |
+| ChipTensor args (count, dtypes, shapes) | `args[0..N]` reads in `kernel_entry` |
 | Scalar args (count, values) | `args[N..]` reads, treat float scalars as `f32_bits()` |
 | `hw_block_dim` | SPMD mix: `<<<HW, ...>>>` in the original launcher (typically 24); AIC-only / AIV-only: **default 1** |
 | FIFO slot sizes (SPMD mix only) | `PAConfig<...>::*_SLOT_SIZE * FIFO_DEPTH * hw_blocks` — **compute from kernel constants, not from memory** |
@@ -92,7 +92,7 @@ If the kernel hardcodes the shape via `static constexpr` (e.g.
 smaller. The wrapper `#include`s the local copy. Sync the host-side
 `kBatch` to the same value — both must move together or the kernel walks
 off-end. For per-task kernels (`aic_pv_matmul` etc.) the shape comes
-from the `Tensor` shapes you build in `replay_host.cpp`, so just shrink
+from the `ChipTensor` shapes you build in `replay_host.cpp`, so just shrink
 those directly.
 
 ## Step 2 — Create the workspace
@@ -276,7 +276,7 @@ ACL host runner. Common responsibilities (all shapes):
 1. `aclInit` → `aclrtSetDevice(getenv("ACL_DEVICE_ID"))` → one stream.
 2. `aclrtMalloc` for every input/output tensor and every FIFO/scratch
    buffer the kernel reads or writes.
-3. Build the kernel's `Tensor` structs on host, `aclrtMemcpy` to a
+3. Build the kernel's `ChipTensor` structs on host, `aclrtMemcpy` to a
    device-side `d_tensors` array.
 4. Build per-row `args[]` arrays. Per row: slot 0..N-1 = device pointer
    to `d_tensors[i]`, scalar slots per kernel.
@@ -314,7 +314,7 @@ auto fill_args = [&](std::vector<int64_t> &args, int rows,
     for (int r = 0; r < rows; ++r) {
         int64_t *row = args.data() + uint64_t(r) * kArgsSlots;
         for (int i = 0; i < kNumTensors; ++i) {
-            row[i] = (int64_t)((uintptr_t)d_tensors + i * sizeof(Tensor));
+            row[i] = (int64_t)((uintptr_t)d_tensors + i * sizeof(ChipTensor));
         }
         // row[kNumTensors..] = scalar values (f32_bits() for floats)
         row[48] = (int64_t)(local_base  + r * sizeof(LocalContext));
@@ -357,10 +357,10 @@ init_tensor(&tensors[2], d_block_table,kBtBytes,   DataType::INT32,    {kBatch, 
 init_tensor(&tensors[3], d_oi_new,     kOiBytes,   DataType::FLOAT32,  {kQTile, kHeadDim});
 
 std::array<int64_t, kArgsSlots> args{};
-args[0] = (int64_t)((uintptr_t)d_tensors + 0 * sizeof(Tensor));
-args[1] = (int64_t)((uintptr_t)d_tensors + 1 * sizeof(Tensor));
-args[2] = (int64_t)((uintptr_t)d_tensors + 2 * sizeof(Tensor));
-args[3] = (int64_t)((uintptr_t)d_tensors + 3 * sizeof(Tensor));
+args[0] = (int64_t)((uintptr_t)d_tensors + 0 * sizeof(ChipTensor));
+args[1] = (int64_t)((uintptr_t)d_tensors + 1 * sizeof(ChipTensor));
+args[2] = (int64_t)((uintptr_t)d_tensors + 2 * sizeof(ChipTensor));
+args[3] = (int64_t)((uintptr_t)d_tensors + 3 * sizeof(ChipTensor));
 args[4] = (int64_t)kNBlocks;    // n_blocks
 args[5] = (int64_t)kBtOffset;   // bt_offset
 ACL_CHECK(aclrtMemcpy(d_args, sizeof(args), args.data(), sizeof(args),

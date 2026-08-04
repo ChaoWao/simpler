@@ -58,5 +58,5 @@ Ring buffer and submit type definitions are duplicated per-runtime (not in a sha
 Cross-architecture shared files are in `src/common/task_interface/`:
 
 - `data_type.h` — DataType enum and element size helpers
-- `tensor.h` — unified strided `Tensor` type + `TensorArgType` (host↔device data transport)
+- `tensor.h` — unified strided `ChipTensor` type + `TensorArgType` (host↔device data transport)
 - `task_args.h` — TaskArgs template (separated tensor/scalar argument storage)

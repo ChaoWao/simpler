@@ -54,8 +54,8 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &blocks = orch_args.tensor(0).ref();
-    const Tensor &shape = orch_args.tensor(1).ref();
+    const ChipTensor &blocks = orch_args.tensor(0).ref();
+    const ChipTensor &shape = orch_args.tensor(1).ref();
 
     const int32_t cluster_count = rt_available_cluster_count();
     const int32_t aiv_count = rt_available_aiv_count();

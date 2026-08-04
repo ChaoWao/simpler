@@ -34,11 +34,11 @@ from simpler.task_interface import (  # noqa: E402
     ArgDirection,
     CallConfig,
     ChipCallable,
+    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
     TaskArgs,
-    Tensor,
     TensorArgType,
 )
 from simpler.worker import Worker  # noqa: E402
@@ -158,7 +158,7 @@ def run(device_ids: list[int], platform: str = "a2a3") -> int:
                     chip_args.add_tensor(make_tensor_arg(host_inputs[i]), TensorArgType.INPUT)
                     chip_args.add_tensor(make_tensor_arg(host_outputs[i]), TensorArgType.OUTPUT_EXISTING)
                     chip_args.add_tensor(
-                        Tensor.make(
+                        ChipTensor.make(
                             data=domain.buffer_ptrs["scratch"],
                             shapes=(float_elems,),
                             dtype=DataType.FLOAT32,

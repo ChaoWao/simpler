@@ -51,7 +51,7 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     };
 }
 
-static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
+static void submit_mix(const ChipTensor &out, int16_t block_num, int64_t base_cl, bool sync_start) {
     MixedKernels mk;
     mk.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     mk.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
@@ -66,7 +66,7 @@ static void submit_mix(const Tensor &out, int16_t block_num, int64_t base_cl, bo
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
-    const Tensor &ext_output = orch_args.tensor(0).ref();
+    const ChipTensor &ext_output = orch_args.tensor(0).ref();
 
     int64_t cl = 0;
 

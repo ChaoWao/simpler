@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
-from .task_interface import DataType, Tensor
+from .task_interface import ChipTensor, DataType
 from .worker_chip_orch_comm import (
     NotifyOp,
     WaitCmp,
@@ -173,7 +173,7 @@ def _host_byte_span(buffer: Any, nbytes: int, *, writable: bool) -> _HostByteSpa
         return _HostByteSpan(nbytes=nbytes, ptr=ptr, view=None)
 
     access = "writable" if writable else "readable"
-    raise ValueError(f"L3-L2 queue requires a registered Tensor or {access} contiguous ordinary host buffer")
+    raise ValueError(f"L3-L2 queue requires a registered ChipTensor or {access} contiguous ordinary host buffer")
 
 
 def make_worker_chip_queue_layout(depth: int, input_arena_bytes: int, output_arena_bytes: int) -> WorkerChipQueueLayout:
@@ -258,9 +258,9 @@ class WorkerChipQueue:
         orch: Any,
         region: WorkerChipOrchRegion,
         layout: WorkerChipQueueLayout,
-        desc_fields: Tensor,
-        desc_seq: Tensor,
-        desc_read: Tensor,
+        desc_fields: ChipTensor,
+        desc_seq: ChipTensor,
+        desc_read: ChipTensor,
     ) -> None:
         self._orch = orch
         self._region = region
@@ -331,16 +331,16 @@ class WorkerChipQueue:
             raise RuntimeError("L3-L2 queue expired after orchestration run")
         self._region._ensure_live()
 
-    def _validate_registered_buffer(self, buffer: Any, nbytes: int) -> Tensor:
-        if not isinstance(buffer, Tensor):
-            raise ValueError("L3-L2 queue requires a registered Tensor returned by orch.alloc(...)")
+    def _validate_registered_buffer(self, buffer: Any, nbytes: int) -> ChipTensor:
+        if not isinstance(buffer, ChipTensor):
+            raise ValueError("L3-L2 queue requires a registered ChipTensor returned by orch.alloc(...)")
         self._region._validate_host_buffer(buffer)
         if int(nbytes) > int(buffer.nbytes()):
-            raise ValueError(f"L3-L2 queue nbytes={nbytes} exceeds registered Tensor size {int(buffer.nbytes())}")
+            raise ValueError(f"L3-L2 queue nbytes={nbytes} exceeds registered ChipTensor size {int(buffer.nbytes())}")
         return buffer
 
-    def _registered_buffer_or_none(self, buffer: Any, nbytes: int) -> Tensor | None:
-        if not isinstance(buffer, Tensor):
+    def _registered_buffer_or_none(self, buffer: Any, nbytes: int) -> ChipTensor | None:
+        if not isinstance(buffer, ChipTensor):
             return None
         return self._validate_registered_buffer(buffer, nbytes)
 

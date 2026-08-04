@@ -18,7 +18,7 @@ import pytest
 from simpler import worker as worker_module
 from simpler import worker_chip_orch_comm
 from simpler.orchestrator import Orchestrator
-from simpler.task_interface import DataType, Tensor, get_element_size
+from simpler.task_interface import ChipTensor, DataType, get_element_size
 from simpler.worker import _IDLE, _OFF_STATE, Worker, _buffer_field_addr, _mailbox_store_i32
 from simpler.worker_chip_message_queue import (
     WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET,
@@ -111,7 +111,7 @@ class _FakeCOrch:
         storage_t = ctypes.c_uint8 * nbytes
         storage = storage_t()
         self._buffers.append(storage)
-        return Tensor.make(ctypes.addressof(storage), tuple(int(x) for x in shape), dtype)
+        return ChipTensor.make(ctypes.addressof(storage), tuple(int(x) for x in shape), dtype)
 
 
 class _FakeClient:

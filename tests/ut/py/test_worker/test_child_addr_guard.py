@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import simpler.orchestrator as orch_mod
-from _task_interface import DataType, Tensor, TensorArgType
+from _task_interface import ChipTensor, DataType, TensorArgType
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import TaskArgs
 from simpler.worker import Worker, _ChildProvEntry, _Lifecycle
@@ -38,7 +38,7 @@ def _l3() -> Worker:
 
 def _child_args(ptr: int, *, n: int = 16) -> TaskArgs:
     args = TaskArgs()
-    args.add_tensor(Tensor.make(ptr, (n,), DataType.FLOAT32, child_memory=True), TensorArgType.OUTPUT_EXISTING)
+    args.add_tensor(ChipTensor.make(ptr, (n,), DataType.FLOAT32, child_memory=True), TensorArgType.OUTPUT_EXISTING)
     return args
 
 
@@ -334,7 +334,7 @@ class TestSubmitDispatchGuard:
         fake = MagicMock()
         o = Orchestrator(fake, w)
         args = TaskArgs()
-        args.add_tensor(Tensor.make(0, (16,), DataType.FLOAT32, child_memory=False), TensorArgType.INPUT)
+        args.add_tensor(ChipTensor.make(0, (16,), DataType.FLOAT32, child_memory=False), TensorArgType.INPUT)
         o.submit_next_level(object(), args, None, worker=0)
         fake.submit_next_level.assert_called_once()
 

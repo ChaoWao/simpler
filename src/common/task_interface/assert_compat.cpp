@@ -11,10 +11,10 @@
 /**
  * Host-side definition of the assert_compat.h diagnostics.
  *
- * Linked only into host-side targets that include the unified Tensor but do
+ * Linked only into host-side targets that include the unified ChipTensor but do
  * NOT link the per-arch runtime orchestration/common.cpp (which provides the
  * richer, LOG_ERROR-backed implementation). The nanobind binding is the
- * primary consumer: Tensor::make ODR-uses Tensor::init_external, which calls
+ * primary consumer: ChipTensor::make ODR-uses ChipTensor::init_external, which calls
  * always_assert. This keeps the binding self-contained without dragging in a
  * runtime-arch-specific translation unit.
  */

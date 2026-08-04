@@ -11,7 +11,7 @@
 /**
  * assert_compat.h — shared assertion macros and diagnostics.
  *
- * Factored out of the per-arch runtime `common.h` so that the unified `Tensor`
+ * Factored out of the per-arch runtime `common.h` so that the unified `ChipTensor`
  * (now in src/common/task_interface/tensor.h) can use `always_assert` /
  * `debug_assert` without pulling in a runtime-specific header. The runtime
  * `common.h` includes this header; `assert_impl` / `get_stacktrace` are

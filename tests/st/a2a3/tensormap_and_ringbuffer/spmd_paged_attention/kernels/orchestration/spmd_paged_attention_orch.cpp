@@ -97,16 +97,16 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t kv_shapes[2] = {static_cast<uint32_t>(kv_total_rows), static_cast<uint32_t>(head_dim)};
     uint32_t out_shapes[2] = {static_cast<uint32_t>(batch * num_heads), static_cast<uint32_t>(head_dim)};
 
-    Tensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type);
-    Tensor key_cache = make_tensor_external(kc_ptr, kv_shapes, 2, data_type);
-    Tensor value_cache = make_tensor_external(vc_ptr, kv_shapes, 2, data_type);
-    Tensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
+    ChipTensor query = make_tensor_external(query_ptr, query_shapes, 2, data_type);
+    ChipTensor key_cache = make_tensor_external(kc_ptr, kv_shapes, 2, data_type);
+    ChipTensor value_cache = make_tensor_external(vc_ptr, kv_shapes, 2, data_type);
+    ChipTensor out = make_tensor_external(out_ptr, out_shapes, 2, DataType::FLOAT32);
 
     uint32_t bt_shapes[2] = {static_cast<uint32_t>(batch), static_cast<uint32_t>(max_num_blocks_per_req)};
-    Tensor block_table =
+    ChipTensor block_table =
         make_tensor_external(orch_args.tensor(3).ref().data_as<void>(), bt_shapes, 2, DataType::INT32, false);
     uint32_t cl_shapes[1] = {static_cast<uint32_t>(batch)};
-    Tensor context_lens =
+    ChipTensor context_lens =
         make_tensor_external(orch_args.tensor(4).ref().data_as<void>(), cl_shapes, 1, DataType::INT32, false);
 
     // GM FIFO buffers for TPUSH/TPOP (one set of slots per hardware block)
