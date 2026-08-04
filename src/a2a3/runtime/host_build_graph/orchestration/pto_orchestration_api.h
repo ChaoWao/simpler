@@ -276,9 +276,11 @@ static inline bool rt_is_fatal() {
  *   uint64_t raw = get_tensor_data(tensor, 1, idx);       // old usage unchanged
  *   float val = get_tensor_data<float>(tensor, 1, idx);   // typed read
  *
- * If the tensor has a producer in TensorMap, spin-waits until the producer
- * task completes before reading. External tensors (make_tensor_external)
- * are read immediately without waiting.
+ * This API reads the registered host view used to stage an external tensor.
+ * It is valid while host orchestration is building the graph, before device
+ * scheduling starts. A tensor produced by a submitted task cannot become
+ * readable during graph construction, and a runtime-created output has no
+ * registered host view; either use is reported as an invalid argument.
  */
 template <typename T = uint64_t>
 static inline T get_tensor_data(const Tensor &tensor, uint32_t ndims, const uint32_t indices[]) {
@@ -297,24 +299,11 @@ static inline T get_tensor_data(const Tensor &tensor, uint32_t ndims, const uint
  *   set_tensor_data(tensor, 1, idx, raw_u64);     // old usage unchanged
  *   set_tensor_data(tensor, 1, idx, 42.0f);       // typed write (T = float)
  *
- * If the tensor has a producer in TensorMap, spin-waits until the producer
- * and all its consumers complete before writing (WAW + WAR safety).
- * External tensors (make_tensor_external) with no TensorMap entry are
- * written immediately without waiting.
- *
- * Limitation: TensorMap only tracks producers (OUTPUT/INOUT), not consumers
- * that used the tensor as INPUT. If a kernel reads this tensor as INPUT
- * (not INOUT) and the tensor has no TensorMap producer entry, set_tensor_data
- * cannot detect the reader and may cause a data race.
- *
- * To ensure WAR safety for all access patterns, use add_inout() instead of
- * add_input() for kernel parameters that may later be written via
- * set_tensor_data. INOUT creates a TensorMap entry that enables automatic
- * consumer tracking via the ring's completed_watermark.
- *
- * The tensor must already have an allocated buffer (addr != 0).
- * For runtime-created outputs, call this only on the Tensor returned by
- * add_output(TensorCreateInfo) after submit returns.
+ * This API updates the registered host view used to stage an external tensor.
+ * The updated value becomes part of the graph's initial device data. It is not
+ * a synchronization barrier for submitted readers or writers. A tensor with a
+ * submitted producer, or a runtime-created output with no registered host view,
+ * is rejected as an invalid argument.
  */
 template <typename T = uint64_t>
 static inline void set_tensor_data(const Tensor &tensor, uint32_t ndims, const uint32_t indices[], T value) {

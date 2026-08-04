@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Main Implementation
+ * host_build_graph runtime implementation
  *
  * Implements the unified runtime API that combines orchestrator and scheduler.
  *
@@ -120,14 +120,12 @@ void rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, cons
     va_end(args);
 }
 
-// Wait for all producers of this tensor to be safe for data access.
-// Checks owner metadata (lifecycle anchor) and OverlapMap (modifier writers).
-// For reads: wait until each producer COMPLETED (done writing).
-// For writes: also wait until all consumers done reading
-//   (consumer low bits of fanout_refcount >= consumer count, excluding the
-//    bit31 scope reference).
-// Uses cycle-based timeout (checked every 1024 spins).
-// Returns false on timeout (sets orch.fatal).
+// Validate every producer reference before waiting on its slot. The host builds
+// the complete graph before device scheduling starts, so a live device producer
+// cannot complete during this call; the timeout remains a defensive failure
+// backstop rather than a synchronization mechanism for orchestration code.
+// For writes, completed_watermark additionally protects against overwriting a
+// producer while one of its submitted consumers is still live.
 MAYBE_UNINITIALIZED_BEGIN
 static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wait_for_consumers, const char *caller) {
     PTO2TaskId owner = tensor.owner_task_id;
@@ -143,6 +141,33 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
     const PTO2TaskSlotState *seg[kSegmentCap];
     int seg_count = 0;
     bool failed = false;
+
+    auto resolve_producer = [&](PTO2TaskId producer) -> const PTO2TaskSlotState * {
+        if (!producer.is_valid() || producer.ring() != 0) {
+            orch.report_fatal(
+                PTO2_ERROR_INVALID_ARGS, caller,
+                "tensor producer task %#llx has invalid ring %u; host_build_graph uses ring 0",
+                static_cast<unsigned long long>(producer.raw), static_cast<unsigned int>(producer.ring())
+            );
+            failed = true;
+            return nullptr;
+        }
+
+        auto &ring = orch.sm_header->ring;
+        int32_t local_id = static_cast<int32_t>(producer.local());
+        int32_t slot_index = ring.get_slot_by_task_id(local_id);
+        auto &slot = ring.get_slot_state_by_slot(slot_index);
+        if (slot.task == nullptr || slot.task->task_id != producer) {
+            orch.report_fatal(
+                PTO2_ERROR_INVALID_ARGS, caller,
+                "tensor producer task %#llx does not match the descriptor bound to slot %d",
+                static_cast<unsigned long long>(producer.raw), slot_index
+            );
+            failed = true;
+            return nullptr;
+        }
+        return &slot;
+    };
 
     auto wait_one_producer = [&](const PTO2TaskSlotState &slot) {
         uint8_t ring_id = 0;
@@ -228,16 +253,17 @@ static bool wait_for_tensor_ready(PTO2Runtime *rt, const Tensor &tensor, bool wa
     auto do_wait = [&]() {
         // Step A: creator retention — read owner directly from tensor metadata
         if (owner.is_valid()) {
-            auto &s = orch.sm_header->ring.get_slot_state_by_task_id(owner.local());
-            try_push(s);
+            const auto *slot = resolve_producer(owner);
             if (failed) return;
+            try_push(*slot);
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
         orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
             PTO2TaskId pid = entry.producer_task_id;
-            auto &s = orch.sm_header->ring.get_slot_state_by_task_id(pid.local());
-            try_push(s);
+            const auto *slot = resolve_producer(pid);
+            if (failed) return false;
+            try_push(*slot);
             return !failed;
         });
         if (failed) return;

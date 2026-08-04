@@ -144,7 +144,7 @@ constexpr uint64_t PTO2_TENSOR_DATA_TIMEOUT_MS = 15000;  // 15 s
  * Conditions:
  *   PENDING->COMPLETED:   all subtasks finish (set by scheduler) or task is a
  *                         hidden alloc completed inline by the orchestrator
- *   COMPLETED->CONSUMED:  fanout_refcount == fanout_count && state == COMPLETED
+ *   COMPLETED->CONSUMED:  per-ring completed_watermark >= last_consumer_local_id
  */
 typedef enum {
     PTO2_TASK_PENDING = 0,    // Submitted; awaiting fanin, queued, or dispatched

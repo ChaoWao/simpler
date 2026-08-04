@@ -8,8 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#ifndef SCHEDULER_TYPES_H
-#define SCHEDULER_TYPES_H
+#pragma once
 
 #include <atomic>
 #include <cstddef>
@@ -391,6 +390,18 @@ public:
         return MixPlacement::PENDING;
     }
 
+    BitStates get_mix_cluster_offset_states(uint8_t core_mask, MixPlacement placement) const {
+        BitStates result;
+        BitStates candidates = get_cluster_offset_states();
+        while (candidates.has_value()) {
+            int32_t cluster_offset = candidates.pop_first();
+            if (classify_mix_cluster(cluster_offset, core_mask) == placement) {
+                result |= BitStates::bit(cluster_offset);
+            }
+        }
+        return result;
+    }
+
     // --- Gated MIX split placement ---
     // A gated MIX block can place each of its cores INDEPENDENTLY (idle core -> gated
     // running slot; busy core with a free pending slot -> gated pending slot), because
@@ -439,15 +450,7 @@ public:
     }
 
     BitStates get_mix_running_cluster_offset_states(uint8_t core_mask) const {
-        BitStates result;
-        BitStates candidates = get_cluster_offset_states();
-        while (candidates.has_value()) {
-            int32_t cluster_offset = candidates.pop_first();
-            if (classify_mix_cluster(cluster_offset, core_mask) == MixPlacement::RUNNING) {
-                result |= BitStates::bit(cluster_offset);
-            }
-        }
-        return result;
+        return get_mix_cluster_offset_states(core_mask, MixPlacement::RUNNING);
     }
 
     int32_t count_mix_running_clusters(uint8_t core_mask) const {
@@ -510,7 +513,7 @@ public:
     int32_t core_num() const { return cluster_count_ * 3; }
 
 private:
-    int32_t cluster_count_;
+    int32_t cluster_count_{0};
     BitStates aic_mask_;
     BitStates aiv_mask_;
     BitStates core_states_;
@@ -604,5 +607,3 @@ inline uint64_t sync_start_drain_next_attempt(uint64_t attempt) {
 inline uint64_t sync_start_drain_ack_subtree_token(uint64_t attempt) {
     return attempt | SYNC_START_DRAIN_ACK_SUBTREE_READY;
 }
-
-#endif  // SCHEDULER_TYPES_H

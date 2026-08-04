@@ -1,222 +1,124 @@
-# Submit by Cluster - Requirements and Main-Branch-Aligned Design
+# Cluster-Aware Submission in `host_build_graph`
 
-## 1. Goal
+## Contract
 
-Define a single, main-branch-aligned specification for PTO2 cluster submission that combines:
-
-1. Product requirements (what must be true).
-2. Runtime design (how it is implemented on current main baseline).
-
-The target model is: one submitted graph node is one `MixedTask`, and dispatch/completion is mixed-task-granular.
-
-## 2. Background and Motivation
-
-Future Ascend hardware is expected to provide stronger locality within an AICore cluster (`1 AIC + 2 AIV`).
-The runtime therefore needs a "submit together, run together" model for related AIC/AIV kernels.
-
-Legacy per-task submit (`kernel_id + worker_type`) cannot express atomic co-dispatch of multiple kernels to one cluster.
-
-## 3. Scope
-
-### In Scope
-
-1. New orchestration-facing submit API for cluster-aware mixed submission.
-2. Runtime/backend scheduler and executor changes to treat a mixed submit as one atomic scheduling unit.
-3. Dependency gating, readiness, dispatch, completion, and reclamation at mixed-task granularity.
-4. AIV slot equivalence (`AIV0` and `AIV1` are equivalent execution targets).
-
-### Out of Scope
-
-1. User-facing cluster pinning (`allocate_cluster/free_cluster`-style APIs).
-2. New worker types beyond AIC/AIV.
-3. Cross-cluster user placement policies.
-4. Hardware topology changes beyond `1 AIC + 2 AIV` per cluster.
-
-## 4. Main-Branch Baseline Constraints
-
-Design must preserve the current main runtime architecture:
-
-1. Executor threading split (orchestrator thread vs scheduler threads), and post-orchestrator transition (`transition_requested_` + `reassign_cores_for_all_threads()`).
-2. Shared-memory hot/cold split (`PTO2TaskDescriptor` hot + `PTO2TaskPayload` cold).
-
-## 5. Terminology
-
-1. `cluster`: one physical unit with `1 AIC + 2 AIV`.
-2. `MixedKernels`: 3 submit slots (`AIC`, `AIV0`, `AIV1`) with `INVALID_KERNEL_ID` for inactive slots.
-3. `MixedTask`: one runtime graph node created by one submit call.
-4. `active_mask`: bitmask of active subtask slots.
-5. `resource shape`: normalized lane demand class of a mixed task.
-
-## 6. API Contract
+One call to `rt_submit_task` creates one mixed graph task. The task may use any
+nonempty combination of the physical cluster's `AIC`, `AIV0`, and `AIV1`
+lanes; all active lanes share one argument payload, dependency set, logical
+block count, and completion record.
 
 ```cpp
-inline constexpr int32_t INVALID_KERNEL_ID = -1;
+MixedKernels kernels;
+kernels.aic_kernel_id = aic_func_id;
+kernels.aiv0_kernel_id = aiv0_func_id;
+kernels.aiv1_kernel_id = aiv1_func_id;
 
-struct MixedKernels {
-    int32_t aic_kernel_id{INVALID_KERNEL_ID};
-    int32_t aiv0_kernel_id{INVALID_KERNEL_ID};
-    int32_t aiv1_kernel_id{INVALID_KERNEL_ID};
-};
-
-static inline void rt_submit_task(PTO2Runtime* rt,
-                                       const MixedKernels& mixed_kernels,
-                                       Arg* args,
-                                       int32_t num_args);
-
-static inline void rt_submit_aic_task(PTO2Runtime* rt,
-                                           int32_t kernel_id,
-                                           Arg* args,
-                                           int32_t num_args);
-
-static inline void rt_submit_aiv_task(PTO2Runtime* rt,
-                                           int32_t kernel_id,
-                                           Arg* args,
-                                           int32_t num_args);
+L0TaskArgs args;
+args.add_inout(output);
+args.launch_spec.set_block_num(block_num);
+TaskOutputTensors result = rt_submit_task(kernels, args);
 ```
 
-Rules:
+`rt_submit_aic_task` and `rt_submit_aiv_task` are convenience wrappers over the
+same mixed-task contract.
 
-1. One submit call creates one `MixedTask`.
-2. All active slots share the same `args` and `num_args`.
-3. At least one slot must be active.
-4. `aiv0_kernel_id` and `aiv1_kernel_id` are semantically equivalent.
-5. Wrappers are orchestration sugar only (inline in orchestration API); no dedicated runtime ops entries.
-6. Submit-contract types are defined once in a shared header-only submit-types surface consumed by orchestration and runtime headers.
-7. Invalid submits follow existing PTO2 behavior (`always_assert`), not a new recoverable return-code API.
+## Task Representation
 
-## 7. Data Model (Requirements + Design)
+The shared graph image separates stable task identity from scheduling state:
 
-`PTO2TaskDescriptor` (hot path) carries mixed-task identity/state:
+- `PTO2TaskDescriptor` contains the task ID, kernel IDs, and packed-buffer
+  addresses.
+- `PTO2TaskPayload` contains tensors, scalars, predicates, and position-
+  independent `fanin_local_ids[]`.
+- `PTO2TaskSlotState` contains the active mask, task attributes, logical block
+  count, subtask counters, completion state, and descriptor/payload bindings.
 
-1. `task_id`
-2. `active_mask`
-3. `completed_subtasks` (atomic counter, incremented per subtask completion)
-4. `kernel_id[3]` for `(AIC, AIV0, AIV1)`
-5. dependency heads/counters and packed-buffer metadata
+This image is built on the host, relocated once, and copied to the device. It
+contains no fanout adjacency or dependency-pool pointers.
 
-`PTO2TaskPayload` (cold path) carries:
+## Resource Shapes
 
-1. shared args/tensors/scalars copied once per mixed submit
-2. fanin mixed-task IDs
-3. other cold-path submit metadata
+`ActiveMask::to_shape()` maps a task to one of four shapes:
 
-Producer identity in TensorMap is mixed-task ID end-to-end.
+| Shape | Meaning |
+| ----- | ------- |
+| `AIC` | One AIC lane per logical block |
+| `AIV` | One AIV lane per logical block |
+| `MIX` | Two or three active lanes in one physical cluster |
+| `DUMMY` | Dependency-only task with no AICore dispatch |
 
-## 8. Scheduling Model
+A single-AIV task is normalized to the AIV0 submit slot. MIX dispatch still
+uses the full active mask so unused lanes do not block placement.
 
-### 8.1 Resource Shapes
+## Logical Blocks and Validation
 
-Runtime uses shape-based ready queues (not worker-type queues):
+`block_num` is the number of logical SPMD blocks, not the number of physical
+clusters. Non-sync tasks may be wider than the device and dispatch in waves.
 
-1. `AIC_ONLY`
-2. `AIV_X1`
-3. `AIV_X2`
-4. `AIC_AIV_X1`
-5. `AIC_AIV_X2`
+Submission validates before allocating or publishing a slot:
 
-Queueing key is normalized resource shape (not raw slot label).
+```text
+block_num >= 1
+block_num * popcount(active_mask) <= INT16_MAX
+```
 
-### 8.2 Atomic Cluster Dispatch
+The product is the number stored in the 16-bit completion counter. Invalid
+values latch `PTO2_ERROR_INVALID_ARGS`; they are not capped at the device's
+physical cluster count.
 
-1. Dispatch decision unit is one mixed task.
-2. For multi-slot mixed tasks, partial launch is forbidden.
-3. A mixed task is dispatchable only when one local owned cluster can satisfy all required lanes.
-4. Compatible mixed tasks may co-reside over time if they use disjoint free lanes.
+`require_sync_start` adds a separate residency constraint because every block
+must launch as one cohort:
 
-### 8.3 Dependency and Completion
+- AIV-only: `block_num <= rt_available_aiv_count()`
+- AIC or MIX: `block_num <= rt_available_cluster_count()`
 
-1. Fanin release/readiness remains dependency-correct and graph-level.
-2. Two-stage completion:
-   - `on_subtask_complete(task_id, subslot)`
-   - `on_task_complete(task_id)` only when `completed_subtasks == total_required_subtasks`
-3. Downstream release is triggered once per mixed task completion, not once per subslot.
+## Dependency and Readiness Flow
 
-## 9. Executor Ownership and Numbering
+1. Host orchestration allocates a task slot and builds its payload.
+2. TensorMap and explicit dependencies append producer local IDs to
+   `fanin_local_ids[]`.
+3. Submit publishes only the finished graph data; it does not push ready tasks.
+4. After H2D, device boot scans every submitted task exactly once.
+5. A task with every fanin complete is routed to its ready queue; otherwise it
+   registers on its first unmet producer's wake list.
+6. Producer completion reclassifies wake-list consumers until they become ready.
 
-### 9.1 Canonical Flattened Numbering (Unchanged)
+Completion flags are monotonic, so a task never needs periodic fanin polling.
 
-Given `block_dim` clusters:
+## Dispatch and Completion
 
-1. AIC IDs: `[0, block_dim)`
-2. AIV IDs: `[block_dim, 3 * block_dim)`
-3. Cluster `i`: `{i, block_dim + i, 2 * block_dim + i}`
+- AIC and AIV tasks claim as many free cores as the current scheduler owns and
+  requeue remaining logical blocks for later waves.
+- MIX placement selects whole clusters whose used lanes can all accept the
+  task. High cluster offsets are represented by the runtime's 128-bit bitset.
+- `require_sync_start` uses local staging when possible and a generation-tagged
+  global drain when the cohort spans scheduler ownership domains.
+- Each completed lane increments `completed_subtasks`; the mixed task completes
+  exactly once when it reaches `block_num * popcount(active_mask)`.
 
-This project-defined flattened numbering is kept unchanged.
+## Executor Model
 
-### 9.2 Cluster Ownership
+The host loads and executes the orchestration shared object synchronously. The
+device has no orchestration thread: every launched AICPU thread participates in
+scheduling its assigned cores after the boot thread attaches the prebuilt graph.
+Cluster ownership is assigned during the AICore handshake and remains stable for
+the run.
 
-1. One cluster must be owned by one scheduler domain/thread at a time.
-2. No split-cluster ownership in either:
-   - initial `assign_cores_to_threads()`
-   - post-orchestrator `reassign_cores_for_all_threads()`
-3. Lane occupancy bookkeeping must remain consistent with ownership after reassignment.
+## Capacity
 
-## 10. Functional Requirements
+`host_build_graph` is whole-graph-resident. Task slots, heap bytes, fanin IDs,
+and TensorMap entries are not reclaimed while the graph is executing. The graph
+must fit the configured task window, heap, and TensorMap pool before launch.
 
-### 10.1 Valid Mixed Shapes
+## Validation
 
-1. AIC only
-2. AIV only (1 or 2 AIV lanes)
-3. AIC + 1 AIV
-4. AIC + 2 AIV
-
-### 10.2 Runtime Behavior per Submit
-
-1. Validate submit arguments.
-2. Allocate mixed-task ID and initialize descriptor/payload/slot_state once.
-3. Lookup producers via TensorMap; collect fanin metadata and increment producers' `fanout_count`.
-4. Wire fanout edges and determine readiness **inline in submit**: link each live producer's `fanout_head` via `dep_pool` entries and seed readiness directly — `push_ready_routed` for zero-fanin tasks, `route_ready_once` once a producer's fanin resolves. No device-side wiring queue is involved.
-5. Dispatch all active lanes atomically when resources allow.
-6. Aggregate completion and release downstream once.
-
-## 11. Non-Functional Requirements
-
-1. Correctness: no dependency violation, no partial mixed-task dispatch.
-2. Determinism: dependency-correct ordering preserved; AIV lane choice may vary but remains semantically equivalent.
-3. Fairness: resource-aware polling heuristic is allowed; strict starvation-free guarantee across all shapes is not required.
-4. Performance: no obvious regression for non-cluster workflows.
-5. Observability: lifecycle visibility for submit/ready/dispatch/block/complete.
-
-## 12. Acceptance Criteria
-
-Feature is accepted when:
-
-1. Orchestration compiles and submits via `MixedKernels` API/wrappers.
-2. Scheduler dispatches each mixed task as one cluster scheduling decision.
-3. Dependencies gate mixed-task readiness correctly.
-4. AIV execution remains cluster-local and semantically equivalent across lanes.
-5. Existing non-cluster workflows continue to pass without behavior regression.
-6. Cluster ownership is never split across scheduler domains before/after transition.
-
-## 13. Verification Matrix
-
-Recommended validation coverage:
-
-1. Mapping correctness for cluster-to-core ID relation.
-2. Atomic dispatch for multi-slot shapes.
-3. Dependency gating and completion aggregation (`done_mask == active_mask`).
-4. Lane-occupancy co-residency behavior for compatible shapes.
-5. Core-transition ownership stability.
-6. Invalid submit handling (`always_assert` path).
-7. Regression coverage for existing examples/tests.
-
-Milestone command (device):
+Run the HBG runtime simulation sweep after runtime changes:
 
 ```bash
-python tests/st/a2a3/tensormap_and_ringbuffer/batch_paged_attention/test_batch_paged_attention.py \
-  -p a2a3 -d 9
+pytest examples tests/st --platform a2a3sim --runtime host_build_graph
+pytest examples tests/st --platform a5sim --runtime host_build_graph
 ```
 
-Final validation:
-
-```bash
-pytest examples tests/st -m "not sdma" --platform a2a3   # SDMA cases quarantined by marker; run them with -m sdma
-```
-
-## 14. Resolved Decisions
-
-1. Legacy orchestration-facing single-task submit is replaced by mixed submit contract.
-2. Invalid mixed submits fail with existing submit-time assert behavior.
-3. Per-cluster concurrent capacity is lane-occupancy-driven, not a fixed constant.
-4. Submit-contract types live in one shared header-only surface.
-5. Resource-aware dispatch heuristics are allowed without a strict starvation-free guarantee.
+The `host_build_graph_wide_dispatch` scene specifically covers wide AIV work,
+sync-start MIX placement, normal MIX placement, and bit offsets above 63 with
+`aicpu_thread_num=2`.
