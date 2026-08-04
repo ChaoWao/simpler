@@ -17,31 +17,34 @@
 extern "C" {
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
-async_notify_orchestration_config(const ChipTaskArgs &orch_args) {
+deferred_notify_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{.expected_arg_count = 5};
 }
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
 aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
-    return async_notify_orchestration_config(orch_args);
+    return deferred_notify_orchestration_config(orch_args);
 }
 
-__attribute__((visibility("default"))) void async_notify_orchestration(const ChipTaskArgs &orch_args) {
+__attribute__((visibility("default"))) void deferred_notify_orchestration(const ChipTaskArgs &orch_args) {
     if (orch_args.tensor_count() + orch_args.scalar_count() != 5) {
-        LOG_ERROR("async_notify_demo: expected 5 args");
+        LOG_ERROR("deferred_notify_demo: expected 5 args");
         return;
     }
 
-    const ChipTensor &input = orch_args.tensor(0).ref();
-    const ChipTensor &output = orch_args.tensor(1).ref();
+    const ChipTensor &partial = orch_args.tensor(0).ref();
+    const ChipTensor &mailbox = orch_args.tensor(1).ref();
     const ChipTensor &result = orch_args.tensor(2).ref();
     const ChipTensor &notify_counter = orch_args.tensor(3).ref();
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
 
+    uint32_t shapes[1] = {mailbox.shapes[0]};
+    TensorCreateInfo producer_output_info(shapes, 1, DataType::FLOAT32);
     CoreTaskArgs params_producer;
-    params_producer.add_input(input);
-    params_producer.add_output(output);
+    params_producer.add_input(partial);
+    params_producer.add_inout(mailbox);
+    params_producer.add_output(producer_output_info);
     params_producer.add_scalar(notify_counter.buffer.addr);
     params_producer.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     rt_submit_aiv_task(0, params_producer);
@@ -57,7 +60,7 @@ __attribute__((visibility("default"))) void async_notify_orchestration(const Chi
 
     CoreTaskArgs params_consumer;
     params_consumer.add_input(notify_token);
-    params_consumer.add_input(output);
+    params_consumer.add_input(mailbox);
     params_consumer.add_output(result);
     params_consumer.add_scalar(notify_counter.buffer.addr);
     rt_submit_aiv_task(1, params_consumer);

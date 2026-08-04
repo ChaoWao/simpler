@@ -416,8 +416,9 @@ cycle-accurate replay, so it is not listed as a runnable coverage case here.
 
 **Not Core swimlane targets (excluded).** Runtime-mechanics tests (`orch_so_cache`,
 `prepared_callable`, `dynamic_register`, `l3_group`, `l3_dependency`,
-`worker_chip_orch_comm`, `aicore_op_timeout`, `scope_stats`); comm / notify
-demos (`async_notify_demo`, `deferred_notify_demo`,
+`worker_chip_orch_comm`, `aicore_op_timeout`, `scope_stats`); comm / notify tests
+(`tests/st/worker/comm_domain/async_notify`,
+`tests/st/worker/comm_domain/deferred_notify`, and
 `sdma_async_completion_demo`); DFX wrappers that reuse other kernels
 (`dep_gen`, `pmu`, `args_dump`, `chip_swimlane` — they trace `vector_example`
 / `mixed_example`); `host_build_graph/*` (a different runtime whose dump
