@@ -6,11 +6,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Unit tests for simpler.buffer: identity/descriptor pack-unpack + create/import round trip.
+"""Unit tests for simpler.buffer: identity/descriptor construction + create/import round trip.
 
 The three wire types are the C++ structs of buffer.h bound directly, so what is pinned here is the
 Python-visible contract over them — construction rejects what `validate_buffer_descriptor` rejects,
-a round trip through `pack`/`unpack` is the identity, and equality and hashing ignore wire padding.
+and equality and hashing ignore wire padding. There is deliberately no `pack`/`unpack`: no Python
+path turns these types into bytes or back, which is what keeps construction the only way in.
 Imports come from `simpler.buffer` because that is where a caller reaches them, alongside the
 registry and the Buffer constructors that are genuinely defined there.
 """
@@ -30,6 +31,7 @@ from simpler.buffer import (
     mint_owner_instance_id,
     re_export,
     wrap_device_malloc,
+    wrap_fork_inherited,
 )
 from simpler.task_interface import ChipTensor
 
@@ -276,3 +278,38 @@ def test_construction_rejects_a_zero_stride():
             h.tensor(shapes=(4, 8), dtype=DataType.FLOAT32, strides=(8, 0))
     finally:
         h.close()
+
+
+def test_construction_rejects_an_extent_that_overflows():
+    # shapes/strides are u32 each, so one (shape-1)*stride product alone approaches 2^64. An extent
+    # summed without saturation wraps to a small value and the view passes as "in bounds" while
+    # really spanning exabytes — reachable straight from here.
+    h = create_host_shared_buffer(64, mint_owner_instance_id(), buffer_id=1)
+    try:
+        with pytest.raises(ValueError, match="overflows 64 bits"):
+            h.tensor(shapes=(2147483649,), dtype=DataType.FLOAT32, strides=(2147483648,))
+    finally:
+        h.close()
+
+
+def test_fork_backend_is_stated_not_inferred_from_access():
+    # FORK_SHM and FORK_COW are opposite kernel write semantics, so the caller states which mmap it
+    # holds; deriving it from `access` makes a read-only MAP_SHARED backing inexpressible.
+    oid = mint_owner_instance_id()
+    shared_ro = wrap_fork_inherited(
+        0x1000, 64, oid, buffer_id=1, access=AccessMode.READ, backend_kind=BackendKind.FORK_SHM
+    )
+    assert shared_ro.backend_kind == BackendKind.FORK_SHM
+    assert shared_ro.to_descriptor().access == AccessMode.READ
+
+    cow = wrap_fork_inherited(0x1000, 64, oid, buffer_id=2)  # the safe default pair
+    assert cow.backend_kind == BackendKind.FORK_COW
+    assert cow.base == 0x1000
+
+    # A write grant over copy-on-write would be silently unobservable by the owner, so the
+    # descriptor's validator refuses it rather than letting the pair exist.
+    bad = wrap_fork_inherited(
+        0x1000, 64, oid, buffer_id=3, access=AccessMode.READWRITE, backend_kind=BackendKind.FORK_COW
+    )
+    with pytest.raises(ValueError, match="FORK_COW"):
+        bad.to_descriptor()
