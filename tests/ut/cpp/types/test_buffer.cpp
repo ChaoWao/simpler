@@ -36,12 +36,17 @@ CanonicalIdentity make_identity() {
     return id;
 }
 
+// A POSIX_SHM body is the shm name the consumer opens; a valid descriptor always carries one.
+constexpr const char *kShmName = "psm_deadbeef";
+
 Tensor make_tensor() {
     Tensor r{};
     r.buffer.magic = BUFFER_DESCRIPTOR_MAGIC;
     r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
     r.buffer.identity = make_identity();
     r.buffer.nbytes = 8192;  // must cover byte_offset + the strided extent below
+    r.buffer.body_len = static_cast<uint16_t>(std::strlen(kShmName));
+    std::memcpy(r.buffer.body, kShmName, r.buffer.body_len);
     r.byte_offset = 4096;
     r.ndims = 3;
     r.shapes[0] = 2;
@@ -51,6 +56,21 @@ Tensor make_tensor() {
     r.strides[1] = 8;
     r.strides[2] = 1;
     r.dtype = DataType::FLOAT16;
+    return r;
+}
+
+// An address-bearing backend body is exactly one u64 LE base.
+void set_address_body(Tensor &r, uint64_t base) {
+    std::memset(r.buffer.body, 0, DESC_MAX_BYTES);
+    r.buffer.body_len = static_cast<uint16_t>(BACKEND_ADDRESS_BODY_BYTES);
+    std::memcpy(r.buffer.body, &base, sizeof(base));
+}
+
+Tensor make_device_tensor() {
+    Tensor r = make_tensor();
+    r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::DEVICE_MALLOC);
+    r.buffer.address_space = static_cast<uint8_t>(AddressSpace::DEVICE);
+    set_address_body(r, 0xDEAD0000ULL);
     return r;
 }
 
@@ -167,6 +187,7 @@ TEST(BufferAbi, ForkCowGrantsReadOnly) {
     Tensor r = make_tensor();
     r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::FORK_COW);
     r.buffer.access = static_cast<uint8_t>(AccessMode::READ);
+    set_address_body(r, 0x7F0000000000ULL);  // a fork-inherited host VA, not a shm name
     EXPECT_NO_THROW(validate_tensor(r));
 
     // A write grant over copy-on-write would land in a private copy the owner never sees, so it is
@@ -223,6 +244,7 @@ TEST(BufferAbi, DecodeRejectsEveryCorruptedField) {
         {"unknown dtype", offsetof(Tensor, dtype), {0x7F}},
         {"stride must be > 0", offsetof(Tensor, strides), {0, 0, 0, 0}},
         {"byte_offset is not a multiple", offsetof(Tensor, byte_offset), {0x03, 0, 0, 0, 0, 0, 0, 0}},
+        {"reserved bytes past body_len", offsetof(BufferDescriptor, body) + DESC_MAX_BYTES - 1, {0x01}},
     };
     for (const auto &c : cases) {
         SCOPED_TRACE(c.what);
@@ -230,6 +252,88 @@ TEST(BufferAbi, DecodeRejectsEveryCorruptedField) {
             validate_tensor(decode_with_corruption(c.offset, c.value.data(), c.value.size())), std::invalid_argument
         );
     }
+}
+
+// `backend_kind` says how the consumer reads `body`, so a body that does not fit that reading is not
+// a smaller backing — it is a different value. The address case is the sharp one: a short body reads
+// as a TRUNCATED pointer with nothing about it to distinguish it from a real one.
+TEST(BufferAbi, DecodeRejectsABodyThatDoesNotMatchItsBackend) {
+    Tensor dev = make_device_tensor();
+    EXPECT_NO_THROW(validate_tensor(dev));
+
+    for (uint16_t bad_len : {uint16_t{0}, uint16_t{3}, uint16_t{7}, uint16_t{9}, uint16_t{DESC_MAX_BYTES}}) {
+        SCOPED_TRACE(bad_len);
+        Tensor r = make_device_tensor();
+        r.buffer.body_len = bad_len;
+        EXPECT_THROW(validate_tensor(r), std::invalid_argument);
+    }
+
+    // Nothing is mapped or allocated at 0, so a zero base is an unfilled body rather than a location.
+    Tensor null_base = make_device_tensor();
+    set_address_body(null_base, 0);
+    EXPECT_THROW(validate_tensor(null_base), std::invalid_argument);
+
+    // POSIX_SHM carries a name the consumer opens, and the Python side decodes it as UTF-8 first.
+    // Restricting it to printable ASCII makes that decode total: bytes that pass here always decode.
+    Tensor no_name = make_tensor();
+    no_name.buffer.body_len = 0;
+    EXPECT_THROW(validate_tensor(no_name), std::invalid_argument);
+
+    for (auto bad : {'\0', '\x01', ' ', '/', '\x7F', '\xFF'}) {
+        SCOPED_TRACE(static_cast<int>(static_cast<unsigned char>(bad)));
+        Tensor bad_name = make_tensor();
+        bad_name.buffer.body[2] = bad;
+        EXPECT_THROW(validate_tensor(bad_name), std::invalid_argument);
+    }
+
+    // A REMOTE_SIDECAR arg's authoritative descriptor rides in the per-task sidecar, so a body here
+    // is a second, unread source of truth.
+    Tensor sidecar = make_tensor();
+    sidecar.buffer.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+    EXPECT_THROW(validate_tensor(sidecar), std::invalid_argument);
+    sidecar.buffer.body_len = 0;
+    std::memset(sidecar.buffer.body, 0, DESC_MAX_BYTES);
+    EXPECT_NO_THROW(validate_tensor(sidecar));
+}
+
+// The unused tail of `body` crosses a process boundary with the descriptor, so whatever the owner's
+// memory held there crosses with it. Distinct from the struct's `_pad`, which equality and hashing
+// ignore on purpose so two decodes of one backing key alike.
+TEST(BufferAbi, DecodeRejectsNonZeroReservedTail) {
+    Tensor r = make_tensor();
+    EXPECT_NO_THROW(validate_tensor(r));
+
+    for (uint32_t i : {r.buffer.body_len + 0u, DESC_MAX_BYTES / 2, DESC_MAX_BYTES - 1}) {
+        SCOPED_TRACE(i);
+        Tensor dirty = make_tensor();
+        dirty.buffer.body[i] = static_cast<char>(0xA5);
+        EXPECT_THROW(validate_tensor(dirty), std::invalid_argument);
+    }
+}
+
+// A Tensor's shape/stride slots past `ndims` are the same case as the descriptor's body tail: the
+// blob memcpy carries all 144 bytes whatever a producer chose to fill. Without this, two encodings
+// of one view differ over the inactive slots while every active field agrees.
+TEST(BufferAbi, DecodeRejectsNonZeroSlotsPastNdims) {
+    Tensor r = make_tensor();  // ndims == 3, so slots 3 and 4 are inactive
+    EXPECT_NO_THROW(validate_tensor(r));
+
+    for (uint32_t i = r.ndims; i < static_cast<uint32_t>(MAX_TENSOR_DIMS); ++i) {
+        SCOPED_TRACE(i);
+        Tensor dirty_shape = make_tensor();
+        dirty_shape.shapes[i] = 7;
+        EXPECT_THROW(validate_tensor(dirty_shape), std::invalid_argument);
+
+        Tensor dirty_stride = make_tensor();
+        dirty_stride.strides[i] = 7;
+        EXPECT_THROW(validate_tensor(dirty_stride), std::invalid_argument);
+    }
+
+    // The extent is unchanged by an inactive slot, so nothing else in the gate would have caught it.
+    Tensor dirty = make_tensor();
+    dirty.shapes[4] = 7;
+    dirty.strides[4] = 7;
+    EXPECT_EQ(tensor_extent_bytes(dirty), tensor_extent_bytes(r));
 }
 
 TEST(BufferAbi, DecodeRejectsAViewPastItsBacking) {

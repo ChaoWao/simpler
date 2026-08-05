@@ -99,7 +99,8 @@ it is the resolved `addr` + `size`. That is the whole of what materialization do
 **Dead on the device** (`Tensor`-only): `magic` discriminates untrusted bytes at
 a decode boundary the device does not have. `identity` / `backend_kind` / `body`
 / `body_len` are the *recipe* for finding the backing — spent once at
-materialization, never consulted again. `access` has no device enforcement point
+materialization, never consulted again; what a body may contain is fixed per
+backend, see [Backends](#backends). `access` has no device enforcement point
 (it is checked at submit). `owner_worker_path_id` is diagnostic.
 
 **Meaningless before materialization** (`ChipTensor`-only): `buffer.addr` is the
@@ -260,14 +261,31 @@ gates, or keys on it.
 
 ## Backends
 
-| Backend | Materializes to | Used for |
-| ------- | --------------- | -------- |
-| `POSIX_SHM` | a named shm mapped into the consumer | `create_buffer` / `alloc_shared_tensor` |
-| `FORK_SHM` | the same VA, no map | a pre-fork `MAP_SHARED` host buffer (e.g. `share_memory_()`), writable from the child |
-| `FORK_COW` | the same VA, no map | a pre-fork plain host buffer: copy-on-write, so **READ only** |
-| `VMM_WINDOW` | the device VA of the window carved by `allocate_domain`, no map | communication-domain window / buffer |
-| `DEVICE_MALLOC` | the device pointer, no map (chip-local) | `alloc_child_tensor` |
-| `REMOTE_SIDECAR` | (P2) resolved via the remote transport | an arg to a remote L3; the descriptor rides in the sidecar |
+| Backend | Materializes to | `body` must be | Used for |
+| ------- | --------------- | -------------- | -------- |
+| `POSIX_SHM` | a named shm mapped into the consumer | the shm name: 1–32 bytes of printable ASCII, no `/` | `create_buffer` / `alloc_shared_tensor` |
+| `FORK_SHM` | the same VA, no map | exactly 8 bytes, a non-zero u64 LE base | a pre-fork `MAP_SHARED` host buffer (e.g. `share_memory_()`), writable from the child |
+| `FORK_COW` | the same VA, no map | exactly 8 bytes, a non-zero u64 LE base | a pre-fork plain host buffer: copy-on-write, so **READ only** |
+| `VMM_WINDOW` | the device VA of the window carved by `allocate_domain`, no map | exactly 8 bytes, a non-zero u64 LE base | communication-domain window / buffer |
+| `DEVICE_MALLOC` | the device pointer, no map (chip-local) | exactly 8 bytes, a non-zero u64 LE base | `alloc_child_tensor` |
+| `REMOTE_SIDECAR` | (P2) resolved via the remote transport | empty | an arg to a remote L3; the descriptor rides in the sidecar |
+
+**The body rule is enforced, not advisory.** `backend_kind` is what selects how a
+consumer reads `body`, so a body that does not fit that reading is not a smaller
+backing — it is a different value, and a short address body reads as a truncated
+pointer indistinguishable from a real one. Construction and every decode run the
+same check, so a descriptor that breaks the table above cannot be built or
+received. Two consequences worth knowing:
+
+- **Bytes past `body_len` must be zero**, as must a `Tensor`'s `shapes` /
+  `strides` slots past `ndims`. Both are regions a producer chose not to fill,
+  and the whole struct crosses the process boundary, so whatever the owner's
+  memory held there would cross with it. The `_pad` fields are *not* covered:
+  they are alignment slack, and `CanonicalIdentity`'s is deliberately tolerated
+  so two decodes of one backing still key alike.
+- **A POSIX shm object smaller than the descriptor's `nbytes` is refused at
+  import.** Every view bound check is `byte_offset + extent <= nbytes`, so an
+  unverified `nbytes` makes all of them vacuous.
 
 ## What a submit checks
 
