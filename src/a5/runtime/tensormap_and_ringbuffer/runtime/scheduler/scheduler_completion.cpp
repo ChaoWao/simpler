@@ -335,6 +335,15 @@ void SchedulerContext::check_running_cores_for_completion(
         }
 #endif
 
+#if SIMPLER_DFX
+        // Release an ACK-gated AICore swimlane buffer only after capturing the
+        // FIN observation timestamp. Publishing the retained buffer can do
+        // deferred-release work, which must not be charged to (end -> finish).
+        if (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED) {
+            chip_swimlane_aicpu_on_aicore_ack(core_id, thread_idx, static_cast<uint32_t>(reg_task_id));
+        }
+#endif
+
         // --- Apply phase: execute actions based on transition ---
 
         // 1. Complete finished tasks (capture pointers before modifying core state)

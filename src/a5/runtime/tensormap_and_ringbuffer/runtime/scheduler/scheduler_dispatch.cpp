@@ -184,9 +184,8 @@ SchedulerContext::PublishHandle SchedulerContext::prepare_subtask_to_core(
 
     // AICore buffer rotation lives on the dispatch path: count this dispatch
     // and rotate before write_reg when we're about to cross a BUFFER_SIZE
-    // boundary. The just-filled buffer is stashed for ACK-gated release; a5 does
-    // not wire the ACK hook, so it drains via the next-rotation / run-end
-    // backstop. `reg_task_id` is passed as the gate token.
+    // boundary. The just-filled buffer is stashed until the completion path
+    // observes the matching ACK/FIN. `reg_task_id` is passed as the gate token.
 #if SIMPLER_DFX
     if (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED) {
         chip_swimlane_aicpu_on_aicore_dispatch(core_id, thread_idx, reg_task_id);
