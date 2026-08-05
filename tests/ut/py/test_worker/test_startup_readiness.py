@@ -1612,6 +1612,37 @@ class TestTerminalStateContract:
             finally:
                 child.close()
 
+    def test_add_worker_freezes_child_before_topology_publication(self):
+        parent = Worker(level=4, num_sub_workers=0)
+        child = Worker(level=3, num_sub_workers=0)
+        parent.add_worker(child)
+
+        with child._hierarchical_start_cv:
+            assert child._topology_parent is parent
+        with pytest.raises(RuntimeError, match="attached as a child"):
+            child.init()
+
+    def test_add_worker_rejects_self_attachment(self):
+        worker = Worker(level=4, num_sub_workers=0)
+        with pytest.raises(ValueError, match="cannot add a Worker to itself"):
+            worker.add_worker(worker)
+
+    def test_add_worker_rejects_already_attached_child(self):
+        first_parent = Worker(level=4, num_sub_workers=0)
+        second_parent = Worker(level=4, num_sub_workers=0)
+        child = Worker(level=3, num_sub_workers=0)
+        first_parent.add_worker(child)
+        with pytest.raises(RuntimeError, match="already attached to another parent"):
+            second_parent.add_worker(child)
+
+    def test_add_worker_rejects_attached_parent(self):
+        root = Worker(level=5, num_sub_workers=0)
+        middle = Worker(level=4, num_sub_workers=0)
+        leaf = Worker(level=3, num_sub_workers=0)
+        root.add_worker(middle)
+        with pytest.raises(RuntimeError, match="already attached as a child"):
+            middle.add_worker(leaf)
+
 
 class TestFailureSurfacing:
     """Every waiter on a failed init observes the same original cause, and a

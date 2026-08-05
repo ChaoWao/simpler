@@ -1102,6 +1102,9 @@ class ChipWorker:
     def __init__(self):
         self._impl = _ChipWorker()
         self._owner_id = uuid.uuid4().hex
+        self._lifecycle_lock = threading.Lock()
+        self._init_owner_thread: threading.Thread | None = None
+        self._init_in_progress = False
         self._registry_lock = threading.Lock()
         self._callable_registry: dict[int, ChipCallable] = {}
         self._identity_registry: dict[bytes, Any] = {}
@@ -1149,48 +1152,63 @@ class ChipWorker:
         `_ChipWorker.init(...)` from `_task_interface` instead of going
         through this wrapper.
         """
-        if log_level is None:
-            from . import _log  # noqa: PLC0415
+        with self._lifecycle_lock:
+            if self._init_in_progress:
+                raise RuntimeError("ChipWorker.init() is already in progress")
+            if self._impl.initialized:
+                raise RuntimeError("ChipWorker is already initialized")
+            self._init_owner_thread = threading.current_thread()
+            self._init_in_progress = True
 
-            log_level = _log.get_current_config()
+        try:
+            if log_level is None:
+                from . import _log  # noqa: PLC0415
 
-        # 1. libsimpler_log.so — RTLD_GLOBAL singleton, before host_runtime.so.
-        if not bins.simpler_log_path:
-            raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
-        log_handle = _preload_global(str(bins.simpler_log_path))
-        log_handle.simpler_log_init.argtypes = [ctypes.c_int]
-        log_handle.simpler_log_init.restype = ctypes.c_int
-        rc = log_handle.simpler_log_init(int(log_level))
-        if rc != 0:
-            raise RuntimeError(f"simpler_log_init failed with code {rc}")
+                log_level = _log.get_current_config()
 
-        # 2. libcpu_sim_context.so — sim platforms only (host_runtime.so's sim
-        #    variant resolves sim_context_set_* / pto_sim_get_* against it).
-        if bins.sim_context_path:
-            _preload_global(str(bins.sim_context_path))
+            # 1. libsimpler_log.so — RTLD_GLOBAL singleton, before host_runtime.so.
+            if not bins.simpler_log_path:
+                raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
+            log_handle = _preload_global(str(bins.simpler_log_path))
+            log_handle.simpler_log_init.argtypes = [ctypes.c_int]
+            log_handle.simpler_log_init.restype = ctypes.c_int
+            rc = log_handle.simpler_log_init(int(log_level))
+            if rc != 0:
+                raise RuntimeError(f"simpler_log_init failed with code {rc}")
 
-        # 3. host_runtime.so is dlopen'd RTLD_LOCAL inside _impl.init.
-        #    dispatcher_path is passed as an empty string on sim (where bins
-        #    has dispatcher_path=None); the onboard simpler_init reads it
-        #    via LoadAicpuOp::BootstrapDispatcher, sim ignores it.
-        dispatcher_path = getattr(bins, "dispatcher_path", None)
-        self._impl.init(
-            str(bins.host_path),
-            str(bins.aicpu_path),
-            str(bins.aicore_path),
-            "" if dispatcher_path is None else str(dispatcher_path),
-            int(device_id),
-            prewarm_config,
-            bool(enable_sdma),
-        )
-        for slot_id, callable_obj in list(self._callable_registry.items()):
-            self._impl.register_callable(int(slot_id), callable_obj)
+            # 2. libcpu_sim_context.so — sim platforms only.
+            if bins.sim_context_path:
+                _preload_global(str(bins.sim_context_path))
+
+            # 3. host_runtime.so is dlopen'd RTLD_LOCAL inside _impl.init.
+            # dispatcher_path is empty on sim; onboard consumes the real path.
+            dispatcher_path = getattr(bins, "dispatcher_path", None)
+            self._impl.init(
+                str(bins.host_path),
+                str(bins.aicpu_path),
+                str(bins.aicore_path),
+                "" if dispatcher_path is None else str(dispatcher_path),
+                int(device_id),
+                prewarm_config,
+                bool(enable_sdma),
+            )
+            for slot_id, callable_obj in list(self._callable_registry.items()):
+                self._impl.register_callable(int(slot_id), callable_obj)
+        finally:
+            with self._lifecycle_lock:
+                self._init_in_progress = False
 
     def finalize(self):
         """Tear down everything: device resources and runtime library.
 
         Terminal operation — the object cannot be reused after this.
         """
+        with self._lifecycle_lock:
+            owner = self._init_owner_thread
+            if owner is not None and owner is not threading.current_thread():
+                raise RuntimeError("ChipWorker.finalize() must run on the thread that called ChipWorker.init()")
+            if self._init_in_progress:
+                raise RuntimeError("ChipWorker.finalize() cannot run while ChipWorker.init() is in progress")
         try:
             self._impl.finalize()
         finally:

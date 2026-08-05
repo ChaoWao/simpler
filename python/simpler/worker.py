@@ -3065,6 +3065,8 @@ def _journal_child_survivors(journal, sub_shms, sub_pids, chip_shms, chip_pids, 
                 def _cleanup_child():
                     try:
                         wpid, _status = os.waitpid(_pid, os.WNOHANG)
+                    except ChildProcessError:
+                        wpid = _pid
                     except OSError:
                         wpid = 0
                     if wpid == 0:
@@ -3086,6 +3088,17 @@ def _journal_child_survivors(journal, sub_shms, sub_pids, chip_shms, chip_pids, 
                 return _cleanup_child
 
             journal.add("child", f"{kind} pid {pid} (shm unreclaimed)", _make_cleanup())
+
+        for orphan_index, shm in enumerate(shms[len(pids) :], start=len(pids)):
+
+            def _cleanup_orphan_shm(_shm=shm):
+                try:
+                    _shm.close()
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        _shm.unlink()
+
+            journal.add("shm", f"{kind} mailbox {orphan_index} without live child", _cleanup_orphan_shm)
 
 
 class _Lifecycle(enum.Enum):
@@ -3132,6 +3145,12 @@ class CleanupJournal:
     def add(self, kind, identity, cleanup_fn):
         self._entries.append((kind, identity, cleanup_fn))
 
+    def add_once(self, kind, identity, cleanup_fn):
+        key = (kind, identity)
+        if any((entry_kind, entry_identity) == key for entry_kind, entry_identity, _fn in self._entries):
+            return
+        self.add(kind, identity, cleanup_fn)
+
     def extend(self, entries):
         self._entries.extend(entries)
 
@@ -3139,14 +3158,20 @@ class CleanupJournal:
     def empty(self):
         return len(self._entries) == 0
 
+    def __len__(self):
+        return len(self._entries)
+
     @property
     def errors(self):
         return list(self._errors)
 
-    def drive(self):
+    def drive(self, only: set[tuple[str, str]] | None = None):
         errors = []
         remaining = []
         for kind, identity, cleanup_fn in self._entries:
+            if only is not None and (kind, identity) not in only:
+                remaining.append((kind, identity, cleanup_fn))
+                continue
             try:
                 cleanup_fn()
             except BaseException as exc:  # noqa: BLE001
@@ -3157,6 +3182,10 @@ class CleanupJournal:
             self._errors.extend(errors)
         return errors[0] if errors else None
 
+    def drive_kinds(self, kinds: set[str]):
+        """Drive every retained entry whose resource kind is in ``kinds``."""
+        return self.drive({(kind, identity) for kind, identity, _cleanup in self._entries if kind in kinds})
+
 
 class _CloseAttempt:
     """Private completion record for one close() teardown attempt.
@@ -3166,12 +3195,9 @@ class _CloseAttempt:
     wait on its ``done``, so every joiner of the same attempt sees the same
     outcome. ``incomplete=True`` means the tree was not fully reclaimed.
 
-    Teardown is single-shot and terminal: once it *runs* (``_teardown_attempted``
-    latches True), an un-reclaimed resource LEAKS — a later close() never re-drives
-    a half-torn tree. Teardown stays UN-attempted, with the tree intact and a
-    later close() free to drive drain+teardown, only where the drain itself did
-    not complete: in-flight leases or accepted run fences outlived the shared
-    cleanup budget, or an async interruption left a run fence undrained.
+    CLOSED is terminal for public admission, but teardown debt is retryable. A
+    later close() re-drives entries left in ``CleanupJournal``; a drain timeout
+    likewise leaves the native tree intact for a later attempt.
     """
 
     __slots__ = ("_outcome",)
@@ -3804,6 +3830,7 @@ class Worker:
         self._next_handle_id: int = 0
         self._owner_id = uuid.uuid4().hex
         self._shm_token: str = ""
+        self._shm_tree_tokens: set[str] = set()
         self._uncertain_hashids: set[bytes] = set()
         # Single authoritative lifecycle state (see _Lifecycle). All reads and
         # writes hold _hierarchical_start_cv. `_initialized` / `_hierarchical_
@@ -3817,10 +3844,9 @@ class Worker:
         # a public lifecycle state). Concurrent close()s pin to the attempt they
         # observe and wait on its completion; None until the first close().
         self._close_completion: _CloseAttempt | None = None
-        # One-way latch: True once close() has *entered* teardown. Teardown is
-        # terminal — after it runs, a later close() never re-drives a half-torn
-        # tree (un-reclaimed resources leak). Only a drain-timeout, which leaves
-        # this False, permits a later close() to drive drain+teardown once.
+        # True once close() has entered teardown. A journal residual overrides
+        # this replay latch and permits a later close() to re-drive the recorded
+        # post-success cleanup actions.
         self._teardown_attempted: bool = False
         self._cancel_token: bool = False
         self._cleanup_journal = CleanupJournal()
@@ -3943,6 +3969,7 @@ class Worker:
 
         # L4+ next-level Worker children (added via add_worker before init)
         self._next_level_workers: list[Worker] = []
+        self._topology_parent: Worker | None = None
         self._next_level_worker_ids: list[int] = []
         self._next_level_shms: list[SharedMemory] = []
         self._next_level_pids: list[int] = []
@@ -4295,6 +4322,11 @@ class Worker:
     def _close_remote_sessions(self, sessions: list[_RemoteSession]) -> None:
         for session in reversed(sessions):
             self._close_remote_session(session)
+
+    def _release_remote_sessions(self) -> None:
+        sessions = list(self._remote_sessions)
+        self._close_remote_sessions(sessions)
+        self._remote_sessions.clear()
 
     def _require_remote_worker_started(self, worker_id: int) -> None:
         """Argument + resource gate for the public remote-memory APIs. Admission
@@ -6082,20 +6114,47 @@ class Worker:
             raise RuntimeError("Worker.add_worker() requires level >= 4")
         if self._config.get("device_ids", []):
             raise RuntimeError("Worker.add_worker() cannot be combined with device_ids on the same Worker")
-        if worker._lifecycle is not _Lifecycle.NEW:
-            # init() happens inside the forked child process, so the child must
-            # be pristine — not started, failed, or closed.
-            raise RuntimeError("Child worker must be NEW (not started/failed/closed) before add_worker()")
-        # Hold the lifecycle lock across the state check and the topology
-        # mutation so a concurrent init() cannot freeze the topology snapshot
-        # between them.
-        with self._hierarchical_start_cv:
+        if worker is self:
+            raise ValueError("Worker.add_worker() cannot add a Worker to itself")
+        # Claim both lifecycle locks in a deterministic order. The old child
+        # check happened before the parent lock, so child.init() could win in
+        # between and publish an already-started child into a NEW parent.
+        first, second = sorted((self._hierarchical_start_cv, worker._hierarchical_start_cv), key=id)
+        with first, second:
             if self._lifecycle is not _Lifecycle.NEW:
                 raise RuntimeError("Worker.add_worker() must be called before init()")
+            if self._topology_parent is not None:
+                raise RuntimeError("Worker.add_worker() cannot mutate a Worker already attached as a child")
+            if worker._lifecycle is not _Lifecycle.NEW:
+                raise RuntimeError("Child worker must be NEW (not started/failed/closed) before add_worker()")
+            if worker._topology_parent is not None:
+                raise RuntimeError("Child worker is already attached to another parent")
             worker_id = self._allocate_next_level_worker_id()
+            worker._topology_parent = self
             self._next_level_workers.append(worker)
             self._next_level_worker_ids.append(worker_id)
             return worker_id
+
+    def _assign_shm_namespace(self, used_prefixes: set[str] | None = None) -> set[str]:
+        """Assign one root-visible mailbox token to every Worker in this tree."""
+        if used_prefixes is None:
+            used_prefixes = set()
+            shm_dir = "/dev/shm"
+            if os.path.isdir(shm_dir):
+                for entry in os.scandir(shm_dir):
+                    if entry.name.startswith("sp-") and len(entry.name) >= 12:
+                        used_prefixes.add(entry.name[3:11])
+        while True:
+            token = uuid.uuid4().hex
+            if token[:8] not in used_prefixes:
+                break
+        used_prefixes.add(token[:8])
+        self._shm_token = token
+        tokens = {self._shm_token}
+        for child in self._next_level_workers:
+            tokens.update(child._assign_shm_namespace(used_prefixes))
+        self._shm_tree_tokens = tokens
+        return tokens
 
     # ------------------------------------------------------------------
     # init — auto-discovery
@@ -6202,6 +6261,8 @@ class Worker:
                 # whose private teardown is still finishing) is never revived by a
                 # concurrent init().
                 raise RuntimeError("Worker is closed; create a new Worker")
+            if self._topology_parent is not None and _startup_deadline is None:
+                raise RuntimeError("Worker.init(): a Worker attached as a child is initialized by its parent")
             # Reject an initial callable that can never run before any startup
             # resource is spent: a childless worker that accepted a callable
             # would otherwise come up READY yet inert. Held under the lifecycle
@@ -6213,8 +6274,8 @@ class Worker:
             self._startup_error = None
             self._init_owner_thread = threading.current_thread()
             self._cancel_token = False
-            if self._is_startup_root or _startup_deadline is None:
-                self._shm_token = uuid.uuid4().hex
+            if _startup_deadline is None:
+                self._assign_shm_namespace()
             self._lifecycle = _Lifecycle.INITIALIZING
             if self.level >= 3:
                 self._is_startup_root = _startup_deadline is None
@@ -6314,8 +6375,6 @@ class Worker:
         if self._remote_worker_specs:
             self._remote_session_timeout_s()
 
-        for inner in self._next_level_workers:
-            inner._shm_token = self._shm_token
         # 1. Allocate sub-worker mailboxes (unified layout, MAILBOX_SIZE each).
         for i in range(n_sub):
             shm = SharedMemory(create=True, size=MAILBOX_SIZE, name=_shm_name(self._shm_token, f"sub-{i}"))
@@ -6816,9 +6875,11 @@ class Worker:
                     wpid, _status = os.waitpid(pid, os.WNOHANG)
                 except ChildProcessError:
                     to_reap.discard(pid)
+                    reaped.add(pid)
                     continue
                 if wpid != 0:
                     to_reap.discard(pid)
+                    reaped.add(pid)
             if to_reap and time.monotonic() <= deadline:
                 time.sleep(_STARTUP_POLL_INTERVAL_S)
             else:
@@ -6844,46 +6905,21 @@ class Worker:
             "killed": list(killed),
         }
 
-        for shm in self._sub_shms + self._chip_shms + self._next_level_shms:
-            try:
-                shm.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                shm.unlink()
-            except FileNotFoundError:
-                pass
-            except Exception:  # noqa: BLE001
-                pass
-
         # Release the pre-fork _Worker so a retry / close() won't double-free
         # the HeapRing mmap the C++ ctor grabbed.
         self._worker = None
         self._orch = None
 
-        # Survivors (children not reaped within the deadline) are registered in
-        # the journal so a subsequent close() can retry. Children that were
-        # SIGKILL'd are excluded — they should die imminently and be reaped
-        # by init; if they survive past SIGKILL they are in an un-recoverable
-        # D-state and journal retry would endlessly fail.
-        _reaped_or_killed = reaped | set(killed)
-        _journal_child_survivors(
-            self._cleanup_journal,
-            self._sub_shms,
-            self._sub_pids,
-            self._chip_shms,
-            self._chip_pids,
-            self._next_level_shms,
-            self._next_level_pids,
-            _reaped_or_killed,
-        )
-        self._chip_pids.clear()
-        self._sub_pids.clear()
-        self._next_level_pids.clear()
+        # Signal delivery is not reclamation. Use the same pid/shm pairing and
+        # journal handoff as normal close; a SIGKILL survivor remains retryable.
+        try:
+            self._reclaim_child_groups(deadline)
+        except BaseException as exc:  # noqa: BLE001 -- rollback remains best-effort
+            sys.stderr.write(
+                f"[worker pid={os.getpid()}] WARN: startup child reclaim failed (continuing best-effort): {exc}\n"
+            )
+            sys.stderr.flush()
         self._startup_group_leader_pids.clear()
-        self._sub_shms.clear()
-        self._chip_shms.clear()
-        self._next_level_shms.clear()
 
     def _cleanup_partial_init(self) -> None:
         """Best-effort cleanup for init() failures before the Worker is public-live.
@@ -6894,27 +6930,8 @@ class Worker:
         """
         deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
 
-        try:
-            self._release_active_remote_slot_refs()
-        except BaseException:  # noqa: BLE001
-            pass
-
-        remote_sessions = list(self._remote_sessions)
-        if self._worker is not None:
-            try:
-                self._worker.close()
-            except BaseException:  # noqa: BLE001
-                pass
-        self._close_remote_sessions(remote_sessions)
-        if self._chip_worker is not None:
-            try:
-                self._chip_worker.finalize()
-            except BaseException:  # noqa: BLE001
-                pass
-            self._chip_worker = None
-
-        self._remote_sessions.clear()
-        self._abort_hierarchical(deadline=deadline)
+        with contextlib.suppress(BaseException):
+            self._teardown_worker_tree(startup_abort=True, deadline=deadline)
         self._comm_base_ready = False
 
     @property
@@ -7213,27 +7230,36 @@ class Worker:
                     pass
 
     def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
-        # Per-region best-effort: mapping close and child release are independent
-        # ownership debts, so both are attempted before the region is expired.
+        # A region stays tracked until both ownership debts commit. This makes a
+        # failed close replayable by the cleanup journal instead of publishing a
+        # false success after dropping the only reference to the region.
         tracked = self._live_worker_chip_regions if resources is None else resources.worker_chip_regions
         if not tracked:
             return
         regions = list(tracked)
         errors: list[BaseException] = []
         for region in regions:
+            region_errors: list[BaseException] = []
             try:
                 region._close_worker_host_mapping()
             except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
+                region_errors.append(exc)
             try:
                 if self._worker is not None:
                     self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
             except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
+                region_errors.append(exc)
+            # End-of-run cleanup is poisoned and terminal for that run, so it
+            # still expires both sides after attempting both debts. Whole-tree
+            # close instead retains the region for journal replay.
+            if region_errors and resources is None:
+                errors.extend(region_errors)
+                continue
             try:
                 region._expire()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
+            errors.extend(region_errors)
 
             tracking_lists = (
                 (tracked,) if tracked is self._live_worker_chip_regions else (tracked, self._live_worker_chip_regions)
@@ -7754,9 +7780,8 @@ class Worker:
         immediate backend free + drop from ``_live_domains`` on each handle.
 
         Every handle is attempted and the first error is raised once they all
-        have been. A failed handle stays in ``_live_domains`` so the leak stays
-        detectable: close() reports it as a terminal residual instead of
-        returning success (terminal — it is not retried).
+        have been. A failed handle stays in ``_live_domains`` so close()'s
+        journal can retry it without losing the ownership record.
         """
         live_domains = self._live_domains if resources is None else resources.live_domains
 
@@ -8197,24 +8222,26 @@ class Worker:
     def _release_all_host_buffers(self) -> None:
         """Unmap + free every still-registered host buffer (called from close()).
 
-        Per-buffer best-effort: every buffer's shm is closed even if its unmap
-        broadcast (or a prior buffer) fails, so one failure never strands the
-        rest; the first error is raised after all are attempted so close()
-        reports the leak rather than swallowing it to stderr."""
+        Per-buffer best-effort: one buffer's failure never strands the rest, and
+        the first error is raised after all are attempted so close() reports the
+        leak rather than swallowing it to stderr. A buffer whose unmap broadcast
+        fails keeps its registry entry so the cleanup journal can retry it."""
         with self._registry_lock:
-            entries = list(self._host_buf_registry.values())
-            self._host_buf_registry.clear()
-            self._rebuild_host_buf_snapshot()
+            entries = list(self._host_buf_registry.items())
         errors: list[BaseException] = []
-        for entry in entries:
+        for data_ptr, entry in entries:
             try:
-                try:
-                    if self._worker is not None:  # resource presence, not lifecycle (see _close_host_shm)
-                        self._broadcast_host_unmap(entry.token)
-                finally:
-                    # Tolerates a still-live view over a zero-copy buffer at close():
-                    # unlinks the name regardless so the OS reclaims it once dropped.
-                    self._close_host_shm(entry)
+                if self._worker is not None:  # resource presence, not lifecycle (see _close_host_shm)
+                    child_errors = self._broadcast_host_unmap(entry.token)
+                    if child_errors:
+                        raise RuntimeError(f"host buffer token={entry.token} unmap failed: {child_errors[0]}")
+                # Tolerates a still-live view over a zero-copy buffer at close():
+                # unlinks the name regardless so the OS reclaims it once dropped.
+                self._close_host_shm(entry)
+                with self._registry_lock:
+                    if self._host_buf_registry.get(data_ptr) is entry:
+                        self._host_buf_registry.pop(data_ptr)
+                        self._rebuild_host_buf_snapshot()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
         if errors:
@@ -8764,10 +8791,8 @@ class Worker:
         return self._worker is not None or self._chip_worker is not None
 
     def _has_live_resources(self) -> bool:
-        """Any teardown-owned resource is still present. close() reads this once,
-        to decide whether the first (and only) teardown needs to run — it is NOT
-        a retry gate; teardown is terminal (see close()). Covers the native tree,
-        child pids/shms, L3-L2 regions, live CommDomains, host buffers, and
+        """Any teardown-owned resource is still present. Covers the native tree,
+        child pids/shms, Worker-Chip regions, live CommDomains, host buffers, and
         pending remote frees/import-releases."""
         return (
             self._has_native_tree()
@@ -8776,6 +8801,7 @@ class Worker:
             or bool(self._live_worker_chip_regions)
             or bool(self._live_domains)
             or bool(self._host_buf_registry)
+            or bool(self._remote_sessions)
             or bool(self._pending_remote_buffer_frees or self._pending_remote_import_releases)
             or not self._cleanup_journal.empty
         )
@@ -8798,13 +8824,17 @@ class Worker:
             parts.append(f"{len(self._live_domains)} comm domain(s)")
         if self._host_buf_registry:
             parts.append(f"{len(self._host_buf_registry)} host buffer(s)")
+        if self._remote_sessions:
+            parts.append(f"{len(self._remote_sessions)} remote session(s)")
         n_remote = len(self._pending_remote_buffer_frees) + len(self._pending_remote_import_releases)
         if n_remote:
             parts.append(f"{n_remote} pending remote free(s)")
+        if not self._cleanup_journal.empty:
+            parts.append(f"{len(self._cleanup_journal)} cleanup journal item(s)")
         return ", ".join(parts) if parts else "(none)"
 
     def close(self) -> None:  # noqa: PLR0912, PLR0915 -- lifecycle linearization: reentrancy / init-guard / join / owner / claim / drain / teardown
-        """Release this worker's resources. Terminal and single-shot.
+        """Release this worker's resources. Publicly terminal and retryable.
 
         A permanent commitment, not a reversible attempt: CLOSED is published
         atomically and never reverts to READY, and the leased live-tree APIs are
@@ -8821,12 +8851,9 @@ class Worker:
           Closing from the init-owner thread itself is rejected.
         - A concurrent ``close()`` joins the in-flight attempt and observes its
           result; teardown never runs twice at once.
-        - Teardown is single-shot. Once it runs, a later ``close()`` re-raises
-          the same result rather than re-driving a half-torn tree. A retry is
-          permitted only where the drain did not complete and so left teardown
-          un-attempted and the tree intact: either in-flight leases or accepted
-          run fences outlived the shared cleanup budget, or an asynchronous
-          interruption left a run fence undrained.
+        - A later ``close()`` retries journaled teardown debt. The journal keeps
+          each resource until its native free succeeds and preserves the child
+          pid/mailbox pair until ``waitpid`` proves the child is gone.
         - Native teardown runs on the ``init()``-owner thread, being device-bound.
         """
         # close() is a permanent commitment against a resource, not a reversible
@@ -8839,13 +8866,9 @@ class Worker:
         #     closing from the init-owner thread is rejected;
         #   - a concurrent close() joins the in-flight attempt and observes its
         #     result; the same worker's teardown never runs twice at once;
-        #   - teardown is single-shot and TERMINAL: once it runs, an un-reclaimed
-        #     resource leaks and a later close() re-raises the same result — it
-        #     never re-drives a half-torn tree. A later close() may retry only
-        #     where the drain left teardown un-attempted and the tree intact —
-        #     leases or accepted run fences outliving the shared budget, or an
-        #     async interruption leaving a run fence undrained; a tree with a
-        #     live op is never torn down;
+        #   - CLOSED remains absorbing, while journaled teardown debt may be
+        #     re-driven by a later close(); a tree with a live op is never torn
+        #     down;
         #   - native teardown runs only on the init-owner thread (device-bound).
         # `attempt` is None until the claim installs it. The pre-claim checks
         # raise/return before that, so the finally skips completion for them. From
@@ -9107,11 +9130,10 @@ class Worker:
         first stuck group burn the whole budget and left later groups as
         one-poll survivors). ``pids[i]`` pairs with ``shms[i]``; a shm is freed
         ONLY once its pid is reaped (freeing a live child's mailbox is a
-        use-after-free), so a survivor keeps BOTH. Teardown is terminal — a
-        survivor LEAKS and is reported as an error so close() never returns
-        success while a child is alive; an abnormal exit (signal / non-zero code)
-        is likewise reported. The first error is raised after every child is
-        attempted.
+        use-after-free), so a survivor keeps BOTH for ``_reclaim_child_groups``
+        to transfer into the retry journal. An abnormal exit (signal / non-zero
+        code) is likewise reported. The first error is raised after every child
+        is attempted.
         """
         errors: list[BaseException] = []
         bad_exits: list[str] = []
@@ -9174,17 +9196,88 @@ class Worker:
         if errors:
             raise errors[0]
 
-    def _teardown_ready_tree(self) -> None:
-        """Tear down the worker's live tree. Called only from close() after it
-        has published CLOSED and drained the leased ops, so no leased operation
-        is in flight. Register and unregister hold the same lease from their
-        READY gate through registry publication and child-facing cleanup.
+    def _unlink_shm_namespace(self, protected_names: set[str]) -> None:
+        """Unlink orphan mailboxes belonging to this exact startup tree."""
+        shm_dir = "/dev/shm"
+        if not self._shm_tree_tokens or not os.path.isdir(shm_dir):
+            return
+        prefixes = tuple(f"sp-{token[:8]}-" for token in self._shm_tree_tokens)
+        errors: list[BaseException] = []
+        for entry in os.scandir(shm_dir):
+            if entry.name in protected_names or not entry.name.startswith(prefixes):
+                continue
+            try:
+                orphan = SharedMemory(name=entry.name)
+                try:
+                    orphan.unlink()
+                finally:
+                    orphan.close()
+            except FileNotFoundError:
+                pass
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
-        Best-effort and error-accumulating: every step runs even if an earlier
-        one raised, so one failing resource never strands the rest. Teardown is
-        terminal — an un-reclaimed resource LEAKS (it is not retried) and the
-        first collected error is re-raised after all steps complete so the leak
-        surfaces to the caller. The child-reap grace starts only after SHUTDOWN
+    def _reclaim_child_groups(self, deadline: float) -> None:
+        """One waitpid→mailbox-release sequence shared by abort and close."""
+        groups = [
+            (self._sub_shms, self._sub_pids),
+            (self._chip_shms, self._chip_pids),
+            (self._next_level_shms, self._next_level_pids),
+        ]
+        reap_error: BaseException | None = None
+        try:
+            self._reap_child_groups(groups, deadline)
+        except BaseException as exc:  # noqa: BLE001
+            reap_error = exc
+
+        protected_names = {
+            shm.name for shms, _pids in groups for shm in shms if isinstance(getattr(shm, "name", None), str)
+        }
+        _journal_child_survivors(
+            self._cleanup_journal,
+            self._sub_shms,
+            self._sub_pids,
+            self._chip_shms,
+            self._chip_pids,
+            self._next_level_shms,
+            self._next_level_pids,
+            set(),
+        )
+        self._sub_pids.clear()
+        self._chip_pids.clear()
+        self._next_level_pids.clear()
+        self._sub_shms.clear()
+        self._chip_shms.clear()
+        self._next_level_shms.clear()
+
+        try:
+            self._unlink_shm_namespace(protected_names)
+        except BaseException as exc:  # noqa: BLE001
+            self._cleanup_journal.add_once(
+                "shm",
+                f"startup namespace {self._shm_token[:8]}",
+                lambda names=protected_names: self._unlink_shm_namespace(names),
+            )
+            if reap_error is None:
+                reap_error = exc
+        if reap_error is not None:
+            raise reap_error
+
+    def _teardown_worker_tree(  # noqa: PLR0912 -- one ordered driver for rollback and close resource classes
+        self, *, startup_abort: bool, deadline: float | None = None
+    ) -> None:
+        """Drive the one resource sequence used by startup rollback and close.
+
+        Normal close enters after publishing CLOSED and draining leased ops.
+        Startup rollback enters before FAILED publication, when the tree may be
+        only partially constructed; the same journal actions tolerate absence.
+
+        Every ownership-bearing step is first recorded in the post-success
+        journal. Independent pre-transport steps are attempted together; if one
+        remains owed, the native transport and children stay alive for a later
+        close() retry. The child-reap grace starts only after SHUTDOWN
         has been broadcast to every group (below), not at teardown entry, so the
         (potentially blocking) pre-child cleanup cannot consume it and reduce the
         reap to a single poll.
@@ -9197,32 +9290,46 @@ class Worker:
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
 
-        journal_err = self._cleanup_journal.drive()
+        # Register the whole pre-transport ownership set before driving it. The
+        # journal attempts every independent action and removes only successful
+        # entries. Any survivor fences the transport teardown below.
+        pre_transport_keys: set[tuple[str, str]] = set()
+        for kind, identity, cleanup in (
+            ("region", "all Worker-Chip regions", self._cleanup_worker_chip_regions),
+            ("domain", "all CommDomains", self._release_all_live_domains),
+            ("provenance", "child allocation provenance", self._clear_child_prov),
+            ("remote", "active remote slot references", self._release_active_remote_slot_refs),
+            ("remote", "pending remote frees", self._flush_pending_remote_frees),
+            ("host-buffer", "all host buffers", self._release_all_host_buffers),
+        ):
+            self._cleanup_journal.add_once(kind, identity, cleanup)
+            pre_transport_keys.add((kind, identity))
+        journal_err = self._cleanup_journal.drive(pre_transport_keys)
         if journal_err is not None:
             errors.append(journal_err)
-        # Release any orch-allocated CommDomain handles before tearing down the
-        # C++ scheduler: once `dw.close()` runs the chip mailboxes are unusable
-        # and we can no longer drive CTRL_RELEASE_DOMAIN.
-        _step(self._cleanup_worker_chip_regions)
-        if self._live_domains:
-            _step(self._release_all_live_domains)
-        _step(self._clear_child_prov)
-        _step(self._release_active_remote_slot_refs)
-        _step(self._flush_pending_remote_frees)
-        # Host buffers must be released while the local L3 child mailboxes are
-        # still usable (before _worker.close()).
-        _step(self._release_all_host_buffers)
+            if not startup_abort:
+                raise journal_err
+
+        # Session shutdown is the remote transport barrier: never run it in the
+        # same all-attempt batch as pending remote frees.
+        self._cleanup_journal.add_once("remote", "remote L3 sessions", self._release_remote_sessions)
+        session_err = self._cleanup_journal.drive({("remote", "remote L3 sessions")})
+        if session_err is not None:
+            errors.append(session_err)
+            if not startup_abort:
+                raise session_err
 
         if self.level == 2:
 
             def _finalize_chip() -> None:
                 if self._chip_worker:
-                    try:
-                        self._chip_worker.finalize()
-                    finally:
-                        self._chip_worker = None
+                    self._chip_worker.finalize()
+                    self._chip_worker = None
 
-            _step(_finalize_chip)
+            self._cleanup_journal.add_once("native", "ChipWorker", _finalize_chip)
+            journal_err = self._cleanup_journal.drive({("native", "ChipWorker")})
+            if journal_err is not None:
+                errors.append(journal_err)
         else:
 
             def _close_worker() -> None:
@@ -9231,7 +9338,28 @@ class Worker:
                     self._worker = None
                     self._orch = None
 
-            _step(_close_worker)
+            self._cleanup_journal.add_once("native", "hierarchical Worker", _close_worker)
+            journal_err = self._cleanup_journal.drive({("native", "hierarchical Worker")})
+            if journal_err is not None:
+                errors.append(journal_err)
+                if not startup_abort:
+                    raise errors[0]
+            self._cleanup_journal.add_once(
+                "shm", "Worker-Chip orchestration mappings", self._close_worker_chip_orch_comm
+            )
+            journal_err = self._cleanup_journal.drive({("shm", "Worker-Chip orchestration mappings")})
+            if journal_err is not None:
+                errors.append(journal_err)
+                if not startup_abort:
+                    raise errors[0]
+            if startup_abort:
+                self._abort_hierarchical(deadline=deadline)
+                if not self._next_level_pids and not self._next_level_shms:
+                    self._next_level_workers.clear()
+                    self._next_level_worker_ids.clear()
+                if errors:
+                    raise errors[0]
+                return
             # Two-phase child shutdown: broadcast SHUTDOWN to EVERY group first,
             # then reap all groups together within the shared deadline. Sending
             # SHUTDOWN per-group-then-reap (serial) let a stuck child in the first
@@ -9246,11 +9374,18 @@ class Worker:
                 _step(lambda shms=shms: self._broadcast_child_shutdown(shms))
             # Grace starts NOW, once SHUTDOWN is delivered to every group — not at
             # teardown entry — so the (blocking) pre-child cleanup above cannot
-            # eat it. Reap removes reclaimed pids/shms in place; a surviving child
-            # is left in place and reported as an error (terminal, not retried).
+            # eat it. Reap transfers a surviving pid/shm pair into the journal;
+            # a later close() can retry without freeing a live mailbox.
             reap_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
-            _step(lambda: self._reap_child_groups(groups, reap_deadline))
-            _step(self._close_worker_chip_orch_comm)
+            _step(lambda: self._reclaim_child_groups(reap_deadline))
+            # A prior attempt may already have transferred a surviving child
+            # and its mailbox into the journal. Retry those entries only after
+            # this attempt has delivered SHUTDOWN and reaped the live groups;
+            # otherwise an unreaped child can fence the very work that lets it
+            # converge. Namespace/orphan-shm debt belongs to the same phase.
+            post_child_err = self._cleanup_journal.drive_kinds({"child", "shm"})
+            if post_child_err is not None:
+                errors.append(post_child_err)
             # Drop next-level worker refs only once their pids/shms are reclaimed.
             if not self._next_level_pids and not self._next_level_shms:
                 self._next_level_workers.clear()
@@ -9258,6 +9393,9 @@ class Worker:
 
         if errors:
             raise errors[0]
+
+    def _teardown_ready_tree(self) -> None:
+        self._teardown_worker_tree(startup_abort=False)
 
     def __enter__(self) -> Worker:
         return self
