@@ -20,6 +20,8 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstddef>
+#include <unistd.h>
 
 // =============================================================================
 // Level enable flags (mutated by the setter below)
@@ -55,35 +57,49 @@ void init_log_switch() {
 }
 
 // =============================================================================
-// Low-level dev_log_* / dev_vlog_* (sim: fprintf to stderr; no buffer needed)
+// Low-level dev_log_* / dev_vlog_*
+//
+// Each record "[TAG] func: body\n" is formatted into a single stack buffer and
+// emitted with one write(). The buffer caps the record at 2048 bytes, below
+// Linux PIPE_BUF (4096), so a record is delivered atomically when stderr is a
+// pipe — concurrent AICPU sim threads and forked chip workers sharing stderr
+// never interleave partial records.
 // =============================================================================
 
-void dev_vlog_debug(const char *func, const char *fmt, va_list args) {
-    fprintf(stderr, "[DEBUG] %s: ", func);
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
+namespace {
+
+void emit_record(const char *level_tag, const char *func, const char *fmt, va_list args) {
+    char buffer[2048];
+    constexpr size_t kNewlineSlot = 1;
+    constexpr size_t kBodyLimit = sizeof(buffer) - kNewlineSlot;
+
+    int prefix = snprintf(buffer, sizeof(buffer), "[%s] %s: ", level_tag, func);
+    size_t len = (prefix < 0) ? 0 : static_cast<size_t>(prefix);
+    if (len > kBodyLimit) {
+        len = kBodyLimit;  // prefix filled the buffer; reserve the newline slot
+    }
+
+    int body = vsnprintf(buffer + len, sizeof(buffer) - len, fmt, args);
+    if (body > 0) {
+        len += static_cast<size_t>(body);
+        if (len > kBodyLimit) {
+            len = kBodyLimit;  // body truncated; reserve the newline slot
+        }
+    }
+
+    buffer[len++] = '\n';
+    ssize_t written = write(STDERR_FILENO, buffer, len);
+    (void)written;
 }
 
-void dev_vlog_info(const char *func, const char *fmt, va_list args) {
-    fprintf(stderr, "[INFO] %s: ", func);
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
-}
+}  // namespace
 
-void dev_vlog_timing(const char *func, const char *fmt, va_list args) {
-    fprintf(stderr, "[TIMING] %s: ", func);
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
-}
+void dev_vlog_debug(const char *func, const char *fmt, va_list args) { emit_record("DEBUG", func, fmt, args); }
 
-void dev_vlog_warn(const char *func, const char *fmt, va_list args) {
-    fprintf(stderr, "[WARN] %s: ", func);
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
-}
+void dev_vlog_info(const char *func, const char *fmt, va_list args) { emit_record("INFO", func, fmt, args); }
 
-void dev_vlog_error(const char *func, const char *fmt, va_list args) {
-    fprintf(stderr, "[ERROR] %s: ", func);
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
-}
+void dev_vlog_timing(const char *func, const char *fmt, va_list args) { emit_record("TIMING", func, fmt, args); }
+
+void dev_vlog_warn(const char *func, const char *fmt, va_list args) { emit_record("WARN", func, fmt, args); }
+
+void dev_vlog_error(const char *func, const char *fmt, va_list args) { emit_record("ERROR", func, fmt, args); }

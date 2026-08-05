@@ -67,9 +67,11 @@ extern "C" void set_log_level(int level);
 // Platform-specific logging functions (low-level layer)
 //
 // va_list primitives used by the unified_log_* adapter to forward a caller's
-// variadic args without an intermediate vsnprintf-to-buffer round-trip. Sim
-// is buffer-free; onboard still buffers internally because CANN's dlog API
-// has no va_list variant. Caller owns va_start/va_end.
+// variadic args. Both backends format a whole record into one stack buffer and
+// emit it in a single call: sim writes it with one write(2), kept under
+// PIPE_BUF so concurrent threads / forked workers on a shared stderr never
+// interleave partial records; onboard buffers because CANN's dlog API has no
+// va_list variant. Caller owns va_start/va_end.
 // =============================================================================
 
 #include <cstdarg>

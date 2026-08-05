@@ -835,6 +835,25 @@ target_link_libraries(test_onboard_device_log_level PRIVATE
 add_test(NAME test_onboard_device_log_level COMMAND test_onboard_device_log_level)
 set_tests_properties(test_onboard_device_log_level PROPERTIES LABELS "no_hardware")
 
+# Sim device-log record atomicity: concurrent threads and forked workers must
+# not interleave partial records on the shared stderr. Pure host code — compile
+# the sim backend alongside the test; no CANN, no hardware.
+add_executable(test_sim_device_log
+    common/test_sim_device_log.cpp
+    ${COMMON_PLATFORM_DIR}/sim/aicpu/device_log.cpp
+)
+target_include_directories(test_sim_device_log PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${COMMON_PLATFORM_DIR}/include
+)
+target_link_libraries(test_sim_device_log PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_sim_device_log COMMAND test_sim_device_log)
+set_tests_properties(test_sim_device_log PROPERTIES LABELS "no_hardware")
+
 # a2a3 host-side AICPU affinity selection (compute_allowed_cpus). Pure logic —
 # no CANN headers, no hardware: compile the probe .cpp alongside the test. The
 # test provides its own no-op logger stubs, so no logger sources are linked.
