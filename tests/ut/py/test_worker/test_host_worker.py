@@ -285,19 +285,29 @@ class _FakeNativeRunImpl:
         generation,
         _run_id=0,
         _dispatch_id=0,
+        accepted_addr=0,
+        accepted_value=0,
     ):
         slot = int(slot_id)
         prepare_error = self.prepare_errors.get((slot, int(generation)))
         if prepare_error is not None:
             raise prepare_error
         self.prepare_identities.append((slot, int(generation), int(_run_id), int(_dispatch_id)))
-        token = SimpleNamespace(slot_id=slot, generation=int(generation), run_epoch=slot + 1)
+        token = SimpleNamespace(
+            slot_id=slot,
+            generation=int(generation),
+            run_epoch=slot + 1,
+            accepted_addr=int(accepted_addr),
+            accepted_value=int(accepted_value),
+        )
         self.events.append(("prepare", slot))
         self.prepared[slot].set()
         return token
 
-    def _launch_native_run(self, token, accepted_addr, accepted_value) -> None:
+    def _launch_native_run(self, token) -> None:
         slot = int(token.slot_id)
+        accepted_addr = int(token.accepted_addr)
+        accepted_value = int(token.accepted_value)
         state_addr = int(accepted_addr) - worker_mod._OFF_ACCEPTED
         self.events.append(
             (

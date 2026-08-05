@@ -10,10 +10,9 @@
 """L3 launch acceptance is published on every platform.
 
 A ChipTask's sticky acceptance word is written by the platform runner once the
-run crosses its launch boundary, through the `set_task_accepted_state_ctx`
-binding ChipWorker resolves at init. Both the onboard and the simulation
-host_runtime.so export that symbol, so a completed dispatch must leave the word
-set in whichever mailbox frame carried it.
+run crosses its launch boundary, through the launch-acceptance target bound per
+run and published at the real kernel-launch marker. A completed dispatch must
+leave the word set in whichever mailbox frame carried it.
 """
 
 import ctypes

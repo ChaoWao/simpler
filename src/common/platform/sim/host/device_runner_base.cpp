@@ -83,12 +83,6 @@ bool create_temp_so_file(const std::string &path_template, const uint8_t *data, 
 // SimDeviceRunnerBase Implementation
 // =============================================================================
 
-int SimDeviceRunnerBase::set_task_accepted_state(volatile int32_t *state, int32_t accepted_value) {
-    task_accepted_state_ = state;
-    task_accepted_value_ = accepted_value;
-    return 0;
-}
-
 bool SimDeviceRunnerBase::try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal) {
     if (owner == nullptr || launch_signal == nullptr) return false;
     const void *expected = nullptr;
@@ -119,22 +113,7 @@ bool SimDeviceRunnerBase::native_run_owned_by(const void *owner) const {
 }
 
 void SimDeviceRunnerBase::publish_task_accepted() const {
-    if (task_accepted_state_ != nullptr) {
-        __atomic_store_n(task_accepted_state_, task_accepted_value_, __ATOMIC_RELEASE);
-    }
-    if (native_launch_signal_ != nullptr) native_launch_signal_->notify();
-}
-
-int SimDeviceRunnerBase::select_pipeline_slot(uint32_t slot_id) {
-    if (slot_id >= PTO_PIPELINE_MAX_DEPTH) return -1;
-    pipeline_slot_ = slot_id;
-    return 0;
-}
-
-int SimDeviceRunnerBase::select_arena_bank(uint32_t bank_id) {
-    if (bank_id >= PTO_PIPELINE_MAX_DEPTH) return -1;
-    arena_bank_ = bank_id;
-    return 0;
+    if (native_launch_signal_ != nullptr) native_launch_signal_->publish_acceptance();
 }
 
 uint64_t SimDeviceRunnerBase::arena_bank_gm_heap_base(uint32_t bank_id) const {
@@ -148,8 +127,11 @@ uint64_t SimDeviceRunnerBase::retained_temp_addr(uint32_t slot_id) const {
     return reinterpret_cast<uint64_t>(retained_temp_addrs_[slot_id]);
 }
 
-int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) {
-    ArenaBank &bank = arena_bank();
+int SimDeviceRunnerBase::setup_static_arena(
+    uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
+) {
+    if (arena_bank >= arena_banks_.size()) return -1;
+    ArenaBank &bank = this->arena_bank(arena_bank);
     // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
@@ -217,12 +199,12 @@ int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_si
 }
 
 bool SimDeviceRunnerBase::lookup_prebuilt_runtime_arena_cache(
-    uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
+    uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
     void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
 ) const {
     // The cache holds one entry and its bases point into bank 0, so any other
     // bank must rebuild rather than be handed a region it does not own.
-    if (arena_bank_ != 0) return false;
+    if (arena_bank != 0) return false;
     if (!prebuilt_runtime_arena_cache_valid_ || prebuilt_runtime_arena_cache_hash_ != hash ||
         prebuilt_runtime_arena_cache_key_.size() != key_size || key_data == nullptr || gm_heap_base == nullptr ||
         sm_base == nullptr || runtime_arena_base == nullptr || runtime_off == nullptr || image_data == nullptr ||
@@ -242,11 +224,11 @@ bool SimDeviceRunnerBase::lookup_prebuilt_runtime_arena_cache(
 }
 
 void SimDeviceRunnerBase::mark_prebuilt_runtime_arena_cached(
-    uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base, void *runtime_arena_base,
-    size_t runtime_off, const void *image_data, size_t image_size
+    uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base,
+    void *runtime_arena_base, size_t runtime_off, const void *image_data, size_t image_size
 ) {
     // Single-entry cache owned by bank 0; see lookup_prebuilt_runtime_arena_cache.
-    if (arena_bank_ != 0) return;
+    if (arena_bank != 0) return;
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_hash_ = hash;
     prebuilt_runtime_arena_cache_key_.assign(
@@ -262,20 +244,23 @@ void SimDeviceRunnerBase::mark_prebuilt_runtime_arena_cached(
     prebuilt_runtime_arena_cache_valid_ = true;
 }
 
-void *SimDeviceRunnerBase::acquire_pooled_gm_heap() {
-    DeviceArena &arena = arena_bank().gm_heap;
+void *SimDeviceRunnerBase::acquire_pooled_gm_heap(uint32_t arena_bank) {
+    if (arena_bank >= arena_banks_.size()) return nullptr;
+    DeviceArena &arena = this->arena_bank(arena_bank).gm_heap;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
 }
 
-void *SimDeviceRunnerBase::acquire_pooled_gm_sm() {
-    DeviceArena &arena = arena_bank().gm_sm;
+void *SimDeviceRunnerBase::acquire_pooled_gm_sm(uint32_t arena_bank) {
+    if (arena_bank >= arena_banks_.size()) return nullptr;
+    DeviceArena &arena = this->arena_bank(arena_bank).gm_sm;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
 }
 
-void *SimDeviceRunnerBase::acquire_pooled_runtime_arena() {
-    DeviceArena &arena = arena_bank().runtime_pool;
+void *SimDeviceRunnerBase::acquire_pooled_runtime_arena(uint32_t arena_bank) {
+    if (arena_bank >= arena_banks_.size()) return nullptr;
+    DeviceArena &arena = this->arena_bank(arena_bank).runtime_pool;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
 }
@@ -377,14 +362,20 @@ int SimDeviceRunnerBase::device_memset(void *dev_ptr, int value, size_t bytes) {
     return 0;
 }
 
-void SimDeviceRunnerBase::get_retained_temp_buffer(void **addr, size_t *size) {
-    if (addr != nullptr) *addr = retained_temp_addrs_[pipeline_slot_];
-    if (size != nullptr) *size = retained_temp_sizes_[pipeline_slot_];
+void SimDeviceRunnerBase::get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, size_t *size) {
+    if (pipeline_slot >= retained_temp_addrs_.size()) {
+        if (addr != nullptr) *addr = nullptr;
+        if (size != nullptr) *size = 0;
+        return;
+    }
+    if (addr != nullptr) *addr = retained_temp_addrs_[pipeline_slot];
+    if (size != nullptr) *size = retained_temp_sizes_[pipeline_slot];
 }
 
-void SimDeviceRunnerBase::set_retained_temp_buffer(void *addr, size_t size) {
-    retained_temp_addrs_[pipeline_slot_] = addr;
-    retained_temp_sizes_[pipeline_slot_] = size;
+void SimDeviceRunnerBase::set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, size_t size) {
+    if (pipeline_slot >= retained_temp_addrs_.size()) return;
+    retained_temp_addrs_[pipeline_slot] = addr;
+    retained_temp_sizes_[pipeline_slot] = size;
 }
 
 void SimDeviceRunnerBase::clear_temporary_buffer() {

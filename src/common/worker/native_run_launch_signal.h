@@ -9,16 +9,20 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_COMMON_WORKER_NATIVE_RUN_LAUNCH_SIGNAL_H_
-#define SRC_COMMON_WORKER_NATIVE_RUN_LAUNCH_SIGNAL_H_
+#pragma once
 
+#include <cstdint>
 #include <condition_variable>
 #include <mutex>
 
-/** Sticky one-shot wakeup for the host thread waiting on launch readiness. */
+/** Sticky one-shot wakeup for the host thread waiting on launch readiness, and
+ * the per-run home of the launch-acceptance target the host binds before launch
+ * and the device publishes at its real kernel-launch marker. */
 class NativeRunLaunchSignal {
 public:
-    NativeRunLaunchSignal() = default;
+    explicit NativeRunLaunchSignal(volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0) :
+        accepted_state_(accepted_state),
+        accepted_value_(accepted_value) {}
     NativeRunLaunchSignal(const NativeRunLaunchSignal &) = delete;
     NativeRunLaunchSignal &operator=(const NativeRunLaunchSignal &) = delete;
 
@@ -29,9 +33,26 @@ public:
         });
     }
 
+    /** Publish the acceptance value (if bound) at the launch marker and wake the
+     * launch waiter. */
+    void publish_acceptance() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (notified_) return;
+            if (accepted_state_ != nullptr) {
+                __atomic_store_n(accepted_state_, accepted_value_, __ATOMIC_RELEASE);
+            }
+            accepted_state_ = nullptr;
+            notified_ = true;
+        }
+        cv_.notify_one();
+    }
+
     void notify() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (notified_) return;
+            accepted_state_ = nullptr;
             notified_ = true;
         }
         cv_.notify_one();
@@ -40,7 +61,7 @@ public:
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
+    volatile int32_t *accepted_state_{nullptr};
+    int32_t accepted_value_{0};
     bool notified_{false};
 };
-
-#endif  // SRC_COMMON_WORKER_NATIVE_RUN_LAUNCH_SIGNAL_H_

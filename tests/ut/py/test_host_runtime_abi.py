@@ -21,9 +21,13 @@ _NEWLY_REQUIRED_PIPELINE_SYMBOLS = {
     "get_arena_bank_gm_heap_base_ctx",
     "get_pipeline_contract",
     "get_retained_temp_addr_ctx",
+    "supports_concurrent_native_prepare_ctx",
+}
+_REMOVED_AMBIENT_SELECTION_SYMBOLS = {
+    "select_arena_bank_ctx",
+    "select_pipeline_slot_ctx",
     "set_native_run_identity_ctx",
     "set_task_accepted_state_ctx",
-    "supports_concurrent_native_prepare_ctx",
 }
 
 _SIM_CASES = [
@@ -69,3 +73,4 @@ def test_host_runtime_exports_required_pipeline_symbols(arch: str, variant: str,
     symbols = _defined_external_symbols(runtime_path)
 
     assert _NEWLY_REQUIRED_PIPELINE_SYMBOLS <= symbols, sorted(_NEWLY_REQUIRED_PIPELINE_SYMBOLS - symbols)
+    assert symbols.isdisjoint(_REMOVED_AMBIENT_SELECTION_SYMBOLS), sorted(symbols & _REMOVED_AMBIENT_SELECTION_SYMBOLS)

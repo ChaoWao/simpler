@@ -77,10 +77,6 @@ public:
         }
     }
 
-    /** Carry an already-validated run lease into resource selection. */
-    int select_pipeline_slot(uint32_t slot_id);
-    int select_arena_bank(uint32_t bank_id);
-    uint32_t pipeline_slot() const { return pipeline_slot_; }
     uint64_t arena_bank_gm_heap_base(uint32_t bank_id) const;
 
     /**
@@ -96,13 +92,13 @@ public:
 
     // --- Pure / no-op virtuals dispatched from the shared c_api glue ----
     /** Compatibility composition retained while the C API owns an executor. */
-    int run(Runtime &runtime, const CallConfig &config) {
-        const int rc = enqueue_run(runtime, config);
+    int run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
+        const int rc = enqueue_run(runtime, config, pipeline_slot);
         return rc == 0 ? drain_run() : rc;
     }
 
     /** Submit a Runtime and retain all state needed to query and drain it. */
-    virtual int enqueue_run(Runtime &runtime, const CallConfig &config) = 0;
+    virtual int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) = 0;
     /** Return one of the SIMPLER_NATIVE_RUN_POLL_* values without waiting. */
     virtual int poll_run() = 0;
     /** Wait for completion, publish DFX, and release per-run resources. */
@@ -117,9 +113,6 @@ public:
     virtual void adopt_native_run_thread_state(void * /*snapshot*/) noexcept {}
     virtual void destroy_native_run_thread_state(void * /*snapshot*/) noexcept {}
 
-    /** Bind an optional external launch-acceptance target. */
-    int set_task_accepted_state(volatile int32_t *state, int32_t accepted_value);
-
     /** Reserve the runner's single active native execution through finalize. */
     bool try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal);
     void release_native_run(const void *owner);
@@ -128,17 +121,17 @@ public:
 
     // --- Shared methods --------------------------------------------------
 
-    int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
+    int setup_static_arena(uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
-    void *acquire_pooled_gm_heap();
-    void *acquire_pooled_gm_sm();
-    void *acquire_pooled_runtime_arena();
+    void *acquire_pooled_gm_heap(uint32_t arena_bank);
+    void *acquire_pooled_gm_sm(uint32_t arena_bank);
+    void *acquire_pooled_runtime_arena(uint32_t arena_bank);
     bool lookup_prebuilt_runtime_arena_cache(
-        uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
+        uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void **gm_heap_base, void **sm_base,
         void **runtime_arena_base, size_t *runtime_off, const void **image_data, size_t *image_size
     ) const;
     void mark_prebuilt_runtime_arena_cached(
-        uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base,
+        uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size, void *gm_heap_base, void *sm_base,
         void *runtime_arena_base, size_t runtime_off, const void *image_data, size_t image_size
     );
 
@@ -152,8 +145,8 @@ public:
     int copy_to_device(void *dev_ptr, const void *host_ptr, size_t bytes);
     int copy_from_device(void *host_ptr, const void *dev_ptr, size_t bytes);
     int device_memset(void *dev_ptr, int value, size_t bytes);
-    void get_retained_temp_buffer(void **addr, size_t *size);
-    void set_retained_temp_buffer(void *addr, size_t size);
+    void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, size_t *size);
+    void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, size_t size);
     void clear_temporary_buffer();
 
     // On sim, allocate_tensor returns a plain host pointer, so the "device"
@@ -178,7 +171,7 @@ public:
     bool has_callable(int32_t callable_id) const;
     // One-step bind: replay CallableState (kernel addrs + active_callable_id)
     // then run the per-run bind_callable_to_runtime_impl with the state's
-    // host_orch_func_ptr + signature. `api` is g_host_api; `orch_args` is a
+    // host_orch_func_ptr + signature. `api` is bound to this run; `orch_args` is a
     // const ChipStorageTaskArgs* (void* keeps task_interface headers out of this
     // header). Returns 0 on success, non-zero on failure.
     int bind_callable_to_runtime(
@@ -319,9 +312,7 @@ protected:
         size_t cached_runtime_arena_size{0};
     };
     std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
-    ArenaBank &arena_bank() { return *arena_banks_[arena_bank_]; }
-    uint32_t pipeline_slot_{0};
-    uint32_t arena_bank_{0};
+    ArenaBank &arena_bank(uint32_t bank_id) { return *arena_banks_[bank_id]; }
     bool prebuilt_runtime_arena_cache_valid_{false};
     uint64_t prebuilt_runtime_arena_cache_hash_{0};
     std::vector<uint8_t> prebuilt_runtime_arena_cache_key_;
@@ -392,8 +383,6 @@ protected:
 
     Runtime *last_runtime_{nullptr};
 
-    volatile int32_t *task_accepted_state_{nullptr};
-    int32_t task_accepted_value_{0};
     std::atomic<const void *> active_native_run_{nullptr};
     NativeRunLaunchSignal *native_launch_signal_{nullptr};
 

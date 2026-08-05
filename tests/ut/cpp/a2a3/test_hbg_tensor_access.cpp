@@ -23,6 +23,7 @@
 #include <cstring>
 #include <vector>
 
+#include "common/host_api.h"
 #include "host_tensor_access.h"
 
 namespace {
@@ -45,12 +46,20 @@ int record_copy(void *dev_ptr, const void *host_ptr, size_t size) {
     return g_copy_result;
 }
 
+// host_tensor_access_reset retains the HostApi pointer for the run, so this
+// static test object outlives every binding. The adapter ignores runner_ctx.
+int record_copy_for_api(void * /*runner_ctx*/, void *dev_ptr, const void *host_ptr, size_t size) {
+    return record_copy(dev_ptr, host_ptr, size);
+}
+const HostApiOps kRecordCopyOps{.copy_to_device = record_copy_for_api};
+HostApi record_copy_api(nullptr, 0, 0, &kRecordCopyOps);
+
 class HostTensorAccessTest : public ::testing::Test {
 protected:
     void SetUp() override {
         g_copies.clear();
         g_copy_result = 0;
-        host_tensor_access_reset(&record_copy);
+        host_tensor_access_reset(&record_copy_api);
     }
     void TearDown() override { host_tensor_access_reset(nullptr); }
 };
@@ -150,7 +159,7 @@ TEST_F(HostTensorAccessTest, ResetDropsEveryRegistration) {
     int32_t value = 0;
     ASSERT_TRUE(host_tensor_read(kFakeDeviceBase, &value, sizeof(value)));
 
-    host_tensor_access_reset(&record_copy);
+    host_tensor_access_reset(&record_copy_api);
     EXPECT_FALSE(host_tensor_read(kFakeDeviceBase, &value, sizeof(value)));
 }
 

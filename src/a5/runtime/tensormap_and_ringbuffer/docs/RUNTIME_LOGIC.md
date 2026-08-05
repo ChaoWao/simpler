@@ -125,10 +125,9 @@ On each trb bind, `RetainedTempBump`:
 
 Slices are recorded as `BufferNoop` leases: per-tensor release is a no-op, and
 the retained buffer is neither freed at end of run nor per run — it lives on
-the runner and is freed once in `finalize`. If the platform leaves the slot
-callbacks null (e.g. a backend without a retained buffer), bind transparently
-falls back to per-tensor `device_malloc` (recorded as `Free` leases, freed in
-validate).
+the runner and is freed once in `finalize`. The uniform host-runtime contract
+requires the retained-buffer callbacks on every backend; bind has no
+per-tensor allocation fallback.
 
 Public device-memory APIs keep their original semantics. `device_malloc_ctx`,
 `device_free_ctx`, `Worker.malloc()`, and `Worker.free()` still allocate and

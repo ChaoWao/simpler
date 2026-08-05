@@ -1798,7 +1798,7 @@ NB_MODULE(_task_interface, m) {
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
             nb::call_guard<nb::gil_scoped_release>(),
-            "Prepare a generation-bound native run without crossing its device launch fence."
+            "Prepare a native run after lease admission without crossing its device launch fence."
         )
         .def(
             "_prepare_native_run_with_pipeline_lease",
@@ -1808,28 +1808,26 @@ NB_MODULE(_task_interface, m) {
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
             nb::call_guard<nb::gil_scoped_release>(),
-            "Prepare a generation-bound native run from pre-encoded task args."
+            "Prepare a native run from pre-encoded task args after lease admission."
         )
         .def(
             "_prepare_native_run_from_blob",
             [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
-               const CallConfig &config, uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id) {
+               const CallConfig &config, uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id,
+               uint64_t accepted_state_addr, int32_t accepted_value) {
                 TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
                 return self.prepare_native_run(
-                    callable_id, view, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id
+                    callable_id, view, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id,
+                    reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value
                 );
             },
             nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
             nb::arg("slot_id"), nb::arg("generation"), nb::arg("run_id") = 0, nb::arg("dispatch_id") = 0,
-            nb::call_guard<nb::gil_scoped_release>(),
-            "Prepare a generation-bound native run from a raw mailbox TaskArgs blob."
+            nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0, nb::call_guard<nb::gil_scoped_release>(),
+            "Prepare a native run from a raw mailbox TaskArgs blob after lease admission."
         )
         .def(
-            "_launch_native_run",
-            [](ChipWorker &self, const ChipWorkerNativeRun &run, uint64_t accepted_state_addr, int32_t accepted_value) {
-                self.launch_native_run(run, reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value);
-            },
-            nb::arg("run"), nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0,
+            "_launch_native_run", &ChipWorker::launch_native_run, nb::arg("run"),
             nb::call_guard<nb::gil_scoped_release>(),
             "Launch a prepared native run and return after its real device launch fence."
         )

@@ -17,7 +17,9 @@
 #include <thread>
 
 #include "call_config.h"
+#include "common/host_api.h"
 #include "native_run_launch_signal.h"
+#include "pto_runtime_c_api.h"
 #include "runtime.h"
 
 /** Internal phase of the caller-owned opaque native-run storage. */
@@ -29,20 +31,37 @@ enum class NativeRunPhase : uint8_t {
 };
 
 /**
- * Caller-owned state for one progressable native lifecycle. Runtime,
- * CallConfig, and resource selection are per-run. Runner-owned execution,
- * diagnostics, and timing remain exclusive from launch through finalize.
+ * The single placement-owned carrier for one progressable native lifecycle.
+ * It captures immutable selection, identity, acceptance, configuration, and
+ * HostApi binding during prepare; later phases never recover them from a
+ * runner field or thread-local. The object is address-stable through finalize.
  */
 template <typename Runner>
-struct NativeRunState {
+struct NativeRunContext {
     static constexpr uint64_t kMagic = UINT64_C(0x534d504c52554e31);  // "SMPLRUN1"
 
-    NativeRunState(Runner *runner_in, const CallConfig &config_in, uint64_t trace_hid_in) :
+    NativeRunContext(
+        Runner *runner_in, const CallConfig &config_in, uint64_t trace_hid_in, const NativeRunDescriptor &descriptor_in,
+        const HostApiOps *host_api_ops
+    ) :
         runner(runner_in),
         config(config_in),
-        trace_hid(trace_hid_in) {}
+        descriptor(descriptor_in),
+        host_api(runner_in, descriptor_in.pipeline_slot, descriptor_in.arena_bank, host_api_ops),
+        trace_hid(trace_hid_in),
+        launch_signal(descriptor_in.accepted_state, descriptor_in.accepted_value) {
+        // Publish the storage tag only after every potentially-throwing member
+        // has been constructed. A failed placement construction must leave the
+        // caller-owned slot reusable rather than looking like a prepared run.
+        magic = kMagic;
+    }
 
-    ~NativeRunState() {
+    NativeRunContext(const NativeRunContext &) = delete;
+    NativeRunContext &operator=(const NativeRunContext &) = delete;
+    NativeRunContext(NativeRunContext &&) = delete;
+    NativeRunContext &operator=(NativeRunContext &&) = delete;
+
+    ~NativeRunContext() {
         if (executor.joinable()) executor.join();
         if (host_thread_state != nullptr) {
             runner->destroy_native_run_thread_state(host_thread_state);
@@ -56,9 +75,11 @@ struct NativeRunState {
         if (snapshot != nullptr) runner->adopt_native_run_thread_state(snapshot);
     }
 
-    uint64_t magic{kMagic};
+    uint64_t magic{0};
     Runner *runner{nullptr};
     CallConfig config{};
+    NativeRunDescriptor descriptor{};
+    HostApi host_api;
     Runtime runtime{};
     uint64_t trace_hid{0};
     unsigned trace_inv{0};
@@ -67,14 +88,8 @@ struct NativeRunState {
     std::atomic<int> execution_rc{-1};
     std::atomic<bool> execution_done{false};
     std::atomic<NativeRunPhase> phase{NativeRunPhase::Prepared};
-    NativeRunLaunchSignal launch_signal{};
+    NativeRunLaunchSignal launch_signal;
     void *host_thread_state{nullptr};
-    uint64_t run_id{0};
-    uint64_t generation{0};
-    uint64_t dispatch_id{0};
-    uint64_t run_epoch{0};
-    uint32_t pipeline_slot{0};
-    uint32_t arena_bank{0};
     char trace_attrs[192]{};
     bool runner_resources_owned{false};
     bool runner_reserved{false};
@@ -83,9 +98,9 @@ struct NativeRunState {
 
 /** End object lifetime, then mark the caller-owned storage reusable. */
 template <typename Runner>
-void destroy_native_run_state(NativeRunState<Runner> *state) {
-    void *storage = state;
-    state->~NativeRunState<Runner>();
+void destroy_native_run_context(NativeRunContext<Runner> *context) {
+    void *storage = context;
+    context->~NativeRunContext<Runner>();
     constexpr uint64_t kEmpty = 0;
     std::memcpy(storage, &kEmpty, sizeof(kEmpty));
 }

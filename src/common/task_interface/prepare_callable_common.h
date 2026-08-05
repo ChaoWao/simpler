@@ -30,6 +30,7 @@
 #include "arg_direction.h"
 #include "callable.h"
 #include "chip_callable_layout.h"
+#include "common/host_api.h"
 
 struct ChildKernelAddr {
     int func_id;
@@ -74,15 +75,13 @@ struct CallableArtifacts {
 };
 
 /**
- * Upload the ChipCallable buffer via `upload_fn` and compute the device-side
+ * Upload the ChipCallable buffer through `api` and compute the device-side
  * address of every child kernel.
  *
  * @param callable   ChipCallable to upload. May have child_count() == 0; the
  *                   chip buffer is still uploaded and retained, while `out`
  *                   remains empty on success.
- * @param upload_fn  HostApi::upload_chip_callable_buffer — declared as
- *                   `uint64_t (*)(const void *)` to avoid pulling runtime
- *                   headers into task_interface. Must not be null.
+ * @param api        Context-bound platform host interface. Must not be null.
  * @param out        Cleared on entry; on success, populated with one
  *                   {func_id, device_addr} entry per child kernel. Caller is
  *                   responsible for validating func_id against its runtime's
@@ -90,14 +89,14 @@ struct CallableArtifacts {
  * @return 0 on success, -1 on argument error or upload failure.
  */
 inline int upload_and_collect_child_addrs(
-    const ChipCallable *callable, uint64_t (*upload_fn)(const void *), std::vector<ChildKernelAddr> *out,
+    const ChipCallable *callable, const HostApi *api, std::vector<ChildKernelAddr> *out,
     uint64_t *out_chip_dev = nullptr, uint64_t *out_chip_hash = nullptr, uint64_t *out_aicore_image_hash = nullptr
 ) {
-    if (callable == nullptr || upload_fn == nullptr || out == nullptr) return -1;
+    if (callable == nullptr || api == nullptr || out == nullptr) return -1;
     out->clear();
 
     const ChipCallableLayout layout = compute_chip_callable_layout(callable);
-    uint64_t chip_dev = upload_fn(callable);
+    uint64_t chip_dev = api->upload_chip_callable_buffer(callable);
     if (chip_dev == 0) return -1;
     if (out_chip_dev != nullptr) *out_chip_dev = chip_dev;
     if (out_chip_hash != nullptr) *out_chip_hash = layout.content_hash;

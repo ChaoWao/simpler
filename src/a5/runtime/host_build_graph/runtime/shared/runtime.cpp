@@ -26,9 +26,6 @@
 // =============================================================================
 
 Runtime::Runtime() {
-    // NOTE: host_api is initialized in InitRuntime() (host-only code)
-    // because the CApi functions don't exist when compiled for device.
-
     // Initialize handshake buffers
     memset(workers, 0, sizeof(workers));
     worker_count = 0;

@@ -241,8 +241,8 @@ int DeviceRunner::abandon_native_run_resources(uint32_t pipeline_slot) {
     return retire_run_aicore_stream(pipeline_slot, RunStreamSlots::CompletionStatus::Unproven);
 }
 
-int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config) {
-    const unsigned selected_pipeline_slot = pipeline_slot();
+int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
+    const unsigned selected_pipeline_slot = pipeline_slot;
     if (active_run_.owns_resources) {
         LOG_ERROR("enqueue_run entered while slot %u still owns resources", active_run_.slot);
         return -1;

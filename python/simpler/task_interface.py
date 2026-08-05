@@ -1386,9 +1386,9 @@ class ChipWorker:
     def _prepare_native_run_with_pipeline_lease(self, callable_id, args, slot_id, generation, config=None, **kwargs):
         """Prepare one native run without crossing its device launch fence.
 
-        Private B3a seam for the hierarchical endpoint. The returned token is
-        bound to both the pipeline lease generation and a unique prepare epoch;
-        it must be passed back to launch/poll/wait/finalize on this ChipWorker.
+        The lease generation is validated during admission. The returned
+        token's unique prepare epoch is authoritative for subsequent
+        launch/poll/wait/finalize calls on this ChipWorker.
         Keep every tensor backing buffer referenced by ``args`` alive until
         finalize returns.
         """

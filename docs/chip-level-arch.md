@@ -106,7 +106,7 @@ DeviceRunner runner;
 void *ptr = runner.allocate_tensor(bytes);
 runner.copy_to_device(dev_ptr, host_ptr, bytes);
 runner.set_executors(aicpu_binary, aicore_binary);   // once, at init time
-runner.run(runtime, config);                         // compatibility composition: enqueue + drain
+runner.run(runtime, config, pipeline_slot);          // compatibility composition: enqueue + drain
 runner.finalize();
 ```
 
@@ -127,10 +127,12 @@ void *runtime = allocate_zeroed_aligned(size, alignment); // stable until finali
 simpler_register_callable(ctx, cid, callable);        // one-time per callable
 
 // Progressable form; simpler_run(...) composes these phases synchronously.
-simpler_prepare_run(ctx, runtime, cid, args, config); // bind, no device launch
-simpler_launch_run(ctx, runtime);                     // returns after launch fence
-simpler_wait_run(ctx, runtime);                       // or poll until complete
-simpler_finalize_run(ctx, runtime);                   // validate, copy back, destroy
+// `descriptor` carries this run's slot/bank/identity and the optional
+// launch-acceptance target published at the kernel-launch marker.
+simpler_prepare_run(ctx, runtime, cid, args, config, &descriptor); // bind, no device launch
+simpler_launch_run(ctx, runtime);  // publishes descriptor acceptance and returns after launch fence
+simpler_wait_run(ctx, runtime);                                    // or poll until complete
+simpler_finalize_run(ctx, runtime);                                // validate, copy back, destroy
 
 simpler_unregister_callable(ctx, cid);
 finalize_device(ctx);

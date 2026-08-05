@@ -2504,6 +2504,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 generation,
                 run_id,
                 dispatch_id,
+                frame.frame_addr + _OFF_ACCEPTED,
+                _TASK_ACCEPTED,
             )
             return frame.native_run
 
@@ -2764,11 +2766,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                             native_run = None
                             try:
                                 native_run = prepare_frame_native_run(next_frame)
-                                cw._impl._launch_native_run(
-                                    native_run,
-                                    next_frame.frame_addr + _OFF_ACCEPTED,
-                                    _TASK_ACCEPTED,
-                                )
+                                cw._impl._launch_native_run(native_run)
                             except Exception as e:  # noqa: BLE001
                                 launch_message = _format_exc(f"chip_process dev={device_id}: native launch", e)
                                 finalize_failed = False

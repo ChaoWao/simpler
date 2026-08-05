@@ -20,6 +20,8 @@
 
 #include <vector>
 
+#include "common/host_api.h"
+
 namespace {
 
 struct HostTensorRegion {
@@ -36,7 +38,7 @@ struct HostTensorRegion {
 // costs less than the map that would replace it.
 std::vector<HostTensorRegion> g_regions;
 
-int (*g_copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size) = nullptr;
+const HostApi *g_host_api = nullptr;
 
 // The region serving the whole of [dev_addr, dev_addr + bytes), or nullptr.
 // `*offset` is the span's distance from that region's base.
@@ -78,15 +80,15 @@ bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes) {
     if (!region->mirrored) {
         return true;
     }
-    if (g_copy_to_device == nullptr) {
+    if (g_host_api == nullptr) {
         return false;
     }
-    return g_copy_to_device(reinterpret_cast<void *>(dev_addr), dst, static_cast<size_t>(bytes)) == 0;
+    return g_host_api->copy_to_device(reinterpret_cast<void *>(dev_addr), dst, static_cast<size_t>(bytes)) == 0;
 }
 
-void host_tensor_access_reset(int (*copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size)) {
+void host_tensor_access_reset(const HostApi *api) {
     g_regions.clear();
-    g_copy_to_device = copy_to_device;
+    g_host_api = api;
 }
 
 bool host_tensor_access_add(uint64_t dev_base, uint64_t size, void *host_view) {

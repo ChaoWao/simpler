@@ -299,7 +299,6 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
            simpler_wait_run, simpler_finalize_run, simpler_run,
            simpler_unregister_callable, get_pipeline_contract,
            supports_concurrent_native_prepare_ctx,
-           set_native_run_identity_ctx, set_task_accepted_state_ctx,
            get_arena_bank_gm_heap_base_ctx, get_retained_temp_addr_ctx,
            finalize_device
     create_device_context() → DeviceContextHandle
@@ -311,12 +310,12 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
       DeviceRunner::set_executors(aicpu, aicore)       binaries owned by runner
 
 ChipWorker.run(handle, args, config)                   # public wrapper path
-  simpler_run(ctx, buf, internal callable entry, args, config)
-    simpler_prepare_run(...)
-      new (buf) NativeRunState()             owns Runtime + executor state
-      DeviceRunner::bind_callable_to_runtime(r, cid, api, args, rings)
-    simpler_launch_run(...)
-      executor thread: DeviceRunner::enqueue_run(r, config)
+  simpler_run(ctx, buf, cid, args, config, &descriptor)
+    simpler_prepare_run(..., &descriptor)
+      new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + executor state
+      DeviceRunner::bind_callable_to_runtime(r, cid, &host_api, args, rings)
+    simpler_launch_run(...)                         # acceptance was captured by prepare
+      executor thread: DeviceRunner::enqueue_run(r, config, slot)
         clear_cpu_sim_shared_storage()
         ensure_binaries_loaded()             lazily dlopen AICPU; reload AICore for this run
         launch AICPU + AICore threads
@@ -329,7 +328,7 @@ ChipWorker.run(handle, args, config)                   # public wrapper path
     simpler_wait_run(...)
     simpler_finalize_run(...)
       validate_runtime_impl(r)               copy results, remove kernels
-      state->~NativeRunState()               destroys Runtime
+      state->~NativeRunContext()               destroys Runtime
 
 ChipWorker.finalize()
   finalize_device(ctx)
@@ -373,12 +372,12 @@ device_worker_main(device_id)
             upload child kernels, copy orch SO to device buffer
         for each launch with that handle:
           ChipWorker.run(handle, args, config)
-            simpler_run(ctx, buf, internal callable entry, args, config)
-              simpler_prepare_run(...)
-                new (buf) NativeRunState()     owns Runtime + executor state
+            simpler_run(ctx, buf, cid, args, config, &descriptor)
+              simpler_prepare_run(..., &descriptor)
+                new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + executor state
                 bind_callable_to_runtime()     replay + rtMalloc, rtMemcpy to device
-              simpler_launch_run(...)
-                executor thread: DeviceRunner::enqueue_run()
+              simpler_launch_run(...)               # publishes descriptor acceptance
+                executor thread: DeviceRunner::enqueue_run(..., slot)
                   ensure_binaries_loaded()     already done by init
                   launch_aicore_kernel()       cached rtRegisterAllKernel handle
                                                  + rtKernelLaunchWithHandleV2
