@@ -699,20 +699,9 @@ void ChipWorker::launch_native_run(const ChipWorkerNativeRun &run) {
         if (state.run_epoch != run.run_epoch || state.phase != NativeRunPhase::PREPARED) {
             throw std::runtime_error("native-run token is stale or used in the wrong phase");
         }
-        state.phase = NativeRunPhase::LAUNCHING;
     }
 
-    int rc = -1;
-    try {
-        rc = launch_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
-    } catch (...) {
-        std::lock_guard<std::mutex> lk(native_run_mu_);
-        NativeRunSlotState &state = native_run_states_[run.slot_id];
-        if (state.run_epoch == run.run_epoch && state.phase == NativeRunPhase::LAUNCHING) {
-            state.phase = NativeRunPhase::PREPARED;
-        }
-        throw;
-    }
+    int rc = launch_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
     if (rc != 0) {
         int poll_rc = poll_run_fn_(device_ctx_, runtime_bufs_[run.slot_id].data());
         std::lock_guard<std::mutex> lk(native_run_mu_);
@@ -828,8 +817,7 @@ void ChipWorker::cleanup_native_runs_noexcept() noexcept {
             NativeRunSlotState &state = native_run_states_[slot_id];
             phase = state.phase;
             if (phase == NativeRunPhase::EMPTY) continue;
-            if (phase == NativeRunPhase::PREPARING || phase == NativeRunPhase::LAUNCHING ||
-                phase == NativeRunPhase::FINALIZING) {
+            if (phase == NativeRunPhase::PREPARING || phase == NativeRunPhase::FINALIZING) {
                 continue;
             }
             state.phase = NativeRunPhase::FINALIZING;

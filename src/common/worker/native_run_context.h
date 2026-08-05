@@ -15,18 +15,16 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <thread>
 
 #include "call_config.h"
 #include "common/host_api.h"
-#include "native_run_launch_signal.h"
+#include "native_run_execution.h"
 #include "pto_runtime_c_api.h"
 #include "runtime.h"
 
 /** Internal phase of the caller-owned opaque native-run storage. */
 enum class NativeRunPhase : uint8_t {
     Prepared,
-    Launching,
     Running,
     Complete,
 };
@@ -49,8 +47,7 @@ struct NativeRunContext {
         config(config_in),
         descriptor(descriptor_in),
         host_api(runner_in, descriptor_in.pipeline_slot, descriptor_in.arena_bank, host_api_ops),
-        trace_hid(trace_hid_in),
-        launch_signal(descriptor_in.accepted_state, descriptor_in.accepted_value) {
+        trace_hid(trace_hid_in) {
         // Publish the storage tag only after every potentially-throwing member
         // has been constructed. A failed placement construction must leave the
         // caller-owned slot reusable rather than looking like a prepared run.
@@ -62,18 +59,13 @@ struct NativeRunContext {
     NativeRunContext(NativeRunContext &&) = delete;
     NativeRunContext &operator=(NativeRunContext &&) = delete;
 
-    ~NativeRunContext() {
-        if (executor.joinable()) executor.join();
-        if (host_thread_state != nullptr) {
-            runner->destroy_native_run_thread_state(host_thread_state);
+    /** Publish acceptance only from this run's completed launch receipt. */
+    bool publish_acceptance(const LaunchReceipt &receipt) const noexcept {
+        if (!receipt.matches(identity())) return false;
+        if (descriptor.accepted_state != nullptr) {
+            __atomic_store_n(descriptor.accepted_state, descriptor.accepted_value, __ATOMIC_RELEASE);
         }
-    }
-
-    /** Move prepare-thread state into the executor before enqueue and drain. */
-    void adopt_host_thread_state() noexcept {
-        void *snapshot = host_thread_state;
-        host_thread_state = nullptr;
-        if (snapshot != nullptr) runner->adopt_native_run_thread_state(snapshot);
+        return true;
     }
 
     uint64_t magic{0};
@@ -85,15 +77,12 @@ struct NativeRunContext {
     uint64_t trace_hid{0};
     unsigned trace_inv{0};
     long long trace_start_ns{0};
-    std::thread executor{};
-    std::atomic<int> execution_rc{-1};
-    std::atomic<bool> execution_done{false};
+    long long runner_trace_start_ns{0};
+    int completion_rc{-1};
     std::atomic<NativeRunPhase> phase{NativeRunPhase::Prepared};
-    NativeRunLaunchSignal launch_signal;
     std::unique_ptr<typename Runner::PreparedExecution> prepared_execution{};
     std::unique_ptr<typename Runner::ActiveExecution> active_execution{};
     LaunchPermit launch_permit{};
-    void *host_thread_state{nullptr};
     char trace_attrs[192]{};
     bool runner_resources_owned{false};
     bool runner_reserved{false};

@@ -35,7 +35,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -560,6 +559,16 @@ static void emit_native_run_host_wall(unsigned trace_inv, uint64_t trace_hid, lo
     STRACE_HOST_SPAN_AT("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0);
 }
 
+static void emit_native_run_runner_wall(SimNativeRunContext *state) {
+    if (state->runner_trace_start_ns == 0) return;
+    const long long end_ns = STRACE_NOW_NS();
+    STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
+    STRACE_HOST_SPAN_AT(
+        "simpler_run.runner_run", state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1
+    );
+    state->runner_trace_start_ns = 0;
+}
+
 static int cleanup_failed_prepare(SimNativeRunContext *state, int execution_rc, bool clear_gm_sm) {
     const unsigned trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
@@ -656,7 +665,6 @@ int simpler_prepare_run(
             &state->prepared_execution
         );
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
-        state->host_thread_state = runner->take_native_run_thread_state();
         return 0;
     } catch (...) {
         if (state != nullptr) return cleanup_failed_prepare(state, -1, true);
@@ -669,65 +677,32 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
     if (!state->runner_claimed || !state->runner->native_run_owned_by(state)) return -1;
 
-    state->phase.store(NativeRunPhase::Launching, std::memory_order_release);
-
+    state->runner_trace_start_ns = STRACE_NOW_NS();
+    int rc = -1;
     try {
-        // The compatibility backend uses one blocking executor per run. The
-        // prepare-through-finalize runner claim limits it to one per context.
-        state->executor = state->runner->create_thread([state]() {
-            STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
-            int rc = -1;
-            bool entered_run = false;
-            try {
-                int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
-                if (attach_rc == 0) {
-                    state->adopt_host_thread_state();
-                    {
-                        STRACE("simpler_run.runner_run");
-                        entered_run = true;
-                        SimDeviceRunnerBase::LaunchOutcome launch = state->runner->launch_execution(
-                            std::move(state->prepared_execution), std::move(state->launch_permit)
-                        );
-                        rc = launch.rc;
-                        state->prepared_execution = std::move(launch.prepared);
-                        state->active_execution = std::move(launch.active);
-                        if (launch.progress == LaunchProgress::Complete) {
-                            if (!state->launch_signal.publish_receipt(launch.receipt, state->identity())) rc = -1;
-                        }
-                        if (state->active_execution != nullptr) {
-                            int drain_rc = state->runner->drain_execution(*state->active_execution);
-                            if (rc == 0) rc = drain_rc;
-                        } else if (state->prepared_execution != nullptr) {
-                            state->runner->abandon_prepared_execution(*state->prepared_execution);
-                        }
-                    }
-                } else {
-                    rc = attach_rc;
-                }
-            } catch (...) {
-                rc = -1;
-            }
-            if (!entered_run && state->prepared_execution != nullptr) {
-                try {
-                    state->runner->abandon_prepared_execution(*state->prepared_execution);
-                } catch (...) {
-                    rc = -1;
-                }
-            }
-            state->execution_rc.store(rc, std::memory_order_relaxed);
-            state->execution_done.store(true, std::memory_order_release);
-            state->launch_signal.notify();
-        });
+        rc = state->runner->attach_current_thread(state->runner->device_id());
+        if (rc == 0) {
+            SimDeviceRunnerBase::LaunchOutcome launch =
+                state->runner->launch_execution(std::move(state->prepared_execution), std::move(state->launch_permit));
+            rc = launch.rc;
+            state->prepared_execution = std::move(launch.prepared);
+            state->active_execution = std::move(launch.active);
+            if (launch.progress == LaunchProgress::Complete && !state->publish_acceptance(launch.receipt)) rc = -1;
+        }
     } catch (...) {
-        state->phase.store(NativeRunPhase::Prepared, std::memory_order_release);
-        return -1;
+        rc = -1;
     }
-
-    state->launch_signal.wait();
-    if (state->execution_done.load(std::memory_order_acquire)) {
-        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
-        return state->execution_rc.load(std::memory_order_relaxed);
+    if (rc != 0) {
+        state->completion_rc = rc;
+        if (state->active_execution != nullptr) {
+            state->phase.store(NativeRunPhase::Running, std::memory_order_release);
+        } else {
+            state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+            emit_native_run_runner_wall(state);
+        }
+        return rc;
     }
+    state->completion_rc = 0;
     state->phase.store(NativeRunPhase::Running, std::memory_order_release);
     return 0;
 }
@@ -737,48 +712,51 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     if (state == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Prepared) return SIMPLER_NATIVE_RUN_POLL_ERROR;
-    if (phase == NativeRunPhase::Complete || state->execution_done.load(std::memory_order_acquire)) {
-        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
-        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
-    }
+    if (phase == NativeRunPhase::Complete) return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
     if (state->active_execution == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
-    const int poll_rc = state->runner->poll_execution(*state->active_execution);
-    if (state->execution_done.load(std::memory_order_acquire)) {
-        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
-        return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
-    }
-    // The simulated kernel fence may precede host-side DFX and resource
-    // cleanup, so terminal publication remains at executor completion.
-    return poll_rc == SIMPLER_NATIVE_RUN_POLL_COMPLETE ? SIMPLER_NATIVE_RUN_POLL_NOT_READY : poll_rc;
+    return state->runner->poll_execution(*state->active_execution);
 }
 
 int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_wait_run");
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
-    if (phase == NativeRunPhase::Prepared || phase == NativeRunPhase::Launching) return -1;
-    if (state->executor.joinable()) state->executor.join();
+    if (phase == NativeRunPhase::Prepared) return -1;
+    if (phase == NativeRunPhase::Complete) return state->completion_rc;
+    int drain_rc = -1;
+    try {
+        if (state->active_execution != nullptr) {
+            drain_rc = state->runner->drain_execution(*state->active_execution);
+        }
+    } catch (...) {}
+    if (state->completion_rc == 0) state->completion_rc = drain_rc;
     state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
-    return state->execution_rc.load(std::memory_order_relaxed);
+    emit_native_run_runner_wall(state);
+    return state->completion_rc;
 }
 
 int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_finalize_run");
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
-    if (phase == NativeRunPhase::Launching) return -1;
     const unsigned trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
 
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
 
-    int execution_rc = -1;
-    const bool launched = phase != NativeRunPhase::Prepared;
-    if (launched) {
-        if (state->executor.joinable()) state->executor.join();
-        execution_rc = state->execution_rc.load(std::memory_order_relaxed);
+    int execution_rc = state->completion_rc;
+    const bool launched = state->active_execution != nullptr;
+    if (phase == NativeRunPhase::Running && launched) {
+        int drain_rc = -1;
+        try {
+            drain_rc = state->runner->drain_execution(*state->active_execution);
+        } catch (...) {}
+        if (execution_rc == 0) execution_rc = drain_rc;
+        state->completion_rc = execution_rc;
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
     }
+    emit_native_run_runner_wall(state);
 
     int validation_rc = -1;
     try {

@@ -65,8 +65,8 @@ device-log lines. A phase that was never stamped
 [device-phases.md](device-phases.md) for the device-side mechanism.
 
 The phased native-run interface preserves this same marker contract. Prepare
-allocates one `inv` and records the host-wall start; prepare, the executor's
-enqueue/drain lifecycle, and finalize temporarily bind that `(inv, hid)` while
+allocates one `inv` and records the host-wall start; prepare, the child progress
+path's launch/drain lifecycle, and finalize bind that `(inv, hid)` while
 emitting their spans. Finalize releases the runner claim, destroys the per-run
 state, and then emits the stored `simpler_run` wall, so the root includes that
 cleanup tail.

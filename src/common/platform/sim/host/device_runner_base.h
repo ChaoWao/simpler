@@ -60,7 +60,6 @@
 #include "runtime.h"
 
 struct HostApi;  // common/host_api.h — fwd-declared to keep task_interface headers out
-class NativeRunLaunchSignal;
 
 // Width sim resolves the CallConfig "auto" sentinel to, deliberately below
 // PLATFORM_MAX_BLOCKDIM (24 on a2a3, 36 on a5). The simulator runs one OS
@@ -143,7 +142,6 @@ public:
 
         bool poisoned() const { return progress == LaunchProgress::Partial; }
     };
-
     /** Submit a Runtime and retain all state needed to query and drain it. */
     virtual int prepare_execution(
         Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
@@ -158,12 +156,6 @@ public:
     virtual int finalize() = 0;
     // a2a3 and a5 both override; an arch without dep_gen leaves the no-op.
     virtual void set_dep_gen_enabled(bool /*enable*/) {}
-
-    // Transfer any runtime-specific TLS captured during prepare to the run's
-    // executor. A non-null snapshot stays caller-owned until adopt or destroy.
-    virtual void *take_native_run_thread_state() { return nullptr; }
-    virtual void adopt_native_run_thread_state(void * /*snapshot*/) noexcept {}
-    virtual void destroy_native_run_thread_state(void * /*snapshot*/) noexcept {}
 
     /** Reserve the runner's single active native execution through finalize. */
     bool try_acquire_native_run(const void *owner, const NativeRunIdentity &identity, LaunchPermit *permit);

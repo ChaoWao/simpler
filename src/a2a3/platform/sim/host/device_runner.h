@@ -47,9 +47,6 @@ public:
     // runtime uses instead of the device collector. Defined in the .cpp so this
     // header stays free of the runtime-provided capture symbols.
     void set_dep_gen_enabled(bool enable) override;
-    void *take_native_run_thread_state() override;
-    void adopt_native_run_thread_state(void *snapshot) noexcept override;
-    void destroy_native_run_thread_state(void *snapshot) noexcept override;
 
 private:
     struct ActiveRun;

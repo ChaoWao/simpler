@@ -342,7 +342,7 @@ private:
     );
     uint32_t arena_bank_for_slot(uint32_t slot_id) const;
 
-    enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHING, LAUNCHED, REAPED, FINALIZING };
+    enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHED, REAPED, FINALIZING };
     struct NativeRunSlotState {
         uint64_t lease_generation{0};
         uint64_t run_epoch{0};
