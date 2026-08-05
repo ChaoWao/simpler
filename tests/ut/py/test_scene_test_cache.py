@@ -20,12 +20,20 @@ instances die while the extension is still live.
 
 from __future__ import annotations
 
+import importlib
+
 from _task_interface import ArgDirection, ChipCallable  # pyright: ignore[reportMissingImports]
 
 # ``simpler_setup/__init__.py`` re-exports the ``scene_test`` *decorator*,
 # which shadows the submodule attribute when accessed via ``simpler_setup``.
 # Importing the names directly from the submodule avoids that ambiguity.
-from simpler_setup.scene_test import _compile_cache, _pto_isa_compile_cache_token, clear_compile_cache
+from simpler_setup.scene_test import (
+    SceneTestCase,
+    _compile_cache,
+    _pto_isa_compile_cache_token,
+    clear_compile_cache,
+    l3_compile_cache_key,
+)
 
 
 def _build_chip_callable(tag: str) -> ChipCallable:
@@ -65,3 +73,25 @@ def test_pto_isa_compile_cache_token_tracks_pin(monkeypatch):
     assert _pto_isa_compile_cache_token() == pin_a
     monkeypatch.setattr("simpler_setup.pto_isa.read_pto_isa_pin", lambda: pin_b)
     assert _pto_isa_compile_cache_token() == pin_b
+
+
+def test_compile_cache_keys_include_module(monkeypatch):
+    """Same-named scene classes from different test modules must not share binaries."""
+    monkeypatch.setattr("simpler_setup.pto_isa.read_pto_isa_pin", lambda: "pin")
+    captured = []
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    monkeypatch.setattr(
+        scene_test_module,
+        "_compile_chip_callable_from_spec",
+        lambda spec, platform, runtime, cache_key: captured.append(cache_key),
+    )
+
+    first = type("TestScene", (SceneTestCase,), {"__module__": "tests.first", "_st_runtime": "a5", "CALLABLE": {}})
+    second = type("TestScene", (SceneTestCase,), {"__module__": "tests.second", "_st_runtime": "a5", "CALLABLE": {}})
+    first.compile_chip_callable("a5")
+    second.compile_chip_callable("a5")
+
+    assert captured[0] != captured[1]
+    assert l3_compile_cache_key("tests.first", "TestScene", "child", "a5", "a5") != l3_compile_cache_key(
+        "tests.second", "TestScene", "child", "a5", "a5"
+    )
