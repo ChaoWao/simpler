@@ -192,6 +192,8 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
         ("a2a3", "host_build_graph", 1, 1),
         ("a2a3", "tensormap_and_ringbuffer", 2, 2),
         ("a5", "host_build_graph", 2, 1),
+        ("a5", "tensormap_and_ringbuffer", 2, 1),
+        ("a5sim", "tensormap_and_ringbuffer", 2, 1),
         ("a2a3sim", "host_build_graph", 2, 1),
     ],
 )

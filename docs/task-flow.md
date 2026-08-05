@@ -265,9 +265,10 @@ One memcpy of a few KB per task; negligible.
 
 #### Pipeline resource leases
 
-A2/A3 host runtimes declare `pipeline_depth = 2` as resource capacity. The
-contract determines the concrete copy count rather than permitting concurrent
-device execution by itself:
+A2/A3 host runtimes and the A5 tensor-map-and-ring-buffer runtime declare
+`pipeline_depth = 2` as resource capacity. The contract determines the
+concrete copy count rather than permitting concurrent device execution by
+itself:
 
 | Resource class | Copies | Selection |
 | -------------- | -----: | --------- |
@@ -310,10 +311,16 @@ run N+1:   PREPARED
 run N+2:   blocked in begin_run before its graph callback
 ```
 
-Where a backend publishes depth one — A5, or any runtime without a depth-two
-contract — the *second* submission is the one that blocks in `begin_run`, and
-there is no prepared successor at all. Code that relies on a later callback to
-unblock an earlier run deadlocks on such a backend.
+Where a backend publishes depth one, the *second* submission is the one that
+blocks in `begin_run`, and there is no prepared successor at all. Code that
+relies on a later callback to unblock an earlier run deadlocks on such a
+backend.
+
+A5 tensor-map-and-ring-buffer publishes depth two for whole-run admission, but
+its local endpoint still has one mailbox frame and device execution remains
+serial. The second reservation may build and become `PREPARED`; it does not
+gain a second concurrently executable device frame. A5 host-build-graph
+publishes no contract and stays at depth one.
 
 `begin_run` acquires a generation-safe lease before invoking the callback.
 The FIFO head may enter `EXECUTING` while its callback is still building, which

@@ -8377,10 +8377,13 @@ class Worker:
         the depth this worker's backends negotiated, not a constant: at the
         negotiated depth two, one active plus one prepared run are permitted and
         a third submission blocks before invoking its graph callback; where a
-        backend publishes depth one — A5, or any runtime without a depth-two
-        contract — the *second* submission already blocks there. A caller whose
-        first run only completes because a later callback runs would deadlock on
-        such a backend. Completion and cleanup stay attached to each handle.
+        backend publishes depth one, the *second* submission already blocks
+        there. A5 tensor-map-and-ring-buffer publishes depth two, while its
+        local endpoint retains one mailbox frame and serial device execution;
+        A5 host-build-graph publishes no contract and stays at depth one. A
+        caller whose first run only completes because a later callback runs
+        would deadlock on a depth-one backend. Completion and cleanup stay
+        attached to each handle.
         """
         with self._operation_lease("submit"):
             return self._submit_locked(callable, args, config)
