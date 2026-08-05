@@ -375,16 +375,6 @@ void SchedulerContext::check_running_cores_for_completion(
         );
         if (!t.matched) continue;
 
-#if SIMPLER_DFX
-        // Release an ACK-gated AICore swimlane buffer if this matched ACK/FIN is
-        // the one a rotation is waiting on: it proves the core advanced past the
-        // just-rotated buffer's tail record (FIN precedes the record write on
-        // this runtime, so rotation could not release the buffer itself).
-        if (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED) {
-            chip_swimlane_aicpu_on_aicore_ack(core_id, thread_idx, static_cast<uint32_t>(reg_task_id));
-        }
-#endif
-
 #if SIMPLER_SCHED_PROFILING
         if (chip_swimlane.chip_swimlane_enabled && (t.running_done || t.pending_done)) {
             chip_swimlane.complete_hit_count++;
@@ -401,6 +391,15 @@ void SchedulerContext::check_running_cores_for_completion(
         uint64_t finish_ts = 0;
         if (chip_swimlane_level_ >= ChipSwimlaneLevel::AICPU_TIMING && (t.pending_done || t.running_done)) {
             finish_ts = get_sys_cnt_aicpu();
+        }
+#endif
+
+#if SIMPLER_DFX
+        // Release an ACK-gated AICore swimlane buffer only after capturing the
+        // FIN observation timestamp. Publishing the retained buffer can do
+        // deferred-release work, which must not be charged to (end -> finish).
+        if (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED) {
+            chip_swimlane_aicpu_on_aicore_ack(core_id, thread_idx, static_cast<uint32_t>(reg_task_id));
         }
 #endif
 
