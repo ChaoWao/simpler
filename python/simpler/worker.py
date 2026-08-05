@@ -6447,12 +6447,19 @@ class Worker:
                 session_id = 1
             # The handshake blocks until the remote subtree is READY; the whole
             # open derives its per-op remaining from the shared root deadline.
-            session = self._open_remote_session(
-                spec=spec,
-                worker_id=worker_id,
-                session_id=session_id,
-                deadline=deadline,
-            )
+            try:
+                session = self._open_remote_session(
+                    spec=spec,
+                    worker_id=worker_id,
+                    session_id=session_id,
+                    deadline=deadline,
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(f"remote L3 session open failed for worker {worker_id}: {exc}") from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"remote L3 session open failed for worker {worker_id}: {type(exc).__name__}: {exc}"
+                ) from exc
             self._remote_sessions.append(session)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -6461,17 +6468,24 @@ class Worker:
             # attach_timeout bounds the command/health connect + HELLO read by the
             # remaining startup budget; runtime_timeout is the full runtime command
             # budget, never clamped by leftover startup time.
-            self._worker.add_remote_l3_socket(
-                session.worker_id,
-                session.session_id,
-                spec.transport,
-                session.command_host,
-                session.command_port,
-                session.health_host,
-                session.health_port,
-                remaining,
-                session_timeout,
-            )
+            try:
+                self._worker.add_remote_l3_socket(
+                    session.worker_id,
+                    session.session_id,
+                    spec.transport,
+                    session.command_host,
+                    session.command_port,
+                    session.health_host,
+                    session.health_port,
+                    remaining,
+                    session_timeout,
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(f"remote L3 endpoint attach failed for worker {worker_id}: {exc}") from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"remote L3 endpoint attach failed for worker {worker_id}: {type(exc).__name__}: {exc}"
+                ) from exc
         # Attach may have consumed the last slice of the budget; a final root
         # deadline check keeps a just-over-budget attach from committing READY.
         if time.monotonic() >= deadline:
