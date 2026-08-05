@@ -287,28 +287,31 @@ def wrap_fork_inherited(
     owner_worker_path: str = "",
     generation: int = 1,
     access: AccessMode = AccessMode.READ,
+    backend_kind: BackendKind = BackendKind.FORK_COW,
 ) -> Buffer:
     """Wrap a pre-fork, fork-inherited host allocation as a zero-copy ``Buffer``.
 
     Memory allocated before the children were forked is present in every child at the *same* virtual
     address; the backend body is that base VA (u64 LE) and the consumer materializes to the same VA
-    with no mapping and no copy. The backend tag follows the mmap the caller actually has, which is
-    what ``access`` states:
+    with no mapping and no copy. ``backend_kind`` states which mmap the caller actually holds, and is
+    a classification the caller must make rather than something inferred from ``access``:
 
-    * ``MAP_SHARED`` (e.g. a ``torch.Tensor.share_memory_()``) — a child's writes land in the pages
-      the parent reads, so it can serve as an OUTPUT. Pass ``access=READWRITE``; tagged FORK_SHM.
-    * plain ``MAP_PRIVATE`` — copy-on-write: a child's first write splits the page into a private
-      copy the parent never sees. Read-only, the default; tagged FORK_COW so the distinction is a
-      classification rather than something a reader has to infer from ``access``.
+    * ``FORK_SHM`` — ``MAP_SHARED`` (e.g. a ``torch.Tensor.share_memory_()``): a child's writes land
+      in the pages the parent reads, so it can serve as an OUTPUT. Any ``access`` is legal.
+    * ``FORK_COW`` — plain ``MAP_PRIVATE``: copy-on-write, so a child's first write splits the page
+      into a private copy the parent never sees. ``access`` must be ``READ``; the descriptor's
+      validator rejects anything else.
+
+    The two are not interchangeable and neither implies an ``access``: a ``MAP_SHARED`` backing
+    granted READ only is a legal, expressible combination.
     """
     identity = CanonicalIdentity(owner_instance_id, buffer_id, generation)
-    backend = BackendKind.FORK_SHM if access != AccessMode.READ else BackendKind.FORK_COW
     return Buffer(
         identity=identity,
         owner_worker_path_id=intern_worker_path(owner_worker_path),
         address_space=AddressSpace.HOST,
         access=access,
-        backend_kind=backend,
+        backend_kind=backend_kind,
         nbytes=nbytes,
         body=int(data_ptr).to_bytes(8, "little"),
         shm=None,
@@ -426,9 +429,13 @@ class ImportRegistry:
         cached ImportedBuffer thereafter (map-once).
 
         Takes the descriptor, never its bytes: every producer of one — an owner's ``to_descriptor()``,
-        a re-export, an element pulled out of a received TaskArgs — hands over the bound type, and a
-        caller holding raw bytes decodes them with ``BufferDescriptor.unpack`` so the decode is
-        visible at its call site.
+        a re-export, an element pulled out of a received TaskArgs — hands over the bound type, and
+        there is no Python path from raw bytes to a descriptor at all, which is what keeps
+        ``validate_buffer_descriptor`` a gate rather than a habit.
+
+        Adds no endpoint check of its own: a DEVICE backing resolved here yields a device pointer,
+        which is only meaningful on its owner chip. The endpoint × ``address_space`` matrix is a
+        separate change; until it lands, that invariant rests on the caller.
         """
         key = desc.identity
         cached = self._by_identity.get(key)
@@ -441,9 +448,10 @@ class ImportRegistry:
             BackendKind.VMM_WINDOW,
         ):
             # The body is the base pointer (u64 LE), already valid in this process — no mapping.
-            # FORK_SHM: a COW-inherited host VA. DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on
-            # the chip that allocated / carved it (the tensor must only reach that chip — a topology
-            # invariant).
+            # FORK_SHM / FORK_COW: a host VA inherited across the fork, so the child already holds
+            # the same address (they differ in write semantics, not in how they resolve).
+            # DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on the chip that allocated / carved
+            # it (the tensor must only reach that chip — a topology invariant).
             base = int.from_bytes(desc.body, "little")
             imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None)
         elif desc.backend_kind == BackendKind.POSIX_SHM:

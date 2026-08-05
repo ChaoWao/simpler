@@ -8328,10 +8328,14 @@ class Worker:
 
     def _create_buffer_locked(self, nbytes: int) -> Buffer:
         # An L3+ buffer is consumed by a forked child that lazily maps it, so a childless L3+ buffer
-        # can reach no consumer. An L2 leaf has no children and materializes in-process, so it needs
-        # none.
-        if self.level >= 3 and not self._chip_shms and not self._sub_shms:
-            raise RuntimeError("create_buffer requires at least one forked chip or sub child (this Worker has none)")
+        # can reach no consumer. Every kind of forked child counts: a next-level Worker child maps a
+        # POSIX_SHM backing by name exactly as a chip or sub child does, so an L4 whose only children
+        # are local L3 Workers can consume one. An L2 leaf has no children and materializes
+        # in-process, so it needs none.
+        if self.level >= 3 and not self._chip_shms and not self._sub_shms and not self._next_level_shms:
+            raise RuntimeError(
+                "create_buffer requires at least one forked chip, sub, or next-level child (this Worker has none)"
+            )
         if nbytes <= 0:
             raise ValueError("create_buffer: nbytes must be positive")
         buffer_id = self._next_buffer_id()

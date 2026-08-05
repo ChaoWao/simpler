@@ -138,8 +138,9 @@ whose own comment records the hazard.
 
 Both are called what they are, and by the **same** name in both languages, which
 is what [codestyle rule 13](../.claude/rules/codestyle.md) requires of a public
-type. The L3+ wire type is `Tensor` — `simpler.task_interface.Tensor` in Python,
-the global `Tensor` of `src/common/task_interface/buffer.h` in C++. The device
+type. The L3+ wire type is `Tensor` — `simpler.buffer.Tensor` in Python (it joins
+`simpler.task_interface` in the wire cutover, per the Status note above), the
+global `Tensor` of `src/common/task_interface/buffer.h` in C++. The device
 POD is `ChipTensor` in both, from `src/common/task_interface/tensor.h`.
 
 Rule 13 is what makes the plain names available: the device POD held the global
@@ -212,6 +213,14 @@ torch.frombuffer(h.shm.buf, dtype=torch.float32, count=n).fill_(5.0)  # before r
 worker.run(my_orch, ...)                                             # orch names tensors only
 result = torch.frombuffer(out_h.shm.buf, dtype=torch.float32, count=n)  # after run()
 ```
+
+> **`h.shm` is transitional — wrap it.** Byte access belongs on the view, not on the
+> backing object: a `POSIX_SHM` buffer has an `shm` and a device one never will, so
+> code written against `h.shm.buf` forks by backend and cannot be told "this backing
+> has no host mapping" — it just gets `None`. The accessor that replaces it lands with
+> the view algebra; until then, put `h.shm.buf` behind one helper of your own so the
+> switch is a one-line change. Note also that a `frombuffer` tensor keeps the
+> memoryview alive: drop it before `close()`, or the release raises `BufferError`.
 
 ## How a tensor reaches its consumer (three-way split)
 
