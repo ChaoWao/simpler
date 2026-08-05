@@ -37,17 +37,16 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
 
-      - name: Set up C++ compiler (Linux)
-        if: inputs.setup_variant == 'github' && runner.os == 'Linux'
+      - name: Set up C++ compiler
+        if: inputs.setup_variant == 'github'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++
-
-      - name: Set up C++ compiler (macOS)
-        if: inputs.setup_variant == 'github' && runner.os == 'macOS'
-        run: |
-          brew install ninja cmake
-          brew install gcc@15 || brew install gcc
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build g++
+          else
+            brew install ninja cmake
+            brew install gcc@15 || brew install gcc
+          fi
 
       - name: Set up Python ${{ inputs.python_version }}
         if: inputs.setup_variant == 'github'

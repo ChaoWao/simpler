@@ -7,9 +7,9 @@
 Three watchdogs compete, and whichever fires first determines whether you get a
 clean `-100` with a `sub_class`, or a masked `507018`:
 
-- the scheduler no-progress timeout (`PTO2_SCHEDULER_TIMEOUT_MS`),
-- the STARS op-execute timeout (`PTO2_OP_EXECUTE_TIMEOUT_US`, ~45 s, kills `aicpu-sd`),
-- the host stream-sync timeout (`PTO2_STREAM_SYNC_TIMEOUT_MS`).
+- the scheduler no-progress timeout (`SIMPLER_SCHEDULER_TIMEOUT_MS`),
+- the STARS op-execute timeout (`SIMPLER_OP_EXECUTE_TIMEOUT_US`, ~45 s, kills `aicpu-sd`),
+- the host stream-sync timeout (`SIMPLER_STREAM_SYNC_TIMEOUT_MS`).
 
 **A 45 s op-execute kill is not proof of a deadlock** — the kernel may simply be
 slow. To find out which, order the race deliberately. The STs do exactly this, and

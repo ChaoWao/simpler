@@ -1,0 +1,136 @@
+name: Simulation Scene Tests (a2a3sim)
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: false
+        type: string
+      ref:
+        required: false
+        type: string
+      runs_on:
+        required: true
+        type: string
+      setup_variant:
+        description: github or self-cpu.
+        required: true
+        type: string
+      include_dfx_smokes:
+        required: false
+        default: false
+        type: boolean
+      python_version:
+        required: false
+        default: "3.10"
+        type: string
+
+jobs:
+  run:
+    name: st-sim-a2a3sim
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 30
+    env:
+      SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up C++ compiler
+        if: inputs.setup_variant == 'github'
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+            sudo apt-get install -y g++-15 || sudo apt-get install -y g++
+            if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
+            sudo apt-get install -y graphviz
+          else
+            brew install ninja
+            brew install gcc@15 || brew install gcc
+            brew install graphviz
+          fi
+
+      - name: Verify provisioned toolchain
+        if: inputs.setup_variant == 'self-cpu'
+        run: |
+          command -v ninja
+          command -v g++
+          command -v dot
+          if ! command -v g++-15 >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/bin"
+            ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
+            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Set up Python ${{ inputs.python_version }}
+        if: inputs.setup_variant == 'github'
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Cache pip packages
+        uses: ./.github/actions/cache-pip
+
+      - name: Install dependencies
+        if: inputs.setup_variant == 'github'
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install '.[test]'
+
+      - name: venv + deps
+        if: inputs.setup_variant == 'self-cpu'
+        uses: ./.github/actions/setup-venv
+        with:
+          packages: ".[test]"
+
+      - name: Run pytest scene tests
+        run: |
+          if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
+            source .venv/bin/activate
+          fi
+          python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
+            --pto-session-timeout 600 --require-pto-isa
+
+      - name: dep_gen smoke (a2a3)
+        if: inputs.include_dfx_smokes
+        run: |
+          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-dep-gen
+
+      - name: dep_gen smoke (a2a3 host_build_graph)
+        if: inputs.include_dfx_smokes
+        run: |
+          pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-dep-gen
+
+      - name: chip_swimlane smoke (a2a3)
+        if: inputs.include_dfx_smokes
+        run: |
+          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-chip-swimlane --enable-dep-gen
+
+      - name: PMU smoke (a2a3)
+        if: inputs.include_dfx_smokes
+        run: |
+          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --enable-pmu 2
+
+      - name: args_dump smoke (a2a3)
+        if: inputs.include_dfx_smokes
+        run: |
+          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+            --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
+            --require-pto-isa --dump-args

@@ -111,46 +111,42 @@ jobs:
   st-sim-a2a3:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    uses: ./.github/workflows/_st-sim.yml
+    uses: ./.github/workflows/_st-sim-a2a3.yml
     with:
       repository: ${{ inputs.repository || github.repository }}
       ref: ${{ inputs.ref || github.sha }}
       runs_on: '["self-hosted","cpu"]'
       setup_variant: self-cpu
-      platform: a2a3sim
       include_dfx_smokes: false
 
   st-sim-a5:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    uses: ./.github/workflows/_st-sim.yml
+    uses: ./.github/workflows/_st-sim-a5.yml
     with:
       repository: ${{ inputs.repository || github.repository }}
       ref: ${{ inputs.ref || github.sha }}
       runs_on: '["self-hosted","cpu"]'
       setup_variant: self-cpu
-      platform: a5sim
       include_dfx_smokes: false
 
   ut-a2a3:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    uses: ./.github/workflows/_ut-npu.yml
+    uses: ./.github/workflows/_ut-npu-a2a3.yml
     with:
       repository: ${{ inputs.repository || github.repository }}
       ref: ${{ inputs.ref || github.sha }}
-      platform: a2a3
       runs_on: '["self-hosted","a2a3"]'
       include_cann_examples: false
 
   st-onboard-a2a3:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a2a3_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    uses: ./.github/workflows/_st-npu.yml
+    uses: ./.github/workflows/_st-npu-a2a3.yml
     with:
       repository: ${{ inputs.repository || github.repository }}
       ref: ${{ inputs.ref || github.sha }}
-      platform: a2a3
       runs_on: '["self-hosted","a2a3"]'
       include_dfx_smokes: false
       a2a3_sdma_mode: legacy-paths
@@ -158,21 +154,19 @@ jobs:
   ut-a5:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.non_code_only != 'true' && needs.detect-changes.outputs.ut_affected == 'true'
-    uses: ./.github/workflows/_ut-npu.yml
+    uses: ./.github/workflows/_ut-npu-a5.yml
     with:
       repository: ${{ inputs.repository || github.repository }}
       ref: ${{ inputs.ref || github.sha }}
-      platform: a5
       runs_on: '["self-hosted","a5"]'
       include_cann_examples: false
 
   st-onboard-a5:
     needs: [detect-changes]
     if: needs.detect-changes.outputs.a5_changed == 'true' && needs.detect-changes.outputs.st_affected == 'true'
-    uses: ./.github/workflows/_st-npu.yml
+    uses: ./.github/workflows/_st-npu-a5.yml
     with:
       repository: ${{ inputs.repository || github.repository }}
       ref: ${{ inputs.ref || github.sha }}
-      platform: a5
       runs_on: '["self-hosted","a5"]'
       include_dfx_smokes: false
