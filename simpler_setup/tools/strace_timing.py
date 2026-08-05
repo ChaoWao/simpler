@@ -48,16 +48,26 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+# The host-log record prefix `HostLogger::emit` writes ahead of every message.
+# Its func segment excludes ':' because `LOG_TIMING` passes `__FUNCTION__`, an
+# unqualified name; a qualified name containing '::' would stop this alternative
+# from matching, leaving the `[STRACE]` alternative to bound the record instead.
 _HOST_LOG_PREFIX = (
     r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\]"
     r"\[T0x[0-9a-fA-F]+\]\[[A-Z]+\]\s+[^:\r\n]+:\s+"
 )
+# MULTILINE anchors the `$` alternative at every line end, so a caller passing a
+# multi-line blob rather than one line per item keeps every record but the last.
 _STRACE_RE = re.compile(
     r"\[STRACE\]\s+v=(?P<v>\d+)\s+pid=(?P<pid>\d+)\s+tid=(?P<tid>\d+)\s+"
     r"inv=(?P<inv>\d+)\s+hid=(?P<hid>[0-9a-fA-F]+)\s+depth=(?P<depth>\d+)\s+"
     r"name=(?P<name>\S+)\s+ts=(?P<ts>\d+)\s+dur=(?P<dur>\d+)(?P<attrs>.*?)"
-    rf"(?={_HOST_LOG_PREFIX}|\[STRACE\]|\r?$)"
+    rf"(?={_HOST_LOG_PREFIX}|\[STRACE\]|\r?$)",
+    re.MULTILINE,
 )
+# A record start, matched independently of whether the rest of that record
+# survived the write that emitted it.
+_STRACE_HEAD_RE = re.compile(r"\[STRACE\]\s+v=\d+")
 
 
 @dataclass
@@ -98,6 +108,16 @@ class Invocation:
         for s in self.spans:
             m.setdefault(s.name, s)
         return m
+
+
+def count_record_heads(lines):
+    """Count ``[STRACE]`` record starts, torn ones included.
+
+    Pairs with :func:`parse_spans`, which yields only records that survived
+    intact. A shortfall between the two counts is instrumentation loss, and
+    without it a torn record is indistinguishable from a real measurement.
+    """
+    return sum(len(_STRACE_HEAD_RE.findall(line)) for line in lines)
 
 
 def parse_spans(lines):
@@ -496,6 +516,13 @@ def main(argv=None):
             lines = f.readlines()
 
     spans = list(parse_spans(lines))
+    heads = count_record_heads(lines)
+    if heads > len(spans):
+        print(
+            f"warning: {heads - len(spans)} of {heads} [STRACE] records are incomplete and are "
+            "excluded from the timing below",
+            file=sys.stderr,
+        )
     invocations = group_invocations(spans)
     buckets = bucket_by_hid(invocations)
 

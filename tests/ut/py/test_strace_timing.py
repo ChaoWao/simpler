@@ -8,27 +8,55 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-from simpler_setup.tools.strace_timing import parse_spans
+from simpler_setup.tools.strace_timing import count_record_heads, parse_spans
 
 
-def _marker(pid, inv, name, attrs=""):
-    return f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=0 name={name} ts=100 dur=20 {attrs}"
+def _record(pid, inv, name, attrs=""):
+    """One host-log record in the shape `HostLogger::emit` writes it.
+
+    `LOG_TIMING` prepends `[<file>:<line>] ` to the caller's format string, so
+    the marker never sits flush against the `<func>: ` separator on stderr.
+    """
+    return (
+        f"[2026-08-04 10:00:00.00000{pid}][T0x{pid}][TIMING] emit_span: [strace.h:132] "
+        f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=0 name={name} ts=100 dur=20 {attrs}"
+    )
 
 
 def test_parse_spans_finds_adjacent_records_on_one_physical_line():
     line = (
-        "[2026-08-04 10:00:00.000001][T0x1][TIMING] emit: "
-        + _marker(11, 1, "simpler_run", "rank=0")
-        + "[2026-08-04 10:00:00.000002][T0x2][TIMING] emit: "
-        + _marker(22, 2, "simpler_run.runner_run.device_wall", "clk=dev rank=1")
+        _record(1, 1, "simpler_run", "rank=0")
+        + _record(2, 2, "simpler_run.runner_run.device_wall", "clk=dev rank=1")
         + "\n"
     )
 
     spans = list(parse_spans([line]))
 
     assert [(span.pid, span.inv, span.name) for span in spans] == [
-        (11, 1, "simpler_run"),
-        (22, 2, "simpler_run.runner_run.device_wall"),
+        (1, 1, "simpler_run"),
+        (2, 2, "simpler_run.runner_run.device_wall"),
     ]
     assert spans[0].attrs == "rank=0"
     assert spans[1].attrs == "clk=dev rank=1"
+
+
+def test_parse_spans_keeps_every_record_of_a_multi_line_blob():
+    blob = _record(1, 1, "simpler_run", "rank=0") + "\n" + _record(2, 2, "simpler_run.bind", "rank=1") + "\n"
+
+    spans = list(parse_spans([blob]))
+
+    assert [(span.pid, span.inv, span.name) for span in spans] == [
+        (1, 1, "simpler_run"),
+        (2, 2, "simpler_run.bind"),
+    ]
+    assert spans[0].attrs == "rank=0"
+    assert spans[1].attrs == "rank=1"
+
+
+def test_count_record_heads_sees_a_torn_record_that_parse_spans_drops():
+    intact = _record(1, 1, "simpler_run", "rank=0")
+    torn = intact[: intact.index(" ts=")]
+    lines = [intact + "\n", torn + "\n"]
+
+    assert count_record_heads(lines) == 2
+    assert len(list(parse_spans(lines))) == 1

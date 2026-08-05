@@ -22,8 +22,6 @@
 #include <cstring>
 #include <ctime>
 #include <pthread.h>
-#include <sstream>
-#include <string>
 #include <vector>
 
 #include <unistd.h>
@@ -32,30 +30,54 @@ using simpler::log::LogLevel;
 
 namespace {
 
-std::string format_message(const char *fmt, va_list args) {
-    va_list sizing_args;
-    va_copy(sizing_args, args);
-    const int required = vsnprintf(nullptr, 0, fmt, sizing_args);
-    va_end(sizing_args);
-    if (required < 0) {
-        return {};
-    }
+// Every STRACE marker renders well inside this, so the heap fallback below
+// stays off the path a traced run pays per span.
+constexpr size_t kRecordStackCapacity = 2048;
 
-    std::vector<char> buffer(static_cast<size_t>(required) + 1);
+// Renders the timestamp/thread/level prefix, the caller's message, and an
+// optional trailing newline into `buffer`, and returns the length of the whole
+// record. A return value of `capacity` or more means `buffer` holds only a
+// truncated prefix and the caller must re-render into that many bytes.
+size_t format_record(
+    char *buffer, size_t capacity, const char *ts, unsigned long tid, const char *level_tag, const char *func,
+    const char *fmt, va_list args, bool append_newline
+) {
+    size_t length = 0;
+    auto tail = [&]() -> char * {
+        return length < capacity ? buffer + length : nullptr;
+    };
+    auto remaining = [&]() -> size_t {
+        return length < capacity ? capacity - length : 0;
+    };
+
+    const int prefix = snprintf(tail(), remaining(), "[%s][T0x%lx][%s] %s: ", ts, tid, level_tag, func);
+    if (prefix < 0) {
+        return 0;
+    }
+    length += static_cast<size_t>(prefix);
+
     va_list formatting_args;
     va_copy(formatting_args, args);
-    const int written = vsnprintf(buffer.data(), buffer.size(), fmt, formatting_args);
+    const int body = vsnprintf(tail(), remaining(), fmt, formatting_args);
     va_end(formatting_args);
-    if (written < 0) {
-        return {};
+    if (body > 0) {
+        length += static_cast<size_t>(body);
     }
-    return std::string(buffer.data(), static_cast<size_t>(written));
+
+    if (append_newline) {
+        if (length + 1 < capacity) {
+            buffer[length] = '\n';
+            buffer[length + 1] = '\0';
+        }
+        length += 1;
+    }
+    return length;
 }
 
-void write_stderr(const std::string &record) {
+void write_stderr(const char *record, size_t size) {
     size_t offset = 0;
-    while (offset < record.size()) {
-        const ssize_t written = ::write(STDERR_FILENO, record.data() + offset, record.size() - offset);
+    while (offset < size) {
+        const ssize_t written = ::write(STDERR_FILENO, record + offset, size - offset);
         if (written > 0) {
             offset += static_cast<size_t>(written);
         } else if (written < 0 && errno == EINTR) {
@@ -127,18 +149,26 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
 
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
-    std::ostringstream stream;
-    stream << '[' << ts << "][T0x" << std::hex << tid << "][" << level_tag << "] " << func << ": "
-           << format_message(fmt, args);
-    std::string record = stream.str();
-    if (fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n') {
-        record.push_back('\n');
+    const bool append_newline = fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n';
+
+    // One write per record: a record of at most PIPE_BUF bytes reaches a shared
+    // pipe indivisibly, so forked workers writing a captured stderr cannot
+    // interleave inside it. A longer record — a large LOG_ERROR dump, say — has
+    // no such guarantee; STRACE markers stay well below the limit.
+    char stack_buffer[kRecordStackCapacity];
+    const size_t length =
+        format_record(stack_buffer, sizeof(stack_buffer), ts, tid, level_tag, func, fmt, args, append_newline);
+    if (length < sizeof(stack_buffer)) {
+        std::scoped_lock lock(mutex_);
+        write_stderr(stack_buffer, length);
+        return;
     }
 
+    std::vector<char> heap_buffer(length + 1);
+    const size_t heap_length =
+        format_record(heap_buffer.data(), heap_buffer.size(), ts, tid, level_tag, func, fmt, args, append_newline);
     std::scoped_lock lock(mutex_);
-    // STRACE records fit within PIPE_BUF, so one write keeps each record
-    // indivisible when forked workers share a captured stderr pipe.
-    write_stderr(record);
+    write_stderr(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length);
 }
 
 void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list args) {
