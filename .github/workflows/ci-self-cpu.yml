@@ -149,7 +149,6 @@ jobs:
       ref: ${{ inputs.ref || github.sha }}
       runs_on: '["self-hosted","a2a3"]'
       include_dfx_smokes: false
-      a2a3_sdma_mode: legacy-paths
 
   ut-a5:
     needs: [detect-changes]
