@@ -138,7 +138,7 @@ Owns:
 
 Owns no threads. Every entry point is documented as one of:
 
-- lane-owned SPSC operations (`push_to_ready`, `push_recycled`,
+- lane-owned SPSC operations (`push_to_ready`, `wait_push_to_ready`, `push_recycled`,
   `pop_recycled`, `drain_done_into_recycled`),
 - collector producer operations (`notify_copy_done`, one shard per collector),
 - shared operations with narrow internal locking for blocking waits / mappings
@@ -173,7 +173,8 @@ Provides:
   returns finished buffers through the matching done shard.
 - `poll_and_collect_loop` — per-shard `wait_pop_ready` with a 100 ms cv
   tick, dispatches to `Derived::on_buffer_collected`, then calls
-  `manager_.notify_copy_done(...)` itself; idle-timeout hang detector.
+  `manager_.notify_copy_done(...)` itself; its idle-timeout detector reports
+  stalled traffic but keeps the consumer alive until execution completes.
 - `set_memory_context` / `clear_memory_context` so `Derived::init` can
   stash the alloc/reg/free callbacks before threads start; if init aborts
   before stashing, `start(tf)` becomes a no-op.
@@ -188,9 +189,10 @@ is where the unified algorithms live:
 - `process_entry` — resolve/copy the popped buffer, refill the originating
   free queue only from the current drain shard's local recycled lane, then
   push to the host ready shard. Runtime drain does not allocate and does not
-  consume done shards directly. If the host ready shard is full, the
-  undelivered buffer is retired rather than written to the done shard, keeping
-  the done shard's producer side collector-only.
+  consume done shards directly. If the host ready shard is full, the drain
+  thread retains the buffer and waits until its collector frees a slot. This
+  makes the device-ready pop to host-ready push a lossless hand-off while
+  keeping the done shard's producer side collector-only.
 - `proactive_replenish` — before worker threads start, top every
   (kind, instance) free queue up to `kSlotCount` and optionally warm
   recycled lanes. If recycled is dry while filling free queues it
@@ -326,7 +328,7 @@ Current users:
                               resolve_host_ptr
                               pop recycled[q]
                                 (top up originating free_queue)
-                              push_to_ready(shard q) ─────────► wait_pop_ready(q)
+                              wait_push_to_ready(shard q) ────► wait_pop_ready(q)
                                                                 Derived::on_buffer_collected
                                                                   (copy records out)
                                                                 notify_copy_done(q)

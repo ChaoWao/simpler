@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <future>
 #include <set>
 #include <thread>
 #include <utility>
@@ -324,6 +325,48 @@ TEST(BufferPoolManagerShardingTest, WaitPopReadyWakesOnProducer) {
     EXPECT_EQ(out.dev_buffer_ptr, ptr(0x7000));
     EXPECT_EQ(out.shard_marker, 7u);
     producer.join();
+}
+
+TEST(BufferPoolManagerShardingTest, WaitPushReadyWakesOnConsumerAndPreservesFifo) {
+    using namespace std::chrono_literals;
+    using Manager = profiling_common::BufferPoolManager<TestModule>;
+
+    Manager manager;
+    for (uintptr_t i = 0; i < Manager::kHostQueueCapacity; i++) {
+        ASSERT_TRUE(manager.push_to_ready(TestReadyBufferInfo{ptr(0x1000 + i), static_cast<uint32_t>(i)}, 0));
+    }
+
+    std::promise<void> started_promise;
+    std::future<void> started = started_promise.get_future();
+    std::promise<void> done_promise;
+    std::future<void> done = done_promise.get_future();
+    std::thread producer([&]() {
+        started_promise.set_value();
+        manager.wait_push_to_ready(TestReadyBufferInfo{ptr(0x2000), 99}, 0);
+        done_promise.set_value();
+    });
+
+    EXPECT_EQ(started.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(done.wait_for(20ms), std::future_status::timeout);
+
+    TestReadyBufferInfo first{};
+    EXPECT_TRUE(manager.wait_pop_ready(first, 500ms, 0));
+    EXPECT_EQ(first.dev_buffer_ptr, ptr(0x1000));
+    EXPECT_EQ(first.shard_marker, 0u);
+
+    EXPECT_EQ(done.wait_for(500ms), std::future_status::ready);
+    producer.join();
+
+    TestReadyBufferInfo out{};
+    for (uintptr_t i = 1; i < Manager::kHostQueueCapacity; i++) {
+        ASSERT_TRUE(manager.try_pop_ready(out, 0));
+        EXPECT_EQ(out.dev_buffer_ptr, ptr(0x1000 + i));
+        EXPECT_EQ(out.shard_marker, static_cast<uint32_t>(i));
+    }
+    ASSERT_TRUE(manager.try_pop_ready(out, 0));
+    EXPECT_EQ(out.dev_buffer_ptr, ptr(0x2000));
+    EXPECT_EQ(out.shard_marker, 99u);
+    EXPECT_FALSE(manager.try_pop_ready(out, 0));
 }
 
 TEST(BufferPoolManagerShardingTest, DoneShardsRecycleByKind) {
@@ -804,33 +847,61 @@ TEST(BufferPoolManagerShardingTest, ReplenishRecycledPoolsUsesSlotSizedBatchForS
     manager.clear_mappings();
 }
 
-TEST(BufferPoolManagerShardingTest, ProcessEntryReadyFullDoesNotPublishDoneFromDrainThread) {
+TEST(BufferPoolManagerShardingTest, ProcessEntryWaitsForReadySpaceInsteadOfRetiringBuffer) {
     using Manager = profiling_common::BufferPoolManager<AlgorithmModule>;
+    using namespace std::chrono_literals;
 
     Manager manager;
     AlgorithmHeader header{};
     void *dev_ptr = ptr(0x7000);
     manager.register_mapping(dev_ptr, dev_ptr);
 
+    std::promise<void> copied_promise;
+    std::future<void> copied = copied_promise.get_future();
+    std::atomic<bool> copied_signalled{false};
+    profiling_common::MemoryOps ops;
+    ops.copy_from_device = [&](void * /*host_dst*/, const void *dev_src, size_t /*size*/) {
+        if (dev_src == dev_ptr && !copied_signalled.exchange(true, std::memory_order_acq_rel)) {
+            copied_promise.set_value();
+        }
+        return 0;
+    };
+    manager.set_memory_context(std::move(ops), nullptr, &header, sizeof(header), 0);
+
     ASSERT_TRUE(manager.push_to_ready(AlgorithmReadyBufferInfo{ptr(0x1111), ptr(0x1111)}, 0));
 
-    profiling_common::ProfilerAlgorithms<AlgorithmModule>::process_entry(
-        manager, &header, 0, AlgorithmReadyEntry{reinterpret_cast<uint64_t>(dev_ptr)}
-    );
+    std::promise<void> process_done_promise;
+    std::future<void> process_done = process_done_promise.get_future();
+    std::thread management([&]() {
+        profiling_common::ProfilerAlgorithms<AlgorithmModule>::process_entry(
+            manager, &header, 0, AlgorithmReadyEntry{reinterpret_cast<uint64_t>(dev_ptr)}
+        );
+        process_done_promise.set_value();
+    });
+
+    EXPECT_EQ(copied.wait_for(500ms), std::future_status::ready);
+    EXPECT_EQ(process_done.wait_for(20ms), std::future_status::timeout);
+
+    AlgorithmReadyBufferInfo first{};
+    EXPECT_TRUE(manager.wait_pop_ready(first, 500ms, 0));
+    EXPECT_EQ(first.dev_buffer_ptr, ptr(0x1111));
+
+    EXPECT_EQ(process_done.wait_for(500ms), std::future_status::ready);
+    management.join();
 
     profiling_common::DoneInfo done{};
     EXPECT_FALSE(manager.try_pop_done(done, 0));
 
     AlgorithmReadyBufferInfo ready{};
     ASSERT_TRUE(manager.try_pop_ready(ready, 0));
-    EXPECT_EQ(ready.dev_buffer_ptr, ptr(0x1111));
+    EXPECT_EQ(ready.dev_buffer_ptr, dev_ptr);
     EXPECT_FALSE(manager.try_pop_ready(ready, 0));
 
     std::vector<void *> released;
     manager.release_owned_buffers([&](void *p) {
         released.push_back(p);
     });
-    EXPECT_EQ(released, (std::vector<void *>{dev_ptr}));
+    EXPECT_TRUE(released.empty());
 }
 
 TEST(BufferPoolManagerShardingTest, BlockBatchCarvesRangeMappingsAndReleasesBaseOnce) {

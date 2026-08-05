@@ -177,8 +177,9 @@
  *
  *   static constexpr int          kIdleTimeoutSec;
  *       Bound on how long the loop sits with no buffers AND no
- *       `execution_complete_` signal before logging an error and exiting
- *       (use the subsystem's PLATFORM_*_TIMEOUT_SECONDS).
+ *       `execution_complete_` signal before logging an error. The collector
+ *       remains alive until execution completes so a blocked drain producer
+ *       always has a consumer (use the subsystem's PLATFORM_*_TIMEOUT_SECONDS).
  *
  *   static constexpr const char*  kSubsystemName;
  *       Used in the idle-timeout log line (e.g. "ChipSwimlane", "PMU", "ArgsDump").
@@ -451,9 +452,11 @@ struct ProfilerAlgorithms {
             (void)top_up_free_queue(mgr, site.kind, *site.free_queue, site.buffer_size, q);
         }
 
-        if (!mgr.push_to_ready(site.info, q)) {
-            (void)mgr.retire_unqueued_buffer(site.kind, site.info.dev_buffer_ptr, q);
-        }
+        // The device ready entry was already acknowledged by
+        // try_pop_aicpu_entry(). Keep ownership here until the collector frees
+        // a host-ring slot; retiring on transient host backpressure would make
+        // the buffer unreachable to Derived::on_buffer_collected().
+        mgr.wait_push_to_ready(site.info, q);
     }
 
     // Top up every (kind, instance) free_queue to kSlotCount before worker
@@ -1178,15 +1181,15 @@ private:
     /**
      * Main collector loop. Blocks on one manager ready-queue shard with a 100 ms
      * cv-wait tick. On each hit it dispatches the buffer to Derived via
-     * on_buffer_collected() and recycles the buffer. Exits in two cases:
+     * on_buffer_collected() and recycles the buffer. Exits only after:
      *
-     *   1. execution_complete_ was set (by stop()) and this ready_queue shard is
-     *      empty, after a final non-blocking drain pass.
-     *   2. No buffer arrived for `Derived::kIdleTimeoutSec` consecutive
-     *      seconds AND execution_complete_ has not been signalled — this
-     *      is a hang detector that logs an error and bails out. Multi-shard
-     *      collectors arm this only after a shard has seen traffic, because
-     *      an empty shard can be a valid run shape.
+     *   execution_complete_ was set (by stop()) and this ready_queue shard is
+     *   empty, after a final non-blocking drain pass.
+     *
+     * No buffer for `Derived::kIdleTimeoutSec` after traffic is still reported
+     * as a hang warning, but the consumer stays alive. A later final-drain push
+     * may be blocked on this shard, so exiting before execution_complete_ would
+     * leave the management thread waiting forever.
      */
     void poll_and_collect_loop(int shard_index) {
         const auto wait_tick = std::chrono::milliseconds(100);
@@ -1222,10 +1225,13 @@ private:
             }
             if (std::chrono::steady_clock::now() - idle_start.value() >= idle_timeout) {
                 LOG_ERROR(
-                    "%s collector idle timeout after %d seconds — giving up", Derived::kSubsystemName,
-                    Derived::kIdleTimeoutSec
+                    "%s collector idle timeout after %d seconds — staying alive until execution completes",
+                    Derived::kSubsystemName, Derived::kIdleTimeoutSec
                 );
-                break;
+                // Report once per traffic burst. A newly consumed buffer sets
+                // has_seen_buffer again and re-arms the detector.
+                has_seen_buffer = false;
+                idle_start.reset();
             }
         }
     }
