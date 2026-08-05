@@ -68,19 +68,24 @@ deep-dive — see [l2-timing.md](l2-timing.md).
   `[STRACE]` marker nested under `simpler_run.runner_run.device_wall`
   (see [host-trace.md](host-trace.md)).
 
-### Gating: `SIMPLER_DEVICE_STRACE_ENABLE` (host/device split)
+### Gating device-domain markers
 
 The device markers can be turned off independently of the host spans so a
 deployment can profile the two domains separately:
 
-* **Device** (`clk=dev` markers): the runtime env `SIMPLER_DEVICE_STRACE_ENABLE`,
-  read once by `emit_device_phase_markers` in the host `c_api_shared`. `=0`
-  suppresses the whole device-phase emit; any other value (or unset) keeps it on
-  (**default on**). It does not affect the on-device stamping cost (cheap plain
-  stores) — only whether the host re-emits the readback as markers.
+* **Device** (`clk=dev` markers): `SIMPLER_HOST_STRACE=1`, a visible
+  `LOG_TIMING` level, and the runtime env `SIMPLER_DEVICE_STRACE_ENABLE` must all
+  be enabled. The env is read once; `=0` disables the markers, while any other
+  value (or unset) keeps them on (**default on**). Onboard, the same predicate
+  controls buffer setup/reset, AICPU stamping, D2H readback, and marker
+  emission. A disabled predicate leaves the device base null, so stamping
+  no-ops and the marker-only H2D/D2H transfers are skipped.
 * **Host** (`simpler_run` / `bind` / `runner_run` / `validate` spans): no new
   knob — they ride the compile-time `SIMPLER_HOST_STRACE` macro and the log level
   (`LOG_TIMING`), so raising the log threshold drops them.
+
+The simulator still applies `SIMPLER_DEVICE_STRACE_ENABLE` at emission time;
+the transfer optimization above is specific to the onboard device buffer.
 
 `RunWall` is the whole on-NPU wall (the former `RunTiming.device_wall`); it is
 emitted as the `simpler_run.runner_run.device_wall` marker, not returned.

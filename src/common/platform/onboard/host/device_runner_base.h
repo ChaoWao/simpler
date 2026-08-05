@@ -58,6 +58,7 @@
 #include "common/dma_workspace.h"
 #include "common/chip_swimlane_profiling.h"
 #include "utils/device_arena.h"
+#include "device_phase_capture.h"
 #include "device_runner_helpers.h"
 #include "aicpu_loader/host/load_aicpu_op.h"
 #include "host/chip_swimlane_collector.h"
@@ -736,13 +737,10 @@ protected:
     int resolve_aicpu_thread_num(int requested, int usable, int arch_default);
 
     /**
-     * Lazy-allocate the 8-byte device-resident buffer that AICPU writes
-     * the run wall (ns) into and that `read_device_wall_ns()` pulls
-     * back after stream sync. Idempotent: a no-op once
-     * `device_wall_dev_ptr_` is non-null. Routes the alloc through
-     * `mem_alloc_`; the pointer is freed by `finalize_common()`.
-     * Failure to alloc is non-fatal (`device_wall_data_base` stays 0,
-     * subsequent `last_device_wall_ns()` reads 0).
+     * Prepare the device-phase/task-timing buffer for one run. Capture-disabled
+     * runs publish a null device base. Capture-enabled runs allocate lazily,
+     * reset every record, and publish the base for AICPU stamping. Allocation or
+     * reset failure is non-fatal; the base stays null and timing reads as 0.
      */
     void ensure_device_wall_buffer();
 
@@ -782,11 +780,9 @@ protected:
     int sync_stream_pair(rtStream_t aicpu_stream, rtStream_t aicore_stream);
 
     /**
-     * Pull the device wall (ns) back from `device_wall_dev_ptr_` and
-     * cache it on `device_wall_ns_`. D2H copy failure is a soft warn —
-     * `device_wall_ns_` stays at 0 so `last_device_wall_ns()` returns 0
-     * to callers. No-op if `device_wall_dev_ptr_` is null (lazy alloc
-     * may have failed silently).
+     * Read and reduce the device-phase/task-timing records after stream sync.
+     * Capture-disabled runs and missing buffers leave all cached timings at 0.
+     * A D2H failure is a soft warning and also leaves timing at 0.
      */
     void read_device_wall_ns();
 
@@ -1047,8 +1043,8 @@ protected:
     // stamps raw sys-counter cycles per phase through that pointer; subclass
     // drain pulls it back via `read_device_wall_ns()` after stream sync and
     // caches the per-phase ns spans for `last_device_phase_ns()` (and RunWall
-    // for `last_device_wall_ns()`). Allocated once at simpler_init, freed in the
-    // subclass `finalize()`.
+    // for `last_device_wall_ns()`). Allocated lazily on the first capture-enabled
+    // run and freed in the subclass `finalize()`.
     void *device_wall_dev_ptr_{nullptr};
     uint64_t device_wall_ns_{0};
     uint64_t device_phase_ns_[NUM_AICPU_PHASES] = {0};
