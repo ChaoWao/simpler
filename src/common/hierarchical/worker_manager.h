@@ -44,6 +44,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../task_interface/buffer.h"
 #include "../task_interface/call_config.h"
 #include "remote_wire.h"
 #include "types.h"
@@ -168,6 +169,16 @@ static_assert(
                                  static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(ChipTensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
     "mailbox args region must hold the largest TaskArgs blob the runtime accepts (issue #1024)"
+);
+// The same bound against the wire element. `Tensor` is 144 B where `ChipTensor` is 128 B, so the
+// assert above does not cover it: the wire cutover swaps the blob's element without touching either
+// cap, and the region only has to grow by 16 B x 256 for the frame to overflow. Asserting it here
+// means a frozen descriptor size and a frame size that cannot hold 256 of them fail the build rather
+// than the first 256-tensor task.
+static_assert(
+    MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
+                                 static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
+    "mailbox args region must hold 256 wire Tensors, the element the blob carries after the cutover"
 );
 
 // Control sub-commands (written at MAILBOX_OFF_CALLABLE when state == CONTROL_*)
