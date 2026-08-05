@@ -67,7 +67,6 @@
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
-#include "host/raii_scope_guard.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
@@ -348,11 +347,10 @@ typedef void (*OrchestrationEntryFunc)(const ChipTaskArgs &);
 typedef void (*OrchestrationBindFunc)(PTO2Runtime *);
 
 // Resolved orchestration .so entry points. register_callable_impl allocates one
-// of these (so both the entry and the .so's own framework_bind_runtime — which
-// sets the .so-private g_current_runtime its inline rt_submit_* reads — are
-// available per run) and stores its pointer in CallableArtifacts::
-// host_orch_func_ptr. Owned for the callable's lifetime alongside
-// host_dlopen_handle.
+// of these (the entry, plus the .so's own framework_bind_runtime, which sets
+// the .so-private g_current_runtime its inline rt_submit_* read) and stores its
+// pointer in CallableArtifacts::host_orch_func_ptr. Owned for the callable's
+// lifetime alongside host_dlopen_handle.
 struct HostOrchEntryPoints {
     OrchestrationEntryFunc entry{nullptr};
     OrchestrationBindFunc bind{nullptr};
@@ -467,7 +465,7 @@ struct GraphHostStateBinding {
 };
 
 int32_t run_host_orchestration(
-    Runtime *runtime, const HostApi *api, PTO2Runtime *rt, DeviceArena &host_arena,
+    Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
     void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
@@ -508,12 +506,17 @@ int32_t run_host_orchestration(
     rt->mode = PTO2_MODE_EXECUTE;
 
     const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
-    framework_bind_runtime(rt);
     if (entry_points->bind == nullptr) {
         LOG_ERROR("host-orch: orch .so framework_bind_runtime was not resolved");
         return -1;
     }
     rt->active_callable_hash = reinterpret_cast<uint64_t>(entry_points->entry);
+    rt->tensor_access = &tensor_access;
+    // Binds the orchestration .so's own framework_current_runtime, which its
+    // inline rt_submit_* read. The host library links a same-named copy from
+    // orchestration/common.cpp, but nothing outside the .so includes
+    // pto_orchestration_api.h, so nothing reads that one — rt_scope_* and
+    // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
     rt_scope_begin(rt);
@@ -697,13 +700,10 @@ extern "C" int bind_callable_to_runtime_impl(
     // Build device args: copy from input, replace host tensor pointers with device pointers
     ChipStorageTaskArgs device_args;
 
-    // Open this run's host-view window. It closes once the orchestrator has
-    // finished, so no host view outlives the point at which a task could make
-    // it stale.
-    host_tensor_access_reset(api);
-    auto host_tensor_access_guard = RAIIScopeGuard([]() {
-        host_tensor_access_reset(nullptr);
-    });
+    // This run's host-view window. The accessor owns every mapping it
+    // registers and releases them on every exit path, so no host view outlives
+    // the point at which a task could make it stale.
+    HostTensorAccessor tensor_access(api);
 
     int64_t t_args_start = _now_ms();
     for (int i = 0; i < tensor_count; i++) {
@@ -757,11 +757,7 @@ extern "C" int bind_callable_to_runtime_impl(
         // to the device. A tensor with neither is not host-accessible, so the
         // prepare fails here rather than the orchestrator dereferencing a
         // device address.
-        void *host_view = api->register_device_memory_to_host(dev_ptr, size);
-        if (host_view == nullptr) {
-            host_view = host_ptr;
-        }
-        if (!host_tensor_access_add(reinterpret_cast<uint64_t>(dev_ptr), size, host_view)) {
+        if (!tensor_access.add(reinterpret_cast<uint64_t>(dev_ptr), size, host_ptr)) {
             LOG_ERROR("host-orch: no host view for tensor %d (dev_ptr %p, %zu bytes)", i, dev_ptr, size);
             return -1;
         }
@@ -858,13 +854,12 @@ extern "C" int bind_callable_to_runtime_impl(
         ChipTaskArgs orch_l2;
         orch_l2.create_from_chip_args(device_args);
         int32_t total_tasks = run_host_orchestration(
-            runtime, api, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap, eff_heap_sizes,
-            eff_task_window_sizes, host_orch_func_ptr, orch_l2
+            runtime, api, tensor_access, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap,
+            eff_heap_sizes, eff_task_window_sizes, host_orch_func_ptr, orch_l2
         );
         // The orchestrator is the only host-view reader; from here the device
         // owns these buffers, so drop the window on both exits.
-        host_tensor_access_reset(nullptr);
-        host_tensor_access_guard.dismiss();
+        tensor_access.close();
         if (total_tasks < 0) {
             LOG_ERROR("host-orch: orchestration run failed");
             return -1;
@@ -988,12 +983,6 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     LOG_INFO("=== Cleaning Up ===");
     for (int i = 0; i < tensor_pair_count; i++) {
         if (tensor_pairs[i].dev_ptr != nullptr) {
-            // Release the SVM host mapping installed at staging time before
-            // freeing the device buffer (unregister-before-free, as the HAL
-            // requires). No-op on sim. Keyed by dev_ptr.
-            if (tensor_pairs[i].host_ptr != nullptr) {
-                api->unregister_device_memory_from_host(tensor_pairs[i].dev_ptr);
-            }
             api->device_free(tensor_pairs[i].dev_ptr);
         }
     }

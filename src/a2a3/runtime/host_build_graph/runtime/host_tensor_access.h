@@ -34,11 +34,11 @@
  * dereference: only tensors the runtime staged have a host view at all, so a
  * GM-heap tensor or a pass-through child-memory buffer resolves to nothing.
  *
- * Registrations are valid only for one orchestration run — the window between
+ * Registrations are owned by one orchestration run — the window between
  * staging and the first dispatched task. A mirror is a copy, and nothing has
  * executed yet to make it stale; once tasks run, a stale mirror would be
- * indistinguishable from live device memory. `host_tensor_access_reset` bounds
- * that window at both ends.
+ * indistinguishable from live device memory. `HostTensorAccessor` bounds that
+ * window and releases its mappings on every exit path.
  *
  * The read/write pair carries weak fallbacks in the runtime translation unit
  * (`orchestrator_core/pto_runtime2.cpp`) that dereference `dev_addr` directly,
@@ -55,12 +55,64 @@
 struct HostApi;  // common/host_api.h — fwd-declared so this header stays out of platform includes
 
 /**
+ * The registered regions of one orchestration run, and the mappings that run
+ * installed to serve them.
+ *
+ * One accessor per run, mutated only by the thread running that run's
+ * orchestration. The region and mapping tables are plain vectors with no lock,
+ * so concurrent `add` / `close` on one accessor is a data race; concurrent runs
+ * are isolated by each owning a separate accessor, which is what makes two runs
+ * unable to see or drop each other's regions.
+ *
+ * `add` is the only producer of mappings and the only caller of
+ * `register_device_memory_to_host`; `close` unregisters exactly the mappings
+ * this accessor installed and nothing else. Both are reached on every return
+ * path — `close` is idempotent and the destructor calls it — so a mapping
+ * cannot outlive the run that made it.
+ *
+ * A null `api` makes every `add` fail, so a registered region always implies a
+ * usable `api`; `write`'s mirror push-back relies on that and does not re-check.
+ *
+ * The state lives behind `Impl` because this header is also compiled by the
+ * AICPU build (through `orchestrator_core/pto_runtime2.cpp`, which resolves the
+ * weak read/write fallbacks below), and that build has no `<vector>`. Keep the
+ * standard containers in `host/host_tensor_access.cpp`.
+ */
+class HostTensorAccessor {
+public:
+    explicit HostTensorAccessor(const HostApi *api);
+    ~HostTensorAccessor();
+
+    HostTensorAccessor(const HostTensorAccessor &) = delete;
+    HostTensorAccessor &operator=(const HostTensorAccessor &) = delete;
+
+    /**
+     * Register `[dev_base, dev_base + size)`, preferring a host mapping of the
+     * device buffer and falling back to `fallback_host_view` (the staging copy)
+     * when the platform cannot map it.
+     *
+     * @return false for an empty region, a null `api`, or when neither a
+     *         mapping nor a fallback view is available.
+     */
+    bool add(uint64_t dev_base, uint64_t size, void *fallback_host_view);
+    bool read(uint64_t dev_addr, void *dst, uint64_t bytes) const;
+    bool write(uint64_t dev_addr, const void *src, uint64_t bytes) const;
+
+    /** Drop every region and unregister every mapping this accessor installed. */
+    void close() noexcept;
+
+private:
+    struct Impl;
+    Impl *impl_;
+};
+
+/**
  * Read `bytes` at device address `dev_addr` into `dst`.
  *
  * @return false when no registered region covers the whole span; `dst` is
  *         untouched.
  */
-bool host_tensor_read(uint64_t dev_addr, void *dst, uint64_t bytes);
+bool host_tensor_read(HostTensorAccessor *accessor, uint64_t dev_addr, void *dst, uint64_t bytes);
 
 /**
  * Write `bytes` from `src` to device address `dev_addr`, leaving the bytes
@@ -69,23 +121,4 @@ bool host_tensor_read(uint64_t dev_addr, void *dst, uint64_t bytes);
  * @return false when no registered region covers the whole span, or when the
  *         push-back to the device fails.
  */
-bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes);
-
-/**
- * Drop every registration and latch the host interface used to push
- * mirror-mode writes to the device (its `copy_to_device`; null when no write
- * can need one).
- *
- * Called around one orchestration run: before the first
- * `host_tensor_access_add`, and again once the run has finished, after which
- * every access fails until the next run registers its own tensors.
- */
-void host_tensor_access_reset(const HostApi *api);
-
-/**
- * Register `[dev_base, dev_base + size)` as reachable from the host at
- * `host_view`.
- *
- * @return false for an empty region or a null `host_view`.
- */
-bool host_tensor_access_add(uint64_t dev_base, uint64_t size, void *host_view);
+bool host_tensor_write(HostTensorAccessor *accessor, uint64_t dev_addr, const void *src, uint64_t bytes);
