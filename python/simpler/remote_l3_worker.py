@@ -26,6 +26,8 @@ import threading
 import time
 from typing import Any
 
+from .remote_l3_protocol import HOST_TCP_TRANSPORT_PROFILE
+
 
 def _read_exact(sock: socket.socket, n: int) -> bytes:
     data = bytearray()
@@ -62,8 +64,8 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         raise ValueError("manifest remote_worker_level must be 3")
     if not str(manifest["platform"]):
         raise ValueError("manifest platform must be non-empty")
-    if str(manifest["transport"]) != "sim":
-        raise ValueError("only sim transport is accepted by simpler-remote-worker")
+    if str(manifest["transport"]) != HOST_TCP_TRANSPORT_PROFILE:
+        raise ValueError(f"only {HOST_TCP_TRANSPORT_PROFILE} transport is accepted by simpler-remote-worker")
 
 
 def _session_timeout_s(manifest: dict[str, Any]) -> float:
@@ -147,7 +149,8 @@ def _start_session(manifest: dict[str, Any]) -> tuple[dict[str, Any], subprocess
     # when no runner survives (a failed handshake has already been killed and
     # reaped here), so a failed send then leaves nothing to reclaim. A successful
     # send only means the bytes were queued locally, not that the parent read
-    # them; unobserved receipt would need an ACK / lease, which sim does not have.
+    # them; unobserved receipt would need an ACK / lease, which the
+    # host_tcp protocol does not have.
     _validate_manifest(manifest)
     # Both numeric timeouts are validated before any spawn resource (ready pipe,
     # manifest tempfile, runner Popen) exists: the runner is never launched only

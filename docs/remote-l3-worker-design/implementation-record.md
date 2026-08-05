@@ -9,15 +9,15 @@ It is updated as each documented feature is completed and verified.
 
 | Step | Documented feature | Status | Notes |
 | ---- | ------------------ | ------ | ----- |
-| 1 | Endpoint interface and local adapter | In progress | Local adapter and remote sim endpoint are implemented; HCOMM endpoint adapters remain. |
+| 1 | Endpoint interface and local adapter | In progress | Local adapter and remote host_tcp endpoint are implemented; HCOMM endpoint adapters remain. |
 | 2 | Worker eligibility metadata | In progress | Callable worker-id sets are intersected with owner/imported remote sidecar eligibility. |
 | 3 | Remote task sidecars and dependency keys | In progress | Public `TaskArgs.add_tensor(RemoteTensorRef(...))` API, remote TensorMap keys, and remote payload-sidecar rejection are implemented. |
 | 4 | Failed task poisoning | In progress | Remote task-failure poisoning and session-exit endpoint failure are verified; explicit health-expiry-only coverage remains. |
 | 5 | Versioned remote frame codec | In progress | TASK/COMPLETION/CONTROL_REPLY/HELLO/CONTROL/HEALTH exist; core fuzz/bounds coverage is present, with more exhaustive corpus testing still possible. |
 | 6 | Remote callable registry | In progress | Dispatcher `PYTHON_IMPORT`, inner manifest/control `PYTHON_IMPORT`, and inner manifest/control inline `CHIP_CALLABLE` are implemented; serialized payloads and staged chip blobs remain negotiated extensions. |
-| 7 | Fork-safe simulation session runner | In progress | Daemon/session bootstrap and HELLO READY barrier are implemented for sim transport. |
-| 8 | Remote control-plane parity | In progress | Registry, alloc/free/copy, export/import/release-import controls are implemented for sim; Remote CommDomain controls are reserved/unsupported. |
-| 9 | Remote buffer registry | In progress | Sim owner/imported buffers, TASK materialization, public memory API, opaque handles, slot/import-ref capture, and deferred free/release-import are implemented. |
+| 7 | Fork-safe host_tcp session runner | In progress | Daemon/session bootstrap and HELLO READY barrier are implemented for host_tcp transport. |
+| 8 | Remote control-plane parity | In progress | Registry, alloc/free/copy, export/import/release-import controls are implemented for host_tcp; Remote CommDomain controls are reserved/unsupported. |
+| 9 | Remote buffer registry | In progress | host_tcp owner/imported buffers, TASK materialization, public memory API, opaque handles, slot/import-ref capture, and deferred free/release-import are implemented. |
 | 10 | A2 RoCE HCOMM profile | Pending | Hardware-gated profile. |
 | 11 | A3 HCCS HCOMM profile | Pending | Hardware-gated profile. |
 | 12 | A5 UB HCOMM profile | Pending | Hardware-gated profile. |
@@ -59,7 +59,7 @@ It is updated as each documented feature is completed and verified.
 - Mapped `WorkerEndpoint::control_prepare(digest)` for remote endpoints to a
   typed `PREPARE_CALLABLE` control. The session runner accepts it only for a
   committed `REMOTE_TASK_DISPATCHER` / `PYTHON_IMPORT` digest.
-- Added typed sim `ALLOC_REMOTE_BUFFER`, `FREE_REMOTE_BUFFER`,
+- Added typed host_tcp `ALLOC_REMOTE_BUFFER`, `FREE_REMOTE_BUFFER`,
   `COPY_TO_REMOTE`, and `COPY_FROM_REMOTE` handling in the session runner.
 - Added `Worker.remote_malloc()`, `remote_free()`, `remote_copy_to()`, and
   `remote_copy_from()` public APIs. Remote handles are returned by the Worker
@@ -72,7 +72,7 @@ It is updated as each documented feature is completed and verified.
   `drain()`.
 - Added session-side `RemoteTensorDesc` materialization before
   `inner_worker.run()`: `HOST_INLINE` descriptors become local ctypes-backed
-  tensors and sim `REMOTE_DEVICE` descriptors resolve through the live session
+  tensors and host_tcp `REMOTE_DEVICE` descriptors resolve through the live session
   buffer registry.
 - Removed the descriptor-dropping Python `task_args_from_wire()` helper so the
   session runner has a single registry-backed materialization path.
@@ -84,7 +84,7 @@ It is updated as each documented feature is completed and verified.
 - Documented the v1 `EXPORT_BUFFER`, `IMPORT_BUFFER`, and `RELEASE_IMPORT`
   wire schema, imported-handle identity, release deferral, and partial-import
   rollback contract.
-- Implemented sim `EXPORT_BUFFER`, `IMPORT_BUFFER`, and `RELEASE_IMPORT`.
+- Implemented host_tcp `EXPORT_BUFFER`, `IMPORT_BUFFER`, and `RELEASE_IMPORT`.
   Imports use shared-memory backed mappings in the session runner, imported
   handles remain opaque on the parent, and owner frees wait for live imports
   and slot refs to drain.
@@ -101,31 +101,31 @@ It is updated as each documented feature is completed and verified.
 - Focused endpoint/data eligibility tests:
   remote sidecar owner filtering and non-owner C++ direct-submit rejection
   passed.
-- Remote sim daemon/session noop TASK integration:
+- Remote host_tcp daemon/session noop TASK integration:
   noop TASK, prepare-callable control, error completion, post-init dynamic
   registration, unregister/reregister, health, buffer copy, failed dependency,
   session exit, input-free deferral, and `HOST_INLINE` integration passed with
   `11 passed` outside the network-restricted sandbox. The same tests skip
   inside the sandbox when local TCP sockets are denied.
-- Remote sim long TASK health integration:
+- Remote host_tcp long TASK health integration:
   a remote orch that keeps the command lane busy for 1 second completed while
   the independent health lane stayed live.
-- Remote sim buffer copy integration:
+- Remote host_tcp buffer copy integration:
   `remote_malloc` + `COPY_TO_REMOTE` + remote TASK materialization/write +
-  `COPY_FROM_REMOTE` passed on the sim backend.
-- Remote sim input-only free deferral:
+  `COPY_FROM_REMOTE` passed on the host_tcp backend.
+- Remote host_tcp input-only free deferral:
   freeing an input buffer immediately after submit kept the remote allocation
   alive until the captured slot ref dropped after drain.
-- Remote sim `HOST_INLINE` descriptor integration:
+- Remote host_tcp `HOST_INLINE` descriptor integration:
   inline TASK payload materialized into a session-local tensor and fed a
   remote output write.
 - C++ wire fuzz/bounds coverage:
   bad frame version/type/flags, truncated control payload, and invalid remote
   descriptor inline fields are rejected.
-- Remote sim failed-dependency integration:
+- Remote host_tcp failed-dependency integration:
   a failed remote producer poisoned a downstream same-buffer remote consumer,
   and the consumer did not dispatch or mutate the buffer.
-- Remote sim endpoint-failure integration:
+- Remote host_tcp endpoint-failure integration:
   a session runner exit during TASK returned a bounded endpoint failure to the
   parent instead of hanging `drain()`.
 - Remote callable unregister/reregister integration:

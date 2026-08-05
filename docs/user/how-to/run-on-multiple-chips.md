@@ -90,11 +90,10 @@ implementations.
   explicitly; there is no cross-node collective path today.
 - **`--enable-chip-swimlane` does not work on L3.** It is rejected up front. To
   get a swimlane, scope the run to one chip with `--level 2`.
-- **Multi-host (L4) is not usable for data movement yet.** The control plane is
-  real — you can register a remote worker, and the remote side builds a genuine
-  L3 subtree — but the transport is simulation-backed, and the daemon rejects
-  any other setting. The RoCE / HCCS / UB profiles are documented contracts, not
-  working paths. See [Remote L3 Worker Design](../../remote-l3-worker-design.md)
+- **Multi-host (L4) remote L3 uses the shipped host_tcp data plane.** You
+  can register a remote worker, the remote side builds a genuine L3 subtree,
+  and remote buffers move through the host TCP session. The RoCE / HCCS / UB
+  peer-memory profiles are documented contracts, not working paths. See [Remote L3 Worker Design](../../remote-l3-worker-design.md)
   and the [Capability Survey](../../capability-survey.md) before designing
   against it.
 

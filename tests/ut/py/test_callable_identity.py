@@ -1204,7 +1204,7 @@ def test_remote_sim_noop_task_roundtrip():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_noop_orch"),
@@ -1228,7 +1228,7 @@ def test_remote_sim_prepare_callable_control_roundtrip():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_noop_orch"),
@@ -1254,7 +1254,7 @@ def test_remote_sim_error_completion_raises_root_error():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_raises_orch"),
@@ -1279,7 +1279,7 @@ def test_remote_sim_post_init_register_roundtrip():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         worker.init()
         handle = worker.register(
@@ -1303,7 +1303,7 @@ def test_remote_sim_unregister_then_reregister_roundtrip():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         worker.init()
 
@@ -1337,7 +1337,7 @@ def test_remote_sim_health_lane_stays_live_during_long_task():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_sleep_orch"),
@@ -1366,7 +1366,7 @@ def test_remote_sim_inner_python_import_register_runs_sub_task():
             RemoteWorkerSpec(
                 endpoint=f"127.0.0.1:{port}",
                 platform="a2a3sim",
-                transport="sim",
+                transport="host_tcp",
                 num_sub_workers=1,
             )
         )
@@ -1430,7 +1430,7 @@ def test_remote_sim_buffer_copy_roundtrip():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_increment_u8_orch"),
@@ -1471,10 +1471,10 @@ def test_remote_sim_imported_buffer_runs_on_peer_worker():
         owner_daemon.await_ready()
         peer_daemon.await_ready()
         owner_worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{owner_port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{owner_port}", platform="a2a3sim", transport="host_tcp")
         )
         peer_worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{peer_port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{peer_port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_increment_u8_orch"),
@@ -2453,7 +2453,7 @@ def test_remote_sim_failed_dependency_skips_consumer():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         fail_handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_fail_before_write_orch"),
@@ -2502,7 +2502,7 @@ def test_remote_sim_session_exit_becomes_endpoint_failure():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_exit_orch"),
@@ -2527,7 +2527,7 @@ def test_remote_sim_input_free_is_deferred_until_slot_refs_drop():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_sum_u8_orch"),
@@ -2572,7 +2572,7 @@ def test_remote_sim_host_inline_descriptor_roundtrip():
     try:
         daemon.await_ready()
         worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="sim")
+            RemoteWorkerSpec(endpoint=f"127.0.0.1:{port}", platform="a2a3sim", transport="host_tcp")
         )
         handle = worker.register(
             RemoteCallable("tests.ut.py.test_callable_identity:_remote_sum_u8_orch"),

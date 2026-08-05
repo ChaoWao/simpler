@@ -212,7 +212,7 @@ class TestDaemonPreflightBeforeSpawn:
             "parent_worker_level": 4,
             "remote_worker_level": 3,
             "platform": "a2a3sim",
-            "transport": "sim",
+            "transport": "host_tcp",
             "session_timeout_s": 30.0,
             "startup_remaining_s": 10.0,
         }

@@ -407,7 +407,7 @@ callable registry:
   inner L3 Worker registry:
     hashid -> ChipCallable register payload, when needed
     hashid -> Python import descriptor, when needed
-comm policy: roce | hccs | ub | sim
+comm policy: host_tcp | roce | hccs | ub
 feature flags
 ```
 
@@ -587,16 +587,16 @@ The recommended first cut is conservative:
    **Implemented for C++ submit, Python `TaskArgs.add_tensor(RemoteTensorRef(...))`,
    owner buffers, and imported simulation buffers.**
 3. Add the versioned frame codec and the independent health-lane contract.
-   **Implemented for the socket-backed simulation transport.**
+   **Implemented for the socket-backed host_tcp transport.**
 4. Add remote callable registration with all-or-nothing multi-endpoint
    visibility and final-unregister cleanup. **Implemented for dispatcher
    `PYTHON_IMPORT`, inner `PYTHON_IMPORT`, and inner inline
    `CHIP_CALLABLE`.**
 5. Add the fork-safe simulation session runner with explicit prestart before
    `HELLO READY`. **Implemented.**
-6. Prove local behavior is unchanged and remote sim behavior handles success,
+6. Prove local behavior is unchanged and remote host_tcp behavior handles success,
    failure, hashid mapping, timeouts, health, and buffer cleanup.
-   **Focused Python remote sim and C++ no-hardware UT coverage is present.**
+   **Focused Python remote host_tcp and C++ no-hardware UT coverage is present.**
 7. Add A2 RoCE, A3 HCCS, and A5 UB profiles behind the HCOMM adapter layer.
    **Pending.**
 

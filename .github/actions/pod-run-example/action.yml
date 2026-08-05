@@ -1,0 +1,189 @@
+name: Run one pod example across the pair
+description: >-
+  Start the peer's L3 daemon, run one example's parent against it, then stop the
+  daemon and pull its logs back. Call once per example; pod-stage has already
+  put the tree and the venv on the peer, which every example shares.
+
+inputs:
+  example:
+    description: Example directory name. Names this example's log directory, so it must be unique within a run.
+    required: true
+  env-prefix:
+    description: >-
+      Environment-variable prefix the example's parent script reads, e.g.
+      SIMPLER_VECTOR_ADD_MIXED_L3. Taken as an input rather than derived from
+      `example`, so an example is free to name its variables as it likes. The
+      daemon side needs no prefix — it is the same generic session server for
+      every example and is started directly below.
+    required: true
+  parent-script:
+    description: Repo-relative script that runs the parent side.
+    required: true
+  local-devices:
+    description: Device ids the local L3 owns. Defaults to the pod config's.
+    required: false
+    default: ''
+  remote-devices:
+    description: Device ids the peer's L3 owns. Defaults to the pod config's.
+    required: false
+    default: ''
+  daemon-port:
+    description: Port the peer's daemon listens on. Defaults to the pod config's.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # The daemon must outlive this step, so its ssh is backgrounded with its
+    # output redirected to a file. The pid goes to a file because the collect
+    # step below cannot inherit a shell variable. python3, not the venv's
+    # python: this poll only needs the stdlib and the venv is not activated.
+    - name: Start the peer's L3 daemon (${{ inputs.example }})
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        EXAMPLE: ${{ inputs.example }}
+        ENV_PREFIX: ${{ inputs.env-prefix }}
+        IN_DAEMON_PORT: ${{ inputs.daemon-port }}
+      run: |
+        set -euo pipefail
+        source "$POD_SSH_HELPER"
+        DAEMON_PORT="${IN_DAEMON_PORT:-$POD_L3_DAEMON_PORT}"
+        LOCAL_LOGS="$RUN_DIR/$EXAMPLE/daemon-${POD_REMOTE_MACHINE}"
+        REMOTE_LOGS="output/pod-ci/$EXAMPLE/daemon-${POD_REMOTE_MACHINE}"
+        mkdir -p "$LOCAL_LOGS" "$RUN_DIR/$EXAMPLE/parent-${POD_MACHINE}/ascend"
+        {
+          echo "POD_EXAMPLE=$EXAMPLE"
+          echo "POD_EXAMPLE_ENV_PREFIX=$ENV_PREFIX"
+          echo "POD_EXAMPLE_DAEMON_PORT=$DAEMON_PORT"
+          echo "POD_EXAMPLE_REMOTE_LOGS=$REMOTE_LOGS"
+        } >> "$GITHUB_ENV"
+
+        pod_ssh "
+          pkill -f 'python -m simpler.remote_l3_worker --host ${REMOTE_DAEMON_HOST} --port ${DAEMON_PORT}' || true
+        " || true
+
+        pod_ssh "
+          set -eo pipefail
+          cd '$REMOTE_WORKDIR'
+          export PYTHONPATH="\${PYTHONPATH:-}"
+          export CMAKE_PREFIX_PATH="\${CMAKE_PREFIX_PATH:-}"
+          source '$POD_REMOTE_CANN_ENV'
+          set -u
+          source .venv/bin/activate
+          # The job-level timeouts are the parent's environment; ssh carries no
+          # environment, so the peer would otherwise schedule against the
+          # built-in defaults and the two halves of one run would disagree on
+          # how long a stall may last.
+          export SIMPLER_SCHEDULER_TIMEOUT_MS='$SIMPLER_SCHEDULER_TIMEOUT_MS'
+          export SIMPLER_OP_EXECUTE_TIMEOUT_US='$SIMPLER_OP_EXECUTE_TIMEOUT_US'
+          export SIMPLER_STREAM_SYNC_TIMEOUT_MS='$SIMPLER_STREAM_SYNC_TIMEOUT_MS'
+          mkdir -p '$REMOTE_LOGS'
+          export ASCEND_PROCESS_LOG_PATH="\$PWD/$REMOTE_LOGS"
+          echo '[pod-daemon] machine${POD_REMOTE_MACHINE} listening on ${REMOTE_DAEMON_HOST}:${DAEMON_PORT}'
+          python -m simpler.remote_l3_worker --host '${REMOTE_DAEMON_HOST}' --port '${DAEMON_PORT}'
+        " > "$LOCAL_LOGS/daemon.ssh.log" 2>&1 &
+        echo $! > "$RUNNER_TEMP/pod-daemon-$EXAMPLE.pid"
+
+        # A daemon that dies during import never opens the port, so on its own
+        # the connect probe only reports that after the full wait. The ssh
+        # process exits with it, so its absence is the earlier and more precise
+        # signal — and it is the one that can name the log holding the reason.
+        python3 - <<PYWAIT
+        import os
+        import socket
+        import sys
+        import time
+
+        ssh_pid = int(open("$RUNNER_TEMP/pod-daemon-$EXAMPLE.pid").read().strip())
+
+        def ssh_alive():
+            try:
+                os.kill(ssh_pid, 0)
+            except ProcessLookupError:
+                return False
+            # An exited child stays visible to kill(0) until bash reaps it, so
+            # the zombie state counts as gone.
+            try:
+                with open(f"/proc/{ssh_pid}/stat") as stat:
+                    return stat.read().rsplit(") ", 1)[1].split(" ", 1)[0] != "Z"
+            except OSError:
+                return False
+
+        deadline = time.time() + ${POD_DAEMON_WAIT_S}
+        while time.time() < deadline:
+            if not ssh_alive():
+                print(
+                    "remote daemon ssh exited before the port opened; "
+                    "see $LOCAL_LOGS/daemon.ssh.log",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                with socket.create_connection(("${REMOTE_DAEMON_HOST}", ${DAEMON_PORT}), timeout=2):
+                    sys.exit(0)
+            except OSError:
+                time.sleep(1)
+        print("remote daemon did not become reachable", file=sys.stderr)
+        sys.exit(1)
+        PYWAIT
+
+    - name: Run the parent (${{ inputs.example }})
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        EXAMPLE: ${{ inputs.example }}
+        ENV_PREFIX: ${{ inputs.env-prefix }}
+        PARENT_SCRIPT: ${{ inputs.parent-script }}
+        IN_LOCAL_DEVICES: ${{ inputs.local-devices }}
+        IN_REMOTE_DEVICES: ${{ inputs.remote-devices }}
+      run: |
+        set -eo pipefail
+        export PYTHONPATH="${PYTHONPATH:-}"
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+        source "$POD_CANN_ENV"
+        source .venv/bin/activate
+        set -u
+        export ASCEND_PROCESS_LOG_PATH="$RUN_DIR/$EXAMPLE/parent-${POD_MACHINE}/ascend"
+        export "${ENV_PREFIX}_REMOTE=${REMOTE_DAEMON_HOST}:${POD_EXAMPLE_DAEMON_PORT}"
+        export "${ENV_PREFIX}_LOCAL_DEVICES=${IN_LOCAL_DEVICES:-$POD_LOCAL_DEVICES}"
+        export "${ENV_PREFIX}_REMOTE_DEVICES=${IN_REMOTE_DEVICES:-$POD_REMOTE_DEVICES}"
+        export "${ENV_PREFIX}_SESSION_TIMEOUT=$POD_L3_SESSION_TIMEOUT_S"
+        export "${ENV_PREFIX}_SESSION_LISTEN_HOST=$POD_L3_SESSION_LISTEN_HOST"
+
+        timeout "${POD_SMOKE_TIMEOUT_S}s" bash "$PARENT_SCRIPT"
+
+    # Runs even when the parent failed — that is the case whose logs are worth
+    # having, since a device-side failure names its reason only there. The
+    # staging tree itself stays for the next example; pod-teardown clears it.
+    - name: Stop the daemon and collect its logs (${{ inputs.example }})
+      if: always()
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        EXAMPLE: ${{ inputs.example }}
+      run: |
+        set +e
+        [ -r "${POD_SSH_HELPER:-}" ] || exit 0
+        source "$POD_SSH_HELPER"
+
+        PID_FILE="$RUNNER_TEMP/pod-daemon-$EXAMPLE.pid"
+        if [ -r "$PID_FILE" ]; then
+          kill "$(cat "$PID_FILE")" 2>/dev/null
+          rm -f "$PID_FILE"
+        fi
+        # The daemon's chip children keep writing after the daemon itself is
+        # signalled, so wait for it to actually go before anything reads or
+        # removes that tree.
+        pod_ssh "
+          pkill -f 'python -m simpler.remote_l3_worker --host ${REMOTE_DAEMON_HOST} --port ${POD_EXAMPLE_DAEMON_PORT}' || true
+          for _ in \$(seq 1 20); do
+            pgrep -f 'python -m simpler.remote_l3_worker --host ${REMOTE_DAEMON_HOST} --port ${POD_EXAMPLE_DAEMON_PORT}' >/dev/null || break
+            sleep 0.5
+          done
+        "
+        rsync -a -e "$RSYNC_SSH" \
+          "$REMOTE_TARGET:$REMOTE_WORKDIR/$POD_EXAMPLE_REMOTE_LOGS/" \
+          "$RUN_DIR/$EXAMPLE/daemon-${POD_REMOTE_MACHINE}/" 2>/dev/null
+        exit 0

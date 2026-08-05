@@ -5,13 +5,13 @@ fork/shm behavior working.
 
 Status for the local PR #866 cut:
 
-- Steps 1-5 are implemented for the simulation transport, including an
+- Steps 1-5 are implemented for the host_tcp transport, including an
   independent health lane.
 - Step 6 is implemented for dispatcher `PYTHON_IMPORT`, inner manifest/control
   `PYTHON_IMPORT`, and inner manifest/control inline `CHIP_CALLABLE`.
   `PYTHON_SERIALIZED` remains a negotiated future extension, and
   staged chip-callable blobs require a staged-blob adapter before use.
-- Steps 7-9 are implemented for the two-process simulation runner and sim
+- Steps 7-9 are implemented for the two-process host_tcp session runner and host_tcp
   remote buffers, including export/import/release-import.
 - Steps 10-12 remain pending hardware-profile work. Remote CommDomain controls
   remain reserved/unsupported in this cut.
@@ -152,8 +152,8 @@ Status for the local PR #866 cut:
      do not add the hashid to the parent-facing dispatcher registry.
    - Release staged callable bytes after confirmed commit or abort cleanup.
 
-7. Fork-safe simulation session runner. **Implemented for the socket-backed
-   simulation transport.**
+7. Fork-safe host_tcp session runner. **Implemented for the socket-backed
+   host_tcp transport.**
    - Add `simpler-remote-worker` control entry point.
    - Add per-session `simpler-remote-l3-session` runner.
    - Pass the validated bootstrap manifest from daemon to runner through an
@@ -163,14 +163,14 @@ Status for the local PR #866 cut:
      plus `_start_hierarchical()`: fork L3 chip/sub children, register local
      endpoints, and start the inner Scheduler before any remote transport or
      health threads are started.
-   - Start the sim transport only after the local L3 child tree is established,
+   - Start the host_tcp transport only after the local L3 child tree is established,
      then run the post-prestart `HELLO`/ready handshake.
    - Treat `HELLO ready_state=READY` as a scheduling barrier; the parent must
      not schedule an endpoint that is alive but not prestarted.
-   - Run TASK frames over the sim transport and return completions.
+   - Run TASK frames over the host_tcp transport and return completions.
    - Add localhost two-process integration tests.
 
-8. Remote control-plane parity. **Implemented for the simulation transport;
+8. Remote control-plane parity. **Implemented for the host_tcp transport;
    Remote CommDomain controls remain reserved/unsupported.**
    - Map existing NEXT_LEVEL controls onto typed remote frames:
      prepare, register, unregister, remote buffer allocation, remote buffer
@@ -240,11 +240,11 @@ Status for the local PR #866 cut:
 | Local adapter regression | Existing L3/L4 fork/shm behavior unchanged. |
 | Endpoint eligibility | Exact target is rejected before enqueue when ineligible. |
 | Frame fuzz/bounds | Corrupt lengths and counts are rejected. |
-| Remote sim hello | Parent bootstraps remote L3 and shuts down cleanly. |
+| Remote host_tcp hello | Parent bootstraps remote L3 and shuts down cleanly. |
 | Manifest handoff | Runner reads manifest before transport starts. |
 | Prestart barrier | HELLO READY only after inner L3 scheduler is started. |
-| Remote sim task | L4 parent dispatches one L3 orch task successfully. |
-| Remote sim error | Remote orch raises; parent raises with host/seq/hashid. |
+| Remote host_tcp task | L4 parent dispatches one L3 orch task successfully. |
+| Remote host_tcp error | Remote orch raises; parent raises with host/seq/hashid. |
 | Failed dependency | Consumer of failed remote producer is not dispatched. |
 | Remote hashid mapping | Daemon resolves an outer remote-orch hashid. |
 | Remote dep key | Shared remote buffer serializes through TensorMap. |
@@ -298,7 +298,7 @@ Status for the local PR #866 cut:
 
 The current cut lands endpoint abstraction, endpoint eligibility, remote
 callable identity, remote sidecars, frame codec, failure poisoning, the
-fork-safe simulation runner, and sim buffer import/export. Hardware HCOMM
+fork-safe host_tcp session runner, and host_tcp buffer import/export. Hardware HCOMM
 profiles and Remote CommDomain controls remain future work.
 
 ## Failure Poisoning Contract

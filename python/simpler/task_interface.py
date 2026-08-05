@@ -180,7 +180,7 @@ class RemoteAddressSpace(IntEnum):
 
     ``HOST_INLINE`` carries the payload in the message itself rather than
     naming remote memory. ``REMOTE_WINDOW`` and ``UB_LDST`` are protocol
-    placeholders: the shipped transport is simulation-backed.
+    placeholders: the shipped host_tcp transport uses host-side session buffers.
     """
 
     HOST_INLINE = 1

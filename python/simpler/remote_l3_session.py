@@ -43,6 +43,7 @@ from .callable_identity import (
     validate_hashid,
 )
 from .remote_l3_protocol import (
+    HOST_TCP_TRANSPORT_PROFILE,
     PROTOCOL_VERSION,
     CallableKind,
     ChipCallableBlobLocation,
@@ -75,7 +76,7 @@ from .remote_l3_protocol import (
     send_frame,
 )
 from .task_interface import ChipCallable, ChipTensor, TaskArgs
-from .worker import Worker
+from .worker import Worker, _NoHostBufferChildrenError
 
 sys.modules.setdefault("simpler.remote_l3_session", sys.modules[__name__])
 
@@ -111,6 +112,7 @@ class _RemoteBufferEntry:
     nbytes: int
     generation: int
     address_space: RemoteAddressSpace
+    owner: Worker | None = None
     offset: int = 0
     released: bool = False
 
@@ -120,6 +122,8 @@ class _RemoteBufferEntry:
             buf = self.data.buf
             assert buf is not None
             return ctypes.addressof(ctypes.c_char.from_buffer(buf))
+        if hasattr(self.data, "data_ptr"):
+            return int(self.data.data_ptr)
         return ctypes.addressof(self.data)
 
     @property
@@ -130,6 +134,10 @@ class _RemoteBufferEntry:
 
     def close(self, *, unlink: bool = False) -> None:
         if not isinstance(self.data, shared_memory.SharedMemory):
+            if self.owner is not None:
+                owner, self.owner = self.owner, None
+                self.data.buffer.release()
+                owner.free_host_buffer(self.data)
             return
         self.data.close()
         if unlink:
@@ -656,9 +664,19 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                         buffer_id = next_buffer_id
                         next_buffer_id += 1
                         generation = 1
-                        buf = shared_memory.SharedMemory(create=True, size=int(nbytes))
+                        try:
+                            buf = inner_worker.create_host_buffer(int(nbytes))
+                            entry = _RemoteBufferEntry(
+                                buf,
+                                int(nbytes),
+                                generation,
+                                RemoteAddressSpace.REMOTE_DEVICE,
+                                owner=inner_worker,
+                            )
+                        except _NoHostBufferChildrenError:
+                            buf = shared_memory.SharedMemory(create=True, size=int(nbytes))
+                            entry = _RemoteBufferEntry(buf, int(nbytes), generation, RemoteAddressSpace.REMOTE_DEVICE)
                         key = _buffer_key(buffer_id, generation)
-                        entry = _RemoteBufferEntry(buf, int(nbytes), generation, RemoteAddressSpace.REMOTE_DEVICE)
                         buffers[key] = entry
                         remote_addr = entry.addr
                         result = struct.pack(
@@ -752,8 +770,8 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                             raise ValueError("EXPORT_BUFFER names released buffer")
                         if request.offset + request.nbytes > entry.nbytes:
                             raise ValueError("EXPORT_BUFFER range exceeds buffer")
-                        if request.transport_profile not in ("", "sim"):
-                            raise ValueError("EXPORT_BUFFER transport_profile is not supported by sim")
+                        if request.transport_profile not in ("", HOST_TCP_TRANSPORT_PROFILE):
+                            raise ValueError("EXPORT_BUFFER transport_profile is not supported by host_tcp")
                         export_id = next_export_id
                         next_export_id += 1
                         result = ExportBufferResult(
@@ -768,7 +786,7 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                             rkey_or_token=export_id,
                             ub_ldst_va=0,
                             access_flags=request.access_flags,
-                            transport_profile="sim",
+                            transport_profile=HOST_TCP_TRANSPORT_PROFILE,
                             transport_descriptor=entry.shm_name.encode("utf-8"),
                         )
                         payload = encode_control_reply(
@@ -789,8 +807,8 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                         if request.importer_worker_id != worker_id:
                             raise ValueError("IMPORT_BUFFER worker mismatch")
                         export_desc = request.export_desc
-                        if export_desc.transport_profile != "sim":
-                            raise ValueError("IMPORT_BUFFER transport_profile is not supported by sim")
+                        if export_desc.transport_profile != HOST_TCP_TRANSPORT_PROFILE:
+                            raise ValueError("IMPORT_BUFFER transport_profile is not supported by host_tcp")
                         shm_name = export_desc.transport_descriptor.decode("utf-8")
                         shm = shared_memory.SharedMemory(name=shm_name)
                         import_id = next_import_id
@@ -816,7 +834,7 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                             rkey_or_token=import_id,
                             ub_ldst_va=export_desc.ub_ldst_va,
                             access_flags=request.requested_access_flags,
-                            transport_profile="sim",
+                            transport_profile=HOST_TCP_TRANSPORT_PROFILE,
                             import_descriptor=b"",
                         )
                         payload = encode_control_reply(

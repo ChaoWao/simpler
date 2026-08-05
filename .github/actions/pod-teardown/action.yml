@@ -1,0 +1,23 @@
+name: Clear the pod staging tree
+description: >-
+  Remove this run's tree from the peer. Call once, with `if: always()`. Each
+  pod-run-example already stopped its own daemon; the sweep here only catches an
+  example that died before reaching that step.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set +e
+        # pod-stage may never have run, so assume nothing.
+        [ -n "${REMOTE_WORKDIR:-}" ] || exit 0
+        [ -r "${POD_SSH_HELPER:-}" ] || exit 0
+        source "$POD_SSH_HELPER"
+
+        pod_ssh "pkill -f 'python -m simpler.remote_l3_worker --host ${REMOTE_DAEMON_HOST}' || true"
+        # rm -rf on a tree a surviving chip child is still writing fails with
+        # ENOTEMPTY, so retry once after giving it a moment.
+        pod_ssh "rm -rf '$REMOTE_WORKDIR' 2>/dev/null || { sleep 5; rm -rf '$REMOTE_WORKDIR'; }"
+        exit 0

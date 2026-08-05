@@ -20,7 +20,7 @@ The complete test-type × hardware-tier matrix. Empty cells have no tests yet; o
 | Category | github-hosted (no hardware) | a2a3 runner | a5 runner |
 | -------- | --------------------------- | ----------- | --------- |
 | **ut** (py + cpp) | `ut` | `ut-a2a3` | `ut-a5` |
-| **st** | `st-sim-a2a3`, `st-sim-a5` | `st-onboard-a2a3` | `st-onboard-a5` |
+| **st** | `st-sim-a2a3`, `st-sim-a5` | `st-onboard-a2a3`, `st-pod-onboard-a2a3` | `st-onboard-a5` |
 
 ## GitHub Actions Jobs
 
@@ -30,11 +30,11 @@ shape. The executable job bodies live in reusable workflows:
 `_detect-changes.yml`, `_pre-commit.yml`, `_ut-no-hardware.yml`,
 `_packaging.yml`, `_profiling-flags-smoke.yml`, `_st-sim-a2a3.yml`,
 `_st-sim-a5.yml`, `_ut-npu-a2a3.yml`, `_ut-npu-a5.yml`,
-`_st-npu-a2a3.yml`, and `_st-npu-a5.yml`. The scene-test and NPU unit-test
-bodies are split one workflow per architecture so each job renders only its own
-steps. Shared step scaffolding that is safe to run
+`_st-npu-a2a3.yml`, `_st-npu-a5.yml`, and `_st-pod.yml`. The scene-test and
+NPU unit-test bodies are split one workflow per architecture so each job
+renders only its own steps. Shared step scaffolding that is safe to run
 after checkout lives in composite actions under `.github/actions/`
-(`cache-pip`, `setup-venv`).
+(`cache-pip`, `setup-venv`, and the three `pod-*` actions).
 
 ```text
 PullRequest
@@ -47,6 +47,7 @@ PullRequest
   ├── st-sim-a5              (ubuntu + macOS)        — a5_changed && st_affected
   ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [needs ut_affected]
   ├── st-onboard-a2a3        (a2a3 self-hosted)      — a2a3_changed && st_affected
+  ├── st-pod-onboard-a2a3    (a2a3pod pair)          — a2a3_changed && st_affected
   ├── ut-a5                  (a5 self-hosted)        — Python + C++ UT, a5 hardware [needs ut_affected]
   └── st-onboard-a5          (a5 self-hosted)        — a5_changed && st_affected
 ```
@@ -60,6 +61,45 @@ PullRequest
 | `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --device ...`, then a separate `-m sdma` step, then the DFX per-feature smokes |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + `ctest -L "^requires_hardware(_a5)?$"` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
 | `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --device ...` |
+| `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | the L4 mixed local/remote examples, one L3 per machine |
+
+### Multi-machine pod jobs
+
+`st-pod-onboard-a2a3` is the only job spanning two machines. The runner it
+lands on becomes the L4 parent and drives its peer entirely over ssh; the peer
+runs no workflow code at all. Everything that identifies either machine —
+addresses, the device split, ports, the staging root, proxies — comes from a
+`.env` the runner carries, so `_st-pod.yml` holds no machine-specific value.
+Adding or re-addressing a machine is an edit to that file. Only a machine
+hosting a runner needs one.
+
+Its body splits by what is per-run and what is per-example:
+
+| Action | Called | What it does |
+| ------ | ------ | ------------ |
+| `pod-stage` | once | rsync this run's tree onto the peer and build it there |
+| `pod-run-example` | once per example | start the peer's L3 daemon, run the example's parent, stop the daemon and pull its logs |
+| `pod-teardown` | once, `if: always()` | remove the run's tree from the peer |
+
+Staging and the peer-side build are the job's whole cost, and every example
+runs against that same tree and venv, so they happen once; only the daemon and
+the parent repeat. A job-level matrix over examples would instead repeat the
+staging and both venvs per branch.
+
+Examples run with `continue-on-error` and a summary step decides the result:
+one round holds two machines, so learning about only the first failure wastes
+the second half of it. **A step reporting green there has not necessarily
+passed** — `continue-on-error` rewrites a failed step's `conclusion` to success
+and leaves the truth in `outcome`, which only the summary step reads.
+
+Each example's logs go to `output/pod-ci-<run>-<attempt>/<example>/` and the
+whole directory is uploaded as one artifact. Reach for it first on a
+device-side failure: the host traceback only says the peer's scheduler gave
+up, and the sub-class saying why is printed on the device.
+
+Writing an example — the files, the entry module, the environment variables
+`pod-run-example` sets — is covered in
+[`examples/workers/README.md`](../examples/workers/README.md).
 
 ### Nightly sanitizer sweep
 

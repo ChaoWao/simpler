@@ -34,7 +34,7 @@ be re-checked directly.
 
 The 7-level model (L6 Cluster … L0 Core) is declared in
 [hierarchical-level-runtime.md](hierarchical-level-runtime.md). Its own status
-table is accurate: L3 implemented; L4 local implemented, remote simulation only;
+table is accurate: L3 implemented; L4 local implemented, remote host_tcp shipped;
 L5/L6 untested.
 
 **The level is a label in C++ and a real branch in Python.** `Worker` stores
@@ -98,7 +98,7 @@ AICPU directly: [l3-l2-orch-comm.md](l3-l2-orch-comm.md) and
 `examples/workers/l3/`. Parent-directed targeting of a specific child is
 [directed-next-level-scheduling.md](directed-next-level-scheduling.md).
 
-### L4 — host → remote host (control plane shipped, data plane simulation only)
+### L4 — host → remote host (host_tcp data plane shipped)
 
 Shipped: `add_remote_worker(RemoteWorkerSpec)` → JSON manifest over TCP →
 `simpler-remote-worker` daemon → session runner → C++ `RemoteL3Endpoint`
@@ -107,13 +107,15 @@ registered as a NEXT_LEVEL endpoint and dispatched by the same Scheduler
 The remote session builds a real `Worker(level=3, device_ids=…)` and initialises
 its chip subtree before answering READY.
 
-**Design only:** `transport` defaults to `"sim"` and the daemon raises on any
-other value (`python/simpler/remote_l3_worker.py:66`). Remote buffers are
-`multiprocessing.shared_memory`, so `REMOTE_WINDOW` / `UB_LDST` are protocol
-placeholders. The A2 RoCE / A3 HCCS / A5 UB HCOMM profiles are documented
-contracts marked hardware-gated
-([remote-l3-worker-design.md](remote-l3-worker-design.md):71-77). There is no
-L4 example and no CI job starts the daemon.
+`transport` defaults to `"host_tcp"`, and the daemon rejects other
+profiles. Remote buffers use session-managed host storage, so `REMOTE_WINDOW` /
+`UB_LDST` remain protocol placeholders for future peer-memory transports. The
+A2 RoCE / A3 HCCS / A5 UB HCOMM profiles are documented contracts marked
+hardware-gated
+([remote-l3-worker-design.md](remote-l3-worker-design.md):71-77).
+`examples/workers/l4/vector_add_mixed_l3/` is the L4 example — one parent
+driving a local L3 subtree and a remote one on a second machine — and the
+`st-pod-onboard-a2a3` job starts the daemon on that peer.
 
 ## Launching AICore and AICPU work (the CANN surface)
 
