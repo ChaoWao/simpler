@@ -163,6 +163,64 @@ def test_load_func_names_auto_discovery_and_explicit_precedence(tmp_path):
     assert func_names == {"0": "explicit"}
 
 
+def test_graph_prepare_phases_create_graph_execution_envelopes(tmp_path):
+    out = tmp_path / "trace.json"
+    outer_a = 3
+    outer_b = 7
+    node_a0 = (1 << 32) | (outer_a << 10)
+    node_a1 = (1 << 32) | ((outer_a << 10) | 1)
+    node_b0 = (1 << 32) | (outer_b << 10)
+    scheduler_phases = [
+        [
+            {
+                "phase": "graph_prepare",
+                "task_id": outer_a,
+                "start_time_us": 1.0,
+                "end_time_us": 1.4,
+                "tasks_processed": 1,
+            },
+            {
+                "phase": "graph_prepare",
+                "task_id": outer_a,
+                "start_time_us": 1.5,
+                "end_time_us": 1.8,
+                "tasks_processed": 1,
+            },
+            {
+                "phase": "graph_prepare",
+                "task_id": outer_b,
+                "start_time_us": 5.0,
+                "end_time_us": 5.2,
+                "tasks_processed": 1,
+            },
+        ]
+    ]
+    tasks = [
+        _task_row(node_a0, 0, dispatch=2.0, start=2.2, end=3.0, receive=2.1),
+        _task_row(node_a1, 1, dispatch=3.2, start=3.4, end=4.0, receive=3.3),
+        _task_row(node_b0, 0, dispatch=5.3, start=5.5, end=6.0, receive=5.4),
+    ]
+
+    sc.generate_chrome_trace_json(tasks, str(out), scheduler_phases=scheduler_phases, core_to_thread=[0, 0])
+
+    with open(out) as f:
+        events = json.load(f)["traceEvents"]
+    assert any(
+        event.get("ph") == "M" and event.get("pid") == 5 and event.get("args", {}).get("name") == "Graph Execution"
+        for event in events
+    )
+    graph_events = [event for event in events if event.get("cat") == "graph_execution"]
+    assert [event["args"]["outer_task_id"] for event in graph_events] == [outer_a, outer_b]
+    assert graph_events[0]["args"]["visible_node_count"] == 2
+    assert graph_events[0]["args"]["prepare_slice_count"] == 2
+    assert graph_events[0]["ts"] == 1.0
+    assert graph_events[0]["dur"] == 4.0
+    assert (
+        sum(event.get("cat") == "scheduler" and event.get("name", "").startswith("graph_prepare(") for event in events)
+        == 3
+    )
+
+
 def test_spmd_pred_routes_dependency_to_earliest_slice(tmp_path):
     pred_id = 100
     succ_id = 200

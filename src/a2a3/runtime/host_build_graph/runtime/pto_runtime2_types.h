@@ -73,8 +73,8 @@
 #define PTO2_TASK_WINDOW_SIZE 16384  // Default per-ring task window size (power of 2)
 
 // Single ring. host_build_graph is host-orch: the whole graph is built on the
-// host, fits one ring, and the device runs it once without reclaim (see stages
-// 1-2 — execution-time recycle removed). The multi-ring design existed only to
+// host, fits one ring, and the device runs it once without reclaim. The
+// multi-ring design existed only to
 // let inner scopes reclaim independently under small rings; with no reclaim and
 // a whole-graph-resident ring, per-depth isolation is moot, so all scope depths
 // map to the single ring 0 (0 == 0).
@@ -163,6 +163,13 @@ struct PTO2TaskAllocResult {
     void *packed_end;   // packed_base + aligned output_size
 
     bool failed() const { return task_id < 0; }
+};
+
+enum class TaskKind : uint8_t {
+    KERNEL = 0,
+    DUMMY = 1,
+    GRAPH = 2,
+    GRAPH_NODE = 3,
 };
 
 struct PTO2OutputLayout {
@@ -480,7 +487,7 @@ struct alignas(64) PTO2TaskSlotState {
     // MPSC-deferred completion. The release write is sequenced before
     // on_subtask_complete's acq_rel fetch_add and the acquire read after.
     std::atomic<bool> any_subtask_deferred{false};
-    uint8_t _async_pad{0};
+    TaskKind task_kind{TaskKind::KERNEL};
 
     std::atomic<int16_t> completed_subtasks{0};  // Each core completion increments by 1
     int16_t total_required_subtasks{0};          // = logical_block_num * popcount(active_mask)
@@ -489,6 +496,14 @@ struct alignas(64) PTO2TaskSlotState {
     // can run concurrently after a partial staged release. All paths claim
     // ranges through claim_block_range().
     std::atomic<int16_t> next_block_idx{0};
+
+    // Graph-only scheduling metadata occupies the former tail padding, keeping
+    // the slot state at one cache line and preserving the 40-byte descriptor
+    // ABI consumed by AICore. Readiness uses the shared intrusive wake-list
+    // fields above; this index identifies the node in the saved fanin CSR.
+    // Ordinary ring tasks leave both Graph fields -1/null.
+    int32_t graph_node_index{-1};
+    void *graph_context{nullptr};
 
     int32_t claim_block_range(int32_t block_limit, int32_t max_count, int32_t &start) {
         int16_t current = next_block_idx.load(std::memory_order_relaxed);
@@ -528,13 +543,21 @@ struct alignas(64) PTO2TaskSlotState {
      * execution-time slot recycle. Skips payload/task (bound once) and
      * task_state (the orchestrator sets PENDING when it populates the slot).
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
+     * Graph-affine replay passes preserve_graph_binding=true because its node
+     * index, kind, and execution pointer are static properties of the retained
+     * storage block.
      */
-    void reset_for_reuse() {
+    void reset_for_reuse(bool preserve_graph_binding = false) {
         wake_list_head.store(nullptr, std::memory_order_relaxed);
         next_in_wake_list = nullptr;
         any_subtask_deferred.store(false, std::memory_order_relaxed);
         completed_subtasks.store(0, std::memory_order_relaxed);
         next_block_idx.store(0, std::memory_order_relaxed);
+        if (!preserve_graph_binding) {
+            graph_node_index = -1;
+            graph_context = nullptr;
+            task_kind = TaskKind::KERNEL;
+        }
         // Note: active_mask and task_attrs are per-submit-constant fields
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // last_consumer_local_id is seeded in prepare_task once the id is known.

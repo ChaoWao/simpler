@@ -215,8 +215,8 @@ void device_free_ctx(DeviceContextHandle ctx, void *dev_ptr);
 
 /**
  * Total device HBM (bytes) currently committed by this device context's
- * MemoryAllocator (user tensors + pooled arenas + runtime buffers). Excludes
- * HCCL/VMM comm windows. Returns 0 on NULL ctx.
+ * MemoryAllocator (user tensors + pooled arenas + Graph execution blocks +
+ * runtime buffers). Excludes HCCL/VMM comm windows. Returns 0 on NULL ctx.
  */
 size_t committed_device_memory_ctx(DeviceContextHandle ctx);
 

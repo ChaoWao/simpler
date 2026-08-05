@@ -115,26 +115,32 @@ def _paged_block_table_slot_mapping(seq_lens: torch.Tensor) -> tuple[torch.Tenso
     return block_table, slot_mapping
 
 
-def generate_inputs(seed: int = 1234, seq_len: int = DEFAULT_SEQ_LEN) -> TaskArgsBuilder:
-    """Deterministic fixture for decode_fwd_layers (N=40), stacked x40 along dim 0.
+def generate_inputs(
+    seed: int = 1234,
+    seq_len: int = DEFAULT_SEQ_LEN,
+    n_layers: int = N_LAYERS,
+) -> TaskArgsBuilder:
+    """Deterministic fixture for decode_fwd_layers, stacked along dim 0.
 
     Every lane uses sequence length ``seq_len`` (default 3500, the stress prompt).
     Per-layer weights are replicated (stack0) so every layer reuses layer 0's
     weights, matching the lib's const-layer-0 stacked-fwd reference; each layer
     still has its own KV pool.
 
-    The stacks are the bulk of the fixture: ~24.6 GiB of weights plus ~13.4 GiB
-    of paged KV at this regime.
+    At the default 40 layers, the stacks are the bulk of the fixture:
+    ~24.6 GiB of weights plus ~13.4 GiB of paged KV at this regime.
     """
     if not (1 <= seq_len <= MAX_SEQ):
         raise ValueError(f"seq_len must be in [1, {MAX_SEQ}], got {seq_len}")
+    if n_layers <= 0:
+        raise ValueError(f"n_layers must be positive, got {n_layers}")
     g = torch.Generator().manual_seed(seed)
 
     def rn(shape, std=1.0, bias=0.0):
         return torch.empty(shape).normal_(0.0, std, generator=g) + bias
 
     def s0(t):  # replicate along dim 0 (one slice per layer)
-        return torch.cat([t] * N_LAYERS, dim=0).contiguous()
+        return torch.cat([t] * n_layers, dim=0).contiguous()
 
     seq_lens = torch.full([BATCH], seq_len, dtype=torch.int32)
     block_table, slot_mapping = _paged_block_table_slot_mapping(seq_lens)
@@ -265,9 +271,11 @@ def _one_layer(args, layer: int, x: torch.Tensor) -> torch.Tensor:
     return down + h1  # FP32
 
 
-def compute_golden(args: TaskArgsBuilder) -> None:
-    """Fill ``args.out`` (and INOUT k_cache/v_cache) for the 40-layer decode chunk."""
+def compute_golden(args: TaskArgsBuilder, n_layers: int = N_LAYERS) -> None:
+    """Fill ``args.out`` and the INOUT KV caches for a decoder stack."""
+    if n_layers <= 0:
+        raise ValueError(f"n_layers must be positive, got {n_layers}")
     cur = args.hidden_states.float()  # copy_hidden: bf16 input embedded as FP32
-    for layer in range(N_LAYERS):
+    for layer in range(n_layers):
         cur = _one_layer(args, layer, cur)
     args.out[:] = cur.to(torch.bfloat16)  # copy_out: single FP32->bf16 round

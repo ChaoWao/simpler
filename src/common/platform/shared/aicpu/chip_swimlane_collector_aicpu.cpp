@@ -987,6 +987,20 @@ void chip_swimlane_aicpu_record_predicated_skip(
     record_aicpu_worker_task(thread_idx, ChipSwimlaneSchedPhaseKind::PredicatedSkip, complete_time, loop_iter, task_id);
 }
 
+void chip_swimlane_aicpu_record_graph_prepare(
+    int thread_idx, uint64_t start_time, uint64_t end_time, uint32_t loop_iter, uint64_t task_id,
+    uint32_t nodes_materialized
+) {
+    auto *record = acquire_sched_phase_record(thread_idx);
+    if (record == nullptr) return;
+    fill_sched_phase_record(
+        record, ChipSwimlaneSchedPhaseKind::GraphPrepare, start_time, end_time, loop_iter, nodes_materialized,
+        /*shared_at_start=*/nullptr, /*shared_at_end=*/nullptr
+    );
+    record->phase_data.graph_task.local_id = static_cast<uint32_t>(task_id);
+    record->phase_data.graph_task.ring_id = static_cast<uint32_t>(task_id >> 32);
+}
+
 void chip_swimlane_aicpu_set_orch_thread_idx(int thread_idx) { s_orch_thread_idx = thread_idx; }
 
 void chip_swimlane_aicpu_record_orch_phase(

@@ -279,7 +279,6 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             runtime->set_slot_states_ptr(nullptr);
 
             sched_ctx_.bind_runtime(rt);
-
             // Latch the host-built task count (on_orchestration_done sets total_tasks_)
             // BEFORE the runtime_init_ready_ release below — that store is the barrier
             // that unblocks the scheduler threads. Otherwise they would acquire
@@ -288,13 +287,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // to keep them alive).
             // NOTE: do NOT call rt_orchestration_done(rt) here. The HOST already
             // called it in run_host_orchestration; the orchestrator's own
-            // task-allocator pointers are intentionally NOT relocated (only the
-            // SM cross-task pointers and the host-built fanout adjacency —
-            // dep_pool / ready queues / fanout_head — were), so they still hold
-            // host addresses and mark_done()'s active_count() read would
-            // dereference host memory and fault the AICPU. on_orchestration_done
-            // only needs total_tasks and the scalar
-            // orchestrator.inline_completed_tasks, both already valid.
+            // task-allocator pointers are intentionally NOT relocated, so they
+            // still hold host addresses and mark_done() would fault the AICPU.
             sched_ctx_.on_orchestration_done(runtime, rt, thread_idx, runtime->host_total_tasks);
             LOG_INFO("Thread %d: host-orch boot complete (%d tasks)", thread_idx, runtime->host_total_tasks);
         }
@@ -309,8 +303,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // orchestration setup, seeds its disjoint slice of the whole graph's ready
     // set + wake lists, then barriers. Only once all slices are done does the
     // leader publish runtime_init_ready_, so no thread dispatches against a
-    // half-seeded graph. This replaces the O(total_tasks) serial classify the
-    // leader used to run alone while the others idle-waited.
+    // half-seeded graph.
     while (!classify_ready_.load(std::memory_order_acquire)) {
         SPIN_WAIT_HINT();
     }
@@ -364,6 +357,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         if (rt != nullptr) {
             // Clear g_current_runtime in this DSO before destroying rt.
             framework_bind_runtime(nullptr);
+            // Graph execution blocks are host-owned GM retained by the
+            // DeviceRunner. This run only drops its submission references;
+            // the blocks remain reusable until Worker finalization.
             runtime_destroy(rt, runtime_arena_);
             rt = nullptr;
         }

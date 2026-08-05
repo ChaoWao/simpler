@@ -43,14 +43,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "../common/pto_runtime_status.h"
 #include "../runtime/common.h"
 #include "../runtime/dep_gen_host_graph.h"
+#include "../runtime/graph_execution.h"
 #include "../runtime/host_tensor_access.h"
+#include "../runtime/graph_host_state.h"
 #include "../runtime/pto_orchestrator.h"
 #include "../runtime/pto_runtime2.h"
 #include "../runtime/pto_shared_memory.h"
@@ -298,11 +303,8 @@ namespace {
 
 // host_build_graph is host-orchestration-first: the HOST dlopens the
 // orchestration .so and runs it to completion. The shared memory + arena carry
-// host-DDR cross-task pointers (slot_state.task/payload,
-// payload.fanin_inline_slot_states[], dep_pool/ready queues); the host relocates them to
-// their final device addresses (relocate_host_orch_image, below) BEFORE the H2D
-// copy, so the device receives a fully device-addressed image and schedules
-// only — no on-device pointer fixup.
+// host-DDR cross-task pointers; the host relocates them to their final device
+// addresses before the H2D copy, so the device schedules a complete image.
 
 bool write_all_bytes(int fd, const uint8_t *data, size_t size) {
     size_t total = 0;
@@ -356,49 +358,12 @@ struct HostOrchEntryPoints {
     OrchestrationBindFunc bind{nullptr};
 };
 
-// Run the orchestrator on the host. `rt` was built with its scheduler half
-// pointing at the device SM; here we re-point ONLY the orchestrator half at a
-// host SM mirror, run the orchestration entry against it, latch the submitted
-// task count, and H2D the populated SM to the device (the device scheduler
-// reads task descriptors from there). The device never dereferences the
-// orchestrator's SM pointers, so leaving them host-side is safe. Returns the
-// total task count (>= 0) on success, or -1 on failure.
-// host_build_graph host-orch: the orchestrator built the task graph in a host
-// SM mirror and (when wiring is folded into submit) the fanout adjacency in the
-// host arena, storing host-DDR addresses into the cross-task pointers. Relocate
-// them to their FINAL device addresses here on the host, BEFORE the SM/arena are
-// copied to the device — so the device receives a fully device-addressed image
-// and boots scheduler-only with no on-device pointer fixup.
-//
-// Relocated pointers span TWO regions with DIFFERENT deltas: the SM block
-// (slot_state.task/.payload, fanin_inline_slot_states[], dep-entry.slot_state,
-// ready-queue slot.slot_state) and the arena block (slot_state.fanout_head,
-// dep-entry.next point into the SM but live in the arena).
-// Rather than track which delta each field needs, reloc() classifies every
-// pointer by the region it points INTO and applies that region's delta; foreign
-// and null pointers pass through untouched. The fanout adjacency is wired inline
-// during host submit, so dep_pool/ready are already populated here.
-//
-// The orchestrator's own task-allocator pointers are intentionally NOT relocated
-// (the device runs scheduler-only and never dereferences them, and must not call
-// rt_orchestration_done — the host already did). Multi-fanin spill is not yet
-// relocated; a task exceeding PTO2_FANIN_INLINE_CAP producers latches fatal here
-// (returns false) rather than shipping un-relocated host pointers to the device.
-// Returns false on any unrelocatable pointer so the caller can fail the prepare.
 static bool relocate_host_orch_image(
-    PTO2SharedMemoryHandle &host_sm_handle, [[maybe_unused]] PTO2Runtime *rt, uint64_t host_sm, uint64_t sm_size,
-    int64_t sm_delta, uint64_t host_arena, uint64_t arena_size, int64_t arena_delta
+    PTO2SharedMemoryHandle &host_sm_handle, uint64_t host_sm, uint64_t sm_size, int64_t sm_delta, uint64_t host_arena,
+    uint64_t arena_size, int64_t arena_delta
 ) {
-    // host_build_graph is single-ring; the loops below iterate the lone ring and
-    // index header->ring (singular). If the ring depth ever grows, those loops
-    // would relocate the same ring N times (applying the delta repeatedly =
-    // corruption), so pin the assumption here.
     static_assert(PTO2_MAX_RING_DEPTH == 1, "relocate_host_orch_image assumes a single ring");
 
-    // SM and arena windows must not overlap — reloc classifies a pointer by
-    // which window it falls in, so an overlap would misclassify and apply the
-    // wrong delta. Both are independent malloc-backed host buffers in practice;
-    // assert it so a future shared-buffer layout can't silently corrupt.
     if (!(host_sm + sm_size <= host_arena || host_arena + arena_size <= host_sm)) {
         LOG_ERROR(
             "host-orch: SM window [%#lx,+%#lx) overlaps arena window [%#lx,+%#lx); cannot relocate", host_sm, sm_size,
@@ -408,45 +373,98 @@ static bool relocate_host_orch_image(
     }
 
     bool ok = true;
-    auto reloc = [&](auto *&p) {
-        using Ptr = std::remove_reference_t<decltype(p)>;
-        uint64_t v = reinterpret_cast<uint64_t>(p);
-        if (v == 0) {
-            return;
-        }
-        if (v >= host_sm && v < host_sm + sm_size) {
-            p = reinterpret_cast<Ptr>(static_cast<uintptr_t>(v + sm_delta));
-        } else if (v >= host_arena && v < host_arena + arena_size) {
-            p = reinterpret_cast<Ptr>(static_cast<uintptr_t>(v + arena_delta));
+    auto relocate = [&](auto *&pointer) {
+        using Pointer = std::remove_reference_t<decltype(pointer)>;
+        const uint64_t address = reinterpret_cast<uint64_t>(pointer);
+        if (address == 0) return;
+        if (address >= host_sm && address < host_sm + sm_size) {
+            pointer = reinterpret_cast<Pointer>(static_cast<uintptr_t>(address + sm_delta));
+        } else if (address >= host_arena && address < host_arena + arena_size) {
+            pointer = reinterpret_cast<Pointer>(static_cast<uintptr_t>(address + arena_delta));
         } else {
-            // A non-null pointer in neither window is an external/host address
-            // the device would dereference verbatim after H2D. No field should
-            // legitimately carry one; latch fatal rather than ship a host VA to
-            // the device (silent AICPU corruption otherwise).
-            LOG_ERROR("host-orch: pointer %#lx is outside both SM and arena windows; cannot relocate for device", v);
+            LOG_ERROR(
+                "host-orch: pointer %#lx is outside both SM and arena windows; cannot relocate for device", address
+            );
             ok = false;
         }
     };
 
     PTO2SharedMemoryHeader *header = host_sm_handle.header;
     if (header != nullptr) {
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-            PTO2SharedMemoryRingHeader &ring = header->ring;
-            int32_t count = ring.fc.current_task_index.load(std::memory_order_acquire);
-            for (int32_t slot = 0; slot < count; slot++) {
-                PTO2TaskSlotState *ss = &ring.slot_states[slot];
-                // Polling: fanin is a flat array of position-independent local-id
-                // integers on the payload, so only the two per-slot arena/SM
-                // pointers need relocating. There is no fanout_head/dep_pool graph
-                // and no host-seeded ready queue (the device boot scan classifies),
-                // so those relocation passes are gone.
-                reloc(ss->task);
-                reloc(ss->payload);
-            }
+        PTO2SharedMemoryRingHeader &ring = header->ring;
+        const int32_t count = ring.fc.current_task_index.load(std::memory_order_acquire);
+        for (int32_t slot = 0; slot < count; ++slot) {
+            PTO2TaskSlotState *state = &ring.slot_states[slot];
+            relocate(state->task);
+            relocate(state->payload);
         }
     }
     return ok;
 }
+
+bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostState &graph_state) {
+    std::unordered_map<uint64_t, uint32_t> occurrences;
+    const size_t count = graph_host_upload_count(graph_state);
+    for (size_t index = 0; index < count; ++index) {
+        std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
+        if (!upload.has_value() || upload->outer_slot->task_kind != TaskKind::GRAPH ||
+            upload->outer_slot->task == nullptr) {
+            LOG_ERROR("host-orch: invalid pending Graph POD image");
+            return false;
+        }
+        auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
+        const GraphDefinition *definition = graph_submission_definition(*submission);
+        size_t execution_bytes = 0;
+        if (definition == nullptr || definition->full_key != submission->graph_key || definition->task_count == 0 ||
+            definition->task_count > GRAPH_MAX_NODES ||
+            !graph_execution_storage_bytes(
+                static_cast<int32_t>(definition->task_count), definition->tensor_arg_count, definition->total_bytes,
+                &execution_bytes
+            )) {
+            LOG_ERROR("host-orch: invalid Graph execution storage request");
+            return false;
+        }
+        const uint32_t occurrence = occurrences[submission->graph_key]++;
+        void *execution_storage = api->acquire_graph_execution_buffer(
+            submission->graph_key, occurrence, execution_bytes, alignof(GraphNodeStorage)
+        );
+        if (execution_storage == nullptr) {
+            LOG_ERROR(
+                "host-orch: failed to retain %zu bytes for Graph execution key=%#llx occurrence=%u", execution_bytes,
+                static_cast<unsigned long long>(submission->graph_key), occurrence
+            );
+            return false;
+        }
+        submission->execution_storage = reinterpret_cast<uint64_t>(execution_storage);
+        submission->execution_storage_bytes = execution_bytes;
+        submission->local_execution = 0;
+        submission->activation_gate = 0;
+
+        void *device_submission = api->device_malloc(upload->bytes);
+        if (device_submission == nullptr) {
+            LOG_ERROR("host-orch: failed to allocate %zu bytes for Graph submission", upload->bytes);
+            return false;
+        }
+        if (api->copy_to_device(device_submission, upload->data, upload->bytes) != 0) {
+            LOG_ERROR("host-orch: failed to upload Graph submission POD image");
+            api->device_free(device_submission);
+            return false;
+        }
+        upload->outer_slot->graph_context = device_submission;
+        runtime->tensor_pairs_.push_back({nullptr, device_submission, upload->bytes, false});
+    }
+    return true;
+}
+
+struct GraphHostStateBinding {
+    explicit GraphHostStateBinding(PTO2OrchestratorState &orchestrator, GraphHostState *state) :
+        orchestrator(orchestrator) {
+        orchestrator.graph_host_state = state;
+    }
+    ~GraphHostStateBinding() { orchestrator.graph_host_state = nullptr; }
+
+    PTO2OrchestratorState &orchestrator;
+};
 
 int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, PTO2Runtime *rt, DeviceArena &host_arena,
@@ -454,14 +472,10 @@ int32_t run_host_orchestration(
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
     void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
-    // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
 
-    std::vector<uint8_t> host_sm_buf(sm_size, 0);
-    void *host_sm = host_sm_buf.data();
-
-    // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
-    // init_data_from_layout resets the orchestrator state, so this is safe.
+    std::vector<uint8_t> host_sm_buffer(sm_size, 0);
+    void *host_sm = host_sm_buffer.data();
     if (!rt->orchestrator.init_data_from_layout(
             layout.orch, host_arena, host_sm, gm_heap, eff_heap_sizes[0], eff_task_window_sizes[0]
         )) {
@@ -470,17 +484,19 @@ int32_t run_host_orchestration(
     }
     rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, &rt->scheduler);
 
-    // Initialize the host SM header (ring flow control) so submit_task can run.
     PTO2SharedMemoryHandle host_sm_handle;
     if (!host_sm_handle.init_per_ring(host_sm, sm_size, eff_task_window_sizes, eff_heap_sizes)) {
         LOG_ERROR("host-orch: host SM init_per_ring failed");
         return -1;
     }
 
-    // Install the ops table (host s_runtime_ops) and latch this run's cluster
-    // counts. worker_count is published by DeviceRunner::prepare_launch_shape
-    // before this bind, so the host orchestrator sees the same geometry the
-    // AICPU re-derives from the handshake at boot.
+    GraphHostStatePtr graph_state = make_graph_host_state();
+    if (!graph_state) {
+        LOG_ERROR("host-orch: failed to allocate Graph host state");
+        return -1;
+    }
+    GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
+
     const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
     if (block_dim < 1) {
         LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
@@ -490,42 +506,30 @@ int32_t run_host_orchestration(
         rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
     );
     rt->mode = PTO2_MODE_EXECUTE;
-    // get_tensor_data/set_tensor_data resolve buffer.addr through the host
-    // views registered at staging time (runtime/host_tensor_access.h), so the
-    // host orchestrator can read control tensors (e.g. paged_attention's
-    // context_lens/block_table) whether or not the platform maps device memory
-    // into the host address space.
 
-    // Bind both framework_current_runtime instances: the host library's (used by
-    // rt_scope_* / rt_orchestration_done) and the orch .so's own copy (used by
-    // its inline rt_submit_* -> current_runtime()).
-    const HostOrchEntryPoints *eps = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
+    const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
     framework_bind_runtime(rt);
-    if (eps->bind != nullptr) {
-        eps->bind(rt);
-    } else {
+    if (entry_points->bind == nullptr) {
         LOG_ERROR("host-orch: orch .so framework_bind_runtime was not resolved");
         return -1;
     }
+    rt->active_callable_hash = reinterpret_cast<uint64_t>(entry_points->entry);
+    entry_points->bind(rt);
 
     rt_scope_begin(rt);
-    eps->entry(orch_l2);
+    entry_points->entry(orch_l2);
     rt_scope_end(rt);
     rt_orchestration_done(rt);
 
-    int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
 
-    // Relocate the host-DDR cross-task pointers to their final DEVICE addresses
-    // on the host, before the SM and arena leave for the device. Pointers into
-    // the SM shift by sm_delta; pointers into the arena (fanout adjacency, wiring
-    // queue) shift by arena_delta. After this both the SM and arena carry device
-    // addresses, so the device boots scheduler-only.
     const int64_t sm_delta = static_cast<int64_t>(reinterpret_cast<uint64_t>(device_sm)) -
                              static_cast<int64_t>(reinterpret_cast<uint64_t>(host_sm));
     const int64_t arena_delta = static_cast<int64_t>(reinterpret_cast<uint64_t>(device_arena)) -
                                 static_cast<int64_t>(reinterpret_cast<uint64_t>(host_arena.base()));
     if (!relocate_host_orch_image(
-            host_sm_handle, rt, reinterpret_cast<uint64_t>(host_sm), sm_size, sm_delta,
+            host_sm_handle, reinterpret_cast<uint64_t>(host_sm), sm_size, sm_delta,
             reinterpret_cast<uint64_t>(host_arena.base()), layout.arena_size, arena_delta
         )) {
         LOG_ERROR("host-orch: relocation failed; refusing to H2D an image with unrelocated host pointers");
@@ -658,7 +662,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
 extern "C" int bind_callable_to_runtime_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
     const ArgDirection *signature, int sig_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
-    [[maybe_unused]] const uint64_t *ring_dep_pool  // polling has no dep_pool; kept for ABI stability
+    [[maybe_unused]] const uint64_t *ring_dep_pool
 ) {
     if (runtime == nullptr) {
         LOG_ERROR("Runtime pointer is null");
@@ -787,7 +791,7 @@ extern "C" int bind_callable_to_runtime_impl(
     uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(eff_task_window_sizes);
 
     int64_t t_prebuilt_start = _now_ms();
-    DeviceArena host_arena;  // libc malloc backend by default
+    DeviceArena host_arena;
     PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_sizes, eff_heap_sizes);
     if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
@@ -846,12 +850,6 @@ extern "C" int bind_callable_to_runtime_impl(
     }
     runtime_wire_arena_pointers(host_arena, layout, rt);
 
-    // host_build_graph host-orch: run the orchestrator on the host now, against
-    // a host SM mirror, and ship the populated SM to the device. The arena
-    // (copied to the device below) carries the resulting orchestrator/scheduler
-    // state; the device boots scheduler-only. register_callable_impl guarantees
-    // host_orch_func_ptr is non-null on success (it fails the whole prepare
-    // otherwise), so this is an assertion-style guard, not a fallback path.
     if (host_orch_func_ptr == nullptr) {
         LOG_ERROR("host-orch: orchestration entry points were not resolved");
         return -1;
@@ -993,7 +991,9 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
             // Release the SVM host mapping installed at staging time before
             // freeing the device buffer (unregister-before-free, as the HAL
             // requires). No-op on sim. Keyed by dev_ptr.
-            api->unregister_device_memory_from_host(tensor_pairs[i].dev_ptr);
+            if (tensor_pairs[i].host_ptr != nullptr) {
+                api->unregister_device_memory_from_host(tensor_pairs[i].dev_ptr);
+            }
             api->device_free(tensor_pairs[i].dev_ptr);
         }
     }

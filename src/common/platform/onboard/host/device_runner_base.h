@@ -139,6 +139,9 @@ public:
     int device_memset(void *dev_ptr, int value, std::size_t bytes);
     void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, std::size_t *size);
     void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, std::size_t size);
+    void *acquire_graph_execution_buffer(
+        uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, std::size_t bytes, std::size_t alignment
+    );
     void clear_temporary_buffer();
     /**
      * Map a device buffer into the host address space and return a
@@ -855,6 +858,7 @@ protected:
      * @return 0 on success, first nonzero rc encountered otherwise.
      */
     int finalize_common();
+    void release_graph_execution_buffers();
 
     /**
      * Stamp the active callable_id onto a Runtime so the AICPU knows which
@@ -998,6 +1002,13 @@ protected:
     // the grow/pack logic lives in trb bind.
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<std::size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
+    struct RetainedGraphExecutionBuffer {
+        void *allocation{nullptr};
+        void *aligned_addr{nullptr};
+        std::size_t capacity{0};
+    };
+    using GraphExecutionBufferMap = std::unordered_map<uint64_t, std::vector<RetainedGraphExecutionBuffer>>;
+    std::array<GraphExecutionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_execution_buffers_{};
 
     // One independently committed set of the three pooled device regions. A
     // run reaches its set through the arena bank its lease selects, so

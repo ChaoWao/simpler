@@ -539,6 +539,10 @@ enum class ChipSwimlaneSchedPhaseKind : uint32_t {
     PredicatedSkip = 12,  // Per-task marker for a real task retired inline because
                           // its dispatch predicate evaluated false. Uses the same
                           // phase_data.dummy_task identity payload as DummyTask.
+    // Outer (sched lane): one bounded Graph Definition materialization slice.
+    // phase_data.graph_task identifies the ring-0 outer Graph task and
+    // tasks_processed is the number of nodes patched in this slice.
+    GraphPrepare = 13,
 };
 
 /** Index layout of the queue-depth snapshot arrays below: AIC=0, AIV=1, MIX=2.
@@ -575,6 +579,10 @@ struct ChipSwimlaneAicpuSchedPhaseRecord {
             uint32_t local_id;  // task_id bits [31:0]
             uint32_t ring_id;   // task_id bits [63:32]
         } dummy_task;
+        struct {
+            uint32_t local_id;  // outer Graph task_id bits [31:0]
+            uint32_t ring_id;   // outer Graph task_id bits [63:32]
+        } graph_task;
     } phase_data;
     int16_t shared_depth_at_start[CHIP_SWIMLANE_NUM_QUEUE_SHAPES];  // sched->ready_queues[shape].size()
     int16_t shared_depth_at_end[CHIP_SWIMLANE_NUM_QUEUE_SHAPES];
