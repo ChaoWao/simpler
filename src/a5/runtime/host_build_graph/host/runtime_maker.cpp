@@ -1014,13 +1014,12 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     return rc;
 }
 
-// host_build_graph resolves orchestration on the host, so it exports no AICPU
-// entries beyond the base {simpler_aicpu_exec, simpler_aicpu_init} — in
-// particular it does not export simpler_aicpu_register_callable. Reporting an
-// empty extra-symbol set keeps the common AICPU loader from looking for it.
+// host_build_graph resolves orchestration on the host, but the A5 platform
+// exports the topology query entry used before the first normal launch.
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
+    static const char *const kExtra[] = {"simpler_aicpu_query_topology"};
     if (count != nullptr) {
-        *count = 0;
+        *count = sizeof(kExtra) / sizeof(kExtra[0]);
     }
-    return nullptr;
+    return kExtra;
 }

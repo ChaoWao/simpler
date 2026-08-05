@@ -1,0 +1,32 @@
+{
+  "_comment": "Ascend950PR_9599 CPU_TOPO verified by live DSMI dump on 2026-08-05 (CANN 9.2.0). Full 9-logical layout kept for FG cluster/die classification; only role=compute entries are O/S-schedulable (device OCCUPY=0x1f8). cpu0=Control/OS_SCHED, cpu1+2=Data SMT pair on phy1. role/available are documentation fields ignored by the loader; occupy_mask is the match gate. Used only when live CPU_TOPO is unavailable.",
+  "socs": {
+    "Ascend950PR_9599": {
+      "_comment": "Documentation may contain an escaped quote (\") and an unmatched brace ({).",
+      "occupy_mask": 504,
+      "cpus": [
+        {"cpu_id": 0, "phy_cpu_id": 0, "hyperthread_id": 0, "role": "control", "available": false},
+        {"cpu_id": 1, "phy_cpu_id": 1, "hyperthread_id": 0, "role": "data", "available": false},
+        {"cpu_id": 2, "phy_cpu_id": 1, "hyperthread_id": 1, "role": "data", "available": false},
+        {"cpu_id": 3, "phy_cpu_id": 2, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 4, "phy_cpu_id": 3, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 5, "phy_cpu_id": 4, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 6, "phy_cpu_id": 5, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 7, "phy_cpu_id": 6, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 8, "phy_cpu_id": 7, "hyperthread_id": 0, "role": "compute", "available": true}
+      ]
+    },
+    "Ascend950PR_9579": {
+      "host_arch": "x86_64",
+      "occupy_mask": 62,
+      "selection_policy": "generic",
+      "cpus": [
+        {"cpu_id": 1, "phy_cpu_id": 1, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 2, "phy_cpu_id": 2, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 3, "phy_cpu_id": 3, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 4, "phy_cpu_id": 4, "hyperthread_id": 0, "role": "compute", "available": true},
+        {"cpu_id": 5, "phy_cpu_id": 5, "hyperthread_id": 0, "role": "compute", "available": true}
+      ]
+    }
+  }
+}

@@ -85,8 +85,9 @@ broken Path B (`KERNEL_TYPE_AICPU_CUSTOM`, issue #822).
 +---------------------+
 ```
 
-Reused unchanged: `build/lib/a2a3/dispatcher/libsimpler_aicpu_dispatcher.so`
-from the standard runtime build.
+The dispatcher is reused unchanged from the standard runtime build. Select the
+A2/A3 or A5 artifact through `SIMPLER_DISPATCHER_SO`; the A5 artifact is the
+default because `--json` performs A5 topology classification.
 
 ## Build
 
@@ -108,20 +109,34 @@ cmake ..
 cmake --build .
 ```
 
+If the Ascend driver is installed outside `/usr/local/Ascend/driver`, configure
+the host build with
+`-DASCEND_DRIVER_LIB_DIR=/path/to/driver/lib64/driver`.
+
 ## Run
 
 The dispatcher SO comes from a normal `pip install .` runtime build —
 build the runtime first if you have not.
 
 ```bash
-export SIMPLER_DISPATCHER_SO=$REPO/build/lib/a2a3/dispatcher/libsimpler_aicpu_dispatcher.so
+export SIMPLER_DISPATCHER_SO=$REPO/build/lib/a5/dispatcher/libsimpler_aicpu_dispatcher.so
 export SIMPLER_AICPU_QUERY_SO=$REPO/tools/cann-examples/aicpu-device-query/device/build/libaicpu_query.so
 
 # Always run hardware work via task-submit on this dev box (see
 # .claude/rules/running-onboard.md).
 task-submit --device auto --device-num 1 \
     --run "$REPO/tools/cann-examples/aicpu-device-query/host/build/query_device_hal \$TASK_DEVICE"
+
+# A5 only: merge Host CPU_TOPO with the queried device masks, classify FG/PG,
+# resolve the automatic affinity plan, and write machine-readable JSON.
+task-submit --device auto --device-num 1 \
+    --run "$REPO/tools/cann-examples/aicpu-device-query/host/build/query_device_hal \$TASK_DEVICE --json"
 ```
+
+`--json` keeps diagnostics on stderr and writes only the JSON document to
+stdout. The document includes topology source, FG/PG classification, all
+logical-CPU metadata, device masks, selection policy, active count, full OCCUPY
+launch count, and `[S..., O]` affinity.
 
 ## Running on each arch
 
@@ -139,9 +154,9 @@ have been validated with this tool — see "What it answered" above.
 ## Scope and limits
 
 - This is **not** a generic device-side HAL inspector. The hardcoded
-  query list in `host/query_device_hal.cpp` reflects exactly what was
-  needed to close the a3 AICPU question. Extending the list to other
-  modules / infoTypes is a small edit — `requests` vector + the
+  query list in `host/query_device_hal.cpp` reflects the A3/A5 occupancy
+  and virtualization questions plus A5 classification. Extending the list to
+  other modules / infoTypes is a small edit — `requests` vector + the
   `kModuleName`/`kInfoName` switches.
 - The inner SO uses local device id 0 (`self_did = 0`) — validated as
   the correct convention from inside an AICPU OS process. Passing the

@@ -942,16 +942,22 @@ target_link_libraries(test_a2a3_aicpu_affinity_select PRIVATE
 add_test(NAME test_a2a3_aicpu_affinity_select COMMAND test_a2a3_aicpu_affinity_select)
 set_tests_properties(test_a2a3_aicpu_affinity_select PROPERTIES LABELS "no_hardware")
 
-# a5 CPU_TOPO fallback and affinity selection. Pure logic; the fallback is
-# restricted to the verified x86 Ascend950PR_9579 standard-card signature.
+# a5 CPU_TOPO fallback and affinity selection. Pure logic; packaged fallback
+# entries enforce their own verified SoC, host-architecture, and OCCUPY constraints.
 set(A5_ONBOARD_HOST_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/onboard/host)
 add_executable(test_a5_aicpu_topology_fallback
     a5/test_aicpu_topology_fallback.cpp
     ${A5_ONBOARD_HOST_DIR}/aicpu_topology_probe.cpp
 )
+add_custom_command(TARGET test_a5_aicpu_topology_fallback POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${A5_ONBOARD_HOST_DIR}/aicpu_cpu_topo_fallback.json"
+        "$<TARGET_FILE_DIR:test_a5_aicpu_topology_fallback>/aicpu_cpu_topo_fallback.json"
+)
 target_include_directories(test_a5_aicpu_topology_fallback PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${A5_ONBOARD_HOST_DIR}
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/include
     ${SIMPLER_LOG_DIR}/include
     ${SIMPLER_COMMON_PLATFORM_DIR}/include
 )

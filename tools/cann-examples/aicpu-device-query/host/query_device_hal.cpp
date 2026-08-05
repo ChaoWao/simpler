@@ -42,6 +42,8 @@
 #include <runtime/rt.h>
 #include <runtime/runtime/rts/rts_kernel.h>
 
+#include "aicpu_topology_probe.h"
+
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -308,17 +310,16 @@ std::string MakeJsonDescriptor(uint64_t fp, const std::string &so_basename) {
 }  // namespace
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: %s <device_id>\n", argv[0]);
+    if (argc < 2 || argc > 3 || (argc == 3 && std::strcmp(argv[2], "--json") != 0)) {
+        std::fprintf(stderr, "usage: %s <device_id> [--json]\n", argv[0]);
         return 1;
     }
     int device_id = std::atoi(argv[1]);
+    const bool json_output = argc == 3;
 
     const char *dispatcher_path_env = std::getenv("SIMPLER_DISPATCHER_SO");
-    std::string dispatcher_path = dispatcher_path_env ?
-                                      dispatcher_path_env :
-                                      "/data/wcwxyai/workspace/simpler/.claude/worktrees/parallel-petting-newt/build/"
-                                      "lib/a2a3/dispatcher/libsimpler_aicpu_dispatcher.so";
+    std::string dispatcher_path =
+        dispatcher_path_env ? dispatcher_path_env : "build/lib/a5/dispatcher/libsimpler_aicpu_dispatcher.so";
     const char *inner_path_env = std::getenv("SIMPLER_AICPU_QUERY_SO");
     std::string inner_path =
         inner_path_env ? inner_path_env : "tools/cann-examples/aicpu-device-query/device/build/libaicpu_query.so";
@@ -330,6 +331,9 @@ int main(int argc, char **argv) {
 
     // Built-in initial query set — exactly what the kernel.cpp probe ran, so
     // we can sanity-check against the on-record results.
+    constexpr size_t kOsSchedRequestIndex = 0;
+    constexpr size_t kOccupyRequestIndex = 1;
+    constexpr size_t kPfOccupyRequestIndex = 4;
     std::vector<QueryRequest> requests = {
         {1 /* AICPU */, 5 /* OS_SCHED */},     {1 /* AICPU */, 8 /* OCCUPY */},     {1 /* AICPU */, 1 /* CORE_NUM */},
         {1 /* AICPU */, 20 /* PF_CORE_NUM */}, {1 /* AICPU */, 21 /* PF_OCCUPY */}, {2 /* CCPU */, 8 /* OCCUPY */},
@@ -416,7 +420,7 @@ int main(int argc, char **argv) {
         return std::string(b);
     }();
     std::string preinstall_path = MakePreinstallPath(fp, device_id);
-    std::printf("[bootstrap] inner SO at %s (fp=%016lx)\n", preinstall_path.c_str(), fp);
+    if (!json_output) std::printf("[bootstrap] inner SO at %s (fp=%016lx)\n", preinstall_path.c_str(), fp);
 
     char json_path_buf[128];
     std::snprintf(json_path_buf, sizeof(json_path_buf), "/tmp/simpler_inner_%016lx_%d.json", fp, getpid());
@@ -494,13 +498,53 @@ int main(int argc, char **argv) {
         "D2H QueryResult"
     );
 
-    // ---- Pretty-print ----
-    std::printf("\n=== device=%d  device-side HAL view (via dispatcher + inner SO) ===\n", device_id);
-    for (size_t i = 0; i < requests.size(); ++i) {
-        std::printf(
-            "  %-12s + %-14s  rc=%d  val=0x%lx (%ld)\n", kModuleName(requests[i].module_type),
-            kInfoName(requests[i].info_type), results[i].rc, (long)results[i].value, (long)results[i].value
-        );
+    if (json_output) {
+        pto::a5::AicpuDeviceOccupancy occupancy;
+        occupancy.os_sched = static_cast<uint64_t>(results[kOsSchedRequestIndex].value);
+        occupancy.os_sched_valid = results[kOsSchedRequestIndex].rc == 0;
+        occupancy.occupy = static_cast<uint64_t>(results[kOccupyRequestIndex].value);
+        occupancy.occupy_valid = results[kOccupyRequestIndex].rc == 0;
+        occupancy.pf_occupy = static_cast<uint64_t>(results[kPfOccupyRequestIndex].value);
+        occupancy.pf_occupy_valid = results[kPfOccupyRequestIndex].rc == 0;
+
+        pto::a5::AicpuTopology topology;
+        if (!pto::a5::probe_aicpu_topology(static_cast<uint32_t>(device_id), occupancy, topology)) {
+            std::fprintf(stderr, "A5 AICPU topology probe failed for device %d\n", device_id);
+            return 1;
+        }
+        if (topology.soc_name.find("Ascend950") == std::string::npos) {
+            std::fprintf(stderr, "--json A5 classification is unsupported for SoC %s\n", topology.soc_name.c_str());
+            return 1;
+        }
+
+        pto::a5::AicpuLaunchPlan launch_plan;
+        std::string plan_error;
+        if (!pto::a5::build_aicpu_launch_plan(topology, 0, launch_plan, plan_error)) {
+            std::fprintf(stderr, "A5 AICPU launch planning failed: %s\n", plan_error.c_str());
+            return 1;
+        }
+
+        pto::a5::AicpuSelectionPolicy policy = pto::a5::AicpuSelectionPolicy::kScenario;
+        if (topology.generic_selection_only) {
+            policy = pto::a5::AicpuSelectionPolicy::kGeneric;
+        } else if (topology.scenario_type == pto::a5::AicpuScenarioType::kUnknown) {
+            policy = pto::a5::AicpuSelectionPolicy::kSequentialFallback;
+            std::fprintf(
+                stderr,
+                "WARNING: AICPU topology UNKNOWN; selected %d active roles from %d stable CPUs; launch count=%d\n",
+                launch_plan.effective_active_count, launch_plan.stable_reachable_count, launch_plan.launch_count
+            );
+        }
+        std::fputs(pto::a5::format_aicpu_topology_json(topology, policy, launch_plan).c_str(), stdout);
+    } else {
+        // ---- Pretty-print ----
+        std::printf("\n=== device=%d  device-side HAL view (via dispatcher + inner SO) ===\n", device_id);
+        for (size_t i = 0; i < requests.size(); ++i) {
+            std::printf(
+                "  %-12s + %-14s  rc=%d  val=0x%lx (%ld)\n", kModuleName(requests[i].module_type),
+                kInfoName(requests[i].info_type), results[i].rc, (long)results[i].value, (long)results[i].value
+            );
+        }
     }
 
     ACL_CHECK(aclrtDestroyStream(stream), "destroy stream");

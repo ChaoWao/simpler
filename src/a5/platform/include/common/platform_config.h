@@ -22,8 +22,7 @@
  * - Derived: All other limits calculated from base configuration
  */
 
-#ifndef SRC_A5_PLATFORM_INCLUDE_COMMON_PLATFORM_CONFIG_H_
-#define SRC_A5_PLATFORM_INCLUDE_COMMON_PLATFORM_CONFIG_H_
+#pragma once
 
 #include <cstdint>
 
@@ -49,12 +48,13 @@ constexpr int PLATFORM_AIV_CORES_PER_BLOCKDIM = 2;
  * Maximum AICPU scheduling threads
  * Determines parallelism level of the AICPU task scheduler.
  */
-constexpr int PLATFORM_MAX_AICPU_THREADS = 7;
+constexpr int PLATFORM_MAX_AICPU_THREADS = 5;
 
 /**
  * Default active AICPU thread count when aicpu_thread_num is left at 0 (auto):
- * 1 orchestrator + 4 schedulers. Onboard topology probing assigns those
- * threads to device-visible CPUs; simulation uses the value directly.
+ * 1 orchestrator + 4 schedulers. Keep this distinct from the active upper
+ * bound even while both values are 5; the two settings have different runtime
+ * semantics and match the A2/A3 platform contract.
  */
 constexpr int PLATFORM_DEFAULT_AICPU_THREAD_NUM = 5;  // 1 orch + 4 sched
 
@@ -65,10 +65,10 @@ constexpr int PLATFORM_DEFAULT_AICPU_THREAD_NUM = 5;  // 1 orch + 4 sched
  * popcount(OCCUPY), and DeviceRunner passes that count (not this
  * constant) to rtsLaunchCpuKernel.
  *
- * The bound exists for the static gate buffers in
- * src/common/platform/onboard/aicpu/platform_aicpu_affinity.cpp
- * (s_filter_thread_cpu[MAX_GATE_THREADS] etc.) — keep it ≥ any
- * runtime aicpu_launch_count we expect to see.
+ * The bound sizes the per-launched-thread phase/task-timing storage and rejects
+ * a runtime launch population beyond the supported A5 topology. The common
+ * affinity gate has its own ABI bound, MAX_GATE_THREADS=16; keep this platform
+ * limit at or below that independent common bound.
  *
  * Two over-subscription failure modes to keep in mind when choosing
  * the runtime launch count vs this bound:
@@ -726,5 +726,3 @@ enum : uint32_t {
  * Used to indicate that pending_task_ids_ or running_task_ids_ slot is empty.
  */
 constexpr int AICPU_TASK_INVALID = -1;
-
-#endif  // SRC_A5_PLATFORM_INCLUDE_COMMON_PLATFORM_CONFIG_H_

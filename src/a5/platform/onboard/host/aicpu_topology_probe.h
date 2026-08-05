@@ -9,18 +9,16 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef SRC_A5_PLATFORM_ONBOARD_HOST_AICPU_TOPOLOGY_PROBE_H_
-#define SRC_A5_PLATFORM_ONBOARD_HOST_AICPU_TOPOLOGY_PROBE_H_
+#pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace pto::a5 {
 
-// Per-cpu_id metadata used by the packing algorithm. Filled from the driver
-// CPU_TOPO data when available. The verified x86 standard-card fallback
-// derives it from the AICPU OCCUPY bitmap. cluster/die ids follow the a5
-// mapping (cluster = phy/2, die = phy/4).
+// Per-cpu_id metadata used by the packing algorithm. Filled from CPU_TOPO
+// data when available. Topology fields are -1 in the OCCUPY-only fallback.
 struct AicpuLogicalCpu {
     int32_t cpu_id;
     int32_t phy_cpu_id;
@@ -29,29 +27,83 @@ struct AicpuLogicalCpu {
     int32_t die_id;          // phy_cpu_id / 4
 };
 
-// Probe device-side AICPU topology. Returns true iff the user pool was
-// successfully resolved (at least one entry in `out_user_cpus`). The output
-// only contains cpu_ids that are in the device-side OCCUPY bitmap (i.e.
-// user-schedulable), sorted by cpu_id ascending.
-//
-// This function uses these driver calls:
-//   * halGetDeviceInfo(AICPU, OCCUPY) — user-schedulable bitmap
-//   * halGetDeviceInfoByBuff(SYSTEM, CPU_TOPO)  (primary)
-//   * dsmi_get_device_info(SOC_INFO, CPU_TOPO)  (fallback)
-//
-// CPU_TOPO-less x86 Ascend950PR_9579 standard cards with OCCUPY=0x3e use
-// the verified OCCUPY-only topology below. Other signatures remain
-// unsupported.
-// All driver entry points are dlsym'd from the host process (CANN is
-// expected to be already loaded by the surrounding `aclInit` path).
-bool probe_aicpu_topology(uint32_t device_id, std::vector<AicpuLogicalCpu> &out_user_cpus);
+enum class AicpuScenarioType {
+    kNotApplicable,
+    kFg,
+    kPg1,
+    kPg2,
+    kUnknown,
+};
 
-// Build topology metadata only for the verified x86 standard-card signature:
-// Ascend950PR_9579 with OCCUPY=0x3e. Every set bit is a distinct non-SMT
-// physical CPU and retains the a5 two-physical-CPUs-per-cluster,
-// two-clusters-per-die layout. Returns false on all other hosts, SoCs, or
-// masks.
+enum class AicpuTopologySource {
+    kDriver,
+    kJsonFallback,
+    kOccupyFallback,
+};
+
+enum class AicpuSelectionPolicy {
+    kScenario,
+    kGeneric,
+    kSequentialFallback,
+};
+
+struct AicpuDeviceOccupancy {
+    uint64_t occupy{0};
+    uint64_t pf_occupy{0};
+    uint64_t os_sched{0};
+    bool occupy_valid{false};
+    bool pf_occupy_valid{false};
+    bool os_sched_valid{false};
+};
+
+struct AicpuTopology {
+    std::string soc_name;
+    AicpuTopologySource source{AicpuTopologySource::kDriver};
+    AicpuScenarioType scenario_type{AicpuScenarioType::kUnknown};
+    bool scheduler_smt_enabled{false};
+    uint32_t logical_cpu_count{0};
+    std::vector<int32_t> surviving_cluster_ids;
+    std::vector<AicpuLogicalCpu> os_schedulable_cpus;
+    AicpuDeviceOccupancy device_occupancy;
+    bool generic_selection_only{false};
+};
+
+// Complete host decision for one AICPU launch. The affinity convention is
+// [scheduler..., orchestrator], so allowed_cpus.back() always carries O.
+struct AicpuLaunchPlan {
+    int32_t requested_active_count{0};  // 0 means automatic
+    int32_t effective_active_count{0};
+    int32_t stable_reachable_count{0};
+    int32_t launch_count{0};
+    std::vector<int32_t> allowed_cpus;
+    bool warn_stable_reachable_below_default{false};
+    bool warn_cpu_topology_unavailable{false};
+};
+
+// Preserve the original verified x86 standard-card fallback contract.
 bool derive_topology_from_occupy(const char *soc_name, uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus);
+
+// Merge host CPU_TOPO metadata with the authoritative device-side scheduler
+// pool and classify the resulting A5 topology. Returns false only when the
+// probe itself is unusable; an unrecognised but internally valid shape is
+// returned successfully with scenario_type == kUnknown.
+bool probe_aicpu_topology(
+    uint32_t device_id, const AicpuDeviceOccupancy &device_occupancy, AicpuTopology &out_topology
+);
+
+// Enumerate OCCUPY set bits without inferring any topology relationships.
+// Returns false when the mask is empty.
+bool enumerate_cpus_from_occupy(uint64_t occupy, std::vector<AicpuLogicalCpu> &out_user_cpus);
+
+// Load the full logical CPU_TOPO for a packaged fallback whose SoC and every
+// constraint declared by that entry (host architecture and/or OCCUPY) match.
+// Output is not OCCUPY-filtered. `out_generic_selection_only` reports entries
+// that must keep using compute_allowed_cpus() instead of scenario selection.
+// Returns false when the signature is absent, mismatched, or unusable.
+bool load_cpu_topo_from_json(
+    const char *soc_name, uint64_t occupy, std::vector<AicpuLogicalCpu> &out_all_cpus,
+    bool *out_generic_selection_only = nullptr
+);
 
 // Compute the `ALLOWED_CPUS` selection for the surviving threads.
 //
@@ -87,6 +139,45 @@ bool compute_allowed_cpus(
     std::vector<int32_t> &out_allowed_cpus
 );
 
-}  // namespace pto::a5
+// Classify an internally valid A5 topology from raw logical topology and the
+// driver-filtered scheduler pool. FG / PG1 / PG2 come from the surviving
+// cluster/die layout. Scheduler SMT availability is recorded separately in
+// AicpuTopology::scheduler_smt_enabled and does not define another scenario.
+// Logical CPU count is not used as a scenario gate.
+AicpuScenarioType classify_aicpu_scenario(
+    uint32_t logical_cpu_count, const std::vector<AicpuLogicalCpu> &all_logical_cpus,
+    const std::vector<AicpuLogicalCpu> &os_schedulable_cpus
+);
 
-#endif  // SRC_A5_PLATFORM_ONBOARD_HOST_AICPU_TOPOLOGY_PROBE_H_
+// Compute the documented topology policy for a known A5 scenario with an
+// active count in [2, 5]. Output order is [S0, ..., S(active_count-2), O].
+// The output is empty on failure.
+bool compute_scenario_allowed_cpus(
+    const AicpuTopology &topology, int32_t active_count, std::vector<int32_t> &out_allowed_cpus
+);
+
+// Unknown-topology fallback: select exactly active_count CPUs in [2, 5]. Use
+// topology order when metadata is valid; OCCUPY-only metadata naturally
+// degenerates to cpu_id order. The last selected CPU is O and all preceding
+// CPUs are S. The output is empty when capacity is insufficient.
+bool compute_unknown_allowed_cpus(
+    const AicpuTopology &topology, int32_t active_count, std::vector<int32_t> &out_allowed_cpus
+);
+
+// Resolve automatic/manual active count, affinity and physical launch count.
+// Automatic mode shrinks when fewer than PLATFORM_DEFAULT_AICPU_THREAD_NUM CPUs are
+// stably reachable. Manual mode is exact. Launch coverage is never clamped.
+bool build_aicpu_launch_plan(
+    const AicpuTopology &topology, int32_t requested_active_count, AicpuLaunchPlan &out_plan, std::string &out_error
+);
+
+const char *aicpu_scenario_name(AicpuScenarioType scenario);
+const char *aicpu_topology_source_name(AicpuTopologySource source);
+
+// Serialize the complete topology and launch decision for diagnostic tooling.
+// The result is a standalone JSON object terminated by a newline.
+std::string format_aicpu_topology_json(
+    const AicpuTopology &topology, AicpuSelectionPolicy policy, const AicpuLaunchPlan &launch_plan
+);
+
+}  // namespace pto::a5

@@ -842,9 +842,8 @@ host hand-off queue).
 
 ### 7.5 Configuration knobs
 
-All defaults live in
-[`platform_config.h`](../../src/a2a3/platform/include/common/platform_config.h)
-and match between `a2a3` and `a5`:
+All defaults live in each platform's `platform_config.h`. The values below
+match between `a2a3` and `a5` except for the platform thread cap:
 
 | Constant | Default | Effect |
 | -------- | ------- | ------ |
@@ -852,7 +851,7 @@ and match between `a2a3` and `a5`:
 | `PLATFORM_DUMP_BUFFERS_PER_THREAD` | 8 | Arena size multiplier and SPSC free queue depth |
 | `PLATFORM_DUMP_AVG_TENSOR_BYTES` | 64 KiB | Arena size multiplier |
 | `PLATFORM_DUMP_MAX_DIMS` | 5 | Upper bound on shape / offset arrays |
-| `PLATFORM_MAX_AICPU_THREADS` | 7 | Number of dump-producing threads |
+| `PLATFORM_MAX_AICPU_THREADS` | a2a3: 4; a5: 5 | Maximum number of dump-producing threads |
 
 Per-thread arena =
 `BUFFERS_PER_THREAD × RECORDS_PER_BUFFER × AVG_TENSOR_BYTES`

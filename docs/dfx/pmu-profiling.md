@@ -333,7 +333,7 @@ a2a3). At shutdown, AICPU flushes any partially-filled buffers via
 a5's `PmuCollector` derives from
 `ProfilerBase<PmuCollector, PmuModule>` and uses the same framework
 abstractions as a2a3, including the same split mgmt + collector shard
-shape (`kMaxCollectorThreads` = `PLATFORM_MAX_AICPU_THREADS`, i.e. 7 on
+shape (`kMaxCollectorThreads` = `PLATFORM_MAX_AICPU_THREADS`, i.e. 5 on
 a5 vs 4 on a2a3, capping the shard arrays; the live drain/collector
 count is `min(aicpu_thread_num, kMaxCollectorThreads)`). The
 behavioral deviation from §5.2 is the **transport channel**: a5 has no
@@ -502,7 +502,7 @@ device-side counters.
 | Counter readout | AICPU MMIO `read_reg` | AICore MMIO `ld_dev` |
 | Per-core staging | direct write into `records[count]` | dual-issue slots, AICPU commits on FIN |
 | Buffer model | rotating pool (free + ready queues, SPSC protocol) | identical |
-| Host threads | split mgmt + collector shards, writes shard-local temp files during execution and merges at reconcile | same split mgmt + collector shards (7 = `PLATFORM_MAX_AICPU_THREADS` vs a2a3's 4) |
+| Host threads | split mgmt + collector shards, writes shard-local temp files during execution and merges at reconcile | same split mgmt + collector shards (5 = `PLATFORM_MAX_AICPU_THREADS` vs a2a3's 4) |
 | Host-class shape | `ProfilerBase<PmuCollector, PmuModule>` | identical |
 | Host transport | `halHostRegister` shared memory | host-shadow `malloc` + per-tick `rtMemcpy`/`memcpy` |
 | `MemoryOps` callbacks | 3 (`alloc`, `reg`, `free_`) | 5 (+ `copy_to_device`, `copy_from_device`) |

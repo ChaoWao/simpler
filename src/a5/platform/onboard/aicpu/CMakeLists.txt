@@ -101,6 +101,8 @@ target_link_directories(aicpu_kernel
         ${ASCEND_HOME_PATH}/lib64
 )
 
+target_link_libraries(aicpu_kernel PRIVATE ascend_hal)
+
 # Output name
 set_target_properties(aicpu_kernel PROPERTIES OUTPUT_NAME aicpu_kernel)
 
