@@ -28,6 +28,11 @@ template <typename T>
 inline constexpr bool is_supported_scalar_arg_v = std::is_arithmetic_v<std::remove_cv_t<std::remove_reference_t<T>>> ||
                                                   std::is_enum_v<std::remove_cv_t<std::remove_reference_t<T>>>;
 
+// Maximum tensor rank a view can describe. Both the L3+ `Tensor` of buffer.h and the device
+// `ChipTensor` of tensor.h size their shapes[] / strides[] by it, so it is shared here rather than
+// owned by either.
+constexpr int MAX_TENSOR_DIMS = 5;
+
 /**
  * Supported data types for tensor elements
  */
@@ -80,7 +85,9 @@ inline uint64_t get_element_size(DataType dtype) {
         1,  // DataType::FP8E8M0 (A5 only)
         1,  // DataType::FP4E2M1 (A5 only)
     };
-    return data_type_size[static_cast<int>(dtype)];
+    // Bounds-checked: `dtype` is a raw u8 on the wire, so a decoder can hand this any value.
+    const auto index = static_cast<std::size_t>(dtype);
+    return index < data_type_size.size() ? data_type_size[index] : 0;
 }
 
 /**

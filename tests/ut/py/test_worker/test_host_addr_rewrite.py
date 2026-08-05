@@ -18,7 +18,7 @@ per-tensor ``child_memory`` flag, not on the numeric address alone.
 
 import struct
 
-from _task_interface import TENSOR_CHILD_MEMORY_OFFSET, TENSOR_STRIDE_BYTES
+from _task_interface import CHIP_TENSOR_CHILD_MEMORY_OFFSET, CHIP_TENSOR_STRIDE_BYTES
 from simpler.worker import _BLOB_HEADER_BYTES, _rewrite_blob_host_addrs
 
 _PARENT_LO = 0x7F00_0000_0000
@@ -27,25 +27,25 @@ _CHILD_BASE = 0x7E00_0000_0000
 
 
 def _make_blob(tensors: list[tuple[int, int]]) -> bytearray:
-    """Build a task-args blob: [int32 T][int32 S][Tensor*T].
+    """Build a task-args blob: [int32 T][int32 S][ChipTensor*T].
 
     ``tensors`` is a list of ``(addr, child_memory)``. Only the two fields the
     rewrite reads (buffer.addr at offset 0, child_memory at its struct offset)
     are populated; the rest of each 128-byte tensor stays zero.
     """
     n = len(tensors)
-    buf = bytearray(_BLOB_HEADER_BYTES + n * TENSOR_STRIDE_BYTES)
+    buf = bytearray(_BLOB_HEADER_BYTES + n * CHIP_TENSOR_STRIDE_BYTES)
     struct.pack_into("<i", buf, 0, n)  # tensor count
     struct.pack_into("<i", buf, 4, 0)  # scalar count
     for i, (addr, child_mem) in enumerate(tensors):
-        off = _BLOB_HEADER_BYTES + i * TENSOR_STRIDE_BYTES
+        off = _BLOB_HEADER_BYTES + i * CHIP_TENSOR_STRIDE_BYTES
         struct.pack_into("<Q", buf, off, addr)
-        struct.pack_into("<B", buf, off + TENSOR_CHILD_MEMORY_OFFSET, child_mem)
+        struct.pack_into("<B", buf, off + CHIP_TENSOR_CHILD_MEMORY_OFFSET, child_mem)
     return buf
 
 
 def _tensor_addr(buf: bytearray, i: int) -> int:
-    off = _BLOB_HEADER_BYTES + i * TENSOR_STRIDE_BYTES
+    off = _BLOB_HEADER_BYTES + i * CHIP_TENSOR_STRIDE_BYTES
     return struct.unpack_from("<Q", buf, off)[0]
 
 

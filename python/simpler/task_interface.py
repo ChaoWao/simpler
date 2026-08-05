@@ -9,13 +9,18 @@
 # ruff: noqa: PLW0603, PLC0415
 """Public Python API for task_interface nanobind bindings.
 
-Re-exports the canonical C++ types (DataType, ChipTensor, ChipStorageTaskArgs,
-TaskArgs, TensorArgType) plus ``scalar_to_uint64``. Torch-aware helpers
-(``make_tensor_arg``, ``torch_dtype_to_datatype``) live in
-``simpler_setup.torch_interop`` — this module has no torch dependency.
+Re-exports the canonical C++ types (DataType, ChipTensor, ChipStorageTaskArgs, TaskArgs,
+TensorArgType) plus ``scalar_to_uint64``. Torch-aware helpers (``make_tensor_arg``,
+``torch_dtype_to_datatype``) live in ``simpler_setup.torch_interop`` — this module has no torch
+dependency.
+
+The address-free L3+ ``Tensor`` of ``simpler.buffer`` is deliberately **not** re-exported here.
+``TaskArgs.add_tensor`` still takes a ``ChipTensor``, so a ``Tensor`` on this surface would be a
+public type whose advertised operation rejects it. It joins this module in the wire cutover that
+makes ``TaskArgs`` carry it, not before.
 
 Usage:
-    from simpler.task_interface import DataType, ChipTensor, ChipStorageTaskArgs
+    from simpler.task_interface import ChipTensor, DataType, TensorArgType
     from simpler_setup.torch_interop import make_tensor_arg
 """
 
