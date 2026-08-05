@@ -817,10 +817,43 @@ target_link_libraries(test_host_log_off PRIVATE
 )
 add_test(NAME test_host_log_off COMMAND test_host_log_off)
 
+set(COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
+function(add_device_phase_capture_test name host_strace device_strace expected)
+    add_executable(${name}
+        common/test_device_phase_capture.cpp
+        ${COMMON_PLATFORM_DIR}/onboard/host/device_phase_capture.cpp
+        ${SIMPLER_LOG_DIR}/host_log.cpp
+    )
+    target_compile_definitions(${name} PRIVATE
+        SIMPLER_HOST_STRACE=${host_strace}
+        EXPECT_CAPTURE_ENABLED=${expected}
+    )
+    target_include_directories(${name} PRIVATE
+        ${GTEST_INCLUDE_DIRS}
+        ${COMMON_PLATFORM_DIR}/onboard/host
+        ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+        ${SIMPLER_LOG_DIR}
+        ${SIMPLER_LOG_DIR}/include
+    )
+    target_link_libraries(${name} PRIVATE
+        ${GTEST_MAIN_LIB}
+        ${GTEST_LIB}
+        pthread
+    )
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "SIMPLER_DEVICE_STRACE_ENABLE=${device_strace}"
+        LABELS "no_hardware"
+    )
+endfunction()
+
+add_device_phase_capture_test(test_device_phase_capture 1 1 1)
+add_device_phase_capture_test(test_device_phase_capture_env_off 1 0 0)
+add_device_phase_capture_test(test_device_phase_capture_compile_off 0 1 0)
+
 # Onboard uses CANN for DEBUG/INFO/WARN/ERROR but keeps TIMING on simpler's
 # finer threshold. The dlog stub makes the CANN levels available without SDK
 # headers or hardware.
-set(COMMON_PLATFORM_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/platform)
 add_executable(test_onboard_device_log_level
     common/test_onboard_device_log_level.cpp
     ${COMMON_PLATFORM_DIR}/onboard/aicpu/device_log.cpp

@@ -1169,7 +1169,7 @@ int DeviceRunnerBase::finalize_common() {
     release_graph_execution_buffers();
     clear_temporary_buffer();
 
-    // Free the 8-byte device_wall buffer (allocated lazily in run()) while
+    // Free the device-phase/task-timing buffer (allocated lazily in run()) while
     // mem_alloc_ and the device context are still live. free_tensor() routes
     // through mem_alloc_.free(), so it must run before mem_alloc_.finalize()
     // and before the subclass's `rtDeviceReset()` tears down the device runtime.
@@ -1276,6 +1276,12 @@ int DeviceRunnerBase::resolve_aicpu_thread_num(int requested, int usable, int ar
 }
 
 void DeviceRunnerBase::ensure_device_wall_buffer() {
+    if (!device_phase_capture_enabled()) {
+        // A null base makes the AICPU stamping helpers no-op.
+        kernel_args_.args.device_wall_data_base = 0;
+        return;
+    }
+
     // Per-thread fixed AICPU phase records (thread-major:
     // AicpuPhaseRecord[NUM_AICPU_PHASES] per launched AICPU thread). Slot
     // AicpuPhase::RunWall keeps the original whole-run wall; the rest subdivide
@@ -1293,11 +1299,9 @@ void DeviceRunnerBase::ensure_device_wall_buffer() {
     constexpr size_t kBytes = device_phase_buffer_bytes(kThreads);
     if (device_wall_dev_ptr_ == nullptr) {
         device_wall_dev_ptr_ = allocate_tensor(kBytes);
-        if (device_wall_dev_ptr_ != nullptr) {
-            kernel_args_.args.device_wall_data_base = reinterpret_cast<uint64_t>(device_wall_dev_ptr_);
-        }
     }
     if (device_wall_dev_ptr_ != nullptr) {
+        kernel_args_.args.device_wall_data_base = reinterpret_cast<uint64_t>(device_wall_dev_ptr_);
         AicpuPhaseRecord init[kRecords];
         for (int i = 0; i < kRecords; ++i) {
             init[i].start_cycle = kPhaseUnset;  // start/dispatch: sentinel so min()/unset-check ignore unused slots
@@ -1429,6 +1433,7 @@ void DeviceRunnerBase::read_device_wall_ns() {
         task_slot_dispatch_ns_[s] = 0;
         task_slot_finish_ns_[s] = 0;
     }
+    if (!device_phase_capture_enabled()) return;
     if (device_wall_dev_ptr_ == nullptr) return;
 
     constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;

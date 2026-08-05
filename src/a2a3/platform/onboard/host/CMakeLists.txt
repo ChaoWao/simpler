@@ -73,6 +73,7 @@ list(APPEND HOST_RUNTIME_SOURCES
 # Add common/platform/onboard/host sources (shared between a2a3 / a5 onboard).
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/device_runner_helpers.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/device_phase_capture.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/device_runner_base.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/c_api_shared.cpp"
 )

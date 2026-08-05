@@ -45,8 +45,9 @@ Do not use "PROFILING" as a catch-all.
   profiling counters: `SIMPLER_ORCH_PROFILING` (orchestrator task/cycle
   counters), `SIMPLER_SCHED_PROFILING` (scheduler dispatch hit/miss + cycle),
   `SIMPLER_TENSORMAP_PROFILING` (tensor-map hash-table chain/overlap stats).
-- `SIMPLER_HOST_STRACE` gates **only** the host `[STRACE]` facility — so it is
-  `HOST_STRACE`, not `PROFILING`.
+- `SIMPLER_HOST_STRACE` gates the `[STRACE]` facility. Onboard, it also gates
+  capture work whose only consumer is a device-domain `[STRACE]` marker — so it
+  is `HOST_STRACE`, not `PROFILING`.
 
 ### 3. Runtime-subsystem-specific knobs carry an owner prefix; platform knobs do not
 
@@ -79,12 +80,11 @@ by **independent layers**:
 | Runtime emission (does it actually emit?) | env (`SIMPLER_DEVICE_STRACE_ENABLE`, log level) | on |
 | Runtime detail tier | `get_chip_swimlane_level()` | AICPU_TIMING |
 
-`SIMPLER_HOST_STRACE` (compile) gates whether the host `[STRACE]` macros
-exist at all; `SIMPLER_DEVICE_STRACE_ENABLE` (runtime env) gates whether the
-device-domain `[STRACE]` markers get emitted into the host log. They are an
-**asymmetric pair by design**: host-strace code lives in a header (natural
-compile-time gate), device-strace is emitted from already-compiled code based
-on runtime timing (natural runtime gate).
+`SIMPLER_HOST_STRACE` (compile) gates whether `[STRACE]` markers exist at all;
+`SIMPLER_DEVICE_STRACE_ENABLE` (runtime env) independently gates device-domain
+markers. Onboard device-phase capture also requires the `LOG_TIMING` level to
+be visible. The capture predicate is shared by buffer setup/reset, readback,
+and emission, so disabled markers do not leave marker-only transfers behind.
 
 ## Reference: the configuration surface
 
@@ -96,13 +96,13 @@ on runtime timing (natural runtime gate).
 | `SIMPLER_ORCH_PROFILING` | 0 | orchestrator-phase counters (requires `SIMPLER_DFX`) |
 | `SIMPLER_SCHED_PROFILING` | 0 | scheduler hot-path counters (requires `SIMPLER_DFX`) |
 | `SIMPLER_TENSORMAP_PROFILING` | 0 | tensor-map hash-table counters (requires `SIMPLER_ORCH_PROFILING`) |
-| `SIMPLER_HOST_STRACE` | 1 | host `[STRACE]` RAII macros (`strace.h`); independent of `SIMPLER_DFX` |
+| `SIMPLER_HOST_STRACE` | 1 | `[STRACE]` macros (`strace.h`) and onboard capture used only by device-domain markers; independent of `SIMPLER_DFX` |
 
 ### Env vars
 
 | Env | Layer | Value | Gates |
 | --- | ----- | ----- | ----- |
-| `SIMPLER_DEVICE_STRACE_ENABLE` | host general | bool | device-domain `[STRACE]` emission to host log |
+| `SIMPLER_DEVICE_STRACE_ENABLE` | host general | bool | device-domain `[STRACE]` capture/emission onboard; emission in sim |
 | `SIMPLER_TMR_SERIAL_ORCH_SCHED_ENABLE` | host runtime | bool | serial orch→scheduler transition (TMR subsystem) |
 | `SIMPLER_PMU_EVENT_TYPE` | host platform | enum | which PMU event the PMU collector samples |
 | `SIMPLER_OP_EXECUTE_TIMEOUT_US` | host platform | µs | op-execute timeout (overrides the `platform_config.h` compile default) |

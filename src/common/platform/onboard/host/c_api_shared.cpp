@@ -496,28 +496,14 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
     }
 }
 
-// Runtime gate for device-domain phase emission. SIMPLER_DEVICE_STRACE_ENABLE=0
-// suppresses the device (clk=dev) markers so a deployment can profile host and
-// device independently; any other value (or unset) keeps them on. Host-side
-// [STRACE] spans are unaffected — they ride SIMPLER_HOST_STRACE + the log level.
-// Read once and cached: getenv is not thread-safe against setenv, and the value
-// is a process-lifetime config knob.
-static bool device_profiling_enabled() {
-    static const bool enabled = [] {
-        const char *v = std::getenv("SIMPLER_DEVICE_STRACE_ENABLE");
-        return v == nullptr || std::strcmp(v, "0") != 0;
-    }();
-    return enabled;
-}
-
 // Emit device-domain trace markers for the AICPU phases. RunWall (the whole
 // on-NPU wall, i.e. the former RunTiming.device_wall) is emitted at depth 2
 // under runner_run; its preamble/so_load/graph_build/post_orch subdivisions are
 // emitted at depth 3 beneath it. Phases never stamped (0 ns) are skipped.
-// STRACE_DEV_SPAN_AT self-compiles to nothing when profiling is off, so no extra
-// gate is needed here.
+// Capture and emission share one gate, so a gated-off run performs no transfers
+// for markers that cannot reach the log.
 static void emit_device_phase_markers(DeviceRunnerBase *runner) {
-    if (!device_profiling_enabled()) return;
+    if (!device_phase_capture_enabled()) return;
     const uint64_t run_wall_ns = runner->last_device_phase_ns(AicpuPhase::RunWall);
     if (run_wall_ns != 0) {
         STRACE_DEV_SPAN_AT("simpler_run.runner_run.device_wall", 0, static_cast<long long>(run_wall_ns), 2);
