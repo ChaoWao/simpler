@@ -192,11 +192,14 @@ static_assert(offsetof(BufferDescriptor, body) == 56);
 
 // Field-wise, so neither the struct padding nor the unused tail of `body` takes part: two decodes of
 // one backing describe the same buffer whatever bytes sit outside the fields that carry meaning.
+// `body_len` is clamped rather than trusted: this is the one length field in the header, and an
+// unvalidated descriptor reaching a comparison must not be able to bound a read past `body`.
 inline bool operator==(const BufferDescriptor &a, const BufferDescriptor &b) {
+    const size_t body_len = a.body_len < DESC_MAX_BYTES ? a.body_len : DESC_MAX_BYTES;
     return a.identity == b.identity && a.address_space == b.address_space && a.access == b.access &&
            a.backend_kind == b.backend_kind && a.nbytes == b.nbytes &&
            a.owner_worker_path_id == b.owner_worker_path_id && a.body_len == b.body_len &&
-           std::memcmp(a.body, b.body, a.body_len) == 0;
+           std::memcmp(a.body, b.body, body_len) == 0;
 }
 inline bool operator!=(const BufferDescriptor &a, const BufferDescriptor &b) { return !(a == b); }
 
@@ -224,16 +227,43 @@ struct Tensor {
     uint8_t _pad[3];
 };
 
-// Byte extent of a (possibly strided) view: the last addressable element, plus one element. Summed
-// in u64 so a hostile shape/stride cannot wrap it. Callers that have not yet validated `r` must not
-// trust the result for anything but a bound.
+// Saturating u64 arithmetic. Every input below is wire-supplied, and `shapes[i]` and `strides[i]`
+// are each u32, so one product alone reaches ~2^64: an unsaturated sum would wrap to a SMALL extent
+// and pass the bound check in validate_tensor while the view really spans exabytes.
+inline uint64_t tensor_mul_sat(uint64_t a, uint64_t b) {
+#if defined(__clang__) || defined(__GNUC__)
+    uint64_t result = 0;
+    return __builtin_mul_overflow(a, b, &result) ? UINT64_MAX : result;
+#else
+    return (a != 0 && b > UINT64_MAX / a) ? UINT64_MAX : a * b;
+#endif
+}
+inline uint64_t tensor_add_sat(uint64_t a, uint64_t b) {
+#if defined(__clang__) || defined(__GNUC__)
+    uint64_t result = 0;
+    return __builtin_add_overflow(a, b, &result) ? UINT64_MAX : result;
+#else
+    return (a > UINT64_MAX - b) ? UINT64_MAX : a + b;
+#endif
+}
+
+// Sentinel `tensor_extent_bytes` returns when a view's extent does not fit 64 bits. No real backing
+// is 16 EiB, so a Tensor whose extent lands here describes no representable view and is rejected.
+inline constexpr uint64_t TENSOR_EXTENT_UNREPRESENTABLE = UINT64_MAX;
+
+// Byte extent of a (possibly strided) view: the last addressable element, plus one element.
+// Saturates at TENSOR_EXTENT_UNREPRESENTABLE rather than wrapping, so an extent a hostile
+// shape/stride cannot express is rejected instead of comparing as a small, in-bounds value.
+// Callers that have not yet validated `r` must not trust the result for anything but a bound.
 inline uint64_t tensor_extent_bytes(const Tensor &r) {
     uint64_t last_elem = 0;
     for (uint32_t i = 0; i < r.ndims && i < static_cast<uint32_t>(MAX_TENSOR_DIMS); ++i) {
         if (r.shapes[i] == 0) continue;
-        last_elem += static_cast<uint64_t>(r.shapes[i] - 1) * static_cast<uint64_t>(r.strides[i]);
+        last_elem = tensor_add_sat(
+            last_elem, tensor_mul_sat(static_cast<uint64_t>(r.shapes[i] - 1), static_cast<uint64_t>(r.strides[i]))
+        );
     }
-    return (last_elem + 1) * get_element_size(r.dtype);
+    return tensor_mul_sat(tensor_add_sat(last_elem, 1), get_element_size(r.dtype));
 }
 
 /**
@@ -280,9 +310,14 @@ inline void validate_buffer_descriptor(const BufferDescriptor &h) {
 /**
  * Reject any Tensor whose fields are not self-consistent, BEFORE any of them is trusted.
  *
- * This is the single implementation behind every trust boundary — construction, the builder
- * (`TaskArgs.add_tensor`, which accepts raw bytes), blob decode on receipt, and materialization —
- * so they can never drift apart. Throws `std::invalid_argument` naming the field.
+ * This is the single implementation behind the trust boundaries that build or decode a Tensor —
+ * construction and the builder (`TaskArgs.add_tensor`, which accepts raw bytes) today, blob decode
+ * on receipt when the wire carries a Tensor — so they can never drift apart. Throws
+ * `std::invalid_argument` naming the field.
+ *
+ * Materialization is NOT behind this gate yet: `ImportRegistry.materialize` takes an already-decoded
+ * descriptor and adds no endpoint check, so nothing there refuses a DEVICE backing handed to a host
+ * endpoint. That gate is a separate change; do not read this comment as covering it.
  *
  * `ndims` is bounded against `MAX_TENSOR_DIMS` here; the descriptor's own length-like field is
  * bounded by `validate_buffer_descriptor` above, which this runs first.
@@ -306,6 +341,9 @@ inline void validate_tensor(const Tensor &r) {
         if (r.strides[i] == 0) reject("invalid Tensor: stride must be > 0 (broadcast and negative step unsupported)");
     }
     const uint64_t extent_bytes = tensor_extent_bytes(r);
+    if (extent_bytes == TENSOR_EXTENT_UNREPRESENTABLE) {
+        reject("invalid Tensor: view extent overflows 64 bits (shape/stride not representable)");
+    }
     if (r.byte_offset > h.nbytes || extent_bytes > h.nbytes - r.byte_offset) {
         reject("invalid Tensor: view extends past the backing (byte_offset + extent > nbytes)");
     }
@@ -314,10 +352,11 @@ inline void validate_tensor(const Tensor &r) {
 // Do two views of the SAME backing touch a common byte? Compared as bounding ranges
 // [byte_offset, byte_offset + extent): a strided view's gaps are treated as occupied, so this is
 // conservative — it never misses a real overlap, and may report one for two interleaved views.
+// The end offsets saturate, so an unvalidated extent cannot wrap a range into a false "disjoint".
 inline bool tensors_overlap(const Tensor &a, const Tensor &b) {
     if (!(a.buffer.identity == b.buffer.identity)) return false;
-    const uint64_t a_end = a.byte_offset + tensor_extent_bytes(a);
-    const uint64_t b_end = b.byte_offset + tensor_extent_bytes(b);
+    const uint64_t a_end = tensor_add_sat(a.byte_offset, tensor_extent_bytes(a));
+    const uint64_t b_end = tensor_add_sat(b.byte_offset, tensor_extent_bytes(b));
     return a.byte_offset < b_end && b.byte_offset < a_end;
 }
 

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,9 +23,6 @@
 #include <gtest/gtest.h>
 
 #include "buffer.h"
-#include <random>
-#include <vector>
-
 #include "task_args.h"
 
 namespace {
@@ -248,6 +246,53 @@ TEST(BufferAbi, DecodeRejectsAViewPastItsBacking) {
     EXPECT_THROW(validate_tensor(r), std::invalid_argument);
 }
 
+TEST(BufferAbi, DecodeRejectsAnExtentThatOverflows64Bits) {
+    // shapes[] and strides[] are each u32, so one (shape-1)*stride product alone reaches ~2^64. An
+    // extent summed without saturation wraps to a SMALL value, which then passes the bound check
+    // below while the view really spans exabytes — accepted here, the consumer would address far
+    // outside its backing. One dimension is enough to trigger it.
+    Tensor r = make_tensor();
+    r.dtype = DataType::FLOAT32;  // 4 B
+    r.byte_offset = 0;
+    r.ndims = 1;
+    r.shapes[0] = 2147483649u;   // 2^31 + 1
+    r.strides[0] = 2147483648u;  // 2^31   => (2^31)*(2^31)*4 == 2^64, wraps to 4 unsaturated
+    r.buffer.nbytes = 4;
+    EXPECT_EQ(tensor_extent_bytes(r), TENSOR_EXTENT_UNREPRESENTABLE);
+    EXPECT_THROW(validate_tensor(r), std::invalid_argument);
+
+    // Multi-dimensional variant: two terms that sum past 2^64. Rejected on the extent itself, so a
+    // descriptor claiming an absurd nbytes cannot buy the view back.
+    r = make_tensor();
+    r.dtype = DataType::INT8;
+    r.byte_offset = 0;
+    r.ndims = 2;
+    r.shapes[0] = 4294967295u;
+    r.strides[0] = 4294967295u;
+    r.shapes[1] = 7u;
+    r.strides[1] = 2147483648u;
+    r.buffer.nbytes = UINT64_MAX;
+    EXPECT_EQ(tensor_extent_bytes(r), TENSOR_EXTENT_UNREPRESENTABLE);
+    EXPECT_THROW(validate_tensor(r), std::invalid_argument);
+}
+
+// Two views of one backing that fully overlap must never be reported as disjoint: a saturating
+// extent keeps the end offsets from wrapping a range into a false "no overlap", which at the
+// dependency layer is a missed edge rather than a rejected argument.
+TEST(BufferAbi, OverlapSurvivesASaturatedExtent) {
+    Tensor a = make_tensor();
+    Tensor b = a;
+    EXPECT_TRUE(tensors_overlap(a, b));
+
+    a.ndims = 1;
+    a.shapes[0] = 4294967295u;
+    a.strides[0] = 4294967295u;
+    a.byte_offset = 1;  // nonzero, so the end offset is what overflows: 1 + saturated extent
+    b = a;
+    EXPECT_EQ(tensor_extent_bytes(a), TENSOR_EXTENT_UNREPRESENTABLE);
+    EXPECT_TRUE(tensors_overlap(a, b));
+}
+
 TEST(BufferAbi, ValidateNeverWalksOffArbitraryBytes) {
     // A peer can write anything of the right length. None of it may be accepted without passing
     // every field check, and none of it may read past the struct — the fixed-length identity and
@@ -270,6 +315,12 @@ TEST(BufferAbi, ValidateNeverWalksOffArbitraryBytes) {
         EXPECT_LE(r.buffer.body_len, DESC_MAX_BYTES);
         EXPECT_GT(r.ndims, 0u);
         EXPECT_LE(r.ndims, static_cast<uint32_t>(MAX_TENSOR_DIMS));
+        // The footprint invariant belongs here too: without it, an extent that wrapped to a small
+        // value survives as "in bounds" and the pass reports nothing.
+        const uint64_t extent = tensor_extent_bytes(r);
+        EXPECT_NE(extent, TENSOR_EXTENT_UNREPRESENTABLE);
+        ASSERT_LE(r.byte_offset, r.buffer.nbytes);
+        EXPECT_LE(extent, r.buffer.nbytes - r.byte_offset);
     }
 
     for (uint8_t fill : {uint8_t{0x00}, uint8_t{0xFF}}) {
