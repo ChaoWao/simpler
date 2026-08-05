@@ -1000,10 +1000,9 @@ static TaskOutputTensors submit_task_common(
                 task_id.raw, static_cast<uint32_t>(args.scalar_count()), args.scalar_dtypes()
             );
         }
-        // Selective vs full dump is latched at dump_args_init from DumpDataHeader
-        // (host-decided before any dispatch), so it is race-free regardless of
-        // submission order. Here we only record each marked task's arg mask and
-        // metadata flags, which selective collection consults.
+        // Preserve the existing Level-1 task/arg mask whenever dump is enabled.
+        // Level 1 uses it to select records; hybrid Level 3 reuses the same mask only
+        // to decide which tensors contribute payload alongside full metadata.
         if (args.dump_arg_mask() != 0) {
             set_dump_args_task_mask(task_id.raw, args.dump_arg_mask(), args.dump_arg_index_ambiguous_mask());
         }

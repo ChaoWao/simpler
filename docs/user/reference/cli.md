@@ -35,7 +35,7 @@ programs — see the [Python API reference](python-api.md).
 | `--enable-chip-swimlane` | Per-task timing. Bare flag = level 4 (full); `1` AICore timing, `2` + dispatch/fanout, `3` + scheduler phases, `4` + orchestration. **L2 only** |
 | `--enable-swimlane-overhead` | Adds the 8 Overhead Analysis counter tracks. Requires `--enable-chip-swimlane` **and** a `deps.json` — add `--enable-dep-gen` if absent |
 | `--enable-pmu` | AICore hardware counters. Bare flag = `PIPE_UTILIZATION` (2); pass an event type to override, e.g. `--enable-pmu 4` |
-| `--dump-args` | Capture per-task arguments. `0` off, `1` partial (only args marked via `Arg::dump(...)`) |
+| `--dump-args` | Capture per-task arguments. `0` off; `1` partial; `2` full; `3` hybrid (all metadata plus payload selected via `Arg::dump(...)`) |
 | `--enable-dep-gen` | Capture the dependency graph (first round only) |
 | `--enable-scope-stats` | Per-scope peaks to `<output_prefix>/scope_stats.jsonl` |
 

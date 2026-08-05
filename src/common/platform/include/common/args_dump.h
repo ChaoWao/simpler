@@ -242,13 +242,13 @@ static_assert(sizeof(DumpReadyQueueEntry) == 32, "DumpReadyQueueEntry must be 32
  * - Queue full: (tail + 1) % capacity == head
  */
 
-// Args-dump level. Carried in DumpDataHeader so the
-// AICPU latches the mode in dump_args_init() before any task is dispatched.
+// Args-dump level. Carried in DumpDataHeader so the AICPU can latch the mode
+// before any task is dispatched.
 enum class DumpArgsLevel : uint32_t {
-    OFF = 0,             // no dump
-    PARTIAL = 1,         // only args marked with Arg::dump(...)
-    FULL = 2,            // every task's tensor/scalar I/O (JSON manifest + BIN payload)
-    FULL_JSON_ONLY = 3,  // every task's tensor/scalar metadata to JSON; no BIN
+    OFF = 0,      // no dump
+    PARTIAL = 1,  // only args marked with Arg::dump(...)
+    FULL = 2,     // every task's tensor/scalar I/O (JSON manifest + BIN payload)
+    HYBRID = 3,   // every task's metadata; payload only for Arg::dump()-marked tensors
 };
 
 struct DumpDataHeader {
@@ -262,7 +262,7 @@ struct DumpDataHeader {
     uint32_t records_per_buffer;
     uint64_t arena_size_per_thread;
     uint32_t magic;
-    uint32_t dump_args_level;  // DumpArgsLevel: 0=off, 1=partial, 2=full, 3=full_json_only
+    uint32_t dump_args_level;  // DumpArgsLevel: 0=off, 1=partial, 2=full, 3=hybrid
     // DFX backpressure coordination (unified across all DFX subsystems).
     DfxBackpressureHeader backpressure;
 } __attribute__((aligned(64)));

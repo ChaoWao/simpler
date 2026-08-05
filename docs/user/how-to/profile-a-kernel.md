@@ -11,7 +11,7 @@ Start by asking which question you have:
 | Where did wall-clock go, host vs device? | nothing — `[STRACE]` markers are always emitted | [L2 Timing](../../dfx/l2-timing.md), [host trace](../../dfx/host-trace.md) |
 | Which task ran when, on which core? | `--enable-chip-swimlane` | [Chip Swimlane Profiling](../../dfx/chip-swimlane-profiling.md) |
 | Is the scheduler the bottleneck, or starved? | `--enable-chip-swimlane --enable-dep-gen --enable-swimlane-overhead` | [Scheduler-Overhead Model](../../dfx/sched-overhead-model.md) |
-| Why is *one* task slow inside the core? | `--dump-args`, then the L0 tool | [Core Swimlane Profiling](../../dfx/core-swimlane-profiling.md) |
+| Why is *one* task slow inside the core? | `--dump-args`, then Core Swimlane | [Core Swimlane Profiling](../../dfx/core-swimlane-profiling.md) |
 | What do the AICore hardware counters say? | `--enable-pmu` | [PMU Profiling](../../dfx/pmu-profiling.md) |
 | What does the dependency graph actually look like? | `--enable-dep-gen` | [dep_gen](../../dfx/dep-gen.md) |
 | Am I near a ring / dep-pool capacity limit? | `--enable-scope-stats` | [Scope Stats](../../dfx/scope-stats.md) |

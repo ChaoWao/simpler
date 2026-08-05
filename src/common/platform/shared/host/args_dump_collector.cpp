@@ -245,10 +245,9 @@ void ArgsDumpCollector::start_writer_thread_once() {
     std::string run_dir_name = "args_dump";
     run_dir_ = std::filesystem::path(output_prefix_) / run_dir_name;
     std::filesystem::create_directories(run_dir_);
-    // FULL_JSON_ONLY captures no payload (device sets payload_size == 0), so
-    // there is nothing to stream — skip the .bin file rather than leaving a
-    // 0-byte artifact next to the manifest.
-    if (dump_args_level_ != DumpArgsLevel::FULL_JSON_ONLY) {
+    // Hybrid Level 3 opens args.bin lazily if an Arg::dump()-selected tensor
+    // emits payload; an unmarked run remains metadata-only.
+    if (dump_args_level_ != DumpArgsLevel::HYBRID) {
         bin_file_.open(run_dir_ / "args.bin", std::ios::binary);
     }
     next_bin_offset_ = 0;
@@ -601,6 +600,9 @@ void ArgsDumpCollector::writer_loop() {
         }
 
         if (!request.bytes.empty()) {
+            if (!bin_file_.is_open()) {
+                bin_file_.open(run_dir_ / "args.bin", std::ios::binary);
+            }
             bin_file_.write(
                 reinterpret_cast<const char *>(request.bytes.data()), static_cast<std::streamsize>(request.bytes.size())
             );
@@ -745,6 +747,7 @@ int ArgsDumpCollector::export_dump_files() {
     json << "    \"type\": \"logical_contiguous\",\n";
     json << "    \"byte_order\": \"little_endian\"\n";
     json << "  },\n";
+    json << "  \"dump_args_level\": " << static_cast<uint32_t>(dump_args_level_) << ",\n";
     json << "  \"total_args\": " << collected_.size() << ",\n";
     json << "  \"before_dispatch\": " << num_before_dispatch << ",\n";
     json << "  \"after_completion\": " << num_after_completion << ",\n";
@@ -754,7 +757,7 @@ int ArgsDumpCollector::export_dump_files() {
     json << "  \"truncated_args\": " << total_truncated_count_.load(std::memory_order_relaxed) << ",\n";
     json << "  \"dropped_records\": " << total_dropped_record_count_.load(std::memory_order_relaxed) << ",\n";
     json << "  \"dropped_overwrite\": " << total_overwrite_count_.load(std::memory_order_relaxed) << ",\n";
-    if (dump_args_level_ == DumpArgsLevel::FULL_JSON_ONLY) {
+    if (dump_args_level_ == DumpArgsLevel::HYBRID && bytes_written_.load() == 0) {
         json << "  \"bin_file\": null,\n";
     } else {
         json << "  \"bin_file\": \"args.bin\",\n";
