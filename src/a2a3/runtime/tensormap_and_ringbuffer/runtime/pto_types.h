@@ -22,8 +22,7 @@
  * without type conflicts (Handshake, TensorLease, HostApi).
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_
+#pragma once
 
 #include <stdint.h>
 #include <string.h>
@@ -133,8 +132,6 @@ private:
     // (every OUTPUT/OUTPUT_EXISTING slot is one of the Arg's tensor slots).
     const ChipTensor *tensors_[MAX_TENSOR_ARGS];
 };
-
-using TaskSubmitResult = TaskOutputTensors;
 
 // =============================================================================
 // Argument Types (for pto_submit_task API)
@@ -663,5 +660,3 @@ struct ChipTaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
         }
     }
 };
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_

@@ -97,12 +97,16 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 TRB bind normally allocates one device buffer per ordinary non-child tensor
 during host-side argument staging, copies input bytes as needed, records
 copy-back metadata, and frees those temporary buffers during runtime
-validation. TRB replaces those per-run malloc/free pairs with a single
-retained buffer, owned per pipeline slot, that its runs reuse. This is always on for
-TRB — an internal allocation optimization, not user-facing configuration.
+validation. TRB replaces those per-run malloc/free pairs with a retained buffer
+that its runs reuse. This is always on for TRB — an internal allocation
+optimization, not user-facing configuration.
+
+The buffer is owned per pipeline slot, not per runner: TRB's task args are
+`HOST_PER_RUN`, so two runs holding different slot leases stage through
+different buffers even though they share arena bank 0 for device scratch.
 
 The platform side is deliberately thin: `DeviceRunnerBase` only remembers a
-`{addr, size}` slot across runs, exposed through two HostApi callbacks —
+`{addr, size}` slot per pipeline slot, exposed through two HostApi callbacks —
 `get_retained_temp_buffer` and `set_retained_temp_buffer`. It is not an
 allocator; all grow/pack/slice logic lives in `runtime_maker.cpp`
 (`RetainedTempBump`).
@@ -124,8 +128,8 @@ On each trb bind, `RetainedTempBump`:
   falls back to `device_malloc` mid-run.
 
 Slices are recorded as `BufferNoop` leases: per-tensor release is a no-op, and
-the retained buffer is neither freed at end of run nor per run — it lives on
-the runner and is freed once in `finalize`. The uniform host-runtime contract
+the retained buffer is neither freed at end of run nor per run — each slot's
+buffer lives on the runner and is freed once in `finalize`. The uniform host-runtime contract
 requires the retained-buffer callbacks on every backend; bind has no
 per-tensor allocation fallback.
 

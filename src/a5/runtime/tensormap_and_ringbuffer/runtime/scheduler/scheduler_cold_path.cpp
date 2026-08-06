@@ -506,8 +506,7 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, [[maybe_unu
     );
 
     uint64_t sched_total = chip_swimlane.sched_complete_cycle + chip_swimlane.sched_async_cycle +
-                           chip_swimlane.sched_scan_cycle + chip_swimlane.sched_dispatch_cycle +
-                           chip_swimlane.sched_idle_cycle;
+                           chip_swimlane.sched_dispatch_cycle + chip_swimlane.sched_idle_cycle;
     if (sched_total == 0) sched_total = 1;
 
     {
@@ -603,11 +602,6 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, [[maybe_unu
             "Thread %d:     setup        : %.3fus (%.1f%%)", thread_idx,
             cycles_to_us(chip_swimlane.sched_dispatch_setup_cycle),
             chip_swimlane.sched_dispatch_setup_cycle * 100.0 / d_parent
-        );
-
-        LOG_INFO(
-            "Thread %d:   scan           : %.3fus (%.1f%%)", thread_idx, cycles_to_us(chip_swimlane.sched_scan_cycle),
-            chip_swimlane.sched_scan_cycle * 100.0 / sched_total
         );
 
         LOG_INFO(

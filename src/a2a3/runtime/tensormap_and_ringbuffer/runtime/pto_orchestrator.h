@@ -25,8 +25,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef PTO_ORCHESTRATOR_H
-#define PTO_ORCHESTRATOR_H
+#pragma once
 
 #include "common/chip_swimlane_profiling.h"
 #include "utils/device_arena.h"
@@ -139,7 +138,7 @@ struct PTO2OrchestratorState {
     // Phase 1: declare every sub-region (per-ring fanin pool, scope arrays,
     // tensor_map sub-layout) on the supplied arena. task_window_sizes feeds
     // the nested tensor_map layout. Returned layout is consumed by
-    // init_from_layout.
+    // init_data_from_layout.
     static PTO2OrchestratorLayout reserve_layout(
         DeviceArena &arena, const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH],
         int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
@@ -211,5 +210,3 @@ struct PTO2OrchProfilingData {
 
 PTO2OrchProfilingData orchestrator_get_profiling();
 #endif
-
-#endif  // PTO_ORCHESTRATOR_H

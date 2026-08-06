@@ -511,19 +511,6 @@ static bool check_scope_can_accept_task(PTO2OrchestratorState *orch, PTO2TaskAll
     return false;
 }
 
-static void prefetch_payload(PTO2TaskPayload *payload, int32_t tensor_count, int32_t scalar_count) {
-    for (int32_t i = 0; i < tensor_count; i++) {
-        __builtin_prefetch(&payload->tensors[i], 1, 3);
-        __builtin_prefetch(reinterpret_cast<char *>(&payload->tensors[i]) + 64, 1, 3);
-    }
-    for (int32_t i = 0; i < scalar_count; i += 8) {
-        __builtin_prefetch(&payload->scalars[i], 1, 3);
-    }
-    __builtin_prefetch(payload, 1, 3);
-    __builtin_prefetch(reinterpret_cast<char *>(payload) + 64, 1, 3);
-    __builtin_prefetch(reinterpret_cast<char *>(payload) + 128, 1, 3);
-}
-
 static bool prepare_task(
     PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
     TaskAttrs task_attrs, PTO2PreparedTask *out
@@ -560,7 +547,7 @@ static bool prepare_task(
     out->slot_state->reset_for_reuse();
     out->slot_state->fanin_count = 0;
 
-    prefetch_payload(out->payload, args.tensor_count(), args.scalar_count());
+    out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
     // Re-bind payload/task pointers each submit. Value is per-slot constant
     // (same as &task_payloads[slot] / &task_descriptors[slot]), but writing

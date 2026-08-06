@@ -67,7 +67,7 @@ struct Segment {
 
 /**
  * Layout descriptor produced by PTO2TensorMap::reserve_layout(). Stores the
- * region offsets returned by DeviceArena::reserve() so init_from_layout()
+ * region offsets returned by DeviceArena::reserve() so init_data_from_layout()
  * can fetch the matching pointers after the arena is committed.
  *
  * All offsets are relative to the arena's base.

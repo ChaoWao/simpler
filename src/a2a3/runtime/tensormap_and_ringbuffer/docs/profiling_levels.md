@@ -71,7 +71,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 
 **What's compiled:**
 
-- Base timing counters for the scheduler loop (`sched_complete/dispatch/idle/scan`)
+- Base timing counters for the scheduler loop (`sched_complete/dispatch/idle`)
 - Host-side phase windows: each sched/orch thread publishes its
   start/end window via `aicpu_phase_set_window`, which the host reduces
   into the `Orch` / `Sched` `[STRACE]` markers
@@ -111,7 +111,7 @@ Each sub-level macro requires `SIMPLER_DFX=1`:
 
 - All Level 1 features
 - Detailed scheduler phase counters
-- Phase-specific statistics (complete, scan, dispatch, idle)
+- Phase-specific statistics (complete, dispatch, idle)
 - Hit rate tracking (complete poll, ready queue pop)
 
 **Log output (per scheduler thread, normal run):** the `sched_start/sched_end/
@@ -135,7 +135,6 @@ Thread X:   dispatch       : XXXus (XX.X%)
 Thread X:     poll         : XXXus (XX.X%)
 Thread X:     pop          : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:     setup        : XXXus (XX.X%)
-Thread X:   scan           : XXXus (XX.X%)
 Thread X:   idle           : XXXus (XX.X%)
 Thread X:   avg/complete   : XXXus
 Thread X: Scheduler summary: total_time=XXXus, loops=XXX, tasks_scheduled=XXX
