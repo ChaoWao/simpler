@@ -857,9 +857,11 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         }
     }
 
-    // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
-    // platform_deinit_aicore_regs is idempotent; orchestrator threads have
+    // Shutdown AICore even when sched_ctx_.completed_ was already true:
+    // platform_deinit_aicore_regs is idempotent, and orchestrator threads have
     // core_trackers_[thread_idx].core_num() == 0 so they skip the loop harmlessly.
+    // A fatal run is the exception — shutdown() returns immediately there,
+    // because emergency_shutdown() has already quiesced every core.
     int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
     if (shutdown_rc != 0 && run_rc == 0) {
         run_rc = shutdown_rc;

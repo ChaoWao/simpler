@@ -10,6 +10,8 @@
  */
 #include "scheduler_context.h"
 
+#include "utils/fatal_shutdown_latch.h"
+
 #include <cinttypes>
 #include <cstdio>
 
@@ -65,17 +67,13 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
             "completed_tasks=%d, total_tasks=%d",
             thread_idx, orch_err, completed_tasks_.load(std::memory_order_relaxed), total_tasks_
         );
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
+        emergency_shutdown(runtime);
         return LoopAction::BREAK_LOOP;
     }
     int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
     if (sched_err != PTO2_ERROR_NONE) {
         LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
+        emergency_shutdown(runtime);
         return LoopAction::BREAK_LOOP;
     }
 
@@ -102,17 +100,13 @@ SchedulerContext::check_idle_fatal_error(int32_t thread_idx, PTO2SharedMemoryHea
     int32_t orch_err = header->orch_error_code.load(std::memory_order_acquire);
     if (orch_err != PTO2_ERROR_NONE) {
         LOG_ERROR("Thread %d: Fatal error detected (code=%d), sending EXIT_SIGNAL to all cores", thread_idx, orch_err);
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
+        emergency_shutdown(runtime);
         return LoopAction::BREAK_LOOP;
     }
     int32_t sched_err = header->sched_error_code.load(std::memory_order_acquire);
     if (sched_err != PTO2_ERROR_NONE) {
         LOG_ERROR("Thread %d: Scheduler fatal error detected (code=%d)", thread_idx, sched_err);
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
+        emergency_shutdown(runtime);
         return LoopAction::BREAK_LOOP;
     }
     return LoopAction::NONE;
@@ -452,7 +446,7 @@ int32_t SchedulerContext::handle_timeout_exit(
         // sees the locators above already settled.
         header->sched_stall_detail.store(cls.detail, std::memory_order_release);
     }
-    if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+    if (begin_emergency_shutdown()) {
         log_shutdown_stall_snapshot(thread_idx, idle_iterations, last_progress_count);
 #if SIMPLER_DFX
         // Capture the in-flight kernels' partial output before signalling the
@@ -472,7 +466,7 @@ int32_t SchedulerContext::handle_timeout_exit(
             );
         }
 #endif
-        emergency_shutdown(runtime);
+        signal_emergency_shutdown(runtime);
     }
 #if SIMPLER_DFX
     uint64_t sched_timeout_ts = get_sys_cnt_aicpu();
@@ -631,8 +625,18 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, [[maybe_unu
 // Shutdown: deinit AICore regs for this thread's cores (and PMU finalize if enabled).
 // Orchestrator threads have core_trackers_[thread_idx].core_num() == 0 -> no-op.
 // platform_deinit_aicore_regs is idempotent; safe to call after early completion.
+//
+// A fatal run returns before any of that: emergency_shutdown() has already
+// broadcast exit to every core and quiesced its register block, so re-running
+// the per-thread path would only re-poll cores that have already stopped. PMU
+// finalize is skipped with it — the host force-resets the card after a fatal
+// run, so counters read here would not survive into the next generation.
 // =============================================================================
 int32_t SchedulerContext::shutdown(int32_t thread_idx) {
+    if (fatal_shutdown_started_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+
     const int32_t *cores = core_trackers_[thread_idx].core_ids();
     int32_t core_num = core_trackers_[thread_idx].core_num();
     if (core_num == 0) return 0;
@@ -963,11 +967,7 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
 // Abort the run on a handshake failure discovered without the all-thread barrier
 // (non-DFX path): latch completion so every scheduler thread exits its dispatch
 // loop, and broadcast exit to whatever cores did come up. Idempotent.
-void SchedulerContext::abort_and_shutdown(Runtime *runtime) {
-    if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-        emergency_shutdown(runtime);
-    }
-}
+void SchedulerContext::abort_and_shutdown(Runtime *runtime) { emergency_shutdown(runtime); }
 
 // Profiling-subsystem init (leader-only). pmu_aicpu_init needs every core's
 // physical_core_id, so the barrier-free init path calls this behind an
@@ -1046,26 +1046,50 @@ bool SchedulerContext::assign_cores_to_threads() {
 }
 
 // =============================================================================
-// Emergency shutdown: broadcast exit signal to every handshake'd core and
-// deinit their AICore register blocks. Idempotent.
+// Emergency shutdown: elect one thread, broadcast exit to every handshake'd
+// core, then join them. Idempotent — the per-thread shutdown() path no-ops once
+// fatal shutdown has started, so cores are quiesced exactly once.
 // =============================================================================
-void SchedulerContext::emergency_shutdown(Runtime *runtime) {
+bool SchedulerContext::begin_emergency_shutdown() {
+    return publish_fatal_shutdown(fatal_shutdown_started_, completed_);
+}
+
+void SchedulerContext::signal_emergency_shutdown(Runtime *runtime) {
     (void)runtime;  // exit is now delivered via each core's register block, not GM
     LOG_WARN("Emergency shutdown: sending exit signal to all initialized cores");
+    // Broadcast to every core before joining any of them, so the cores drain
+    // concurrently and a dead core's timeout does not serialize behind the
+    // cores ahead of it. Cores never opened (reg_addr==0) are reaped by the
+    // host device reset that follows.
+    for (int32_t i = 0; i < cores_total_num_; i++) {
+        if (core_exec_states_[i].reg_addr != 0) {
+            platform_signal_aicore_exit(core_exec_states_[i].reg_addr);
+        }
+    }
+    // The join is what leaves the card usable for the next process: it quiesces
+    // each core's register block (dispatch idle, fast path closed) once the core
+    // confirms it stopped. Returning while cores still run leaves the card
+    // poisoned past the host's device reset. One deadline covers the whole
+    // group, so a fatal run where every core is dead costs a single deinit
+    // timeout rather than one per core. The wait is an on-device register poll,
+    // so it adds no host or remote operation.
+    const uint64_t exit_deadline = platform_aicore_exit_deadline();
     int32_t timeout_count = 0;
     for (int32_t i = 0; i < cores_total_num_; i++) {
-        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which both
-        // releases a core still polling for its window to open and signals it to
-        // exit. Cores never opened (reg_addr==0) are reaped by the host device
-        // reset that follows a handshake failure.
         if (core_exec_states_[i].reg_addr != 0) {
-            if (platform_deinit_aicore_regs(core_exec_states_[i].reg_addr) != 0) {
+            if (platform_finish_aicore_exit(core_exec_states_[i].reg_addr, exit_deadline) != 0) {
                 timeout_count++;
             }
         }
     }
     if (timeout_count > 0) {
         LOG_ERROR("Emergency shutdown: %d cores did not acknowledge exit", timeout_count);
+    }
+}
+
+void SchedulerContext::emergency_shutdown(Runtime *runtime) {
+    if (begin_emergency_shutdown()) {
+        signal_emergency_shutdown(runtime);
     }
 }
 
@@ -1320,6 +1344,7 @@ void SchedulerContext::deinit() {
     total_tasks_ = 0;
     orchestrator_done_.store(false, std::memory_order_release);
     completed_.store(false, std::memory_order_release);
+    fatal_shutdown_started_.store(false, std::memory_order_release);
 
     // Reset core discovery and assignment state
     aic_count_ = 0;
@@ -1388,9 +1413,7 @@ void SchedulerContext::on_orchestration_done(
         orch_err = sched_->sm_header->orch_error_code.load(std::memory_order_relaxed);
     }
     if (orch_err != PTO2_ERROR_NONE) {
-        if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-            emergency_shutdown(runtime);
-        }
+        emergency_shutdown(runtime);
     }
 
 #if SIMPLER_DFX

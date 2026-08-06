@@ -237,13 +237,14 @@ private:
     // fresh AICore stream per run, handle kept when a destroy fails — is
     // testable without a device.
     RunStreamSlots run_stream_slots_{
-        [](void **out) {
-            return rtStreamCreate(reinterpret_cast<rtStream_t *>(out), 0);
+        [this](void **out) {
+            return create_run_stream(out);
         },
         [](void *stream) {
             return rtStreamDestroy(static_cast<rtStream_t>(stream));
         }
     };
+    int create_run_stream(void **out);
     int ensure_run_stream_set(unsigned slot);
     // Destroys this run's AICore stream. Returns the driver's error and KEEPS
     // the handle when the destroy fails: the stream may still hold the previous
@@ -362,7 +363,7 @@ private:
      * collectors in a pristine, re-initializable state) and from finalize()
      * as a backstop before mem_alloc_.finalize().
      */
-    void finalize_collectors();
+    void finalize_collectors(bool abandon_device_resources = false);
     // Shared enable flags (`enable_chip_swimlane_`, `enable_dump_args_`,
     // `enable_pmu_`, `enable_scope_stats_`, `chip_swimlane_level_`,
     // `pmu_event_type_`, `output_prefix_`) live on `DeviceRunnerBase`.

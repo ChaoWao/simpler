@@ -56,25 +56,33 @@ def _build_chip_callable(platform: str) -> ChipCallable:
     )
 
 
-@pytest.mark.platforms(["a2a3", "a5"])
-@pytest.mark.device_count(1)
-@pytest.mark.runtime(RUNTIME)
-@pytest.mark.timeout(60)
-def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids, monkeypatch):
+def _exercise_aicore_timeout(st_platform, st_device_ids, monkeypatch, tmp_path, *, enable_sdma: bool):
     configure_logging("error")
     monkeypatch.setenv("SIMPLER_SCHEDULER_TIMEOUT_MS", "2000")
     monkeypatch.setenv("SIMPLER_OP_EXECUTE_TIMEOUT_US", "3000000")
     monkeypatch.setenv("SIMPLER_STREAM_SYNC_TIMEOUT_MS", "4000")
 
     chip_callable = _build_chip_callable(st_platform)
-    worker = Worker(level=2, platform=st_platform, runtime=RUNTIME, device_id=int(st_device_ids[0]))
+    worker = Worker(
+        level=2,
+        platform=st_platform,
+        runtime=RUNTIME,
+        device_id=int(st_device_ids[0]),
+        enable_sdma=enable_sdma,
+    )
     handle = worker.register(chip_callable)
     worker.init()
+    close_elapsed = None
     try:
         config = CallConfig()
         # >=2 so the orchestration thread and the scheduler thread don't fight
         # for a single AICPU; smaller configs may not dispatch the AIC task.
         config.aicpu_thread_num = 2
+        # Keep device-backed DFX buffers alive through the injected failure.
+        # Fatal cleanup must stop the host threads and forget those mappings
+        # without unregistering/freeing buffers on the poisoned card.
+        config.enable_chip_swimlane = 1
+        config.output_prefix = str(tmp_path)
 
         t0 = time.monotonic()
         # Acceptable error codes for the STARS-killed AICore op. Device status
@@ -94,7 +102,12 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
         # regression we care about is that the timeout chain reaps the hang in
         # single-digit seconds and surfaces either the device classification or
         # a valid host fallback rather than deadlocking.
-        with pytest.raises(RuntimeError, match=r"run failed with code (-100|507(046|018|000))"):
+        error_codes = r"(-100|507(046|018|000))"
+        if enable_sdma:
+            # CANN 9.0.0/driver 26.0.rc1 containment deliberately stops the
+            # SDMA run stream early so reset precedes DEV_RUNNING_DOWN.
+            error_codes = r"(-100|507(046|018|015|000))"
+        with pytest.raises(RuntimeError, match=rf"run failed with code {error_codes}"):
             worker.run(handle, ChipStorageTaskArgs(), config)
         elapsed = time.monotonic() - t0
 
@@ -103,4 +116,42 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
         # If this fires, the timeout chain is broken (or absent).
         assert elapsed < 10, f"run() took {elapsed:.1f}s — timeout chain did not fire"
     finally:
+        close_t0 = time.monotonic()
         worker.close()
+        close_elapsed = time.monotonic() - close_t0
+
+    # The SDMA case is issue #1425: one reset attempt only, because a failed
+    # reset there already blocks on the driver event a retry would multiply.
+    # The ordinary case budgets the full kFatalResetAttempts=3, since each
+    # attempt drains before resetting and can recover what the previous one
+    # could not. One attempt costs the stream-sync budget (4 s here) plus the
+    # driver reset (~11 s on the a5 CI package) plus a small probe, so the
+    # ceiling has to hold three of those — otherwise a retry that works
+    # correctly, just slowly, is reported as an unbounded teardown.
+    # Every limit stays far below the 150/300 s driver-event stalls this
+    # regression exists to catch.
+    close_limit = 30 if enable_sdma else (60 if st_platform == "a5" else 45)
+    assert close_elapsed < close_limit, (
+        f"Worker.close() took {close_elapsed:.1f}s with enable_sdma={enable_sdma}; fatal teardown did not stay bounded"
+    )
+
+
+@pytest.mark.platforms(["a2a3", "a5"])
+@pytest.mark.device_count(1)
+@pytest.mark.runtime(RUNTIME)
+# Sits above the in-test close ceiling (60 s on a5) plus worker setup and the
+# 10 s run budget, so the assertions report first; this mark is only the
+# backstop for a genuine hang.
+@pytest.mark.timeout(180)
+def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids, monkeypatch, tmp_path):
+    _exercise_aicore_timeout(st_platform, st_device_ids, monkeypatch, tmp_path, enable_sdma=False)
+
+
+@pytest.mark.sdma
+@pytest.mark.platforms(["a2a3"])
+@pytest.mark.device_count(1)
+@pytest.mark.runtime(RUNTIME)
+@pytest.mark.timeout(90)
+def test_sdma_worker_aicore_fault_teardown_is_bounded(st_platform, st_device_ids, monkeypatch, tmp_path):
+    """Real SDMA provisioning must not turn one AICore fault into a five-minute close."""
+    _exercise_aicore_timeout(st_platform, st_device_ids, monkeypatch, tmp_path, enable_sdma=True)

@@ -364,6 +364,20 @@ TEST(RunStreamSlots, DestroyAllReportsFailureAndRetriesWhatSurvived) {
     EXPECT_EQ(fake.live_count(), 0u);
 }
 
+TEST(RunStreamSlots, AbandonAllClearsHandlesWithoutDestroyingThem) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+    ASSERT_EQ(slots.acquire(0), 0);
+
+    slots.abandon_all();
+
+    EXPECT_EQ(slots.aicpu(0), nullptr);
+    EXPECT_EQ(slots.aicore(0), nullptr);
+    EXPECT_EQ(fake.live_count(), 2u);
+    EXPECT_EQ(slots.destroy_all(), 0);
+    EXPECT_EQ(fake.live_count(), 2u);
+}
+
 // A failed create leaves nothing half-owned behind.
 TEST(RunStreamSlots, AFailedCreateLeavesTheSlotEmpty) {
     FakeStreams fake;

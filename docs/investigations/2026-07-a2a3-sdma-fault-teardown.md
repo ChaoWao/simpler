@@ -6,6 +6,63 @@
 risk and ordinary Workers are unaffected; full recovery inside an SDMA-enabled
 Worker after a fault is deferred pending a CANN runtime-and-driver fix
 
+## 2026-08 package-specific follow-up
+
+PR #1664 adds a narrower containment for the installed CANN 9.0.0 and driver
+26.0.rc1 combination. Only run streams belonging to a Worker that actually
+provisioned the SDMA workspace use stop-on-failure mode. Fatal close on such a
+Worker then waits for `max(10 seconds, configured op timeout + 5 seconds)`,
+attempts one force reset, and forgets the failed generation's host handles
+without issuing per-resource destroy/free calls.
+
+This is an empirically validated workaround, not an SDMA retirement contract.
+CANN still exposes neither a completion fence nor a portable upper bound for
+the final CP-process stream release. Ordinary a2a3 Workers and all a5 Workers
+therefore keep normal stream mode, their existing error/diagnostic behavior,
+and no added handoff delay. The hardware regression test keeps the
+package-specific workaround visible by covering real SDMA provisioning followed
+by an AICore fault and a bounded `Worker.close()`.
+
+### Reset attempts are budgeted per stream population, not globally
+
+`force_reset_device()` drains the card before resetting it and returns 0 only
+when its post-reset probe confirms a usable generation, so a second call runs
+against a settled card and can recover a poison the first could not. Ordinary
+poison therefore keeps a bounded three-attempt budget on both a2a3 and a5.
+
+A Worker holding the 48 CP-process SDMA streams is the exception and gets a
+single attempt: there a reset that does not confirm has already blocked on the
+driver's 150/300-second remote-event timeout, so a retry multiplies that wait
+without adding a completion condition.
+
+Collapsing both populations onto a single attempt regresses ordinary
+fault-injection recovery — the poisoned card stays poisoned for the next
+process that lands on it, which surfaces as unrelated tests failing with
+507018/507046 on the devices a fault-injection test just used.
+
+### Emergency shutdown broadcasts in parallel but still joins the cores
+
+The AICore exit acknowledgement is what leaves a card usable for the next
+process: only after a core confirms it stopped does the AICPU quiesce that
+core's register block, putting the dispatch register back to idle and closing
+the fast path. Returning from emergency shutdown while cores are still running
+leaves the card poisoned past the host's device reset, and the next process on
+that device fails at launch.
+
+So the fatal path signals every handshake'd core first and joins them second,
+rather than signalling and waiting one core at a time. Cores drain
+concurrently and the per-core quiesce is preserved.
+
+The join takes **one deadline for the whole group**, not one timeout per core.
+That distinction is load-bearing on the fatal path, where every core is
+typically dead: the onboard deinit timeout is 1 second, so a per-core deadline
+costs a second per unresponsive core and pushes an AICore-timeout run past a
+10-second budget, while a shared deadline caps the whole group at one second.
+
+The wait is an on-device poll of the core's `COND` register, so it costs no
+host or remote operation and is unrelated to the CANN SDMA teardown problem
+above.
+
 ## Question
 
 Can simpler keep PTO-ISA async SDMA available while avoiding the roughly

@@ -139,6 +139,30 @@ inline void write_reg(uint64_t reg_base_addr, RegId reg, uint64_t value) {
  */
 void platform_init_aicore_regs(uint64_t reg_addr);
 
+/** Send the AICore exit signal without waiting for an acknowledgement. */
+void platform_signal_aicore_exit(uint64_t reg_addr);
+
+/**
+ * Absolute sys-cnt value one deinit timeout from now. Share a single deadline
+ * across a group of cores so the whole group costs one timeout rather than one
+ * per unresponsive core.
+ */
+uint64_t platform_aicore_exit_deadline();
+
+/**
+ * Wait for a signalled AICore to acknowledge exit, then quiesce its register
+ * block (dispatch register back to idle, fast path closed).
+ *
+ * Pairs with platform_signal_aicore_exit when stopping several cores: signal
+ * them all, take one deadline from platform_aicore_exit_deadline(), then finish
+ * each core against that shared deadline.
+ *
+ * @param deadline absolute sys-cnt value to give up at.
+ * @return 0 once the core acknowledges, -1 on timeout — an unresponsive core is
+ *         left for the host's device reset to clear.
+ */
+int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline);
+
 /**
  * Deinitialize AICore registers before termination
  *

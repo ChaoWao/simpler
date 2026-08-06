@@ -179,6 +179,7 @@ private:
     // Device orchestration: set by last orchestrator when graph is built; schedulers poll it.
     std::atomic<bool> orchestrator_done_{false};
     std::atomic<bool> completed_{false};
+    std::atomic<bool> fatal_shutdown_started_{false};
     uint64_t *func_id_to_addr_{nullptr};
 
     // --- Thread/core configuration ---
@@ -220,8 +221,10 @@ private:
     // Assign discovered cores (cluster = 1 AIC + 2 AIV) round-robin across scheduler threads.
     bool assign_cores_to_threads();
 
-    // Emergency shutdown: broadcast exit signal to every handshake'd core and
-    // deinit their AICore register blocks. Idempotent.
+    // Publish fatal state before completion, then elect one thread to broadcast
+    // exit to every handshake'd core. Idempotent.
+    bool begin_emergency_shutdown();
+    void signal_emergency_shutdown(Runtime *runtime);
     void emergency_shutdown(Runtime *runtime);
 
     // =========================================================================

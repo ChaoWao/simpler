@@ -62,19 +62,16 @@ void platform_init_aicore_regs(uint64_t reg_addr) {
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
 }
 
-int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
-    // Send exit signal to AICore
-    write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+void platform_signal_aicore_exit(uint64_t reg_addr) { write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL); }
 
-    // Wait for AICore to acknowledge exit, with timeout. Timeout is
-    // variant-specific (sim wider than onboard) — see
-    // inner_get_deinit_timeout_ticks declaration in platform_regs.h.
-    // On timeout, skip register cleanup (AICore is unresponsive; host will
+uint64_t platform_aicore_exit_deadline() { return get_sys_cnt_aicpu() + inner_get_deinit_timeout_ticks(); }
+
+int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline) {
+    // Wait for AICore to acknowledge exit, until the caller's deadline. On
+    // timeout, skip register cleanup (AICore is unresponsive; host will
     // aclrtResetDevice to clear all hardware state).
-    const uint64_t deinit_timeout_ticks = inner_get_deinit_timeout_ticks();
-    uint64_t t0 = get_sys_cnt_aicpu();
     while (read_reg(reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
-        if (get_sys_cnt_aicpu() - t0 > deinit_timeout_ticks) {
+        if (get_sys_cnt_aicpu() > deadline) {
             return -1;
         }
     }
@@ -84,6 +81,11 @@ int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
     // Close fast path control
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
     return 0;
+}
+
+int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
+    platform_signal_aicore_exit(reg_addr);
+    return platform_finish_aicore_exit(reg_addr, platform_aicore_exit_deadline());
 }
 
 uint32_t platform_get_physical_cores_count() {

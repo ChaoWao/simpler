@@ -238,6 +238,17 @@ void LoadAicpuOp::Finalize() {
     }
 }
 
+void LoadAicpuOp::AbandonAfterDeviceFailure() {
+    binary_handle_ = nullptr;
+    func_handles_.clear();
+    inner_fp_ = 0;
+    inner_so_basename_.clear();
+    if (!json_file_path_.empty()) {
+        std::remove(json_file_path_.c_str());
+        json_file_path_.clear();
+    }
+}
+
 LoadAicpuOp::~LoadAicpuOp() { Finalize(); }
 
 bool LoadAicpuOp::GenerateAicpuOpJson(const std::string &json_path, const std::string &kernel_so) {
