@@ -109,6 +109,25 @@ Compilation breaks down as ~1.1–1.3 s per ordinary incore, 6.6 s for the
 orchestration, and 8.4 s for the vendor FAI kernel's AIV variant (1330 KiB) —
 the single outlier.
 
+### Post-cache lock boundary
+
+Local a2a3 validation of the #1604 persistent compile cache on 2026-08-03 used
+the same `StressBatch16Seq3500` case and split the invocation at the CI lock
+boundary:
+
+| Phase | Wall | Device lock |
+| ----- | ---- | ----------- |
+| cold `scene_test_compile` warm-up (37 compilation units) | 75.24 s | not held |
+| `task-submit` invocation after warm-up | 53.87 s | held after allocation |
+| device `runner_run.device_wall` marker inside that invocation | 35.416 ms | held |
+
+The cache artifact was written before `task-submit`, remained unchanged during
+the device run, and the case passed. This confirms that compilation no longer
+consumes card time. Fixture construction and golden computation still execute
+inside the locked pytest process; moving them would require a same-job data
+handoff or a delayed-lock interface rather than the long-lived golden cache
+rejected below.
+
 ### The root cause
 
 None of the golden's 359 s was arithmetic. Its reference walks **3584 small
@@ -197,11 +216,12 @@ with nothing checking it was right.
   already exists (`l3_compile_cache_key()` composes a stable key) and only ever
   reaches an in-memory dict. Tracked with the device-lock question in
   [#1604](https://github.com/hw-native-sys/simpler/issues/1604).
-- **The device lock.** All ~115 s of the case is CPU work performed while
-  holding a card, because `ci.yml` wraps the whole pytest session in
-  `task-submit`. Also [#1604](https://github.com/hw-native-sys/simpler/issues/1604);
-  note it pulls against the competing idea of holding **one** lock for the whole
-  job, which would reclaim the 210 s of re-queueing but lengthen the hold.
+- **The device lock.** The #1604 warm-up keeps kernel compilation outside
+  `task-submit`; fixture construction and golden computation remain inside the
+  locked pytest process. Moving those phases requires a same-job handoff or a
+  delayed-lock interface. It still pulls against the competing idea of holding
+  **one** lock for the whole job, which would reclaim the 210 s of re-queueing
+  but lengthen the hold.
 
 ## References
 

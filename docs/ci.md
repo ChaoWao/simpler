@@ -246,6 +246,40 @@ a5 runners are ARM64-only and always use `task-submit`. Steps that only build
 arch. The same device-lock rule applies to local onboard work — see
 [.claude/rules/running-onboard.md](../.claude/rules/running-onboard.md).
 
+The two onboard scene-test jobs (`st-onboard-a2a3`, `st-onboard-a5`) compile
+their selected test batch before entering `task-submit`. The lock-free warm-up
+populates the `build/cache/kernels/` cache; the subsequent pytest invocation
+keeps the existing batch-level device allocation and reconstructs each
+`ChipCallable` from that cache. The warm-up does not acquire one lock per case,
+and runners with exclusive devices continue to execute pytest directly.
+Compilation is serial by default; both onboard jobs pass `--compile-workers 8`,
+which assumes the runner's CPU is theirs alone — it starts eight `ccec`
+processes at once. The sim jobs run on ephemeral GitHub-hosted runners with no
+restored cache, so they compile cold every time and get no warm-up step.
+
+A warm-up that cannot compile a class reports it and keeps going: the pass only
+fills a cache, so the locked pytest run that follows is what recompiles the
+class and attributes the failure to the case that owns it, instead of one
+unbuildable kernel costing the whole batch its results.
+
+`actions/checkout` cleans ignored files before each job, so the onboard jobs
+restore and save `build/cache/kernels/` through `actions/cache`. Cache keys are
+partitioned by target architecture, runner OS/architecture, and PTO-ISA pin.
+The artifact's own key covers the contents of its orchestration, incore, and
+transitively included sources, the compiler identities and effective fixed
+flags, a digest of the modules that decide artifact bytes
+(`kernel_compiler.py`, `toolchain.py`, `elf_parser.py`), the binding's
+serialized-callable ABI, and a manual schema constant. It also carries the
+owning test class's qualified name, so two scene tests built from identical
+sources keep separate entries rather than sharing one.
+
+Entries are content-addressed and therefore never overwritten, so a run prunes
+entries whose last use is more than 14 days old before it exits. Without that,
+the directory grows by one entry per kernel change forever and the saved
+`actions/cache` archive — one new entry per push, restored by prefix — would
+crowd the repository's 10 GB cache budget and evict the pip and cmake caches
+the other jobs depend on.
+
 ## Test Sources
 
 ### `tests/ut/` — Python unit tests (ut-py)
