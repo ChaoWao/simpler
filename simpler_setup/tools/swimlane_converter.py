@@ -1343,6 +1343,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     task_to_aicpu_event_id: dict[tuple[int, int], int] = {}
     task_to_aicpu_tid: dict[tuple[int, int], int] = {}
     aicpu_worker_anchor_map: dict[int, list[dict]] = defaultdict(list)
+    drain_prepare_event_id_by_record: dict[int, int] = {}
     event_id = 0
 
     AICPU_TID_BASE = 19000  # noqa: N806
@@ -1789,19 +1790,22 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         phase_args["tasks_processed"] = tasks_processed
                 display_name = f"{phase}({tasks_processed})"
                 event_tid = resolve_tid if phase == "resolve" else tid
-                events.append(
-                    {
-                        "args": phase_args,
-                        "cat": "scheduler",
-                        "cname": phase_colors.get(phase, "generic_work"),
-                        "name": display_name,
-                        "ph": "X",
-                        "pid": 2,
-                        "tid": event_tid,
-                        "ts": start_us,
-                        "dur": dur,
-                    }
-                )
+                phase_event = {
+                    "args": phase_args,
+                    "cat": "scheduler",
+                    "cname": phase_colors.get(phase, "generic_work"),
+                    "name": display_name,
+                    "ph": "X",
+                    "pid": 2,
+                    "tid": event_tid,
+                    "ts": start_us,
+                    "dur": dur,
+                }
+                if phase == "drain_prepare":
+                    phase_event["id"] = event_id
+                    drain_prepare_event_id_by_record[id(record)] = event_id
+                    event_id += 1
+                events.append(phase_event)
 
                 # Queue-depth counter tracks (Perfetto "ph": "C"). Emit ONE
                 # sample per phase at its end_us — phase N's end is phase N+1's
@@ -2129,6 +2133,34 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     )
                     flow_id += 1
 
+    FLOW_EPSILON_US = 0.01
+
+    def _find_drain_prepare(thread_idx, dispatch_us):
+        if scheduler_phases is None or thread_idx < 0 or thread_idx >= len(scheduler_phases):
+            return None
+        thread_records = scheduler_phases[thread_idx]
+        drains = [record for record in thread_records if record.get("phase") == "drain"]
+        prepares = [record for record in thread_records if record.get("phase") == "drain_prepare"]
+        matches = []
+        for drain in drains:
+            drain_start = drain["start_time_us"]
+            drain_end = drain["end_time_us"]
+            if not drain_start <= dispatch_us <= drain_end:
+                continue
+            for prepare in prepares:
+                prepare_start = prepare["start_time_us"]
+                prepare_end = prepare["end_time_us"]
+                if drain_start <= prepare_start and prepare_end <= drain_end and prepare_end == dispatch_us:
+                    matches.append((drain_start, prepare_start, prepare))
+        if not matches:
+            return None
+        return max(matches, key=lambda match: (match[0], match[1]))[2]
+
+    def _slice_end_anchor(record):
+        start_us = record["start_time_us"]
+        end_us = record["end_time_us"]
+        return end_us - min(FLOW_EPSILON_US, max((end_us - start_us) / 2, 0.0))
+
     # Complete-phase flow arrows. The complete phase wraps the AICPU's
     # completion-polling loop: it observes AICore subtask FINs, increments
     # the slot's per-task subtask counter, and on the LAST subtask of a
@@ -2225,7 +2257,6 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         # flow to a slice and the arrow is invisible when you click the task.
         # The pid=2 endpoint (thread + ts) is identical for both views, so
         # completion attribution is unchanged; only the visual source differs.
-        FLOW_EPSILON_US = 0.01
         for tid, comp in task_to_complete.items():
             _last_end_us, last_finish_us, last_cid = task_last_subtask[tid]
             owning_thread = core_to_thread[last_cid]
@@ -2368,11 +2399,23 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     # the arrow would point backwards.
                     if d_us < end_us:
                         continue
+                    drain_prepare = _find_drain_prepare(d_thr, d_us)
+                    dst_us = d_us
+                    dst_event_id = None
+                    flow_name = "complete→ready"
+                    if drain_prepare is not None:
+                        dst_us = drain_prepare["start_time_us"]
+                        if dst_us < end_us:
+                            dst_us = _slice_end_anchor(drain_prepare)
+                        if dst_us < end_us:
+                            continue
+                        dst_event_id = drain_prepare_event_id_by_record.get(id(drain_prepare))
+                        flow_name = "complete→prepare"
                     events.append(
                         {
                             "cat": "flow",
                             "id": flow_id,
-                            "name": "complete→ready",
+                            "name": flow_name,
                             "ph": "s",
                             "pid": 2,
                             "tid": src_tid,
@@ -2381,21 +2424,24 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                             "ts": end_us - FLOW_EPSILON_US,
                         }
                     )
-                    events.append(
-                        {
-                            "cat": "flow",
-                            "id": flow_id,
-                            "name": "complete→ready",
-                            "ph": "f",
-                            "pid": 2,
-                            "tid": sched_lane_tid(d_thr, 0),
-                            "ts": d_us,
-                            "bp": "e",
-                        }
-                    )
+                    flow_f = {
+                        "cat": "flow",
+                        "id": flow_id,
+                        "name": flow_name,
+                        "ph": "f",
+                        "pid": 2,
+                        "tid": sched_lane_tid(d_thr, 0),
+                        "ts": dst_us,
+                        "bp": "e",
+                    }
+                    if dst_event_id is not None:
+                        flow_f["bind_id"] = dst_event_id
+                    events.append(flow_f)
                     flow_id += 1
 
-    # Scheduler DISPATCH → task execution arrows
+    drain_prepare_by_task_record = {}
+
+    # Scheduler dispatch/prepare → task execution arrows
     if scheduler_phases and has_aicpu_data:
         # Build core_id → scheduler thread mapping.
         # Prefer explicit core_to_thread from perf JSON (written by AICPU after orchestration).
@@ -2444,50 +2490,61 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 sched_tid = sched_lane_tid(matched_thread, 0)
                 core_tid = core_to_tid[task["core_id"]]
                 aicpu_tid = task_to_aicpu_tid.get((task["task_id"], task["core_id"]), core_tid)
+                drain_prepare = _find_drain_prepare(matched_thread, dispatch_us)
+                drain_prepare_by_task_record[id(task)] = drain_prepare
+                source_us = drain_prepare["start_time_us"] if drain_prepare is not None else dispatch_us
+                source_event_id = (
+                    drain_prepare_event_id_by_record.get(id(drain_prepare)) if drain_prepare is not None else None
+                )
+                flow_name = "prepare→dispatch" if drain_prepare is not None else "dispatch"
 
-                # Flow: scheduler DISPATCH → Worker View task start
-                events.append(
-                    {
-                        "cat": "flow",
-                        "id": flow_id,
-                        "name": "dispatch",
-                        "ph": "s",
-                        "pid": 2,
-                        "tid": sched_tid,
-                        "ts": dispatch_us,
-                    }
-                )
-                events.append(
-                    {
-                        "cat": "flow",
-                        "id": flow_id,
-                        "name": "dispatch",
-                        "ph": "f",
-                        "pid": 4,
-                        "tid": core_tid,
-                        "ts": task["start_time_us"],
-                        "bp": "e",
-                    }
-                )
-                flow_id += 1
-
-                # Flow: scheduler DISPATCH → Scheduler View task start
-                aicpu_eid = task_to_aicpu_event_id.get((task["task_id"], task["core_id"]))
-                events.append(
-                    {
-                        "cat": "flow",
-                        "id": flow_id,
-                        "name": "dispatch",
-                        "ph": "s",
-                        "pid": 2,
-                        "tid": sched_tid,
-                        "ts": dispatch_us,
-                    }
-                )
+                # Flow: scheduler preparation/dispatch → Worker View task start.
+                flow_s = {
+                    "cat": "flow",
+                    "id": flow_id,
+                    "name": flow_name,
+                    "ph": "s",
+                    "pid": 2,
+                    "tid": sched_tid,
+                    "ts": source_us,
+                }
+                if source_event_id is not None:
+                    flow_s["bind_id"] = source_event_id
+                events.append(flow_s)
                 flow_f = {
                     "cat": "flow",
                     "id": flow_id,
-                    "name": "dispatch",
+                    "name": flow_name,
+                    "ph": "f",
+                    "pid": 4,
+                    "tid": core_tid,
+                    "ts": task["start_time_us"],
+                    "bp": "e",
+                }
+                worker_event_id = task_to_event_id.get((task["task_id"], task["core_id"]))
+                if source_event_id is not None and worker_event_id is not None:
+                    flow_f["bind_id"] = worker_event_id
+                events.append(flow_f)
+                flow_id += 1
+
+                # Flow: scheduler preparation/dispatch → Scheduler View task start.
+                aicpu_eid = task_to_aicpu_event_id.get((task["task_id"], task["core_id"]))
+                flow_s = {
+                    "cat": "flow",
+                    "id": flow_id,
+                    "name": flow_name,
+                    "ph": "s",
+                    "pid": 2,
+                    "tid": sched_tid,
+                    "ts": source_us,
+                }
+                if source_event_id is not None:
+                    flow_s["bind_id"] = source_event_id
+                events.append(flow_s)
+                flow_f = {
+                    "cat": "flow",
+                    "id": flow_id,
+                    "name": flow_name,
                     "ph": "f",
                     "pid": 3,
                     "tid": aicpu_tid,
@@ -2499,10 +2556,9 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 events.append(flow_f)
                 flow_id += 1
 
-    # Orchestrator → scheduler dispatch:
-    # Anchor each task's dispatch arrow on the end of its orch_submit record
-    # (covers the entire submit_task() span). Legacy captures with the older
-    # per-sub-step phases (orch_fanin / orch_params) are accepted as fallbacks.
+    # Orchestrator → scheduler work. A drain-dispatched task first connects
+    # to the drain_prepare slice that belongs to its owning scheduler and outer
+    # drain; ordinary tasks retain the direct submit-to-dispatch arrow.
     if orchestrator_phases and scheduler_phases:
         orch_anchor_by_task = {}
         for orch_idx, thread_records in enumerate(orchestrator_phases):
@@ -2528,6 +2584,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                     orch_anchor_by_task[tid_k] = (record, orch_idx, "params→dispatch")
 
         if has_aicpu_data and orch_anchor_by_task:
+            emitted_prepare_inputs = set()
             for task in tasks:
                 tid = normalize_pto2_task_id_int(task.get("task_id"))
                 if tid is None:
@@ -2551,6 +2608,17 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 anchor_us = anchor_rec["end_time_us"]
 
                 orch_tid = 4000 + orch_idx
+                drain_prepare = drain_prepare_by_task_record.get(id(task))
+                target_us = dispatch_us
+                target_event_id = None
+                if drain_prepare is not None:
+                    prepare_key = (tid, matched_thread, id(drain_prepare))
+                    if prepare_key in emitted_prepare_inputs:
+                        continue
+                    emitted_prepare_inputs.add(prepare_key)
+                    target_us = drain_prepare["start_time_us"]
+                    target_event_id = drain_prepare_event_id_by_record.get(id(drain_prepare))
+                    flow_name = flow_name.replace("→dispatch", "→prepare")
 
                 events.append(
                     {
@@ -2563,18 +2631,19 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         "ts": anchor_us,
                     }
                 )
-                events.append(
-                    {
-                        "cat": "flow",
-                        "id": flow_id,
-                        "name": flow_name,
-                        "ph": "f",
-                        "pid": 2,
-                        "tid": sched_tid,
-                        "ts": dispatch_us,
-                        "bp": "e",
-                    }
-                )
+                flow_f = {
+                    "cat": "flow",
+                    "id": flow_id,
+                    "name": flow_name,
+                    "ph": "f",
+                    "pid": 2,
+                    "tid": sched_tid,
+                    "ts": target_us,
+                    "bp": "e",
+                }
+                if target_event_id is not None:
+                    flow_f["bind_id"] = target_event_id
+                events.append(flow_f)
                 flow_id += 1
 
     if verbose:
