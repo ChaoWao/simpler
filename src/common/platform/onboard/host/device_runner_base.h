@@ -1118,14 +1118,12 @@ protected:
     // `nullptr` before init.
     rtStream_t stream_aicpu_{nullptr};
     rtStream_t stream_aicore_{nullptr};
-    // Platform-level device phase buffer: device-resident
-    // AicpuPhaseRecord[NUM_AICPU_PHASES] per launched AICPU thread (thread-
-    // major), whose address rides on `KernelArgs.device_wall_data_base`. AICPU
-    // stamps raw sys-counter cycles per phase through that pointer; subclass
-    // drain pulls it back via `read_device_wall_ns()` after stream sync and
-    // caches the per-phase ns spans for `last_device_phase_ns()` (and RunWall
-    // for `last_device_wall_ns()`). Allocated lazily on the first capture-enabled
-    // run and freed in the subclass `finalize()`.
+    // Platform-level device phase buffer: a header, thread-major phase records,
+    // and the optional task-timing tail. Its address rides on
+    // `KernelArgs.device_wall_data_base`. AICPU stamps raw sys-counter cycles;
+    // subclass drain always pulls back the header + phases after stream sync,
+    // and only pulls the tail when the header marks it used. Allocated lazily
+    // on the first capture-enabled run and freed in subclass `finalize()`.
     void *device_wall_dev_ptr_{nullptr};
     uint64_t device_wall_ns_{0};
     uint64_t device_phase_ns_[NUM_AICPU_PHASES] = {0};

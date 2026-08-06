@@ -21,6 +21,7 @@
 #endif
 
 #include "aicpu/device_time.h"
+#include "aicpu/device_phase_aicpu.h"
 #include "callable_protocol.h"
 #include "pto2_dispatch_payload.h"
 #include "runtime.h"
@@ -359,6 +360,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     LOG_INFO("Thread %d: Completed", thread_idx);
 
     completion_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
+        aicpu_publish_task_timing_tail_usage(aicpu_thread_num_);
         // Destroy the host_build_graph runtime. sm_handle / rt are recreated
         // every run, so always tear them down here.
         if (rt != nullptr) {

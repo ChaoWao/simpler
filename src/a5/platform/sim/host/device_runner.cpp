@@ -75,7 +75,7 @@ struct DeviceRunner::ActiveRun {
     void *reg_blocks{nullptr};
     std::vector<std::thread> aicpu_threads;
     std::vector<std::thread> aicore_threads;
-    std::vector<AicpuPhaseRecord> phase_buf;
+    DevicePhaseBufferStorage<PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH> phase_buf{};
 
     void join() noexcept {
         for (auto &thread : aicpu_threads) {
@@ -419,11 +419,6 @@ int DeviceRunner::prepare_execution(
     }
 
     constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
-    constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
-    constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
-    constexpr size_t kTailRecs = static_cast<size_t>(task_timing_buffer_slots(kPhaseThreads));
-    static_assert(sizeof(AicpuPhaseRecord) == sizeof(TaskTimingRecord), "phase/tail records must share size");
-    active_run_->phase_buf.assign(kPhaseRecs + kTailRecs, AicpuPhaseRecord{kPhaseUnset, 0});
     active_run_->aicpu_threads.reserve(over_launch);
     active_run_->aicore_threads.reserve(num_aicore);
     execution->num_aicore = num_aicore;
@@ -484,7 +479,8 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                 if (kernel_args_.device_wall_data_base != 0) {
                     *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
                 }
-                set_platform_phase_base_func_(reinterpret_cast<uint64_t>(run->phase_buf.data()));
+                reset_device_phase_buffer(&run->phase_buf, over_launch);
+                set_platform_phase_base_func_(reinterpret_cast<uint64_t>(&run->phase_buf));
                 sim_t0 = std::chrono::steady_clock::now();
                 run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
             } catch (...) {
@@ -567,8 +563,8 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     uint64_t phase_start[NUM_AICPU_PHASES];
     uint64_t phase_cycles[NUM_AICPU_PHASES];
     constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
-    constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
-    reduce_aicpu_phase_windows(active_run_->phase_buf.data(), kPhaseThreads, phase_start, phase_cycles);
+    const void *phase_buffer = &active_run_->phase_buf;
+    reduce_aicpu_phase_windows(device_phase_records(phase_buffer), kPhaseThreads, phase_start, phase_cycles);
     auto cyc_to_ns = [](uint64_t c) {
         return static_cast<uint64_t>(c * 1'000'000'000.0 / static_cast<double>(PLATFORM_PROF_SYS_CNT_FREQ));
     };
@@ -586,12 +582,14 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     }
     device_phase_ns_[static_cast<int>(AicpuPhase::RunWall)] = device_wall_ns_;
 
-    // Resolve the task-timing tail on the phase `origin` timeline (shared logic
-    // in device_phase.h). Sim-specific here: the tail lives inline in phase_buf
-    // (in-process, no D2H) and `cyc_to_ns` uses the sim sys-counter frequency.
-    const TaskTimingRecord *tail =
-        reinterpret_cast<const TaskTimingRecord *>(active_run_->phase_buf.data() + kPhaseRecs);
-    resolve_task_timing_slots_ns(tail, kPhaseThreads, origin, cyc_to_ns, task_slot_dispatch_ns_, task_slot_finish_ns_);
+    std::fill_n(task_slot_dispatch_ns_, NUM_TASK_TIMING_SLOTS, uint64_t{0});
+    std::fill_n(task_slot_finish_ns_, NUM_TASK_TIMING_SLOTS, uint64_t{0});
+    if (device_phase_buffer_header(phase_buffer)->task_timing_tail_used != 0) {
+        const TaskTimingRecord *tail = task_timing_tail_records(phase_buffer, kPhaseThreads);
+        resolve_task_timing_slots_ns(
+            tail, kPhaseThreads, origin, cyc_to_ns, task_slot_dispatch_ns_, task_slot_finish_ns_
+        );
+    }
 
     int runtime_rc = run_completion_.first_error();
     if (runtime_rc != 0) {

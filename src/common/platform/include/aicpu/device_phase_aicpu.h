@@ -12,8 +12,9 @@
  * @file device_phase_aicpu.h
  * @brief AICPU-side stamping into the fixed device-phase buffer.
  *
- * The buffer (AicpuPhaseRecord[NUM_AICPU_PHASES] per AICPU thread, thread-major)
- * is host-allocated; its base address is published into the AICPU SO via
+ * The buffer (header + AicpuPhaseRecord[NUM_AICPU_PHASES] per AICPU thread +
+ * optional task-timing tail) is host-allocated; its base address is published
+ * into the AICPU SO via
  * `set_platform_phase_base()` (onboard: kernel.cpp from KernelArgs; sim: the
  * host dlsym's the setter), exactly like the dump / chip_swimlane / pmu bases.
  * The per-thread slot is resolved from `platform_aicpu_affinity_thread_idx()`
@@ -28,8 +29,7 @@
  * thread slot is out of range, so call sites need no extra guards.
  */
 
-#ifndef PLATFORM_AICPU_DEVICE_PHASE_AICPU_H_
-#define PLATFORM_AICPU_DEVICE_PHASE_AICPU_H_
+#pragma once
 
 #include <cstdint>
 
@@ -55,7 +55,8 @@ inline AicpuPhaseRecord *aicpu_phase_records(uint64_t buffer_base, int thread_id
     if (buffer_base == 0 || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH) {
         return nullptr;
     }
-    return reinterpret_cast<AicpuPhaseRecord *>(buffer_base) + thread_idx * NUM_AICPU_PHASES;
+    AicpuPhaseRecord *records = device_phase_records(reinterpret_cast<void *>(buffer_base));
+    return records + thread_idx * NUM_AICPU_PHASES;
 }
 
 /** This thread's phase records, resolved from the published base + affinity idx. */
@@ -108,8 +109,26 @@ inline TaskTimingRecord *aicpu_task_timing_records(uint64_t buffer_base, int thr
     if (buffer_base == 0 || thread_idx < 0 || thread_idx >= PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH) {
         return nullptr;
     }
-    uint64_t tail = buffer_base + task_timing_tail_offset(PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH);
-    return reinterpret_cast<TaskTimingRecord *>(tail) + thread_idx * NUM_TASK_TIMING_SLOTS;
+    TaskTimingRecord *tail =
+        task_timing_tail_records(reinterpret_cast<void *>(buffer_base), PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH);
+    return tail + thread_idx * NUM_TASK_TIMING_SLOTS;
+}
+
+/**
+ * Publish whether any task-timing record was dispatched this run. Call only
+ * from the last surviving AICPU thread, after an acquire/release completion
+ * gate has made every scheduler thread's record writes visible. The scan stays
+ * out of the dispatch hot path and runs once per capture-enabled run.
+ */
+inline void aicpu_publish_task_timing_tail_usage(int active_threads) {
+    uint64_t buffer_base = get_platform_phase_base();
+    if (buffer_base == 0 || active_threads <= 0 || active_threads > PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH) {
+        return;
+    }
+
+    void *buffer = reinterpret_cast<void *>(buffer_base);
+    const TaskTimingRecord *tail = task_timing_tail_records(buffer, PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH);
+    device_phase_buffer_header(buffer)->task_timing_tail_used = task_timing_tail_used(tail, active_threads) ? 1 : 0;
 }
 
 /**
@@ -174,5 +193,3 @@ public:
 private:
     AicpuPhase phase_;
 };
-
-#endif  // PLATFORM_AICPU_DEVICE_PHASE_AICPU_H_
