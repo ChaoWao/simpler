@@ -74,7 +74,6 @@
 #include "native_run_execution.h"
 
 struct HostApi;  // common/host_api.h — fwd-declared to keep task_interface headers out
-class NativeRunLaunchSignal;
 
 /**
  * Common base class for both a2a3 and a5 onboard `DeviceRunner`s.
@@ -575,12 +574,9 @@ public:
 
         bool poisoned() const { return progress == LaunchProgress::Partial; }
     };
-
     /**
-     * Prepare host-owned execution state and submit the Runtime to the device.
-     * Success means the platform's real kernel-launch boundary was crossed;
-     * all state needed by poll_execution() and drain_execution() remains owned by the
-     * runner until drain completes.
+     * Prepare host-owned execution state without crossing the device launch
+     * boundary. The returned object owns everything needed by launch.
      */
     virtual int prepare_execution(
         Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
@@ -591,14 +587,13 @@ public:
 
     /**
      * Query the active run without waiting. Returns one of the
-     * SIMPLER_NATIVE_RUN_POLL_* values. This may run concurrently with
-     * drain_execution() on the compatibility executor.
+     * SIMPLER_NATIVE_RUN_POLL_* values.
      */
     virtual int poll_execution(const ActiveExecution &active) = 0;
 
     /**
      * Wait for the launched run, publish DFX, and release its execution
-     * resources. Called on the same executor thread as launch_execution().
+     * resources. Called on the child progress path that performed launch.
      */
     virtual int drain_execution(ActiveExecution &active) = 0;
 
@@ -617,12 +612,6 @@ public:
      * The base default is a no-op for any arch that does not implement dep_gen.
      */
     virtual void set_dep_gen_enabled(bool /*enable*/) {}
-
-    // Transfer any runtime-specific TLS captured during prepare to the run's
-    // executor. A non-null snapshot stays caller-owned until adopt or destroy.
-    virtual void *take_native_run_thread_state() { return nullptr; }
-    virtual void adopt_native_run_thread_state(void * /*snapshot*/) noexcept {}
-    virtual void destroy_native_run_thread_state(void * /*snapshot*/) noexcept {}
 
     /**
      * Launch an AICPU kernel. Internal helper used by the subclass's

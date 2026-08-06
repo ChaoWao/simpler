@@ -106,7 +106,10 @@ DeviceRunner runner;
 void *ptr = runner.allocate_tensor(bytes);
 runner.copy_to_device(dev_ptr, host_ptr, bytes);
 runner.set_executors(aicpu_binary, aicore_binary);   // once, at init time
-runner.run(runtime, config, pipeline_slot);          // compatibility composition: enqueue + drain
+std::unique_ptr<DeviceRunnerBase::PreparedExecution> prepared;
+runner.prepare_execution(runtime, config, pipeline_slot, identity, &prepared);
+auto launched = runner.launch_execution(std::move(prepared), std::move(permit));
+runner.drain_execution(*launched.active);            // child progress path owns progress
 runner.finalize();
 ```
 

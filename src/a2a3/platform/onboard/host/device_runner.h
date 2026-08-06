@@ -122,9 +122,6 @@ public:
      * `DeviceRunnerBase`.
      */
     void set_dep_gen_enabled(bool enable) override;
-    void *take_native_run_thread_state() override;
-    void adopt_native_run_thread_state(void *snapshot) noexcept override;
-    void destroy_native_run_thread_state(void *snapshot) noexcept override;
 
     /**
      * Cleanup all resources

@@ -312,20 +312,19 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
 ChipWorker.run(handle, args, config)                   # public wrapper path
   simpler_run(ctx, buf, cid, args, config, &descriptor)
     simpler_prepare_run(..., &descriptor)
-      new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + executor state
+      new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + progress state
       DeviceRunner::bind_callable_to_runtime(r, cid, &host_api, args, rings)
-    simpler_launch_run(...)                         # acceptance was captured by prepare
-      executor thread: DeviceRunner::launch_execution(prepared, permit)
+      DeviceRunner::prepare_execution(r, config, slot, identity)
+    simpler_launch_run(...)
+      child progress path: DeviceRunner::launch_execution(prepared, permit)
         clear_cpu_sim_shared_storage()
         ensure_binaries_loaded()             lazily dlopen AICPU; reload AICore for this run
         launch AICPU + AICore threads
-        publish launch fence                 simpler_launch_run may return
-      executor thread: DeviceRunner::drain_execution(active)
-        join all threads
-        dlclose AICore SO                     AICPU stays loaded across runs
-    simpler_poll_run(...)                    caller thread, concurrent with drain
+        publish acceptance from the completed launch receipt
+    simpler_poll_run(...)                    nonblocking child progress query
       DeviceRunner::poll_execution(active)    nonblocking completion query
     simpler_wait_run(...)
+      DeviceRunner::drain_execution(active)   join threads; close AICore SO
     simpler_finalize_run(...)
       validate_runtime_impl(r)               copy results, remove kernels
       state->~NativeRunContext()               destroys Runtime
@@ -374,20 +373,20 @@ device_worker_main(device_id)
           ChipWorker.run(handle, args, config)
             simpler_run(ctx, buf, cid, args, config, &descriptor)
               simpler_prepare_run(..., &descriptor)
-                new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + executor state
+                new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + progress state
                 bind_callable_to_runtime()     replay + rtMalloc, rtMemcpy to device
-              simpler_launch_run(...)               # publishes descriptor acceptance
-                executor thread: DeviceRunner::launch_execution(prepared, permit)
+                DeviceRunner::prepare_execution(..., slot, identity)
+              simpler_launch_run(...)
+                child progress path: DeviceRunner::launch_execution(prepared, permit)
                   ensure_binaries_loaded()     already done by init
                   launch_aicore_kernel()       cached rtRegisterAllKernel handle
                                                  + rtKernelLaunchWithHandleV2
                   launch_aicpu_kernel(Run)     rtsLaunchCpuKernel, cached rtFuncHandle
-                  publish launch fence         simpler_launch_run may return
-                executor thread: DeviceRunner::drain_execution(active)
-                  aclrtSynchronizeStreamWithTimeout() wait on both streams
-              simpler_poll_run(...)            caller thread, concurrent with drain
+                  publish acceptance from the completed launch receipt
+              simpler_poll_run(...)            nonblocking child progress query
                 DeviceRunner::poll_execution(active) nonblocking stream query
               simpler_wait_run(...)
+                DeviceRunner::drain_execution(active) wait on both streams
               simpler_finalize_run(...)        rtMemcpy results back; destroy state
 
     ChipWorker.finalize()
