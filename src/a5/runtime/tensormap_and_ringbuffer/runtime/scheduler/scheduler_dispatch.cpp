@@ -749,6 +749,7 @@ void SchedulerContext::dispatch_ready_tasks(
 // =============================================================================
 
 int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_idx) {
+    always_assert(sched_ != nullptr);
     CoreTracker &tracker = core_trackers_[thread_idx];
 
     PTO2SharedMemoryHeader *header = sched_->sm_header;
