@@ -65,6 +65,7 @@ enum PTO2RuntimeMode {
  * dependencies on runtime .cpp files.
  */
 typedef struct PTO2Runtime PTO2Runtime;  // forward declare for ops signatures
+class HostTensorAccessor;
 
 struct PTO2RuntimeOps {
     TaskOutputTensors (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
@@ -150,6 +151,13 @@ struct PTO2Runtime {
 
     // Statistics
     int64_t total_cycles;
+
+    // Host views of the tensors this run staged, owned by the run that
+    // registered them. Null on the AICPU path, which loads device addresses
+    // directly; get_tensor_data / set_tensor_data then fail closed rather than
+    // dereferencing one. Lives past the first two fields, so the orchestration
+    // .so's partial PTO2Runtime definition neither sees nor needs it.
+    HostTensorAccessor *tensor_access;
 
     // Prebuilt-arena fast path metadata. Carries every offset
     // wire_arena_pointers needs at AICPU boot so the AICPU can reconstruct

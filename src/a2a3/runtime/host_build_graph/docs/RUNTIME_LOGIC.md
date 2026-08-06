@@ -45,7 +45,7 @@ addresses populate the per-run dispatch table.
 
 For each run, the host:
 
-1. validates and stages external tensors, registering their host views;
+1. validates and stages external tensors into a run-owned host accessor;
 2. reserves one backing arena for runtime/shared-memory subregions;
 3. binds the runtime to the orchestration DSO;
 4. calls the orchestration entry synchronously;
@@ -65,7 +65,7 @@ eligibility. Exactly one returning AICPU thread claims that eligibility and
 resets executor/scheduler state for the next run.
 
 Publishing cleanup only after destruction prevents `deinit()` from racing the
-runtime arena or its file-scope binding.
+runtime arena or this run's host accessor.
 
 ## 3. Prebuilt Graph Image
 

@@ -41,12 +41,14 @@
 // address is not loadable in general. Visibility is hidden so the host .so
 // does not export them into the global dynamic symbol table (same pattern as
 // get_sys_cnt_aicpu above and the dep_gen stubs in pto_orchestrator.cpp).
-__attribute__((weak, visibility("hidden"))) bool host_tensor_read(uint64_t dev_addr, void *dst, uint64_t bytes) {
+__attribute__((weak, visibility("hidden"))) bool
+host_tensor_read(HostTensorAccessor *, uint64_t dev_addr, void *dst, uint64_t bytes) {
     memcpy(dst, reinterpret_cast<const void *>(dev_addr), bytes);
     return true;
 }
 
-__attribute__((weak, visibility("hidden"))) bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes) {
+__attribute__((weak, visibility("hidden"))) bool
+host_tensor_write(HostTensorAccessor *, uint64_t dev_addr, const void *src, uint64_t bytes) {
     memcpy(reinterpret_cast<void *>(dev_addr), src, bytes);
     return true;
 }
@@ -297,7 +299,7 @@ uint64_t get_tensor_data(PTO2Runtime *rt, const ChipTensor &tensor, uint32_t ndi
     uint64_t elem_size = get_element_size(tensor.dtype);
     uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
     uint64_t result = 0;
-    if (!host_tensor_read(elem_addr, &result, elem_size)) {
+    if (!host_tensor_read(rt->tensor_access, elem_addr, &result, elem_size)) {
         rt->orchestrator.report_fatal(
             PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
             "no host view for device address %#llx (%llu bytes): during host orchestration only tensors the "
@@ -328,7 +330,7 @@ void set_tensor_data(
     uint64_t flat_offset = tensor.compute_flat_offset(indices, ndims);
     uint64_t elem_size = get_element_size(tensor.dtype);
     uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
-    if (!host_tensor_write(elem_addr, &value, elem_size)) {
+    if (!host_tensor_write(rt->tensor_access, elem_addr, &value, elem_size)) {
         rt->orchestrator.report_fatal(
             PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
             "no writable host view for device address %#llx (%llu bytes): during host orchestration only tensors "
