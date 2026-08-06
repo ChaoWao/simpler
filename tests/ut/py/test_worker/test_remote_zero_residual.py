@@ -157,7 +157,7 @@ def _remote_spec(port: int, *, num_sub_workers: int = 0) -> RemoteWorkerSpec:
     return RemoteWorkerSpec(
         endpoint=f"127.0.0.1:{port}",
         platform="a2a3sim",
-        transport="sim",
+        transport="host_tcp",
         num_sub_workers=num_sub_workers,
     )
 
