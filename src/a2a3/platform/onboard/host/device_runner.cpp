@@ -717,8 +717,8 @@ int DeviceRunner::reap_run(unsigned slot) {
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     teardown_shared_collectors_after_run();
 
-    // a2a3-only dep_gen teardown: host-orch emits the graph snapshot adopted
-    // from the prepare thread; device-orch stops the collector, reconciles the
+    // a2a3-only dep_gen teardown: host-orch emits the graph its orchestration
+    // built on this same thread; device-orch stops the collector, reconciles the
     // ring, and replays the records.
     if (enable_dep_gen_) {
         const std::string deps = make_deps_json_path(output_prefix_);

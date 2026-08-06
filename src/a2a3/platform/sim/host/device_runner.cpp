@@ -671,7 +671,7 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
         pmu_collector_.reconcile_counters();
     }
 
-    // Host-orch emits the graph snapshot adopted from the prepare thread;
+    // Host-orch emits the graph its orchestration built on this same thread;
     // device-orch stops the collector, reconciles the ring, and replays.
     if (enable_dep_gen_) {
         const std::string deps = make_deps_json_path(output_prefix_);

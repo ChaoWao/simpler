@@ -195,7 +195,7 @@ void fill_producer(EdgeAnnot &e, const PTO2TensorMapEntry &entry) {
 }
 
 // ---------------------------------------------------------------------------
-// Capture state — thread-local while built, then moved with its native run
+// Capture state — thread-local, built and emitted on the same thread
 // ---------------------------------------------------------------------------
 
 struct HostGraphState {
@@ -495,25 +495,6 @@ extern "C" void dep_gen_host_graph_set_enabled(bool enable) { state().enabled = 
 
 extern "C" bool dep_gen_host_graph_active() { return true; }
 
-extern "C" void *dep_gen_host_graph_take_capture() {
-    HostGraphState &current = state();
-    if (!current.enabled) return nullptr;
-    auto *capture = new HostGraphState(std::move(current));
-    current = HostGraphState{};
-    return capture;
-}
-
-extern "C" void dep_gen_host_graph_adopt_capture(void *capture) noexcept {
-    if (capture == nullptr) return;
-    auto *captured_state = static_cast<HostGraphState *>(capture);
-    state() = std::move(*captured_state);
-    delete captured_state;
-}
-
-extern "C" void dep_gen_host_graph_destroy_capture(void *capture) noexcept {
-    delete static_cast<HostGraphState *>(capture);
-}
-
 extern "C" int dep_gen_host_graph_emit(const char *deps_json_path) {
     if (deps_json_path == nullptr) {
         LOG_ERROR("dep_gen host graph: null deps_json_path");
@@ -523,11 +504,9 @@ extern "C" int dep_gen_host_graph_emit(const char *deps_json_path) {
     if (!s.captured) {
         // An empty graph here is not "the orchestration submitted nothing" —
         // begin_task() would have set captured even for a graph of one task.
-        // It means capture was never armed or the run-owned snapshot was not
-        // adopted onto this progress thread before teardown.
-        LOG_ERROR(
-            "dep_gen host graph: no capture was adopted on this thread — deps.json not written to %s", deps_json_path
-        );
+        // The graph is thread-local, so it means either capture was never armed
+        // or this run's orchestration ran on a different thread than this emit.
+        LOG_ERROR("dep_gen host graph: no capture on this thread — deps.json not written to %s", deps_json_path);
         return -3;
     }
     if (!write_deps_json(deps_json_path, s.tasks, s.tensors, s.edges)) {
