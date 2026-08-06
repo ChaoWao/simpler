@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <new>
 #include <type_traits>
 #include <utility>
 
@@ -66,6 +67,32 @@ TEST(NativeRunExecutionTest, AicoreFailureIsSafePrelaunchFailure) {
     EXPECT_EQ(result.progress, LaunchProgress::NotStarted);
     EXPECT_EQ(aicpu_submissions, 0);
     EXPECT_FALSE(result.poisoned());
+}
+
+TEST(NativeRunExecutionTest, ArmingFailureReportedAsRcStaysSafe) {
+    int aicpu_submissions = 0;
+    LaunchTransactionResult result = exact_launch_transaction(
+        kIdentity, NativeRunExecutionTestPeer::mint(kIdentity),
+        [&]() -> int {
+            // The shape every real submit callback uses: the arming prologue
+            // catches its own throws and reports them as an rc, so the failure
+            // stays on the safe side of the first submission.
+            try {
+                throw std::bad_alloc();
+            } catch (...) {
+                return -1;
+            }
+        },
+        [&]() {
+            ++aicpu_submissions;
+            return 0;
+        }
+    );
+
+    EXPECT_EQ(result.rc, -1);
+    EXPECT_EQ(result.progress, LaunchProgress::NotStarted);
+    EXPECT_FALSE(result.poisoned());
+    EXPECT_EQ(aicpu_submissions, 0);
 }
 
 TEST(NativeRunExecutionTest, AicoreExceptionPoisonsWithoutTryingAicpu) {

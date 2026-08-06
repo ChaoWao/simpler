@@ -123,6 +123,21 @@ struct LaunchTransactionResult {
     bool poisoned() const { return progress == LaunchProgress::Partial; }
 };
 
+/**
+ * The exact two-submission launch transaction.
+ *
+ * Consumes an identity-bound permit, then submits AICore and AICPU in that
+ * order. Only both submissions succeeding produces a `LaunchReceipt`.
+ *
+ * Callback contract: a submit callback owns everything it does before it
+ * attempts its real device submission, and must report such a failure as a
+ * non-zero return rather than an exception. An escaping exception is therefore
+ * evidence that the submission itself was attempted, and the run is classified
+ * `Partial` — uncertain execution, which retains resources and poisons
+ * admission. Returning non-zero from `submit_aicore` is by contrast a failure
+ * before any execution-visible submission, so it stays `NotStarted` and is safe
+ * to roll back.
+ */
 template <typename AicoreSubmit, typename AicpuSubmit>
 struct ExactLaunchTransaction {
     static LaunchTransactionResult
@@ -135,8 +150,6 @@ struct ExactLaunchTransaction {
             result.rc = std::forward<AicoreSubmit>(submit_aicore)();
         } catch (...) {
             result.rc = -1;
-            // Submission callbacks may throw after starting work. Without a
-            // receipt, the caller must retain resources and poison admission.
             result.progress = LaunchProgress::Partial;
             return result;
         }

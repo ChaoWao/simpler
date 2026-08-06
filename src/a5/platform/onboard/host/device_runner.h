@@ -212,8 +212,11 @@ private:
     std::atomic<RunPollState> run_poll_state_{RunPollState::Idle};
     std::atomic<uint32_t> run_poll_slot_{PTO_PIPELINE_MAX_DEPTH};
 
-    // Release execution-owned per-run resources and publish a sticky terminal
-    // state. Idempotent so enqueue rollback and drain share one path.
+    // Release execution-owned per-run resources. Idempotent so prepare rollback
+    // and drain share one path. `launched` publishes the sticky terminal poll
+    // state, which only a run that reached the streams may claim; the collectors
+    // are released either way, since prepare_execution() initialized them for
+    // this run alone.
     void cleanup_execution(PreparedExecution &prepared, bool launched) noexcept;
 
     // On an AICore launch/sync error, best-effort drain the device so a later

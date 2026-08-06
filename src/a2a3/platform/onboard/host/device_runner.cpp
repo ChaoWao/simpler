@@ -250,7 +250,7 @@ int DeviceRunner::prepare_execution(
     auto execution = std::make_unique<PreparedExecution>(identity, runtime, config, pipeline_slot);
     execution->resources_owned = true;
     auto prepare_rollback = RAIIScopeGuard([this, &execution]() {
-        cleanup_execution(*execution, /*launched=*/false, /*retire_aicore=*/false);
+        cleanup_execution(*execution, /*retire_aicore=*/false);
     });
     if (!run_stream_slots_.ready(selected_pipeline_slot)) {
         LOG_ERROR("run stream set %u was not provisioned during native prepare", selected_pipeline_slot);
@@ -471,7 +471,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
     PreparedExecution &prepared = *active.prepared;
     const uint32_t pipeline_slot = prepared.pipeline_slot;
     auto drain_cleanup = RAIIScopeGuard([this, &prepared]() {
-        cleanup_execution(prepared, /*launched=*/true, /*retire_aicore=*/true);
+        cleanup_execution(prepared, /*retire_aicore=*/true);
     });
 
     int rc = reap_run(pipeline_slot);
@@ -493,12 +493,12 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
     return 0;
 }
 
-void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool launched, bool retire_aicore) noexcept {
+void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool retire_aicore) noexcept {
     if (!prepared.resources_owned) return;
 
     // Collectors must stop before their backing arguments are released; the
     // per-run stream retires last. Each cleanup operation is idempotent.
-    if (launched) finalize_collectors();
+    finalize_collectors();
     (void)prepared.kernel_args.finalize_device_kernel_args();
     (void)prepared.kernel_args.finalize_runtime_args();
     if (prepared.kernel_args.args.pmu_reg_addrs != 0) {
@@ -517,7 +517,7 @@ void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool launched,
 }
 
 void DeviceRunner::abandon_prepared_execution(PreparedExecution &prepared) noexcept {
-    cleanup_execution(prepared, /*launched=*/false, /*retire_aicore=*/true);
+    cleanup_execution(prepared, /*retire_aicore=*/true);
 }
 
 int DeviceRunner::ensure_run_stream_set(unsigned slot) {
@@ -582,46 +582,54 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
     LaunchTransactionResult result = exact_launch_transaction(
         prepared.identity, std::move(permit),
         [&]() {
-            activate_launch_shape(runtime);
-            (void)arm_device_wall_buffer(prepared.kernel_args);
-            start_shared_collectors_for_run();
-            if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
-                auto thread_factory = [this](std::function<void()> fn) {
-                    return create_thread(std::move(fn));
-                };
-                dep_gen_collector_.start(thread_factory);
-            }
-            if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
-                std::vector<CoreType> core_types(num_aicore);
-                for (int i = 0; i < num_aicore; i++)
-                    core_types[i] = runtime.get_workers()[i].core_type;
-                chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
-            }
-            int rc = run_stream_slots_.mark_submitted(slot);
-            if (rc != 0) {
-                LOG_ERROR("launch_run: failed to publish stream set %u: %d", slot, rc);
-                return rc;
-            }
+            // Arming precedes any execution-visible submission, so its failures —
+            // including a thread-spawn or allocation throw — are reported as an rc
+            // and leave the run safely rollback-able.
+            try {
+                activate_launch_shape(runtime);
+                (void)arm_device_wall_buffer(prepared.kernel_args);
+                start_shared_collectors_for_run();
+                if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
+                    auto thread_factory = [this](std::function<void()> fn) {
+                        return create_thread(std::move(fn));
+                    };
+                    dep_gen_collector_.start(thread_factory);
+                }
+                if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
+                    std::vector<CoreType> core_types(num_aicore);
+                    for (int i = 0; i < num_aicore; i++)
+                        core_types[i] = runtime.get_workers()[i].core_type;
+                    chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
+                }
+                int rc = run_stream_slots_.mark_submitted(slot);
+                if (rc != 0) {
+                    LOG_ERROR("launch_run: failed to publish stream set %u: %d", slot, rc);
+                    return rc;
+                }
 
-            // Launch the AICore worker BEFORE the AICPU Run task — mirrors the a5 path
-            // so the two arches stay symmetric. First-launch latency optimization +
-            // op-timeout-family defense-in-depth: with the AICPU Run task launched first
-            // it occupies the device (spinning in the handshake), and the first AICore
-            // launch — which lazily loads the kernel binary onto the device inside
-            // rtKernelLaunchWithHandleV2 — is slow; launching AICore first does that load
-            // on an idle device. The handshake is launch-order-independent. The ~1.4 s
-            // slow-launch / 207001 wedge was measured on a5; this mirror is UNVERIFIED on
-            // a2a3 silicon (the dev box is a5-only), relying on CI. See
-            // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
-            // The AICore publishes aicore_done on launch (gated by nothing), and the
-            // workers region persists across runs in the pooled arena. Clearing each
-            // worker's aicore_done before the AICore kernel launches keeps the AICPU's
-            // handshake sweep from reading a prior run's report — which would open a
-            // window on that run's physical_core_id. Only aicore_done needs clearing; the
-            // AICore overwrites physical_core_id/core_type in the same report.
-            Handshake *workers = runtime.get_workers();
-            for (int i = 0; i < num_aicore; i++)
-                workers[i].aicore_done = 0;
+                // Launch the AICore worker BEFORE the AICPU Run task — mirrors the a5 path
+                // so the two arches stay symmetric. First-launch latency optimization +
+                // op-timeout-family defense-in-depth: with the AICPU Run task launched first
+                // it occupies the device (spinning in the handshake), and the first AICore
+                // launch — which lazily loads the kernel binary onto the device inside
+                // rtKernelLaunchWithHandleV2 — is slow; launching AICore first does that load
+                // on an idle device. The handshake is launch-order-independent. The ~1.4 s
+                // slow-launch / 207001 wedge was measured on a5; this mirror is UNVERIFIED on
+                // a2a3 silicon (the dev box is a5-only), relying on CI. See
+                // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
+                // The AICore publishes aicore_done on launch (gated by nothing), and the
+                // workers region persists across runs in the pooled arena. Clearing each
+                // worker's aicore_done before the AICore kernel launches keeps the AICPU's
+                // handshake sweep from reading a prior run's report — which would open a
+                // window on that run's physical_core_id. Only aicore_done needs clearing; the
+                // AICore overwrites physical_core_id/core_type in the same report.
+                Handshake *workers = runtime.get_workers();
+                for (int i = 0; i < num_aicore; i++)
+                    workers[i].aicore_done = 0;
+            } catch (...) {
+                LOG_ERROR("launch_run: arming failed before any stream submission");
+                return -1;
+            }
 
             LOG_INFO("=== launch_aicore_kernel ===");
             int launch_rc = launch_aicore_kernel(streams.aicore, prepared.kernel_args.device_k_args_);
