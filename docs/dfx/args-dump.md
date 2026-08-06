@@ -370,7 +370,9 @@ DumpBufferState[num_dump_threads]               (per-thread)
 ├── current_buf_ptr            (AICPU active DumpMetaBuffer*)
 ├── current_buf_seq
 ├── arena_base / arena_size    (per-thread arena pointers)
-├── arena_write_offset         (AICPU monotonic cursor)
+├── arena_write_offset         (AICPU cursor in the current arena reuse cycle)
+├── published_payload_count    (payloads committed to Host through RQ entries)
+├── completed_payload_count    (published watermark acknowledged by Host)
 └── dropped_record_count
 
 DumpMetaBuffer pool (rotated)                   (BUFFERS_PER_THREAD per thread)
@@ -565,21 +567,19 @@ deviation from §5.4 is the **transport channel**: a5 has no
 host-shadow `malloc()` and the mgmt loop synchronizes the two via
 `profiling_copy.h` (`rtMemcpy` onboard, `memcpy` in sim).
 `MemoryOps` therefore carries five callbacks (`alloc` / `reg` /
-`free_` / `copy_to_device` / `copy_from_device`); the mgmt loop
-mirrors the entire shm region (`DumpDataHeader` + per-thread
-`DumpBufferState`) device → host at the top of every tick, then
-pushes back only the fields host modified (advanced
-`queue_heads[q]`, refilled `free_queue.tail` and
-`buffer_ptrs[slot]`) via `BufferPoolManager::write_range_to_device`.
-The bulk `mirror_shm_to_device` is **not** called from the mgmt
-loop: it would race with AICPU writes to device-only fields
-(`current_buf_ptr`, `total/dropped` counters, `queue_tails`,
-`free_queue.head`) and roll them back. Each popped
-`DumpMetaBuffer` is still pulled on demand inside
-`ProfilerAlgorithms::process_entry`. The per-thread arena lives
-outside the shm region, so `on_buffer_collected` issues an
-additional `copy_from_device` for the arena bytes referenced by
-the buffer's records.
+`free_` / `copy_to_device` / `copy_from_device`). The mgmt threads
+pull queue indices and ready entries on demand, then push back only
+the fields host modified (advanced `queue_heads[q]`, refilled
+`free_queue.tail` and `buffer_ptrs[slot]`) via
+`BufferPoolManager::write_range_to_device`. Each popped
+`DumpMetaBuffer` is pulled inside `ProfilerAlgorithms::process_entry`.
+The per-thread arena lives outside the shm region, so
+`on_buffer_collected` separately refreshes `arena_write_offset` and
+copies the arena bytes. The freeze-release predicate refreshes each
+thread's `published_payload_count` before comparing their sum with the
+single host writer's completed payload count. Once equal, Host writes each
+thread's published watermark back as `completed_payload_count`; AICPU requires
+this acknowledgement before reusing that thread's arena.
 
 ```text
         HOST                                         DEVICE
@@ -598,8 +598,8 @@ the buffer's records.
 │   split mgmt starts      │               │   wait FIN               │
 │   collector shards start │               │   AFTER_COMPLETION       │
 │                          │               │     dump_arg_record()    │
-│ mgmt every 10us tick:    │               │   if buffer full:        │
-│   copy_from_device(shm)  │<──memcpy─────<│     push ready entry,    │
+│ mgmt polling:            │               │   if buffer full:        │
+│   refresh queue fields   │<──memcpy─────<│     push ready entry,    │
 │   for each ready entry:  │               │     pop next from free_q │
 │     copy buf from device │<──memcpy─────<│                          │
 │     resolve host ptr     │               │ dump_args_flush():       │
@@ -704,9 +704,10 @@ device.
 
 ## 7. Limitations
 
-Three failure modes exist when dump buffers run out of space. All
-three surface in the JSON manifest plus the `dump_args_flush`
-log line so users can detect and diagnose them.
+Three pressure or failure conditions exist when dump buffers run out
+of space. Successful arena backpressure preserves payload; truncation
+and record discard surface in the JSON manifest plus the
+`dump_args_flush` log line so users can detect and diagnose them.
 
 ### 7.1 Truncation (`truncated = true`)
 
@@ -734,73 +735,32 @@ contiguous), enough for statistical sampling.
 proportionally) so the arena is at least as large as the biggest
 tensor you need to inspect.
 
-### 7.2 Overwrite (`overwritten = true`)
+### 7.2 Arena payload freeze release
 
-**Trigger:** the circular arena wraps around and AICPU writes new
-payload data over a region whose metadata record has already been
-emitted but whose payload has not yet been consumed by the host.
+`arena_write_offset` remains monotonic and physical writes use `% arena_size`.
+Before reserving an offset or copying payload bytes, AICPU checks whether the
+arena is already one full physical cycle deep or whether the new payload would
+cross the physical end. If so, it seals/publishes the current metadata buffer
+and opens the existing freeze.
 
-**a2a3 mechanism:** the arena is a monotonic-offset circular buffer.
-`arena_write_offset` grows without bound; the actual write position
-is `offset % arena_size`. When the host processes a record it
-compares the record's `payload_offset` against a high-water mark:
-
-```text
-high_water = max payload_offset seen so far (maintained per-thread)
-if high_water > arena_size:
-    oldest_valid = high_water − arena_size
-    if record.payload_offset < oldest_valid:
-        overwritten = true
-```
-
-Because a2a3 uses shared memory and a background reader, the host
-can drain arena data while the kernel is still running. Overwrite
-happens only when AICPU writes faster than the host can read —
-many large tensors arrive in rapid succession without the host
-keeping up.
-
-**a5 mechanism:** same arithmetic, but detection happens in
-`collect_all()` after `rtStreamSynchronize`:
-
-```text
-write_offset = arena_header.write_offset   (total bytes ever written)
-if write_offset > arena_size:
-    oldest_valid = write_offset − arena_size
-    if record.payload_offset < oldest_valid:
-        overwritten = true
-```
-
-a5 collects only after the stream finishes, so the entire execution
-window's data must fit in the arena. If total payload bytes written
-across all tasks exceed `arena_size`, the earliest payloads are
-overwritten.
-
-**Effect:** overwritten records appear with `"overwritten": true`
-and zero payload bytes in the binary file. Metadata (shape, dtype,
-task_id) is preserved — only the raw data is lost.
-
-**Tuning:** raise `PLATFORM_DUMP_BUFFERS_PER_THREAD` (arena grows
-proportionally) so total payload fits, or reduce the number of
-tasks being dumped.
+At each existing RQ publish point, AICPU counts the non-empty tensor payload
+records in that metadata buffer. The host's single writer increments one global
+completion count only after `args.bin` accepts a payload.
+`backpressure_release_ready()` therefore holds an existing queue freeze until
+the completed count reaches the sum of all threads' published counts. The common
+framework still independently requires all RQs drained and FQs refilled. Host
+also acknowledges each completed per-thread watermark. The triggering thread
+requires that acknowledgement, even if the common queue freeze has already
+released, before aligning its monotonic logical offset to the next physical
+arena boundary and writing the pending payload from the arena start.
+The cursor is never reset and no reclaimed/published arena offset is needed.
 
 ### 7.3 Record discard (`dropped_count` / `dropped_records`)
 
 **Trigger:** the metadata record buffer (not the payload arena) is
 full and no replacement buffer is available.
 
-**a5 mechanism (simple):** each thread has a single `DumpBuffer`
-with `capacity = RECORDS_PER_BUFFER` (default 256). When `count >=
-capacity`, subsequent `dump_arg_record()` calls increment
-`dropped_count` and return immediately — no metadata, no payload
-is stored for that tensor.
-
-```text
-if buf.count >= buf.capacity:
-    buf.dropped_count++
-    return              ← tensor silently skipped
-```
-
-**a2a3 mechanism (rotating buffers):** each thread rotates through
+**Mechanism (identical on a2a3 and a5):** each thread rotates through
 multiple metadata buffers via an SPSC free queue. When a buffer
 fills (256 records), AICPU tries to:
 
@@ -808,10 +768,11 @@ fills (256 records), AICPU tries to:
    host mgmt thread to pick up).
 2. Pop a fresh buffer from the free queue.
 
-If the ready queue is full or the free queue is empty, AICPU
-spin-waits up to `DUMP_SPIN_WAIT_LIMIT` (1 000 000 iterations) to
-give the host mgmt thread (driving `BufferPoolManager<DumpModule>`)
-time to replenish. If the wait expires:
+If the ready queue is full or the free queue is empty, AICPU raises
+the corresponding DFX contention signal and waits at the existing
+bounded freeze gate while the host drains/refills the queues. If the
+host-crash timeout expires, the current records are accounted as
+dropped.
 
 ```text
 // Overwrite current buffer — account for lost records
@@ -836,8 +797,9 @@ host hand-off queue).
 | Condition | Flag | Metadata | Payload | a2a3 | a5 |
 | --------- | ---- | -------- | ------- | ---- | -- |
 | Tensor > arena | `truncated` | Preserved | Partial (`arena/2` bytes) | Same | Same |
-| Arena wraps, old data overwritten | `overwritten` | Preserved | Lost (zero bytes in bin) | Rare (concurrent drain) | Likely if total data > arena |
-| Record buffer full, no free buffer | `dropped_count` | Lost | Lost | After spin-wait fallback | Immediate when count ≥ capacity |
+| Arena host writer falls behind | none on success | Preserved | Preserved after bounded freeze | Same | Same |
+| Arena collection/write fails | `overwritten` or run error | Preserved | May be lost | Same | Same |
+| Record buffer full, no free buffer | `dropped_count` | Lost | Lost | After freeze timeout | Same |
 
 ### 7.5 Configuration knobs
 
@@ -847,8 +809,8 @@ and match between `a2a3` and `a5`:
 
 | Constant | Default | Effect |
 | -------- | ------- | ------ |
-| `PLATFORM_DUMP_RECORDS_PER_BUFFER` | 256 | Max records per DumpBuffer (a2a3: per metadata buffer) |
-| `PLATFORM_DUMP_BUFFERS_PER_THREAD` | 8 | Arena size multiplier (a2a3: also SPSC free queue depth) |
+| `PLATFORM_DUMP_RECORDS_PER_BUFFER` | 256 | Max records per metadata buffer |
+| `PLATFORM_DUMP_BUFFERS_PER_THREAD` | 8 | Arena size multiplier and SPSC free queue depth |
 | `PLATFORM_DUMP_AVG_TENSOR_BYTES` | 64 KiB | Arena size multiplier |
 | `PLATFORM_DUMP_MAX_DIMS` | 5 | Upper bound on shape / offset arrays |
 | `PLATFORM_MAX_AICPU_THREADS` | 7 | Number of dump-producing threads |

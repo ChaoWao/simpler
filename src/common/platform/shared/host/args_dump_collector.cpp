@@ -19,10 +19,9 @@
  *        export.
  *
  * a5 specifics: device↔host transfers go through profiling_copy.h. The
- * framework's mgmt loop mirrors the shm region per tick and pulls each
- * popped DumpMetaBuffer's contents on demand. on_buffer_collected pulls
- * the relevant portion of the originating thread's arena before reading
- * args records (arena buffers live outside the shm region).
+ * framework pulls queue fields and each popped DumpMetaBuffer on demand.
+ * on_buffer_collected separately refreshes the originating thread's arena
+ * write cursor and payload bytes because arenas live outside the shm region.
  */
 
 #include "host/args_dump_collector.h"
@@ -117,6 +116,9 @@ int ArgsDumpCollector::initialize(
     total_truncated_count_.store(0, std::memory_order_relaxed);
     total_overwrite_count_.store(0, std::memory_order_relaxed);
     last_progress_ms_.store(0, std::memory_order_relaxed);
+    for (auto &count : written_payload_counts_) {
+        count.store(0, std::memory_order_relaxed);
+    }
 
     // Stash the memory context on the base up-front so alloc_paired_buffer
     // (which reads alloc_cb_/register_cb_/free_cb_/device_id_)
@@ -170,6 +172,8 @@ int ArgsDumpCollector::initialize(
         state->arena_base = reinterpret_cast<uint64_t>(ai.dev_ptr);
         state->arena_size = arena_size;
         state->arena_write_offset = 0;
+        state->published_payload_count = 0;
+        state->completed_payload_count = 0;
         state->dropped_record_count = 0;
 
         LOG_INFO(
@@ -275,12 +279,16 @@ void ArgsDumpCollector::process_dump_buffer(const DumpReadyBufferInfo &info, int
     uint64_t records_appended = 0;
 
     // a5: pull the relevant portion of the originating thread's arena from
-    // device. arena_write_offset was mirrored into shm_host_ at the top of
-    // the mgmt tick that produced this entry, so it is safe to read here.
+    // device. The arena lives outside the shared-memory region, so refresh
+    // its write cursor explicitly before copying the payload bytes.
     int thread_idx = static_cast<int>(info.thread_index);
     if (thread_idx >= 0 && thread_idx < static_cast<int>(arenas_.size())) {
         ArenaInfo &ai = arenas_[thread_idx];
         DumpBufferState *state = get_dump_buffer_state(shm_host_, thread_idx);
+        DumpBufferState *device_state = get_dump_buffer_state(dump_shared_mem_dev_, thread_idx);
+        profiling_copy_from_device(
+            &state->arena_write_offset, &device_state->arena_write_offset, sizeof(state->arena_write_offset)
+        );
         uint64_t write_offset = state->arena_write_offset;
         uint64_t bytes_to_copy = (write_offset < ai.size) ? write_offset : ai.size;
         if (bytes_to_copy > 0) {
@@ -290,7 +298,6 @@ void ArgsDumpCollector::process_dump_buffer(const DumpReadyBufferInfo &info, int
 
     for (uint32_t i = 0; i < count; i++) {
         const ArgsDumpRecord &rec = buf->records[i];
-
         DumpedArg dt{};
         dt.task_id = rec.task_id;
         // rec is read from device shared memory (untrusted): clamp func_count so a
@@ -370,16 +377,12 @@ void ArgsDumpCollector::process_dump_buffer(const DumpReadyBufferInfo &info, int
         }
 
         dt.payload_size = dt.bytes.size();
-
         bool has_payload = dt.kind == ArgsDumpKind::TENSOR && !dt.overwritten && !dt.bytes.empty();
         if (has_payload) {
-            std::vector<uint8_t> payload = std::move(dt.bytes);
-            DumpedArg writer_item = dt;
-            writer_item.bytes = std::move(payload);
+            PayloadWriteRequest writer_item{info.thread_index, std::move(dt.bytes)};
             {
                 std::scoped_lock<std::mutex> lock(write_mutex_);
                 dt.bin_offset = next_bin_offset_;
-                writer_item.bin_offset = next_bin_offset_;
                 next_bin_offset_ += dt.payload_size;
                 write_queue_.push(std::move(writer_item));
             }
@@ -584,7 +587,7 @@ static uint64_t get_num_elements(const DumpedArg &dt) {
 
 void ArgsDumpCollector::writer_loop() {
     while (true) {
-        DumpedArg dt;
+        PayloadWriteRequest request;
         {
             std::unique_lock<std::mutex> lock(write_mutex_);
             write_cv_.wait(lock, [this] {
@@ -593,18 +596,64 @@ void ArgsDumpCollector::writer_loop() {
             if (write_queue_.empty() && writer_done_.load()) {
                 break;
             }
-            dt = std::move(write_queue_.front());
+            request = std::move(write_queue_.front());
             write_queue_.pop();
         }
 
-        if (!dt.bytes.empty()) {
+        if (!request.bytes.empty()) {
             bin_file_.write(
-                reinterpret_cast<const char *>(dt.bytes.data()), static_cast<std::streamsize>(dt.bytes.size())
+                reinterpret_cast<const char *>(request.bytes.data()), static_cast<std::streamsize>(request.bytes.size())
             );
+            written_payload_counts_[request.thread_index].fetch_add(1, std::memory_order_release);
         }
 
-        bytes_written_ += dt.bytes.size();
+        bytes_written_ += request.bytes.size();
     }
+}
+
+bool ArgsDumpCollector::backpressure_release_ready() const {
+    if (shm_host_ == nullptr || dump_shared_mem_dev_ == nullptr) {
+        return true;
+    }
+    const DumpDataHeader *header = get_dump_header(shm_host_);
+    // A freeze opened later in this management tick remains active until the
+    // next tick evaluates the payload counts.
+    if (header->backpressure.rq_freeze_active == 0 && header->backpressure.fq_freeze_active == 0) {
+        return false;
+    }
+    std::array<uint64_t, PLATFORM_MAX_AICPU_THREADS> published_payload_counts{};
+    for (int t = 0; t < num_dump_threads_; t++) {
+        DumpBufferState *host_state = get_dump_buffer_state(shm_host_, t);
+        DumpBufferState *device_state = get_dump_buffer_state(dump_shared_mem_dev_, t);
+        if (profiling_copy_from_device(
+                &host_state->published_payload_count, &device_state->published_payload_count,
+                sizeof(host_state->published_payload_count)
+            ) != 0) {
+            return false;
+        }
+        published_payload_counts[t] = host_state->published_payload_count;
+    }
+    for (int t = 0; t < num_dump_threads_; t++) {
+        if (written_payload_counts_[t].load(std::memory_order_acquire) != published_payload_counts[t]) {
+            return false;
+        }
+    }
+    for (int t = 0; t < num_dump_threads_; t++) {
+        DumpBufferState *host_state = get_dump_buffer_state(shm_host_, t);
+        DumpBufferState *device_state = get_dump_buffer_state(dump_shared_mem_dev_, t);
+        const uint64_t completed_payload_count = published_payload_counts[t];
+        if (host_state->completed_payload_count == completed_payload_count) {
+            continue;
+        }
+        if (profiling_copy_to_device(
+                &device_state->completed_payload_count, &completed_payload_count, sizeof(completed_payload_count)
+            ) != 0) {
+            return false;
+        }
+        host_state->completed_payload_count = completed_payload_count;
+        wmb();
+    }
+    return true;
 }
 
 int ArgsDumpCollector::export_dump_files() {
@@ -881,6 +930,9 @@ int ArgsDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Dump
     total_overwrite_count_.store(0, std::memory_order_relaxed);
     writer_started_ = false;
     clear_memory_context();
+    for (auto &count : written_payload_counts_) {
+        count.store(0, std::memory_order_relaxed);
+    }
 
     return 0;
 }

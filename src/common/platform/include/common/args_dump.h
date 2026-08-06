@@ -180,27 +180,30 @@ static_assert(sizeof(DumpFreeQueue) == 128, "DumpFreeQueue must be 128 bytes");
  * - free_queue.head: Device writes (pops buffers)
  * - current_buf_ptr: Device writes (after pop), Host reads (for flush/collect)
  * - current_buf_seq: Device writes (monotonic counter)
- * - arena_write_offset: Device writes (monotonic), Host reads (for overwrite detection)
+ * - arena_write_offset: Device writes (monotonic), Host reads for overwrite detection
+ * - published_payload_count: Device counts payload records committed to the ready queue
+ * - completed_payload_count: Host acknowledges payloads after writer completion
  * - dropped_record_count: Device writes (records lost before host export)
  */
 struct DumpBufferState {
-    DumpFreeQueue free_queue;                // SPSC queue of free DumpMetaBuffer addresses
-    volatile uint64_t current_buf_ptr;       // Current active DumpMetaBuffer (0 = none)
-    volatile uint32_t current_buf_seq;       // Sequence number for ordering
-    uint32_t pad0;                           // Alignment
-    volatile uint64_t arena_base;            // Device pointer to this thread's arena
-    volatile uint64_t arena_size;            // Arena size in bytes
-    volatile uint64_t arena_write_offset;    // Monotonic write cursor (host computes % arena_size)
-    volatile uint32_t dropped_record_count;  // Records dropped before host export
-    uint8_t pad1[84];                        // Pad to 256 bytes (172 + 84 = 256)
+    DumpFreeQueue free_queue;                   // SPSC queue of free DumpMetaBuffer addresses
+    volatile uint64_t current_buf_ptr;          // Current active DumpMetaBuffer (0 = none)
+    volatile uint32_t current_buf_seq;          // Sequence number for ordering
+    uint32_t pad0;                              // Alignment
+    volatile uint64_t arena_base;               // Device pointer to this thread's arena
+    volatile uint64_t arena_size;               // Arena size in bytes
+    volatile uint64_t arena_write_offset;       // Monotonic write cursor (host computes % arena_size)
+    volatile uint64_t published_payload_count;  // Payload records committed to the ready queue
+    volatile uint64_t completed_payload_count;  // Host-acknowledged published payload count
+    volatile uint32_t dropped_record_count;     // Records dropped before host export
+    uint8_t pad1[68];                           // Pad to 256 bytes (188 + 68 = 256)
 } __attribute__((aligned(64)));
 
 static_assert(sizeof(DumpBufferState) == 256, "DumpBufferState must be 256 bytes");
 static_assert(offsetof(DumpBufferState, current_buf_ptr) == 128, "DumpBufferState current_buf_ptr offset changed");
 static_assert(offsetof(DumpBufferState, arena_base) == 144, "DumpBufferState arena_base offset changed");
-static_assert(
-    offsetof(DumpBufferState, dropped_record_count) == 168, "DumpBufferState dropped_record_count offset changed"
-);
+static_assert(offsetof(DumpBufferState, completed_payload_count) == 176, "completed payload offset changed");
+static_assert(offsetof(DumpBufferState, dropped_record_count) == 184, "dropped record offset changed");
 
 // =============================================================================
 // DumpReadyQueueEntry - Ready Queue Entry

@@ -32,6 +32,11 @@ int test_free(void *ptr) {
     return 0;
 }
 
+class TestArgsDumpCollector : public ArgsDumpCollector {
+public:
+    void *get_dump_shm_host_ptr() const { return shm_host_; }
+};
+
 }  // namespace
 
 TEST(ArgsDumpCollectorTest, MergesConcurrentShardRecordsIntoManifest) {
@@ -90,6 +95,131 @@ TEST(ArgsDumpCollectorTest, MergesConcurrentShardRecordsIntoManifest) {
     ASSERT_TRUE(manifest_file.is_open());
     const std::string manifest{std::istreambuf_iterator<char>(manifest_file), std::istreambuf_iterator<char>()};
     EXPECT_NE(manifest.find("\"total_args\": " + std::to_string(kShardCount * kRecordsPerShard)), std::string::npos);
+
+    collector.finalize(nullptr, test_free);
+    std::filesystem::remove_all(test_dir);
+}
+
+TEST(ArgsDumpCollectorTest, BackpressureReleaseWaitsForAllPublishedPayloads) {
+    const std::filesystem::path test_dir =
+        std::filesystem::temp_directory_path() / ("args_dump_count_test_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(test_dir);
+    ASSERT_TRUE(std::filesystem::create_directories(test_dir));
+
+    constexpr int kArenaCount = 2;
+    constexpr uint64_t kPayloadSize = sizeof(uint64_t);
+    TestArgsDumpCollector collector;
+    ASSERT_EQ(
+        collector.initialize(kArenaCount, 0, test_alloc, nullptr, test_free, test_dir.string(), DumpArgsLevel::FULL), 0
+    );
+
+    auto *device_base = collector.get_dump_shm_device_ptr();
+    ASSERT_NE(device_base, nullptr);
+    auto *host_base = collector.get_dump_shm_host_ptr();
+    ASSERT_NE(host_base, nullptr);
+    DumpDataHeader *header = get_dump_header(host_base);
+    ASSERT_NE(header, nullptr);
+    EXPECT_FALSE(collector.backpressure_release_ready());
+    header->backpressure.fq_freeze_active = 1;
+    std::vector<DumpMetaBuffer> buffers(kArenaCount);
+    for (int arena_index = 0; arena_index < kArenaCount; arena_index++) {
+        DumpBufferState *state = get_dump_buffer_state(device_base, arena_index);
+        ASSERT_NE(state, nullptr);
+        auto *arena = reinterpret_cast<uint64_t *>(state->arena_base);
+        ASSERT_NE(arena, nullptr);
+        arena[0] = static_cast<uint64_t>(arena_index + 1);
+        state->arena_write_offset = kPayloadSize;
+        state->published_payload_count = 1;
+
+        DumpMetaBuffer &buffer = buffers[arena_index];
+        buffer.count = 1;
+        ArgsDumpRecord &record = buffer.records[0];
+        record.task_id = static_cast<uint64_t>(arena_index);
+        record.role = static_cast<uint8_t>(ArgsDumpRole::INPUT);
+        record.stage = static_cast<uint8_t>(ArgsDumpStage::BEFORE_DISPATCH);
+        record.kind = static_cast<uint8_t>(ArgsDumpKind::TENSOR);
+        record.dtype = static_cast<uint8_t>(DataType::UINT64);
+        record.ndims = 1;
+        record.shapes[0] = 1;
+        record.strides[0] = 1;
+        record.payload_offset = 0;
+        record.payload_size = kPayloadSize;
+    }
+
+    EXPECT_FALSE(collector.backpressure_release_ready());
+
+    DumpReadyBufferInfo first{};
+    first.thread_index = 0;
+    first.host_buffer_ptr = &buffers[0];
+    collector.on_buffer_collected(first, 0);
+    EXPECT_FALSE(collector.backpressure_release_ready());
+
+    DumpReadyBufferInfo second{};
+    second.thread_index = 1;
+    second.host_buffer_ptr = &buffers[1];
+    collector.on_buffer_collected(second, 1);
+    ASSERT_EQ(collector.export_dump_files(), 0);
+    EXPECT_TRUE(collector.backpressure_release_ready());
+    for (int arena_index = 0; arena_index < kArenaCount; arena_index++) {
+        DumpBufferState *state = get_dump_buffer_state(device_base, arena_index);
+        EXPECT_EQ(state->completed_payload_count, state->published_payload_count);
+    }
+
+    collector.finalize(nullptr, test_free);
+    std::filesystem::remove_all(test_dir);
+}
+
+TEST(ArgsDumpCollectorTest, BackpressureReleaseDoesNotOffsetPayloadsAcrossThreads) {
+    const std::filesystem::path test_dir =
+        std::filesystem::temp_directory_path() / ("args_dump_thread_count_test_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(test_dir);
+    ASSERT_TRUE(std::filesystem::create_directories(test_dir));
+
+    TestArgsDumpCollector collector;
+    ASSERT_EQ(collector.initialize(2, 0, test_alloc, nullptr, test_free, test_dir.string(), DumpArgsLevel::FULL), 0);
+
+    auto *device_base = collector.get_dump_shm_device_ptr();
+    ASSERT_NE(device_base, nullptr);
+    auto *host_base = collector.get_dump_shm_host_ptr();
+    ASSERT_NE(host_base, nullptr);
+    DumpDataHeader *header = get_dump_header(host_base);
+    ASSERT_NE(header, nullptr);
+    header->backpressure.fq_freeze_active = 1;
+    DumpBufferState *thread0_state = get_dump_buffer_state(device_base, 0);
+    DumpBufferState *thread1_state = get_dump_buffer_state(device_base, 1);
+    ASSERT_NE(thread0_state, nullptr);
+    ASSERT_NE(thread1_state, nullptr);
+
+    constexpr uint64_t kPayloadSize = sizeof(uint64_t);
+    auto *arena = reinterpret_cast<uint64_t *>(thread0_state->arena_base);
+    ASSERT_NE(arena, nullptr);
+    arena[0] = 1;
+    thread0_state->arena_write_offset = kPayloadSize;
+
+    DumpMetaBuffer buffer{};
+    buffer.count = 1;
+    ArgsDumpRecord &record = buffer.records[0];
+    record.kind = static_cast<uint8_t>(ArgsDumpKind::TENSOR);
+    record.dtype = static_cast<uint8_t>(DataType::UINT64);
+    record.ndims = 1;
+    record.shapes[0] = 1;
+    record.strides[0] = 1;
+    record.payload_size = kPayloadSize;
+
+    DumpReadyBufferInfo info{};
+    info.thread_index = 0;
+    info.host_buffer_ptr = &buffer;
+    collector.on_buffer_collected(info, 0);
+    ASSERT_EQ(collector.export_dump_files(), 0);
+
+    // Model a skewed global snapshot: one payload was written for thread 0,
+    // while the sampled publication belongs to thread 1. Equal totals must
+    // not acknowledge either thread.
+    thread0_state->published_payload_count = 0;
+    thread1_state->published_payload_count = 1;
+    EXPECT_FALSE(collector.backpressure_release_ready());
+    EXPECT_EQ(thread0_state->completed_payload_count, 0u);
+    EXPECT_EQ(thread1_state->completed_payload_count, 0u);
 
     collector.finalize(nullptr, test_free);
     std::filesystem::remove_all(test_dir);

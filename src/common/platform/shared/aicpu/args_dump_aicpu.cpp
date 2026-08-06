@@ -356,6 +356,21 @@ struct DumpDeviceModule {
     static void set_count(Buffer *buffer, uint32_t count) { buffer->count = count; }
 
     static void write_ready_entry(Context ctx, uint32_t tail, uint64_t buffer_ptr, uint32_t buffer_seq) {
+        DumpBufferState *state = s_dump_states[ctx.thread_idx];
+        auto *buffer = reinterpret_cast<DumpMetaBuffer *>(buffer_ptr);
+        uint64_t payload_count = 0;
+        uint32_t record_count = buffer->count;
+        if (record_count > PLATFORM_DUMP_RECORDS_PER_BUFFER) {
+            record_count = PLATFORM_DUMP_RECORDS_PER_BUFFER;
+        }
+        for (uint32_t i = 0; i < record_count; i++) {
+            const ArgsDumpRecord &record = buffer->records[i];
+            if (record.kind == static_cast<uint8_t>(ArgsDumpKind::TENSOR) && record.payload_size > 0) {
+                payload_count++;
+            }
+        }
+        state->published_payload_count += payload_count;
+        wmb();
         ctx.header->queues[ctx.thread_idx][tail].thread_index = static_cast<uint32_t>(ctx.thread_idx);
         ctx.header->queues[ctx.thread_idx][tail].buffer_ptr = buffer_ptr;
         ctx.header->queues[ctx.thread_idx][tail].buffer_seq = buffer_seq;
@@ -424,6 +439,49 @@ static int switch_dump_meta_buffer(int thread_idx) {
     }
     DumpEngine::switch_buffer(dump_context(thread_idx), state);
     return 0;
+}
+
+static bool ensure_dump_arena_capacity(int thread_idx, DumpBufferState *state, uint64_t copy_bytes) {
+    if (copy_bytes == 0) {
+        return true;
+    }
+    if (state == nullptr || copy_bytes > state->arena_size) {
+        return false;
+    }
+
+    const uint64_t physical_offset = state->arena_write_offset % state->arena_size;
+    const bool arena_full = state->arena_write_offset != 0 && physical_offset == 0;
+    const bool crosses_arena_end = copy_bytes > state->arena_size - physical_offset;
+    if (!arena_full && !crosses_arena_end) {
+        return true;
+    }
+
+    DumpMetaBuffer *buf = s_current_dump_buf[thread_idx];
+    if (buf != nullptr && buf->count > 0) {
+        uint32_t seq = state->current_buf_seq;
+        if (switch_dump_meta_buffer(thread_idx) != 0 || state->current_buf_seq == seq) {
+            return false;
+        }
+    }
+
+    const uint64_t target_payload_count = state->published_payload_count;
+    const uint64_t wait_start = get_sys_cnt_aicpu();
+    bool signalled = false;
+    dfx_backpressure::mark_fq_contended(s_dump_header, &signalled);
+    if (!dfx_backpressure::wait_for_release(s_dump_header, wait_start, kDumpQueueBackpressureWaitCycles)) {
+        return false;
+    }
+    while (state->completed_payload_count < target_payload_count) {
+        if (get_sys_cnt_aicpu() - wait_start >= kDumpQueueBackpressureWaitCycles) {
+            return false;
+        }
+        SPIN_WAIT_HINT();
+    }
+    rmb();
+    if (physical_offset != 0) {
+        state->arena_write_offset += state->arena_size - physical_offset;
+    }
+    return true;
 }
 
 struct CircularArenaWriter {
@@ -626,6 +684,19 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info) {
         // ChipTensor larger than entire arena — copy a partial sample
         copy_bytes = state->arena_size / 2;
         truncated = true;
+    }
+
+    if (!ensure_dump_arena_capacity(thread_idx, state, copy_bytes)) {
+        account_dropped_records(state, 1);
+        return -1;
+    }
+    buf = s_current_dump_buf[thread_idx];
+    if (buf == nullptr) {
+        buf = try_pop_dump_meta_buffer(thread_idx, state, state->current_buf_seq);
+        if (buf == nullptr) {
+            account_dropped_records(state, 1);
+            return -1;
+        }
     }
 
     uint64_t offset = state->arena_write_offset;

@@ -534,7 +534,7 @@ struct ProfilerAlgorithms {
     // extra_release_ready is the per-subsystem release predicate
     // (Derived::backpressure_release_ready(), default true). The caller
     // (mgmt_replenish_loop) evaluates it because this static has no Derived.
-    // tensor_dump uses it to hold the release until its collector has pulled all
+    // args_dump uses it to hold the release until its collector has pulled all
     // arena bytes (RQ-empty alone does not imply that — see buffer_pool_manager).
     template <typename Mgr>
     static void update_backpressure_freeze(Mgr &mgr, DataHeader *header, bool extra_release_ready = true) {
@@ -574,8 +574,8 @@ struct ProfilerAlgorithms {
             header->backpressure.fq_contended = 0;
             mgr.write_range_to_device(&header->backpressure.fq_contended, sizeof(header->backpressure.fq_contended));
             LOG_WARN(
-                "%s DFX backpressure TRIGGERED: free-queue-empty, pop-gate freeze OPENED — all AICPU lanes parked at "
-                "their pop gate",
+                "%s DFX backpressure TRIGGERED: free-queue-empty, pop-gate freeze OPENED — lanes park as they "
+                "reach an empty free queue",
                 Module::kSubsystemName
             );
         }
@@ -756,11 +756,12 @@ public:
     // DFX backpressure per-subsystem release predicate (CRTP hook). Default:
     // the freeze may release as soon as the framework's RQ-empty + FQ-full hold.
     // A subsystem whose collector owns a separate, independently-overwritten
-    // region (only tensor_dump today: the payload arena) MUST override this to
+    // region (only args_dump today: the payload arena) MUST override this to
     // return false until its collector has drained that region, else the device
-    // resumes and overwrites not-yet-pulled data. Called on the mgmt_replenish
-    // thread inside the freeze loop — overrides must be cheap, non-blocking, and
-    // read only atomics.
+    // resumes and overwrites not-yet-pulled data. Called once per mgmt tick
+    // before the state-machine update. The idle path must use only local state;
+    // an active-freeze check may refresh device state but must return without
+    // waiting for asynchronous work.
     bool backpressure_release_ready() const { return true; }
 
 private:
@@ -1166,9 +1167,10 @@ private:
             // for freeze_active. Always active (block-on-contention is the only
             // behavior); idle at zero cost until a lane raises `contended`.
             // Per-subsystem release predicate (CRTP): default true, only
-            // tensor_dump overrides it (gate release on collector-quiesce);
+            // args_dump overrides it (gate release on collector-quiesce);
             // evaluated here because update_backpressure_freeze is a static with
-            // no Derived, and must be cheap + non-blocking (freeze hot loop).
+            // no Derived. Its idle path must be local; an active-freeze check
+            // returns false rather than waiting for collector work.
             const bool extra_release_ready = static_cast<const Derived *>(this)->backpressure_release_ready();
             Alg::update_backpressure_freeze(manager_, header, extra_release_ready);
 

@@ -153,6 +153,32 @@ TEST(ProfilerDeviceEngineTest, PopFreeSupportsRecoveryAfterSwitchFailure) {
     EXPECT_EQ(new_buffer.count, 0u);
 }
 
+TEST(ProfilerDeviceEngineTest, PopFreeDoesNotParkWhileAFreeSlotIsAvailable) {
+    FakeHeader header;
+    FakeState state;
+    FakeBuffer new_buffer;
+    FakeBuffer *current = nullptr;
+    header.backpressure.fq_freeze_active = 1;
+    state.free_queue.buffer_ptrs[0] = reinterpret_cast<uint64_t>(&new_buffer);
+    state.free_queue.tail = 1;
+
+    auto buffer = Engine::pop_free(context(&header, &current), &state, 0);
+
+    EXPECT_EQ(buffer, &new_buffer);
+    EXPECT_EQ(state.free_queue.head, 1u);
+}
+
+TEST(ProfilerDeviceEngineTest, WaitForReleaseUsesCallerTimeoutBudget) {
+    FakeHeader header;
+    header.backpressure.fq_contended = 1;
+
+    EXPECT_FALSE(dfx_backpressure::wait_for_release(&header, get_sys_cnt_aicpu(), 0));
+
+    header.backpressure.fq_contended = 0;
+    EXPECT_TRUE(dfx_backpressure::wait_for_release(&header, get_sys_cnt_aicpu(), 0));
+    EXPECT_TRUE(dfx_backpressure::wait_for_release<FakeHeader>(nullptr, get_sys_cnt_aicpu(), 0));
+}
+
 TEST(ProfilerDeviceEngineTest, TryPopFreeReturnsImmediatelyWhenStartupQueueIsEmpty) {
     FakeHeader header;
     FakeState state;
