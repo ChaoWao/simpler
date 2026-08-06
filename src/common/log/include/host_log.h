@@ -17,8 +17,7 @@
  * both TIMING and WARN thresholds to CANN WARN.
  */
 
-#ifndef PLATFORM_HOST_LOG_H_
-#define PLATFORM_HOST_LOG_H_
+#pragma once
 
 #include <cstdarg>
 #include <cstdio>
@@ -32,9 +31,8 @@ public:
 
     void log(simpler::log::LogLevel level, const char *func, const char *fmt, ...);
 
-    // va_list-taking primitives — used by unified_log_* adapters to forward
-    // a caller's variadic args without an intermediate vsnprintf-to-buffer
-    // round-trip. Caller is responsible for `va_start` / `va_end`.
+    // va_list-taking primitive used by unified_log_* adapters. Caller is
+    // responsible for `va_start` / `va_end`.
     void vlog(simpler::log::LogLevel level, const char *func, const char *fmt, va_list args);
 
     void set_level(simpler::log::LogLevel level);
@@ -66,5 +64,3 @@ private:
     simpler::log::LogLevel current_level_;
     std::mutex mutex_;
 };
-
-#endif  // PLATFORM_HOST_LOG_H_

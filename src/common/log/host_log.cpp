@@ -15,14 +15,80 @@
 
 #include "host_log.h"
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <pthread.h>
+#include <vector>
+
+#include <unistd.h>
 
 using simpler::log::LogLevel;
+
+namespace {
+
+// Every STRACE marker renders well inside this, so the heap fallback below
+// stays off the path a traced run pays per span.
+constexpr size_t kRecordStackCapacity = 2048;
+
+// Renders the timestamp/thread/level prefix, the caller's message, and an
+// optional trailing newline into `buffer`, and returns the length of the whole
+// record. A return value of `capacity` or more means `buffer` holds only a
+// truncated prefix and the caller must re-render into that many bytes.
+size_t format_record(
+    char *buffer, size_t capacity, const char *ts, unsigned long tid, const char *level_tag, const char *func,
+    const char *fmt, va_list args, bool append_newline
+) {
+    size_t length = 0;
+    auto tail = [&]() -> char * {
+        return length < capacity ? buffer + length : nullptr;
+    };
+    auto remaining = [&]() -> size_t {
+        return length < capacity ? capacity - length : 0;
+    };
+
+    const int prefix = snprintf(tail(), remaining(), "[%s][T0x%lx][%s] %s: ", ts, tid, level_tag, func);
+    if (prefix < 0) {
+        return 0;
+    }
+    length += static_cast<size_t>(prefix);
+
+    va_list formatting_args;
+    va_copy(formatting_args, args);
+    const int body = vsnprintf(tail(), remaining(), fmt, formatting_args);
+    va_end(formatting_args);
+    if (body > 0) {
+        length += static_cast<size_t>(body);
+    }
+
+    if (append_newline) {
+        if (length + 1 < capacity) {
+            buffer[length] = '\n';
+            buffer[length + 1] = '\0';
+        }
+        length += 1;
+    }
+    return length;
+}
+
+void write_stderr(const char *record, size_t size) {
+    size_t offset = 0;
+    while (offset < size) {
+        const ssize_t written = ::write(STDERR_FILENO, record + offset, size - offset);
+        if (written > 0) {
+            offset += static_cast<size_t>(written);
+        } else if (written < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+}
+
+}  // namespace
 
 HostLogger &HostLogger::get_instance() {
     static HostLogger instance;
@@ -83,13 +149,26 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
 
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
-    std::scoped_lock lock(mutex_);
-    fprintf(stderr, "[%s][T0x%lx][%s] %s: ", ts, tid, level_tag, func);
-    vfprintf(stderr, fmt, args);
-    if (fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n') {
-        fputc('\n', stderr);
+    const bool append_newline = fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n';
+
+    // One write per record: a record of at most PIPE_BUF bytes reaches a shared
+    // pipe indivisibly, so forked workers writing a captured stderr cannot
+    // interleave inside it. A longer record — a large LOG_ERROR dump, say — has
+    // no such guarantee; STRACE markers stay well below the limit.
+    char stack_buffer[kRecordStackCapacity];
+    const size_t length =
+        format_record(stack_buffer, sizeof(stack_buffer), ts, tid, level_tag, func, fmt, args, append_newline);
+    if (length < sizeof(stack_buffer)) {
+        std::scoped_lock lock(mutex_);
+        write_stderr(stack_buffer, length);
+        return;
     }
-    fflush(stderr);
+
+    std::vector<char> heap_buffer(length + 1);
+    const size_t heap_length =
+        format_record(heap_buffer.data(), heap_buffer.size(), ts, tid, level_tag, func, fmt, args, append_newline);
+    std::scoped_lock lock(mutex_);
+    write_stderr(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length);
 }
 
 void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list args) {
