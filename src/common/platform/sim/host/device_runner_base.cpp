@@ -28,7 +28,6 @@
 #include "common/host_api.h"
 #include "cpu_sim_context.h"
 #include "host/raii_scope_guard.h"
-#include "native_run_launch_signal.h"
 #include "task_args.h"
 #include "utils/elf_build_id.h"
 
@@ -83,21 +82,22 @@ bool create_temp_so_file(const std::string &path_template, const uint8_t *data, 
 // SimDeviceRunnerBase Implementation
 // =============================================================================
 
-bool SimDeviceRunnerBase::try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal) {
-    if (owner == nullptr || launch_signal == nullptr) return false;
+bool SimDeviceRunnerBase::try_acquire_native_run(
+    const void *owner, const NativeRunIdentity &identity, LaunchPermit *permit
+) {
+    if (owner == nullptr || permit == nullptr) return false;
     const void *expected = nullptr;
     if (!active_native_run_.compare_exchange_strong(
             expected, owner, std::memory_order_acq_rel, std::memory_order_acquire
         )) {
         return false;
     }
-    native_launch_signal_ = launch_signal;
+    *permit = LaunchPermit(identity);
     return true;
 }
 
 void SimDeviceRunnerBase::release_native_run(const void *owner) {
     if (active_native_run_.load(std::memory_order_acquire) != owner) return;
-    native_launch_signal_ = nullptr;
     const void *expected = owner;
     (void)active_native_run_.compare_exchange_strong(
         expected, nullptr, std::memory_order_release, std::memory_order_relaxed
@@ -110,10 +110,6 @@ bool SimDeviceRunnerBase::native_run_active() const {
 
 bool SimDeviceRunnerBase::native_run_owned_by(const void *owner) const {
     return owner != nullptr && active_native_run_.load(std::memory_order_acquire) == owner;
-}
-
-void SimDeviceRunnerBase::publish_task_accepted() const {
-    if (native_launch_signal_ != nullptr) native_launch_signal_->publish_acceptance();
 }
 
 uint64_t SimDeviceRunnerBase::arena_bank_gm_heap_base(uint32_t bank_id) const {

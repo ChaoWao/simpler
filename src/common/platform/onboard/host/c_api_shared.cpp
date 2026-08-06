@@ -606,9 +606,17 @@ static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_
         validation_rc = -1;
     }
     int resources_rc = 0;
+    if (state->prepared_execution != nullptr) {
+        try {
+            state->runner->abandon_prepared_execution(*state->prepared_execution);
+        } catch (...) {
+            resources_rc = -1;
+        }
+    }
     if (state->runner_resources_owned) {
         try {
-            resources_rc = state->runner->abandon_native_run_resources(state->descriptor.pipeline_slot);
+            int abandon_rc = state->runner->abandon_native_run_resources(state->descriptor.pipeline_slot);
+            if (resources_rc == 0) resources_rc = abandon_rc;
         } catch (...) {
             resources_rc = -1;
         }
@@ -717,6 +725,12 @@ int simpler_prepare_run(
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+        rc = runner->prepare_execution(
+            state->runtime, state->config, state->descriptor.pipeline_slot, state->identity(),
+            &state->prepared_execution
+        );
+        if (rc != 0) return cleanup_failed_prepare(state, rc, true);
+        state->runner_resources_owned = false;
         state->host_thread_state = runner->take_native_run_thread_state();
         return 0;
     } catch (...) {
@@ -729,7 +743,8 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     OnboardNativeRunContext *state = native_run_context(ctx, runtime, "simpler_launch_run");
     if (state == nullptr || state->phase.load(std::memory_order_acquire) != NativeRunPhase::Prepared) return -1;
     if (!state->runner->can_accept_run() || !state->runner_reserved) return -1;
-    if (!state->runner->try_acquire_native_run(state, &state->launch_signal)) {
+    if (state->prepared_execution == nullptr ||
+        !state->runner->try_acquire_native_run(state, state->identity(), &state->launch_permit)) {
         LOG_ERROR("simpler_launch_run: execution claim is occupied (%s)", state->trace_attrs);
         return -1;
     }
@@ -755,11 +770,29 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
                 int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
                 if (attach_rc == 0) {
                     state->adopt_host_thread_state();
-                    state->runner->activate_launch_shape(state->runtime);
                     {
                         STRACE("simpler_run.runner_run");
                         entered_run = true;
-                        rc = state->runner->run(state->runtime, state->config, state->descriptor.pipeline_slot);
+                        DeviceRunnerBase::LaunchOutcome launch = state->runner->launch_execution(
+                            std::move(state->prepared_execution), std::move(state->launch_permit)
+                        );
+                        rc = launch.rc;
+                        state->prepared_execution = std::move(launch.prepared);
+                        state->active_execution = std::move(launch.active);
+                        if (launch.progress == LaunchProgress::Complete) {
+                            if (!state->launch_signal.publish_receipt(launch.receipt, state->identity())) {
+                                LOG_ERROR(
+                                    "simpler_launch_run: launch receipt identity mismatch (%s)", state->trace_attrs
+                                );
+                                rc = -1;
+                            }
+                        }
+                        if (state->active_execution != nullptr) {
+                            int drain_rc = state->runner->drain_execution(*state->active_execution);
+                            if (rc == 0) rc = drain_rc;
+                        } else if (state->prepared_execution != nullptr) {
+                            state->runner->abandon_prepared_execution(*state->prepared_execution);
+                        }
                     }
                 } else {
                     rc = attach_rc;
@@ -767,10 +800,14 @@ int simpler_launch_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
             } catch (...) {
                 rc = -1;
             }
-            if (entered_run) {
-                // run() owns stream retirement on every exit once entered.
-                state->runner_resources_owned = false;
-            } else if (state->runner_resources_owned) {
+            if (!entered_run && state->prepared_execution != nullptr) {
+                try {
+                    state->runner->abandon_prepared_execution(*state->prepared_execution);
+                } catch (...) {
+                    rc = -1;
+                }
+            }
+            if (!entered_run && state->runner_resources_owned) {
                 int resources_rc = -1;
                 try {
                     resources_rc = state->runner->abandon_native_run_resources(state->descriptor.pipeline_slot);
@@ -813,7 +850,8 @@ int simpler_poll_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
     }
-    const int poll_rc = state->runner->poll_run(state->descriptor.pipeline_slot);
+    if (state->active_execution == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    const int poll_rc = state->runner->poll_execution(*state->active_execution);
     if (state->execution_done.load(std::memory_order_acquire)) {
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
         return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
@@ -871,9 +909,17 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     }
 
     int resources_rc = 0;
-    if (!launched && state->runner_resources_owned) {
+    if (state->prepared_execution != nullptr) {
         try {
-            resources_rc = state->runner->abandon_native_run_resources(state->descriptor.pipeline_slot);
+            state->runner->abandon_prepared_execution(*state->prepared_execution);
+        } catch (...) {
+            resources_rc = -1;
+        }
+    }
+    if (state->runner_resources_owned) {
+        try {
+            int abandon_rc = state->runner->abandon_native_run_resources(state->descriptor.pipeline_slot);
+            if (resources_rc == 0) resources_rc = abandon_rc;
         } catch (...) {
             resources_rc = -1;
         }

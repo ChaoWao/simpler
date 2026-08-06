@@ -249,8 +249,8 @@ Applies to all 4 runtime executors: a2a3 (hbg, tmr), a5 (hbg, tmr).
 | SO | Caching | Lifecycle |
 | -- | ------- | --------- |
 | Host runtime | `ChipWorker::lib_handle_` | Per-init: dlopen in `init()`, dlclose in `finalize()` |
-| AICPU | `DeviceRunner::aicpu_so_handle_` | Per-init: loaded lazily by the first `enqueue_run()`, retained across runs, closed by `finalize()` |
-| AICore | `DeviceRunner::aicore_so_handle_` | Per-run: reloaded for the run's kernel binary, closed after a successful `drain_run()` (or by final cleanup) |
+| AICPU | `DeviceRunner::aicpu_so_handle_` | Per-init: loaded lazily by the first `prepare_execution()`, retained across runs, closed by `finalize()` |
+| AICore | `DeviceRunner::aicore_so_handle_` | Per-run: reloaded for the run's kernel binary, closed after a successful `drain_execution()` (or by final cleanup) |
 | Kernel | `DeviceRunner::func_id_to_addr_` (map by func_id) | Per-task: uploaded in `init_runtime_impl()`, removed in `validate_runtime_impl()` |
 | Orchestration | `AicpuExecutor::orch_so_handle_` | Per-run: loaded by orchestrator thread, closed by last thread in `deinit()` |
 
@@ -315,16 +315,16 @@ ChipWorker.run(handle, args, config)                   # public wrapper path
       new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + executor state
       DeviceRunner::bind_callable_to_runtime(r, cid, &host_api, args, rings)
     simpler_launch_run(...)                         # acceptance was captured by prepare
-      executor thread: DeviceRunner::enqueue_run(r, config, slot)
+      executor thread: DeviceRunner::launch_execution(prepared, permit)
         clear_cpu_sim_shared_storage()
         ensure_binaries_loaded()             lazily dlopen AICPU; reload AICore for this run
         launch AICPU + AICore threads
         publish launch fence                 simpler_launch_run may return
-      executor thread: DeviceRunner::drain_run()
+      executor thread: DeviceRunner::drain_execution(active)
         join all threads
         dlclose AICore SO                     AICPU stays loaded across runs
     simpler_poll_run(...)                    caller thread, concurrent with drain
-      DeviceRunner::poll_run()                nonblocking completion query
+      DeviceRunner::poll_execution(active)    nonblocking completion query
     simpler_wait_run(...)
     simpler_finalize_run(...)
       validate_runtime_impl(r)               copy results, remove kernels
@@ -377,16 +377,16 @@ device_worker_main(device_id)
                 new (buf) NativeRunContext(..., descriptor, host_api)   owns Runtime + executor state
                 bind_callable_to_runtime()     replay + rtMalloc, rtMemcpy to device
               simpler_launch_run(...)               # publishes descriptor acceptance
-                executor thread: DeviceRunner::enqueue_run(..., slot)
+                executor thread: DeviceRunner::launch_execution(prepared, permit)
                   ensure_binaries_loaded()     already done by init
                   launch_aicore_kernel()       cached rtRegisterAllKernel handle
                                                  + rtKernelLaunchWithHandleV2
                   launch_aicpu_kernel(Run)     rtsLaunchCpuKernel, cached rtFuncHandle
                   publish launch fence         simpler_launch_run may return
-                executor thread: DeviceRunner::drain_run()
+                executor thread: DeviceRunner::drain_execution(active)
                   aclrtSynchronizeStreamWithTimeout() wait on both streams
               simpler_poll_run(...)            caller thread, concurrent with drain
-                DeviceRunner::poll_run()       nonblocking stream query
+                DeviceRunner::poll_execution(active) nonblocking stream query
               simpler_wait_run(...)
               simpler_finalize_run(...)        rtMemcpy results back; destroy state
 

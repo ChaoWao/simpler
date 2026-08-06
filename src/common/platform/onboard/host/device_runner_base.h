@@ -28,8 +28,9 @@
  *
  * Subclasses (`{a2a3,a5}::DeviceRunner`) add arch-specific state
  * (callable registry, profiling collectors, ACL/HCCL plumbing on a2a3,
- * `enable_*` flags) and the divergent methods (`enqueue_run`, `poll_run`,
- * `drain_run`, `finalize`, `setup_static_arena`, the kernel launch /
+ * `enable_*` flags) and the divergent methods (`prepare_execution`,
+ * `launch_execution`, `poll_execution`, `drain_execution`, `finalize`,
+ * `setup_static_arena`, the kernel launch /
  * chip-callable upload, the per-callable registration helpers, and the
  * per-diagnostic `init_*`).
  */
@@ -53,6 +54,7 @@
 #include <vector>
 
 #include "arg_direction.h"
+#include "call_config.h"
 #include "callable.h"
 #include "common/device_phase.h"
 #include "common/dma_workspace.h"
@@ -69,9 +71,9 @@
 #include "host/args_dump_collector.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
+#include "native_run_execution.h"
 
-struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
-struct CallConfig;  // task_interface/call_config.h — per-run execution config
+struct HostApi;  // common/host_api.h — fwd-declared to keep task_interface headers out
 class NativeRunLaunchSignal;
 
 /**
@@ -99,7 +101,7 @@ public:
      * runner-owned timing and diagnostic state remain exclusive through
      * validation/finalize.
      */
-    bool try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal);
+    bool try_acquire_native_run(const void *owner, const NativeRunIdentity &identity, LaunchPermit *permit);
     void release_native_run(const void *owner);
     bool native_run_active() const;
     bool native_run_owned_by(const void *owner) const;
@@ -240,9 +242,9 @@ public:
     /**
      * Print handshake results from device. Reads the per-core
      * `Handshake` array out of device memory and logs it at DEBUG. Must
-     * be called after `drain_run()` and before `finalize()`.
+     * be called after `drain_execution()` and before `finalize()`.
      */
-    void print_handshake_results();
+    void print_handshake_results(const KernelArgsHelper &kernel_args);
 
     /**
      * Take ownership of the AICPU + AICore executor binaries. Called
@@ -517,32 +519,88 @@ public:
     virtual int provision_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
     virtual int abandon_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
 
-    /** Compatibility composition retained while the C API owns an executor. */
-    int run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
-        const int rc = enqueue_run(runtime, config, pipeline_slot);
-        return rc == 0 ? drain_run(pipeline_slot) : rc;
-    }
+    struct PreparedExecution {
+        PreparedExecution(
+            const NativeRunIdentity &identity_in, Runtime &runtime_in, const CallConfig &config_in,
+            uint32_t pipeline_slot_in
+        ) :
+            identity(identity_in),
+            runtime(&runtime_in),
+            config(config_in),
+            pipeline_slot(pipeline_slot_in) {}
+        PreparedExecution(const PreparedExecution &) = delete;
+        PreparedExecution &operator=(const PreparedExecution &) = delete;
+        PreparedExecution(PreparedExecution &&other) noexcept :
+            identity(other.identity),
+            runtime(std::exchange(other.runtime, nullptr)),
+            config(other.config),
+            pipeline_slot(other.pipeline_slot),
+            num_aicore(other.num_aicore),
+            launch_aicpu_num(other.launch_aicpu_num),
+            kernel_args(std::move(other.kernel_args)),
+            resources_owned(std::exchange(other.resources_owned, false)),
+            aicore_retirement_attempted(std::exchange(other.aicore_retirement_attempted, false)) {}
+        PreparedExecution &operator=(PreparedExecution &&) = delete;
+
+        NativeRunIdentity identity{};
+        Runtime *runtime{nullptr};
+        CallConfig config{};
+        uint32_t pipeline_slot{PTO_PIPELINE_MAX_DEPTH};
+        int num_aicore{0};
+        int launch_aicpu_num{0};
+        KernelArgsHelper kernel_args{};
+        bool resources_owned{false};
+        bool aicore_retirement_attempted{false};
+    };
+
+    struct ActiveExecution {
+        explicit ActiveExecution(std::unique_ptr<PreparedExecution> prepared_in, LaunchProgress progress_in) :
+            prepared(std::move(prepared_in)),
+            progress(progress_in) {}
+        ActiveExecution(const ActiveExecution &) = delete;
+        ActiveExecution &operator=(const ActiveExecution &) = delete;
+        ActiveExecution(ActiveExecution &&) noexcept = default;
+        ActiveExecution &operator=(ActiveExecution &&) noexcept = default;
+
+        std::unique_ptr<PreparedExecution> prepared;
+        LaunchProgress progress{LaunchProgress::NotStarted};
+    };
+
+    struct LaunchOutcome {
+        int rc{-1};
+        LaunchProgress progress{LaunchProgress::NotStarted};
+        std::unique_ptr<PreparedExecution> prepared{};
+        std::unique_ptr<ActiveExecution> active{};
+        LaunchReceipt receipt{};
+
+        bool poisoned() const { return progress == LaunchProgress::Partial; }
+    };
 
     /**
      * Prepare host-owned execution state and submit the Runtime to the device.
      * Success means the platform's real kernel-launch boundary was crossed;
-     * all state needed by poll_run() and drain_run() remains owned by the
+     * all state needed by poll_execution() and drain_execution() remains owned by the
      * runner until drain completes.
      */
-    virtual int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) = 0;
+    virtual int prepare_execution(
+        Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+        std::unique_ptr<PreparedExecution> *prepared
+    ) = 0;
+    virtual LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) = 0;
+    virtual void abandon_prepared_execution(PreparedExecution &prepared) noexcept = 0;
 
     /**
      * Query the active run without waiting. Returns one of the
      * SIMPLER_NATIVE_RUN_POLL_* values. This may run concurrently with
-     * drain_run() on the compatibility executor.
+     * drain_execution() on the compatibility executor.
      */
-    virtual int poll_run(uint32_t pipeline_slot) = 0;
+    virtual int poll_execution(const ActiveExecution &active) = 0;
 
     /**
-     * Wait for the enqueued run, publish DFX, and release its execution
-     * resources. Called on the same executor thread as enqueue_run().
+     * Wait for the launched run, publish DFX, and release its execution
+     * resources. Called on the same executor thread as launch_execution().
      */
-    virtual int drain_run(uint32_t pipeline_slot) = 0;
+    virtual int drain_execution(ActiveExecution &active) = 0;
 
     /**
      * Cleanup all resources. Each arch's `finalize()` wraps
@@ -568,7 +626,7 @@ public:
 
     /**
      * Launch an AICPU kernel. Internal helper used by the subclass's
-     * `enqueue_run()`; thin wrapper that dispatches through `load_aicpu_op_`'s
+     * `launch_execution()`; thin wrapper that dispatches through `load_aicpu_op_`'s
      * cached `rtFuncHandle` (resolved by `LoadAicpuOp::Init` at first
      * bootstrap).
      *
@@ -612,7 +670,7 @@ public:
 
     /**
      * Enablement setters for the four shared diagnostics sub-features.
-     * Applied from the per-run CallConfig by `apply_call_config()` at enqueue;
+     * Applied from the per-run CallConfig by `apply_call_config()` before prepare;
      * downstream execution paths read the corresponding `enable_*_`
      * members directly.
      *
@@ -634,10 +692,9 @@ public:
 
     /**
      * Latch this run's per-run diagnostic config onto the runner's `enable_*_`
-     * members before enqueue uses them. Each arch calls this once at enqueue —
-     * the c_api no longer reaches in with individual set_*_enabled
-     * calls; it just threads the CallConfig through. Defined in the .cpp so this
-     * header does not need the full CallConfig definition.
+     * members before prepare uses them. The c_api applies it only when no active
+     * run can observe the runner-global collector configuration. Defined in the
+     * .cpp so this header does not need the full CallConfig definition.
      */
     void apply_call_config(const CallConfig &config);
 
@@ -651,8 +708,6 @@ public:
     const std::string &output_prefix() const { return output_prefix_; }
 
 protected:
-    /** Publish acceptance through the active run's launch signal, if any. */
-    void publish_task_accepted() const;
     // Ctor is protected: this class is for inheritance only — direct
     // instantiation (`new DeviceRunnerBase()`) is a compile error. The
     // public virtual dtor above lets the shared c_api delete through a
@@ -745,7 +800,8 @@ protected:
      * reset every record, and publish the base for AICPU stamping. Allocation or
      * reset failure is non-fatal; the base stays null and timing reads as 0.
      */
-    void ensure_device_wall_buffer();
+    void ensure_device_wall_buffer(KernelArgsHelper &kernel_args);
+    int arm_device_wall_buffer(KernelArgsHelper &kernel_args);
 
     /**
      * Resolve this run's block_dim: every cluster the device has, i.e.
@@ -790,7 +846,7 @@ protected:
     void read_device_wall_ns();
 
     /**
-     * H2D the Runtime struct via `kernel_args_.init_runtime_args`. Log config
+     * H2D the Runtime struct via the supplied per-execution kernel arguments. Log config
      * and device ordinal are NOT published here: they are per-device invariants
      * latched once into the AICPU SO globals by `simpler_aicpu_init`
      * (`ensure_aicpu_init_launched`) at device init, not carried per-run on
@@ -798,7 +854,7 @@ protected:
      *
      * @return 0 on success, the underlying init_runtime_args rc on failure.
      */
-    int init_runtime_args_with_metadata(Runtime &runtime);
+    int init_runtime_args_with_metadata(Runtime &runtime, KernelArgsHelper &kernel_args);
 
     /**
      * Start collector mgmt + poll threads for the four shared
@@ -938,7 +994,6 @@ protected:
     mutable std::mutex native_run_mu_;
     std::array<NativeRunReservation, PTO_PIPELINE_MAX_DEPTH> native_run_reservations_{};
     std::atomic<const void *> active_native_run_{nullptr};
-    NativeRunLaunchSignal *native_launch_signal_{nullptr};
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
@@ -1046,8 +1101,6 @@ protected:
     // `nullptr` before init.
     rtStream_t stream_aicpu_{nullptr};
     rtStream_t stream_aicore_{nullptr};
-    KernelArgsHelper kernel_args_;
-
     // Platform-level device phase buffer: device-resident
     // AicpuPhaseRecord[NUM_AICPU_PHASES] per launched AICPU thread (thread-
     // major), whose address rides on `KernelArgs.device_wall_data_base`. AICPU

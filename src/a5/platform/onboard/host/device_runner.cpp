@@ -137,28 +137,18 @@ int DeviceRunner::destroy_comm_stream(void *stream) {
     return 0;
 }
 
-int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
-    if (run_resources_owned_) {
-        LOG_ERROR(
-            "enqueue_run entered while slot %u still owns resources", run_poll_slot_.load(std::memory_order_relaxed)
-        );
-        return -1;
-    }
+int DeviceRunner::prepare_execution(
+    Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+    std::unique_ptr<PreparedExecution> *prepared
+) {
+    if (prepared == nullptr || *prepared != nullptr) return -1;
+    auto execution = std::make_unique<PreparedExecution>(identity, runtime, config, pipeline_slot);
+    execution->resources_owned = true;
     const uint32_t selected_pipeline_slot = pipeline_slot;
-    run_poll_slot_.store(selected_pipeline_slot, std::memory_order_relaxed);
-    run_poll_state_.store(RunPollState::Enqueuing, std::memory_order_release);
-    run_resources_owned_ = true;
-    // Before the real AICPU launch marker, enqueue owns rollback. A successful
-    // enqueue dismisses this guard and transfers every resource to drain_run().
-    auto enqueue_rollback = RAIIScopeGuard([this]() {
-        cleanup_active_run();
+    auto prepare_rollback = RAIIScopeGuard([this, &execution]() {
+        cleanup_execution(*execution, /*launched=*/false);
     });
-    // Latch this run's diagnostic enables onto the runner before the collector
-    // paths below read them; block_dim/aicpu_thread_num are consumed locally.
-    apply_call_config(config);
-    // activate_launch_shape() latches this run's geometry onto the runner on the
-    // executor thread immediately before enqueue, so block_dim_ is this run's.
-    const int block_dim = block_dim_;
+    const int block_dim = runtime.get_worker_count() / cores_per_blockdim_;
     int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
     // in-place drain could not clear it. Refuse to run rather than cascade
@@ -187,15 +177,17 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
         return rc;
     }
 
-    ensure_device_wall_buffer();
+    ensure_device_wall_buffer(execution->kernel_args);
 
     if (block_dim < 1) {
-        LOG_ERROR("enqueue_run reached with unresolved block_dim; activate_launch_shape must run first");
+        LOG_ERROR("prepare_execution computed block_dim < 1 from worker_count=%d", runtime.get_worker_count());
         return -1;
     }
     int num_aicore = block_dim * cores_per_blockdim_;
 
-    rc = init_aicore_register_addresses(&kernel_args_.args.regs, static_cast<uint64_t>(device_id_), mem_alloc_);
+    rc = init_aicore_register_addresses(
+        &execution->kernel_args.args.regs, static_cast<uint64_t>(device_id_), mem_alloc_
+    );
     if (rc != 0) {
         LOG_ERROR("init_aicore_register_addresses failed: %d", rc);
         return rc;
@@ -208,7 +200,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     if (enable_pmu_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
     if (enable_dep_gen_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
     if (enable_scope_stats_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS);
-    kernel_args_.args.enable_profiling_flag = enable_profiling_flag;
+    execution->kernel_args.args.enable_profiling_flag = enable_profiling_flag;
 
     resolve_task_binary_addrs(runtime);
 
@@ -268,7 +260,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
 
     // Initialize per-subsystem shared memory.
     if (enable_chip_swimlane_) {
-        rc = init_chip_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
+        rc = init_chip_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_, execution->kernel_args);
         if (rc != 0) {
             LOG_ERROR("init_chip_swimlane failed: %d", rc);
             return rc;
@@ -276,7 +268,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     }
 
     if (enable_dump_args_) {
-        rc = init_args_dump(runtime, device_id_);
+        rc = init_args_dump(runtime, device_id_, execution->kernel_args);
         if (rc != 0) {
             LOG_ERROR("init_args_dump failed: %d", rc);
             return rc;
@@ -284,16 +276,19 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     }
 
     if (enable_pmu_) {
-        rc = init_pmu(num_aicore, launch_aicpu_num, make_pmu_csv_path(output_prefix_), pmu_event_type_, device_id_);
+        rc = init_pmu(
+            num_aicore, launch_aicpu_num, make_pmu_csv_path(output_prefix_), pmu_event_type_, device_id_,
+            execution->kernel_args
+        );
         if (rc != 0) {
             LOG_ERROR("PMU init failed: %d, disabling PMU for this run", rc);
-            kernel_args_.args.pmu_data_base = 0;
+            execution->kernel_args.args.pmu_data_base = 0;
             enable_pmu_ = false;
         }
     }
 
     if (enable_dep_gen_) {
-        rc = init_dep_gen(launch_aicpu_num, device_id_);
+        rc = init_dep_gen(launch_aicpu_num, device_id_, execution->kernel_args);
         if (rc != 0) {
             LOG_ERROR("init_dep_gen failed: %d", rc);
             return rc;
@@ -301,7 +296,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     }
 
     if (enable_scope_stats_) {
-        rc = init_scope_stats(launch_aicpu_num, device_id_);
+        rc = init_scope_stats(launch_aicpu_num, device_id_, execution->kernel_args);
         if (rc != 0) {
             LOG_ERROR("init_scope_stats failed: %d", rc);
             return rc;
@@ -313,102 +308,120 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
         LOG_ERROR("prepare_orch_so failed: %d", rc);
         return rc;
     }
-    rc = init_runtime_args_with_metadata(runtime);
+    rc = init_runtime_args_with_metadata(runtime, execution->kernel_args);
     if (rc != 0) return rc;
 
-    start_shared_collectors_for_run();
-    // a5-specific dep_gen collector — share the same thread_factory shape as base.
-    if (enable_dep_gen_) {
-        auto thread_factory = [this](std::function<void()> fn) {
-            return create_thread(std::move(fn));
-        };
-        dep_gen_collector_.start(thread_factory);
-    }
-
-    // workers[i].core_type is written by the AICore kernel during its
-    // AICPU<->AICore handshake (aicore_executor.cpp), launched further below,
-    // so the values read here reflect the most recent prior run's handshake
-    // still resident in device memory (unset on the first run of a freshly-
-    // loaded runtime). Publish the table to the chip swimlane collector so the
-    // AICORE_TIMING (level=1) host emit path can label lanes ("aic"/"aiv").
-    if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
-        std::vector<CoreType> core_types(num_aicore);
-        for (int i = 0; i < num_aicore; i++) {
-            core_types[i] = runtime.get_workers()[i].core_type;
-        }
-        chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
-    }
-
-    // Launch the AICore worker BEFORE the AICPU Run task. This is a first-launch
-    // latency optimization, not a correctness requirement (the handshake is
-    // launch-order-independent). When the AICPU Run task is launched first it
-    // immediately occupies the device (spinning in handshake_all_cores), and the
-    // first AICore launch — which lazily loads the kernel binary onto the device
-    // inside rtKernelLaunchWithHandleV2 — then takes ~1.4 s instead of ~0.4 ms
-    // (measured a5; the exact device-side contention is not pinned, see the
-    // investigation doc). Submitting the AICore first does that load on an idle
-    // device, then the AICPU spins and finds the AICore already up.
-    //
-    // Defense-in-depth for the op-timeout family (#1019): that ~1.4 s slow launch
-    // is what trips the op-execute timeout when it is tight. #1035 widened the
-    // timeout 1 s -> 3 s so the slow launch no longer wedges, but this ordering
-    // removes the slow launch itself, so the wedge cannot return if the timeout
-    // is ever tightened or a slower device pushes the launch past it. See
-    // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
-    // The AICore publishes aicore_done on launch (gated by nothing), and the
-    // workers region persists across runs in the pooled arena. Clearing each
-    // worker's aicore_done before the AICore kernel launches keeps the AICPU's
-    // handshake sweep from reading a prior run's report — which would open a
-    // window on that run's physical_core_id. Only aicore_done needs clearing; the
-    // AICore overwrites physical_core_id/core_type in the same report.
-    {
-        Handshake *workers = runtime.get_workers();
-        for (int i = 0; i < num_aicore; i++) {
-            workers[i].aicore_done = 0;
-        }
-    }
-
-    LOG_INFO("=== launch_aicore_kernel ===");
-    rc = kernel_args_.init_device_kernel_args(mem_alloc_);
+    rc = execution->kernel_args.init_device_kernel_args(mem_alloc_);
     if (rc != 0) {
         LOG_ERROR("init_device_kernel_args failed: %d", rc);
         return rc;
     }
-    // Publish query/drain ownership before either kernel launch. The real
-    // launch marker is notified inside launch_aicpu_kernel(), so no state that
-    // poll or drain needs may be committed after that call succeeds.
-    run_poll_state_.store(RunPollState::Submitted, std::memory_order_release);
-    rc = launch_aicore_kernel(stream_aicore_, kernel_args_.device_k_args_);
-    if (rc != 0) {
-        LOG_ERROR("launch_aicore_kernel failed: %d", rc);
-        recover_device_or_mark_unusable(rc);
-        return rc;
-    }
-
-    LOG_INFO("=== launch_aicpu_kernel %s ===", host::KernelNames::RunName);
-    // launch_count = popcount(OCCUPY) from the topology probe — one thread
-    // per user-schedulable cpu_id. The filter gate barriers exactly this
-    // many threads (runtime.aicpu_launch_count is read on the device side
-    // by kernel.cpp). The fallback is defensive; normal runs always publish
-    // the topology-derived launch count above.
-    int aicpu_launch_n = (runtime.get_aicpu_launch_count() > 0) ? runtime.get_aicpu_launch_count() : launch_aicpu_num;
-    rc = launch_aicpu_kernel(stream_aicpu_, &kernel_args_.args, host::KernelNames::RunName, aicpu_launch_n);
-    if (rc != 0) {
-        LOG_ERROR("launch_aicpu_kernel (main) failed: %d", rc);
-        // The AICore worker was already launched above and is now spinning in
-        // the handshake waiting for this AICPU Run task. If the Run launch
-        // fails, that AICore is orphaned and will spin to the op-timeout,
-        // poisoning the device — so recover/mark-unusable here (matches the
-        // launch_aicore failure path).
-        recover_device_or_mark_unusable(rc);
-        return rc;
-    }
-
-    enqueue_rollback.dismiss();
+    execution->num_aicore = num_aicore;
+    execution->launch_aicpu_num = launch_aicpu_num;
+    prepare_rollback.dismiss();
+    *prepared = std::move(execution);
     return 0;
 }
 
-int DeviceRunner::poll_run(uint32_t pipeline_slot) {
+DeviceRunnerBase::LaunchOutcome
+DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) {
+    LaunchOutcome outcome;
+    if (prepared == nullptr) return outcome;
+
+    Runtime &runtime = *prepared->runtime;
+    const int num_aicore = prepared->num_aicore;
+    const int launch_aicpu_num = prepared->launch_aicpu_num;
+
+    LaunchTransactionResult transaction = exact_launch_transaction(
+        prepared->identity, std::move(permit),
+        [&]() {
+            activate_launch_shape(runtime);
+            (void)arm_device_wall_buffer(prepared->kernel_args);
+            run_poll_slot_.store(prepared->pipeline_slot, std::memory_order_relaxed);
+            run_poll_state_.store(RunPollState::Enqueuing, std::memory_order_release);
+            start_shared_collectors_for_run();
+            if (enable_dep_gen_) {
+                auto thread_factory = [this](std::function<void()> fn) {
+                    return create_thread(std::move(fn));
+                };
+                dep_gen_collector_.start(thread_factory);
+            }
+            if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
+                std::vector<CoreType> core_types(num_aicore);
+                for (int i = 0; i < num_aicore; i++)
+                    core_types[i] = runtime.get_workers()[i].core_type;
+                chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
+            }
+
+            // Launch the AICore worker BEFORE the AICPU Run task. This is a first-launch
+            // latency optimization, not a correctness requirement (the handshake is
+            // launch-order-independent). When the AICPU Run task is launched first it
+            // immediately occupies the device (spinning in handshake_all_cores), and the
+            // first AICore launch — which lazily loads the kernel binary onto the device
+            // inside rtKernelLaunchWithHandleV2 — then takes ~1.4 s instead of ~0.4 ms
+            // (measured a5; the exact device-side contention is not pinned, see the
+            // investigation doc). Submitting the AICore first does that load on an idle
+            // device, then the AICPU spins and finds the AICore already up.
+            //
+            // Defense-in-depth for the op-timeout family (#1019): that ~1.4 s slow launch
+            // is what trips the op-execute timeout when it is tight. #1035 widened the
+            // timeout 1 s -> 3 s so the slow launch no longer wedges, but this ordering
+            // removes the slow launch itself, so the wedge cannot return if the timeout
+            // is ever tightened or a slower device pushes the launch past it. See
+            // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
+            // The AICore publishes aicore_done on launch (gated by nothing), and the
+            // workers region persists across runs in the pooled arena. Clearing each
+            // worker's aicore_done before the AICore kernel launches keeps the AICPU's
+            // handshake sweep from reading a prior run's report — which would open a
+            // window on that run's physical_core_id. Only aicore_done needs clearing; the
+            // AICore overwrites physical_core_id/core_type in the same report.
+            Handshake *workers = runtime.get_workers();
+            for (int i = 0; i < num_aicore; i++)
+                workers[i].aicore_done = 0;
+
+            LOG_INFO("=== launch_aicore_kernel ===");
+            run_poll_state_.store(RunPollState::Submitted, std::memory_order_release);
+            int launch_rc = launch_aicore_kernel(stream_aicore_, prepared->kernel_args.device_k_args_);
+            if (launch_rc != 0) {
+                LOG_ERROR("launch_aicore_kernel failed: %d", launch_rc);
+                recover_device_or_mark_unusable(launch_rc);
+            }
+            return launch_rc;
+        },
+        [&]() {
+            LOG_INFO("=== launch_aicpu_kernel %s ===", host::KernelNames::RunName);
+            // launch_count = popcount(OCCUPY) from the topology probe — one thread
+            // per user-schedulable cpu_id. The filter gate barriers exactly this
+            // many threads (runtime.aicpu_launch_count is read on the device side
+            // by kernel.cpp). The fallback is defensive; normal runs always publish
+            // the topology-derived launch count above.
+            int aicpu_launch_n =
+                (runtime.get_aicpu_launch_count() > 0) ? runtime.get_aicpu_launch_count() : launch_aicpu_num;
+            int launch_rc = launch_aicpu_kernel(
+                stream_aicpu_, &prepared->kernel_args.args, host::KernelNames::RunName, aicpu_launch_n
+            );
+            if (launch_rc != 0) {
+                LOG_ERROR("launch_aicpu_kernel (main) failed: %d", launch_rc);
+            }
+            return launch_rc;
+        }
+    );
+
+    if (transaction.poisoned()) recover_device_or_mark_unusable(transaction.rc);
+    outcome.rc = transaction.rc;
+    outcome.progress = transaction.progress;
+    outcome.receipt = std::move(transaction.receipt);
+    if (transaction.progress == LaunchProgress::NotStarted) {
+        outcome.prepared = std::move(prepared);
+    } else {
+        outcome.active = std::make_unique<ActiveExecution>(std::move(prepared), transaction.progress);
+    }
+    return outcome;
+}
+
+int DeviceRunner::poll_execution(const ActiveExecution &active) {
+    if (active.prepared == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
+    const uint32_t pipeline_slot = active.prepared->pipeline_slot;
     const RunPollState state = run_poll_state_.load(std::memory_order_acquire);
     if (run_poll_slot_.load(std::memory_order_relaxed) != pipeline_slot) {
         return SIMPLER_NATIVE_RUN_POLL_ERROR;
@@ -428,16 +441,19 @@ int DeviceRunner::poll_run(uint32_t pipeline_slot) {
     return rc;
 }
 
-int DeviceRunner::drain_run(uint32_t pipeline_slot) {
-    if (!run_resources_owned_ || run_poll_slot_.load(std::memory_order_relaxed) != pipeline_slot) {
+int DeviceRunner::drain_execution(ActiveExecution &active) {
+    if (active.prepared == nullptr) return -1;
+    PreparedExecution &prepared = *active.prepared;
+    const uint32_t pipeline_slot = prepared.pipeline_slot;
+    if (!prepared.resources_owned || run_poll_slot_.load(std::memory_order_relaxed) != pipeline_slot) {
         LOG_ERROR(
-            "drain_run slot mismatch: requested=%u active=%u owns=%d", pipeline_slot,
-            run_poll_slot_.load(std::memory_order_relaxed), static_cast<int>(run_resources_owned_)
+            "drain_execution slot mismatch: requested=%u active=%u owns=%d", pipeline_slot,
+            run_poll_slot_.load(std::memory_order_relaxed), static_cast<int>(prepared.resources_owned)
         );
         return -1;
     }
-    auto drain_cleanup = RAIIScopeGuard([this]() {
-        cleanup_active_run();
+    auto drain_cleanup = RAIIScopeGuard([this, &prepared]() {
+        cleanup_execution(prepared, /*launched=*/true);
     });
 
     int rc = sync_run_streams();
@@ -470,23 +486,27 @@ int DeviceRunner::drain_run(uint32_t pipeline_slot) {
     }
 
     // Reads device memory, so it must precede KernelArgs/runtime cleanup.
-    print_handshake_results();
+    print_handshake_results(prepared.kernel_args);
     return 0;
 }
 
-void DeviceRunner::cleanup_active_run() noexcept {
-    if (!run_resources_owned_) return;
+void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool launched) noexcept {
+    if (!prepared.resources_owned) return;
 
     // Collectors stop before device/runtime arguments and register buffers.
-    finalize_collectors();
-    (void)kernel_args_.finalize_device_kernel_args();
-    (void)kernel_args_.finalize_runtime_args();
-    if (kernel_args_.args.regs != 0) {
-        (void)mem_alloc_.free(reinterpret_cast<void *>(kernel_args_.args.regs));
-        kernel_args_.args.regs = 0;
+    if (launched) finalize_collectors();
+    (void)prepared.kernel_args.finalize_device_kernel_args();
+    (void)prepared.kernel_args.finalize_runtime_args();
+    if (prepared.kernel_args.args.regs != 0) {
+        (void)mem_alloc_.free(reinterpret_cast<void *>(prepared.kernel_args.args.regs));
+        prepared.kernel_args.args.regs = 0;
     }
-    run_resources_owned_ = false;
-    run_poll_state_.store(RunPollState::Drained, std::memory_order_release);
+    prepared.resources_owned = false;
+    if (launched) run_poll_state_.store(RunPollState::Drained, std::memory_order_release);
+}
+
+void DeviceRunner::abandon_prepared_execution(PreparedExecution &prepared) noexcept {
+    cleanup_execution(prepared, /*launched=*/false);
 }
 
 void DeviceRunner::recover_device_or_mark_unusable(int aicore_rc) {
@@ -802,11 +822,12 @@ void DeviceRunner::finalize_collectors() {
     }
     if (scope_stats_collector_.is_initialized()) {
         scope_stats_collector_.finalize(/*unregister_cb=*/nullptr, free_cb);
-        kernel_args_.args.scope_stats_data_base = 0;
     }
 }
 
-int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id) {
+int DeviceRunner::init_chip_swimlane(
+    int num_aicore, int aicpu_thread_num, int device_id, KernelArgsHelper &kernel_args
+) {
     auto alloc_cb = [this](size_t size) -> void * {
         return mem_alloc_.alloc(size);
     };
@@ -818,15 +839,15 @@ int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int d
         /*register_cb=*/nullptr, free_cb, output_prefix_
     );
     if (rc == 0) {
-        kernel_args_.args.chip_swimlane_data_base =
+        kernel_args.args.chip_swimlane_data_base =
             reinterpret_cast<uint64_t>(chip_swimlane_collector_.get_chip_swimlane_setup_device_ptr());
-        kernel_args_.args.chip_swimlane_aicore_rotation_table =
+        kernel_args.args.chip_swimlane_aicore_rotation_table =
             reinterpret_cast<uint64_t>(chip_swimlane_collector_.get_aicore_ring_addr_table_device_ptr());
     }
     return rc;
 }
 
-int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
+int DeviceRunner::init_args_dump(Runtime &runtime, int device_id, KernelArgsHelper &kernel_args) {
     int num_dump_threads = runtime.get_aicpu_thread_num();
 
     auto alloc_cb = [this](size_t size) -> void * {
@@ -842,12 +863,13 @@ int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
         return rc;
     }
 
-    kernel_args_.args.dump_data_base = reinterpret_cast<uint64_t>(dump_collector_.get_dump_shm_device_ptr());
+    kernel_args.args.dump_data_base = reinterpret_cast<uint64_t>(dump_collector_.get_dump_shm_device_ptr());
     return 0;
 }
 
 int DeviceRunner::init_pmu(
-    int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id
+    int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id,
+    KernelArgsHelper &kernel_args
 ) {
     auto alloc_cb = [this](size_t size) -> void * {
         return mem_alloc_.alloc(size);
@@ -859,14 +881,14 @@ int DeviceRunner::init_pmu(
         num_cores, num_threads, csv_path, event_type, alloc_cb, /*register_cb=*/nullptr, free_cb, device_id
     );
     if (rc == 0) {
-        kernel_args_.args.pmu_data_base = reinterpret_cast<uint64_t>(pmu_collector_.get_pmu_shm_device_ptr());
-        kernel_args_.args.aicore_pmu_ring_addrs =
+        kernel_args.args.pmu_data_base = reinterpret_cast<uint64_t>(pmu_collector_.get_pmu_shm_device_ptr());
+        kernel_args.args.aicore_pmu_ring_addrs =
             reinterpret_cast<uint64_t>(pmu_collector_.get_aicore_ring_addrs_device_ptr());
     }
     return rc;
 }
 
-int DeviceRunner::init_scope_stats(int num_threads, int device_id) {
+int DeviceRunner::init_scope_stats(int num_threads, int device_id, KernelArgsHelper &kernel_args) {
     // a5: register_cb=nullptr, so the collector mallocs a host shadow per
     // device buffer + rtMemcpy's the zeroed shadow to device (see
     // ProfilerBase::alloc_paired_buffer). No halHostRegister on a5.
@@ -880,12 +902,12 @@ int DeviceRunner::init_scope_stats(int num_threads, int device_id) {
     if (rc != 0) {
         return rc;
     }
-    kernel_args_.args.scope_stats_data_base =
+    kernel_args.args.scope_stats_data_base =
         reinterpret_cast<uint64_t>(scope_stats_collector_.get_scope_stats_shm_device_ptr());
     return 0;
 }
 
-int DeviceRunner::init_dep_gen(int num_threads, int device_id) {
+int DeviceRunner::init_dep_gen(int num_threads, int device_id, KernelArgsHelper &kernel_args) {
     // a5: register_cb=nullptr, so the collector mallocs a host shadow per
     // device buffer + rtMemcpy's the zeroed shadow to device. No
     // halHostRegister on a5 (matches PMU / chip swimlane / dump collectors).
@@ -899,6 +921,6 @@ int DeviceRunner::init_dep_gen(int num_threads, int device_id) {
     if (rc != 0) {
         return rc;
     }
-    kernel_args_.args.dep_gen_data_base = reinterpret_cast<uint64_t>(dep_gen_collector_.get_dep_gen_shm_device_ptr());
+    kernel_args.args.dep_gen_data_base = reinterpret_cast<uint64_t>(dep_gen_collector_.get_dep_gen_shm_device_ptr());
     return 0;
 }

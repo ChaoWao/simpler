@@ -94,9 +94,14 @@ public:
 
     // The blocking entry point composes these operations. enqueue owns rollback
     // until the AICPU launch marker; drain takes that ownership on success.
-    int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) override;
-    int poll_run(uint32_t pipeline_slot) override;
-    int drain_run(uint32_t pipeline_slot) override;
+    int prepare_execution(
+        Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+        std::unique_ptr<PreparedExecution> *prepared
+    ) override;
+    LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) override;
+    void abandon_prepared_execution(PreparedExecution &prepared) noexcept override;
+    int poll_execution(const ActiveExecution &active) override;
+    int drain_execution(ActiveExecution &active) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
     int provision_native_run_resources(uint32_t pipeline_slot) override;
     int abandon_native_run_resources(uint32_t pipeline_slot) override;
@@ -185,7 +190,7 @@ private:
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
     // worker_count_, executor + dispatcher bytes, aicore_bin_handle_,
     // load_aicpu_op_, mem_alloc_, the three DeviceArenas + their cached
-    // sizes, persistent AICPU/AICore streams, kernel_args_, device_wall_*,
+    // sizes, persistent AICPU/AICore streams, device_wall_*,
     // binaries_loaded_) is inherited from `DeviceRunnerBase`.
 
     // Group D state (`chip_callable_buffers_`, `callables_`,
@@ -210,7 +215,7 @@ private:
     // but a *force* reset clears it: finalize() calls force_reset_device() on
     // this path so the next Worker re-inits clean in the same process (see
     // force_reset_device()). This flag drives admission and recovery. See
-    // enqueue_run() and recover_device_or_mark_unusable().
+    // launch_execution() and recover_device_or_mark_unusable().
     // The prepared-run admission thread reads this while the sole device
     // executor may poison the runner after a failed launch.
     std::atomic<bool> device_unusable_{false};
@@ -247,21 +252,14 @@ private:
     int retire_run_aicore_stream(unsigned slot, RunStreamSlots::CompletionStatus completion_status);
     int destroy_run_stream_sets();
 
-    struct ActiveRunState {
-        unsigned slot{PTO_PIPELINE_MAX_DEPTH};
-        bool owns_resources{false};
-        bool aicore_retirement_attempted{false};
-    };
-    ActiveRunState active_run_{};
-
-    // Release executor-owned resources in collector, runtime-argument,
-    // register-buffer, then stream order. Stream retirement is optional because
-    // the success path must report its error without retrying it immediately.
-    void cleanup_active_run(bool retire_aicore) noexcept;
+    // Release execution-owned resources in collector, runtime-argument,
+    // register-buffer, then stream order. Prepared-only cleanup must not touch
+    // collector state owned by an active predecessor.
+    void cleanup_execution(PreparedExecution &prepared, bool launched, bool retire_aicore) noexcept;
 
     // The kernel submission boundary is separate from the stream wait and
-    // post-run teardown: enqueue_run() launches and drain_run() reaps.
-    int launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_num, unsigned slot);
+    // post-run teardown: launch_run() submits and drain_execution() reaps.
+    LaunchTransactionResult launch_run(PreparedExecution &prepared, LaunchPermit permit);
     int reap_run(unsigned slot);
 
     // On an AICore launch/sync error, best-effort drain the device so a later
@@ -304,7 +302,7 @@ private:
      * @param device_id Device ID for host registration
      * @return 0 on success, error code on failure
      */
-    int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
+    int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id, KernelArgsHelper &kernel_args);
 
     /**
      * Initialize args dump shared memory and collector.
@@ -316,7 +314,7 @@ private:
      * @param device_id Device ID for host registration
      * @return 0 on success, error code on failure
      */
-    int init_args_dump(Runtime &runtime, int device_id);
+    int init_args_dump(Runtime &runtime, int device_id, KernelArgsHelper &kernel_args);
 
     /**
      * Initialize PMU streaming shared memory.
@@ -332,7 +330,10 @@ private:
      * @param device_id  Device ID for host registration
      * @return 0 on success, error code on failure
      */
-    int init_pmu(int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id);
+    int init_pmu(
+        int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id,
+        KernelArgsHelper &kernel_args
+    );
 
     /**
      * Initialize dep_gen capture shared memory.
@@ -346,8 +347,8 @@ private:
      * @param device_id          Device ID for host registration
      * @return 0 on success, error code on failure
      */
-    int init_dep_gen(int num_threads, int device_id);
-    int init_scope_stats(int num_threads, int device_id);
+    int init_dep_gen(int num_threads, int device_id, KernelArgsHelper &kernel_args);
+    int init_scope_stats(int num_threads, int device_id, KernelArgsHelper &kernel_args);
 
     /**
      * Finalize whichever diagnostics collectors are currently initialized,

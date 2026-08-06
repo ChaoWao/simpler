@@ -15,6 +15,8 @@
 #include <condition_variable>
 #include <mutex>
 
+#include "native_run_execution.h"
+
 /** Sticky one-shot wakeup for the host thread waiting on launch readiness, and
  * the per-run home of the launch-acceptance target the host binds before launch
  * and the device publishes at its real kernel-launch marker. */
@@ -33,12 +35,12 @@ public:
         });
     }
 
-    /** Publish the acceptance value (if bound) at the launch marker and wake the
-     * launch waiter. */
-    void publish_acceptance() {
+    /** Publish only from the receipt for this run's completed launch transaction. */
+    bool publish_receipt(const LaunchReceipt &receipt, const NativeRunIdentity &identity) {
+        if (!receipt.matches(identity)) return false;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (notified_) return;
+            std::scoped_lock lock(mutex_);
+            if (notified_) return true;
             if (accepted_state_ != nullptr) {
                 __atomic_store_n(accepted_state_, accepted_value_, __ATOMIC_RELEASE);
             }
@@ -46,11 +48,12 @@ public:
             notified_ = true;
         }
         cv_.notify_one();
+        return true;
     }
 
     void notify() {
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::scoped_lock lock(mutex_);
             if (notified_) return;
             accepted_state_ = nullptr;
             notified_ = true;

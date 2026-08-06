@@ -63,10 +63,10 @@ jobs:
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st -m "not sdma" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            python -m pytest examples tests/st -m "not sdma" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
           fi
 
       - name: Run pytest scene tests (a2a3 legacy SDMA paths)

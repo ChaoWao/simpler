@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <thread>
 
 #include "call_config.h"
@@ -89,11 +90,20 @@ struct NativeRunContext {
     std::atomic<bool> execution_done{false};
     std::atomic<NativeRunPhase> phase{NativeRunPhase::Prepared};
     NativeRunLaunchSignal launch_signal;
+    std::unique_ptr<typename Runner::PreparedExecution> prepared_execution{};
+    std::unique_ptr<typename Runner::ActiveExecution> active_execution{};
+    LaunchPermit launch_permit{};
     void *host_thread_state{nullptr};
     char trace_attrs[192]{};
     bool runner_resources_owned{false};
     bool runner_reserved{false};
     bool runner_claimed{false};
+
+    NativeRunIdentity identity() const {
+        return NativeRunIdentity{
+            descriptor.run_epoch, descriptor.generation, descriptor.dispatch_id, descriptor.pipeline_slot
+        };
+    }
 };
 
 /** End object lifetime, then mark the caller-owned storage reusable. */

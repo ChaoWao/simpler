@@ -34,9 +34,14 @@ public:
     DeviceRunner();
     ~DeviceRunner() override;
 
-    int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) override;
-    int poll_run() override;
-    int drain_run() override;
+    int prepare_execution(
+        Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+        std::unique_ptr<PreparedExecution> *prepared
+    ) override;
+    LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) override;
+    void abandon_prepared_execution(PreparedExecution &prepared) noexcept override;
+    int poll_execution(const ActiveExecution &active) override;
+    int drain_execution(ActiveExecution &active) override;
     int finalize() override;
     // Also arms the loaded runtime's host-side graph capture, which a host-orch
     // runtime uses instead of the device collector. Defined in the .cpp so this
