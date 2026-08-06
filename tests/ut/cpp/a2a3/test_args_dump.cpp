@@ -262,3 +262,69 @@ TEST_F(ArgsDumpTest, ArenaBackpressureChecksBeforePayloadOverwrite) {
 
     set_platform_dump_base(0);
 }
+
+TEST_F(ArgsDumpTest, Level3UsesTaskMaskForTensorPayload) {
+    constexpr size_t kDumpMemSize = sizeof(DumpDataHeader) + sizeof(DumpBufferState);
+    alignas(64) uint8_t dump_mem[kDumpMemSize] = {};
+    alignas(64) DumpMetaBuffer meta_buf{};
+    constexpr size_t kArenaSize = 4096;
+    alignas(uint64_t) uint8_t arena[kArenaSize] = {};
+    uint64_t src_data[4] = {10, 20, 30, 40};
+
+    DumpDataHeader *hdr = get_dump_header(dump_mem);
+    hdr->magic = ARGS_DUMP_MAGIC;
+    hdr->dump_args_level = static_cast<uint32_t>(DumpArgsLevel::HYBRID);
+    hdr->num_dump_threads = 1;
+
+    DumpBufferState *state = get_dump_buffer_state(dump_mem, 0);
+    state->free_queue.buffer_ptrs[0] = reinterpret_cast<uint64_t>(&meta_buf);
+    state->free_queue.tail = 1;
+    state->arena_base = reinterpret_cast<uint64_t>(arena);
+    state->arena_size = kArenaSize;
+
+    set_platform_dump_base(reinterpret_cast<uint64_t>(dump_mem));
+    set_dump_args_enabled(true);
+    constexpr uint64_t kTaskId = 0;
+    set_dump_args_task_mask(kTaskId, uint64_t{1} << 6, ARGS_DUMP_ARG_MASK_NONE);
+
+    dump_args_init(1);
+
+    ArgsDumpArgMask mask = ARGS_DUMP_ARG_MASK_NONE;
+    get_dump_args_task_masks(kTaskId, &mask, nullptr);
+    EXPECT_EQ(mask, uint64_t{1} << 6);
+
+    ArgsDumpInfo info = {};
+    info.task_id = kTaskId;
+    info.role = ArgsDumpRole::INPUT;
+    info.stage = ArgsDumpStage::BEFORE_DISPATCH;
+    info.dtype = static_cast<uint8_t>(DataType::UINT64);
+    info.ndims = 1;
+    info.arg_index = 6;
+    info.buffer_addr = reinterpret_cast<uint64_t>(src_data);
+    info.shapes[0] = 4;
+    info.strides[0] = 1;
+    info.kind = static_cast<uint8_t>(ArgsDumpKind::TENSOR);
+    info.func_count = 3;
+    info.func_ids[0] = 0;
+    info.func_ids[1] = 1;
+    info.func_ids[2] = 1;
+
+    ASSERT_EQ(dump_arg_record(0, info), 0);
+    EXPECT_EQ(meta_buf.records[0].payload_size, sizeof(src_data));
+
+    info.arg_index = 7;
+    ASSERT_EQ(dump_arg_record(0, info), 0);
+    EXPECT_EQ(meta_buf.records[1].payload_size, 0u);
+
+    info.kind = static_cast<uint8_t>(ArgsDumpKind::SCALAR);
+    info.scalar_value = 99;
+    ASSERT_EQ(dump_arg_record(0, info), 0);
+    EXPECT_EQ(meta_buf.records[2].payload_size, 0u);
+    EXPECT_EQ(meta_buf.records[2].scalar_value, 99u);
+
+    EXPECT_EQ(state->arena_write_offset, sizeof(src_data));
+    EXPECT_EQ(meta_buf.count, 3u);
+    EXPECT_EQ(memcmp(arena, src_data, sizeof(src_data)), 0);
+
+    set_platform_dump_base(0);
+}

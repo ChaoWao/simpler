@@ -73,6 +73,7 @@ void set_dump_args_enabled(bool enable);
  */
 bool is_dump_args_enabled();
 bool is_dump_args_selective_mode();
+bool should_load_dump_args_task_masks();
 void set_dump_args_task_mask(uint64_t task_id, ArgsDumpArgMask mask, ArgsDumpArgMask flags);
 void get_dump_args_task_masks(uint64_t task_id, ArgsDumpArgMask *mask, ArgsDumpArgMask *flags);
 void set_dump_args_task_scalar_dtypes(uint64_t task_id, uint32_t scalar_count, const uint8_t *scalar_dtypes);
@@ -104,7 +105,7 @@ inline void dump_args_for_task(
     const auto &pl = *slot_state.payload;
     ArgsDumpArgMask dump_arg_mask = ARGS_DUMP_ARG_MASK_NONE;
     ArgsDumpArgMask dump_arg_flags = ARGS_DUMP_ARG_MASK_NONE;
-    if (is_dump_args_selective_mode()) {
+    if (should_load_dump_args_task_masks()) {
         get_dump_args_task_masks(slot_state.task->task_id.raw, &dump_arg_mask, &dump_arg_flags);
     }
     if (!should_dump_task(dump_arg_mask)) {

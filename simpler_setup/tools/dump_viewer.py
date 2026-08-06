@@ -280,8 +280,9 @@ def main():
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    # full_json_only dumps (level 3) carry no payload: bin_file is null and
-    # there is no .bin to export from — listing metadata still works.
+    # Level 3 names args.bin only when orchestration marked at least one tensor
+    # with Arg::dump(). Follow the manifest rather than inferring payload
+    # availability from the level.
     bin_name = manifest.get("bin_file", "args.bin")
     bin_path = (dump_dir / bin_name) if bin_name else None
     args_data = manifest.get("args", manifest.get("tensors", []))

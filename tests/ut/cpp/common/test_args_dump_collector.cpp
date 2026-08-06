@@ -49,9 +49,7 @@ TEST(ArgsDumpCollectorTest, MergesConcurrentShardRecordsIntoManifest) {
     constexpr int kShardCount = DumpModule::kMaxCollectorThreads;
     ArgsDumpCollector collector;
     ASSERT_EQ(
-        collector.initialize(
-            kShardCount, 0, test_alloc, nullptr, test_free, test_dir.string(), DumpArgsLevel::FULL_JSON_ONLY
-        ),
+        collector.initialize(kShardCount, 0, test_alloc, nullptr, test_free, test_dir.string(), DumpArgsLevel::HYBRID),
         0
     );
 
@@ -94,6 +92,8 @@ TEST(ArgsDumpCollectorTest, MergesConcurrentShardRecordsIntoManifest) {
     std::ifstream manifest_file(manifest_path);
     ASSERT_TRUE(manifest_file.is_open());
     const std::string manifest{std::istreambuf_iterator<char>(manifest_file), std::istreambuf_iterator<char>()};
+    EXPECT_NE(manifest.find("\"dump_args_level\": 3"), std::string::npos);
+    EXPECT_NE(manifest.find("\"bin_file\": null"), std::string::npos);
     EXPECT_NE(manifest.find("\"total_args\": " + std::to_string(kShardCount * kRecordsPerShard)), std::string::npos);
 
     collector.finalize(nullptr, test_free);

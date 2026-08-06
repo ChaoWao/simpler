@@ -36,7 +36,7 @@ class TestArgsDump(SceneTestCase):
     """args_dump capture smoke, level-aware on the ``--dump-args`` level.
 
     Uses ``partial_dump_orch`` (5 tasks; four carry ``dump(...)`` markers) so a
-    single orchestration exercises both modes:
+    single orchestration exercises all three enabled levels:
 
     - ``--dump-args 1`` (partial): only marked args are captured — task
       ``0x..00`` via no-arg ``dump()`` (all tensor + scalar args), task
@@ -46,6 +46,10 @@ class TestArgsDump(SceneTestCase):
       Mode is latched host-side before dispatch, so it is race-free regardless
       of submission order.
     - ``--dump-args 2`` (full): markers are ignored, every task is dumped.
+    - ``--dump-args 3`` (hybrid): every task is
+      present in JSON, while only tensors selected by those same ``dump(...)``
+      markers contribute payload bytes to ``args.bin``. The A5 payload values
+      remain untrusted until #1560 is fixed.
 
     The dump level comes straight from the CLI ``--dump-args`` value
     (no per-case override).
@@ -119,16 +123,12 @@ class TestArgsDump(SceneTestCase):
         bin_name = data.get("bin_file")
         tensors = data.get("args", [])
         assert tensors, f"args_dump.json has no entries: {data}"
-        if level == 3:
-            # full_json_only: metadata only, no payload and no .bin file.
-            assert bin_name is None, f"level 3 manifest should have bin_file=null: {data}"
-            assert not (dump_dir / "args.bin").exists(), "level 3 must not write args.bin"
-            assert all(t.get("bin_size") == 0 for t in tensors), tensors
-        else:
-            assert bin_name, f"manifest missing bin_file field: {data}"
-            bin_path = dump_dir / bin_name
-            assert bin_path.exists(), f"manifest names bin_file={bin_name!r} but {bin_path} not found"
-            assert bin_path.stat().st_size > 0, "args.bin is empty"
+        assert data.get("dump_args_level") == level
+        assert "payload_filter" not in data
+        assert bin_name, f"manifest missing bin_file field: {data}"
+        bin_path = dump_dir / bin_name
+        assert bin_path.exists(), f"manifest names bin_file={bin_name!r} but {bin_path} not found"
+        assert bin_path.stat().st_size > 0, "args.bin is empty"
 
         # Unified manifest (#792): tensors and scalar args share one
         # args_dump.json keyed by a "kind" field; no separate legacy sidecar files.
@@ -196,8 +196,9 @@ class TestArgsDump(SceneTestCase):
             ]
             assert ambiguous_scalars == [("0x0000000100000002", 3)]
         else:
-            # Full (level 2 or 3): markers ignored — every one of the 5 tasks is dumped.
-            assert len(task_ids) >= 5, f"full dump should cover all 5 tasks, got {sorted(task_ids)}"
+            # Full and hybrid both record every task; hybrid still uses the
+            # markers above to select tensor payload.
+            assert len(task_ids) >= 5, f"level {level} should cover all 5 tasks, got {sorted(task_ids)}"
 
         # ---- Tool smoke: dump_viewer ----
         # Exit-code-only check; the no-filter default lists every captured
