@@ -77,12 +77,14 @@ class TestChipSwimlane(SceneTestCase):
             "name": "default",
             "platforms": ["a5sim", "a5"],
             "params": {},
+            "required_sched_phases": ("release",),
         },
         {
             "name": "aicpu_threads_2",
             "platforms": ["a5sim", "a5"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
+            "required_sched_phases": ("release",),
         },
     ]
 
@@ -107,7 +109,10 @@ class TestChipSwimlane(SceneTestCase):
         for case in self.CASES:
             if st_platform in case["platforms"]:
                 validate_perf_artifact(
-                    f"TestChipSwimlane_{case['name']}", since=run_marker, expected_task_count=_EXPECTED_TASK_COUNT
+                    f"TestChipSwimlane_{case['name']}",
+                    since=run_marker,
+                    expected_task_count=_EXPECTED_TASK_COUNT,
+                    required_sched_phases=case["required_sched_phases"],
                 )
 
 
