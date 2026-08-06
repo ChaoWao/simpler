@@ -601,11 +601,6 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
                         core_types[i] = runtime.get_workers()[i].core_type;
                     chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
                 }
-                int rc = run_stream_slots_.mark_submitted(slot);
-                if (rc != 0) {
-                    LOG_ERROR("launch_run: failed to publish stream set %u: %d", slot, rc);
-                    return rc;
-                }
 
                 // Launch the AICore worker BEFORE the AICPU Run task — mirrors the a5 path
                 // so the two arches stay symmetric. First-launch latency optimization +
@@ -629,6 +624,14 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
             } catch (...) {
                 LOG_ERROR("launch_run: arming failed before any stream submission");
                 return -1;
+            }
+
+            // Publishing query/drain ownership is a state change, so it sits past
+            // the arming block: everything the block covers is rollback-free.
+            int rc = run_stream_slots_.mark_submitted(slot);
+            if (rc != 0) {
+                LOG_ERROR("launch_run: failed to publish stream set %u: %d", slot, rc);
+                return rc;
             }
 
             LOG_INFO("=== launch_aicore_kernel ===");

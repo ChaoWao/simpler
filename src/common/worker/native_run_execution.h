@@ -129,14 +129,18 @@ struct LaunchTransactionResult {
  * Consumes an identity-bound permit, then submits AICore and AICPU in that
  * order. Only both submissions succeeding produces a `LaunchReceipt`.
  *
+ * A failure before the first execution-visible stream submission is safe: the
+ * run touched no stream, so it rolls back and admission stays clean. Once the
+ * AICore submission succeeds, an AICPU failure leaves execution uncertain, so
+ * the run is `Partial` — resources stay retained and admission is poisoned
+ * until a later drain or teardown proves quiescence.
+ *
  * Callback contract: a submit callback owns everything it does before it
  * attempts its real device submission, and must report such a failure as a
  * non-zero return rather than an exception. An escaping exception is therefore
- * evidence that the submission itself was attempted, and the run is classified
- * `Partial` — uncertain execution, which retains resources and poisons
- * admission. Returning non-zero from `submit_aicore` is by contrast a failure
- * before any execution-visible submission, so it stays `NotStarted` and is safe
- * to roll back.
+ * evidence that the submission itself was attempted, and grades the run
+ * `Partial`. Returning non-zero from `submit_aicore` is by contrast a
+ * before-first-submission failure, so it stays `NotStarted`.
  */
 template <typename AicoreSubmit, typename AicpuSubmit>
 struct ExactLaunchTransaction {
