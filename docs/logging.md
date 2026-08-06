@@ -61,7 +61,7 @@ src/common/platform/                         ← shared device-side log
 ├── include/aicpu/device_log.h               low-level dev_vlog_* declarations
 ├── shared/aicpu/unified_log_device.cpp      C ABI → dev_vlog_* adapter
 ├── onboard/aicpu/device_log.cpp             onboard backend (CANN dlog)
-└── sim/aicpu/device_log.cpp                 sim backend (fprintf to stderr)
+└── sim/aicpu/device_log.cpp                 sim backend (one write(2) to stderr)
 ```
 
 Both architectures link these shared implementations into their platform

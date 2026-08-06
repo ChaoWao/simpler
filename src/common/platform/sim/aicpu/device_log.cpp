@@ -18,9 +18,10 @@
 
 #include "aicpu/device_log.h"
 
+#include <cerrno>
 #include <cstdarg>
-#include <cstdio>
 #include <cstddef>
+#include <cstdio>
 #include <unistd.h>
 
 // =============================================================================
@@ -88,8 +89,20 @@ void emit_record(const char *level_tag, const char *func, const char *fmt, va_li
     }
 
     buffer[len++] = '\n';
-    ssize_t written = write(STDERR_FILENO, buffer, len);
-    (void)written;
+    // On a pipe this transfers the whole record (<= PIPE_BUF) in one atomic
+    // call; the loop only iterates for a non-pipe stderr (regular file, socket)
+    // where write(2) may be interrupted or short, and must not leave a record
+    // without its terminating newline.
+    for (size_t off = 0; off < len;) {
+        ssize_t written = write(STDERR_FILENO, buffer + off, len - off);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;  // nothing the device-log backend can do on a hard failure
+        }
+        off += static_cast<size_t>(written);
+    }
 }
 
 }  // namespace

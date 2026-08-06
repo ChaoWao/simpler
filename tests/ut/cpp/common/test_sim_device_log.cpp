@@ -176,7 +176,9 @@ TEST(SimDeviceLogTest, ForkedProcessesEmitWholeRecords) {
     }
     for (pid_t pid : pids) {
         int status = 0;
-        waitpid(pid, &status, 0);
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        ASSERT_TRUE(WIFEXITED(status)) << "child terminated abnormally";
+        EXPECT_EQ(WEXITSTATUS(status), 0);
     }
     std::string captured = end_capture(cap);
 
