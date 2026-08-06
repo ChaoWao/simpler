@@ -37,6 +37,14 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
 
+      - name: Restore scene-test kernel cache (a5)
+        uses: actions/cache@v5
+        with:
+          path: build/cache/kernels
+          key: scene-kernels-a5-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pto_isa.pin') }}-${{ inputs.ref || github.sha }}
+          restore-keys: |
+            scene-kernels-a5-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pto_isa.pin') }}-
+
       - name: Set up environment
         uses: ./.github/actions/setup-venv
         with:
@@ -48,6 +56,8 @@ jobs:
       - name: Run pytest scene tests (a5)
         run: |
           source .venv/bin/activate
+          python -m simpler_setup.tools.scene_test_compile examples tests/st \
+            --platform a5 --require-pto-isa --compile-workers 8 -q
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
           PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"

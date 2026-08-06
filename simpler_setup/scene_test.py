@@ -26,6 +26,7 @@ import gc
 import inspect
 import logging
 import os
+import platform as host_platform
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import Any, NamedTuple
 
 from .log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, configure_logging
 from .pto_isa import ensure_pto_isa_root
+from .scene_test_cache import compile_artifact_key, get_or_compile
 
 logger = logging.getLogger(__name__)
 
@@ -989,7 +991,7 @@ def _compare_outputs(test_args, golden_args, output_names, rtol, atol):
 
 
 def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
-    """Compile a chip entry spec (orchestration + incores) -> ChipCallable. Session-cached."""
+    """Compile a chip entry spec into a memory- and disk-cached ``ChipCallable``."""
     if cache_key in _compile_cache:
         return _compile_cache[cache_key]
 
@@ -1005,36 +1007,83 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
     pto_isa_root = ensure_pto_isa_root()
     kc = KernelCompiler(platform=platform)
     is_sim = platform.endswith("sim")
-
-    orch_binary = kc.compile_orchestration(runtime, orch["source"])
     inc_dirs = kc.get_orchestration_include_dirs(runtime)
-
-    kernel_binaries = []
+    orch_include_dirs, orch_sources = kc.get_orchestration_cache_inputs(runtime)
+    orch_units = [orch["source"], *orch_sources]
+    compilation_units: list[tuple[str | Path, list[str | Path]]] = [
+        (source, orch_include_dirs) for source in orch_units
+    ]
+    resolved_extra_dirs = []
     for k in incores:
-        signature = k.get("signature", [])
         extra = _resolve_incore_include_dirs(k["extra_include_dirs"], k) if k.get("extra_include_dirs") else []
-        incore = kc.compile_incore(
-            k["source"],
-            core_type=k["core_type"],
-            pto_isa_root=pto_isa_root,
-            extra_include_dirs=inc_dirs + extra,
-        )
-        if not is_sim:
-            incore = extract_text_section(incore)
-        kernel_binaries.append(
+        resolved_extra_dirs.append(extra)
+        compilation_units.append(
             (
-                k["func_id"],
-                CoreCallable.build(signature=signature, binary=incore),
+                k["source"],
+                [
+                    Path(pto_isa_root) / "include",
+                    Path(pto_isa_root) / "include" / "pto",
+                    *kc.get_incore_include_dirs(),
+                    *inc_dirs,
+                    *extra,
+                ],
             )
         )
-
-    chip_callable = ChipCallable.build(
-        signature=orch.get("signature", []),
-        func_name=orch["function_name"],
-        binary=orch_binary,
-        children=kernel_binaries,
-        config_name=orch.get("config_name", ""),
+    artifact_key = compile_artifact_key(
+        {
+            "cache_key": cache_key,
+            "platform": platform,
+            "runtime": runtime,
+            "host_platform": sys.platform,
+            "host_machine": host_platform.machine(),
+            "sanitizers": KernelCompiler._sanitizers,
+            "compiler": kc.compile_cache_token(runtime, [k["core_type"] for k in incores]),
+            "orchestration": {
+                "function_name": orch["function_name"],
+                "config_name": orch.get("config_name", ""),
+                "signature": orch.get("signature", []),
+            },
+            "incores": [
+                {
+                    "func_id": k["func_id"],
+                    "core_type": k["core_type"],
+                    "signature": k.get("signature", []),
+                }
+                for k in incores
+            ],
+        },
+        compilation_units,
     )
+
+    def compile_callable():
+        orch_binary = kc.compile_orchestration(runtime, orch["source"])
+        kernel_binaries = []
+        for k, extra in zip(incores, resolved_extra_dirs, strict=True):
+            signature = k.get("signature", [])
+            incore = kc.compile_incore(
+                k["source"],
+                core_type=k["core_type"],
+                pto_isa_root=pto_isa_root,
+                extra_include_dirs=inc_dirs + extra,
+            )
+            if not is_sim:
+                incore = extract_text_section(incore)
+            kernel_binaries.append(
+                (
+                    k["func_id"],
+                    CoreCallable.build(signature=signature, binary=incore),
+                )
+            )
+
+        return ChipCallable.build(
+            signature=orch.get("signature", []),
+            func_name=orch["function_name"],
+            binary=orch_binary,
+            children=kernel_binaries,
+            config_name=orch.get("config_name", ""),
+        )
+
+    chip_callable = get_or_compile(artifact_key, compile_callable)
     _compile_cache[cache_key] = chip_callable
     return chip_callable
 

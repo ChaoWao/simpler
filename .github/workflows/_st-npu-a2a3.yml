@@ -42,6 +42,14 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
 
+      - name: Restore scene-test kernel cache (a2a3)
+        uses: actions/cache@v5
+        with:
+          path: build/cache/kernels
+          key: scene-kernels-a2a3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pto_isa.pin') }}-${{ inputs.ref || github.sha }}
+          restore-keys: |
+            scene-kernels-a2a3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pto_isa.pin') }}-
+
       - name: Set up environment
         uses: ./.github/actions/setup-venv
         with:
@@ -56,6 +64,13 @@ jobs:
           if ! command -v dot >/dev/null 2>&1; then
             echo "::warning::graphviz 'dot' not found on PATH; deps_viewer tool smoke will skip. Install graphviz on this self-hosted runner to restore coverage."
           fi
+
+      - name: Compile scene-test kernels (a2a3)
+        run: |
+          source /usr/local/Ascend/cann/set_env.sh
+          source .venv/bin/activate
+          python -m simpler_setup.tools.scene_test_compile examples tests/st \
+            --platform a2a3 --require-pto-isa --compile-workers 8 -q
 
       - name: Run pytest scene tests (a2a3)
         if: inputs.a2a3_sdma_mode == 'marker'

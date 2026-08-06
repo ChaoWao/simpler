@@ -1,6 +1,6 @@
-# Profiling & Debug Tools (shipped in the wheel)
+# Tools shipped in the wheel
 
-End-user CLIs for analyzing simpler profiling data and args dumps.
+End-user CLIs for preparing scene tests and analyzing profiling data or args dumps.
 All are invokable as Python modules once the `simpler` wheel is installed —
 no repo checkout required.
 
@@ -9,6 +9,7 @@ no repo checkout required.
 
 ## Tool list
 
+- **[scene_test_compile](#scene_test_compile)** — collect and compile selected Scene Test callables without an NPU
 - **[swimlane_converter](#swimlane_converter)** — perf JSON → Chrome Trace Event (Perfetto)
 - **[sched_overhead_analysis](#sched_overhead_analysis)** — scheduler overhead / Tail OH breakdown
 - **[critical_path](#critical_path)** — chip swimlane critical-path compute/stall analysis
@@ -21,6 +22,29 @@ For CLIs that allow an omitted input, auto-detection paths
 relative to the **current working directory** — run these from the directory
 that holds your `outputs/`. Each test case writes into its own
 `outputs/<case>_<ts>/` directory; those tools auto-pick the latest by mtime.
+
+---
+
+## scene_test_compile
+
+Populate the persistent Scene Test kernel cache without creating a `Worker` or
+accessing an NPU. Arguments after the module name are passed to pytest
+collection, so the warm-up can use the same paths and selection filters as the
+later device run.
+
+```bash
+python -m simpler_setup.tools.scene_test_compile examples tests/st \
+    -m "not sdma" --platform a2a3 --require-pto-isa --compile-workers 8
+```
+
+Compiled `ChipCallable` blobs are stored under `build/cache/kernels/`. A normal
+pytest or standalone scene-test run loads a matching blob from that directory;
+source, transitive-include, compiler, or compilation-logic changes produce a
+different content key, and entries unused for 14 days are pruned. Cache misses
+compile serially by default; pass `--compile-workers N` to opt into compiling
+up to `N` test classes concurrently, one compiler process per worker. A class
+that fails to compile is reported without aborting the rest of the pass. The
+warm-up does not inspect or access NPU devices.
 
 ---
 

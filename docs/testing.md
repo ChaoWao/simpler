@@ -49,6 +49,10 @@ pytest examples tests/st --platform a2a3sim       # specific sim
 pytest examples tests/st -m "not sdma" --platform a2a3          # hardware
 pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7  # hardware with device pool
 
+# Compile the selected hardware batch without creating a Worker or using an NPU
+python -m simpler_setup.tools.scene_test_compile examples tests/st \
+    -m "not sdma" --platform a2a3 --require-pto-isa --compile-workers 8
+
 # SDMA cases run separately, as they do in CI: they are quarantined by
 # @pytest.mark.sdma so no fault-injection case shares a device with a
 # provisioned SDMA workspace (issue #1425)
@@ -86,6 +90,32 @@ If a module is exposed via nanobind (used by both C++ and Python), test in **ut-
 If a module is pure C++ with no Python binding, test in **ut-cpp** (`tests/ut/cpp/`).
 
 ## Scene Test CLI Options
+
+### Lock-free kernel warm-up
+
+`python -m simpler_setup.tools.scene_test_compile` accepts the same pytest
+paths and selection arguments as the subsequent scene-test command. It runs
+pytest collection, compiles each selected `SceneTestCase` class once, and
+stores the resulting `ChipCallable` under `build/cache/kernels/`. It does not
+create a `Worker` or access an NPU. Compilation is serial by default so callers
+with large models do not unexpectedly overload the host. Pass
+`--compile-workers N` to opt into compiling up to `N` test classes concurrently
+— each worker starts its own compiler process, so only raise it on a host whose
+CPU is yours. simpler's two onboard CI jobs (a2a3, a5) use eight; the sim jobs
+have no warm-up step.
+
+A class that fails to compile is reported and skipped rather than aborting the
+pass, so the run that follows still recompiles it and reports the error against
+the case that owns it.
+
+Pass the same paths, `-m`, `--platform`, `--runtime`, and `--level` selections
+to warm-up and execution. A normal pytest or standalone run loads matching
+artifacts from the persistent cache; changed orchestration, incore, or included
+source content, compiler identity, fixed compilation flags, compilation logic,
+or compilation schema produces a new cache entry automatically. Entries unused
+for 14 days are pruned. When `build/` is not writable — a wheel installed into
+a read-only `site-packages` — the cache is skipped with a warning and every
+callable is compiled in-process, exactly as before the cache existed.
 
 Scene tests support advanced CLI options for benchmarking, profiling, and runtime control. These work identically in both pytest and standalone mode.
 
