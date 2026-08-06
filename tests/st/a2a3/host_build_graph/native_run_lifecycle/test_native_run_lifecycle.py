@@ -74,7 +74,9 @@ class TestNativeRunLifecycle(SceneTestCase):
 
         spans = list(parse_spans(capfd.readouterr().err.splitlines()))
         invocations = [inv for inv in group_invocations(spans) if "simpler_run" in inv.by_name()]
-        expected_invocations = 3 if st_platform.endswith("sim") else 7
+        # Two of these are the abandoned diagnostic prepares below, which record a
+        # simpler_run invocation without ever reaching simpler_run.runner_run.
+        expected_invocations = 5 if st_platform.endswith("sim") else 9
         assert len(invocations) == expected_invocations
 
         common_depths = {
@@ -165,6 +167,23 @@ class TestNativeRunLifecycle(SceneTestCase):
             assert torch.count_nonzero(test_args.out) == 0
             chip_worker._unregister_slot(_SLOT)
             chip_worker._register_callable_at_slot(_SLOT, callable_obj)
+
+            # Prepare initializes this run's diagnostics collectors, so abandoning
+            # it must release them. Each collector refuses a second initialize()
+            # while its shared memory is still mapped, so a collector retained by
+            # an abandoned run makes the next prepare on this runner fail.
+            with tempfile.TemporaryDirectory(prefix="simpler-abandon-diagnostics-") as abandon_dir:
+                abandon_config = self._build_config(case["config"])
+                abandon_config.enable_scope_stats = True
+                abandon_config.output_prefix = abandon_dir
+                abandon_args = self.generate_args(case["params"])
+                abandon_chip_args, _ = _build_chip_task_args(abandon_args, self.CALLABLE["orchestration"]["signature"])
+                for _ in range(2):
+                    abandoned = chip_worker._prepare_native_run_with_pipeline_lease(
+                        _SLOT, abandon_chip_args, _SLOT, _GENERATION, config=abandon_config
+                    )
+                    chip_worker._finalize_native_run(abandoned)
+                assert torch.count_nonzero(abandon_args.out) == 0
 
             test_args = self.generate_args(case["params"])
             chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
