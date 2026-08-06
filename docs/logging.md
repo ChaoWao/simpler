@@ -61,7 +61,7 @@ src/common/platform/                         ← shared device-side log
 ├── include/aicpu/device_log.h               low-level dev_vlog_* declarations
 ├── shared/aicpu/unified_log_device.cpp      C ABI → dev_vlog_* adapter
 ├── onboard/aicpu/device_log.cpp             onboard backend (CANN dlog)
-└── sim/aicpu/device_log.cpp                 sim backend (fprintf to stderr)
+└── sim/aicpu/device_log.cpp                 sim backend (one write(2) to stderr)
 ```
 
 Both architectures link these shared implementations into their platform
@@ -139,9 +139,12 @@ void dev_vlog_error (const char *func, const char *fmt, va_list);
 
 `unified_log_device.cpp` forwards the caller's `va_list` directly into
 `dev_vlog_*` — no intermediate `vsnprintf`-to-buffer round-trip in this
-layer. The sim backend is buffer-free (single `vfprintf(stderr, ...)`); the
-onboard backend still buffers internally because CANN's `dlog` is variadic
-only (no `va_list` variant).
+layer. Each backend then formats one whole record and emits it in a single
+call: the sim backend writes it with one `write(2)`, kept under `PIPE_BUF` so
+concurrent AICPU sim threads or forked chip workers sharing `stderr` never
+interleave partial records; the onboard backend buffers into a stack `char`
+array and issues one `dlog_*` because CANN's `dlog` is variadic only (no
+`va_list` variant).
 
 ## Multi-`.so` singleton
 
