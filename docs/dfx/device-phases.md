@@ -49,9 +49,10 @@ deep-dive — see [l2-timing.md](l2-timing.md).
 
 ### Buffer layout & flow
 
-* Host allocates one `AicpuPhaseRecord[NUM_AICPU_PHASES]` per launched AICPU
-  thread (**thread-major**), resets it each run, and publishes its address into
-  the AICPU SO via `set_platform_phase_base()` — a plain global + `extern "C"`
+* Host allocates one fixed buffer with layout `DevicePhaseBufferHeader |
+  AicpuPhaseRecord[] | TaskTimingRecord[]`. Both record regions are
+  **thread-major**. It resets the whole buffer each run and publishes its address
+  into the AICPU SO via `set_platform_phase_base()` — a plain global + `extern "C"`
   setter, exactly like `set_platform_dump_base` / `set_platform_chip_swimlane_base`
   (onboard: `kernel.cpp` from `KernelArgs::device_wall_data_base`; sim: the host
   dlsym's the setter). **No C++ `thread_local`** (per
@@ -62,8 +63,14 @@ deep-dive — see [l2-timing.md](l2-timing.md).
   stamp `Preamble`/`SoLoad`/`GraphBuild`/`PostOrch`/`OrchWindow`/`SchedWindow`
   via `get_platform_phase_base()` + the affinity index — no change to any
   `extern "C"` signature.
-* Host reduces each phase across threads as `max(end) - min(start)` on readback
-  (`DeviceRunnerBase::read_device_wall_ns`), caches per-phase ns
+* After every AICPU thread arrives at the existing completion gate, the last
+  thread scans the task-timing dispatch records once and writes the header's
+  `task_timing_tail_used` bit. This is outside the scheduler dispatch hot path;
+  capture-disabled runs only pay a null-base check at this once-per-run point.
+* Host first reads only the header + phase prefix and reduces each phase across
+  threads as `max(end) - min(start)` (`DeviceRunnerBase::read_device_wall_ns`).
+  It copies the larger task-timing tail only when the header says at least one
+  tagged task was dispatched. It caches per-phase ns
   (`last_device_phase_ns`), and emits each non-zero phase as a `clk=dev`
   `[STRACE]` marker nested under `simpler_run.runner_run.device_wall`
   (see [host-trace.md](host-trace.md)).
@@ -181,9 +188,11 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
   `PTO2TaskSlotState` in the `TaskAttrs` byte (bit 3 `is_timed` + bits 4-7 the
   0..15 tag), co-located with the other per-task scheduling flags. The 16 slots
   are a fixed `TaskTimingRecord[16]` **tail** appended after the `AicpuPhaseRecord`
-  region in the same device buffer — same base pointer, same per-run H2D reset
-  and post-sync D2H readback. It is a distinct record type (dispatch/finish, not
-  start/end) reduced by **min(dispatch) / max(finish)**, not an `AicpuPhase`
+  region in the same device buffer — same base pointer and per-run H2D reset.
+  A 16-byte header at the front lets the host skip the tail D2H entirely when
+  no task was tagged (saving 1536 bytes on a2a3 and 3584 bytes on a5 per run).
+  The tail is a distinct record type (dispatch/finish, not start/end) reduced by
+  **min(dispatch) / max(finish)**, not an `AicpuPhase`
   (those fire once per run/thread; a slot takes many block/subtask events).
 * **Boundaries (match the chip swimlane).** `dispatch` = the earliest Scheduler
   publication of `DATA_MAIN_BASE` (after payload publish, immediately before the
@@ -199,7 +208,10 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
   `finish(B) − dispatch(A)`. A **MIX** task's AIC/AIV0/AIV1 subtasks and an
   **SPMD** task's blocks (dispatched by different Scheduler threads) all fold
   into the one tagged slot.
-* **Emission & reset.** Every complete slot (dispatch set, finish > dispatch) is
+* **Emission & reset.** The last AICPU thread marks the header used when it sees
+  any dispatch, including a dispatched-but-incomplete task; the existing
+  completeness check still decides what is emitted. Every complete slot
+  (dispatch set, finish > dispatch) is
   emitted as a stable `clk=dev` span
   `simpler_run.runner_run.device_wall.task_slot_<N>`, retaining start and
   duration so cross-slot intervals are recoverable; `Worker.run()` still returns

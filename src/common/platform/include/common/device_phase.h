@@ -28,15 +28,17 @@
  * nesting) do NOT belong here — they need a rotating ring and live in the
  * chip swimlane orch/sched pools instead.
  *
- * Layout per AICPU thread: AicpuPhaseRecord[NUM_AICPU_PHASES]. The buffer is
- * thread-major: thread t occupies records [t*NUM_AICPU_PHASES, (t+1)*N).
+ * The buffer layout is a fixed header followed by thread-major phase records
+ * and a thread-major task-timing tail. The header lets the host decide whether
+ * the optional tail contains any dispatched task before copying it from the
+ * device.
  */
 
-#ifndef PLATFORM_COMMON_DEVICE_PHASE_H_
-#define PLATFORM_COMMON_DEVICE_PHASE_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 // Fixed AICPU run phases. Each fires once per run per thread. RunWall (slot 0)
 // is the whole-run wall preserved from the original device_wall buffer; the
@@ -70,6 +72,28 @@ struct AicpuPhaseRecord {
 };
 
 constexpr uint64_t kPhaseUnset = UINT64_MAX;
+
+static_assert(sizeof(AicpuPhaseRecord) == 16, "AicpuPhaseRecord layout must stay 16 bytes");
+static_assert(
+    std::is_trivially_copyable_v<AicpuPhaseRecord> && std::is_standard_layout_v<AicpuPhaseRecord>,
+    "AicpuPhaseRecord must remain a POD wire type"
+);
+
+// One per-run header at the front of the device buffer. The last AICPU thread
+// sets task_timing_tail_used after all scheduler threads have stopped writing
+// task-timing records. Zero means the host may skip the tail D2H.
+struct DevicePhaseBufferHeader {
+    uint64_t task_timing_tail_used;
+    uint64_t reserved;
+};
+
+static_assert(sizeof(DevicePhaseBufferHeader) == 16, "DevicePhaseBufferHeader layout must stay 16 bytes");
+static_assert(
+    std::is_trivially_copyable_v<DevicePhaseBufferHeader> && std::is_standard_layout_v<DevicePhaseBufferHeader>,
+    "DevicePhaseBufferHeader must remain a POD wire type"
+);
+
+constexpr size_t aicpu_phase_buffer_offset() { return sizeof(DevicePhaseBufferHeader); }
 
 // Total record count for a buffer sized to `max_threads` AICPU threads.
 constexpr int aicpu_phase_buffer_slots(int max_threads) { return max_threads * NUM_AICPU_PHASES; }
@@ -106,7 +130,8 @@ reduce_aicpu_phase_windows(const AicpuPhaseRecord *buf, int threads, uint64_t *o
 // =============================================================================
 //
 // A fixed tail appended after the AicpuPhaseRecord region in the SAME device
-// buffer (same base pointer, same per-run H2D reset and post-sync D2H copy).
+// buffer (same base pointer and per-run H2D reset). The header controls whether
+// the host performs the tail's separate post-sync D2H copy.
 // Orchestration tags selected tasks with a slot id 0..NUM_TASK_TIMING_SLOTS-1;
 // the scheduler folds each tagged task's AICPU dispatch/finish cycles into that
 // slot. Unlike AicpuPhase (one {start,end} per run per thread), a slot receives
@@ -130,22 +155,119 @@ struct TaskTimingRecord {
 };
 
 static_assert(sizeof(TaskTimingRecord) == 16, "TaskTimingRecord layout must stay 16 bytes for the fixed tail");
+static_assert(
+    std::is_trivially_copyable_v<TaskTimingRecord> && std::is_standard_layout_v<TaskTimingRecord>,
+    "TaskTimingRecord must remain a POD wire type"
+);
 
 // Task-timing tail is thread-major, same as the phase region: thread t occupies
 // records [t*NUM_TASK_TIMING_SLOTS, (t+1)*N).
 constexpr int task_timing_buffer_slots(int max_threads) { return max_threads * NUM_TASK_TIMING_SLOTS; }
 
-// Byte offset of the task-timing tail from the device buffer base: it sits
-// immediately after the AicpuPhaseRecord region sized for `max_threads`.
+// Byte offset of the task-timing tail from the device buffer base.
 constexpr size_t task_timing_tail_offset(int max_threads) {
-    return static_cast<size_t>(aicpu_phase_buffer_slots(max_threads)) * sizeof(AicpuPhaseRecord);
+    return aicpu_phase_buffer_offset() +
+           static_cast<size_t>(aicpu_phase_buffer_slots(max_threads)) * sizeof(AicpuPhaseRecord);
 }
 
-// Total device buffer bytes: phase region + task-timing tail, both sized for
-// `max_threads` AICPU threads.
+// Total device buffer bytes: header + phase region + task-timing tail.
 constexpr size_t device_phase_buffer_bytes(int max_threads) {
     return task_timing_tail_offset(max_threads) +
            static_cast<size_t>(task_timing_buffer_slots(max_threads)) * sizeof(TaskTimingRecord);
+}
+
+template <int MaxThreads>
+struct DevicePhaseBufferPrefixStorage {
+    static_assert(MaxThreads > 0, "device-phase buffer requires at least one thread");
+
+    DevicePhaseBufferHeader header;
+    AicpuPhaseRecord phases[aicpu_phase_buffer_slots(MaxThreads)];
+};
+
+template <int MaxThreads>
+struct DevicePhaseBufferStorage {
+    static_assert(MaxThreads > 0, "device-phase buffer requires at least one thread");
+
+    DevicePhaseBufferHeader header;
+    AicpuPhaseRecord phases[aicpu_phase_buffer_slots(MaxThreads)];
+    TaskTimingRecord tail[task_timing_buffer_slots(MaxThreads)];
+};
+
+static_assert(
+    std::is_trivially_copyable_v<DevicePhaseBufferPrefixStorage<1>> &&
+        std::is_standard_layout_v<DevicePhaseBufferPrefixStorage<1>>,
+    "DevicePhaseBufferPrefixStorage must remain a POD wire type"
+);
+static_assert(
+    std::is_trivially_copyable_v<DevicePhaseBufferStorage<1>> && std::is_standard_layout_v<DevicePhaseBufferStorage<1>>,
+    "DevicePhaseBufferStorage must remain a POD wire type"
+);
+static_assert(
+    sizeof(DevicePhaseBufferPrefixStorage<1>) == task_timing_tail_offset(1), "device-phase prefix layout drift"
+);
+static_assert(sizeof(DevicePhaseBufferStorage<1>) == device_phase_buffer_bytes(1), "device-phase buffer layout drift");
+
+template <typename ReadTail>
+inline int read_task_timing_tail_if_used(const DevicePhaseBufferHeader &header, ReadTail &&read_tail) {
+    if (header.task_timing_tail_used == 0) return 0;
+    return read_tail();
+}
+
+inline DevicePhaseBufferHeader *device_phase_buffer_header(void *buffer_base) {
+    return static_cast<DevicePhaseBufferHeader *>(buffer_base);
+}
+
+inline const DevicePhaseBufferHeader *device_phase_buffer_header(const void *buffer_base) {
+    return static_cast<const DevicePhaseBufferHeader *>(buffer_base);
+}
+
+inline AicpuPhaseRecord *device_phase_records(void *buffer_base) {
+    return reinterpret_cast<AicpuPhaseRecord *>(static_cast<uint8_t *>(buffer_base) + aicpu_phase_buffer_offset());
+}
+
+inline const AicpuPhaseRecord *device_phase_records(const void *buffer_base) {
+    return reinterpret_cast<const AicpuPhaseRecord *>(
+        static_cast<const uint8_t *>(buffer_base) + aicpu_phase_buffer_offset()
+    );
+}
+
+inline TaskTimingRecord *task_timing_tail_records(void *buffer_base, int max_threads) {
+    return reinterpret_cast<TaskTimingRecord *>(
+        static_cast<uint8_t *>(buffer_base) + task_timing_tail_offset(max_threads)
+    );
+}
+
+inline const TaskTimingRecord *task_timing_tail_records(const void *buffer_base, int max_threads) {
+    return reinterpret_cast<const TaskTimingRecord *>(
+        static_cast<const uint8_t *>(buffer_base) + task_timing_tail_offset(max_threads)
+    );
+}
+
+// Initialize one host or simulator mirror before publishing/copying it to the
+// AICPU. Unset dispatches remain distinguishable from a valid cycle value of 0.
+inline void reset_device_phase_buffer(void *buffer_base, int max_threads) {
+    if (buffer_base == nullptr) return;
+
+    *device_phase_buffer_header(buffer_base) = DevicePhaseBufferHeader{0, 0};
+
+    AicpuPhaseRecord *phases = device_phase_records(buffer_base);
+    for (int i = 0; i < aicpu_phase_buffer_slots(max_threads); ++i) {
+        phases[i] = AicpuPhaseRecord{kPhaseUnset, 0};
+    }
+
+    TaskTimingRecord *tail = task_timing_tail_records(buffer_base, max_threads);
+    for (int i = 0; i < task_timing_buffer_slots(max_threads); ++i) {
+        tail[i] = TaskTimingRecord{kPhaseUnset, 0};
+    }
+}
+
+// A dispatched-but-incomplete task still makes the tail relevant: the host
+// copies it and lets the existing completeness checks decide which slots emit.
+inline bool task_timing_tail_used(const TaskTimingRecord *tail, int threads) {
+    for (int i = 0; i < task_timing_buffer_slots(threads); ++i) {
+        if (tail[i].dispatch_cycle != kPhaseUnset) return true;
+    }
+    return false;
 }
 
 // Reduce a thread-major task-timing tail: for each slot, report the reduced
@@ -209,5 +331,3 @@ inline void resolve_task_timing_slots_ns(
         }
     }
 }
-
-#endif  // PLATFORM_COMMON_DEVICE_PHASE_H_

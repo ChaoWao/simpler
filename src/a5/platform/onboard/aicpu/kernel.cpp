@@ -26,15 +26,11 @@
 #include "aicpu/args_dump_aicpu.h"
 #include "runtime.h"
 
-// Run-wall capture: the host allocates a device buffer addressed by
-// KernelArgs.device_wall_data_base holding one { start_cycle, end_cycle } pair
-// per launched AICPU thread (PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH pairs,
-// raw sys-counter cycles), and resets it to { UINT64_MAX, 0 } before each run.
-// Every surviving simpler_aicpu_exec thread writes its own start/end into its
-// own slot (indexed by platform_aicpu_affinity_thread_idx()) — plain stores,
-// no cross-thread atomics. The host reads the array and reduces once:
-// wall = max(end) - min(start). No single-threaded pre-pass is needed to
-// seed the start.
+// Device timing capture: KernelArgs.device_wall_data_base addresses a fixed
+// header followed by per-thread phase records and an optional task-timing tail.
+// Every surviving simpler_aicpu_exec thread writes its own phase slot with
+// plain stores. The final thread publishes whether the tail was used, allowing
+// the host to skip that D2H when no task was tagged.
 
 // Forward declaration of aicpu_execute (implemented in aicpu_executor.cpp).
 // simpler_aicpu_register_callable is NOT declared/forwarded here: it is

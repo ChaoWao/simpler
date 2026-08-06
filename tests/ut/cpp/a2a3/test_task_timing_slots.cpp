@@ -10,6 +10,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 
@@ -23,24 +24,93 @@ namespace {
 
 TEST(TaskTimingSlots, RecordLayout) {
     EXPECT_EQ(NUM_TASK_TIMING_SLOTS, 16);
+    EXPECT_EQ(sizeof(DevicePhaseBufferHeader), 16u);
     EXPECT_EQ(sizeof(TaskTimingRecord), 16u);
     EXPECT_EQ(TASK_TIMING_SLOT_NONE, -1);
 }
 
-TEST(TaskTimingSlots, TailFollowsPhaseRegion) {
+TEST(TaskTimingSlots, HeaderPrecedesPhaseRegionAndTail) {
     for (int threads : {1, 4, 24}) {
-        // Tail begins exactly where the phase region ends.
+        EXPECT_EQ(aicpu_phase_buffer_offset(), sizeof(DevicePhaseBufferHeader));
         EXPECT_EQ(
             task_timing_tail_offset(threads),
-            static_cast<size_t>(aicpu_phase_buffer_slots(threads)) * sizeof(AicpuPhaseRecord)
+            aicpu_phase_buffer_offset() +
+                static_cast<size_t>(aicpu_phase_buffer_slots(threads)) * sizeof(AicpuPhaseRecord)
         );
-        // Total = phase region + tail, both sized for `threads`.
         EXPECT_EQ(
             device_phase_buffer_bytes(threads),
             task_timing_tail_offset(threads) +
                 static_cast<size_t>(task_timing_buffer_slots(threads)) * sizeof(TaskTimingRecord)
         );
     }
+}
+
+TEST(TaskTimingSlots, BufferResetClearsHeaderAndRecords) {
+    constexpr int kThreads = 3;
+    DevicePhaseBufferStorage<kThreads> storage{};
+    storage.header = DevicePhaseBufferHeader{123, 456};
+    std::fill_n(storage.phases, aicpu_phase_buffer_slots(kThreads), AicpuPhaseRecord{123, 456});
+    std::fill_n(storage.tail, task_timing_buffer_slots(kThreads), TaskTimingRecord{123, 456});
+
+    EXPECT_EQ(sizeof(storage), device_phase_buffer_bytes(kThreads));
+    EXPECT_EQ(device_phase_records(&storage), storage.phases);
+    EXPECT_EQ(task_timing_tail_records(&storage, kThreads), storage.tail);
+
+    reset_device_phase_buffer(&storage, kThreads);
+
+    const DevicePhaseBufferHeader *header = device_phase_buffer_header(&storage);
+    EXPECT_EQ(header->task_timing_tail_used, 0u);
+    EXPECT_EQ(header->reserved, 0u);
+
+    const AicpuPhaseRecord *phases = device_phase_records(&storage);
+    for (int i = 0; i < aicpu_phase_buffer_slots(kThreads); ++i) {
+        EXPECT_EQ(phases[i].start_cycle, kPhaseUnset);
+        EXPECT_EQ(phases[i].end_cycle, 0u);
+    }
+
+    const TaskTimingRecord *tail = task_timing_tail_records(&storage, kThreads);
+    for (int i = 0; i < task_timing_buffer_slots(kThreads); ++i) {
+        EXPECT_EQ(tail[i].dispatch_cycle, kPhaseUnset);
+        EXPECT_EQ(tail[i].finish_cycle, 0u);
+    }
+}
+
+TEST(TaskTimingSlots, TailReadSkippedWhenHeaderIsUnused) {
+    const DevicePhaseBufferHeader header{0, 0};
+    int read_count = 0;
+
+    const int rc = read_task_timing_tail_if_used(header, [&read_count]() {
+        ++read_count;
+        return 17;
+    });
+
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(read_count, 0);
+}
+
+TEST(TaskTimingSlots, TailReadRunsWhenHeaderIsUsed) {
+    const DevicePhaseBufferHeader header{1, 0};
+    int read_count = 0;
+
+    const int rc = read_task_timing_tail_if_used(header, [&read_count]() {
+        ++read_count;
+        return 17;
+    });
+
+    EXPECT_EQ(rc, 17);
+    EXPECT_EQ(read_count, 1);
+}
+
+TEST(TaskTimingSlots, TailUsageTracksAnyDispatchIncludingIncompleteTasks) {
+    constexpr int kThreads = 3;
+    std::vector<TaskTimingRecord> tail(
+        static_cast<size_t>(task_timing_buffer_slots(kThreads)), TaskTimingRecord{kPhaseUnset, 0}
+    );
+
+    EXPECT_FALSE(task_timing_tail_used(tail.data(), kThreads));
+
+    tail[2 * NUM_TASK_TIMING_SLOTS + 7] = {100, 0};
+    EXPECT_TRUE(task_timing_tail_used(tail.data(), kThreads));
 }
 
 // --- Cross-thread min/max reduction ---------------------------------------
