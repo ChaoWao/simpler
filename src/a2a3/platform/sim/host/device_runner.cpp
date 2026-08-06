@@ -526,36 +526,46 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
     LaunchTransactionResult result = exact_launch_transaction(
         prepared->identity, std::move(permit),
         [&]() {
-            set_platform_regs_func_(kernel_args_.regs);
-            if (set_orch_device_id_func_ != nullptr) set_orch_device_id_func_(device_id_);
-            set_platform_dump_base_func_(kernel_args_.dump_data_base);
-            set_dump_args_enabled_func_(enable_dump_args_);
-            set_platform_chip_swimlane_base_func_(kernel_args_.chip_swimlane_data_base);
-            set_platform_chip_swimlane_aicore_rotation_table_func_(kernel_args_.chip_swimlane_aicore_rotation_table);
-            set_chip_swimlane_enabled_func_(enable_chip_swimlane_);
-            set_platform_pmu_base_func_(kernel_args_.pmu_data_base);
-            set_platform_pmu_reg_addrs_func_(kernel_args_.pmu_reg_addrs);
-            set_pmu_enabled_func_(enable_pmu_);
-            set_platform_dep_gen_base_func_(kernel_args_.dep_gen_data_base);
-            set_dep_gen_enabled_func_(enable_dep_gen_ && !dep_gen_host_graph_active());
-            set_scope_stats_enabled_func_(enable_scope_stats_);
-            set_platform_scope_stats_base_func_(kernel_args_.scope_stats_data_base);
+            // Arming precedes any simulated-core thread, so its failures — including
+            // a thread-spawn or allocation throw — are reported as an rc and leave
+            // the run safely rollback-able.
+            try {
+                set_platform_regs_func_(kernel_args_.regs);
+                if (set_orch_device_id_func_ != nullptr) set_orch_device_id_func_(device_id_);
+                set_platform_dump_base_func_(kernel_args_.dump_data_base);
+                set_dump_args_enabled_func_(enable_dump_args_);
+                set_platform_chip_swimlane_base_func_(kernel_args_.chip_swimlane_data_base);
+                set_platform_chip_swimlane_aicore_rotation_table_func_(
+                    kernel_args_.chip_swimlane_aicore_rotation_table
+                );
+                set_chip_swimlane_enabled_func_(enable_chip_swimlane_);
+                set_platform_pmu_base_func_(kernel_args_.pmu_data_base);
+                set_platform_pmu_reg_addrs_func_(kernel_args_.pmu_reg_addrs);
+                set_pmu_enabled_func_(enable_pmu_);
+                set_platform_dep_gen_base_func_(kernel_args_.dep_gen_data_base);
+                set_dep_gen_enabled_func_(enable_dep_gen_ && !dep_gen_host_graph_active());
+                set_scope_stats_enabled_func_(enable_scope_stats_);
+                set_platform_scope_stats_base_func_(kernel_args_.scope_stats_data_base);
 
-            auto thread_factory = [this](std::function<void()> fn) {
-                return create_thread(std::move(fn));
-            };
-            if (enable_chip_swimlane_) chip_swimlane_collector_.start(thread_factory);
-            if (enable_dump_args_) dump_collector_.start(thread_factory);
-            if (enable_pmu_) pmu_collector_.start(thread_factory);
-            if (enable_dep_gen_ && !dep_gen_host_graph_active()) dep_gen_collector_.start(thread_factory);
-            if (enable_scope_stats_) scope_stats_collector_.start(thread_factory);
+                auto thread_factory = [this](std::function<void()> fn) {
+                    return create_thread(std::move(fn));
+                };
+                if (enable_chip_swimlane_) chip_swimlane_collector_.start(thread_factory);
+                if (enable_dump_args_) dump_collector_.start(thread_factory);
+                if (enable_pmu_) pmu_collector_.start(thread_factory);
+                if (enable_dep_gen_ && !dep_gen_host_graph_active()) dep_gen_collector_.start(thread_factory);
+                if (enable_scope_stats_) scope_stats_collector_.start(thread_factory);
 
-            if (kernel_args_.device_wall_data_base != 0) {
-                *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
+                if (kernel_args_.device_wall_data_base != 0) {
+                    *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
+                }
+                set_platform_phase_base_func_(reinterpret_cast<uint64_t>(run->phase_buf.data()));
+                sim_t0 = std::chrono::steady_clock::now();
+                run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
+            } catch (...) {
+                LOG_ERROR("launch_execution: arming failed before any simulated core started");
+                return -1;
             }
-            set_platform_phase_base_func_(reinterpret_cast<uint64_t>(run->phase_buf.data()));
-            sim_t0 = std::chrono::steady_clock::now();
-            run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
 
             LOG_INFO("Launching %d AICore thread(s)", num_aicore);
             for (int i = 0; i < num_aicore; i++) {

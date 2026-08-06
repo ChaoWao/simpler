@@ -253,9 +253,11 @@ private:
     int destroy_run_stream_sets();
 
     // Release execution-owned resources in collector, runtime-argument,
-    // register-buffer, then stream order. Prepared-only cleanup must not touch
-    // collector state owned by an active predecessor.
-    void cleanup_execution(PreparedExecution &prepared, bool launched, bool retire_aicore) noexcept;
+    // register-buffer, then stream order. The collectors this releases were
+    // initialized by prepare_execution() for this run alone; an overlapping
+    // predecessor cannot own any, because a prepared successor is admitted only
+    // when both runs declare no diagnostics.
+    void cleanup_execution(PreparedExecution &prepared, bool retire_aicore) noexcept;
 
     // The kernel submission boundary is separate from the stream wait and
     // post-run teardown: launch_run() submits and drain_execution() reaps.

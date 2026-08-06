@@ -335,50 +335,58 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
     LaunchTransactionResult transaction = exact_launch_transaction(
         prepared->identity, std::move(permit),
         [&]() {
-            activate_launch_shape(runtime);
-            (void)arm_device_wall_buffer(prepared->kernel_args);
+            // Arming precedes any execution-visible submission, so its failures —
+            // including a thread-spawn or allocation throw — are reported as an rc
+            // and leave the run safely rollback-able.
+            try {
+                activate_launch_shape(runtime);
+                (void)arm_device_wall_buffer(prepared->kernel_args);
+                start_shared_collectors_for_run();
+                if (enable_dep_gen_) {
+                    auto thread_factory = [this](std::function<void()> fn) {
+                        return create_thread(std::move(fn));
+                    };
+                    dep_gen_collector_.start(thread_factory);
+                }
+                if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
+                    std::vector<CoreType> core_types(num_aicore);
+                    for (int i = 0; i < num_aicore; i++)
+                        core_types[i] = runtime.get_workers()[i].core_type;
+                    chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
+                }
+
+                // Launch the AICore worker BEFORE the AICPU Run task. This is a first-launch
+                // latency optimization, not a correctness requirement (the handshake is
+                // launch-order-independent). When the AICPU Run task is launched first it
+                // immediately occupies the device (spinning in handshake_all_cores), and the
+                // first AICore launch — which lazily loads the kernel binary onto the device
+                // inside rtKernelLaunchWithHandleV2 — then takes ~1.4 s instead of ~0.4 ms
+                // (measured a5; the exact device-side contention is not pinned, see the
+                // investigation doc). Submitting the AICore first does that load on an idle
+                // device, then the AICPU spins and finds the AICore already up.
+                //
+                // Defense-in-depth for the op-timeout family (#1019): that ~1.4 s slow launch
+                // is what trips the op-execute timeout when it is tight. #1035 widened the
+                // timeout 1 s -> 3 s so the slow launch no longer wedges, but this ordering
+                // removes the slow launch itself, so the wedge cannot return if the timeout
+                // is ever tightened or a slower device pushes the launch past it. See
+                // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
+                // The AICore publishes aicore_done on launch (gated by nothing), and the
+                // workers region persists across runs in the pooled arena. Clearing each
+                // worker's aicore_done before the AICore kernel launches keeps the AICPU's
+                // handshake sweep from reading a prior run's report — which would open a
+                // window on that run's physical_core_id. Only aicore_done needs clearing; the
+                // AICore overwrites physical_core_id/core_type in the same report.
+                Handshake *workers = runtime.get_workers();
+                for (int i = 0; i < num_aicore; i++)
+                    workers[i].aicore_done = 0;
+            } catch (...) {
+                LOG_ERROR("launch_execution: arming failed before any stream submission");
+                return -1;
+            }
+
             run_poll_slot_.store(prepared->pipeline_slot, std::memory_order_relaxed);
             run_poll_state_.store(RunPollState::Enqueuing, std::memory_order_release);
-            start_shared_collectors_for_run();
-            if (enable_dep_gen_) {
-                auto thread_factory = [this](std::function<void()> fn) {
-                    return create_thread(std::move(fn));
-                };
-                dep_gen_collector_.start(thread_factory);
-            }
-            if (enable_chip_swimlane_ && chip_swimlane_collector_.is_initialized()) {
-                std::vector<CoreType> core_types(num_aicore);
-                for (int i = 0; i < num_aicore; i++)
-                    core_types[i] = runtime.get_workers()[i].core_type;
-                chip_swimlane_collector_.set_core_types(core_types.data(), num_aicore);
-            }
-
-            // Launch the AICore worker BEFORE the AICPU Run task. This is a first-launch
-            // latency optimization, not a correctness requirement (the handshake is
-            // launch-order-independent). When the AICPU Run task is launched first it
-            // immediately occupies the device (spinning in handshake_all_cores), and the
-            // first AICore launch — which lazily loads the kernel binary onto the device
-            // inside rtKernelLaunchWithHandleV2 — then takes ~1.4 s instead of ~0.4 ms
-            // (measured a5; the exact device-side contention is not pinned, see the
-            // investigation doc). Submitting the AICore first does that load on an idle
-            // device, then the AICPU spins and finds the AICore already up.
-            //
-            // Defense-in-depth for the op-timeout family (#1019): that ~1.4 s slow launch
-            // is what trips the op-execute timeout when it is tight. #1035 widened the
-            // timeout 1 s -> 3 s so the slow launch no longer wedges, but this ordering
-            // removes the slow launch itself, so the wedge cannot return if the timeout
-            // is ever tightened or a slower device pushes the launch past it. See
-            // docs/investigations/2026-06-pa-unroll-207001-optimeout-window.md.
-            // The AICore publishes aicore_done on launch (gated by nothing), and the
-            // workers region persists across runs in the pooled arena. Clearing each
-            // worker's aicore_done before the AICore kernel launches keeps the AICPU's
-            // handshake sweep from reading a prior run's report — which would open a
-            // window on that run's physical_core_id. Only aicore_done needs clearing; the
-            // AICore overwrites physical_core_id/core_type in the same report.
-            Handshake *workers = runtime.get_workers();
-            for (int i = 0; i < num_aicore; i++)
-                workers[i].aicore_done = 0;
-
             LOG_INFO("=== launch_aicore_kernel ===");
             run_poll_state_.store(RunPollState::Submitted, std::memory_order_release);
             int launch_rc = launch_aicore_kernel(stream_aicore_, prepared->kernel_args.device_k_args_);
@@ -494,7 +502,7 @@ void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool launched)
     if (!prepared.resources_owned) return;
 
     // Collectors stop before device/runtime arguments and register buffers.
-    if (launched) finalize_collectors();
+    finalize_collectors();
     (void)prepared.kernel_args.finalize_device_kernel_args();
     (void)prepared.kernel_args.finalize_runtime_args();
     if (prepared.kernel_args.args.regs != 0) {
