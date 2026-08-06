@@ -54,6 +54,10 @@ pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7  # hardware 
 # provisioned SDMA workspace (issue #1425)
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 
+# A5 ARM64 runs the full corpus; A5 x86_64 deselects SDMA tests
+pytest examples tests/st --platform a5 --device 0-7
+pytest examples tests/st -m "not sdma" --platform a5 --device 0-7
+
 # Single scene test (standalone)
 python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
 
