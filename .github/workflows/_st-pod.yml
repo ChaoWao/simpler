@@ -31,15 +31,6 @@ jobs:
     name: st-pod-onboard-${{ inputs.platform }}
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 60
-    # A runner claim covers only the machine the job landed on; the peer is
-    # driven over ssh and nothing else knows it is busy. Two runs of this job
-    # would then share the peer's devices and its POD_L3_DAEMON_PORT. The group
-    # is deliberately free of github.ref so runs from different PRs collide
-    # here, and cancel-in-progress stays false because a cancelled job is
-    # SIGKILLed before pod-teardown can clear the peer.
-    concurrency:
-      group: pod-${{ inputs.platform }}
-      cancel-in-progress: false
     env:
       SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
       SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
