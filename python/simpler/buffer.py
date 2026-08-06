@@ -399,6 +399,24 @@ def wrap_vmm_window(
     )
 
 
+def _descriptor_delta(a: BufferDescriptor, b: BufferDescriptor) -> str:
+    """The fields on which two descriptors differ, as ``name: old -> new``.
+
+    A whole ``repr`` of both would carry a 32-byte body twice for what is usually a one-field
+    disagreement, and the reader still has to diff them by eye.
+    """
+    fields = (
+        ("nbytes", a.nbytes, b.nbytes),
+        ("access", a.access, b.access),
+        ("backend_kind", a.backend_kind, b.backend_kind),
+        ("address_space", a.address_space, b.address_space),
+        ("owner_worker_path_id", a.owner_worker_path_id, b.owner_worker_path_id),
+        ("body", a.body, b.body),
+    )
+    diff = [f"{name}: {old!r} -> {new!r}" for name, old, new in fields if old != new]
+    return ", ".join(diff) if diff else "no field differs"
+
+
 @dataclass
 class ImportedBuffer:
     """A buffer materialized into the consumer's address space: identity -> local base."""
@@ -408,6 +426,12 @@ class ImportedBuffer:
     nbytes: int
     address_space: AddressSpace = AddressSpace.HOST
     shm: SharedMemory | None = None  # the consumer's own mapping for shm backends
+    # The descriptor this mapping was created from. Identity alone does not pin a backing: it says
+    # WHICH allocation, not how big it is or how to reach it, so a second descriptor carrying the
+    # same identity and a different nbytes / access / backend / body describes something the first
+    # mapping is not. Keeping it is what lets `materialize` detect that instead of silently handing
+    # back the earlier mapping.
+    descriptor: BufferDescriptor | None = None
 
 
 class ImportRegistry:
@@ -419,6 +443,9 @@ class ImportRegistry:
     (a bumped generation is a distinct identity, materialized fresh). Keyed by the canonical identity
     itself so lookups are exact — never a numeric-range guess, and never split by the wire padding
     the identity's equality and hashing deliberately ignore.
+
+    Map-once is a cache, not a trust boundary: a cache hit re-checks that the incoming descriptor
+    still describes the backing that was mapped, so one identity can never come to mean two things.
     """
 
     def __init__(self) -> None:
@@ -433,13 +460,27 @@ class ImportRegistry:
         there is no Python path from raw bytes to a descriptor at all, which is what keeps
         ``validate_buffer_descriptor`` a gate rather than a habit.
 
+        Rejects a descriptor that conflicts with the one already mapped under its identity, and a
+        POSIX shm object smaller than the ``nbytes`` its descriptor claims — every view bound check
+        is computed against that number, so an unverified one makes them all vacuous.
+
         Adds no endpoint check of its own: a DEVICE backing resolved here yields a device pointer,
-        which is only meaningful on its owner chip. The endpoint × ``address_space`` matrix is a
+        which is only meaningful on its owner chip. The endpoint x ``address_space`` matrix is a
         separate change; until it lands, that invariant rests on the caller.
         """
         key = desc.identity
         cached = self._by_identity.get(key)
         if cached is not None:
+            # Field-wise, so wire padding and the unused tail of `body` do not make one backing look
+            # like two. The mapping that exists wins: it is the one already handed out, and callers
+            # may hold addresses into it.
+            if cached.descriptor is not None and cached.descriptor != desc:
+                raise ValueError(
+                    f"ImportRegistry: identity {desc.identity} is already materialized from a "
+                    f"different descriptor ({_descriptor_delta(cached.descriptor, desc)}); one "
+                    f"identity names one backing, so the mapping already handed out is kept and "
+                    f"this is refused"
+                )
             return cached
         if desc.backend_kind in (
             BackendKind.FORK_SHM,
@@ -453,10 +494,20 @@ class ImportRegistry:
             # DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on the chip that allocated / carved
             # it (the tensor must only reach that chip — a topology invariant).
             base = int.from_bytes(desc.body, "little")
-            imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None)
+            imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None, desc)
         elif desc.backend_kind == BackendKind.POSIX_SHM:
             shm = SharedMemory(name=desc.body.decode("utf-8"))
-            imported = ImportedBuffer(desc.identity, _shm_base_addr(shm), desc.nbytes, desc.address_space, shm)
+            # `validate_tensor` admits a view when byte_offset + extent <= nbytes, so a backing
+            # smaller than the nbytes its own descriptor advertises turns every one of those checks
+            # into a comparison against a number no memory stands behind. The object's real size is
+            # the only thing here the owner cannot overstate.
+            if shm.size < desc.nbytes:
+                shm.close()
+                raise ValueError(
+                    f"ImportRegistry: shm object {desc.body.decode('utf-8')!r} is {shm.size} bytes, "
+                    f"short of the {desc.nbytes} its descriptor claims"
+                )
+            imported = ImportedBuffer(desc.identity, _shm_base_addr(shm), desc.nbytes, desc.address_space, shm, desc)
         elif desc.backend_kind == BackendKind.REMOTE_SIDECAR:
             raise ValueError("ImportRegistry: REMOTE_SIDECAR backend is reserved for P2")
         else:

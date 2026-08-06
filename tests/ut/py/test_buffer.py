@@ -66,6 +66,15 @@ def _identity(oid=_OID, buffer_id=7, generation=2):
     return CanonicalIdentity(oid, buffer_id, generation)
 
 
+def _legal_body(backend: BackendKind) -> bytes:
+    """A body that satisfies ``backend``'s schema, so a rejection is attributable to something else."""
+    if backend == BackendKind.POSIX_SHM:
+        return b"psm_legal"
+    if backend == BackendKind.REMOTE_SIDECAR:
+        return b""
+    return (0x1000).to_bytes(8, "little")  # the four address-bearing backends
+
+
 def test_identity_rejects_bad_oid_width():
     with pytest.raises(ValueError):
         CanonicalIdentity(b"\x00" * (OWNER_INSTANCE_ID_BYTES + 1), 1, 1)
@@ -85,6 +94,7 @@ def _descriptor_with_path_id(path_id: int) -> BufferDescriptor:
         access=AccessMode.READWRITE,
         backend_kind=BackendKind.POSIX_SHM,
         nbytes=8,
+        body=b"psm_diag",  # POSIX_SHM's body is the name a consumer opens
         owner_worker_path_id=path_id,
     )
 
@@ -207,6 +217,72 @@ def test_materialize_remote_sidecar_rejected():
         reg.materialize(desc)
 
 
+# --- map-once is a cache, not a trust boundary ------------------------------------------------
+
+
+def _device_descriptor(oid: bytes, buffer_id: int, nbytes: int, ptr: int = 0xDEAD0000) -> BufferDescriptor:
+    return wrap_device_malloc(ptr, nbytes, oid, buffer_id=buffer_id).to_descriptor()
+
+
+def test_materialize_rejects_a_conflicting_descriptor_for_a_live_identity():
+    # Identity says WHICH allocation, not how big it is or how to reach it. A second descriptor
+    # carrying the same identity and a different nbytes describes something the existing mapping is
+    # not, so returning that mapping would hand back a base under a size nothing stands behind.
+    oid = mint_owner_instance_id()
+    reg = ImportRegistry()
+    first = reg.materialize(_device_descriptor(oid, 1, nbytes=4096))
+
+    for conflicting in (
+        _device_descriptor(oid, 1, nbytes=8192),  # same identity, bigger claim
+        _device_descriptor(oid, 1, nbytes=4096, ptr=0xBEEF0000),  # same identity, other backing
+    ):
+        with pytest.raises(ValueError, match="different descriptor"):
+            reg.materialize(conflicting)
+
+    # The mapping already handed out survives: callers may hold addresses into it, so the conflict
+    # is refused rather than resolved by replacing it.
+    assert reg.resolve(first.identity) is first
+    assert reg.materialize(_device_descriptor(oid, 1, nbytes=4096)) is first
+
+
+def test_conflict_error_names_only_the_fields_that_differ():
+    # A whole repr of both descriptors would carry a 32-byte body twice for what is usually a
+    # one-field disagreement, and leave the reader to diff them by eye.
+    oid = mint_owner_instance_id()
+    reg = ImportRegistry()
+    reg.materialize(_device_descriptor(oid, 1, nbytes=4096))
+    with pytest.raises(ValueError) as excinfo:
+        reg.materialize(_device_descriptor(oid, 1, nbytes=8192))
+    message = str(excinfo.value)
+    assert "nbytes: 4096 -> 8192" in message
+    assert "backend_kind" not in message  # unchanged fields stay out of it
+
+
+def test_materialize_rejects_an_shm_object_shorter_than_its_descriptor():
+    # Every view bound check is `byte_offset + extent <= nbytes`, so an unverified nbytes makes all
+    # of them vacuous. The object's real size is the one thing here the owner cannot overstate.
+    oid = mint_owner_instance_id()
+    buffer = create_host_shared_buffer(nbytes=128, owner_instance_id=oid, buffer_id=1)
+    reg = ImportRegistry()
+    try:
+        honest = buffer.to_descriptor()
+        assert reg.materialize(honest).nbytes == 128  # the truthful one maps
+
+        overstated = BufferDescriptor(
+            identity=CanonicalIdentity(oid, 2, 1),  # a fresh identity, so this is not the conflict path
+            address_space=AddressSpace.HOST,
+            access=AccessMode.READWRITE,
+            backend_kind=BackendKind.POSIX_SHM,
+            nbytes=1 << 20,
+            body=honest.body,  # the same 128-byte object
+        )
+        with pytest.raises(ValueError, match="short of the"):
+            reg.materialize(overstated)
+    finally:
+        reg.close()
+        buffer.close()
+
+
 def test_owner_instance_ids_are_distinct():
     ids = {mint_owner_instance_id() for _ in range(64)}
     assert len(ids) == 64
@@ -224,7 +300,8 @@ def test_owner_instance_ids_are_distinct():
 )
 def test_descriptor_rejects_bad_capability_combo(space, backend):
     # §4.1 capability matrix: an unsupported address_space×backend_kind fails at construction (before
-    # dispatch, before it can ride the wire).
+    # dispatch, before it can ride the wire). The body is a legal one for the backend, so the
+    # rejection is attributable to the combination and not to the body schema.
     with pytest.raises(ValueError, match="capability"):
         BufferDescriptor(
             identity=_identity(),
@@ -232,7 +309,7 @@ def test_descriptor_rejects_bad_capability_combo(space, backend):
             access=AccessMode.READWRITE,
             backend_kind=backend,
             nbytes=64,
-            body=b"",
+            body=_legal_body(backend),
         )
 
 
@@ -245,7 +322,47 @@ def test_descriptor_accepts_legal_combos():
         (AddressSpace.HOST, BackendKind.REMOTE_SIDECAR),
         (AddressSpace.DEVICE, BackendKind.REMOTE_SIDECAR),
     ]:
-        BufferDescriptor(_identity(), space, AccessMode.READWRITE, backend, 64, b"")
+        BufferDescriptor(_identity(), space, AccessMode.READWRITE, backend, 64, _legal_body(backend))
+
+
+# --- G2: the body must fit the reading its backend_kind implies --------------------------------
+#
+# The exhaustive per-backend cases live in tests/ut/cpp/types/test_buffer.cpp, which can build the
+# malformed bytes Python cannot (a body_len that disagrees with the body, a non-zero reserved tail).
+# What is checked here is that the gate is reachable from construction.
+
+
+def test_construction_rejects_an_address_body_that_is_not_eight_bytes():
+    # A short body reads as a truncated pointer with nothing to distinguish it from a real one.
+    for bad in (b"", b"\x00\x01\x02", b"\x00" * 7, b"\x00" * 9):
+        with pytest.raises(ValueError, match="exactly 8 bytes"):
+            BufferDescriptor(_identity(), AddressSpace.DEVICE, AccessMode.READWRITE, BackendKind.DEVICE_MALLOC, 64, bad)
+
+
+def test_construction_rejects_a_null_address_body():
+    # Nothing is mapped or allocated at 0, so a zero base is an unfilled body, not a location.
+    with pytest.raises(ValueError, match="null base"):
+        BufferDescriptor(
+            _identity(), AddressSpace.DEVICE, AccessMode.READWRITE, BackendKind.DEVICE_MALLOC, 64, b"\x00" * 8
+        )
+
+
+def test_construction_rejects_a_shm_name_outside_printable_ascii():
+    # The name is decoded as UTF-8 before the shm open, so the wire schema restricts it to a UTF-8
+    # subset: bytes that pass validation always decode. A NUL would additionally truncate the name
+    # at the first C API it reaches, letting two distinct names open one object.
+    for bad in (b"psm\x00abc", b"psm abc", b"psm/abc", b"psm\xffabc", b"psm\x7fabc"):
+        with pytest.raises(ValueError, match="printable ASCII"):
+            BufferDescriptor(_identity(), AddressSpace.HOST, AccessMode.READWRITE, BackendKind.POSIX_SHM, 64, bad)
+
+
+def test_construction_rejects_a_remote_sidecar_body():
+    # The authoritative descriptor rides in the per-task sidecar; a body here is a second source of
+    # truth that nothing reads.
+    with pytest.raises(ValueError, match="no body"):
+        BufferDescriptor(
+            _identity(), AddressSpace.HOST, AccessMode.READWRITE, BackendKind.REMOTE_SIDECAR, 64, b"\x01" * 8
+        )
 
 
 # --- the shared validator, on the paths Python can reach --------------------------------------

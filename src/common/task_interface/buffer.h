@@ -69,6 +69,10 @@ inline constexpr uint32_t OWNER_INSTANCE_ID_BYTES = 8;
 // stores a single u64 address.
 inline constexpr uint32_t DESC_MAX_BYTES = 32;
 
+// Body width of every address-bearing backend: one u64 little-endian base. Exact, not a maximum —
+// a shorter body reads as a truncated pointer indistinguishable from a real one.
+inline constexpr uint32_t BACKEND_ADDRESS_BODY_BYTES = 8;
+
 // Memory space of a backing. Orthogonal to location (local/remote, derived) and to visibility.
 enum class AddressSpace : uint8_t {
     HOST = 0,
@@ -272,7 +276,8 @@ inline uint64_t tensor_extent_bytes(const Tensor &r) {
  * The descriptor half of the tensor gate below, split out because a descriptor also arrives on its
  * own — construction from Python and blob descriptor extraction both hand one over with no view
  * attached. `body_len` is bounded against `DESC_MAX_BYTES` here, mirroring what the fixed-length
- * `CanonicalIdentity` gets structurally. Throws `std::invalid_argument` naming the field.
+ * `CanonicalIdentity` gets structurally, and the body itself is checked against the schema its
+ * `backend_kind` implies. Throws `std::invalid_argument` naming the field.
  *
  * `REMOTE_SIDECAR` is a legal wire value and passes: an arg bound for a remote worker rides the wire
  * with no local backing, and it is *materialization* that refuses it in P1.
@@ -304,6 +309,55 @@ inline void validate_buffer_descriptor(const BufferDescriptor &h) {
     // sees, so a write grant over FORK_COW would be silently unobservable rather than an error.
     if (backend == BackendKind::FORK_COW && h.access != static_cast<uint8_t>(AccessMode::READ)) {
         reject("invalid BufferDescriptor: FORK_COW grants READ only (a child's write would not reach the owner)");
+    }
+
+    // Per-backend body schema. `backend_kind` says how the consumer reads `body`, so a body that
+    // does not fit the reading is not a smaller backing — it is a different value. A DEVICE_MALLOC
+    // body of 3 bytes reads as a TRUNCATED pointer with nothing to distinguish it from a real one.
+    switch (backend) {
+    case BackendKind::FORK_SHM:
+    case BackendKind::FORK_COW:
+    case BackendKind::DEVICE_MALLOC:
+    case BackendKind::VMM_WINDOW: {
+        if (h.body_len != BACKEND_ADDRESS_BODY_BYTES)
+            reject("invalid BufferDescriptor: an address-bearing backend body must be exactly 8 bytes");
+        uint64_t base = 0;
+        std::memcpy(&base, h.body, BACKEND_ADDRESS_BODY_BYTES);
+        // No backing is mapped or allocated at 0, so a zero body is an unfilled one.
+        if (base == 0) reject("invalid BufferDescriptor: address-bearing backend body is a null base");
+        break;
+    }
+    case BackendKind::POSIX_SHM: {
+        // The consumer opens this by name, and the Python side decodes it as UTF-8 before the open.
+        // Restricting the name to printable ASCII other than '/' makes that decode total instead of
+        // a second, weaker schema: it is a UTF-8 subset, so bytes that pass here always decode. '/'
+        // is excluded because shm_open forbids it inside a name; space and the control range because
+        // the name is rendered into paths and diagnostics.
+        if (h.body_len == 0) reject("invalid BufferDescriptor: POSIX_SHM body must carry a shm name");
+        for (uint16_t i = 0; i < h.body_len; ++i) {
+            const auto c = static_cast<unsigned char>(h.body[i]);
+            if (c < 0x21 || c > 0x7E || c == '/') {
+                reject("invalid BufferDescriptor: POSIX_SHM shm name must be printable ASCII without '/'");
+            }
+        }
+        break;
+    }
+    case BackendKind::REMOTE_SIDECAR:
+        // The authoritative descriptor rides in the per-task sidecar, so nothing belongs here.
+        if (h.body_len != 0) reject("invalid BufferDescriptor: REMOTE_SIDECAR carries no body in P1");
+        break;
+    }
+
+    // The unused tail of `body` crosses a process boundary with the descriptor, so whatever the
+    // owner's memory held there would cross with it.
+    //
+    // The rule covers the regions a PRODUCER chooses not to fill — this tail, and a Tensor's
+    // shape/stride slots past `ndims` (see validate_tensor). It does NOT cover the `_pad` fields:
+    // those are alignment slack no producer selects, and `CanonicalIdentity::_pad` in particular is
+    // deliberately tolerated so two decodes of one backing still key alike. Equality stays field-wise
+    // for that reason, so a descriptor is never canonical byte-for-byte, only field-for-field.
+    for (uint32_t i = h.body_len; i < DESC_MAX_BYTES; ++i) {
+        if (h.body[i] != 0) reject("invalid BufferDescriptor: reserved bytes past body_len must be zero");
     }
 }
 
@@ -339,6 +393,16 @@ inline void validate_tensor(const Tensor &r) {
     for (uint32_t i = 0; i < r.ndims; ++i) {
         if (r.shapes[i] == 0) reject("invalid Tensor: shape dimension is zero");
         if (r.strides[i] == 0) reject("invalid Tensor: stride must be > 0 (broadcast and negative step unsupported)");
+    }
+    // Slots past `ndims` are the same case as the descriptor's body tail: a producer chose not to
+    // fill them, and the blob memcpy carries all 144 bytes across the process boundary regardless.
+    // Requiring them zero is also what makes two encodings of one view agree over the active fields
+    // AND the inactive ones, so a decoded element can be compared as bytes. (`_pad` is excluded, as
+    // in the descriptor — it is alignment slack, not a slot anyone selects.)
+    for (uint32_t i = r.ndims; i < static_cast<uint32_t>(MAX_TENSOR_DIMS); ++i) {
+        if (r.shapes[i] != 0 || r.strides[i] != 0) {
+            reject("invalid Tensor: shape/stride slots past ndims must be zero");
+        }
     }
     const uint64_t extent_bytes = tensor_extent_bytes(r);
     if (extent_bytes == TENSOR_EXTENT_UNREPRESENTABLE) {
