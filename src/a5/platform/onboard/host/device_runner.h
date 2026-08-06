@@ -86,9 +86,14 @@ public:
 
     // The blocking entry point composes these operations. enqueue owns rollback
     // until the AICPU launch marker; drain takes that ownership on success.
-    int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) override;
-    int poll_run(uint32_t pipeline_slot) override;
-    int drain_run(uint32_t pipeline_slot) override;
+    int prepare_execution(
+        Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+        std::unique_ptr<PreparedExecution> *prepared
+    ) override;
+    LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) override;
+    void abandon_prepared_execution(PreparedExecution &prepared) noexcept override;
+    int poll_execution(const ActiveExecution &active) override;
+    int drain_execution(ActiveExecution &active) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
 
     // `set_chip_swimlane_enabled`, `set_dump_args_enabled`,
@@ -157,7 +162,7 @@ private:
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
     // worker_count_, executor + dispatcher bytes, aicore_bin_handle_,
     // load_aicpu_op_, mem_alloc_, the three DeviceArenas + their cached
-    // sizes, persistent AICPU/AICore streams, kernel_args_, device_wall_*,
+    // sizes, persistent AICPU/AICore streams, device_wall_*,
     // binaries_loaded_) is inherited from `DeviceRunnerBase`.
 
     // Group D state (`chip_callable_buffers_`, `callables_`,
@@ -193,7 +198,7 @@ private:
     // 507899), but a *force* reset clears it: finalize() calls
     // force_reset_device() on this path so the next Worker re-inits clean in the
     // same process (see force_reset_device()). This flag drives admission and
-    // recovery. See enqueue_run() and recover_device_or_mark_unusable().
+    // recovery. See launch_execution() and recover_device_or_mark_unusable().
     // Admission and recovery execute on different host threads.
     std::atomic<bool> device_unusable_{false};
 
@@ -206,11 +211,10 @@ private:
     };
     std::atomic<RunPollState> run_poll_state_{RunPollState::Idle};
     std::atomic<uint32_t> run_poll_slot_{PTO_PIPELINE_MAX_DEPTH};
-    bool run_resources_owned_{false};
 
-    // Release executor-owned per-run resources and publish a sticky terminal
+    // Release execution-owned per-run resources and publish a sticky terminal
     // state. Idempotent so enqueue rollback and drain share one path.
-    void cleanup_active_run() noexcept;
+    void cleanup_execution(PreparedExecution &prepared, bool launched) noexcept;
 
     // On an AICore launch/sync error, best-effort drain the device so a later
     // enqueue on the same DeviceRunner can recover in place; if the drain itself
@@ -243,7 +247,7 @@ private:
      * @param device_id Device ID
      * @return 0 on success, error code on failure
      */
-    int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id);
+    int init_chip_swimlane(int num_aicore, int aicpu_thread_num, int device_id, KernelArgsHelper &kernel_args);
 
     /**
      * Initialize args dump device buffers.
@@ -253,7 +257,7 @@ private:
      * @param device_id Device ID for allocations
      * @return 0 on success, error code on failure
      */
-    int init_args_dump(Runtime &runtime, int device_id);
+    int init_args_dump(Runtime &runtime, int device_id, KernelArgsHelper &kernel_args);
 
     /**
      * Initialize PMU profiling device buffers.
@@ -269,8 +273,11 @@ private:
     // dep_gen enablement is a5-specific (a2a3 carries its own copy).
     bool enable_dep_gen_{false};
 
-    int init_pmu(int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id);
-    int init_scope_stats(int num_threads, int device_id);
+    int init_pmu(
+        int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id,
+        KernelArgsHelper &kernel_args
+    );
+    int init_scope_stats(int num_threads, int device_id, KernelArgsHelper &kernel_args);
 
     /**
      * Initialize dep_gen capture shared memory.
@@ -279,7 +286,7 @@ private:
      * stores the device pointer to the data header into
      * kernel_args.dep_gen_data_base.
      */
-    int init_dep_gen(int num_threads, int device_id);
+    int init_dep_gen(int num_threads, int device_id, KernelArgsHelper &kernel_args);
 
     // Per-run collector teardown: stops mgmt + poll threads on every collector
     // whose init succeeded, in the only safe order (stop() joins mgmt before

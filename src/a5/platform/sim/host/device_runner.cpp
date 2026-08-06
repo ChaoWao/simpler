@@ -251,23 +251,26 @@ int DeviceRunner::invoke_device_register(const RegisterCallableArgs &reg_args) {
     return aicpu_register_callable_func_(const_cast<RegisterCallableArgs *>(&reg_args));
 }
 
-int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t /*pipeline_slot*/) {
+int DeviceRunner::prepare_execution(
+    Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+    std::unique_ptr<PreparedExecution> *prepared
+) {
+    if (prepared == nullptr || *prepared != nullptr) return -1;
     if (active_run_ != nullptr) {
-        LOG_ERROR("enqueue_run called while another simulated run still owns execution state");
+        LOG_ERROR("prepare_execution called while another simulated run still owns execution state");
         return -1;
     }
+    auto execution = std::make_unique<PreparedExecution>(identity, runtime, config, pipeline_slot);
     active_run_ = std::make_unique<ActiveRun>();
     active_run_->runtime = &runtime;
     run_completion_.reset(1);
-    auto enqueue_cleanup = RAIIScopeGuard([this]() {
+    auto prepare_cleanup = RAIIScopeGuard([this]() {
         run_completion_.abandon();
         cleanup_active_run();
     });
 
     apply_call_config(config);
-    // prepare_launch_shape() resolved block_dim before the graph was built, so
-    // the geometry this run launches with is already on the runner.
-    const int block_dim = block_dim_;
+    const int block_dim = runtime.get_worker_count() / cores_per_blockdim_;
     int launch_aicpu_num = config.aicpu_thread_num;
     clear_cpu_sim_shared_storage();
     // Sim has no hardware topology to probe, so auto uses the architecture
@@ -276,7 +279,7 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
     if (launch_aicpu_num == 0) launch_aicpu_num = PLATFORM_DEFAULT_AICPU_THREAD_NUM;
     runtime.set_aicpu_thread_num(launch_aicpu_num);
     if (block_dim < 1) {
-        LOG_ERROR("enqueue_run reached with unresolved block_dim; prepare_launch_shape must run first");
+        LOG_ERROR("prepare_execution computed block_dim < 1 from worker_count=%d", runtime.get_worker_count());
         return -1;
     }
 
@@ -415,114 +418,123 @@ int DeviceRunner::enqueue_run(Runtime &runtime, const CallConfig &config, uint32
         return -1;
     }
 
-    set_platform_regs_func_(kernel_args_.regs);
-    if (set_orch_device_id_func_ != nullptr) {
-        set_orch_device_id_func_(device_id_);
-    }
-    set_platform_dump_base_func_(kernel_args_.dump_data_base);
-    set_dump_args_enabled_func_(enable_dump_args_);
-    set_platform_chip_swimlane_base_func_(kernel_args_.chip_swimlane_data_base);
-    set_platform_chip_swimlane_aicore_rotation_table_func_(kernel_args_.chip_swimlane_aicore_rotation_table);
-    set_chip_swimlane_enabled_func_(enable_chip_swimlane_);
-    set_platform_pmu_base_func_(kernel_args_.pmu_data_base);
-    set_pmu_enabled_func_(enable_pmu_);
-    set_platform_dep_gen_base_func_(kernel_args_.dep_gen_data_base);
-    set_dep_gen_enabled_func_(enable_dep_gen_);
-    set_scope_stats_enabled_func_(enable_scope_stats_);
-    set_platform_scope_stats_base_func_(kernel_args_.scope_stats_data_base);
-
-    // Start collector mgmt + poll threads now, just before kernels launch.
-    auto thread_factory = [this](std::function<void()> fn) {
-        return create_thread(std::move(fn));
-    };
-    if (enable_chip_swimlane_) {
-        chip_swimlane_collector_.start(thread_factory);
-    }
-    if (enable_dump_args_) {
-        dump_collector_.start(thread_factory);
-    }
-    if (enable_pmu_) {
-        pmu_collector_.start(thread_factory);
-    }
-    if (enable_dep_gen_) {
-        dep_gen_collector_.start(thread_factory);
-    }
-    if (enable_scope_stats_) {
-        scope_stats_collector_.start(thread_factory);
-    }
-
     constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
-    LOG_INFO("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
-    active_run_->aicpu_threads.reserve(over_launch);
-    active_run_->aicore_threads.reserve(num_aicore);
-
-    if (kernel_args_.device_wall_data_base != 0) {
-        *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
-    }
-    const auto sim_t0 = std::chrono::steady_clock::now();
-
-    // AICPU phase capture (preamble/so_load/graph_build/post_orch + orch/sched).
-    // The sim AICPU threads run the same aicpu_execute as onboard; the phase
-    // buffer base is published into the dlopen'd runtime SO via the dlsym'd
-    // set_platform_phase_base (crossing the host↔SO boundary like the dump base),
-    // and each thread resolves its slot from platform_aicpu_affinity_thread_idx()
-    // — no C++ thread_local. The active run owns the buffer until drain reduces
-    // it into device_phase_ns_.
     constexpr int kPhaseThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
     constexpr size_t kPhaseRecs = static_cast<size_t>(kPhaseThreads) * NUM_AICPU_PHASES;
     constexpr size_t kTailRecs = static_cast<size_t>(task_timing_buffer_slots(kPhaseThreads));
-    // One 16-byte-record vector backs the phase region plus the task-timing tail
-    // (both records are 16 bytes; {kPhaseUnset, 0} initializes an AicpuPhaseRecord
-    // start/end and a TaskTimingRecord dispatch/finish identically). The AICPU SO
-    // resolves the tail at base + task_timing_tail_offset(), so it must be part of
-    // the same published buffer.
     static_assert(sizeof(AicpuPhaseRecord) == sizeof(TaskTimingRecord), "phase/tail records must share size");
     active_run_->phase_buf.assign(kPhaseRecs + kTailRecs, AicpuPhaseRecord{kPhaseUnset, 0});
-    set_platform_phase_base_func_(reinterpret_cast<uint64_t>(active_run_->phase_buf.data()));
-    run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
-    ActiveRun *run = active_run_.get();
-
-    for (int i = 0; i < over_launch; i++) {
-        run->aicpu_threads.push_back(create_thread([this, run, launch_aicpu_num, over_launch, sim_t0]() {
-            if (!platform_aicpu_affinity_gate(launch_aicpu_num, over_launch)) {
-                run_completion_.task_finished();
-                return;
-            }
-            int rc = aicpu_execute_func_(run->runtime);
-            if (kernel_args_.device_wall_data_base != 0) {
-                const auto t1 = std::chrono::steady_clock::now();
-                *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) =
-                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - sim_t0).count());
-            }
-            run_completion_.task_finished(rc);
-        }));
-    }
-
-    LOG_INFO("Launching %d AICore thread(s)", num_aicore);
-    for (int i = 0; i < num_aicore; i++) {
-        CoreType core_type = runtime.get_workers()[i].core_type;
-        uint32_t physical_core_id = static_cast<uint32_t>(i);
-        run->aicore_threads.push_back(create_thread([this, run, i, core_type, physical_core_id]() {
-            aicore_execute_func_(
-                run->runtime, i, core_type, physical_core_id, kernel_args_.regs, kernel_args_.enable_profiling_flag,
-                kernel_args_.chip_swimlane_aicore_rotation_table, kernel_args_.aicore_pmu_ring_addrs
-            );
-            run_completion_.task_finished();
-        }));
-    }
-
-    // Both simulated kernel thread groups now exist. This is the sim's real
-    // launch boundary. Their state remains owned until drain_run().
-    publish_task_accepted();
-    enqueue_cleanup.dismiss();
+    active_run_->aicpu_threads.reserve(over_launch);
+    active_run_->aicore_threads.reserve(num_aicore);
+    execution->num_aicore = num_aicore;
+    execution->launch_aicpu_num = launch_aicpu_num;
+    prepare_cleanup.dismiss();
+    *prepared = std::move(execution);
     return 0;
 }
 
-int DeviceRunner::poll_run() { return run_completion_.poll(); }
+SimDeviceRunnerBase::LaunchOutcome
+DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) {
+    LaunchOutcome outcome;
+    if (prepared == nullptr) return outcome;
+    Runtime &runtime = *prepared->runtime;
+    const int num_aicore = prepared->num_aicore;
+    const int launch_aicpu_num = prepared->launch_aicpu_num;
+    constexpr int over_launch = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    ActiveRun *run = active_run_.get();
+    if (run == nullptr) {
+        outcome.prepared = std::move(prepared);
+        return outcome;
+    }
 
-int DeviceRunner::drain_run() {
+    std::chrono::steady_clock::time_point sim_t0;
+
+    LaunchTransactionResult result = exact_launch_transaction(
+        prepared->identity, std::move(permit),
+        [&]() {
+            set_platform_regs_func_(kernel_args_.regs);
+            if (set_orch_device_id_func_ != nullptr) set_orch_device_id_func_(device_id_);
+            set_platform_dump_base_func_(kernel_args_.dump_data_base);
+            set_dump_args_enabled_func_(enable_dump_args_);
+            set_platform_chip_swimlane_base_func_(kernel_args_.chip_swimlane_data_base);
+            set_platform_chip_swimlane_aicore_rotation_table_func_(kernel_args_.chip_swimlane_aicore_rotation_table);
+            set_chip_swimlane_enabled_func_(enable_chip_swimlane_);
+            set_platform_pmu_base_func_(kernel_args_.pmu_data_base);
+            set_pmu_enabled_func_(enable_pmu_);
+            set_platform_dep_gen_base_func_(kernel_args_.dep_gen_data_base);
+            set_dep_gen_enabled_func_(enable_dep_gen_);
+            set_scope_stats_enabled_func_(enable_scope_stats_);
+            set_platform_scope_stats_base_func_(kernel_args_.scope_stats_data_base);
+
+            auto thread_factory = [this](std::function<void()> fn) {
+                return create_thread(std::move(fn));
+            };
+            if (enable_chip_swimlane_) chip_swimlane_collector_.start(thread_factory);
+            if (enable_dump_args_) dump_collector_.start(thread_factory);
+            if (enable_pmu_) pmu_collector_.start(thread_factory);
+            if (enable_dep_gen_) dep_gen_collector_.start(thread_factory);
+            if (enable_scope_stats_) scope_stats_collector_.start(thread_factory);
+
+            if (kernel_args_.device_wall_data_base != 0) {
+                *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = 0;
+            }
+            set_platform_phase_base_func_(reinterpret_cast<uint64_t>(run->phase_buf.data()));
+            sim_t0 = std::chrono::steady_clock::now();
+            run_completion_.reset(static_cast<size_t>(over_launch) + static_cast<size_t>(num_aicore));
+
+            LOG_INFO("Launching %d AICore thread(s)", num_aicore);
+            for (int i = 0; i < num_aicore; i++) {
+                CoreType core_type = runtime.get_workers()[i].core_type;
+                uint32_t physical_core_id = static_cast<uint32_t>(i);
+                run->aicore_threads.push_back(create_thread([this, run, i, core_type, physical_core_id]() {
+                    aicore_execute_func_(
+                        run->runtime, i, core_type, physical_core_id, kernel_args_.regs,
+                        kernel_args_.enable_profiling_flag, kernel_args_.chip_swimlane_aicore_rotation_table,
+                        kernel_args_.aicore_pmu_ring_addrs
+                    );
+                    run_completion_.task_finished();
+                }));
+            }
+            return 0;
+        },
+        [&]() {
+            LOG_INFO("Launching %d AICPU threads (logical=%d)", over_launch, launch_aicpu_num);
+            for (int i = 0; i < over_launch; i++) {
+                run->aicpu_threads.push_back(create_thread([this, run, launch_aicpu_num, over_launch, sim_t0]() {
+                    if (!platform_aicpu_affinity_gate(launch_aicpu_num, over_launch)) {
+                        run_completion_.task_finished();
+                        return;
+                    }
+                    int rc = aicpu_execute_func_(run->runtime);
+                    if (kernel_args_.device_wall_data_base != 0) {
+                        const auto t1 = std::chrono::steady_clock::now();
+                        *reinterpret_cast<uint64_t *>(kernel_args_.device_wall_data_base) = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - sim_t0).count()
+                        );
+                    }
+                    run_completion_.task_finished(rc);
+                }));
+            }
+            return 0;
+        }
+    );
+    if (result.poisoned()) poison_launch();
+    outcome.rc = result.rc;
+    outcome.progress = result.progress;
+    outcome.receipt = std::move(result.receipt);
+    if (result.progress == LaunchProgress::NotStarted) {
+        outcome.prepared = std::move(prepared);
+    } else {
+        outcome.active = std::make_unique<ActiveExecution>(std::move(prepared), result.progress);
+    }
+    return outcome;
+}
+
+int DeviceRunner::poll_execution(const ActiveExecution &) { return run_completion_.poll(); }
+
+int DeviceRunner::drain_execution(ActiveExecution &) {
     if (active_run_ == nullptr) {
-        LOG_ERROR("drain_run called without an enqueued simulated run");
+        LOG_ERROR("drain_execution called without a launched simulated run");
         return -1;
     }
     auto run_cleanup = RAIIScopeGuard([this]() {
@@ -628,6 +640,11 @@ int DeviceRunner::drain_run() {
     }
 
     return 0;
+}
+
+void DeviceRunner::abandon_prepared_execution(PreparedExecution &) noexcept {
+    run_completion_.abandon();
+    cleanup_active_run();
 }
 
 void DeviceRunner::unload_executor_binaries() {

@@ -37,11 +37,14 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pto_runtime_c_api.h"
+#include "native_run_execution.h"
 
 #include "callable.h"
+#include "call_config.h"
 #include "prepare_callable_common.h"
 #include "utils/device_arena.h"
 #include "common/kernel_args.h"
@@ -56,8 +59,7 @@
 #include "host/scope_stats_collector.h"
 #include "runtime.h"
 
-struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
-struct CallConfig;  // task_interface/call_config.h — per-run execution config
+struct HostApi;  // common/host_api.h — fwd-declared to keep task_interface headers out
 class NativeRunLaunchSignal;
 
 // Width sim resolves the CallConfig "auto" sentinel to, deliberately below
@@ -91,18 +93,68 @@ public:
     virtual ~SimDeviceRunnerBase() = default;
 
     // --- Pure / no-op virtuals dispatched from the shared c_api glue ----
-    /** Compatibility composition retained while the C API owns an executor. */
-    int run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) {
-        const int rc = enqueue_run(runtime, config, pipeline_slot);
-        return rc == 0 ? drain_run() : rc;
-    }
+    struct PreparedExecution {
+        PreparedExecution(
+            const NativeRunIdentity &identity_in, Runtime &runtime_in, const CallConfig &config_in,
+            uint32_t pipeline_slot_in
+        ) :
+            identity(identity_in),
+            runtime(&runtime_in),
+            config(config_in),
+            pipeline_slot(pipeline_slot_in) {}
+        virtual ~PreparedExecution() = default;
+        PreparedExecution(const PreparedExecution &) = delete;
+        PreparedExecution &operator=(const PreparedExecution &) = delete;
+        PreparedExecution(PreparedExecution &&other) noexcept :
+            identity(other.identity),
+            runtime(std::exchange(other.runtime, nullptr)),
+            config(other.config),
+            pipeline_slot(other.pipeline_slot),
+            num_aicore(other.num_aicore),
+            launch_aicpu_num(other.launch_aicpu_num) {}
+        PreparedExecution &operator=(PreparedExecution &&) = delete;
+
+        NativeRunIdentity identity{};
+        Runtime *runtime{nullptr};
+        CallConfig config{};
+        uint32_t pipeline_slot{PTO_PIPELINE_MAX_DEPTH};
+        int num_aicore{0};
+        int launch_aicpu_num{0};
+    };
+
+    struct ActiveExecution {
+        explicit ActiveExecution(std::unique_ptr<PreparedExecution> prepared_in, LaunchProgress progress_in) :
+            prepared(std::move(prepared_in)),
+            progress(progress_in) {}
+        ActiveExecution(const ActiveExecution &) = delete;
+        ActiveExecution &operator=(const ActiveExecution &) = delete;
+        ActiveExecution(ActiveExecution &&) noexcept = default;
+        ActiveExecution &operator=(ActiveExecution &&) noexcept = default;
+        std::unique_ptr<PreparedExecution> prepared;
+        LaunchProgress progress{LaunchProgress::NotStarted};
+    };
+
+    struct LaunchOutcome {
+        int rc{-1};
+        LaunchProgress progress{LaunchProgress::NotStarted};
+        std::unique_ptr<PreparedExecution> prepared{};
+        std::unique_ptr<ActiveExecution> active{};
+        LaunchReceipt receipt{};
+
+        bool poisoned() const { return progress == LaunchProgress::Partial; }
+    };
 
     /** Submit a Runtime and retain all state needed to query and drain it. */
-    virtual int enqueue_run(Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot) = 0;
+    virtual int prepare_execution(
+        Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
+        std::unique_ptr<PreparedExecution> *prepared
+    ) = 0;
+    virtual LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) = 0;
+    virtual void abandon_prepared_execution(PreparedExecution &prepared) noexcept = 0;
     /** Return one of the SIMPLER_NATIVE_RUN_POLL_* values without waiting. */
-    virtual int poll_run() = 0;
+    virtual int poll_execution(const ActiveExecution &active) = 0;
     /** Wait for completion, publish DFX, and release per-run resources. */
-    virtual int drain_run() = 0;
+    virtual int drain_execution(ActiveExecution &active) = 0;
     virtual int finalize() = 0;
     // a2a3 and a5 both override; an arch without dep_gen leaves the no-op.
     virtual void set_dep_gen_enabled(bool /*enable*/) {}
@@ -114,10 +166,12 @@ public:
     virtual void destroy_native_run_thread_state(void * /*snapshot*/) noexcept {}
 
     /** Reserve the runner's single active native execution through finalize. */
-    bool try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal);
+    bool try_acquire_native_run(const void *owner, const NativeRunIdentity &identity, LaunchPermit *permit);
     void release_native_run(const void *owner);
     bool native_run_active() const;
     bool native_run_owned_by(const void *owner) const;
+    bool can_accept_run() const { return !launch_poisoned_.load(std::memory_order_acquire); }
+    void poison_launch() { launch_poisoned_.store(true, std::memory_order_release); }
 
     // --- Shared methods --------------------------------------------------
 
@@ -237,7 +291,7 @@ public:
     const std::string &output_prefix() const { return output_prefix_; }
 
     // Latch this run's per-run diagnostic config onto the runner's enable_*_
-    // members before enqueue_run() uses them. Each arch calls this at enqueue;
+    // members before prepare_execution() uses them. Each arch calls this at prepare;
     // the c_api threads the CallConfig through instead of calling setters.
     // Defined in the .cpp so this header does not need the full CallConfig.
     void apply_call_config(const CallConfig &config);
@@ -247,8 +301,6 @@ public:
 
 protected:
     // --- Helpers usable by subclass execution / finalize -----------------
-    /** Publish after both simulated kernel thread groups have been created. */
-    void publish_task_accepted() const;
     int ensure_device_initialized();
     virtual int ensure_binaries_loaded() = 0;
     // Hand the orch-SO descriptor to the sim AICPU register entry. Built
@@ -395,7 +447,7 @@ protected:
     Runtime *last_runtime_{nullptr};
 
     std::atomic<const void *> active_native_run_{nullptr};
-    NativeRunLaunchSignal *native_launch_signal_{nullptr};
+    std::atomic<bool> launch_poisoned_{false};
 
     // Dynamically loaded executor libraries (shared infra; the dlsym'd function-
     // pointer table itself lives on the subclass since signatures diverge

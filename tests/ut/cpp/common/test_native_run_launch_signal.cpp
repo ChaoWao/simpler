@@ -16,6 +16,7 @@
 #include <future>
 #include <thread>
 
+#include "native_run_execution_test_peer.h"
 #include "native_run_launch_signal.h"
 
 TEST(NativeRunLaunchSignalTest, WaitBlocksWithoutConsumingCpu) {
@@ -57,12 +58,22 @@ TEST(NativeRunLaunchSignalTest, NotificationBeforeWaitIsRemembered) {
 TEST(NativeRunLaunchSignalTest, PublishAcceptanceStoresOnceAndKeepsNotificationSticky) {
     volatile int32_t accepted_state = 0;
     NativeRunLaunchSignal signal(&accepted_state, 17);
+    NativeRunIdentity identity{11, 13, 17, 1};
+    LaunchTransactionResult launched = exact_launch_transaction(
+        identity, NativeRunExecutionTestPeer::mint(identity),
+        []() {
+            return 0;
+        },
+        []() {
+            return 0;
+        }
+    );
 
-    signal.publish_acceptance();
+    ASSERT_TRUE(signal.publish_receipt(launched.receipt, identity));
     EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 17);
 
     __atomic_store_n(&accepted_state, 23, __ATOMIC_RELEASE);
-    signal.publish_acceptance();
+    EXPECT_TRUE(signal.publish_receipt(launched.receipt, identity));
     EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 23);
 
     auto waiter = std::async(std::launch::async, [&]() {
@@ -74,9 +85,40 @@ TEST(NativeRunLaunchSignalTest, PublishAcceptanceStoresOnceAndKeepsNotificationS
 TEST(NativeRunLaunchSignalTest, NotificationBeforeLaunchMarkerSuppressesAcceptance) {
     volatile int32_t accepted_state = 5;
     NativeRunLaunchSignal signal(&accepted_state, 17);
+    NativeRunIdentity identity{11, 13, 17, 1};
+    LaunchTransactionResult launched = exact_launch_transaction(
+        identity, NativeRunExecutionTestPeer::mint(identity),
+        []() {
+            return 0;
+        },
+        []() {
+            return 0;
+        }
+    );
 
     signal.notify();
-    signal.publish_acceptance();
+    EXPECT_TRUE(signal.publish_receipt(launched.receipt, identity));
 
     EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 5);
+}
+
+TEST(NativeRunLaunchSignalTest, StaleReceiptCannotPublishAcceptance) {
+    volatile int32_t accepted_state = 5;
+    NativeRunLaunchSignal signal(&accepted_state, 17);
+    NativeRunIdentity identity{11, 13, 17, 1};
+    NativeRunIdentity stale = identity;
+    stale.generation++;
+    LaunchTransactionResult launched = exact_launch_transaction(
+        stale, NativeRunExecutionTestPeer::mint(stale),
+        []() {
+            return 0;
+        },
+        []() {
+            return 0;
+        }
+    );
+
+    EXPECT_FALSE(signal.publish_receipt(launched.receipt, identity));
+    EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 5);
+    signal.notify();
 }

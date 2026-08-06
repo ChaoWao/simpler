@@ -30,6 +30,7 @@
 #include <runtime/rt.h>
 
 #include <cstdint>
+#include <utility>
 
 #include "common/kernel_args.h"  // arch-specific KernelArgs layout
 #include "host/memory_allocator.h"
@@ -60,6 +61,17 @@ int query_stream_pair_nonblocking(rtStream_t aicpu_stream, rtStream_t aicore_str
  * free functions in the arch's own `device_runner.h`.
  */
 struct KernelArgsHelper {
+    KernelArgsHelper() = default;
+    KernelArgsHelper(const KernelArgsHelper &) = delete;
+    KernelArgsHelper &operator=(const KernelArgsHelper &) = delete;
+    KernelArgsHelper(KernelArgsHelper &&other) noexcept :
+        args(other.args),
+        allocator_(std::exchange(other.allocator_, nullptr)),
+        device_k_args_(std::exchange(other.device_k_args_, nullptr)) {
+        other.args = KernelArgs{};
+    }
+    KernelArgsHelper &operator=(KernelArgsHelper &&) = delete;
+
     KernelArgs args;
     MemoryAllocator *allocator_{nullptr};
     KernelArgs *device_k_args_{nullptr};  // Device copy of KernelArgs for AICore

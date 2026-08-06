@@ -43,7 +43,6 @@
 #include "host/acl_error_log.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
-#include "native_run_launch_signal.h"
 #include "platform_comm/comm.h"
 #include "pto_runtime_c_api.h"
 #include "task_args.h"
@@ -621,8 +620,8 @@ int DeviceRunnerBase::query_max_block_dim(rtStream_t stream, uint32_t *out_cube,
     return PLATFORM_MAX_BLOCKDIM;
 }
 
-void DeviceRunnerBase::print_handshake_results() {
-    if (stream_aicpu_ == nullptr || worker_count_ == 0 || kernel_args_.args.runtime_args == nullptr) {
+void DeviceRunnerBase::print_handshake_results(const KernelArgsHelper &kernel_args) {
+    if (stream_aicpu_ == nullptr || worker_count_ == 0 || kernel_args.args.runtime_args == nullptr) {
         return;
     }
 
@@ -630,7 +629,7 @@ void DeviceRunnerBase::print_handshake_results() {
     std::vector<Handshake> workers(worker_count_);
     size_t total_size = sizeof(Handshake) * worker_count_;
     rtMemcpy(
-        workers.data(), total_size, kernel_args_.args.runtime_args->get_workers(), total_size, RT_MEMCPY_DEVICE_TO_HOST
+        workers.data(), total_size, kernel_args.args.runtime_args->get_workers(), total_size, RT_MEMCPY_DEVICE_TO_HOST
     );
 
     LOG_DEBUG("Handshake results for %d cores:", worker_count_);
@@ -1054,13 +1053,7 @@ int DeviceRunnerBase::launch_aicpu_kernel(
     // exported symbol (simpler_aicpu_exec). LaunchBuiltInOp dispatches via
     // rtsLaunchCpuKernel on the cached rtFuncHandle resolved by
     // LoadAicpuOp::Init at first-time bootstrap.
-    int rc = load_aicpu_op_.LaunchBuiltInOp(stream, k_args, sizeof(KernelArgs), aicpu_num, kernel_name);
-    if (rc == 0) {
-        // Both onboard arches enqueue AICore before this Run launch. A
-        // successful return is therefore the common post-enqueue boundary.
-        publish_task_accepted();
-    }
-    return rc;
+    return load_aicpu_op_.LaunchBuiltInOp(stream, k_args, sizeof(KernelArgs), aicpu_num, kernel_name);
 }
 
 int DeviceRunnerBase::launch_aicpu_payload(
@@ -1275,13 +1268,12 @@ int DeviceRunnerBase::resolve_aicpu_thread_num(int requested, int usable, int ar
     return total;
 }
 
-void DeviceRunnerBase::ensure_device_wall_buffer() {
+void DeviceRunnerBase::ensure_device_wall_buffer(KernelArgsHelper &kernel_args) {
     if (!device_phase_capture_enabled()) {
         // A null base makes the AICPU stamping helpers no-op.
-        kernel_args_.args.device_wall_data_base = 0;
+        kernel_args.args.device_wall_data_base = 0;
         return;
     }
-
     // Per-thread fixed AICPU phase records (thread-major:
     // AicpuPhaseRecord[NUM_AICPU_PHASES] per launched AICPU thread). Slot
     // AicpuPhase::RunWall keeps the original whole-run wall; the rest subdivide
@@ -1290,33 +1282,34 @@ void DeviceRunnerBase::ensure_device_wall_buffer() {
     // max(end) - min(start) and surfaces the other phases as trace markers. The
     // buffer is allocated once (lazy) but RESET every run so a stale prior run
     // cannot leak into the reduction.
-    constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
-    // Phase region followed by the task-timing tail. Both records are 16 bytes and
-    // share the {kPhaseUnset, 0} reset, so one AicpuPhaseRecord init array covers
-    // both; the AICPU SO resolves the tail at base + task_timing_tail_offset().
-    static_assert(sizeof(AicpuPhaseRecord) == sizeof(TaskTimingRecord), "phase/tail records must share size");
-    constexpr int kRecords = kThreads * NUM_AICPU_PHASES + task_timing_buffer_slots(kThreads);
-    constexpr size_t kBytes = device_phase_buffer_bytes(kThreads);
+    constexpr size_t kBytes = device_phase_buffer_bytes(PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH);
     if (device_wall_dev_ptr_ == nullptr) {
         device_wall_dev_ptr_ = allocate_tensor(kBytes);
     }
     if (device_wall_dev_ptr_ != nullptr) {
-        kernel_args_.args.device_wall_data_base = reinterpret_cast<uint64_t>(device_wall_dev_ptr_);
-        AicpuPhaseRecord init[kRecords];
-        for (int i = 0; i < kRecords; ++i) {
-            init[i].start_cycle = kPhaseUnset;  // start/dispatch: sentinel so min()/unset-check ignore unused slots
-            init[i].end_cycle = 0;              // end/finish: 0 so max() ignores unused slots
-        }
-        if (copy_to_device(device_wall_dev_ptr_, init, sizeof(init)) != 0) {
-            // Reset failed — disable capture for this run so stale slot data
-            // can't leak into the reduction. Cleared pointer means the buffer
-            // is re-allocated (and re-reset) on the next run.
-            LOG_WARN("device_phase reset H2D failed; disabling phase capture this run");
-            free_tensor(device_wall_dev_ptr_);
-            device_wall_dev_ptr_ = nullptr;
-            kernel_args_.args.device_wall_data_base = 0;
-        }
+        kernel_args.args.device_wall_data_base = reinterpret_cast<uint64_t>(device_wall_dev_ptr_);
     }
+}
+
+int DeviceRunnerBase::arm_device_wall_buffer(KernelArgsHelper &kernel_args) {
+    if (device_wall_dev_ptr_ == nullptr) return 0;
+    constexpr int kThreads = PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH;
+    static_assert(sizeof(AicpuPhaseRecord) == sizeof(TaskTimingRecord), "phase/tail records must share size");
+    constexpr int kRecords = kThreads * NUM_AICPU_PHASES + task_timing_buffer_slots(kThreads);
+    AicpuPhaseRecord init[kRecords];
+    for (int i = 0; i < kRecords; ++i) {
+        init[i].start_cycle = kPhaseUnset;  // start/dispatch: sentinel so min()/unset-check ignore unused slots
+        init[i].end_cycle = 0;              // end/finish: 0 so max() ignores unused slots
+    }
+    if (copy_to_device(device_wall_dev_ptr_, init, sizeof(init)) != 0) {
+        // Reset failed — disable capture for this run so stale slot data
+        // can't leak into the reduction. Keep the shared allocation alive:
+        // an earlier run may still reference it, and the next run retries reset.
+        LOG_WARN("device_phase reset H2D failed; disabling phase capture this run");
+        kernel_args.args.device_wall_data_base = 0;
+        return 0;
+    }
+    return 0;
 }
 
 int DeviceRunnerBase::resolve_block_dim() {
@@ -1491,8 +1484,8 @@ void DeviceRunnerBase::read_device_wall_ns() {
     );
 }
 
-int DeviceRunnerBase::init_runtime_args_with_metadata(Runtime &runtime) {
-    int rc = kernel_args_.init_runtime_args(runtime, mem_alloc_);
+int DeviceRunnerBase::init_runtime_args_with_metadata(Runtime &runtime, KernelArgsHelper &kernel_args) {
+    int rc = kernel_args.init_runtime_args(runtime, mem_alloc_);
     if (rc != 0) {
         LOG_ERROR("init_runtime_args failed: %d", rc);
         return rc;
@@ -1554,8 +1547,10 @@ void DeviceRunnerBase::teardown_shared_collectors_after_run() {
     }
 }
 
-bool DeviceRunnerBase::try_acquire_native_run(const void *owner, NativeRunLaunchSignal *launch_signal) {
-    if (owner == nullptr || launch_signal == nullptr) return false;
+bool DeviceRunnerBase::try_acquire_native_run(
+    const void *owner, const NativeRunIdentity &identity, LaunchPermit *permit
+) {
+    if (owner == nullptr || permit == nullptr) return false;
     std::lock_guard<std::mutex> lk(native_run_mu_);
     bool reserved = false;
     for (const NativeRunReservation &reservation : native_run_reservations_) {
@@ -1571,14 +1566,13 @@ bool DeviceRunnerBase::try_acquire_native_run(const void *owner, NativeRunLaunch
         )) {
         return false;
     }
-    native_launch_signal_ = launch_signal;
+    *permit = LaunchPermit(identity);
     return true;
 }
 
 void DeviceRunnerBase::release_native_run(const void *owner) {
     std::lock_guard<std::mutex> lk(native_run_mu_);
     if (active_native_run_.load(std::memory_order_acquire) != owner) return;
-    native_launch_signal_ = nullptr;
     const void *expected = owner;
     (void)active_native_run_.compare_exchange_strong(
         expected, nullptr, std::memory_order_release, std::memory_order_relaxed
@@ -1646,9 +1640,4 @@ bool DeviceRunnerBase::native_runs_outstanding() const {
         if (reservation.owner != nullptr) return true;
     }
     return false;
-}
-
-void DeviceRunnerBase::publish_task_accepted() const {
-    std::lock_guard<std::mutex> lk(native_run_mu_);
-    if (native_launch_signal_ != nullptr) native_launch_signal_->publish_acceptance();
 }
