@@ -416,6 +416,29 @@ target_include_directories(test_native_run_execution PRIVATE
 target_link_libraries(test_native_run_execution PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
 add_test(NAME test_native_run_execution COMMAND test_native_run_execution)
 set_tests_properties(test_native_run_execution PROPERTIES LABELS "no_hardware")
+
+# NativeRunContext::publish_acceptance is the only path that marks a task
+# accepted, and it is keyed on the launch receipt's identity.
+add_executable(test_native_run_acceptance
+    common/test_native_run_acceptance.cpp
+    ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/shared/runtime.cpp
+)
+target_include_directories(test_native_run_acceptance PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/common
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu
+)
+target_link_libraries(test_native_run_acceptance PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_native_run_acceptance COMMAND test_native_run_acceptance)
+set_tests_properties(test_native_run_acceptance PROPERTIES LABELS "no_hardware")
 # A HostApi value keeps one runner and one run's resource selection even when
 # callers invoke it from different host threads.
 add_common_utils_test(test_host_api common/test_host_api.cpp)

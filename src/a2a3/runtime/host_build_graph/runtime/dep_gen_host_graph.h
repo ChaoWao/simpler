@@ -31,17 +31,17 @@
  *   end_task()              — closes the task, after its last dependency step
  *
  * Control surface, called from the device runner (same host_runtime.so):
- *   set_enabled() / active() / take_capture() / adopt_capture() / emit()
+ *   set_enabled() / active() / emit()
  *
  * The runtime translation unit links weak no-op fallbacks (pto_orchestrator.cpp)
  * so the AICPU build, which has no host graph, resolves without this .cpp.
  *
- * The graph is per-thread state while it is being built. After bind, prepare
- * moves the completed graph into run-owned storage; launch adopts that snapshot
- * into the progress thread's local state before enqueue, and drain emits it.
- * This keeps capture lock-free while allowing serialized lifecycle calls to
- * use different host threads and preventing two prepared contexts on one
- * thread from overwriting one another.
+ * The graph lives in thread-local state, so capture is lock-free and two
+ * prepared contexts on different threads cannot overwrite one another. Emit
+ * reads the calling thread's state, so a run's orchestration (which builds the
+ * graph) and its drain (which emits it) must land on the same thread. The child
+ * progress loop satisfies this by being single-threaded; emit returns -3 if the
+ * invariant is ever broken.
  *
  * Per-task producer dedup mirrors PTO2FaninBuilder, which keys on (ring, slot);
  * this keys on producer task id. The two agree only because host_build_graph is
@@ -123,15 +123,6 @@ void dep_gen_host_graph_set_enabled(bool enable);
  * `false` for runtimes that capture on the device instead.
  */
 bool dep_gen_host_graph_active();
-
-/** Move the current thread's capture into an opaque, caller-owned snapshot. */
-void *dep_gen_host_graph_take_capture();
-
-/** Adopt and consume a snapshot on the current execution thread. */
-void dep_gen_host_graph_adopt_capture(void *capture) noexcept;
-
-/** Destroy a snapshot that will not be launched. */
-void dep_gen_host_graph_destroy_capture(void *capture) noexcept;
 
 /**
  * Write the captured graph to `deps_json_path`. Returns 0 on success, non-zero

@@ -42,26 +42,15 @@ std::string read_file(const std::filesystem::path &path) {
 
 }  // namespace
 
-TEST(DepGenHostGraphTest, CaptureMovesFromPrepareThreadToExecutorThread) {
-    const std::filesystem::path path = output_path("handoff");
+TEST(DepGenHostGraphTest, EmitWritesTheGraphCapturedOnTheSameThread) {
+    const std::filesystem::path path = output_path("same_thread");
     std::filesystem::remove(path);
     dep_gen_host_graph_set_enabled(true);
     dep_gen_host_graph_begin_capture();
     capture_task(11);
     capture_task(12, 11);
 
-    void *capture = dep_gen_host_graph_take_capture();
-    ASSERT_NE(capture, nullptr);
-    EXPECT_EQ(dep_gen_host_graph_emit(path.c_str()), -3);
-
-    int emit_rc = -1;
-    std::thread executor([&]() {
-        dep_gen_host_graph_adopt_capture(capture);
-        emit_rc = dep_gen_host_graph_emit(path.c_str());
-    });
-    executor.join();
-
-    ASSERT_EQ(emit_rc, 0);
+    ASSERT_EQ(dep_gen_host_graph_emit(path.c_str()), 0);
     const std::string json = read_file(path);
     EXPECT_NE(json.find("\"task_id\":\"11\""), std::string::npos);
     EXPECT_NE(json.find("\"task_id\":\"12\""), std::string::npos);
@@ -69,20 +58,35 @@ TEST(DepGenHostGraphTest, CaptureMovesFromPrepareThreadToExecutorThread) {
     std::filesystem::remove(path);
 }
 
-TEST(DepGenHostGraphTest, DestroyedCaptureDoesNotContaminateNextRun) {
-    const std::filesystem::path path = output_path("abandoned");
+TEST(DepGenHostGraphTest, EmitOnAnotherThreadWritesNothingAndReports) {
+    const std::filesystem::path path = output_path("cross_thread");
+    std::filesystem::remove(path);
+    dep_gen_host_graph_set_enabled(true);
+    dep_gen_host_graph_begin_capture();
+    capture_task(21);
+
+    // The graph is thread-local: a run whose orchestration and drain land on
+    // different threads emits nothing rather than a partial deps.json.
+    int emit_rc = 0;
+    std::thread other([&]() {
+        emit_rc = dep_gen_host_graph_emit(path.c_str());
+    });
+    other.join();
+
+    EXPECT_EQ(emit_rc, -3);
+    EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST(DepGenHostGraphTest, BeginCaptureClearsThePreviousRunsGraph) {
+    const std::filesystem::path path = output_path("reset");
     std::filesystem::remove(path);
     dep_gen_host_graph_set_enabled(true);
     dep_gen_host_graph_begin_capture();
     capture_task(101);
-    dep_gen_host_graph_destroy_capture(dep_gen_host_graph_take_capture());
 
     dep_gen_host_graph_set_enabled(true);
     dep_gen_host_graph_begin_capture();
     capture_task(202);
-    void *capture = dep_gen_host_graph_take_capture();
-    ASSERT_NE(capture, nullptr);
-    dep_gen_host_graph_adopt_capture(capture);
     ASSERT_EQ(dep_gen_host_graph_emit(path.c_str()), 0);
 
     const std::string json = read_file(path);
