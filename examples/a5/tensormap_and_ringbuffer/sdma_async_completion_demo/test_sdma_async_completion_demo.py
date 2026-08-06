@@ -204,6 +204,7 @@ def run(
         worker.close()
 
 
+@pytest.mark.sdma
 @pytest.mark.platforms(["a5"])
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(2)

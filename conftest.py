@@ -431,15 +431,17 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "device_count(n): number of NPU devices needed")
     config.addinivalue_line(
         "markers",
-        "sdma: the test provisions the PTO-ISA async-SDMA workspace, so its "
-        "Worker is built with enable_sdma=True. Provisioning creates 48 "
+        "sdma: the test provisions the PTO-ISA async-SDMA workspace. "
+        "SceneTestCase fixtures build its Worker with enable_sdma=True; "
+        "standalone tests may use the platform's default SDMA backend. "
+        "Provisioning creates 48 "
         "device-only STARS streams that sit in the device fault domain, which "
         "makes a later AICore fault on that device cost minutes instead of "
         "~0.3 s (#1425). Two consequences follow from the one marker: such a "
         "test never shares an L2 Worker (the pool key carries the flag) and it "
         "sorts after every ordinary test, so fault-injection cases run on a "
-        "device that has never provisioned. CI additionally runs them in a step "
-        "of their own via -m sdma until #1425 is fixed",
+        "device that has never provisioned. The a2a3 CI additionally runs them "
+        "in a step of their own via -m sdma until #1425 is fixed",
     )
     config.addinivalue_line(
         "markers",

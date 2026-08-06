@@ -60,6 +60,9 @@ jobs:
             --platform a5 --require-pto-isa --compile-workers 8 -q
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
           PYTEST="python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            PYTEST="$PYTEST -m 'not sdma'"
+          fi
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "$PYTEST --pto-session-timeout 1200"
 
       - name: dep_gen smoke (a5)

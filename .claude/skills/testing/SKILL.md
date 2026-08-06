@@ -19,15 +19,17 @@ are markers on the tests, so mirror the sweep with `-m "not sdma"` rather than
 copying a path list. PTO-ISA reproducibility comes from the repo-root
 `pto_isa.pin`.
 
-**CI does not run one flat sweep.** Some tests are quarantined out of the
-general onboard sweep and run in a step of their own, after it, because they are
-only correct in isolation. Reproducing CI means reproducing that
+**CI does not run one flat sweep.** SDMA selection is marker-based on both
+platforms. On a2a3, marked tests are quarantined out of the general onboard
+sweep and run in a step of their own, after it, because they are only correct
+in isolation. On a5, ARM64 runs the full corpus while x86_64 deselects the
+marker. Reproducing a2a3 CI means reproducing that
 shape — a bare `pytest examples tests/st --platform a2a3` is *not* what CI runs
 and will report failures that CI never sees:
 
-| Quarantine | Excludes | Runs instead in |
-| ---------- | -------- | --------------- |
-| `@pytest.mark.sdma` | `sdma_async_completion_demo`, `prefetch_async_demo` | the "SDMA pytest (a2a3)" step, which runs after the sweep |
+| Marker | Tests | CI behavior |
+| ------ | ----- | ----------- |
+| `@pytest.mark.sdma` | a2a3: `sdma_async_completion_demo`, `prefetch_async_demo`; a5: `sdma_async_completion_demo` | a2a3: the dedicated SDMA step; a5: included on ARM64 and deselected on x86_64 |
 
 The SDMA demos provision 48 device-only STARS streams, which makes an AICore
 fault take ~306 s to tear down instead of ~0.3 s — so they must not share a
@@ -81,6 +83,12 @@ pytest examples tests/st -m "not sdma" --platform a2a3 --device <range> \
 # what the marker replaced.
 pytest examples tests/st -m sdma \
     --platform a2a3 --device <2 devs> --pto-session-timeout <timeout>
+
+# A5 ARM64 runs the full corpus; A5 x86_64 deselects SDMA tests.
+pytest examples tests/st --platform a5 --device <range> \
+    --pto-session-timeout <timeout>
+pytest examples tests/st -m "not sdma" --platform a5 --device <range> \
+    --pto-session-timeout <timeout>
 
 # Single runtime
 pytest examples tests/st --platform a2a3sim --runtime host_build_graph
