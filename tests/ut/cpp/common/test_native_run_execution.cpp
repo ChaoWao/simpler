@@ -176,6 +176,40 @@ TEST(NativeRunExecutionTest, BothSubmissionsProduceIdentityBoundReceipt) {
     EXPECT_FALSE(result.receipt.matches(stale));
 }
 
+TEST(NativeRunExecutionTest, MatchingReceiptPublishesAcceptance) {
+    volatile int32_t accepted_state = 0;
+    LaunchTransactionResult launched = exact_launch_transaction(
+        kIdentity, NativeRunExecutionTestPeer::mint(kIdentity),
+        []() {
+            return 0;
+        },
+        []() {
+            return 0;
+        }
+    );
+
+    ASSERT_TRUE(publish_native_run_acceptance(launched.receipt, kIdentity, &accepted_state, 17));
+    EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 17);
+}
+
+TEST(NativeRunExecutionTest, StaleReceiptDoesNotPublishAcceptance) {
+    volatile int32_t accepted_state = 5;
+    NativeRunIdentity stale = kIdentity;
+    stale.generation++;
+    LaunchTransactionResult launched = exact_launch_transaction(
+        stale, NativeRunExecutionTestPeer::mint(stale),
+        []() {
+            return 0;
+        },
+        []() {
+            return 0;
+        }
+    );
+
+    EXPECT_FALSE(publish_native_run_acceptance(launched.receipt, kIdentity, &accepted_state, 17));
+    EXPECT_EQ(__atomic_load_n(&accepted_state, __ATOMIC_ACQUIRE), 5);
+}
+
 TEST(NativeRunExecutionTest, PermitIsOneShot) {
     LaunchPermit permit = NativeRunExecutionTestPeer::mint(kIdentity);
     LaunchPermit first = std::move(permit);

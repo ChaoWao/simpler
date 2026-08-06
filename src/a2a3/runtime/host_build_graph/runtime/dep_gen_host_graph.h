@@ -36,12 +36,10 @@
  * The runtime translation unit links weak no-op fallbacks (pto_orchestrator.cpp)
  * so the AICPU build, which has no host graph, resolves without this .cpp.
  *
- * The graph is per-thread state while it is being built. After bind, prepare
- * moves the completed graph into run-owned storage; launch adopts that snapshot
- * into the progress thread's local state before enqueue, and drain emits it.
- * This keeps capture lock-free while allowing serialized lifecycle calls to
- * use different host threads and preventing two prepared contexts on one
- * thread from overwriting one another.
+ * The graph remains in thread-local state from prepare through drain. Native
+ * prepare and drain therefore execute on the same child progress thread. The
+ * explicit take/adopt/destroy functions remain available to callers that
+ * deliberately transfer a capture, but the native lifecycle does not use them.
  *
  * Per-task producer dedup mirrors PTO2FaninBuilder, which keys on (ring, slot);
  * this keys on producer task id. The two agree only because host_build_graph is

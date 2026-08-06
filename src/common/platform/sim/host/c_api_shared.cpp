@@ -723,12 +723,21 @@ int simpler_wait_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
     if (phase == NativeRunPhase::Prepared) return -1;
     if (phase == NativeRunPhase::Complete) return state->completion_rc;
+    int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
+    if (attach_rc != 0) {
+        if (state->completion_rc == 0) state->completion_rc = attach_rc;
+        state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
+        emit_native_run_runner_wall(state);
+        return state->completion_rc;
+    }
     int drain_rc = -1;
     try {
         if (state->active_execution != nullptr) {
             drain_rc = state->runner->drain_execution(*state->active_execution);
         }
-    } catch (...) {}
+    } catch (...) {
+        LOG_ERROR("simpler_wait_run: drain_execution threw");
+    }
     if (state->completion_rc == 0) state->completion_rc = drain_rc;
     state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
     emit_native_run_runner_wall(state);
@@ -745,13 +754,20 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
 
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
 
+    int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
     int execution_rc = state->completion_rc;
     const bool launched = state->active_execution != nullptr;
     if (phase == NativeRunPhase::Running && launched) {
         int drain_rc = -1;
-        try {
-            drain_rc = state->runner->drain_execution(*state->active_execution);
-        } catch (...) {}
+        if (attach_rc == 0) {
+            try {
+                drain_rc = state->runner->drain_execution(*state->active_execution);
+            } catch (...) {
+                LOG_ERROR("simpler_finalize_run: drain_execution threw");
+            }
+        } else {
+            drain_rc = attach_rc;
+        }
         if (execution_rc == 0) execution_rc = drain_rc;
         state->completion_rc = execution_rc;
         state->phase.store(NativeRunPhase::Complete, std::memory_order_release);
@@ -761,7 +777,6 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     int validation_rc = -1;
     try {
         if (!launched) state->runtime.set_gm_sm_ptr(nullptr);
-        int attach_rc = state->runner->attach_current_thread(state->runner->device_id());
         if (attach_rc == 0) {
             {
                 STRACE("simpler_run.validate");

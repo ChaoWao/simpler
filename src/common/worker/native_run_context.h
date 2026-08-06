@@ -61,11 +61,7 @@ struct NativeRunContext {
 
     /** Publish acceptance only from this run's completed launch receipt. */
     bool publish_acceptance(const LaunchReceipt &receipt) const noexcept {
-        if (!receipt.matches(identity())) return false;
-        if (descriptor.accepted_state != nullptr) {
-            __atomic_store_n(descriptor.accepted_state, descriptor.accepted_value, __ATOMIC_RELEASE);
-        }
-        return true;
+        return publish_native_run_acceptance(receipt, identity(), descriptor.accepted_state, descriptor.accepted_value);
     }
 
     uint64_t magic{0};

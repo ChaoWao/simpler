@@ -523,10 +523,10 @@ extern "C" int dep_gen_host_graph_emit(const char *deps_json_path) {
     if (!s.captured) {
         // An empty graph here is not "the orchestration submitted nothing" —
         // begin_task() would have set captured even for a graph of one task.
-        // It means capture was never armed or the run-owned snapshot was not
-        // adopted onto this progress thread before teardown.
+        // It means capture was never armed or prepare and drain did not execute
+        // on the same child progress thread.
         LOG_ERROR(
-            "dep_gen host graph: no capture was adopted on this thread — deps.json not written to %s", deps_json_path
+            "dep_gen host graph: no capture on the child progress thread — deps.json not written to %s", deps_json_path
         );
         return -3;
     }

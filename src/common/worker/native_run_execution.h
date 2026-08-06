@@ -123,6 +123,18 @@ struct LaunchTransactionResult {
     bool poisoned() const { return progress == LaunchProgress::Partial; }
 };
 
+/** Publish acceptance only from a receipt bound to the selected native run. */
+inline bool publish_native_run_acceptance(
+    const LaunchReceipt &receipt, const NativeRunIdentity &identity, volatile int32_t *accepted_state,
+    int32_t accepted_value
+) noexcept {
+    if (!receipt.matches(identity)) return false;
+    if (accepted_state != nullptr) {
+        __atomic_store_n(accepted_state, accepted_value, __ATOMIC_RELEASE);
+    }
+    return true;
+}
+
 /**
  * The exact two-submission launch transaction.
  *
