@@ -538,9 +538,9 @@ struct alignas(64) PTO2TaskSlotState {
     bool has_any_subtask_deferred() const { return any_subtask_deferred.load(std::memory_order_acquire); }
 
     /**
-     * Reset dynamic scheduling fields to their pristine values. Runs once per
-     * slot at init (pto_shared_memory.cpp) — whole-graph-resident hbg has no
-     * execution-time slot recycle. Skips payload/task (bound once) and
+     * Reset dynamic scheduling fields to their pristine values. Called once per
+     * slot as the orchestrator claims it in prepare_task — whole-graph-resident
+     * hbg has no execution-time slot recycle. Skips payload/task (bound once) and
      * task_state (the orchestrator sets PENDING when it populates the slot).
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
      * Graph-affine replay passes preserve_graph_binding=true because its node

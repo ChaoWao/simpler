@@ -92,9 +92,9 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     last_task_alive = 0;
     advance_lock.store(0, std::memory_order_relaxed);
 
-    // Per-slot SM-side initialization (reset_for_reuse + fanin_count/active_mask
-    // zero) lives in PTO2SharedMemoryHandle::init_header_per_ring so the AICPU
-    // performs it during SM reset; host prebuilt-arena init skips SM access here.
+    // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
+    // the completion flag) happens init-on-write in orch::prepare_task as each slot
+    // is claimed; host prebuilt-arena init skips SM access here.
 
     return true;
 }

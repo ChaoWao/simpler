@@ -494,13 +494,26 @@ struct PTO2SchedulerState {
             return;
         }
         PTO2ResourceShape shape = slot_state->active_mask.to_shape();
+        bool pushed;
         if (shape == PTO2ResourceShape::DUMMY ||
             (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
-            dummy_ready_queue.push(slot_state);
+            pushed = dummy_ready_queue.push(slot_state);
         } else if (slot_state->task_attrs.requires_sync_start()) {
-            ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
+            pushed = ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
         } else {
-            ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+            pushed = ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+        }
+        // A queue is sized for the whole task window and each task is routed to one
+        // queue exactly once, so push cannot legitimately fail. A false return means
+        // the target slot fell outside the shipped prefix, or the window genuinely
+        // exceeds queue capacity — either way the task is dropped and the run would
+        // otherwise stall. Latch a named error so it surfaces as READY_QUEUE_OVERFLOW
+        // rather than an anonymous forward-progress timeout.
+        if (!pushed) {
+            int32_t expected = PTO2_ERROR_NONE;
+            sm_header->sched_error_code.compare_exchange_strong(
+                expected, PTO2_ERROR_READY_QUEUE_OVERFLOW, std::memory_order_acq_rel, std::memory_order_acquire
+            );
         }
     }
 

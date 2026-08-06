@@ -102,7 +102,8 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     // Polling-completion state (device-addressed array, one byte per slot).
     // 0 = pending, 1 = task fully COMPLETED. Writer = the task's completer at
     // on_mixed_task_complete; reader = consumer fanin polling (is_completion_flag_set).
-    // Zeroed host-side at init. Indexed by local_id & task_window_mask.
+    // Cleared per-slot in orch::prepare_task as each slot is claimed. Indexed by
+    // local_id & task_window_mask.
     std::atomic<uint8_t> *completion_flags;
 
     bool is_completion_flag_set(int32_t local_id, std::memory_order order = std::memory_order_acquire) const {

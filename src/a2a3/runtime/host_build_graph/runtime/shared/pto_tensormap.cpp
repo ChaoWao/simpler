@@ -94,13 +94,11 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
     // The pool's persistent invariant after init is "bucket_index == -1 means
     // not linked", set explicitly below.
     memset(entry_pool_arena, 0, static_cast<size_t>(pool_size) * sizeof(PTO2TensorMapEntry));
+    // The memset already zeroed every field (all four link pointers -> nullptr,
+    // producer_task_id -> {}); only bucket_index needs its non-zero "not linked"
+    // marker, so the per-entry loop writes just that.
     for (int32_t i = 0; i < pool_size; i++) {
         entry_pool_arena[i].bucket_index = -1;
-        entry_pool_arena[i].next_in_bucket = nullptr;
-        entry_pool_arena[i].prev_in_bucket = nullptr;
-        entry_pool_arena[i].next_in_task = nullptr;
-        entry_pool_arena[i].prev_in_task = nullptr;
-        entry_pool_arena[i].producer_task_id = PTO2TaskId{};
     }
 
     // free_entry_list: zeroed (was calloc'd before); contents become meaningful
