@@ -49,6 +49,71 @@ Kernels read peer windows through `device_ctx` (which holds every rank's
 window base, local + imported peer); `buffers[name]` is the local slice —
 name it in a task arg with `buffers[name].tensor(shapes, dtype)`.
 
+### Global CommDomain across local and remote L3 nodes
+
+An L4 worker can build the same `CommContext` shape across any combination of
+forked local L3 workers (`add_worker`) and TCP-connected L3 workers
+(`add_remote_worker`) without `mpirun`:
+
+```python
+with orch.allocate_global_domain(
+    name="tp",
+    members=[(node0_worker_id, 0), (node1_worker_id, 0)],
+    window_size=4096,
+    buffers=[CommBufferSpec("payload", "uint8", 4096, 4096)],
+) as domain:
+    ...
+```
+
+Each member is `(l3_worker_id, local_l2_worker_id)`. The order defines dense
+domain ranks. A remote node reads `comm_profile` and `global_device_ranks`
+from `RemoteWorkerSpec`; a local L3 reads the same fields from its `Worker`
+configuration. All participating nodes must use the same profile.
+
+Global CommDomain capability follows the backend that the node actually
+loads: a platform ending in `sim` supports the `sim` profile, and a real
+`a2a3` platform supports `a3-fabric-v1`. Real A5 and any other
+platform/profile combination currently reject allocation before `PREPARE`.
+Each local or remote L3 repeats the same check during `COMM_INIT`, so an
+unsupported backend never advertises a usable descriptor capability.
+
+The control flow is:
+
+1. L4 sends `COMM_INIT` with cluster, node, global-device, and domain-rank
+   identities.
+2. Each L3 asks its participating L2 children to create a local window and
+   export a transport descriptor.
+3. L4 validates and assembles one complete rank-ordered descriptor table.
+4. L4 returns that table to every L3, which forwards it to each L2 for import.
+5. L4 commits only after all imports succeed. Any earlier failure sends
+   `ABORT` and releases every prepared local window.
+
+The descriptor reports the backend's actual mapped size. A3 Fabric may align
+the requested size to its VMM granularity; buffer carving and bounds checks
+therefore use the returned mapping size. Handles and device pointers never
+cross the public Python API. Remote orchestration code calls
+`orch.get_global_domain(domain_id)` to obtain only its committed L3-local
+contexts.
+
+`copy_to_global_domain` and `copy_from_global_domain` provide bounded
+control-plane staging and smoke checks. Normal communication still runs in
+L2 kernels through the imported `CommContext`.
+
+By default a live Global CommDomain is swept after the current `Worker.run`
+drains. Set `retain_after_run=True` when a communication kernel writes results
+into the window and a second L4 run must inspect them. The later run should
+call `domain.release()` after copying the results; `Worker.close()` is the
+final safety net.
+
+Repository CI exercises the complete transaction, rollback, and mixed
+local/remote paths with the `sim` backend. It also exercises the real
+`a3-fabric-v1` backend: the two-machine `st-pod-onboard-a2a3` job runs
+`global_tload_mixed_l3` and `compute_then_tload_mixed_l3`, whose default
+profile is `a3-fabric-v1` on real A3 devices. Those two examples are the
+in-repository harness for the Fabric path; a run that needs to know whether
+Fabric was covered should read that job rather than infer it from the
+simulation checks.
+
 ---
 
 ## 2. Lifetime model
