@@ -180,10 +180,15 @@ def test_l3_sub_worker_maps_rewrites_and_unmaps_host_buffer(monkeypatch):
         # The loop polls two words per iteration; only the state word is
         # scripted, so the sticky shutdown word always reads "not requested".
         shutdown_addr = worker_mod._buffer_field_addr(mailbox_buf, worker_mod._OFF_SHUTDOWN)
+        task_state_addr = (
+            worker_mod._buffer_field_addr(mailbox_buf, worker_mod._OFF_STATE) + worker_mod.MAILBOX_FRAME_SIZE
+        )
 
         def load_state(state_addr):
             if state_addr == shutdown_addr:
                 return 0
+            if state_addr == task_state_addr:
+                return worker_mod._IDLE
             state = next(states)
             if state == worker_mod._TASK_READY:
                 start = worker_mod._OFF_TASK_CALLABLE_HASH

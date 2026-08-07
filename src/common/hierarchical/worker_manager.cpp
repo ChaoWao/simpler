@@ -290,40 +290,43 @@ void WorkerThread::start(
         throw std::invalid_argument("WorkerThread::start: endpoint capacity is zero");
     }
     inflight_.store(0, std::memory_order_relaxed);
-    active_inflight_.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        staged_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
-        staged_dispatch_id_ = 0;
-        activated_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
-        activated_dispatch_id_ = 0;
+        lanes_ = {};
     }
     thread_ = std::thread(&WorkerThread::loop, this);
 }
 
 void WorkerThread::dispatch(WorkerDispatch d) {
     d.prepare_only = false;
-    bool expected = false;
-    if (!active_inflight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    bool lane_occupied = false;
+    {
+        std::lock_guard<std::mutex> lane_lk(lane_mu_);
+        LaneState &active = lane(LaneKind::ACTIVE);
+        if (active.occupied) {
+            lane_occupied = true;
+        } else {
+            active.occupied = true;
+        }
+    }
+    if (lane_occupied) {
         complete_unpublished(d, "WorkerThread::dispatch: active lane is occupied");
         return;
     }
     EnqueueDispatchResult result;
     try {
-        result = enqueue_dispatch(d);
+        result = enqueue_dispatch(d, LaneKind::ACTIVE);
     } catch (const std::exception &e) {
-        // Restore admission before formatting or publishing the failure: both
-        // operations may allocate, and neither may strand the active lane.
-        active_inflight_.store(false, std::memory_order_release);
+        release_lane_unconditional(LaneKind::ACTIVE);
         complete_unpublished(d, std::string("WorkerThread::dispatch: enqueue failed: ") + e.what());
         return;
     } catch (...) {
-        active_inflight_.store(false, std::memory_order_release);
+        release_lane_unconditional(LaneKind::ACTIVE);
         complete_unpublished(d, "WorkerThread::dispatch: enqueue failed");
         return;
     }
     if (result == EnqueueDispatchResult::QUEUED) return;
-    active_inflight_.store(false, std::memory_order_release);
+    release_lane_unconditional(LaneKind::ACTIVE);
     if (result == EnqueueDispatchResult::STOPPING) {
         complete_unpublished(d, "WorkerThread::dispatch: worker is stopping");
     } else {
@@ -349,38 +352,32 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
     bool staged_lane_occupied = false;
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        if (staged_run_id_.load(std::memory_order_relaxed) != INVALID_RUN_ID) {
+        LaneState &staged = lane(LaneKind::STAGED);
+        if (staged.occupied) {
             staged_lane_occupied = true;
         } else {
-            staged_run_id_.store(slot->run_id, std::memory_order_relaxed);
-            staged_dispatch_id_ = 0;
+            staged.occupied = true;
+            staged.run_id = slot->run_id;
         }
     }
     if (staged_lane_occupied) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: worker already owns a staged run");
         return;
     }
-    auto release_staged_lane = [&] {
-        std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        if (staged_run_id_.load(std::memory_order_relaxed) == slot->run_id) {
-            staged_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
-            staged_dispatch_id_ = 0;
-        }
-    };
     EnqueueDispatchResult result;
     try {
-        result = enqueue_dispatch(d, slot->run_id);
+        result = enqueue_dispatch(d, LaneKind::STAGED, slot->run_id);
     } catch (const std::exception &e) {
-        release_staged_lane();
+        release_lane_unconditional(LaneKind::STAGED);
         complete_unpublished(d, std::string("WorkerThread::dispatch_prepared: enqueue failed: ") + e.what());
         return;
     } catch (...) {
-        release_staged_lane();
+        release_lane_unconditional(LaneKind::STAGED);
         complete_unpublished(d, "WorkerThread::dispatch_prepared: enqueue failed");
         return;
     }
     if (result == EnqueueDispatchResult::QUEUED) return;
-    release_staged_lane();
+    release_lane_unconditional(LaneKind::STAGED);
     if (result == EnqueueDispatchResult::STOPPING) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: worker is stopping");
     } else if (result == EnqueueDispatchResult::CAPACITY_EXCEEDED) {
@@ -390,7 +387,8 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
     }
 }
 
-WorkerThread::EnqueueDispatchResult WorkerThread::enqueue_dispatch(WorkerDispatch d, RunId staged_run_id) {
+WorkerThread::EnqueueDispatchResult
+WorkerThread::enqueue_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expected_run_id) {
     std::lock_guard<std::mutex> lk(mu_);
     if (shutdown_.load(std::memory_order_acquire)) {
         return EnqueueDispatchResult::STOPPING;
@@ -399,22 +397,22 @@ WorkerThread::EnqueueDispatchResult WorkerThread::enqueue_dispatch(WorkerDispatc
         return EnqueueDispatchResult::CAPACITY_EXCEEDED;
     }
     d.dispatch_id = next_dispatch_id_;
-    if (staged_run_id != INVALID_RUN_ID) {
+    {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        if (staged_run_id_.load(std::memory_order_relaxed) != staged_run_id || staged_dispatch_id_ != 0) {
+        LaneState &dispatch_lane = lane(lane_kind);
+        if (!dispatch_lane.occupied || dispatch_lane.dispatch_id != 0 ||
+            (expected_run_id != INVALID_RUN_ID && dispatch_lane.run_id != expected_run_id)) {
             return EnqueueDispatchResult::STAGED_IDENTITY_CHANGED;
         }
-        staged_dispatch_id_ = d.dispatch_id;
+        dispatch_lane.dispatch_id = d.dispatch_id;
     }
     try {
         queue_.push(d);  // A failed allocation consumes neither capacity nor dispatch identity.
     } catch (...) {
-        if (staged_run_id != INVALID_RUN_ID) {
-            std::lock_guard<std::mutex> lane_lk(lane_mu_);
-            if (staged_run_id_.load(std::memory_order_relaxed) == staged_run_id &&
-                staged_dispatch_id_ == d.dispatch_id) {
-                staged_dispatch_id_ = 0;
-            }
+        std::lock_guard<std::mutex> lane_lk(lane_mu_);
+        LaneState &dispatch_lane = lane(lane_kind);
+        if (dispatch_lane.dispatch_id == d.dispatch_id) {
+            dispatch_lane.dispatch_id = 0;
         }
         throw;
     }
@@ -427,30 +425,43 @@ WorkerThread::EnqueueDispatchResult WorkerThread::enqueue_dispatch(WorkerDispatc
 bool WorkerThread::activate_prepared(RunId run_id) {
     if (run_id == INVALID_RUN_ID) return false;
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
-    if (staged_run_id_.load(std::memory_order_relaxed) != run_id || staged_dispatch_id_ == 0 ||
-        activated_run_id_.load(std::memory_order_relaxed) == run_id) {
+    LaneState &active = lane(LaneKind::ACTIVE);
+    LaneState &staged = lane(LaneKind::STAGED);
+    if (!staged.occupied || staged.run_id != run_id || staged.dispatch_id == 0 || active.occupied) {
         return false;
     }
-    bool expected = false;
-    if (!active_inflight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        return false;
-    }
-    activated_run_id_.store(run_id, std::memory_order_release);
-    activated_dispatch_id_ = staged_dispatch_id_;
-    staged_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
-    staged_dispatch_id_ = 0;
+    active = staged;
+    active.activation_requested = true;
+    staged = {};
     cv_.notify_one();
     return true;
 }
 
 bool WorkerThread::has_staged_run(RunId run_id) const {
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
-    return staged_run_id_.load(std::memory_order_relaxed) == run_id;
+    const LaneState &staged = lane(LaneKind::STAGED);
+    return staged.occupied && staged.run_id == run_id;
 }
 
 bool WorkerThread::can_stage() const {
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
-    return caps().supports_frame_staging && staged_run_id_.load(std::memory_order_relaxed) == INVALID_RUN_ID;
+    return caps().supports_frame_staging && !lane(LaneKind::STAGED).occupied;
+}
+
+bool WorkerThread::idle() const {
+    std::lock_guard<std::mutex> lane_lk(lane_mu_);
+    return !lane(LaneKind::ACTIVE).occupied;
+}
+
+void WorkerThread::release_lane(LaneKind kind, uint64_t dispatch_id) {
+    std::lock_guard<std::mutex> lane_lk(lane_mu_);
+    LaneState &dispatch_lane = lane(kind);
+    if (dispatch_lane.dispatch_id == dispatch_id) dispatch_lane = {};
+}
+
+void WorkerThread::release_lane_unconditional(LaneKind kind) {
+    std::lock_guard<std::mutex> lane_lk(lane_mu_);
+    lane(kind) = {};
 }
 
 void WorkerThread::complete_unpublished(WorkerDispatch dispatch, const std::string &error_message) {
@@ -553,10 +564,19 @@ void WorkerThread::loop() {
                 }
             }
 
-            RunId activated = activated_run_id_.load(std::memory_order_acquire);
+            RunId activated = INVALID_RUN_ID;
+            {
+                std::lock_guard<std::mutex> lane_lk(lane_mu_);
+                const LaneState &active = lane(LaneKind::ACTIVE);
+                if (active.occupied && active.activation_requested) activated = active.run_id;
+            }
             if (activated != INVALID_RUN_ID) {
                 try {
-                    (void)endpoint_->activate_progress(activated);
+                    if (endpoint_->activate_progress(activated)) {
+                        std::lock_guard<std::mutex> lane_lk(lane_mu_);
+                        LaneState &active = lane(LaneKind::ACTIVE);
+                        if (active.occupied && active.run_id == activated) active.activation_requested = false;
+                    }
                 } catch (const std::exception &e) {
                     fail_progress_driver(std::string("activate_progress failed: ") + e.what());
                 } catch (...) {
@@ -633,7 +653,7 @@ void WorkerThread::loop() {
         // scheduler placing work sees a stale non-idle lane — which is what
         // on_idle_ closes.
         on_complete_(std::move(completion));
-        active_inflight_.store(false, std::memory_order_release);
+        release_lane(LaneKind::ACTIVE, d.dispatch_id);
         inflight_.fetch_sub(1, std::memory_order_acq_rel);
         cv_.notify_one();
         if (on_idle_) on_idle_();
@@ -684,18 +704,14 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
     }
 
     on_complete_(std::move(completion));
-    if (dispatch.prepare_only) {
+    {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        if (dispatch.dispatch_id == staged_dispatch_id_) {
-            staged_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
-            staged_dispatch_id_ = 0;
-        } else if (dispatch.dispatch_id == activated_dispatch_id_) {
-            activated_run_id_.store(INVALID_RUN_ID, std::memory_order_relaxed);
-            activated_dispatch_id_ = 0;
-            active_inflight_.store(false, std::memory_order_release);
+        for (LaneState &dispatch_lane : lanes_) {
+            if (dispatch_lane.occupied && dispatch_lane.dispatch_id == dispatch.dispatch_id) {
+                dispatch_lane = {};
+                break;
+            }
         }
-    } else {
-        active_inflight_.store(false, std::memory_order_release);
     }
     inflight_.fetch_sub(1, std::memory_order_acq_rel);
     cv_.notify_one();
@@ -866,7 +882,7 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
         throw std::runtime_error("remote task sidecar is not supported by local mailbox");
     }
     if (state.run_id == INVALID_RUN_ID || state.pipeline_lease.reserved != 0 || state.pipeline_lease.generation == 0 ||
-        state.pipeline_lease.slot_id >= task_frame_count_) {
+        (task_frame_count_ > 1 && state.pipeline_lease.slot_id >= task_frame_count_)) {
         throw std::runtime_error("task frame has an invalid pipeline lease identity");
     }
     const size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor) +
@@ -878,7 +894,7 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
         );
     }
 
-    const size_t frame_index = state.pipeline_lease.slot_id;
+    const size_t frame_index = task_frame_count_ == 1 ? 0 : state.pipeline_lease.slot_id;
     // Linearize task-frame publication against base-frame controls. The
     // control mutex is released immediately after the task state release-store;
     // controls may still execute while the native run is active, subject to

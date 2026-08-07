@@ -19,7 +19,6 @@ namespace remote_l3 {
 namespace {
 
 static constexpr uint8_t MAGIC[4] = {'S', 'L', 'R', '3'};
-static constexpr size_t FRAME_HEADER_BYTES = 40;
 
 void ensure(bool condition, const std::string &message) {
     if (!condition) throw std::runtime_error(message);

@@ -16,13 +16,12 @@
  * Provides idle-worker selection and dispatch to the Scheduler.
  * The Scheduler drives the DAG; the Manager drives the workers.
  *
- * Each WorkerThread owns one endpoint-progress loop. Compatibility endpoints
- * serialize a blocking TASK_READY -> TASK_DONE exchange. A two-frame local
- * endpoint may additionally publish one PREPARE_READY successor while the
- * active frame runs; FIFO promotion changes it to ACTIVATE. The Python child
- * resolves each frame's callable digest to a child-local slot and executes it
- * on its `ChipWorker` (NEXT_LEVEL). SUB and unsupported platform/runtime paths
- * retain the serialized exchange.
+ * Each WorkerThread owns one endpoint-progress loop. Every registered local
+ * and remote endpoint advances through submit/poll without blocking that loop.
+ * A two-frame local endpoint may additionally publish one PREPARE_READY
+ * successor while the active frame runs; FIFO promotion changes it to ACTIVATE.
+ * The Python child resolves each frame's callable digest to a child-local slot
+ * and executes it on its `ChipWorker` (NEXT_LEVEL).
  */
 
 #pragma once
@@ -288,8 +287,8 @@ public:
 
     virtual const WorkerEndpointCaps &caps() const = 0;
     virtual WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) = 0;
-    // Endpoints with an earlier launch boundary override this. The default is a
-    // conservative completion-time acceptance for remote, SUB and A5 paths.
+    // Compatibility endpoints without progress support use completion-time
+    // acceptance unless they override this boundary.
     virtual WorkerCompletion
     run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept);
 
@@ -364,7 +363,7 @@ public:
     WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
     WorkerCompletion
     run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept) override;
-    bool progressable() const override { return task_frame_count_ > 1; }
+    bool progressable() const override { return true; }
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override;
     bool poll_progress(WorkerEndpointProgress &progress) override;
     bool activate_progress(RunId run_id) override;
@@ -518,7 +517,7 @@ public:
     // The active lane and staged-successor lane are intentionally distinct.
     // A staged successor must not make a second task from the active run
     // dispatchable on the same device.
-    bool idle() const { return !active_inflight_.load(std::memory_order_acquire); }
+    bool idle() const;
     bool can_stage() const;
     bool busy() const { return inflight_.load(std::memory_order_acquire) != 0; }
     const WorkerEndpointCaps &caps() const;
@@ -532,10 +531,8 @@ public:
 
     // Memory control — callable from the orch thread while the worker thread
     // may be running a task. Commands serialize with each other on
-    // `mailbox_mu_`. A compatibility endpoint also serializes task dispatch on
-    // that mutex; a two-frame endpoint has a separate base control frame, so
-    // its single child progress owner may service control while a native run is
-    // active.
+    // `mailbox_mu_`. Task dispatch uses separate task frames, so the single
+    // child progress owner may observe a control request while a task is active.
     uint64_t control_malloc(size_t size);
     uint64_t control_committed_device_memory();
     void control_free(uint64_t ptr);
@@ -549,9 +546,9 @@ public:
     // Dynamic post-init register/unregister of a ChipCallable identity.
     // `shm_name` is the (NUL-terminated, ≤ CTRL_SHM_NAME_BYTES-1) POSIX shm
     // name where the ChipCallable bytes are staged; `blob_size` is the exact
-    // byte span to read from that shm. Both methods hold mailbox_mu_; on a
-    // two-frame endpoint the child additionally preserves any callable still
-    // referenced by an outstanding task frame.
+    // byte span to read from that shm. Both methods hold mailbox_mu_; a child
+    // additionally preserves any callable still referenced by an outstanding
+    // task frame.
     void control_register(const char *shm_name, size_t blob_size, const uint8_t *digest);
     void control_unregister(const uint8_t *digest);
     void control_remote_prepare_register(
@@ -588,7 +585,7 @@ public:
     // writes its (device_ctx, local_window_base, buffer_ptrs) into
     // `reply_shm_name`.  Both names are NUL-terminated and ≤
     // CTRL_SHM_NAME_BYTES-1. Holds mailbox_mu_ so control commands serialize;
-    // two-frame task dispatch uses distinct frame state.
+    // task dispatch uses distinct frame state.
     void control_alloc_domain(const char *request_shm_name, const char *reply_shm_name);
     void control_release_domain(const char *request_shm_name);
 
@@ -606,6 +603,18 @@ private:
         STAGED_IDENTITY_CHANGED,
     };
 
+    enum class LaneKind : uint8_t {
+        ACTIVE = 0,
+        STAGED = 1,
+    };
+
+    struct LaneState {
+        bool occupied{false};
+        bool activation_requested{false};
+        RunId run_id{INVALID_RUN_ID};
+        uint64_t dispatch_id{0};
+    };
+
     Ring *ring_{nullptr};
     std::unique_ptr<WorkerEndpoint> endpoint_;
     std::function<void(WorkerCompletion)> on_complete_;
@@ -618,19 +627,19 @@ private:
     std::condition_variable cv_;
     std::atomic<bool> shutdown_{false};
     std::atomic<uint32_t> inflight_{0};
-    std::atomic<bool> active_inflight_{false};
     uint64_t next_dispatch_id_{1};
     mutable std::mutex lane_mu_;
-    std::atomic<RunId> staged_run_id_{INVALID_RUN_ID};
-    uint64_t staged_dispatch_id_{0};
-    std::atomic<RunId> activated_run_id_{INVALID_RUN_ID};
-    uint64_t activated_dispatch_id_{0};
+    std::array<LaneState, 2> lanes_{};
     std::unordered_set<uint64_t> accepted_dispatch_ids_;
     std::unordered_map<uint64_t, std::string> accept_errors_;
 
     void loop();
     WorkerCompletion dispatch_process(WorkerDispatch d, const std::function<void()> &on_accept);
-    EnqueueDispatchResult enqueue_dispatch(WorkerDispatch d, RunId staged_run_id = INVALID_RUN_ID);
+    EnqueueDispatchResult enqueue_dispatch(WorkerDispatch d, LaneKind lane, RunId expected_run_id = INVALID_RUN_ID);
+    LaneState &lane(LaneKind kind) { return lanes_[static_cast<size_t>(kind)]; }
+    const LaneState &lane(LaneKind kind) const { return lanes_[static_cast<size_t>(kind)]; }
+    void release_lane(LaneKind kind, uint64_t dispatch_id);
+    void release_lane_unconditional(LaneKind kind);
     void finish_progress_dispatch(const WorkerEndpointProgress &progress);
     void fail_progress_driver(const std::string &reason) noexcept;
 };
