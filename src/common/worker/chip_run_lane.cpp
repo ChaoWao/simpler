@@ -208,6 +208,28 @@ struct ChipRunLaneState {
         }
     }
 
+    // Block on the device for the launched front, for waiters with no deadline
+    // to bound them. Only the front can be LAUNCHED, so its completion is what
+    // lets any waiter in the FIFO advance. Re-polling instead would hold a core
+    // for the whole run — the case codestyle rule 5 sends to a wakeup primitive
+    // rather than a busy loop. Reports whether it actually blocked, so a caller
+    // that cannot be unblocked this way does not spin on it.
+    bool block_on_front() noexcept {
+        if (fifo.empty()) return false;
+        const auto front = fifo.front();
+        if (front->phase != ChipRunState::Phase::LAUNCHED) return false;
+        try {
+            worker->wait_native_run(front->native_run);
+        } catch (...) {
+            const std::exception_ptr wait_error = std::current_exception();
+            if (front->error == nullptr) front->error = wait_error;
+            poison_with(front->error);
+        }
+        finish(front);
+        launch_front();
+        return true;
+    }
+
     ChipWorker *worker;
     mutable std::mutex mu;
     std::deque<std::shared_ptr<ChipRunState>> fifo;
@@ -229,6 +251,7 @@ bool ChipRun::done() {
 
 bool ChipRun::wait_until(Deadline deadline) {
     if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
+    const bool unbounded = deadline == Deadline::max();
     while (true) {
         {
             std::lock_guard<std::mutex> lk(lane_->mu);
@@ -236,6 +259,10 @@ bool ChipRun::wait_until(Deadline deadline) {
                 ChipRunLaneState::rethrow_run_error(run_);
                 return true;
             }
+            // An unbounded waiter has no deadline to end its loop, so polling
+            // here would spin for the whole run. Block on the device instead;
+            // if nothing is blockable yet the poll loop below still applies.
+            if (unbounded && lane_->block_on_front()) continue;
         }
         if (Clock::now() >= deadline) return false;
     }
