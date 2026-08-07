@@ -14,6 +14,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,10 @@ struct ChipWorkerNativeRun {
     uint64_t run_id{0};
     uint64_t dispatch_id{0};
 };
+
+class ChipRun;
+class ChipRunLane;
+struct ChipRunLaneState;
 
 class ChipWorker {
 public:
@@ -121,6 +126,13 @@ public:
     bool poll_native_run(const ChipWorkerNativeRun &run);
     void wait_native_run(const ChipWorkerNativeRun &run);
     void finalize_native_run(const ChipWorkerNativeRun &run);
+
+    ChipRun submit_chip_run(
+        int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config, const PipelineSlotLease &lease,
+        uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0,
+        bool activated = true
+    );
+    void close_chip_run_lane();
 
     // Per-callable_id preparation. Requires init() first and a callable_id
     // in [0, MAX_REGISTERED_CALLABLE_IDS) (cap 64).
@@ -315,14 +327,6 @@ private:
     std::unordered_map<uint64_t, size_t> comm_session_index_;
     uint64_t base_comm_handle_ = 0;
 
-    // Slot 0 with no generation bookkeeping: an unleased run is a caller that
-    // is not using the pipeline, and minting a generation for it here would
-    // advance the filter past the leases a real pool later presents.
-    static constexpr uint32_t UNLEASED_SLOT = 0;
-    void run_on_slot(
-        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-        volatile int32_t *accepted_state, int32_t accepted_value
-    );
     uint32_t arena_bank_for_slot(uint32_t slot_id) const;
 
     enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHED, REAPED, FINALIZING };
@@ -336,9 +340,16 @@ private:
     ChipWorkerNativeRun prepare_native_run_on_slot(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
         uint64_t generation, uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state,
-        int32_t accepted_value
+        int32_t accepted_value, bool admit_pipeline_generation
+    );
+    ChipWorkerNativeRun prepare_native_run_for_lane(
+        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+        uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value,
+        bool pipeline_leased
     );
     void cleanup_native_runs_noexcept() noexcept;
+
+    friend struct ChipRunLaneState;
 
     class RuntimeStorage {
     public:
@@ -365,6 +376,7 @@ private:
     mutable std::mutex native_run_mu_;
     PipelineSlotGenerationFilter pipeline_generations_;
     PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
+    std::unique_ptr<ChipRunLane> run_lane_;
     // device_id_ is set once in init() and never modified afterward. All
     // ChipWorker callers run on the thread that called init() (the same
     // thread is the only one that subsequently calls malloc / copy_to /

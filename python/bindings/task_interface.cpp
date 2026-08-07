@@ -53,6 +53,7 @@
 #include "arg_direction.h"
 #include "callable.h"
 #include "callable_protocol.h"
+#include "chip_run_lane.h"
 #include "chip_worker.h"
 #include "data_type.h"
 #include "dma_workspace.h"
@@ -2010,6 +2011,26 @@ NB_MODULE(_task_interface, m) {
         .def_ro("run_id", &ChipWorkerNativeRun::run_id)
         .def_ro("dispatch_id", &ChipWorkerNativeRun::dispatch_id);
 
+    nb::enum_<ChipRunPreparationDisposition>(m, "_ChipRunPreparationDisposition")
+        .value("VALIDATED_ONLY", ChipRunPreparationDisposition::VALIDATED_ONLY)
+        .value("NATIVE_PREPARED", ChipRunPreparationDisposition::NATIVE_PREPARED);
+
+    nb::class_<ChipRun>(m, "_ChipRun")
+        .def("done", &ChipRun::done)
+        .def("activate", &ChipRun::activate)
+        .def("abandon", &ChipRun::abandon, nb::call_guard<nb::gil_scoped_release>())
+        .def_prop_ro("launched", &ChipRun::launched)
+        .def_prop_ro("lane_poisoned", &ChipRun::lane_poisoned)
+        .def_prop_ro("preparation_disposition", &ChipRun::preparation_disposition)
+        .def(
+            "_raise_if_failed",
+            [](ChipRun &self) {
+                if (!self.done()) throw std::logic_error("ChipRun is not terminal");
+                (void)self.wait_until(ChipRun::Deadline::max());
+            },
+            nb::call_guard<nb::gil_scoped_release>()
+        );
+
     // --- ChipWorker ---
     nb::class_<ChipWorker>(m, "_ChipWorker")
         .def(nb::init<>())
@@ -2093,6 +2114,25 @@ NB_MODULE(_task_interface, m) {
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
             nb::call_guard<nb::gil_scoped_release>(),
             "Prepare a native run from pre-encoded task args after lease admission."
+        )
+        .def(
+            "_submit_chip_run_materialized",
+            [](ChipWorker &self, int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config,
+               uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id,
+               uint64_t accepted_state_addr, int32_t accepted_value, bool activated) {
+                return self.submit_chip_run(
+                    callable_id, args, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id,
+                    reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value, activated
+                );
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
+            nb::arg("run_id"), nb::arg("dispatch_id"), nb::arg("accepted_state_addr"), nb::arg("accepted_value"),
+            nb::arg("activated"), nb::call_guard<nb::gil_scoped_release>(),
+            "Submit materialized task args to the chip native-run lane."
+        )
+        .def(
+            "_close_chip_run_lane", &ChipWorker::close_chip_run_lane, nb::call_guard<nb::gil_scoped_release>(),
+            "Drain active native ownership, abandon unlaunched work, and close the chip run lane."
         )
         .def(
             "_prepare_native_run_materialized",

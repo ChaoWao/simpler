@@ -703,6 +703,8 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     std::memcpy(frame + MAILBOX_OFF_ERROR, &zero_err, sizeof(zero_err));
     std::memset(frame + MAILBOX_OFF_ERROR_MSG, 0, MAILBOX_ERROR_MSG_SIZE);
     clear_task_accepted(frame);
+    const int32_t no_disposition = static_cast<int32_t>(MailboxPreparationDisposition::NONE);
+    std::memcpy(frame + MAILBOX_OFF_PREPARATION_DISPOSITION, &no_disposition, sizeof(no_disposition));
     uint64_t reserved_callable = 0;
     std::memcpy(frame + MAILBOX_OFF_CALLABLE, &reserved_callable, sizeof(reserved_callable));
     std::memcpy(frame + MAILBOX_OFF_CONFIG, &state.config, sizeof(CallConfig));
@@ -793,6 +795,7 @@ WorkerCompletion LocalMailboxEndpoint::poisoned_completion(const FrameRecord &re
 
 bool LocalMailboxEndpoint::poll_progress(WorkerEndpointProgress &progress) {
     std::lock_guard<std::mutex> lk(progress_mu_);
+    progress.preparation_disposition = MailboxPreparationDisposition::NONE;
     bool any_occupied = false;
     for (const FrameRecord &record : frames_)
         any_occupied = any_occupied || record.occupied;
@@ -853,9 +856,18 @@ bool LocalMailboxEndpoint::poll_progress(WorkerEndpointProgress &progress) {
                 if (endpoint_poisoned_) break;
             }
             if (!record.staged_reported) {
+                int32_t disposition_value = 0;
+                std::memcpy(&disposition_value, frame + MAILBOX_OFF_PREPARATION_DISPOSITION, sizeof(disposition_value));
+                const auto disposition = static_cast<MailboxPreparationDisposition>(disposition_value);
+                if (disposition != MailboxPreparationDisposition::VALIDATED_ONLY &&
+                    disposition != MailboxPreparationDisposition::NATIVE_PREPARED) {
+                    poison_progress("invalid preparation disposition at endpoint staging");
+                    break;
+                }
                 record.staged_reported = true;
                 progress.kind = WorkerProgressKind::FRAME_STAGED;
                 progress.dispatch = record.dispatch;
+                progress.preparation_disposition = disposition;
                 poll_cursor_ = (index + 1) % task_frame_count_;
                 return true;
             }

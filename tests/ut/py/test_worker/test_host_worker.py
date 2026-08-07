@@ -255,6 +255,48 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     assert fake_parent.initialized
 
 
+class _FakeChipRun:
+    def __init__(self, lane, submission) -> None:
+        self._lane = lane
+        self.submission = submission
+        self.token = None
+        self.activated = False
+        self._launched = False
+        self.terminal = False
+        self.error: Optional[BaseException] = None
+        self._disposition = worker_mod._VALIDATED_ONLY
+
+    @property
+    def launched(self) -> bool:
+        return self._launched
+
+    @property
+    def lane_poisoned(self) -> bool:
+        return self._lane._lane_poisoned
+
+    @property
+    def preparation_disposition(self):
+        return SimpleNamespace(value=self._disposition)
+
+    def activate(self) -> None:
+        self.activated = True
+        self._lane._launch_front()
+        self._lane._prepare_successor()
+
+    def abandon(self) -> None:
+        if self._launched:
+            raise RuntimeError("cannot abandon a launched fake ChipRun")
+        self._lane._finish(self)
+
+    def done(self) -> bool:
+        return self._lane._progress(self)
+
+    def _raise_if_failed(self) -> None:
+        assert self.terminal
+        if self.error is not None:
+            raise self.error
+
+
 class _FakeNativeRunImpl:
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
         self.supports_concurrent_native_prepare = supports_concurrent_native_prepare
@@ -268,10 +310,13 @@ class _FakeNativeRunImpl:
         self.poll_errors: dict[tuple[int, int], BaseException] = {}
         self.finalize_errors: dict[tuple[int, int], BaseException] = {}
         self.prepare_identities: list[tuple[int, int, int, int]] = []
+        self.poll_states: list[tuple[int, int]] = []
         self.register_calls: list[tuple[int, int]] = []
         self.register_called = threading.Event()
         self._finalized_runs: set[tuple[int, int]] = set()
         self._polled_slots: set[int] = set()
+        self._runs: list[_FakeChipRun] = []
+        self._lane_poisoned = False
 
     def register_callable_from_blob(self, cid: int, blob_addr: int) -> None:
         self.register_calls.append((int(cid), int(blob_addr)))
@@ -327,6 +372,8 @@ class _FakeNativeRunImpl:
 
     def _poll_native_run(self, token) -> bool:
         slot = int(token.slot_id)
+        state_addr = int(token.accepted_addr) - worker_mod._OFF_ACCEPTED
+        self.poll_states.append((slot, _mailbox_load_i32(state_addr)))
         error = self.poll_errors.get((slot, int(token.generation)))
         if error is not None:
             raise error
@@ -345,6 +392,149 @@ class _FakeNativeRunImpl:
         error = self.finalize_errors.get(run_key)
         if error is not None:
             raise error
+
+    @staticmethod
+    def _has_diagnostics(config) -> bool:
+        return bool(
+            config.enable_chip_swimlane
+            or config.enable_dump_args
+            or config.enable_pmu
+            or config.enable_dep_gen
+            or config.enable_scope_stats
+        )
+
+    def _prepare(self, run: _FakeChipRun) -> None:
+        s = run.submission
+        run.token = self._prepare_native_run_materialized(
+            s.cid,
+            s.args,
+            s.config,
+            s.slot_id,
+            s.generation,
+            s.run_id,
+            s.dispatch_id,
+            s.accepted_addr,
+            s.accepted_value,
+        )
+        run._disposition = worker_mod._NATIVE_PREPARED
+
+    def _finish(self, run: _FakeChipRun) -> None:
+        try:
+            if run.token is not None:
+                self._finalize_native_run(run.token)
+        except BaseException as error:  # noqa: BLE001
+            run.error = run.error or error
+            self._lane_poisoned = True
+        run.terminal = True
+        if run in self._runs:
+            self._runs.remove(run)
+
+    def _launch_front(self) -> None:
+        if not self._runs:
+            return
+        run = self._runs[0]
+        if self._lane_poisoned:
+            run.error = run.error or RuntimeError("fake chip run lane is poisoned")
+            self._finish(run)
+            return
+        if not run.activated or run._launched or run.terminal:
+            return
+        if run.token is None:
+            try:
+                self._prepare(run)
+            except BaseException as error:  # noqa: BLE001
+                run.error = error
+                run.terminal = True
+                self._runs.remove(run)
+                return
+        try:
+            self._launch_native_run(run.token)
+            run._launched = True
+        except BaseException as error:  # noqa: BLE001
+            run.error = error
+            self._finish(run)
+
+    def _prepare_successor(self) -> None:
+        if len(self._runs) != 2:
+            return
+        predecessor, successor = self._runs
+        if (
+            predecessor._launched
+            and successor.token is None
+            and self.supports_concurrent_native_prepare
+            and not self._has_diagnostics(predecessor.submission.config)
+            and not self._has_diagnostics(successor.submission.config)
+        ):
+            try:
+                self._prepare(successor)
+            except BaseException as error:  # noqa: BLE001
+                successor.error = error
+                successor.terminal = True
+                self._runs.remove(successor)
+
+    def _progress(self, target: _FakeChipRun) -> bool:
+        if target.terminal:
+            return True
+        if not self._runs or self._runs[0] is not target:
+            return False
+        self._launch_front()
+        self._prepare_successor()
+        if target.terminal:
+            self._launch_front()
+            return True
+        if not target._launched:
+            return False
+        try:
+            if not self._poll_native_run(target.token):
+                return False
+        except BaseException as error:  # noqa: BLE001
+            target.error = error
+            self._lane_poisoned = True
+        self._finish(target)
+        self._launch_front()
+        self._prepare_successor()
+        return True
+
+    def _submit_chip_run_materialized(  # noqa: PLR0913 -- mirrors the production binding
+        self,
+        cid,
+        args,
+        config,
+        slot_id,
+        generation,
+        run_id,
+        dispatch_id,
+        accepted_addr,
+        accepted_value,
+        activated,
+    ):
+        submission = SimpleNamespace(
+            cid=cid,
+            args=args,
+            config=config,
+            slot_id=int(slot_id),
+            generation=int(generation),
+            run_id=int(run_id),
+            dispatch_id=int(dispatch_id),
+            accepted_addr=int(accepted_addr),
+            accepted_value=int(accepted_value),
+        )
+        run = _FakeChipRun(self, submission)
+        run.activated = bool(activated)
+        self._runs.append(run)
+        self._runs.sort(key=lambda candidate: candidate.submission.dispatch_id)
+        self._launch_front()
+        self._prepare_successor()
+        return run
+
+    def _close_chip_run_lane(self) -> None:
+        while self._runs:
+            run = self._runs[0]
+            if run._launched:
+                self.completed[run.submission.slot_id].set()
+            self._finish(run)
+        if self._lane_poisoned:
+            raise RuntimeError("fake chip run lane is poisoned")
 
 
 class _FakeTwoFrameChipWorker:
@@ -422,6 +612,11 @@ class _TwoFrameLoopHarness:
 
     def accepted_addr(self, index: int) -> int:
         return self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_ACCEPTED
+
+    def preparation_disposition(self, index: int) -> int:
+        return _mailbox_load_i32(
+            self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_PREPARATION_DISPOSITION
+        )
 
     def publish(
         self,
@@ -512,6 +707,7 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
 
         harness.publish(1, 2)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert harness.preparation_disposition(1) == worker_mod._VALIDATED_ONLY
         assert not harness.cw._impl.prepared[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
@@ -540,6 +736,19 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
         harness.close()
 
 
+def test_two_frame_publishes_launch_before_polling_immediate_completion():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.cw._impl.completed[0].set()
+        harness.publish(0, 1)
+        harness.start()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+
+        assert harness.cw._impl.poll_states[0] == (0, worker_mod._TASK_LAUNCHED)
+    finally:
+        harness.close()
+
+
 def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
@@ -552,6 +761,7 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
 
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert harness.preparation_disposition(1) == worker_mod._NATIVE_PREPARED
         assert harness.cw._impl.prepared[1].is_set()
         assert not harness.cw._impl.finalized[0].is_set()
         assert not harness.cw._impl.launched[1].is_set()
@@ -751,6 +961,7 @@ def test_two_frame_prepare_ready_waits_for_sticky_activation():
         harness.publish(0, 1, state=worker_mod._PREPARE_READY)
         harness.start()
         harness.wait_state(0, worker_mod._FRAME_STAGED)
+        assert harness.preparation_disposition(0) == worker_mod._VALIDATED_ONLY
         assert not harness.cw._impl.prepared[0].is_set()
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
