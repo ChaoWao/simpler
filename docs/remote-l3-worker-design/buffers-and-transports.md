@@ -141,8 +141,10 @@ Endpoint rules:
   pointer.
 - `RemoteL3Endpoint` requires a sidecar for every tensor payload that crosses
   the remote protocol, including `HOST_INLINE` payloads.
-- Remote TASK frames write `TensorWire.data == 0`; parent virtual
-  addresses never cross the remote protocol.
+- Remote TASK frames carry each argument's `Tensor` verbatim, and that `Tensor`
+  is a `REMOTE_SIDECAR` placeholder: it names the remote backing but describes
+  none of its own. Parent virtual addresses and the parent's own backings never
+  cross the remote protocol.
 - A remote tensor with `child_memory=True` and no sidecar is invalid. Local
   child-memory pointers are meaningful only inside fork/shm topology.
 - The remote session runner translates each `RemoteTensorDesc` into a wire

@@ -35,10 +35,12 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 )
 from simpler.buffer import (
     AccessMode,
+    AddressSpace,
     BackendKind,
     Tensor,
     create_host_shared_buffer,
     mint_owner_instance_id,
+    remote_sidecar_tensor,
     wrap_device_malloc,
     wrap_fork_inherited,
 )
@@ -70,6 +72,19 @@ def _dev_ref(addr, shapes, dtype, tag=None):
 def _ref_addr(ref: Tensor) -> int:
     """The device pointer carried in a DEVICE_MALLOC ref's backend body."""
     return int.from_bytes(bytes(ref.buffer.body)[:8], "little")
+
+
+def _remote_arg_tensor(shapes, nbytes, owner_worker_id=2, buffer_id=9, generation=1):
+    """The per-argument record a remote L3 TASK carries: the submitter's REMOTE_SIDECAR placeholder."""
+    return remote_sidecar_tensor(
+        shapes=tuple(shapes),
+        dtype=int(DataType.UINT8.value),
+        nbytes=int(nbytes),
+        owner_worker_id=owner_worker_id,
+        buffer_id=buffer_id,
+        generation=generation,
+        address_space=AddressSpace.HOST,
+    )
 
 
 def _session_buffer_minter():
@@ -767,7 +782,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         )
         from simpler.remote_l3_session import _materialize_task_args
 
-        tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+        tensor = _remote_arg_tensor((4,), nbytes=4)
         desc = RemoteTensorDesc(
             address_space=WireRemoteAddressSpace.HOST_INLINE,
             owner_worker_id=0,
@@ -806,7 +821,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         )
         from simpler.remote_l3_session import _materialize_task_args
 
-        tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+        tensor = _remote_arg_tensor((4,), nbytes=4)
         desc = RemoteTensorDesc(
             address_space=WireRemoteAddressSpace.HOST_INLINE,
             owner_worker_id=0,
@@ -852,7 +867,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         try:
             ctypes.memmove(backing.base, b"01234567", 8)
             entry = _RemoteBufferEntry(backing, 8, 1, WireRemoteAddressSpace.REMOTE_DEVICE)
-            tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+            tensor = _remote_arg_tensor((4,), nbytes=4)
             desc = RemoteTensorDesc(
                 address_space=WireRemoteAddressSpace.REMOTE_DEVICE,
                 owner_worker_id=2,
@@ -913,7 +928,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
                     flags=0,
                 )
 
-            tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+            tensor = _remote_arg_tensor((4,), nbytes=4)
             wire = RemoteTaskArgsWire(
                 (tensor, tensor),
                 (RemoteTensorSidecar(True, sub_range(0)), RemoteTensorSidecar(True, sub_range(4))),
@@ -959,7 +974,7 @@ class TestRemoteL3SessionTaskArgsMaterialization:
                 flags=0,
             )
             wire = RemoteTaskArgsWire(
-                (ChipTensor.make(0, (4,), DataType.UINT8),), (RemoteTensorSidecar(True, desc),), (), b""
+                (_remote_arg_tensor((4,), nbytes=4),), (RemoteTensorSidecar(True, desc),), (), b""
             )
 
             args, _inline_backings = _materialize_task_args(

@@ -60,6 +60,7 @@ __all__ = [
     "intern_worker_path",
     "mint_owner_instance_id",
     "re_export",
+    "remote_backing_identity",
     "remote_sidecar_tensor",
     "worker_path_for_id",
     "wrap_device_malloc",
@@ -254,6 +255,20 @@ def re_export(source: BufferDescriptor) -> Buffer:
     )
 
 
+def remote_backing_identity(owner_worker_id: int, buffer_id: int, generation: int) -> CanonicalIdentity:
+    """The canonical identity of a backing that lives on another machine's worker.
+
+    A remote owner's ``owner_instance_id`` never crosses the remote L3 wire, so the nonce is the
+    owning worker's id instead. This is the single rule for naming a remote backing: the submitting
+    L4's ``REMOTE_SIDECAR`` placeholder and the importing session runner both derive from it, so one
+    remote backing carries one identity on both sides of the hop.
+    """
+    oid = int(owner_worker_id).to_bytes(OWNER_INSTANCE_ID_BYTES, "little")
+    # A HOST_INLINE placeholder has no backing and so no generation of its own; 0 is the reserved
+    # "uninitialized" value a decoder rejects, so it carries the initial generation instead.
+    return CanonicalIdentity(oid, int(buffer_id), int(generation) or 1)
+
+
 def remote_sidecar_tensor(
     shapes: tuple[int, ...],
     dtype: int,
@@ -271,13 +286,11 @@ def remote_sidecar_tensor(
     descriptor rides in the per-task RemoteTaskArgsSidecar). The identity encodes the remote buffer
     (``owner_worker_id`` folded into the opaque nonce, plus ``buffer_id`` / ``generation``) so
     dependency inference and routing stay stable across the hop.
+
+    This placeholder is what the remote L3 wire carries verbatim as the task's per-argument record.
     """
-    oid = int(owner_worker_id).to_bytes(OWNER_INSTANCE_ID_BYTES, "little")
-    # A HOST_INLINE placeholder has no backing and so no generation of its own; 0 is the reserved
-    # "uninitialized" value a decoder rejects, so the placeholder carries the initial generation.
-    identity = CanonicalIdentity(oid, buffer_id, int(generation) or 1)
     descriptor = BufferDescriptor(
-        identity=identity,
+        identity=remote_backing_identity(owner_worker_id, buffer_id, generation),
         owner_worker_path_id=intern_worker_path(f"remote/{owner_worker_id}"),
         address_space=address_space,
         access=AccessMode.READWRITE,

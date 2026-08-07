@@ -214,9 +214,8 @@ add_library(hierarchical_objs OBJECT
     ${HIERARCHICAL_SRC_DIR}/worker.cpp
     ${WORKER_SRC_DIR}/chip_run_lane.cpp
     ${WORKER_SRC_DIR}/chip_worker.cpp
-    # Host-side assert_impl / get_stacktrace for the unified Tensor's
-    # always_assert (init_external, reached via make_tensor_external in
-    # remote_wire.cpp / orchestrator.cpp). Mirrors the binding's CMake.
+    # Host-side assert_impl / get_stacktrace for the unified ChipTensor's
+    # always_assert (init_external and the view ops). Mirrors the binding's CMake.
     # ODR invariant: assert_impl / get_stacktrace are ALSO defined in the runtime
     # orchestration/common.cpp. No target may link both that and this file, or
     # the linker sees duplicate symbols. This target links neither runtime

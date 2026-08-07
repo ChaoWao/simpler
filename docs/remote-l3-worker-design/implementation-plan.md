@@ -92,8 +92,7 @@ Status for the local PR #866 cut:
      bounded error payloads.
    - Include tests that reject unknown enum values, non-zero reserved fields,
      and truncated multi-byte fields.
-   - Include tests that reject non-zero `TensorWire.data` in remote
-     TASK frames.
+   - Include tests that reject a remote TASK argument carrying a local backing.
 
 6. Remote callable registry. **Implemented for dispatcher `PYTHON_IMPORT`,
    inner manifest/control `PYTHON_IMPORT`, and inner manifest/control inline
@@ -251,7 +250,7 @@ Status for the local PR #866 cut:
 | Remote import eligibility | Imported peer handle makes only the importer worker eligible. |
 | Remote import dep key | Owner and imported views use the same owner-based TensorMap key. |
 | Raw pointer rejection | Unstaged host pointer fails before slot commit. |
-| Wire data zero | Non-zero remote TASK tensor data is rejected. |
+| Wire backing-free | A remote TASK tensor carrying a local backing or a non-zero `byte_offset` is rejected on encode and on decode. |
 | HOST_INLINE desc | Inline payloads require a descriptor and bounds checks. |
 | Remote buffer copy | Host stages input, remote writes output, host pulls. |
 | Input-only free deferral | Released input buffer survives queued consumers. |

@@ -34,15 +34,14 @@ from multiprocessing import shared_memory
 from typing import Any, Callable
 
 from .buffer import (
-    OWNER_INSTANCE_ID_BYTES,
     AccessMode,
     AddressSpace,
     BackendKind,
     Buffer,
-    CanonicalIdentity,
     create_host_shared_buffer,
     intern_worker_path,
     mint_owner_instance_id,
+    remote_backing_identity,
 )
 from .callable_identity import (
     CallableHandle,
@@ -558,13 +557,13 @@ def _buffer_key(buffer_id: int, generation: int) -> tuple[int, int]:
 def _import_wire_buffer(export_desc: Any, shm_name: str, base: int) -> Buffer:
     """The wire ``Buffer`` naming an imported backing, whose owner is another worker's process.
 
-    The owner's ``owner_instance_id`` never crosses the remote wire, so the identity is rebuilt from
-    the export triple the same way the submitting L4's ``REMOTE_SIDECAR`` placeholder builds it —
-    the importing runner and the submitter therefore name one remote backing with one identity.
+    The backing is named by ``remote_backing_identity`` — the one rule the submitting L4's
+    ``REMOTE_SIDECAR`` placeholder also uses — so one remote backing carries one identity on both
+    sides of the hop. It is minted here, at IMPORT_BUFFER, because a local address for an imported
+    shm exists from then on and every later task over it must name the same backing.
     """
-    oid = int(export_desc.owner_worker_id).to_bytes(OWNER_INSTANCE_ID_BYTES, "little")
     return Buffer(
-        identity=CanonicalIdentity(oid, int(export_desc.buffer_id), int(export_desc.generation)),
+        identity=remote_backing_identity(export_desc.owner_worker_id, export_desc.buffer_id, export_desc.generation),
         owner_worker_path_id=intern_worker_path(f"remote/{int(export_desc.owner_worker_id)}"),
         address_space=AddressSpace.HOST,
         access=AccessMode.READWRITE,
@@ -585,31 +584,40 @@ def _materialize_task_args(
 ) -> tuple[TaskArgs, list[Buffer]]:
     """The wire ``TaskArgs`` a remote TASK's orchestration function receives.
 
-    Every element is a ``Tensor`` over a backing this runner holds, so an orchestration function
-    forwards its own args to a chip child exactly as one at any other level does. The returned
-    ``Buffer`` list is the session-scoped backings minted for this task's HOST_INLINE payloads; they
-    live no longer than the run and the caller closes them once it returns.
+    The wire carries each argument as the submitter's own ``REMOTE_SIDECAR`` ``Tensor``: its view
+    (shapes, strides, dtype) is taken verbatim, and the sidecar names the local backing that view is
+    rebuilt over. Every element is therefore a ``Tensor`` over a backing this runner holds, so an
+    orchestration function forwards its own args to a chip child exactly as one at any other level
+    does. The returned ``Buffer`` list is the session-scoped backings minted for this task's
+    HOST_INLINE payloads; they live no longer than the run and the caller closes them once it
+    returns.
     """
-    if len(args.remote_desc) != len(args.tensor_metadata):
-        raise ValueError("remote TASK descriptor count does not match tensor metadata count")
+    if len(args.remote_desc) != len(args.tensors):
+        raise ValueError("remote TASK descriptor count does not match tensor count")
     task_args = TaskArgs()
     inline_backings: list[Buffer] = []
 
     try:
-        for tensor, sidecar in zip(args.tensor_metadata, args.remote_desc):
+        for tensor, sidecar in zip(args.tensors, args.remote_desc):
             if not sidecar.present:
                 raise ValueError("remote TASK tensor payload requires a RemoteTensorRef sidecar")
             desc = sidecar.desc
             if desc is None:
                 raise ValueError("remote TASK descriptor is marked present but missing")
-            if desc.nbytes != tensor.nbytes():
-                raise ValueError("remote TASK descriptor nbytes does not match tensor metadata")
+            if desc.nbytes != tensor.buffer.nbytes:
+                raise ValueError("remote TASK descriptor nbytes does not match the tensor's backing")
+            # The sidecar is the sole authority for where the view sits in the backing, so the
+            # placeholder's own descriptor spans exactly the view and its byte_offset is zero.
+            if tensor.byte_offset != 0:
+                raise ValueError("remote TASK tensor must carry no byte_offset of its own")
             if desc.address_space == RemoteAddressSpace.HOST_INLINE:
                 backing, byte_offset = _materialize_inline_payload(args, desc, mint_inline_buffer)
                 inline_backings.append(backing)
             else:
                 backing, byte_offset = _resolve_session_backing(desc, buffers, worker_id)
-            task_args.add_tensor(backing.tensor(tuple(tensor.shapes), tensor.dtype, byte_offset=byte_offset))
+            task_args.add_tensor(
+                backing.tensor(tensor.shapes, tensor.dtype, strides=tensor.strides, byte_offset=byte_offset)
+            )
     except BaseException:
         # A rejected arg leaves the caller no list to release, so the backings minted for the args
         # that did decode are released here.
