@@ -65,6 +65,7 @@ target_include_directories(_task_interface PRIVATE
     ${CMAKE_SOURCE_DIR}/src/common/platform/include
     ${CMAKE_SOURCE_DIR}/src/common/platform/include/common
     ${CMAKE_SOURCE_DIR}/src/common/platform/include/host
+    ${CMAKE_SOURCE_DIR}/src/common/log/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

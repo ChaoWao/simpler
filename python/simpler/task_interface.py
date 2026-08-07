@@ -27,7 +27,6 @@ Usage:
 from __future__ import annotations
 
 import ctypes
-import os
 import threading
 import uuid
 import weakref
@@ -36,6 +35,14 @@ from enum import IntEnum
 from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+# `preload_global` is the process-wide RTLD_GLOBAL dlopen registry.
+# host_runtime.so resolves its undefined HostLogger / unified_log_* (and, on sim,
+# sim_context_*) symbols against those globals, so each must be loaded — exactly
+# once — before any host_runtime.so dlopen. The registry lives in _log_preload so
+# the import-time logger preload and ChipWorker.init share one entry per path.
+from ._log_preload import host_span_sink_address as _host_span_sink_address
+from ._log_preload import preload_global as _preload_global
 
 if TYPE_CHECKING:
     # Annotation-only: `CallableHandle` is imported lazily at its use site, and
@@ -1221,22 +1228,30 @@ class GlobalCommDomainView:
 # Process-wide RTLD_GLOBAL preload registry. host_runtime.so resolves its
 # undefined HostLogger / unified_log_* (and, on sim, sim_context_*) symbols
 # against these globals, so they must be loaded — exactly once — before any
-# host_runtime.so dlopen. Keyed by path; mirrors the C++ side's old
-# std::once_flag semantics. Never closed.
-_preloaded_globals: dict[str, ctypes.CDLL] = {}
+# host_runtime.so dlopen. The registry lives in _log_preload so the import-time
+# logger preload and ChipWorker.init below share one entry per path: a second
+# dlopen of an already-registered path is skipped rather than repeated.
 
 
-def _preload_global(path: str) -> ctypes.CDLL:
-    """dlopen `path` with RTLD_NOW | RTLD_GLOBAL, idempotently (one CDLL per path).
+def _initialize_simpler_log(bins: Any, log_level: int | None = None) -> ctypes.CDLL:
+    """Load and seed the process-global logger before runtime use or fork."""
+    if log_level is None:
+        from . import _log  # noqa: PLC0415
 
-    Eager resolution (RTLD_NOW) mirrors the previous C++ dlopen flags and
-    surfaces any missing-symbol problem at load time rather than first use.
-    """
-    handle = _preloaded_globals.get(path)
-    if handle is None:
-        handle = ctypes.CDLL(path, mode=os.RTLD_NOW | os.RTLD_GLOBAL)
-        _preloaded_globals[path] = handle
-    return handle
+        log_level = _log.get_current_config()
+    if not bins.simpler_log_path:
+        raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
+
+    log_handle = _preload_global(str(bins.simpler_log_path))
+    bind_host_span_sink = getattr(_ti_module, "_bind_host_span_sink", None)
+    if bind_host_span_sink is not None:
+        bind_host_span_sink(_host_span_sink_address(log_handle))
+    log_handle.simpler_log_init.argtypes = [ctypes.c_int]
+    log_handle.simpler_log_init.restype = ctypes.c_int
+    rc = log_handle.simpler_log_init(int(log_level))
+    if rc != 0:
+        raise RuntimeError(f"simpler_log_init failed with code {rc}")
+    return log_handle
 
 
 class ChipWorker:
@@ -1319,20 +1334,8 @@ class ChipWorker:
             self._init_in_progress = True
 
         try:
-            if log_level is None:
-                from . import _log  # noqa: PLC0415
-
-                log_level = _log.get_current_config()
-
             # 1. libsimpler_log.so — RTLD_GLOBAL singleton, before host_runtime.so.
-            if not bins.simpler_log_path:
-                raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
-            log_handle = _preload_global(str(bins.simpler_log_path))
-            log_handle.simpler_log_init.argtypes = [ctypes.c_int]
-            log_handle.simpler_log_init.restype = ctypes.c_int
-            rc = log_handle.simpler_log_init(int(log_level))
-            if rc != 0:
-                raise RuntimeError(f"simpler_log_init failed with code {rc}")
+            _initialize_simpler_log(bins, log_level)
 
             # 2. libcpu_sim_context.so — sim platforms only.
             if bins.sim_context_path:

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from simpler import env_manager
 
@@ -21,6 +21,42 @@ from .environment import PROJECT_ROOT
 from .toolchain import Aarch64GxxToolchain, CCECToolchain, GxxToolchain, Toolchain
 
 logger = logging.getLogger(__name__)
+
+
+def place_binary(
+    src: Union[str, Path], dest: Union[str, Path], post_process: Optional[Callable[[Path], None]] = None
+) -> Path:
+    """Copy `src` over `dest` atomically, preserving metadata.
+
+    `shutil.copy2` alone truncates and rewrites the destination in place, which
+    corrupts the mapping of any process that already has `dest` dlopened — the
+    fault surfaces later, as a SIGSEGV inside the dynamic linker on an unrelated
+    dlopen or at interpreter exit, far from the rewrite. Writing a sibling
+    temporary and renaming leaves the old inode intact for those processes while
+    new dlopens pick up the replacement.
+
+    `post_process` runs on the staged copy, before it becomes visible under
+    `dest`; a step that rewrites the artifact (`strip`) must go there rather than
+    run against `dest` afterwards, or it reintroduces the in-place rewrite.
+
+    The temporary is created in `dest`'s directory so the rename stays within one
+    filesystem, which is what makes it atomic.
+    """
+    src_path = Path(src)
+    dest_path = Path(dest)
+    fd, staged_name = tempfile.mkstemp(dir=str(dest_path.parent), prefix=f".{dest_path.name}.", suffix=".tmp")
+    os.close(fd)
+    staged = Path(staged_name)
+    try:
+        shutil.copy2(src_path, staged)
+        os.chmod(staged, os.stat(src_path).st_mode & 0o7777)
+        if post_process is not None:
+            post_process(staged)
+        os.replace(staged, dest_path)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return dest_path
 
 
 class BuildTarget:
@@ -303,20 +339,24 @@ class RuntimeCompiler:
                     dest_dir = Path(dispatcher_dest)
                     dest_dir.mkdir(parents=True, exist_ok=True)
                     dest_dispatcher = dest_dir / dispatcher_name
-                    shutil.copy2(dispatcher_so, dest_dispatcher)
                     # Cross-arch strip: aicpu .so is aarch64 even on x86 host;
                     # GNU strip 2.38 on Ubuntu 22.04 cannot read it. Prefer
                     # llvm-strip (multi-arch) when available.
                     strip_bin = shutil.which("llvm-strip") or shutil.which("aarch64-linux-gnu-strip") or "strip"
-                    subprocess.run([strip_bin, "-s", str(dest_dispatcher)], check=True)
+
+                    def _strip(staged: Path, strip_bin: str = strip_bin) -> None:
+                        # strip_bin is selected only from the trusted host toolchain.
+                        subprocess.run([strip_bin, "-s", str(staged)], check=True)  # noqa: S603
+
+                    place_binary(dispatcher_so, dest_dispatcher, post_process=_strip)
             if output_dir is not None:
                 od = Path(output_dir)
                 od.mkdir(parents=True, exist_ok=True)
                 dest = od / binary_name
-                shutil.copy2(binary_path, dest)
+                place_binary(binary_path, dest)
                 if target_platform == "host" and self.platform == "a5":
                     topo_fallback = Path(cmake_source_dir) / "aicpu_cpu_topo_fallback.json"
-                    shutil.copy2(topo_fallback, od / topo_fallback.name)
+                    place_binary(topo_fallback, od / topo_fallback.name)
                 return dest
             else:
                 with open(binary_path, "rb") as f:
@@ -496,7 +536,7 @@ class RuntimeCompiler:
                 od = Path(output_dir)
                 od.mkdir(parents=True, exist_ok=True)
                 dest = od / binary_name
-                shutil.copy2(binary_path, dest)
+                place_binary(binary_path, dest)
                 return dest
             else:
                 with open(binary_path, "rb") as f:
@@ -537,7 +577,7 @@ class RuntimeCompiler:
                 od = Path(output_dir)
                 od.mkdir(parents=True, exist_ok=True)
                 dest = od / binary_name
-                shutil.copy2(binary_path, dest)
+                place_binary(binary_path, dest)
                 return dest
             else:
                 with open(binary_path, "rb") as f:

@@ -40,6 +40,10 @@ One line per span, emitted on scope exit
 | `ts` `dur` | start + duration in ns. Maps 1:1 onto a Chrome-trace `"X"` event. For host spans `ts` is `CLOCK_MONOTONIC` (`steady_clock`), same-host cross-process comparable. For `clk=dev` device spans (see below) `ts` is instead a **device-clock** start offset on a per-invocation origin — comparable to the other device spans (so the orch∪sched window is recoverable), not the host clock. |
 | `k=v ...` | optional per-span attributes (e.g. `ntensor=4`); a parser that doesn't recognize one ignores it. |
 
+Span names and attributes percent-encode control bytes and record delimiters.
+They are length-capped (with `~` marking truncation) so each marker remains a
+single atomic pipe write even when forked workers share captured stderr.
+
 ## Span tree
 
 ```text
@@ -82,21 +86,63 @@ including time the caller spends polling or doing other host work; blocking
 | 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
 | 3 | `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched,task_slot_*}` |
 
+## L3/L4 host scheduler spans
+
+A hierarchical worker with direct local chip children also emits these spans
+through the same process-global `libsimpler_log.so` sink:
+
+| Span | Host decision point |
+| ---- | ------------------- |
+| `l3.graph_build` | serialized Python graph callback |
+| `l3.submit` | next-level task publication after slot allocation |
+| `l3.dispatch` | scheduler handoff to a worker thread |
+| `l3.frame_submit` | local child mailbox-frame publication |
+| `l3.activate` | prepared-frame activation |
+| `l3.complete` | terminal child progress handling |
+
+Their attributes carry the available `run_id`, `task_slot`, `group_index`,
+`worker_id`, `dispatch_id`, and endpoint kind.
+
+The spans reach the logger over a fixed POD C ABI, `SimplerHostSpan` in
+`common/host_span.h`. `_task_interface` cannot link `libsimpler_log.so` — that
+library is reached by `RTLD_GLOBAL` dlopen at runtime — so each extension/DSO
+owns its own nullable sink function pointer instead of an undefined link symbol.
+`simpler._log_preload` loads the library, and `simpler._log` passes the exported
+entry-point address into `_task_interface` before Worker initialization. Every later
+`fork()` therefore inherits the bound pointer and logger mapping, so parent and
+child markers reach one sink. A process that never loads the logger leaves the
+extension-local pointer null, which disables host spans without failing anything. A later
+`ChipWorker.init` refreshes the binding after loading the required runtime
+logger. `host_runtime.so` links the library directly and needs none of this.
+
 ## Reading the markers — `strace_timing.py`
 
 ```bash
 # TPOT table (per-callable, decode = most-invoked hid bucket)
 python -m simpler_setup.tools.strace_timing path/to/host_or_device.log
 
-# also emit a Chrome-trace / Perfetto JSON (lane = pid → host call tree)
+# also emit the established per-invocation call-tree JSON
 python -m simpler_setup.tools.strace_timing path/to/log --trace-out strace.json
+
+# emit the L3/L4 host scheduler timeline on real OS pid/tid lanes
+python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane.json
 ```
 
 The tool groups by `(pid, inv)`, rebuilds each invocation's tree from `depth`,
 buckets by `hid`, and prints each callable's mean `simpler_run` plus per-stage
-means. With `--trace-out` it writes one `ph:"X"` event per span keyed by pid, so
-the L3 parent and each L2 child render as separate lanes in
+means. With `--trace-out` it writes one `ph:"X"` event per span on a synthetic
+per-invocation lane, so each call renders as an isolated nested tree in
 [Perfetto](https://ui.perfetto.dev) / `chrome://tracing`.
+
+`--swimlane` is a separate view. Host slices keep their real OS pid/tid, and
+task submission-to-dispatch handoffs render as flow arrows. Chrome Trace JSON
+has only one visible timestamp axis, so putting the raw per-invocation device
+clock beside `CLOCK_MONOTONIC` would create a multi-day empty interval. The
+converter therefore keeps `clk=dev` records, with their original ns timestamps,
+in the top-level `unalignedDeviceSpans` array instead of `traceEvents`; it does
+not guess a clock offset. Perfetto opens directly on the host activity, while
+the existing tables, tree, and `--trace-out` still provide the device-phase
+timing views.
 
 ## Why markers, not a return value
 

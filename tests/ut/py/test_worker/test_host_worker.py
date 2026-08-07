@@ -229,10 +229,12 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
         runtime="host_build_graph",
     )
     worker._chip_shms = [SharedMemory(create=True, size=MAILBOX_SIZE) for _ in range(2)]
+    worker._l3_bins = "bins"
     fake_parent = FakeParentWorker()
     worker._worker = cast(Any, fake_parent)
     worker._startup_deadline = time.monotonic() + 5.0
     fork_pids = iter((12001, 12002))
+    startup_events: list[tuple] = []
 
     def fake_await_children_ready(shms, _pids, kind: str, _deadline: float) -> None:
         if kind != "chip":
@@ -241,7 +243,18 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
             assert shm.buf is not None
             worker_mod._PIPELINE_LEASE_FMT.pack_into(shm.buf, worker_mod._OFF_PIPELINE_LEASE, depth, 0, 0)
 
-    monkeypatch.setattr(worker_mod.os, "fork", lambda: next(fork_pids))
+    def fake_fork() -> int:
+        startup_events.append(("fork",))
+        return next(fork_pids)
+
+    monkeypatch.setattr(worker_mod.os, "fork", fake_fork)
+    monkeypatch.setattr(worker_mod._simpler_log, "get_current_config", lambda: 60)
+    monkeypatch.setattr(
+        worker_mod,
+        "_initialize_simpler_log",
+        lambda bins, level: startup_events.append(("log", bins, level)),
+        raising=False,
+    )
     monkeypatch.setattr(worker, "_await_children_ready", fake_await_children_ready)
     monkeypatch.setattr(worker_mod, "Orchestrator", lambda native, owner: (native, owner))
     try:
@@ -254,6 +267,8 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     assert fake_parent.configured_depths == [1]
     assert [call[1:] for call in fake_parent.next_level_calls] == [(12001, 2), (12002, 1)]
     assert fake_parent.initialized
+    assert startup_events[0] == ("log", "bins", 60)
+    assert startup_events[1:] == [("fork",), ("fork",)]
 
 
 class _FakeChipRun:
@@ -2657,6 +2672,22 @@ class TestRunHandle:
         assert events == ["begin", "scope_begin", "scope_end", "fail", "fail", "wait", "release"]
         assert not worker._accepted_run_handles
         assert worker._ordered_cleanup_error is None
+
+    def test_graph_failure_still_emits_graph_build_span(self, monkeypatch):
+        worker, _events = self._submission_failure_worker(failures=0)
+        emitted = []
+        timestamps = iter((100, 275))
+        monkeypatch.setattr(worker_mod, "_host_spans_active", lambda: True)
+        monkeypatch.setattr(worker_mod.time, "monotonic_ns", lambda: next(timestamps))
+        monkeypatch.setattr(worker_mod, "_emit_host_span", lambda *args: emitted.append(args))
+
+        def bad_graph(*_args):
+            raise ValueError("bad graph")
+
+        with pytest.raises(ValueError, match="bad graph"):
+            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
+
+        assert emitted == [("l3.graph_build", 1, 0, 0, 100, 175, "run_id=1 role=facade")]
 
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)

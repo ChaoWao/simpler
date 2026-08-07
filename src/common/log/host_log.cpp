@@ -21,18 +21,68 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <limits.h>
 #include <pthread.h>
+#include <string>
 #include <vector>
 
 #include <unistd.h>
+
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+
+#include "common/host_span.h"
 
 using simpler::log::LogLevel;
 
 namespace {
 
-// Every STRACE marker renders well inside this, so the heap fallback below
-// stays off the path a traced run pays per span.
+// Every STRACE marker renders well inside this allocation bound, so the heap
+// fallback below stays off the path a traced run pays per span. This capacity
+// is not an atomic-write guarantee.
 constexpr size_t kRecordStackCapacity = 2048;
+
+// POSIX guarantees atomic pipe writes up to _POSIX_PIPE_BUF (512 bytes). A
+// conservative bound for the logger prefix, fixed-width STRACE fields, and
+// newline is 256 bytes, leaving the other half for the encoded text fields.
+constexpr size_t kHostSpanNameCapacity = 64;
+constexpr size_t kHostSpanAttributesCapacity = 192;
+static_assert(kHostSpanNameCapacity + kHostSpanAttributesCapacity <= _POSIX_PIPE_BUF - 256);
+
+std::string encode_host_span_field(const char *value, size_t capacity, bool attributes) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(capacity);
+    bool truncated = false;
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p != '\0'; ++p) {
+        const unsigned char c = *p;
+        const bool printable = c >= 0x20 && c <= 0x7E;
+        const bool grammar_character = attributes && (c == ' ' || c == '=');
+        const bool safe =
+            printable && c != '%' && c != '[' && c != ']' && (grammar_character || (c != ' ' && c != '='));
+        const size_t required = safe ? 1 : 3;
+        if (encoded.size() + required > capacity) {
+            truncated = true;
+            break;
+        }
+        if (safe) {
+            encoded.push_back(static_cast<char>(c));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(kHex[c >> 4]);
+            encoded.push_back(kHex[c & 0x0F]);
+        }
+    }
+    if (truncated && capacity != 0) {
+        if (encoded.size() == capacity) {
+            encoded.back() = '~';
+        } else {
+            encoded.push_back('~');
+        }
+    }
+    return encoded;
+}
 
 // Renders the timestamp/thread/level prefix, the caller's message, and an
 // optional trailing newline into `buffer`, and returns the length of the whole
@@ -86,6 +136,14 @@ void write_stderr(const char *record, size_t size) {
             break;
         }
     }
+}
+
+long host_trace_tid() {
+#if defined(__linux__) && defined(SYS_gettid)
+    return static_cast<long>(syscall(SYS_gettid));
+#else
+    return static_cast<long>(getpid());
+#endif
 }
 
 }  // namespace
@@ -151,10 +209,11 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
 
     const bool append_newline = fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n';
 
-    // One write per record: a record of at most PIPE_BUF bytes reaches a shared
-    // pipe indivisibly, so forked workers writing a captured stderr cannot
-    // interleave inside it. A longer record — a large LOG_ERROR dump, say — has
-    // no such guarantee; STRACE markers stay well below the limit.
+    // One write per record avoids thread interleaving under mutex_. On a shared
+    // pipe, only records no larger than that pipe's PIPE_BUF are indivisible
+    // across forked writers. Machine-readable host spans are separately
+    // budgeted to the portable _POSIX_PIPE_BUF floor (512 bytes); longer human
+    // log records use this same best-effort write path without that promise.
     char stack_buffer[kRecordStackCapacity];
     const size_t length =
         format_record(stack_buffer, sizeof(stack_buffer), ts, tid, level_tag, func, fmt, args, append_newline);
@@ -204,4 +263,21 @@ extern "C" int simpler_log_init(int log_level) {
     }
     HostLogger::get_instance().set_level(static_cast<LogLevel>(log_level));
     return 0;
+}
+
+extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
+    if (span == nullptr || span->abi_version != SIMPLER_HOST_SPAN_ABI_VERSION ||
+        span->struct_size < sizeof(SimplerHostSpan) || span->name == nullptr) {
+        return;
+    }
+    const std::string name = encode_host_span_field(span->name, kHostSpanNameCapacity, false);
+    const std::string attributes =
+        encode_host_span_field(span->attributes == nullptr ? "" : span->attributes, kHostSpanAttributesCapacity, true);
+    HostLogger::get_instance().log(
+        LogLevel::TIMING, "emit_host_span",
+        "[STRACE] v=1 pid=%d tid=%ld inv=%llu hid=%llx depth=%d name=%s ts=%lld dur=%lld %s",
+        static_cast<int>(getpid()), host_trace_tid(), static_cast<unsigned long long>(span->invocation_id),
+        static_cast<unsigned long long>(span->callable_hash), span->depth, name.c_str(),
+        static_cast<long long>(span->timestamp_ns), static_cast<long long>(span->duration_ns), attributes.c_str()
+    );
 }

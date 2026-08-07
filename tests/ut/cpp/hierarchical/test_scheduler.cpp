@@ -37,6 +37,8 @@
 #include <vector>
 
 #include "call_config.h"
+#include "common/host_span.h"
+#include "common/host_span_scope.h"
 #include "orchestrator.h"
 #include "ring.h"
 #include "scheduler.h"
@@ -45,6 +47,39 @@
 #include "types.h"
 #include "worker_manager.h"
 #include "task_args.h"
+
+namespace {
+
+std::mutex captured_host_spans_mu;
+std::vector<std::string> captured_host_span_names;
+
+class ScopedHostSpanCapture {
+public:
+    ScopedHostSpanCapture() {
+        std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+        captured_host_span_names.clear();
+        simpler::host_trace::bind_sink(&simpler_log_emit_host_span);
+    }
+
+    ~ScopedHostSpanCapture() { simpler::host_trace::bind_sink(nullptr); }
+
+    ScopedHostSpanCapture(const ScopedHostSpanCapture &) = delete;
+    ScopedHostSpanCapture &operator=(const ScopedHostSpanCapture &) = delete;
+};
+
+bool captured_host_span(const std::string &name) {
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    return std::find(captured_host_span_names.begin(), captured_host_span_names.end(), name) !=
+           captured_host_span_names.end();
+}
+
+}  // namespace
+
+extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
+    if (span == nullptr || span->name == nullptr) return;
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    captured_host_span_names.emplace_back(span->name);
+}
 
 // ---------------------------------------------------------------------------
 // MockMailboxWorker: in-process stand-in for the forked Python child loop.
@@ -1141,6 +1176,40 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
     allocator.shutdown();
 }
 
+TEST(WorkerManagerTest, DispatchAndCompletionEmitHostSpans) {
+    ScopedHostSpanCapture host_span_capture;
+
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot slot = make_progress_slot(allocator, /*run_id=*/73, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(slot, INVALID_SLOT);
+
+    WorkerThread worker;
+    auto endpoint = std::make_unique<DeterministicProgressEndpoint>();
+    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
+    std::vector<WorkerCompletion> completed;
+    worker.start(
+        &allocator,
+        [&](WorkerCompletion completion) {
+            completed.push_back(std::move(completion));
+        },
+        [](WorkerDispatch) {}, std::move(endpoint)
+    );
+
+    worker.dispatch(WorkerDispatch{slot, 0});
+    ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
+    EXPECT_TRUE(captured_host_span("l3.dispatch"));
+
+    const WorkerDispatch submitted = endpoint_ptr->submitted().front();
+    endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted);
+    worker.progress();
+    ASSERT_EQ(completed.size(), 1u);
+    EXPECT_TRUE(captured_host_span("l3.complete"));
+
+    worker.stop();
+    allocator.shutdown();
+}
+
 TEST(WorkerManagerTest, AdmissionRejectionsCompleteClaimedDispatchesWithoutThrowing) {
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
@@ -1350,6 +1419,8 @@ TEST(WorkerManagerTest, SubmitExceptionQuiescesEndpointOwnedPublication) {
 }
 
 TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
+    ScopedHostSpanCapture host_span_capture;
+
     alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
@@ -1391,6 +1462,8 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
+    EXPECT_TRUE(captured_host_span("l3.frame_submit"));
+    EXPECT_TRUE(captured_host_span("l3.activate"));
     allocator.shutdown();
 }
 

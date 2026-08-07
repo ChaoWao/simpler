@@ -22,12 +22,14 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "common/host_span_scope.h"
 #include "ring.h"
 
 namespace {
@@ -54,6 +56,43 @@ std::string format_digest(const uint8_t *digest) {
     }
     return out;
 }
+
+#if SIMPLER_HOST_STRACE
+const char *endpoint_kind_name(WorkerEndpointKind kind) {
+    switch (kind) {
+    case WorkerEndpointKind::LOCAL_MAILBOX:
+        return "local_mailbox";
+    case WorkerEndpointKind::REMOTE_L3:
+        return "remote_l3";
+    }
+    return "unknown";
+}
+
+RunId trace_run_id(Ring *ring, TaskSlot task_slot) {
+    if (ring == nullptr) return INVALID_RUN_ID;
+    TaskSlotState *state = ring->slot_state(task_slot);
+    return state == nullptr ? INVALID_RUN_ID : state->run_id;
+}
+
+uint64_t trace_callable_hash(Ring *ring, TaskSlot task_slot) {
+    if (ring == nullptr) return 0;
+    TaskSlotState *state = ring->slot_state(task_slot);
+    if (state == nullptr) return 0;
+    uint64_t hash = 0;
+    std::memcpy(&hash, state->callable.digest.data(), sizeof(hash));
+    return hash;
+}
+
+std::string
+trace_dispatch_attrs(RunId run_id, const WorkerDispatch &dispatch, const WorkerEndpointCaps &caps, const char *role) {
+    std::ostringstream attrs;
+    attrs << "run_id=" << run_id << " task_slot=" << dispatch.task_slot << " group_index=" << dispatch.group_index
+          << " worker_id=" << caps.worker_id << " dispatch_id=" << dispatch.dispatch_id
+          << " endpoint_kind=" << endpoint_kind_name(caps.kind)
+          << " prepare_only=" << static_cast<int>(dispatch.prepare_only) << " role=" << role;
+    return attrs.str();
+}
+#endif
 
 // Wall-clock period between child liveness samples. Every mailbox wait spins,
 // so an iteration count would not map to a bounded wall time.
@@ -390,7 +429,10 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
 
 WorkerThread::SubmitDispatchResult
 WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expected_run_id) {
-    std::lock_guard<std::mutex> admission_lk(admission_mu_);
+#if SIMPLER_HOST_STRACE
+    const int64_t trace_start_ns = simpler::host_trace::now_ns();
+#endif
+    std::unique_lock<std::mutex> admission_lk(admission_mu_);
     if (shutdown_.load(std::memory_order_acquire)) {
         return SubmitDispatchResult::STOPPING;
     }
@@ -409,6 +451,10 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
     }
     ++next_dispatch_id_;
     inflight_.fetch_add(1, std::memory_order_release);
+#if SIMPLER_HOST_STRACE
+    const RunId trace_run = trace_run_id(ring_, d.task_slot);
+    const uint64_t trace_hash = trace_callable_hash(ring_, d.task_slot);
+#endif
     try {
         endpoint_->submit_progress(ring_, d);
     } catch (const std::exception &e) {
@@ -416,6 +462,14 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
     } catch (...) {
         fail_submission(d, "submit_progress failed with unknown exception");
     }
+    admission_lk.unlock();
+#if SIMPLER_HOST_STRACE
+    const int64_t trace_end_ns = simpler::host_trace::now_ns();
+    const std::string trace_attrs = trace_dispatch_attrs(trace_run, d, endpoint_->caps(), "scheduler");
+    simpler::host_trace::emit(
+        "l3.dispatch", trace_run, trace_hash, 0, trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
+    );
+#endif
     return SubmitDispatchResult::SUBMITTED;
 }
 
@@ -576,6 +630,11 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
         return;
     }
 
+#if SIMPLER_HOST_STRACE
+    const RunId trace_run = trace_run_id(ring_, dispatch.task_slot);
+    const uint64_t trace_hash = trace_callable_hash(ring_, dispatch.task_slot);
+    std::string complete_attrs = trace_dispatch_attrs(trace_run, dispatch, endpoint_->caps(), "worker");
+#endif
     WorkerCompletion completion = progress.completion;
     if (accepted_dispatch_ids_.erase(dispatch.dispatch_id) == 0) {
         // This advances only the run-level waiter after a terminal endpoint
@@ -598,6 +657,10 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
         accept_errors_.erase(accept_error);
     }
 
+#if SIMPLER_HOST_STRACE
+    complete_attrs += " outcome=" + std::to_string(static_cast<int32_t>(completion.outcome));
+    simpler::host_trace::SpanScope complete_trace("l3.complete", trace_run, trace_hash, 0, std::move(complete_attrs));
+#endif
     on_complete_(std::move(completion));
     {
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
@@ -640,6 +703,13 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
             std::to_string(MAILBOX_ARGS_CAPACITY)
         );
     }
+
+#if SIMPLER_HOST_STRACE
+    simpler::host_trace::SpanScope frame_submit_trace(
+        "l3.frame_submit", state.run_id, trace_callable_hash(ring, dispatch.task_slot), 0,
+        trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
+    );
+#endif
 
     // The lease slot id is a native pipeline slot bounded by the runtime's
     // PipelineContract, not a mailbox frame number. A two-frame endpoint maps
@@ -893,14 +963,24 @@ bool LocalMailboxEndpoint::poll_progress(WorkerEndpointProgress &progress) {
 }
 
 bool LocalMailboxEndpoint::activate_progress(RunId run_id) {
-    std::lock_guard<std::mutex> lk(progress_mu_);
+    std::unique_lock<std::mutex> lk(progress_mu_);
     if (endpoint_poisoned_) return false;
     for (size_t index = 0; index < task_frame_count_; ++index) {
         FrameRecord &record = frames_[index];
         if (!record.occupied || !record.dispatch.prepare_only || record.run_id != run_id) continue;
+#if SIMPLER_HOST_STRACE
+        std::ostringstream activate_attrs;
+        activate_attrs << "run_id=" << run_id << " task_slot=" << record.dispatch.task_slot
+                       << " group_index=" << record.dispatch.group_index << " worker_id=" << caps_.worker_id
+                       << " dispatch_id=" << record.dispatch.dispatch_id
+                       << " endpoint_kind=" << endpoint_kind_name(caps_.kind)
+                       << " prepare_only=" << static_cast<int>(record.dispatch.prepare_only) << " role=worker";
+        simpler::host_trace::SpanScope activate_trace("l3.activate", run_id, 0, 0, activate_attrs.str());
+#endif
         record.activation_requested = true;
         char *frame = task_frame(index);
         (void)try_publish_activation(record, frame);
+        lk.unlock();
         return true;
     }
     return false;
