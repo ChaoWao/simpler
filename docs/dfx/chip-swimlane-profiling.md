@@ -819,7 +819,7 @@ a5's `ChipSwimlaneCollector` derives from
 `ProfilerBase<ChipSwimlaneCollector, ChipSwimlaneModule>` and uses the same
 framework abstractions as a2a3, including the same split mgmt +
 collector shard shape (`kMaxCollectorThreads` =
-`PLATFORM_MAX_AICPU_THREADS`, i.e. 7 on a5 vs 4 on a2a3, capping the
+`PLATFORM_MAX_AICPU_THREADS`, i.e. 5 on a5 vs 4 on a2a3, capping the
 shard arrays; the live drain/collector count is
 `min(aicpu_thread_num, kMaxCollectorThreads)`). The
 behavioral deviation from §5.2 is the **transport channel**: a5 has no
@@ -956,7 +956,7 @@ PHASE), same shape as a2a3.
 | AICPU commit on FIN | identical | |
 | Buffer model | rotating pool (free + ready queues) per kind | identical |
 | Ready queue | per-AICPU-thread, multiplexes 4 kinds via `ReadyQueueEntry::kind` | per-AICPU-thread, 2 kinds via `is_phase` |
-| Host threads | split mgmt + collector shards, streams during execution | same split mgmt + collector shards (7 = `PLATFORM_MAX_AICPU_THREADS` vs a2a3's 4) |
+| Host threads | split mgmt + collector shards, streams during execution | same split mgmt + collector shards (5 = `PLATFORM_MAX_AICPU_THREADS` vs a2a3's 4) |
 | Host-class shape | `ProfilerBase<ChipSwimlaneCollector, ChipSwimlaneModule>` (`kBufferKinds = 4`) | same base, `kBufferKinds = 2` |
 | Host transport | `halHostRegister` shared memory | host-shadow `malloc` + per-tick `rtMemcpy`/`memcpy` |
 | `MemoryOps` callbacks | 3 (`alloc`, `reg`, `free_`) | 5 (+ `copy_to_device`, `copy_from_device`) |

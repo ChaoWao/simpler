@@ -32,11 +32,11 @@
  * we use host memory instead of device memory.
  */
 
-#ifndef PLATFORM_COMMON_KERNEL_ARGS_H_
-#define PLATFORM_COMMON_KERNEL_ARGS_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "common/dma_workspace.h"
 
@@ -137,6 +137,33 @@ struct InitArgs {
     uint64_t dma_workspace_addr[DMA_WORKSPACE_KIND_COUNT]{};
 };
 
+struct AicpuTopologyQueryResult {
+    int32_t occupy_rc{-1};
+    int32_t pf_occupy_rc{-1};
+    int32_t os_sched_rc{-1};
+    int32_t reserved{0};
+    uint64_t occupy{0};
+    uint64_t pf_occupy{0};
+    uint64_t os_sched{0};
+};
+
+struct AicpuTopologyQueryArgs {
+    uint64_t result_addr{0};
+};
+
+static_assert(
+    std::is_trivially_copyable_v<AicpuTopologyQueryResult> && std::is_standard_layout_v<AicpuTopologyQueryResult>,
+    "AicpuTopologyQueryResult must remain a memcpy-safe wire type"
+);
+static_assert(sizeof(AicpuTopologyQueryResult) == 40, "AicpuTopologyQueryResult ABI size drift");
+static_assert(offsetof(AicpuTopologyQueryResult, occupy) == 16, "AicpuTopologyQueryResult::occupy offset drift");
+static_assert(offsetof(AicpuTopologyQueryResult, os_sched) == 32, "AicpuTopologyQueryResult::os_sched offset drift");
+static_assert(
+    std::is_trivially_copyable_v<AicpuTopologyQueryArgs> && std::is_standard_layout_v<AicpuTopologyQueryArgs>,
+    "AicpuTopologyQueryArgs must remain a memcpy-safe wire type"
+);
+static_assert(sizeof(AicpuTopologyQueryArgs) == 8, "AicpuTopologyQueryArgs ABI size drift");
+
 /**
  * RegisterCallableArgs - device orchestration SO registration payload
  *
@@ -157,5 +184,3 @@ struct RegisterCallableArgs {
 #ifdef __cplusplus
 }
 #endif
-
-#endif  // PLATFORM_COMMON_KERNEL_ARGS_H_

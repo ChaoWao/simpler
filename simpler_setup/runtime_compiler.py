@@ -314,6 +314,9 @@ class RuntimeCompiler:
                 od.mkdir(parents=True, exist_ok=True)
                 dest = od / binary_name
                 shutil.copy2(binary_path, dest)
+                if target_platform == "host" and self.platform == "a5":
+                    topo_fallback = Path(cmake_source_dir) / "aicpu_cpu_topo_fallback.json"
+                    shutil.copy2(topo_fallback, od / topo_fallback.name)
                 return dest
             else:
                 with open(binary_path, "rb") as f:

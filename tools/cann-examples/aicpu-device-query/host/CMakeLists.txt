@@ -20,6 +20,19 @@ set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 
 add_executable(query_device_hal query_device_hal.cpp)
 
+get_filename_component(SIMPLER_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(A5_TOPOLOGY_DIR "${SIMPLER_ROOT}/src/a5/platform/onboard/host")
+target_sources(query_device_hal PRIVATE
+    "${A5_TOPOLOGY_DIR}/aicpu_topology_probe.cpp"
+    "${SIMPLER_ROOT}/src/common/log/host_log.cpp"
+    "${SIMPLER_ROOT}/src/common/log/unified_log_host.cpp"
+)
+add_custom_command(TARGET query_device_hal POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${A5_TOPOLOGY_DIR}/aicpu_cpu_topo_fallback.json"
+        "$<TARGET_FILE_DIR:query_device_hal>/aicpu_cpu_topo_fallback.json"
+)
+
 # runtime/rt.h transitively needs profiling.
 target_include_directories(query_device_hal PRIVATE
     ${ASCEND_HOME_PATH}/include
@@ -27,13 +40,21 @@ target_include_directories(query_device_hal PRIVATE
     ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/pkg_inc/runtime
     ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/pkg_inc/runtime/runtime
     ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/pkg_inc/profiling
+    ${A5_TOPOLOGY_DIR}
+    ${SIMPLER_ROOT}/src/a5/platform/include
+    ${SIMPLER_ROOT}/src/common/platform/include
+    ${SIMPLER_ROOT}/src/common/log/include
+    ${SIMPLER_ROOT}/src/common/log
 )
 
+set(ASCEND_DRIVER_LIB_DIR "/usr/local/Ascend/driver/lib64/driver"
+    CACHE PATH "Directory containing libascend_hal.so")
 target_link_directories(query_device_hal PRIVATE
     ${ASCEND_HOME_PATH}/lib64
     ${ASCEND_HOME_PATH}/runtime/lib64
+    ${ASCEND_DRIVER_LIB_DIR}
 )
 
 # ascendcl for aclrt*, runtime for rt*/rts* (rtAicpuKernelLaunchExWithArgs,
 # rtsBinaryLoadFromFile, rtsFuncGetByName, rtsLaunchCpuKernel).
-target_link_libraries(query_device_hal PRIVATE ascendcl runtime)
+target_link_libraries(query_device_hal PRIVATE ascendcl runtime ascend_hal ${CMAKE_DL_LIBS} pthread)

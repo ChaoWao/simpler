@@ -55,6 +55,7 @@
 #include "host/args_dump_collector.h"
 #include "aicpu_loader/host/load_aicpu_op.h"
 #include "runtime.h"
+#include "aicpu_topology_probe.h"
 
 // KernelArgsHelper is defined in
 // src/common/platform/onboard/host/device_runner_helpers.h (included above).
@@ -275,6 +276,18 @@ private:
     //
     // dep_gen enablement is a5-specific (a2a3 carries its own copy).
     bool enable_dep_gen_{false};
+
+    int query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &out);
+    int query_aicpu_topology(pto::a5::AicpuTopology &out);
+    void clear_aicpu_topology_cache();
+    // Device-side occupancy and the merged Host topology are immutable during
+    // one DeviceRunner attach/reset lifetime. Cache successful probes only;
+    // allowed CPU selection still runs per call because the requested active
+    // count may change. Recovery, reset, and finalize clear both values.
+    bool aicpu_device_occupancy_cached_{false};
+    pto::a5::AicpuDeviceOccupancy aicpu_device_occupancy_{};
+    bool aicpu_topology_cached_{false};
+    pto::a5::AicpuTopology aicpu_topology_{};
 
     int init_pmu(
         int num_cores, int num_threads, const std::string &csv_path, PmuEventType event_type, int device_id,
