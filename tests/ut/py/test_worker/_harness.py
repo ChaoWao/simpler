@@ -25,11 +25,13 @@ native register raise, and the failure surfaces to the caller of
 
 from __future__ import annotations
 
+import ctypes
 import signal
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
+from typing import Any
 
 import pytest
 import simpler.worker as worker_mod
@@ -112,6 +114,9 @@ class _FakeChipImpl:
         if self._register_error is not None:
             raise RuntimeError(self._register_error)
 
+    def run_materialized(self, *_a, **_k) -> None:
+        """An L2 submit reaches the native handle here, with its args already materialized."""
+
 
 class FakeChipWorker:
     """Stand-in for the native ChipWorker — no NPU touched.
@@ -120,6 +125,10 @@ class FakeChipWorker:
     :data:`CHIP_INIT_FAILURE`, ``"hangs"`` blocks past any test budget.
     ``register_error``, orthogonal to the script, makes the post-READY native
     register raise that message on the chip child.
+
+    Its "device" memory is a child-local host allocation, so the pointers
+    ``malloc`` hands out are meaningful only in the process that made them —
+    the same property a real device pointer has across the fork.
 
     Build one with :func:`fake_chip_worker`; ``ChipWorker`` is constructed with
     no arguments on both the L2 in-process and the forked chip-child paths.
@@ -133,6 +142,22 @@ class FakeChipWorker:
             raise ValueError(f"unknown fake-chip script {script!r}; expected one of {_SCRIPTS}")
         self.script = script
         self._impl = _FakeChipImpl(register_error)
+        self._blocks: dict[int, Any] = {}
+
+    def malloc(self, size: int) -> int:
+        block = (ctypes.c_char * int(size))()
+        ptr = ctypes.addressof(block)
+        self._blocks[ptr] = block
+        return ptr
+
+    def free(self, ptr: int) -> None:
+        self._blocks.pop(int(ptr), None)
+
+    def copy_to(self, dst: int, src: int, size: int) -> None:
+        ctypes.memmove(dst, src, size)
+
+    def copy_from(self, dst: int, src: int, size: int) -> None:
+        ctypes.memmove(dst, src, size)
 
     def init(self, *_a, **_k) -> None:
         if self.script == "raises":

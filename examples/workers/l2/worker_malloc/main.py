@@ -12,10 +12,10 @@
 This example exercises the four host<->device memory primitives on the
 ``Worker`` API in isolation, without ever calling ``worker.run()``:
 
-  * ``worker.malloc(nbytes)``   — allocate device memory, returns uint64 ptr
-  * ``worker.copy_to(dst, src, n)`` — H2D byte copy
-  * ``worker.copy_from(dst, src, n)`` — D2H byte copy
-  * ``worker.free(ptr)``        — release device memory
+  * ``worker.malloc(nbytes)``          — allocate device memory, returns a Buffer
+  * ``worker.copy_to(dst_handle, src)``   — H2D byte copy (src = host tensor/buffer)
+  * ``worker.copy_from(dst, src_handle)`` — D2H byte copy (dst = host tensor/buffer)
+  * ``worker.free(handle)``            — release device memory
 
 Why a standalone example for these? On real hardware (a2a3 / a5 onboard) the
 CANN device context is per-thread, so ``rtMalloc`` only succeeds on a thread
@@ -74,13 +74,13 @@ def _round_trip(worker: Worker, nbytes: int, seed: int) -> None:
     src_buf = (ctypes.c_uint8 * nbytes).from_buffer_copy(src)
     dst_buf = (ctypes.c_uint8 * nbytes).from_buffer(dst)
 
-    dev_ptr = worker.malloc(nbytes)
-    assert dev_ptr != 0, f"malloc({nbytes}) returned NULL"
+    dev_h = worker.malloc(nbytes)
+    assert dev_h.base != 0, f"malloc({nbytes}) returned NULL"
     try:
-        worker.copy_to(dev_ptr, ctypes.addressof(src_buf), nbytes)
-        worker.copy_from(ctypes.addressof(dst_buf), dev_ptr, nbytes)
+        worker.copy_to(dev_h, src_buf)
+        worker.copy_from(dst_buf, dev_h)
     finally:
-        worker.free(dev_ptr)
+        worker.free(dev_h)
 
     if bytes(dst) != src:
         # Find first diverging byte to make the failure actionable.
@@ -89,7 +89,7 @@ def _round_trip(worker: Worker, nbytes: int, seed: int) -> None:
             f"round-trip mismatch at byte {first_diff}/{nbytes}: "
             f"sent 0x{src[first_diff]:02x}, got 0x{dst[first_diff]:02x}"
         )
-    print(f"[worker_malloc]   {nbytes:>6} bytes round-trip OK (ptr=0x{dev_ptr:x})")
+    print(f"[worker_malloc]   {nbytes:>6} bytes round-trip OK (ptr=0x{dev_h.base:x})")
 
 
 def run(platform: str, device_id: int) -> int:
@@ -112,19 +112,20 @@ def run(platform: str, device_id: int) -> int:
         # 2. Hold several allocations live concurrently — exercises the
         # allocator's free-list bookkeeping (no buffer aliasing).
         print("[worker_malloc] concurrent live allocations:")
-        ptrs = [worker.malloc(n) for n in SIZES]
-        assert all(p != 0 for p in ptrs), "concurrent malloc returned NULL"
-        assert len(set(ptrs)) == len(ptrs), f"allocator handed out duplicate pointers: {ptrs}"
-        for p in ptrs:
-            worker.free(p)
-        print(f"[worker_malloc]   {len(ptrs)} concurrent buffers, all distinct, freed cleanly")
+        handles = [worker.malloc(n) for n in SIZES]
+        assert all(h.base != 0 for h in handles), "concurrent malloc returned NULL"
+        bases = [h.base for h in handles]
+        assert len(set(bases)) == len(bases), f"allocator handed out duplicate pointers: {[hex(b) for b in bases]}"
+        for h in handles:
+            worker.free(h)
+        print(f"[worker_malloc]   {len(handles)} concurrent buffers, all distinct, freed cleanly")
 
         # 3. Repeat the cycle — confirms free actually returns the slab so
         # we don't OOM after a handful of iterations.
         print("[worker_malloc] alloc/free churn:")
         for _ in range(8):
-            p = worker.malloc(SIZES[0])
-            worker.free(p)
+            h = worker.malloc(SIZES[0])
+            worker.free(h)
         print(f"[worker_malloc]   8x alloc/free of {SIZES[0]} bytes OK")
     finally:
         worker.close()

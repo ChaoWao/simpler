@@ -86,8 +86,12 @@ uint64_t WorkerEndpoint::control_committed_device_memory() {
     throw_unsupported_control("control_committed_device_memory");
 }
 void WorkerEndpoint::control_free(uint64_t) { throw_unsupported_control("control_free"); }
-void WorkerEndpoint::control_copy_to(uint64_t, uint64_t, size_t) { throw_unsupported_control("control_copy_to"); }
-void WorkerEndpoint::control_copy_from(uint64_t, uint64_t, size_t) { throw_unsupported_control("control_copy_from"); }
+void WorkerEndpoint::control_copy_to(const BufferDescriptor &, const BufferDescriptor &, uint64_t) {
+    throw_unsupported_control("control_copy_to");
+}
+void WorkerEndpoint::control_copy_from(const BufferDescriptor &, const BufferDescriptor &, uint64_t) {
+    throw_unsupported_control("control_copy_from");
+}
 void WorkerEndpoint::control_prepare(const uint8_t *) { throw_unsupported_control("control_prepare"); }
 void WorkerEndpoint::control_register(const char *, size_t, const uint8_t *) {
     throw_unsupported_control("control_register");
@@ -659,7 +663,7 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     TaskSlotState *slot_state = ring->slot_state(dispatch.task_slot);
     if (slot_state == nullptr) throw std::out_of_range("LocalMailboxEndpoint::submit_progress: invalid task slot");
     TaskSlotState &state = *slot_state;
-    const TaskArgsView view = state.args_view(dispatch.group_index);
+    const TaskArgs &a = state.args(dispatch.group_index);
     if (!state.remote_sidecar_for(dispatch.group_index).empty()) {
         throw std::runtime_error("remote task sidecar is not supported by local mailbox");
     }
@@ -667,8 +671,7 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
         (task_frame_count_ > 1 && state.pipeline_lease.slot_id >= task_frame_count_)) {
         throw std::runtime_error("task frame has an invalid pipeline lease identity");
     }
-    const size_t blob_bytes = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor) +
-                              static_cast<size_t>(view.scalar_count) * sizeof(uint64_t);
+    const size_t blob_bytes = task_args_blob_size(a);
     if (blob_bytes > MAILBOX_ARGS_CAPACITY) {
         throw std::runtime_error(
             "args blob exceeds mailbox capacity: need " + std::to_string(blob_bytes) + ", capacity " +
@@ -709,21 +712,10 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
         static_cast<size_t>(CALLABLE_HASH_DIGEST_SIZE)
     );
 
+    // The versioned, length-prefixed Tensor blob (the L3->L2 wire; the child
+    // materializes it to a ChipTensor blob before run).
     uint8_t *blob = reinterpret_cast<uint8_t *>(frame + MAILBOX_OFF_TASK_ARGS_BLOB);
-    std::memcpy(blob, &view.tensor_count, sizeof(int32_t));
-    std::memcpy(blob + sizeof(int32_t), &view.scalar_count, sizeof(int32_t));
-    if (view.tensor_count > 0) {
-        std::memcpy(
-            blob + TASK_ARGS_BLOB_HEADER_SIZE, view.tensor_bytes,
-            static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor)
-        );
-    }
-    if (view.scalar_count > 0) {
-        std::memcpy(
-            blob + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor),
-            view.scalars, static_cast<size_t>(view.scalar_count) * sizeof(uint64_t)
-        );
-    }
+    write_blob(blob, a);
 
     const uint64_t protocol = MAILBOX_TASK_PROTOCOL_VERSION;
     const uint64_t slot_id = state.pipeline_lease.slot_id;
@@ -1064,11 +1056,9 @@ WorkerThread *WorkerManager::pick_idle_sub_excluding(const std::vector<WorkerThr
 // LocalMailboxEndpoint — memory control (orch thread, concurrent with worker thread)
 // =============================================================================
 
-static void write_control_args(char *mbox, uint64_t sub_cmd, uint64_t a0 = 0, uint64_t a1 = 0, uint64_t a2 = 0) {
+static void write_control_args(char *mbox, uint64_t sub_cmd, uint64_t a0 = 0) {
     std::memcpy(mbox + MAILBOX_OFF_CALLABLE, &sub_cmd, sizeof(uint64_t));
     std::memcpy(mbox + CTRL_OFF_ARG0, &a0, sizeof(uint64_t));
-    std::memcpy(mbox + CTRL_OFF_ARG1, &a1, sizeof(uint64_t));
-    std::memcpy(mbox + CTRL_OFF_ARG2, &a2, sizeof(uint64_t));
 }
 
 static uint64_t read_control_result(const char *mbox) {
@@ -1269,15 +1259,17 @@ void LocalMailboxEndpoint::control_free(uint64_t ptr) {
     run_control_command("control_free");
 }
 
-void LocalMailboxEndpoint::control_copy_to(uint64_t dst, uint64_t src, size_t size) {
+void LocalMailboxEndpoint::control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
     std::lock_guard<std::mutex> lk(mailbox_mu_);
-    write_control_args(mbox(), CTRL_COPY_TO, dst, src, static_cast<uint64_t>(size));
+    write_control_copy_request(mbox(), CTRL_COPY_TO, dst, src, nbytes);
     run_control_command("control_copy_to");
 }
 
-void LocalMailboxEndpoint::control_copy_from(uint64_t dst, uint64_t src, size_t size) {
+void LocalMailboxEndpoint::control_copy_from(
+    const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes
+) {
     std::lock_guard<std::mutex> lk(mailbox_mu_);
-    write_control_args(mbox(), CTRL_COPY_FROM, dst, src, static_cast<uint64_t>(size));
+    write_control_copy_request(mbox(), CTRL_COPY_FROM, dst, src, nbytes);
     run_control_command("control_copy_from");
 }
 
@@ -1456,14 +1448,14 @@ void WorkerThread::control_free(uint64_t ptr) {
     endpoint_->control_free(ptr);
 }
 
-void WorkerThread::control_copy_to(uint64_t dst, uint64_t src, size_t size) {
+void WorkerThread::control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
     if (!endpoint_) throw std::runtime_error("control_copy_to: null endpoint");
-    endpoint_->control_copy_to(dst, src, size);
+    endpoint_->control_copy_to(dst, src, nbytes);
 }
 
-void WorkerThread::control_copy_from(uint64_t dst, uint64_t src, size_t size) {
+void WorkerThread::control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
     if (!endpoint_) throw std::runtime_error("control_copy_from: null endpoint");
-    endpoint_->control_copy_from(dst, src, size);
+    endpoint_->control_copy_from(dst, src, nbytes);
 }
 
 void WorkerThread::control_alloc_domain(const char *request_shm_name, const char *reply_shm_name) {

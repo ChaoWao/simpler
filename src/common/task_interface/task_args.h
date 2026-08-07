@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * TaskArgsTpl - ChipTensor + scalar argument storage (template)
+ * TaskArgsTpl - tensor + scalar argument storage (template)
  *
  * Template: TaskArgsTpl<T, S, MaxT, MaxS, TensorTag=void>
  *   - Static:  MaxT>0, MaxS>0 — fixed-size arrays
@@ -28,7 +28,7 @@
  *   - ChipStorageTaskArgs — fixed POD matching the runtime.so ABI byte-for-byte
  *
  * Wire / dispatch helpers:
- *   - TaskArgsView        — zero-copy view into a {tensors, scalars} pair (no tags)
+ *   - TaskArgsView        — zero-copy view over a wire blob (no tags)
  *   - write_blob/read_blob — length-prefixed serialization for PROCESS-mode
  *                            mailbox transport (tags stripped on the wire)
  */
@@ -43,7 +43,8 @@
 #include <vector>
 
 #include "arg_direction.h"
-#include "tensor.h"  // unified ChipTensor (strided) + TensorArgType, carried by TaskArgs and on the wire
+#include "buffer.h"  // Tensor wire type + TENSOR_BLOB_MAGIC for the blob envelope
+#include "tensor.h"  // ChipTensor (device POD) + TensorArgType, the tag TaskArgs carries
 
 // ============================================================================
 // TensorTagMixin — conditionally provides per-tensor tag storage
@@ -173,15 +174,18 @@ struct TaskArgsTpl<T, S, 0, 0, TensorTag> : TensorTagMixin<TensorTag, 0> {
 
 // Unified user-facing builder: vector-backed with TensorArgType tags.
 // Used by Orchestrator.submit_*; tags drive dependency inference at submit
-// time and are stripped before the args cross the dispatch boundary.
-using TaskArgs = TaskArgsTpl<ChipTensor, uint64_t, 0, 0, TensorArgType>;
+// time and are stripped before the args cross the dispatch boundary. The element
+// is Tensor (self-describing view; L3+ holds no C++ ChipTensor) — the L3→L2 wire
+// carries Tensors, materialized to ChipStorageTaskArgs (ChipTensor) on the L2 child.
+using TaskArgs = TaskArgsTpl<Tensor, uint64_t, 0, 0, TensorArgType>;
 
-// L2 runtime ABI: fixed POD matching runtime.so byte-for-byte.
-// Assembled from a TaskArgsView on the child side just before pto2_run_runtime.
+// L2 runtime ABI: fixed POD matching runtime.so byte-for-byte, and the sole ChipTensor-typed args
+// container — the materialized form a chip child decodes the L3->L2 Tensor blob into, just before
+// pto2_run_runtime.
 using ChipStorageTaskArgs = TaskArgsTpl<ChipTensor, uint64_t, CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS>;
 
 // ============================================================================
-// TaskArgsView — zero-copy view used by ChipWorker::run and the wire format
+// TaskArgsView — zero-copy view over a wire blob
 // ============================================================================
 //
 // View-only: refers to externally owned tensor + scalar arrays. No tags
@@ -190,34 +194,26 @@ using ChipStorageTaskArgs = TaskArgsTpl<ChipTensor, uint64_t, CHIP_MAX_TENSOR_AR
 struct TaskArgsView {
     int32_t tensor_count;
     int32_t scalar_count;
-    // Raw bytes of the tensor array, NOT a `const ChipTensor*`. When this view is
-    // over a mailbox blob the tensor region starts at an 8-byte boundary, but
-    // `ChipTensor` is `alignas(64)` — forming a `ChipTensor*`/`ChipTensor&` to it would be
-    // undefined behavior. Copy a tensor out with tensors(i); bulk movers
-    // memcpy straight from these bytes. (For the make_view path the bytes are
-    // a 64-aligned vector, but the accessor keeps a single uniform contract.)
+    // Raw bytes of the tensor array, NOT a `const Tensor *`. The blob's tensor region starts at the
+    // 8-byte header boundary, so a `Tensor *` formed onto it would carry an alignment the type does
+    // not promise. Copy a tensor out with tensors(i).
     const uint8_t *tensor_bytes;
     const uint64_t *scalars;  // 8-byte aligned by blob construction; safe to address as uint64_t*
 
-    // Copy the i-th tensor into a properly-aligned local. Never forms a pointer
-    // into the (possibly under-aligned) tensor_bytes region. Bounds-checked: a
-    // negative index would otherwise wrap to a huge offset once cast to size_t.
-    ChipTensor tensors(int32_t i) const {
+    // Copy the i-th tensor into a properly-aligned local and gate it. Bounds-checked: a negative
+    // index would otherwise wrap to a huge offset once cast to size_t. This is the ONLY validation
+    // a blob element ever gets — nothing downstream re-checks magic, tag, body_len, the view's
+    // containment in its backing, or the FORK_COW read-only rule.
+    Tensor tensors(int32_t i) const {
         if (i < 0 || i >= tensor_count) {
             throw std::out_of_range("TaskArgsView::tensors: index out of range");
         }
-        ChipTensor t;
-        std::memcpy(&t, tensor_bytes + static_cast<size_t>(i) * sizeof(ChipTensor), sizeof(ChipTensor));
+        Tensor t;
+        std::memcpy(&t, tensor_bytes + static_cast<size_t>(i) * sizeof(Tensor), sizeof(Tensor));
+        validate_tensor(t);
         return t;
     }
 };
-
-// Build a view directly over a TaskArgs's vectors (THREAD-mode dispatch).
-inline TaskArgsView make_view(const TaskArgs &a) {
-    return TaskArgsView{
-        a.tensor_count(), a.scalar_count(), reinterpret_cast<const uint8_t *>(a.tensor_data()), a.scalar_data()
-    };
-}
 
 // ============================================================================
 // Wire format — length-prefixed blob for PROCESS-mode mailbox transport
@@ -226,19 +222,18 @@ inline TaskArgsView make_view(const TaskArgs &a) {
 // Byte layout (tags stripped):
 //   offset 0:                 int32 tensor_count = T
 //   offset 4:                 int32 scalar_count = S
-//   offset 8:                 ChipTensor tensors[T]             (128 B each)
-//   offset 8 + 128T:          uint64_t scalars[S]           (8 B each)
-// total bytes used:           8 + 128T + 8S
+//   offset 8:                 Tensor tensors[T]             (144 B each)
+//   offset 8 + 144T:          uint64_t scalars[S]           (8 B each)
+// total bytes used:           8 + 144T + 8S
 //
-// NOTE: ChipTensor is alignas(64) but the array starts at the 8-byte header
-// boundary, so blob ChipTensors are NOT guaranteed 64-aligned. All consumers
-// extract them via memcpy / trivially-copyable copy (never in-place SIMD or
-// atomics), which is alignment-tolerant on aarch64.
+// The element is the self-describing wire `Tensor`: it carries its backing's descriptor, so a
+// consumer resolves it with no prior handshake. A chip child materializes each one to a
+// `ChipTensor` (address-bearing) and assembles a `ChipStorageTaskArgs` for the runtime.so ABI.
 
 inline constexpr size_t TASK_ARGS_BLOB_HEADER_SIZE = 8;
 
 inline size_t task_args_blob_size(const TaskArgs &a) {
-    return TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(a.tensor_count()) * sizeof(ChipTensor) +
+    return TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(a.tensor_count()) * sizeof(Tensor) +
            static_cast<size_t>(a.scalar_count()) * sizeof(uint64_t);
 }
 
@@ -250,11 +245,11 @@ inline void write_blob(uint8_t *dst, const TaskArgs &a) {
     std::memcpy(dst + 0, &T, sizeof(T));
     std::memcpy(dst + 4, &S, sizeof(S));
     if (T > 0) {
-        std::memcpy(dst + TASK_ARGS_BLOB_HEADER_SIZE, a.tensor_data(), static_cast<size_t>(T) * sizeof(ChipTensor));
+        std::memcpy(dst + TASK_ARGS_BLOB_HEADER_SIZE, a.tensor_data(), static_cast<size_t>(T) * sizeof(Tensor));
     }
     if (S > 0) {
         std::memcpy(
-            dst + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(ChipTensor), a.scalar_data(),
+            dst + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(Tensor), a.scalar_data(),
             static_cast<size_t>(S) * sizeof(uint64_t)
         );
     }
@@ -267,7 +262,8 @@ inline void write_blob(uint8_t *dst, const TaskArgs &a) {
 // from `src` (e.g. MAILBOX_ARGS_CAPACITY when reading from the IPC mailbox).
 // Throws std::runtime_error if the header reports counts that would walk past
 // `capacity` — defends against shared-memory corruption or a writer-side bug
-// that slipped past the writer's own bounds check.
+// that slipped past the writer's own bounds check. This bounds the envelope
+// only; each element is gated by TaskArgsView::tensors.
 inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
     if (capacity < TASK_ARGS_BLOB_HEADER_SIZE) {
         throw std::runtime_error(
@@ -284,7 +280,7 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
             "read_blob: negative counts — tensors=" + std::to_string(T) + ", scalars=" + std::to_string(S)
         );
     }
-    const size_t needed = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(ChipTensor) +
+    const size_t needed = TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(Tensor) +
                           static_cast<size_t>(S) * sizeof(uint64_t);
     if (needed > capacity) {
         throw std::runtime_error(
@@ -297,32 +293,77 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
         T,
         S,
         src + TASK_ARGS_BLOB_HEADER_SIZE,
-        reinterpret_cast<const uint64_t *>(
-            src + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(ChipTensor)
-        ),
+        reinterpret_cast<const uint64_t *>(src + TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(T) * sizeof(Tensor)),
     };
 }
 
 // ============================================================================
-// L2 ABI helper: build ChipStorageTaskArgs POD from a view (memcpy'd).
-// Runs on the child side immediately before crossing into runtime.so.
+// Submit-time argument validation
 // ============================================================================
 
-inline ChipStorageTaskArgs view_to_chip_storage(TaskArgsView view) {
-    ChipStorageTaskArgs out;
-    if (static_cast<size_t>(view.tensor_count) > CHIP_MAX_TENSOR_ARGS) {
-        throw std::out_of_range("view_to_chip_storage: tensor_count exceeds CHIP_MAX_TENSOR_ARGS");
+// access ⊆ granted: an arg's TensorArgType may only request what the backing grants.
+//   INPUT -> READ, OUTPUT_EXISTING -> WRITE, INOUT -> READWRITE; READWRITE grants everything.
+//   NO_DEP / OUTPUT are unconstrained.
+// Catches e.g. a READ-only copy-on-write backing tagged OUTPUT_EXISTING, whose writes in a forked
+// child would silently never reach the parent.
+inline bool access_permits(uint8_t granted, TensorArgType tag) {
+    auto granted_has = [&](AccessMode need) {
+        return granted == static_cast<uint8_t>(AccessMode::READWRITE) || granted == static_cast<uint8_t>(need);
+    };
+    switch (tag) {
+    case TensorArgType::INPUT:
+        return granted_has(AccessMode::READ);
+    case TensorArgType::OUTPUT_EXISTING:
+        return granted_has(AccessMode::WRITE);
+    case TensorArgType::INOUT:
+        return granted == static_cast<uint8_t>(AccessMode::READWRITE);
+    default:
+        return true;
     }
-    if (static_cast<size_t>(view.scalar_count) > CHIP_MAX_SCALAR_ARGS) {
-        throw std::out_of_range("view_to_chip_storage: scalar_count exceeds CHIP_MAX_SCALAR_ARGS");
+}
+
+// Does this tag declare a write? NO_DEP is excluded deliberately: it opts out of dependency
+// tracking altogether, so its ordering is the caller's to arrange.
+inline bool tag_writes(TensorArgType tag) {
+    return tag == TensorArgType::OUTPUT || tag == TensorArgType::OUTPUT_EXISTING || tag == TensorArgType::INOUT;
+}
+
+/**
+ * Validate one submit's whole argument set, at the point where the values are final.
+ *
+ * `access ⊆ granted` is re-checked here rather than trusted from add time because a tag is mutable
+ * after its element is added — the pair that governs the dispatch is the one present now.
+ *
+ * Overlapping writes WITHIN one TaskArgs are rejected because no later layer can catch them: the two
+ * args belong to one task node, so there is no order between them to express, and a device-staged
+ * copy of a host backing does not even alias on the device for the L2 overlap map to notice.
+ * Disjoint slices of one backing stay legal.
+ *
+ * Members of a group are NOT compared against each other. A group is one DAG node whose members
+ * deliberately share their tags — naming one buffer as every member's OUTPUT is how a group
+ * publishes a single completion token for a downstream task to depend on. Whether such a shared
+ * write carries data or only ordering is not visible here, so the caller owns it.
+ */
+inline void validate_submit_args(const std::vector<TaskArgs> &args_list) {
+    for (const TaskArgs &args : args_list) {
+        for (int32_t i = 0; i < args.tensor_count(); ++i) {
+            if (!access_permits(args.tensor(i).buffer.access, args.tag(i))) {
+                throw std::invalid_argument(
+                    "submit: an argument's TensorArgType requests access the backing does not grant"
+                );
+            }
+        }
     }
-    out.tensor_count_ = view.tensor_count;
-    out.scalar_count_ = view.scalar_count;
-    if (view.tensor_count > 0) {
-        std::memcpy(out.tensors_, view.tensor_bytes, static_cast<size_t>(view.tensor_count) * sizeof(ChipTensor));
+    for (const TaskArgs &args : args_list) {
+        for (int32_t i = 0; i < args.tensor_count(); ++i) {
+            if (!tag_writes(args.tag(i))) continue;
+            for (int32_t j = i + 1; j < args.tensor_count(); ++j) {
+                if (!tensors_overlap(args.tensor(i), args.tensor(j))) continue;
+                throw std::invalid_argument(
+                    "submit: two arguments of one task write overlapping bytes of the same buffer; "
+                    "give them disjoint ranges, or order them as separate tasks"
+                );
+            }
+        }
     }
-    if (view.scalar_count > 0) {
-        std::memcpy(out.scalars_, view.scalars, static_cast<size_t>(view.scalar_count) * sizeof(uint64_t));
-    }
-    return out;
 }

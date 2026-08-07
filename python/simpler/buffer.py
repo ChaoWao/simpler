@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
@@ -38,6 +39,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     CanonicalIdentity,
     DataType,
     Tensor,
+    read_args_from_blob,
 )
 
 __all__ = [
@@ -49,6 +51,8 @@ __all__ = [
     "CanonicalIdentity",
     "ImportRegistry",
     "ImportedBuffer",
+    "MappedArg",
+    "MappedArgs",
     "Tensor",
     "create_host_shared_buffer",
     "host_ptr_nbytes",
@@ -434,6 +438,64 @@ class ImportedBuffer:
     descriptor: BufferDescriptor | None = None
 
 
+@dataclass
+class MappedArg:
+    """A Python compute (sub-worker) task arg: a ``Tensor`` materialized into this process, exposing a
+    writable ``buffer`` at the view origin plus the view geometry. The callable computes with e.g.
+    ``torch.frombuffer(arg.buffer, dtype=<from arg.dtype>, count=prod(arg.shapes))`` — reads/writes
+    land in the shared backing the owner sees.
+    """
+
+    imported: ImportedBuffer
+    byte_offset: int
+    shapes: tuple[int, ...]
+    strides: tuple[int, ...]
+    dtype: int  # DataType value
+
+    @property
+    def buffer(self) -> memoryview:
+        """A memoryview over the mapped backing at this view's origin (``byte_offset``)."""
+        ib = self.imported
+        if ib.shm is not None:
+            base = ib.shm.buf
+            assert base is not None
+        else:
+            # FORK_SHM / FORK_COW: no shm object — the base is a host VA inherited across the
+            # fork, so wrap that range directly.
+            base = memoryview((ctypes.c_char * ib.nbytes).from_address(ib.base))
+        return base[self.byte_offset :]
+
+
+class MappedArgs(Sequence):
+    """A Python sub-worker's task args: the mapped tensor args plus the scalar args.
+
+    Indexes and iterates as the tensor ``MappedArg`` list (``args[i].buffer``, ``len(args)``) — the
+    common compute-leaf access — and additionally exposes the blob's scalars via ``scalar_count()`` /
+    ``scalar(i)`` (uint64, in submission order), mirroring the owner-side ``TaskArgs`` scalar API.
+    """
+
+    __slots__ = ("_scalars", "_tensors")
+
+    def __init__(self, tensors: list[MappedArg], scalars: tuple[int, ...]) -> None:
+        self._tensors = list(tensors)
+        self._scalars = tuple(int(s) for s in scalars)
+
+    def __getitem__(self, i):
+        return self._tensors[i]
+
+    def __len__(self) -> int:
+        return len(self._tensors)
+
+    def tensor_count(self) -> int:
+        return len(self._tensors)
+
+    def scalar_count(self) -> int:
+        return len(self._scalars)
+
+    def scalar(self, i: int) -> int:
+        return self._scalars[i]
+
+
 class ImportRegistry:
     """Per-consumer-endpoint lazy import cache: materialize a ``Tensor``'s embedded descriptor to a
     local base on first receipt (map-once), keyed by canonical identity.
@@ -514,6 +576,44 @@ class ImportRegistry:
             raise NotImplementedError(f"ImportRegistry: backend {desc.backend_kind!r} not supported in P1-B")
         self._by_identity[key] = imported
         return imported
+
+    def materialization_map(self) -> dict[CanonicalIdentity, tuple[int, int]]:
+        """Snapshot for ``materialize_tensor_blob`` / ``materialize_task_args``:
+        identity -> (local base, address_space)."""
+        return {key: (ib.base, int(ib.address_space)) for key, ib in self._by_identity.items()}
+
+    def materialize_blob(self, blob_ptr: int, capacity: int) -> dict[CanonicalIdentity, tuple[int, int]]:
+        """Materialize every embedded descriptor in a task-args blob and return the resolved map."""
+        args = read_args_from_blob(blob_ptr, capacity)
+        for i in range(args.tensor_count()):
+            self.materialize(args.tensor(i).buffer)
+        return self.materialization_map()
+
+    def materialize_args(self, args) -> dict[CanonicalIdentity, tuple[int, int]]:
+        """The same, for a ``TaskArgs`` already held in this process (the L2-leaf path)."""
+        for i in range(args.tensor_count()):
+            self.materialize(args.tensor(i).buffer)
+        return self.materialization_map()
+
+    def mapped_args_from_blob(self, blob_ptr: int, capacity: int) -> MappedArgs:
+        """Materialize a task-args blob into a Python compute callable's args: every tensor becomes a
+        MappedArg (map-once, buffer at the view origin) and the blob's scalars ride alongside. This is
+        the compute-leaf map (a sub-worker reads/writes), distinct from pure forwarding (re-export,
+        which never maps).
+        """
+        args = read_args_from_blob(blob_ptr, capacity)
+        tensors = []
+        for i in range(args.tensor_count()):
+            t = args.tensor(i)
+            if t.buffer.address_space == AddressSpace.DEVICE:
+                # Depth behind the submit-time endpoint check: this process is a host compute leaf, so
+                # a device address here would be handed to torch as a host pointer.
+                raise ValueError(
+                    f"sub-worker argument {i} is a DEVICE-space tensor "
+                    f"({t.buffer.backend_kind.name}); it cannot be mapped into a host process"
+                )
+            tensors.append(MappedArg(self.materialize(t.buffer), t.byte_offset, t.shapes, t.strides, t.dtype))
+        return MappedArgs(tensors, tuple(args.scalar(i) for i in range(args.scalar_count())))
 
     def resolve(self, identity: CanonicalIdentity) -> ImportedBuffer:
         """The already-materialized import for ``identity``. Raises ``KeyError`` if this endpoint has

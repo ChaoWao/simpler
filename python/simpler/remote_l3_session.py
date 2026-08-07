@@ -33,6 +33,17 @@ from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import Any, Callable
 
+from .buffer import (
+    OWNER_INSTANCE_ID_BYTES,
+    AccessMode,
+    AddressSpace,
+    BackendKind,
+    Buffer,
+    CanonicalIdentity,
+    create_host_shared_buffer,
+    intern_worker_path,
+    mint_owner_instance_id,
+)
 from .callable_identity import (
     CallableHandle,
     build_chip_callable_descriptor,
@@ -57,6 +68,7 @@ from .remote_l3_protocol import (
     RemoteAddressSpace,
     RemoteRegistryTarget,
     RemoteTaskArgsWire,
+    RemoteTensorDesc,
     decode_control,
     decode_digest_callable_command,
     decode_export_buffer_request,
@@ -75,8 +87,8 @@ from .remote_l3_protocol import (
     read_frame,
     send_frame,
 )
-from .task_interface import ChipCallable, ChipTensor, TaskArgs
-from .worker import Worker, _NoHostBufferChildrenError
+from .task_interface import ChipCallable, TaskArgs
+from .worker import Worker, _NoBufferConsumerError
 
 sys.modules.setdefault("simpler.remote_l3_session", sys.modules[__name__])
 
@@ -115,9 +127,28 @@ class _RemoteBufferEntry:
     owner: Worker | None = None
     offset: int = 0
     released: bool = False
+    # An imported backing's owner lives in another process, so no ``Buffer`` of this session
+    # describes it; ``_import_wire_buffer`` builds one at IMPORT_BUFFER and it is stored here.
+    wire: Buffer | None = None
+
+    def wire_buffer(self) -> Buffer:
+        """The owner-side ``Buffer`` every task arg over this backing views.
+
+        One per entry, so two args naming different sub-ranges of one backing carry one canonical
+        identity and dependency inference sees the edge between them. The descriptor spans the whole
+        entry (``nbytes`` from ``addr``); a sub-range is a ``byte_offset`` on the view, never a
+        second identity.
+        """
+        if isinstance(self.data, Buffer):
+            return self.data
+        if self.wire is None:
+            raise ValueError("remote buffer entry has no wire descriptor a task arg can name")
+        return self.wire
 
     @property
     def addr(self) -> int:
+        if isinstance(self.data, Buffer):
+            return int(self.data.base)
         if isinstance(self.data, shared_memory.SharedMemory):
             buf = self.data.buf
             assert buf is not None
@@ -128,16 +159,28 @@ class _RemoteBufferEntry:
 
     @property
     def shm_name(self) -> str:
+        if isinstance(self.data, Buffer):
+            # Every Buffer an entry holds is POSIX_SHM-backed, and its shm name is what an importer
+            # on another worker opens.
+            assert self.data.shm is not None
+            return self.data.shm.name
         if not isinstance(self.data, shared_memory.SharedMemory):
             raise ValueError("remote buffer is not backed by SharedMemory")
         return self.data.name
 
     def close(self, *, unlink: bool = False) -> None:
+        if isinstance(self.data, Buffer):
+            # A Buffer always unlinks its own backing on close, so ``unlink`` does not apply here.
+            # Releasing through the owning Worker is what additionally drops its registry entry; a
+            # session-scoped Buffer has no such entry and closes directly.
+            owner, self.owner = self.owner, None
+            if owner is None:
+                self.data.close()
+            else:
+                owner._release_buffer(self.data)  # noqa: SLF001
+            return
         if not isinstance(self.data, shared_memory.SharedMemory):
-            if self.owner is not None:
-                owner, self.owner = self.owner, None
-                self.data.buffer.release()
-                owner.free_host_buffer(self.data)
+            self.owner = None
             return
         self.data.close()
         if unlink:
@@ -480,59 +523,107 @@ def _buffer_key(buffer_id: int, generation: int) -> tuple[int, int]:
     return int(buffer_id), int(generation)
 
 
-def _tensor_with_data(tensor: ChipTensor, data: int) -> ChipTensor:
-    return ChipTensor.make(int(data), tuple(tensor.shapes), tensor.dtype, bool(tensor.child_memory))
+def _import_wire_buffer(export_desc: Any, shm_name: str, base: int) -> Buffer:
+    """The wire ``Buffer`` naming an imported backing, whose owner is another worker's process.
+
+    The owner's ``owner_instance_id`` never crosses the remote wire, so the identity is rebuilt from
+    the export triple the same way the submitting L4's ``REMOTE_SIDECAR`` placeholder builds it —
+    the importing runner and the submitter therefore name one remote backing with one identity.
+    """
+    oid = int(export_desc.owner_worker_id).to_bytes(OWNER_INSTANCE_ID_BYTES, "little")
+    return Buffer(
+        identity=CanonicalIdentity(oid, int(export_desc.buffer_id), int(export_desc.generation)),
+        owner_worker_path_id=intern_worker_path(f"remote/{int(export_desc.owner_worker_id)}"),
+        address_space=AddressSpace.HOST,
+        access=AccessMode.READWRITE,
+        backend_kind=BackendKind.POSIX_SHM,
+        nbytes=int(export_desc.nbytes),
+        body=shm_name.encode("utf-8"),
+        shm=None,
+        base=int(base),
+    )
 
 
-def _materialize_task_args(  # noqa: PLR0912
-    args: RemoteTaskArgsWire, buffers: dict[tuple[int, ...], _RemoteBufferEntry], worker_id: int
-) -> tuple[TaskArgs, list[Any]]:
+def _materialize_task_args(
+    args: RemoteTaskArgsWire,
+    buffers: dict[tuple[int, ...], _RemoteBufferEntry],
+    worker_id: int,
+    *,
+    mint_inline_buffer: Callable[[int], Buffer],
+) -> tuple[TaskArgs, list[Buffer]]:
+    """The wire ``TaskArgs`` a remote TASK's orchestration function receives.
+
+    Every element is a ``Tensor`` over a backing this runner holds, so an orchestration function
+    forwards its own args to a chip child exactly as one at any other level does. The returned
+    ``Buffer`` list is the session-scoped backings minted for this task's HOST_INLINE payloads; they
+    live no longer than the run and the caller closes them once it returns.
+    """
     if len(args.remote_desc) != len(args.tensor_metadata):
         raise ValueError("remote TASK descriptor count does not match tensor metadata count")
     task_args = TaskArgs()
-    keepalive: list[Any] = []
+    inline_backings: list[Buffer] = []
 
-    for tensor, sidecar in zip(args.tensor_metadata, args.remote_desc):
-        materialized = tensor
-        if sidecar.present:
+    try:
+        for tensor, sidecar in zip(args.tensor_metadata, args.remote_desc):
+            if not sidecar.present:
+                raise ValueError("remote TASK tensor payload requires a RemoteTensorRef sidecar")
             desc = sidecar.desc
             if desc is None:
                 raise ValueError("remote TASK descriptor is marked present but missing")
             if desc.nbytes != tensor.nbytes():
                 raise ValueError("remote TASK descriptor nbytes does not match tensor metadata")
             if desc.address_space == RemoteAddressSpace.HOST_INLINE:
-                start = int(desc.inline_payload_offset)
-                end = start + int(desc.inline_payload_len)
-                payload = args.inline_payload[start:end]
-                if len(payload) != desc.inline_payload_len:
-                    raise ValueError("HOST_INLINE payload range exceeds inline arena")
-                buf = ctypes.create_string_buffer(payload, len(payload))
-                keepalive.append(buf)
-                materialized = _tensor_with_data(tensor, ctypes.addressof(buf))
+                backing, byte_offset = _materialize_inline_payload(args, desc, mint_inline_buffer)
+                inline_backings.append(backing)
             else:
-                if desc.owner_worker_id == worker_id and desc.address_space == RemoteAddressSpace.REMOTE_DEVICE:
-                    key = _buffer_key(desc.buffer_id, desc.generation)
-                elif desc.address_space in (RemoteAddressSpace.REMOTE_WINDOW, RemoteAddressSpace.UB_LDST):
-                    key = (desc.owner_worker_id, desc.buffer_id, desc.generation, desc.rkey_or_token)
-                else:
-                    raise ValueError(
-                        "remote TASK descriptor names a different worker without an imported buffer handle"
-                    )
-                entry = buffers.get(key)
-                if entry is None:
-                    raise KeyError("remote TASK descriptor names an unknown or stale buffer/import generation")
-                if entry.released:
-                    raise ValueError("remote TASK descriptor references a released buffer/import")
-                if desc.offset < entry.offset or desc.offset + desc.nbytes > entry.offset + entry.nbytes:
-                    raise ValueError("remote TASK descriptor range exceeds buffer/import")
-                materialized = _tensor_with_data(tensor, entry.addr + int(desc.offset - entry.offset))
-        elif tensor.nbytes() != 0:
-            raise ValueError("remote TASK tensor payload requires a RemoteTensorRef sidecar")
-        task_args.add_tensor(materialized)
+                backing, byte_offset = _resolve_session_backing(desc, buffers, worker_id)
+            task_args.add_tensor(backing.tensor(tuple(tensor.shapes), tensor.dtype, byte_offset=byte_offset))
+    except BaseException:
+        # A rejected arg leaves the caller no list to release, so the backings minted for the args
+        # that did decode are released here.
+        for backing in inline_backings:
+            backing.close()
+        raise
 
     for scalar in args.scalars:
         task_args.add_scalar(int(scalar))
-    return task_args, keepalive
+    return task_args, inline_backings
+
+
+def _materialize_inline_payload(
+    args: RemoteTaskArgsWire,
+    desc: RemoteTensorDesc,
+    mint_inline_buffer: Callable[[int], Buffer],
+) -> tuple[Buffer, int]:
+    start = int(desc.inline_payload_offset)
+    end = start + int(desc.inline_payload_len)
+    payload = args.inline_payload[start:end]
+    if len(payload) != desc.inline_payload_len:
+        raise ValueError("HOST_INLINE payload range exceeds inline arena")
+    backing = mint_inline_buffer(len(payload))
+    ctypes.memmove(backing.base, payload, len(payload))
+    return backing, 0
+
+
+def _resolve_session_backing(
+    desc: RemoteTensorDesc,
+    buffers: dict[tuple[int, ...], _RemoteBufferEntry],
+    worker_id: int,
+) -> tuple[Buffer, int]:
+    if desc.owner_worker_id == worker_id and desc.address_space == RemoteAddressSpace.REMOTE_DEVICE:
+        key = _buffer_key(desc.buffer_id, desc.generation)
+    elif desc.address_space in (RemoteAddressSpace.REMOTE_WINDOW, RemoteAddressSpace.UB_LDST):
+        key = (desc.owner_worker_id, desc.buffer_id, desc.generation, desc.rkey_or_token)
+    else:
+        raise ValueError("remote TASK descriptor names a different worker without an imported buffer handle")
+    entry = buffers.get(key)
+    if entry is None:
+        raise KeyError("remote TASK descriptor names an unknown or stale buffer/import generation")
+    if entry.released:
+        raise ValueError("remote TASK descriptor references a released buffer/import")
+    if desc.offset < entry.offset or desc.offset + desc.nbytes > entry.offset + entry.nbytes:
+        raise ValueError("remote TASK descriptor range exceeds buffer/import")
+    return entry.wire_buffer(), int(desc.offset - entry.offset)
 
 
 def _run_command_loop(  # noqa: PLR0912, PLR0915
@@ -552,6 +643,25 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
     next_export_id = 1
     next_import_id = 1
     buffers: dict[tuple[int, ...], _RemoteBufferEntry] = {}
+    # One nonce per runner incarnation, backing the identity of every buffer this loop mints itself
+    # (the inner Worker mints its own for the ones it owns).
+    session_owner_instance_id = mint_owner_instance_id()
+
+    def mint_session_buffer(nbytes: int) -> Buffer:
+        """A POSIX_SHM backing this loop owns, under a buffer_id no other one in the session reuses.
+
+        Every session-minted identity draws from the one counter, so a consumer's map-once import
+        cache never sees two different backings arrive under one identity.
+        """
+        nonlocal next_buffer_id
+        buffer_id = next_buffer_id
+        next_buffer_id += 1
+        return create_host_shared_buffer(
+            int(nbytes),
+            session_owner_instance_id,
+            buffer_id=buffer_id,
+            owner_worker_path=f"remote/{worker_id}",
+        )
 
     hello = HelloPayload(
         session_id=session_id,
@@ -664,17 +774,27 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                         buffer_id = next_buffer_id
                         next_buffer_id += 1
                         generation = 1
+                        # Either way the backing is one POSIX_SHM ``Buffer``: a canonical identity
+                        # plus a descriptor a consumer resolves by name, so a child forked at any
+                        # time can map it. The remote buffer_id above is the protocol's own handle
+                        # space and names the entry, not the Buffer's identity.
                         try:
-                            buf = inner_worker.create_host_buffer(int(nbytes))
+                            buf = inner_worker.create_buffer(int(nbytes))
                             entry = _RemoteBufferEntry(
-                                buf,
-                                int(nbytes),
-                                generation,
-                                RemoteAddressSpace.REMOTE_DEVICE,
-                                owner=inner_worker,
+                                buf, int(nbytes), generation, RemoteAddressSpace.REMOTE_DEVICE, owner=inner_worker
                             )
-                        except _NoHostBufferChildrenError:
-                            buf = shared_memory.SharedMemory(create=True, size=int(nbytes))
+                        except _NoBufferConsumerError:
+                            # A runner with no forked child consumes its own buffers: the
+                            # orchestration fn dereferences the mapping this process holds, which
+                            # ``_materialize_task_args`` resolves from the entry. The backing is
+                            # session-scoped instead of Worker-owned, and the loop's exit releases
+                            # it — the two lifetimes are the same process.
+                            buf = create_host_shared_buffer(
+                                int(nbytes),
+                                session_owner_instance_id,
+                                buffer_id=buffer_id,
+                                owner_worker_path=f"remote/{worker_id}",
+                            )
                             entry = _RemoteBufferEntry(buf, int(nbytes), generation, RemoteAddressSpace.REMOTE_DEVICE)
                         key = _buffer_key(buffer_id, generation)
                         buffers[key] = entry
@@ -814,13 +934,15 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                         import_id = next_import_id
                         next_import_id += 1
                         key = (export_desc.owner_worker_id, export_desc.buffer_id, export_desc.generation, import_id)
-                        buffers[key] = _RemoteBufferEntry(
+                        entry = _RemoteBufferEntry(
                             shm,
                             int(export_desc.nbytes),
                             int(export_desc.generation),
                             export_desc.address_space,
                             offset=int(export_desc.offset),
                         )
+                        entry.wire = _import_wire_buffer(export_desc, shm_name, entry.addr)
+                        buffers[key] = entry
                         result = ImportBufferResult(
                             importer_worker_id=worker_id,
                             owner_worker_id=export_desc.owner_worker_id,
@@ -918,11 +1040,14 @@ def _run_command_loop(  # noqa: PLR0912, PLR0915
                 orch_fn = dispatch_registry.get(task.callable_digest)
                 if orch_fn is None:
                     raise KeyError(f"remote TASK dispatcher has no callable hashid {task.callable_digest.hex()}")
-                task_args, keepalive = _materialize_task_args(task.args, buffers, worker_id)
+                task_args, inline_backings = _materialize_task_args(
+                    task.args, buffers, worker_id, mint_inline_buffer=mint_session_buffer
+                )
                 try:
                     inner_worker.run(orch_fn, task_args, task.config)
                 finally:
-                    keepalive.clear()
+                    for backing in inline_backings:
+                        backing.close()
                 payload = encode_completion(header.sequence, 0, "")
             except BaseException as exc:  # noqa: BLE001
                 payload = encode_completion(

@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
-from .task_interface import ChipTensor, DataType
+from .buffer import Buffer
+from .task_interface import DataType
 from .worker_chip_orch_comm import (
     NotifyOp,
     WaitCmp,
@@ -173,7 +174,7 @@ def _host_byte_span(buffer: Any, nbytes: int, *, writable: bool) -> _HostByteSpa
         return _HostByteSpan(nbytes=nbytes, ptr=ptr, view=None)
 
     access = "writable" if writable else "readable"
-    raise ValueError(f"L3-L2 queue requires a registered ChipTensor or {access} contiguous ordinary host buffer")
+    raise ValueError(f"L3-L2 queue requires a registered Buffer or {access} contiguous ordinary host buffer")
 
 
 def make_worker_chip_queue_layout(depth: int, input_arena_bytes: int, output_arena_bytes: int) -> WorkerChipQueueLayout:
@@ -258,9 +259,9 @@ class WorkerChipQueue:
         orch: Any,
         region: WorkerChipOrchRegion,
         layout: WorkerChipQueueLayout,
-        desc_fields: ChipTensor,
-        desc_seq: ChipTensor,
-        desc_read: ChipTensor,
+        desc_fields: Buffer,
+        desc_seq: Buffer,
+        desc_read: Buffer,
     ) -> None:
         self._orch = orch
         self._region = region
@@ -331,16 +332,16 @@ class WorkerChipQueue:
             raise RuntimeError("L3-L2 queue expired after orchestration run")
         self._region._ensure_live()
 
-    def _validate_registered_buffer(self, buffer: Any, nbytes: int) -> ChipTensor:
-        if not isinstance(buffer, ChipTensor):
-            raise ValueError("L3-L2 queue requires a registered ChipTensor returned by orch.alloc(...)")
+    def _validate_registered_buffer(self, buffer: Any, nbytes: int) -> Buffer:
+        if not isinstance(buffer, Buffer):
+            raise ValueError("L3-L2 queue requires a registered Buffer returned by orch.alloc(...)")
         self._region._validate_host_buffer(buffer)
-        if int(nbytes) > int(buffer.nbytes()):
-            raise ValueError(f"L3-L2 queue nbytes={nbytes} exceeds registered ChipTensor size {int(buffer.nbytes())}")
+        if int(nbytes) > int(buffer.nbytes):
+            raise ValueError(f"L3-L2 queue nbytes={nbytes} exceeds registered buffer size {int(buffer.nbytes)}")
         return buffer
 
-    def _registered_buffer_or_none(self, buffer: Any, nbytes: int) -> ChipTensor | None:
-        if not isinstance(buffer, ChipTensor):
+    def _registered_buffer_or_none(self, buffer: Any, nbytes: int) -> Buffer | None:
+        if not isinstance(buffer, Buffer):
             return None
         return self._validate_registered_buffer(buffer, nbytes)
 
@@ -388,9 +389,9 @@ class WorkerChipQueue:
     def _write_descriptor(
         self, offset: int, seq: int, opcode: WorkerChipQueueOpcode, payload_offset: int, nbytes: int
     ) -> None:
-        fields_buf = (ctypes.c_uint8 * 24).from_address(int(self._desc_fields.data))
+        fields_buf = (ctypes.c_uint8 * 24).from_address(int(self._desc_fields.base))
         fields_buf[:] = _DESC.pack(0, int(opcode), int(payload_offset), int(nbytes))[8:]
-        seq_buf = (ctypes.c_uint8 * 8).from_address(int(self._desc_seq.data))
+        seq_buf = (ctypes.c_uint8 * 8).from_address(int(self._desc_seq.base))
         seq_buf[:] = struct.pack("<Q", int(seq))
         self._run_primitive(self._region.payload_write, offset + 8, self._desc_fields, nbytes=24)
         self._run_primitive(self._region.payload_write, offset, self._desc_seq, nbytes=8)
@@ -399,7 +400,7 @@ class WorkerChipQueue:
         self._run_primitive(
             self._region.payload_read, offset, self._desc_read, nbytes=WORKER_CHIP_QUEUE_DESC_SLOT_BYTES
         )
-        raw = ctypes.string_at(int(self._desc_read.data), WORKER_CHIP_QUEUE_DESC_SLOT_BYTES)
+        raw = ctypes.string_at(int(self._desc_read.base), WORKER_CHIP_QUEUE_DESC_SLOT_BYTES)
         seq, opcode_value, payload_offset, payload_nbytes = _DESC.unpack(raw)
         try:
             opcode = WorkerChipQueueOpcode(opcode_value)

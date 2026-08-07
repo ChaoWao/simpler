@@ -67,15 +67,47 @@ struct OrchestratorFixture : public ::testing::Test {
         return c;
     }
 
-    // Helper: build a TaskArgs whose only tensor has the given (data, tag).
-    static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
+    // A canonical identity keyed by `buffer_id` (fixed owner nonce/path), so two args with the same
+    // buffer_id collide into one dependency — the successor of the former buffer-address key.
+    static CanonicalIdentity identity_for(uint64_t buffer_id) {
+        CanonicalIdentity id{};
+        id.buffer_id = buffer_id;
+        return id;
+    }
+
+    // The local dependency key the orchestrator derives for a ref over `buffer_id`.
+    static TensorKey ref_key(uint64_t buffer_id) {
+        return TensorKey::local_host(static_cast<uint64_t>(CanonicalIdentityHash{}(identity_for(buffer_id))));
+    }
+
+    // Helper: a TaskArgs whose only ref is a local POSIX_SHM backing keyed by `buffer_id`.
+    static TaskArgs single_tensor_args(uint64_t buffer_id, TensorArgType tag) {
         TaskArgs a;
-        ChipTensor t{};
-        t.buffer.addr = data_ptr;
-        t.ndims = 1;
-        t.shapes[0] = 1;
-        t.dtype = DataType::UINT8;
-        a.add_tensor(t, tag);
+        Tensor r{};
+        r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+        r.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);  // the tags below include writes
+        r.buffer.nbytes = 1;  // has a local backing (not a placeholder) -> tracked by infer_deps
+        r.buffer.identity = identity_for(buffer_id);
+        r.ndims = 1;
+        r.shapes[0] = 1;
+        r.strides[0] = 1;
+        r.dtype = DataType::UINT8;
+        a.add_tensor(r, tag);
+        return a;
+    }
+
+    // Helper: a TaskArgs whose only ref is a REMOTE_SIDECAR placeholder (no local backing; the remote
+    // descriptor rides in the paired RemoteTaskArgsSidecar).
+    static TaskArgs remote_placeholder_args(TensorArgType tag) {
+        TaskArgs a;
+        Tensor r{};
+        r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+        r.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+        r.ndims = 1;
+        r.shapes[0] = 1;
+        r.strides[0] = 1;
+        r.dtype = DataType::UINT8;
+        a.add_tensor(r, tag);
         return a;
     }
 };
@@ -191,7 +223,7 @@ TEST_F(OrchestratorFixture, TensorMapTracksProducer) {
     TaskSlot drain_slot;
     rq.try_pop(drain_slot);
 
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x1234, -1}), a.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0x1234)), a.task_slot);
 }
 
 TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
@@ -200,12 +232,12 @@ TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
     TaskSlot slot;
     rq.try_pop(slot);
 
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x42, -1}), slot);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0x42)), slot);
 
     S(slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
     orch.on_consumed(slot);
 
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x42, -1}), INVALID_SLOT);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0x42)), INVALID_SLOT);
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
 }
 
@@ -224,12 +256,12 @@ TEST_F(OrchestratorFixture, ConsumingASupersededProducerKeepsTheNewerMapping) {
     auto args_b = single_tensor_args(0x5150, TensorArgType::OUTPUT);
     auto b = orch.submit_next_level(C(43), args_b, cfg, 0);
     ASSERT_TRUE(rq.try_pop(drain));
-    ASSERT_EQ(tm.lookup(run_id, TensorKey{0x5150, -1}), b.task_slot);
+    ASSERT_EQ(tm.lookup(run_id, ref_key(0x5150)), b.task_slot);
 
     S(a.task_slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
     ASSERT_TRUE(orch.on_consumed(a.task_slot));
 
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0x5150, -1}), b.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0x5150)), b.task_slot);
 
     auto args_c = single_tensor_args(0x5150, TensorArgType::INPUT);
     auto c = orch.submit_next_level(C(44), args_c, cfg, 0);
@@ -288,12 +320,12 @@ TEST_F(OrchestratorFixture, GroupTaskStoresArgsListPerMember) {
     EXPECT_EQ(S(res.task_slot).task_args_list.size(), 2u);
 
     // args_view(i) yields each member's distinct tensor list.
-    EXPECT_EQ(S(res.task_slot).args_view(0).tensors(0).buffer.addr, 0xA0u);
-    EXPECT_EQ(S(res.task_slot).args_view(1).tensors(0).buffer.addr, 0xA1u);
+    EXPECT_EQ(S(res.task_slot).args(0).tensor(0).buffer.identity.buffer_id, 0xA0u);
+    EXPECT_EQ(S(res.task_slot).args(1).tensor(0).buffer.identity.buffer_id, 0xA1u);
 
     // Both keys registered as producers for the group slot.
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0xA0, -1}), res.task_slot);
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0xA1, -1}), res.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0xA0)), res.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0xA1)), res.task_slot);
 }
 
 TEST_F(OrchestratorFixture, SingleTaskStoresTaskArgsDirectly) {
@@ -303,43 +335,11 @@ TEST_F(OrchestratorFixture, SingleTaskStoresTaskArgsDirectly) {
     EXPECT_FALSE(S(res.task_slot).is_group());
     EXPECT_EQ(S(res.task_slot).group_size(), 1);
     EXPECT_EQ(S(res.task_slot).task_args.tensor_count(), 1);
-    EXPECT_EQ(S(res.task_slot).args_view(0).tensors(0).buffer.addr, 0xC0u);
+    EXPECT_EQ(S(res.task_slot).args(0).tensor(0).buffer.identity.buffer_id, 0xC0u);
 }
 
-TEST_F(OrchestratorFixture, OutputAutoAllocsFromHeapRing) {
-    // An OUTPUT tensor submitted with `data == 0` is auto-allocated from
-    // the HeapRing: the slot's task_args tensor ends up with a non-zero
-    // data pointer that falls inside the allocator's mmap'd region, and
-    // the TensorMap routes that pointer to the slot.
-    TaskArgs args;
-    ChipTensor t{};
-    t.buffer.addr = 0;
-    t.ndims = 1;
-    t.shapes[0] = 1024;  // 1024 * 1 byte = 1024, one aligned slab
-    t.dtype = DataType::UINT8;
-    args.add_tensor(t, TensorArgType::OUTPUT);
-
-    auto res = orch.submit_next_level(C(42), args, cfg, 0);
-    ASSERT_NE(res.task_slot, INVALID_SLOT);
-
-    uint64_t data = S(res.task_slot).task_args.tensor(0).buffer.addr;
-    ASSERT_NE(data, 0u);
-    uintptr_t base = reinterpret_cast<uintptr_t>(allocator.heap_base(0));
-    EXPECT_GE(data, base);
-    EXPECT_LT(data, base + allocator.heap_size(0));
-    EXPECT_EQ(data % HEAP_ALIGN, 0u);
-
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{data, -1}), res.task_slot);
-}
-
-TEST_F(OrchestratorFixture, RemoteOutputSidecarSkipsLocalAutoAllocAndRegistersRemoteKey) {
-    TaskArgs args;
-    ChipTensor t{};
-    t.buffer.addr = 0;
-    t.ndims = 1;
-    t.shapes[0] = 1024;
-    t.dtype = DataType::UINT8;
-    args.add_tensor(t, TensorArgType::OUTPUT);
+TEST_F(OrchestratorFixture, RemoteOutputSidecarRegistersRemoteKey) {
+    TaskArgs args = remote_placeholder_args(TensorArgType::OUTPUT);
 
     RemoteTaskArgsSidecar sidecar;
     sidecar.tensors.resize(1);
@@ -353,7 +353,10 @@ TEST_F(OrchestratorFixture, RemoteOutputSidecarSkipsLocalAutoAllocAndRegistersRe
 
     auto res = orch.submit_next_level(C(42), args, cfg, 3, {3}, sidecar);
     ASSERT_NE(res.task_slot, INVALID_SLOT);
-    EXPECT_EQ(S(res.task_slot).task_args.tensor(0).buffer.addr, 0u);
+    // No local backing: the arg is a REMOTE_SIDECAR placeholder, routed by the sidecar's remote key.
+    EXPECT_EQ(
+        S(res.task_slot).task_args.tensor(0).buffer.backend_kind, static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR)
+    );
 
     TensorKey key = TensorKey::remote_buffer(TensorAddressKind::REMOTE_BUFFER, 3, 9, 2, 64);
     EXPECT_EQ(tm.lookup(run_id, key), res.task_slot);
@@ -369,13 +372,7 @@ TEST_F(OrchestratorFixture, RemoteBarePayloadFailsBeforeSlotCommit) {
 }
 
 TEST_F(OrchestratorFixture, RemoteSidecarRejectsNonOwnerEligibleEndpointWithoutImport) {
-    TaskArgs args;
-    ChipTensor t{};
-    t.buffer.addr = 0;
-    t.ndims = 1;
-    t.shapes[0] = 1;
-    t.dtype = DataType::UINT8;
-    args.add_tensor(t, TensorArgType::INPUT);
+    TaskArgs args = remote_placeholder_args(TensorArgType::INPUT);
 
     RemoteTaskArgsSidecar sidecar;
     sidecar.tensors.resize(1);
@@ -390,13 +387,7 @@ TEST_F(OrchestratorFixture, RemoteSidecarRejectsNonOwnerEligibleEndpointWithoutI
 }
 
 TEST_F(OrchestratorFixture, RemoteInputSidecarUsesRemoteTensorMapKey) {
-    TaskArgs output_args;
-    ChipTensor out{};
-    out.buffer.addr = 0;
-    out.ndims = 1;
-    out.shapes[0] = 1;
-    out.dtype = DataType::UINT8;
-    output_args.add_tensor(out, TensorArgType::OUTPUT);
+    TaskArgs output_args = remote_placeholder_args(TensorArgType::OUTPUT);
 
     RemoteTaskArgsSidecar output_sidecar;
     output_sidecar.tensors.resize(1);
@@ -412,9 +403,7 @@ TEST_F(OrchestratorFixture, RemoteInputSidecarUsesRemoteTensorMapKey) {
     ASSERT_TRUE(rq_next_level.try_pop_single(3, ready));
     ASSERT_EQ(ready, producer.task_slot);
 
-    TaskArgs input_args;
-    ChipTensor in = out;
-    input_args.add_tensor(in, TensorArgType::INPUT);
+    TaskArgs input_args = remote_placeholder_args(TensorArgType::INPUT);
     auto consumer = orch.submit_next_level(C(43), input_args, cfg, 3, {3}, output_sidecar);
 
     EXPECT_EQ(S(consumer.task_slot).state.load(), TaskState::PENDING);
@@ -443,7 +432,7 @@ TEST_F(OrchestratorFixture, InoutWiresCreatorAsFanin) {
     rq.try_pop(writer_slot);
 
     // TensorMap now points at the new writer.
-    EXPECT_EQ(tm.lookup(run_id, TensorKey{0xFEED, -1}), writer.task_slot);
+    EXPECT_EQ(tm.lookup(run_id, ref_key(0xFEED)), writer.task_slot);
     // Writer has the creator recorded as a fanin producer (via INOUT
     // lookup) but no *live* fanin since the creator is already COMPLETED.
     EXPECT_EQ(S(writer.task_slot).fanin_count, 0);
@@ -477,7 +466,7 @@ TEST_F(OrchestratorFixture, OutputAndOutputExistingAreInsertOnly) {
         auto writer_args = single_tensor_args(c.key, c.tag);
         auto writer = orch.submit_next_level(C(42), writer_args, cfg, 0);
 
-        EXPECT_EQ(tm.lookup(run_id, TensorKey{c.key, -1}), writer.task_slot);
+        EXPECT_EQ(tm.lookup(run_id, ref_key(c.key)), writer.task_slot);
         EXPECT_EQ(S(writer.task_slot).fanin_count, 0);
         EXPECT_TRUE(S(writer.task_slot).fanin_producers.empty()) << "tag=" << static_cast<int>(c.tag);
         {
@@ -988,10 +977,14 @@ TEST(DepthOneAdmission, ARetiringRunAlwaysWakesTheOneWaiterItUnblocks) {
         RunId first = orch.begin_run();
         CallConfig cfg;
         TaskArgs args;
-        ChipTensor t{};
-        t.buffer.addr = 0xD000 + static_cast<uint64_t>(round);
+        Tensor t{};
+        t.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+        t.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+        t.buffer.nbytes = 1;
+        t.buffer.identity.buffer_id = 0xD000 + static_cast<uint64_t>(round);
         t.ndims = 1;
         t.shapes[0] = 1;
+        t.strides[0] = 1;
         t.dtype = DataType::UINT8;
         args.add_tensor(t, TensorArgType::OUTPUT);
         CallableIdentity callable;
@@ -1078,10 +1071,14 @@ TEST(SubmitFailure, ASlotWhoseSubmitThrewIsFullyReclaimedByCancellation) {
 
     CallConfig cfg;
     TaskArgs args;
-    ChipTensor t{};
-    t.buffer.addr = 0xE100;
+    Tensor t{};
+    t.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    t.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    t.buffer.nbytes = 1;
+    t.buffer.identity.buffer_id = 0xE100;
     t.ndims = 1;
     t.shapes[0] = 1;
+    t.strides[0] = 1;
     t.dtype = DataType::UINT8;
     args.add_tensor(t, TensorArgType::OUTPUT);
     CallableIdentity callable;
@@ -1110,7 +1107,9 @@ TEST_F(OrchestratorFixture, AllocRegistrationFailureReleasesTheUnownedRingSlot) 
         }
     });
 
-    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8), std::bad_alloc);
+    CanonicalIdentity id{};
+    id.buffer_id = 1;
+    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8, id), std::bad_alloc);
     ASSERT_TRUE(injected);
     ASSERT_NE(allocator.slot_state(0), nullptr);
     EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::CONSUMED);
@@ -1135,7 +1134,9 @@ TEST_F(OrchestratorFixture, AllocFailureAfterScopeRegistrationRemainsCancellatio
         }
     });
 
-    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8), std::bad_alloc);
+    CanonicalIdentity id{};
+    id.buffer_id = 1;
+    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8, id), std::bad_alloc);
     ASSERT_TRUE(injected);
     ASSERT_NE(allocator.slot_state(0), nullptr);
     EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::BUILDING);
@@ -1164,7 +1165,9 @@ TEST_F(OrchestratorFixture, AllocOutputPublicationFailureLeavesAReclaimableJourn
         }
     });
 
-    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8), std::bad_alloc);
+    CanonicalIdentity id{};
+    id.buffer_id = 1;
+    EXPECT_THROW((void)orch.alloc(std::vector<uint32_t>{16}, DataType::UINT8, id), std::bad_alloc);
     ASSERT_TRUE(injected);
     ASSERT_NE(allocator.slot_state(0), nullptr);
     EXPECT_EQ(allocator.slot_state(0)->state.load(std::memory_order_acquire), TaskState::BUILDING);
@@ -1194,10 +1197,14 @@ TEST_F(OrchestratorFixture, SubmitRegistrationFailureReleasesTheUnownedHeapRingS
     });
 
     TaskArgs args;
-    ChipTensor output{};
-    output.buffer.addr = 0;
+    Tensor output{};
+    output.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    output.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    output.buffer.nbytes = 1;
+    output.buffer.identity.buffer_id = 0;
     output.ndims = 1;
     output.shapes[0] = 16;
+    output.strides[0] = 1;
     output.dtype = DataType::UINT8;
     args.add_tensor(output, TensorArgType::OUTPUT);
     EXPECT_THROW((void)orch.submit_next_level(C(90), args, cfg, 0), std::bad_alloc);
@@ -1217,13 +1224,14 @@ TEST_F(OrchestratorFixture, SubmitRegistrationFailureReleasesTheUnownedHeapRingS
 }
 
 TEST_F(OrchestratorFixture, SubmitOutputJournalFailurePreservesThePreviousOwnerAndReclaims) {
-    constexpr uint64_t first_key_addr = 0xE300;
-    constexpr uint64_t previous_key_addr = 0xE301;
-    TensorKey first_key = TensorKey::local_host(first_key_addr);
-    TensorKey previous_key = TensorKey::local_host(previous_key_addr);
+    constexpr uint64_t first_buffer_id = 0xE300;
+    constexpr uint64_t previous_buffer_id = 0xE301;
+    // A wire ChipTensor is keyed by its identity's canonical hash, not by a VA.
+    TensorKey first_key = ref_key(first_buffer_id);
+    TensorKey previous_key = ref_key(previous_buffer_id);
 
     auto previous =
-        orch.submit_next_level(C(91), single_tensor_args(previous_key_addr, TensorArgType::OUTPUT_EXISTING), cfg, 0);
+        orch.submit_next_level(C(91), single_tensor_args(previous_buffer_id, TensorArgType::OUTPUT_EXISTING), cfg, 0);
     TaskSlot ready = INVALID_SLOT;
     ASSERT_TRUE(rq.try_pop(run_id, ready));
     ASSERT_EQ(ready, previous.task_slot);
@@ -1241,14 +1249,18 @@ TEST_F(OrchestratorFixture, SubmitOutputJournalFailurePreservesThePreviousOwnerA
     });
 
     TaskArgs replacement;
-    ChipTensor first{};
-    first.buffer.addr = first_key_addr;
+    Tensor first{};
+    first.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    first.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    first.buffer.nbytes = 1;
+    first.buffer.identity = identity_for(first_buffer_id);
     first.ndims = 1;
     first.shapes[0] = 1;
+    first.strides[0] = 1;
     first.dtype = DataType::UINT8;
     replacement.add_tensor(first, TensorArgType::OUTPUT_EXISTING);
-    ChipTensor second = first;
-    second.buffer.addr = previous_key_addr;
+    Tensor second = first;
+    second.buffer.identity = identity_for(previous_buffer_id);
     replacement.add_tensor(second, TensorArgType::OUTPUT_EXISTING);
 
     EXPECT_THROW((void)orch.submit_next_level(C(92), replacement, cfg, 0), std::bad_alloc);

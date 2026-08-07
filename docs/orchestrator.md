@@ -49,7 +49,8 @@ public:
                                    const std::vector<TaskArgs> &args_list);
 
     // --- Intermediate-buffer allocation (runtime-owned lifetime) ---
-    Tensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
+    uint64_t alloc(const std::vector<uint32_t> &shape, DataType dtype,
+                   const CanonicalIdentity &identity);
 
     // --- Internal lifecycle (invoked by Python Worker.submit/RunHandle) ---
     RunId begin_run();
@@ -723,7 +724,7 @@ idempotent when both fire concurrently at threshold.
 
 ---
 
-## 8b. `alloc(shape, dtype)` — runtime-owned intermediate buffers
+## 8b. `alloc(shape, dtype, identity)` — runtime-owned intermediate buffers
 
 `alloc` creates a synthetic task slot in `COMPLETED` state that owns a
 1024-byte-aligned slab of the Worker's HeapRing. The slab is reclaimed
@@ -731,7 +732,9 @@ implicitly once the slot reaches `CONSUMED` and `last_alive` sweeps over it
 — no per-slot `munmap` runs.
 
 ```cpp
-Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
+uint64_t Orchestrator::alloc(
+    const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity
+) {
     // 1. Atomic {slot, heap_ptr} from the merged Ring. Blocks on
     //    back-pressure; throws on timeout.
     uint64_t aligned = align_up(nbytes(shape, dtype), HEAP_ALIGN);
@@ -740,7 +743,6 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     s.reset();
     // 2. Publish cancellation ownership before registering active_tasks. If
     //    run-slot registration itself throws, release the unowned Ring slot.
-    uint64_t key = reinterpret_cast<uint64_t>(ar.heap_ptr);
     s.run_id = current_run_id;
     s.state = TaskState::BUILDING;
     current_run.register_slot(ar.slot);
@@ -751,8 +753,11 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     int32_t scope_ref = (scope_.depth() > 0) ? 1 : 0;
     if (scope_ref > 0) scope_.register_task(ar.slot);
     s.fanout_total = scope_ref;
-    // 5. Journal the key before TensorMap publication so cancellation can
-    //    erase every entry that became visible before a later failure.
+    // 5. Key on the identity's canonical hash, so a Tensor carrying the same
+    //    identity resolves to this slot in infer_deps. Journal the key before
+    //    TensorMap publication so cancellation can erase every entry that
+    //    became visible before a later failure.
+    uint64_t key = CanonicalIdentityHash{}(identity);
     s.output_keys.push_back(key);
     tensormap_.insert(current_run_id, key, ar.slot);
     // 6. Sim self-consume so the fanout-release threshold math aligns with
@@ -760,7 +765,7 @@ Tensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
     s.fanout_released = 1;
     // 7. Straight to COMPLETED — no dispatch needed.
     s.state = TaskState::COMPLETED;
-    return Tensor{key, shape, dtype};
+    return reinterpret_cast<uint64_t>(ar.heap_ptr);
 }
 ```
 

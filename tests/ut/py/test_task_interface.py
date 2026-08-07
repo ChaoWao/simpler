@@ -11,8 +11,10 @@
 
 import ctypes
 import gc
+import itertools
 import struct
 import weakref
+from multiprocessing.shared_memory import SharedMemory
 
 import pytest
 import simpler.task_interface as task_interface_module
@@ -31,6 +33,15 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_dtype_name,
     get_element_size,
 )
+from simpler.buffer import (
+    AccessMode,
+    BackendKind,
+    Tensor,
+    create_host_shared_buffer,
+    mint_owner_instance_id,
+    wrap_device_malloc,
+    wrap_fork_inherited,
+)
 from simpler.task_interface import (
     RemoteAddressSpace,
     RemoteBufferExport,
@@ -38,6 +49,39 @@ from simpler.task_interface import (
     RemoteTensorRef,
     _remote_sidecar_for,
 )
+
+_REF_BID = itertools.count(1)
+
+
+def _dev_ref(addr, shapes, dtype, tag=None):
+    """A DEVICE_MALLOC ``Tensor`` at ``addr`` for wire-``TaskArgs`` container tests.
+
+    Each call mints a fresh identity, so refs added to one TaskArgs stay distinct. The backend body
+    carries ``addr`` (u64 LE), the container-test counterpart of the old ``ChipTensor.make(addr, ...)``.
+    """
+    nbytes = get_element_size(dtype)
+    for s in shapes:
+        nbytes *= int(s)
+    return wrap_device_malloc(addr, nbytes, mint_owner_instance_id(), next(_REF_BID), "L2").tensor(
+        tuple(shapes), int(dtype.value)
+    )
+
+
+def _ref_addr(ref: Tensor) -> int:
+    """The device pointer carried in a DEVICE_MALLOC ref's backend body."""
+    return int.from_bytes(bytes(ref.buffer.body)[:8], "little")
+
+
+def _session_buffer_minter():
+    """A stand-in for the remote runner's session buffer minter: one nonce, a fresh buffer_id each."""
+    owner_instance_id = mint_owner_instance_id()
+    buffer_ids = itertools.count(1)
+
+    def mint(nbytes: int):
+        return create_host_shared_buffer(int(nbytes), owner_instance_id, buffer_id=next(buffer_ids))
+
+    return mint
+
 
 # ============================================================================
 # DataType enum
@@ -166,23 +210,23 @@ class TestTorchInterop:
         with pytest.raises(KeyError):
             torch_dtype_to_datatype(torch.complex64)
 
-    def test_make_tensor_arg(self):
+    def test_make_chip_tensor_arg(self):
         import torch  # pyright: ignore[reportMissingImports]
 
-        from simpler_setup.torch_interop import make_tensor_arg
+        from simpler_setup.torch_interop import make_chip_tensor_arg
 
         t = torch.zeros(4, 8, dtype=torch.float32)
-        arg = make_tensor_arg(t)
+        arg = make_chip_tensor_arg(t)
         assert isinstance(arg, ChipTensor)
         assert arg.data == t.data_ptr()
         assert arg.shapes == (4, 8)
         assert arg.dtype == DataType.FLOAT32
         assert arg.nbytes() == 4 * 8 * 4
 
-    def test_torch_dtype_fp8_fp4_and_make_tensor_arg(self):
+    def test_torch_dtype_fp8_fp4_and_make_chip_tensor_arg(self):
         import torch  # pyright: ignore[reportMissingImports]
 
-        from simpler_setup.torch_interop import make_tensor_arg, torch_dtype_to_datatype
+        from simpler_setup.torch_interop import make_chip_tensor_arg, torch_dtype_to_datatype
 
         # A5-only MX dtypes (no float8_e5m2). float8_e4m3fn needs torch >= 2.1;
         # float8_e8m0fnu >= 2.7; float4_e2m1fn_x2 (MXFP4 packed) needs a recent
@@ -203,10 +247,10 @@ class TestTorchInterop:
             )
         for attr, expected, torch_dt in available:
             assert torch_dtype_to_datatype(torch_dt) == expected
-            # Regression: make_tensor_arg used to raise
-            # "Unsupported tensor dtype for ChipTensor: torch.<attr>".
+            # Regression: make_chip_tensor_arg used to raise
+            # "Unsupported tensor dtype for Tensor: torch.<attr>".
             t = torch.zeros(2, 4, dtype=torch_dt)
-            arg = make_tensor_arg(t)
+            arg = make_chip_tensor_arg(t)
             assert arg.dtype == expected
             # Each of these dtypes is 1 byte per torch element (FP4 packs 2
             # E2M1 values per byte), so a [2, 4] tensor is 8 bytes.
@@ -288,7 +332,7 @@ class TestTensor:
     def test_repr(self):
         arg = ChipTensor.make(0x1000, (4, 8), DataType.FLOAT16)
         r = repr(arg)
-        assert "ChipTensor" in r
+        assert "Tensor" in r
         assert "4" in r
         assert "8" in r
         assert "FLOAT16" in r
@@ -404,24 +448,22 @@ class TestTaskArgs:
 
     def test_add_tensor_default_tag(self):
         args = TaskArgs()
-        t = ChipTensor.make(0xBEEF, (4, 8), DataType.FLOAT32)
-        args.add_tensor(t)
+        args.add_tensor(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32))
         assert args.tensor_count() == 1
         assert args.tag(0) == TensorArgType.INPUT
 
     def test_add_tensor_with_tag(self):
         args = TaskArgs()
-        t = ChipTensor.make(0xBEEF, (4, 8), DataType.FLOAT32)
-        args.add_tensor(t, TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0xBEEF, (4, 8), DataType.FLOAT32), TensorArgType.OUTPUT)
         assert args.tag(0) == TensorArgType.OUTPUT
 
-    def test_multiple_tensors_with_tags(self):
+    def test_multiple_refs_with_tags(self):
         args = TaskArgs()
-        args.add_tensor(ChipTensor.make(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
-        args.add_tensor(ChipTensor.make(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
-        args.add_tensor(ChipTensor.make(0x3, (4,), DataType.INT8), TensorArgType.INOUT)
-        args.add_tensor(ChipTensor.make(0x4, (5,), DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
-        args.add_tensor(ChipTensor.make(0x5, (6,), DataType.INT32), TensorArgType.NO_DEP)
+        args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
+        args.add_tensor(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0x3, (4,), DataType.INT8), TensorArgType.INOUT)
+        args.add_tensor(_dev_ref(0x4, (5,), DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
+        args.add_tensor(_dev_ref(0x5, (6,), DataType.INT32), TensorArgType.NO_DEP)
         assert args.tensor_count() == 5
         assert args.tag(0) == TensorArgType.INPUT
         assert args.tag(1) == TensorArgType.OUTPUT
@@ -431,7 +473,7 @@ class TestTaskArgs:
 
     def test_set_tag(self):
         args = TaskArgs()
-        args.add_tensor(ChipTensor.make(0x1, (2,), DataType.INT32))
+        args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32))
         assert args.tag(0) == TensorArgType.INPUT
         args.set_tag(0, TensorArgType.INOUT)
         assert args.tag(0) == TensorArgType.INOUT
@@ -445,15 +487,15 @@ class TestTaskArgs:
 
     def test_mixed_with_tags(self):
         args = TaskArgs()
-        args.add_tensor(ChipTensor.make(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
-        args.add_tensor(ChipTensor.make(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32), TensorArgType.INPUT)
+        args.add_tensor(_dev_ref(0x2, (3,), DataType.FLOAT16), TensorArgType.OUTPUT)
         args.add_scalar(99)
         args.add_scalar(100)
         assert args.tensor_count() == 2
         assert args.scalar_count() == 2
         assert len(args) == 4
-        assert args.tensor(0).data == 0x1
-        assert args.tensor(1).data == 0x2
+        assert _ref_addr(args.tensor(0)) == 0x1
+        assert _ref_addr(args.tensor(1)) == 0x2
         assert args.scalar(0) == 99
         assert args.scalar(1) == 100
 
@@ -461,16 +503,16 @@ class TestTaskArgs:
         args = TaskArgs()
         args.add_scalar(42)
         with pytest.raises(RuntimeError):
-            args.add_tensor(ChipTensor.make(0x1, (2,), DataType.INT32))
+            args.add_tensor(_dev_ref(0x1, (2,), DataType.INT32))
 
-    def test_tensor_access(self):
+    def test_ref_access(self):
         args = TaskArgs()
-        args.add_tensor(ChipTensor.make(0xA, (4,), DataType.FLOAT32))
-        args.add_tensor(ChipTensor.make(0xB, (8,), DataType.INT32))
-        assert args.tensor(0).data == 0xA
-        assert args.tensor(1).data == 0xB
-        assert args.tensor(0).shapes == (4,)
-        assert args.tensor(1).shapes == (8,)
+        args.add_tensor(_dev_ref(0xA, (4,), DataType.FLOAT32))
+        args.add_tensor(_dev_ref(0xB, (8,), DataType.INT32))
+        assert _ref_addr(args.tensor(0)) == 0xA
+        assert _ref_addr(args.tensor(1)) == 0xB
+        assert tuple(args.tensor(0).shapes) == (4,)
+        assert tuple(args.tensor(1).shapes) == (8,)
 
     def test_scalar_access(self):
         args = TaskArgs()
@@ -501,7 +543,7 @@ class TestTaskArgs:
 
     def test_clear(self):
         args = TaskArgs()
-        args.add_tensor(ChipTensor.make(0, (1,), DataType.INT8), TensorArgType.OUTPUT)
+        args.add_tensor(_dev_ref(0x100, (1,), DataType.INT8), TensorArgType.OUTPUT)
         args.add_scalar(42)
         args.clear()
         assert len(args) == 0
@@ -509,10 +551,10 @@ class TestTaskArgs:
         assert args.scalar_count() == 0
 
     def test_no_capacity_limit_tensors(self):
-        """TaskArgs is vector-backed — no per-class capacity limit on tensors."""
+        """TaskArgs is vector-backed — no per-class capacity limit on refs."""
         args = TaskArgs()
         for i in range(20):
-            args.add_tensor(ChipTensor.make(i, (1,), DataType.INT8))
+            args.add_tensor(_dev_ref(i + 1, (1,), DataType.INT8))
         assert args.tensor_count() == 20
 
     def test_no_capacity_limit_scalars(self):
@@ -544,7 +586,8 @@ class TestRemoteTaskArgsSidecar:
         args.add_scalar(9)
 
         assert args.tensor_count() == 1
-        assert args.tensor(0).data == 0
+        # An arg destined for a remote worker carries a REMOTE_SIDECAR placeholder ref (no local backing).
+        assert args.tensor(0).buffer.backend_kind == BackendKind.REMOTE_SIDECAR
         assert args.tag(0) == TensorArgType.OUTPUT
         assert args.scalar(0) == 9
 
@@ -740,11 +783,59 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         )
         wire = RemoteTaskArgsWire((tensor,), (RemoteTensorSidecar(True, desc),), (), b"abcd")
 
-        args, keepalive = _materialize_task_args(wire, {}, worker_id=3)
+        args, inline_backings = _materialize_task_args(
+            wire, {}, worker_id=3, mint_inline_buffer=_session_buffer_minter()
+        )
 
-        assert keepalive
-        assert args.tensor(0).data != 0
-        assert ctypes.string_at(args.tensor(0).data, 4) == b"abcd"
+        assert len(inline_backings) == 1
+        backing = inline_backings[0]
+        arg = args.tensor(0)
+        assert arg.buffer.identity == backing.identity
+        assert arg.byte_offset == 0
+        assert ctypes.string_at(backing.base, 4) == b"abcd"
+        backing.close()
+
+    def test_host_inline_backing_is_released_when_the_caller_closes_it(self):
+        from simpler.remote_l3_protocol import (
+            RemoteAddressSpace as WireRemoteAddressSpace,
+        )
+        from simpler.remote_l3_protocol import (
+            RemoteTaskArgsWire,
+            RemoteTensorDesc,
+            RemoteTensorSidecar,
+        )
+        from simpler.remote_l3_session import _materialize_task_args
+
+        tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+        desc = RemoteTensorDesc(
+            address_space=WireRemoteAddressSpace.HOST_INLINE,
+            owner_worker_id=0,
+            buffer_id=0,
+            offset=0,
+            nbytes=4,
+            remote_addr=0,
+            rkey_or_token=0,
+            generation=0,
+            inline_payload_offset=0,
+            inline_payload_len=4,
+            flags=0,
+        )
+        wire = RemoteTaskArgsWire((tensor,), (RemoteTensorSidecar(True, desc),), (), b"abcd")
+        minter = _session_buffer_minter()
+
+        _first, first_backings = _materialize_task_args(wire, {}, worker_id=3, mint_inline_buffer=minter)
+        _second, second_backings = _materialize_task_args(wire, {}, worker_id=3, mint_inline_buffer=minter)
+
+        # Two tasks' payloads are two backings, so a consumer's map-once import cache is never asked
+        # to bind one identity to both.
+        assert first_backings[0].identity != second_backings[0].identity
+        for backing in (*first_backings, *second_backings):
+            assert backing.shm is not None
+            name = backing.shm.name
+            backing.close()
+            assert backing.shm is None
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=name)
 
     def test_remote_buffer_descriptor_materializes_session_registry_address(self):
         from simpler.remote_l3_protocol import (
@@ -757,29 +848,133 @@ class TestRemoteL3SessionTaskArgsMaterialization:
         )
         from simpler.remote_l3_session import _materialize_task_args, _RemoteBufferEntry
 
-        backing = ctypes.create_string_buffer(b"01234567", 8)
-        entry = _RemoteBufferEntry(backing, 8, 1, WireRemoteAddressSpace.REMOTE_DEVICE)
-        tensor = ChipTensor.make(0, (4,), DataType.UINT8)
-        desc = RemoteTensorDesc(
-            address_space=WireRemoteAddressSpace.REMOTE_DEVICE,
-            owner_worker_id=2,
-            buffer_id=9,
-            offset=2,
-            nbytes=4,
-            remote_addr=entry.addr,
-            rkey_or_token=0,
-            generation=1,
-            inline_payload_offset=0,
-            inline_payload_len=0,
-            flags=0,
+        backing = create_host_shared_buffer(8, mint_owner_instance_id(), buffer_id=9)
+        try:
+            ctypes.memmove(backing.base, b"01234567", 8)
+            entry = _RemoteBufferEntry(backing, 8, 1, WireRemoteAddressSpace.REMOTE_DEVICE)
+            tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+            desc = RemoteTensorDesc(
+                address_space=WireRemoteAddressSpace.REMOTE_DEVICE,
+                owner_worker_id=2,
+                buffer_id=9,
+                offset=2,
+                nbytes=4,
+                remote_addr=entry.addr,
+                rkey_or_token=0,
+                generation=1,
+                inline_payload_offset=0,
+                inline_payload_len=0,
+                flags=0,
+            )
+            wire = RemoteTaskArgsWire((tensor,), (RemoteTensorSidecar(True, desc),), (), b"")
+
+            args, inline_backings = _materialize_task_args(
+                wire, {(9, 1): entry}, worker_id=2, mint_inline_buffer=_session_buffer_minter()
+            )
+
+            assert inline_backings == []
+            arg = args.tensor(0)
+            # An interior range is a byte_offset on the view over the WHOLE backing, never a second
+            # identity: two views of one backing must key alike for dependency inference.
+            assert arg.buffer.identity == backing.identity
+            assert arg.buffer.nbytes == 8
+            assert arg.byte_offset == 2
+            assert ctypes.string_at(backing.base + arg.byte_offset, 4) == b"2345"
+        finally:
+            backing.close()
+
+    def test_two_interior_views_of_one_backing_share_its_identity(self):
+        from simpler.remote_l3_protocol import (
+            RemoteAddressSpace as WireRemoteAddressSpace,
         )
-        wire = RemoteTaskArgsWire((tensor,), (RemoteTensorSidecar(True, desc),), (), b"")
+        from simpler.remote_l3_protocol import (
+            RemoteTaskArgsWire,
+            RemoteTensorDesc,
+            RemoteTensorSidecar,
+        )
+        from simpler.remote_l3_session import _materialize_task_args, _RemoteBufferEntry
 
-        args, keepalive = _materialize_task_args(wire, {(9, 1): entry}, worker_id=2)
+        backing = create_host_shared_buffer(8, mint_owner_instance_id(), buffer_id=9)
+        try:
+            entry = _RemoteBufferEntry(backing, 8, 1, WireRemoteAddressSpace.REMOTE_DEVICE)
 
-        assert keepalive == []
-        assert args.tensor(0).data == entry.addr + 2
-        assert ctypes.string_at(args.tensor(0).data, 4) == b"2345"
+            def sub_range(offset):
+                return RemoteTensorDesc(
+                    address_space=WireRemoteAddressSpace.REMOTE_DEVICE,
+                    owner_worker_id=2,
+                    buffer_id=9,
+                    offset=offset,
+                    nbytes=4,
+                    remote_addr=entry.addr + offset,
+                    rkey_or_token=0,
+                    generation=1,
+                    inline_payload_offset=0,
+                    inline_payload_len=0,
+                    flags=0,
+                )
+
+            tensor = ChipTensor.make(0, (4,), DataType.UINT8)
+            wire = RemoteTaskArgsWire(
+                (tensor, tensor),
+                (RemoteTensorSidecar(True, sub_range(0)), RemoteTensorSidecar(True, sub_range(4))),
+                (),
+                b"",
+            )
+
+            args, _inline_backings = _materialize_task_args(
+                wire, {(9, 1): entry}, worker_id=2, mint_inline_buffer=_session_buffer_minter()
+            )
+
+            assert args.tensor(0).buffer.identity == args.tensor(1).buffer.identity
+            assert (args.tensor(0).byte_offset, args.tensor(1).byte_offset) == (0, 4)
+        finally:
+            backing.close()
+
+    def test_materialized_args_forward_to_a_next_level_submit(self):
+        from simpler.orchestrator import _split_next_level_args
+        from simpler.remote_l3_protocol import (
+            RemoteAddressSpace as WireRemoteAddressSpace,
+        )
+        from simpler.remote_l3_protocol import (
+            RemoteTaskArgsWire,
+            RemoteTensorDesc,
+            RemoteTensorSidecar,
+        )
+        from simpler.remote_l3_session import _materialize_task_args, _RemoteBufferEntry
+
+        backing = create_host_shared_buffer(8, mint_owner_instance_id(), buffer_id=9)
+        try:
+            entry = _RemoteBufferEntry(backing, 8, 1, WireRemoteAddressSpace.REMOTE_DEVICE)
+            desc = RemoteTensorDesc(
+                address_space=WireRemoteAddressSpace.REMOTE_DEVICE,
+                owner_worker_id=2,
+                buffer_id=9,
+                offset=0,
+                nbytes=4,
+                remote_addr=entry.addr,
+                rkey_or_token=0,
+                generation=1,
+                inline_payload_offset=0,
+                inline_payload_len=0,
+                flags=0,
+            )
+            wire = RemoteTaskArgsWire(
+                (ChipTensor.make(0, (4,), DataType.UINT8),), (RemoteTensorSidecar(True, desc),), (), b""
+            )
+
+            args, _inline_backings = _materialize_task_args(
+                wire, {(9, 1): entry}, worker_id=2, mint_inline_buffer=_session_buffer_minter()
+            )
+
+            # What a remote orchestration function does with its args: name them in a child's
+            # TaskArgs and submit that to the next level. The chip POD accepts neither step.
+            child_args = TaskArgs()
+            child_args.add_tensor(args.tensor(0), TensorArgType.INPUT)
+            forwarded, remote_sidecar = _split_next_level_args(child_args)
+            assert forwarded is child_args
+            assert remote_sidecar is None
+        finally:
+            backing.close()
 
 
 # ============================================================================
@@ -1023,3 +1218,30 @@ class TestChildMemory:
         out = args.tensor(0)
         assert out.child_memory is True
         assert out.data == 0x2000
+
+
+class TestAddRefAccessSubset:
+    # §3 access: add_tensor rejects an arg whose TensorArgType needs access the handle does not grant.
+    def test_add_tensor_rejects_write_arg_on_read_only_backing(self):
+        oid = mint_owner_instance_id()
+        h = wrap_fork_inherited(0x1000, 64, owner_instance_id=oid, buffer_id=1, access=AccessMode.READ)
+        ref = h.tensor((16,), DataType.FLOAT32)  # READ-only backing
+        args = TaskArgs()
+        with pytest.raises(ValueError, match="access"):
+            args.add_tensor(ref, TensorArgType.OUTPUT_EXISTING)
+        with pytest.raises(ValueError, match="access"):
+            args.add_tensor(ref, TensorArgType.INOUT)
+        args.add_tensor(ref, TensorArgType.INPUT)  # READ⊆READ ok
+
+    def test_add_tensor_accepts_matching_access(self):
+        oid = mint_owner_instance_id()
+        h = create_host_shared_buffer(64, oid, buffer_id=1)  # READWRITE
+        ref = h.tensor((16,), DataType.FLOAT32)
+        try:
+            args = TaskArgs()
+            args.add_tensor(ref, TensorArgType.INPUT)  # READ⊆RW
+            args.add_tensor(ref, TensorArgType.OUTPUT_EXISTING)  # WRITE⊆RW
+            args.add_tensor(ref, TensorArgType.INOUT)  # RW⊆RW
+            assert args.tensor_count() == 3
+        finally:
+            h.close()

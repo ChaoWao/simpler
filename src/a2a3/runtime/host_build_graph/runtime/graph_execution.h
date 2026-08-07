@@ -47,7 +47,7 @@ struct GraphTensor {
     uint8_t dtype;
     uint8_t manual_dep;
     uint8_t is_contiguous;
-    uint8_t child_memory;
+    uint8_t address_space;
     uint8_t reserved[3];
 };
 
@@ -155,7 +155,7 @@ inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
     packed.dtype = static_cast<uint8_t>(tensor.dtype);
     packed.manual_dep = tensor.manual_dep ? 1 : 0;
     packed.is_contiguous = tensor.is_contiguous ? 1 : 0;
-    packed.child_memory = tensor.child_memory;
+    packed.address_space = static_cast<uint8_t>(tensor.address_space);
     return packed;
 }
 
@@ -169,7 +169,7 @@ inline void graph_tensor_unpack(const GraphTensor &packed, ChipTensor *tensor) {
     tensor->dtype = static_cast<DataType>(packed.dtype);
     tensor->manual_dep = packed.manual_dep != 0;
     tensor->is_contiguous = packed.is_contiguous != 0;
-    tensor->child_memory = packed.child_memory;
+    tensor->address_space = static_cast<AddressSpace>(packed.address_space);
     for (uint32_t i = 0; i < MAX_TENSOR_DIMS; ++i) {
         tensor->shapes[i] = packed.shapes[i];
         tensor->strides[i] = packed.strides[i];
@@ -181,7 +181,7 @@ inline void graph_tensor_unpack(const GraphTensor &packed, ChipTensor *tensor) {
 inline bool graph_tensor_wire_valid(const GraphTensor &tensor) {
     if (tensor.buffer_addr == 0 || tensor.ndims == 0 || tensor.ndims > MAX_TENSOR_DIMS ||
         tensor.dtype >= static_cast<uint8_t>(DataType::DATA_TYPE_NUM) || tensor.manual_dep > 1 ||
-        tensor.is_contiguous > 1 || tensor.child_memory > 1) {
+        tensor.is_contiguous > 1 || tensor.address_space > 1) {
         return false;
     }
 

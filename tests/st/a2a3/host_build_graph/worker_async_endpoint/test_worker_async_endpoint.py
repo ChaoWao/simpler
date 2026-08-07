@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
+from simpler.task_interface import DataType, TaskArgs, TensorArgType
 from simpler.worker import (
     _FRAME_STAGED,
     _OFF_ACCEPTED,
@@ -28,12 +29,25 @@ from simpler.worker import (
     _mailbox_load_i32,
 )
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
-from simpler_setup.scene_test import _build_l3_task_args
+from simpler_setup import SceneTestCase, scene_test
 
 _VECTOR_KERNELS = "../vector_example/kernels/aiv"
 _SIZE = 128 * 128
 _CHAIN_LENGTH = 64
+
+_DIR_TAGS = {
+    D.IN: TensorArgType.INPUT,
+    D.OUT: TensorArgType.OUTPUT_EXISTING,
+    D.INOUT: TensorArgType.INOUT,
+}
+
+
+def _chip_args(handles, orch_signature):
+    """A ``TaskArgs`` naming each ``Buffer`` as a whole-buffer float32 view, tagged by the signature."""
+    args = TaskArgs()
+    for handle, direction in zip(handles, orch_signature):
+        args.add_tensor(handle.tensor((_SIZE,), DataType.FLOAT32), _DIR_TAGS[direction])
+    return args
 
 
 class _FileSignal:
@@ -118,8 +132,8 @@ class TestWorkerAsyncEndpoint(SceneTestCase):
 
     @staticmethod
     def _tensor_from_host_buffer(worker, value):
-        buffer = worker.create_host_buffer(_SIZE * torch.float32.itemsize)
-        tensor = torch.frombuffer(buffer.buffer, dtype=torch.float32, count=_SIZE)
+        buffer = worker.create_buffer(_SIZE * torch.float32.itemsize)
+        tensor = torch.frombuffer(buffer.shm.buf, dtype=torch.float32, count=_SIZE)
         tensor.fill_(value)
         return buffer, tensor
 
@@ -171,26 +185,25 @@ class TestWorkerAsyncEndpoint(SceneTestCase):
                 buffers.append(buffer)
                 tensors.append(tensor)
             first_a, first_b, first_out, second_a, second_b, second_out = tensors
+            first_bufs, second_bufs = buffers[:3], buffers[3:]
             handle = type(self)._st_chip_handles["long_vector"]
             signature = type(self)._st_chip_handles["long_vector_sig"]
             sub_handle = type(self)._st_sub_handles["wait_for_release"]
             cfg = self._build_config(self.CASES[0]["config"])
 
-            def submit_vector(orch, a, b, out, *, hold_open=False):
-                builder = TaskArgsBuilder(Tensor("a", a), Tensor("b", b), Tensor("out", out))
-                chip_args, _ = _build_l3_task_args(builder, signature)
-                orch.submit_next_level(handle, chip_args, cfg, worker=0)
+            def submit_vector(orch, arg_buffers, *, hold_open=False):
+                orch.submit_next_level(handle, _chip_args(arg_buffers, signature), cfg, worker=0)
                 if hold_open:
                     orch.submit_sub(sub_handle)
 
             def first_graph(orch, _args, _cfg):
-                submit_vector(orch, first_a, first_b, first_out, hold_open=True)
+                submit_vector(orch, first_bufs, hold_open=True)
 
             first = st_worker.submit(first_graph)
             assert _SUB_ENTERED.wait(30.0), "the predecessor never reached its SubTask fence"
 
             def second_graph(orch, _args, _cfg):
-                submit_vector(orch, second_a, second_b, second_out)
+                submit_vector(orch, second_bufs)
 
             second = st_worker.submit(second_graph)
 
@@ -240,7 +253,7 @@ class TestWorkerAsyncEndpoint(SceneTestCase):
             submit_vector = first_graph = second_graph = None
             if all(run is None or run.done for run in handles):
                 for buffer in buffers:
-                    st_worker.free_host_buffer(buffer)
+                    buffer.close()
                 _clear_signals()
 
 

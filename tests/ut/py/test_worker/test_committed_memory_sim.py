@@ -53,14 +53,14 @@ class TestCommittedDeviceMemory:
             assert baseline >= 0  # arenas lazily committed on sim (>=0); device path verified in serving (43.44 GB)
 
             size = 1 << 20  # 1 MiB
-            ptr = worker.malloc(size, worker_id=0)
-            assert ptr != 0
+            handle = worker.malloc(size)
+            assert handle.base != 0
             after_alloc = worker.committed_device_memory()
             # The allocator tracks the requested size, so the total must have
             # grown by at least the malloc'd bytes on top of the init baseline.
             assert after_alloc >= baseline + size, (baseline, after_alloc, size)
 
-            worker.free(ptr, worker_id=0)
+            worker.free(handle)
             after_free = worker.committed_device_memory()
             assert after_free <= after_alloc - size, (after_alloc, after_free, size)
         finally:

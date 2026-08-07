@@ -30,7 +30,7 @@ from simpler.task_interface import ArgDirection as D
 from simpler.worker import Worker
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
-from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
+from simpler_setup.scene_test import _build_chip_task_args, _build_l2_ref_args, _compare_outputs
 
 _VECTOR_KERNELS = "../vector_example/kernels"
 _REPEATED_RUNS = 4
@@ -142,12 +142,14 @@ class TestRunStreamReuseHbg(SceneTestCase):
     def _run_registered(self, worker, handle, *, subtract):
         params = self.CASES[0]["params"]
         test_args = self.generate_args(params)
-        chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
+        # Worker.run takes Tensor args and materializes them in-process; the runtime.so-ABI POD is
+        # the direct chip API's shape, used by the lease path below.
+        args, output_names = _build_l2_ref_args(test_args, self.CALLABLE["orchestration"]["signature"], worker)
         golden_args = test_args.clone()
         a, b = golden_args.a, golden_args.b
         base = a - b if subtract else a + b
         golden_args.f[:] = (base + 1) * (base + 2)
-        worker.run(handle, chip_args, config=self._build_config(self.CASES[0]["config"]))
+        worker.run(handle, args, config=self._build_config(self.CASES[0]["config"]))
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
     # The st_worker fixture is shared by every test in this class, and so is the

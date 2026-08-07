@@ -44,10 +44,10 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipStorageTaskArgs,
-    ChipTensor,
     CoreCallable,
     DataType,
+    TaskArgs,
+    TensorArgType,
 )
 from simpler.worker import Worker
 
@@ -157,25 +157,25 @@ def _run_one(worker: Worker, chip_handle, label: str, ring: Optional[dict]) -> N
     expected = host_a + host_b
     host_out = torch.zeros(N_ROWS, N_COLS, dtype=torch.float32)
 
-    dev_a = worker.malloc(NBYTES)
-    dev_b = worker.malloc(NBYTES)
-    dev_out = worker.malloc(NBYTES)
-    worker.copy_to(dev_a, host_a.data_ptr(), NBYTES)
-    worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
+    a_h = worker.malloc(NBYTES)
+    b_h = worker.malloc(NBYTES)
+    out_h = worker.malloc(NBYTES)
+    worker.copy_to(a_h, host_a)
+    worker.copy_to(b_h, host_b)
 
-    args = ChipStorageTaskArgs()
-    args.add_tensor(ChipTensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-    args.add_tensor(ChipTensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-    args.add_tensor(ChipTensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+    args = TaskArgs()
+    args.add_tensor(a_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+    args.add_tensor(b_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+    args.add_tensor(out_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
 
     config = _make_config(ring)
     print(f"[per_task_runtime_env] run '{label}': runtime_env={config.runtime_env!r}")
     worker.run(chip_handle, args, config)
 
-    worker.copy_from(host_out.data_ptr(), dev_out, NBYTES)
-    worker.free(dev_a)
-    worker.free(dev_b)
-    worker.free(dev_out)
+    worker.copy_from(host_out, out_h)
+    worker.free(a_h)
+    worker.free(b_h)
+    worker.free(out_h)
 
     assert torch.allclose(host_out, expected, rtol=1e-5, atol=1e-5), f"{label} result mismatch"
     print(f"[per_task_runtime_env] '{label}' golden check PASSED")

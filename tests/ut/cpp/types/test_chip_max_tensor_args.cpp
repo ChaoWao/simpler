@@ -80,23 +80,3 @@ TEST(ChipMaxTensorArgs, ChipStorageRejectsOverflow) {
     }
     EXPECT_THROW(args.add_tensor(make_tensor(0xDEAD)), std::out_of_range);
 }
-
-TEST(ChipMaxTensorArgs, ViewToChipStorageAcceptsCap) {
-    std::vector<ChipTensor> tensors;
-    tensors.reserve(CHIP_MAX_TENSOR_ARGS);
-    for (int i = 0; i < CHIP_MAX_TENSOR_ARGS; ++i) {
-        tensors.push_back(make_tensor(static_cast<uint64_t>(0x2000 + i)));
-    }
-    TaskArgsView view{CHIP_MAX_TENSOR_ARGS, 0, reinterpret_cast<const uint8_t *>(tensors.data()), nullptr};
-
-    ChipStorageTaskArgs chip;
-    ASSERT_NO_THROW(chip = view_to_chip_storage(view));
-    EXPECT_EQ(chip.tensor_count(), CHIP_MAX_TENSOR_ARGS);
-    EXPECT_EQ(chip.tensor(CHIP_MAX_TENSOR_ARGS - 1).buffer.addr, 0x2000u + CHIP_MAX_TENSOR_ARGS - 1);
-}
-
-TEST(ChipMaxTensorArgs, ViewToChipStorageRejectsOverflow) {
-    std::vector<ChipTensor> tensors(CHIP_MAX_TENSOR_ARGS + 1, make_tensor(0));
-    TaskArgsView view{CHIP_MAX_TENSOR_ARGS + 1, 0, reinterpret_cast<const uint8_t *>(tensors.data()), nullptr};
-    EXPECT_THROW(view_to_chip_storage(view), std::out_of_range);
-}

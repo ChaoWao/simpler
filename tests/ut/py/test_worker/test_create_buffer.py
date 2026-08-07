@@ -21,7 +21,7 @@ import threading
 
 import pytest
 from simpler.buffer import AddressSpace, BackendKind, mint_owner_instance_id
-from simpler.worker import Worker
+from simpler.worker import Worker, _NoBufferConsumerError
 
 
 def _bare_worker(level: int, *, chip: int = 0, sub: int = 0, next_level: int = 0) -> Worker:
@@ -72,6 +72,14 @@ def test_childless_l3_plus_is_refused():
     assert not w._buffers
 
 
+def test_the_childless_refusal_carries_its_own_type():
+    # The remote L3 runner catches exactly this refusal to supply a session-scoped backing instead,
+    # so it has to stay distinguishable from every other way create_buffer fails.
+    w = _bare_worker(3)
+    with pytest.raises(_NoBufferConsumerError):
+        w._create_buffer_locked(64)
+
+
 def test_l2_leaf_needs_no_child():
     # An L2 leaf materializes in-process, so it has nothing to hand the backing to and needs no child.
     w = _bare_worker(2)
@@ -108,6 +116,40 @@ def test_release_all_buffers_unlinks_and_empties_the_registry():
     w._create_buffer_locked(32)
     w._release_all_buffers()
     assert not w._buffers
+
+
+def test_release_buffer_drops_only_its_own_entry():
+    w = _bare_worker(2)
+    try:
+        keep = w._create_buffer_locked(32)
+        drop = w._create_buffer_locked(32)
+        w._release_buffer(drop)
+        assert drop.shm is None
+        assert list(w._buffers.values()) == [keep]
+        # A second release of the same buffer is a no-op, not a KeyError on the registry.
+        w._release_buffer(drop)
+        assert list(w._buffers.values()) == [keep]
+    finally:
+        _drain(w)
+
+
+def test_release_buffer_keeps_the_entry_when_close_fails():
+    # Same discipline as _release_all_buffers: a close that fails leaves the entry behind so the
+    # leak is still reported at close() instead of being dropped here.
+    w = _bare_worker(2)
+    bad = w._create_buffer_locked(32)
+    bad_id = next(k for k, v in w._buffers.items() if v is bad)
+    real_close = bad.close
+
+    def boom():
+        raise OSError("close failed")
+
+    bad.close = boom  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="close failed"):
+        w._release_buffer(bad)
+    assert bad_id in w._buffers
+    bad.close = real_close  # type: ignore[method-assign]
+    _drain(w)
 
 
 def test_release_all_buffers_reports_the_failure_and_keeps_the_entry():

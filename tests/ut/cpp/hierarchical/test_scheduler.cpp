@@ -68,7 +68,7 @@
 struct MockMailboxWorker {
     struct Record {
         uint8_t callable_hash0;
-        uint64_t tensor_key;  // first tensor's `data` field (unique per submit in tests)
+        uint64_t tensor_key;  // first tensor's identity buffer_id (unique per submit in tests)
     };
 
     alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
@@ -196,15 +196,13 @@ private:
                 const bool progress_frame = task_state == MailboxState::TASK_READY;
                 char *frame = progress_frame ? task_frame() : mailbox.data();
                 uint8_t callable_hash0 = static_cast<uint8_t>(frame[MAILBOX_OFF_TASK_CALLABLE_HASH]);
-                int32_t t_count = 0;
-                std::memcpy(&t_count, frame + MAILBOX_OFF_TASK_ARGS_BLOB, sizeof(int32_t));
+                // The frame carries the wire blob, so decode it the way a real child does.
+                TaskArgsView view = read_blob(
+                    reinterpret_cast<const uint8_t *>(frame) + MAILBOX_OFF_TASK_ARGS_BLOB, MAILBOX_ARGS_CAPACITY
+                );
                 uint64_t tensor_key = 0;
-                if (t_count > 0) {
-                    ChipTensor first{};
-                    std::memcpy(
-                        &first, frame + MAILBOX_OFF_TASK_ARGS_BLOB + TASK_ARGS_BLOB_HEADER_SIZE, sizeof(ChipTensor)
-                    );
-                    tensor_key = first.buffer.addr;
+                if (view.tensor_count > 0) {
+                    tensor_key = view.tensors(0).buffer.identity.buffer_id;
                 }
                 {
                     std::lock_guard<std::mutex> lk(dispatched_mu);
@@ -601,13 +599,33 @@ static bool poll_until(WorkerEndpoint &endpoint, WorkerEndpointProgress &progres
 // Helper: build a TaskArgs whose only tensor has the given (data, tag).
 // ---------------------------------------------------------------------------
 
-static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
-    TaskArgs a;
-    ChipTensor t{};
-    t.buffer.addr = data_ptr;
+// A valid wire Tensor over a 1-byte POSIX_SHM backing, keyed by `buffer_id`. The dispatch path
+// decodes it with TaskArgsView::tensors, which validates every element, so the descriptor must be
+// well-formed (magic, non-zero generation, strides, an extent that fits the backing).
+static Tensor wire_tensor(uint64_t buffer_id) {
+    Tensor t{};
+    t.buffer.magic = BUFFER_DESCRIPTOR_MAGIC;
+    t.buffer.address_space = static_cast<uint8_t>(AddressSpace::HOST);
+    t.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    t.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    t.buffer.nbytes = 1;
+    t.buffer.identity.buffer_id = buffer_id;
+    t.buffer.identity.generation = 1;
+    // A POSIX_SHM descriptor names its backing; nothing here opens it, but the wire schema requires
+    // the name to be present and printable, and every element a TaskArgsView hands out is validated.
+    const std::string shm_name = "psm_sched_" + std::to_string(buffer_id);
+    t.buffer.body_len = static_cast<uint16_t>(shm_name.size());
+    std::memcpy(t.buffer.body, shm_name.data(), shm_name.size());
     t.ndims = 1;
     t.shapes[0] = 1;
+    t.strides[0] = 1;
     t.dtype = DataType::UINT8;
+    return t;
+}
+
+static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
+    TaskArgs a;
+    Tensor t = wire_tensor(data_ptr);
     a.add_tensor(t, tag);
     return a;
 }
@@ -2306,11 +2324,7 @@ TEST_F(SchedulerFixture, ComposedKernelArgsBlobFitsMailbox) {
 
     TaskArgs args;
     for (int i = 0; i < 76; ++i) {
-        ChipTensor t{};
-        t.buffer.addr = 0x1000u + static_cast<uint64_t>(i) * 0x100u;
-        t.ndims = 1;
-        t.shapes[0] = 1;
-        t.dtype = DataType::UINT8;
+        Tensor t = wire_tensor(0x1000u + static_cast<uint64_t>(i) * 0x100u);
         args.add_tensor(t, TensorArgType::OUTPUT);
     }
     args.add_scalar(1);
@@ -3294,11 +3308,7 @@ TEST_F(GroupSchedulerFixture, APoisonThatLandsMidSubmitLeavesThePropagationToSub
 
     TaskArgs consumer_args;
     for (uint64_t key : {0xF100ULL, 0xB200ULL}) {
-        ChipTensor t{};
-        t.buffer.addr = key;
-        t.ndims = 1;
-        t.shapes[0] = 1;
-        t.dtype = DataType::UINT8;
+        Tensor t = wire_tensor(key);
         consumer_args.add_tensor(t, TensorArgType::INPUT);
     }
 
@@ -3455,11 +3465,7 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
 
 TEST_F(GroupSchedulerFixture, RemoteSidecarRejectsLocalEndpointEligibility) {
     TaskArgs args;
-    ChipTensor tensor{};
-    tensor.buffer.addr = 0;
-    tensor.ndims = 1;
-    tensor.shapes[0] = 1;
-    tensor.dtype = DataType::UINT8;
+    Tensor tensor = wire_tensor(0);
     args.add_tensor(tensor, TensorArgType::OUTPUT);
 
     RemoteTaskArgsSidecar sidecar;

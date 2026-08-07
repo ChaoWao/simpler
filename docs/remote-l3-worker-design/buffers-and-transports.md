@@ -145,9 +145,11 @@ Endpoint rules:
   addresses never cross the remote protocol.
 - A remote tensor with `child_memory=True` and no sidecar is invalid. Local
   child-memory pointers are meaningful only inside fork/shm topology.
-- The remote session runner translates each `RemoteTensorDesc` into a local
-  `ChipTensor` and fills `data` from its validated local mapping
-  immediately before invoking `inner_worker.run()`.
+- The remote session runner translates each `RemoteTensorDesc` into a wire
+  `Tensor` over the backing its validated local mapping names, immediately
+  before invoking `inner_worker.run()`. A `HOST_INLINE` payload has no
+  standing backing, so the runner mints a session-scoped POSIX-shm `Buffer`
+  for it, copies the payload in, and releases it once the run returns.
 
 ## Remote OUTPUT Allocation Policy
 

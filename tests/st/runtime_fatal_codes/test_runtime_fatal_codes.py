@@ -31,7 +31,7 @@ Two host behaviours are exercised, because they genuinely differ:
 import os
 
 import pytest
-from simpler.task_interface import ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs, CoreCallable
+from simpler.task_interface import ArgDirection, CallConfig, ChipCallable, CoreCallable
 from simpler.worker import Worker
 
 from simpler_setup.elf_parser import extract_text_section
@@ -298,7 +298,7 @@ def test_fatal_code_surfaces_on_sim(st_platform, st_device_ids, case_name, monke
     worker, handle, config = _make_worker(st_platform, int(st_device_ids[0]), case_name, monkeypatch)
     try:
         with pytest.raises(RuntimeError, match=rf"(run_runtime|run) failed with code -{case['code']}\b"):
-            worker.run(handle, ChipStorageTaskArgs(), config)
+            worker.run(handle, None, config)
         captured = capfd.readouterr()
         log = captured.err + captured.out
         assert case["marker"] in log, f"missing '{case['marker']}' in host log"
@@ -322,7 +322,7 @@ def test_device_error_class_reaches_host_log(st_platform, st_device_ids, case_na
         # CANN 507xxx instead of the runtime's own -N; we only require that the
         # run fails. The point of the test is the device-classified host LOG.
         with pytest.raises(RuntimeError):
-            worker.run(handle, ChipStorageTaskArgs(), config)
+            worker.run(handle, None, config)
         captured = capfd.readouterr()
         log = captured.err + captured.out
         assert case["marker"] in log, f"device error class '{case['marker']}' not in host log"

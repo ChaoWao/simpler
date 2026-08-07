@@ -358,7 +358,7 @@ class TestJournalRetryOnClose:
             ("_cleanup_worker_chip_regions", "region"),
             ("_release_all_live_domains", "domain"),
             ("_flush_pending_remote_frees", "remote"),
-            ("_release_all_host_buffers", "host-buffer"),
+            ("_release_all_buffers", "buffer"),
         ],
     )
     def test_both_teardown_paths_retry_each_resource_class(self, monkeypatch, startup_abort, method_name, kind):

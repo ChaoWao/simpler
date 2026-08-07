@@ -47,7 +47,6 @@ from simpler.task_interface import (  # noqa: E402
     CallConfig,
     ChipCallable,
     ChipDomainContext,
-    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
@@ -60,6 +59,8 @@ from simpler_setup.elf_parser import extract_text_section  # noqa: E402
 from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
 from simpler_setup.torch_interop import make_tensor_arg  # noqa: E402
+
+_F32 = DataType.FLOAT32
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -163,15 +164,7 @@ def _scratch_buffers() -> list[CommBufferSpec]:
 
 
 def _add_domain_scratch(args: TaskArgs, domain: ChipDomainContext) -> None:
-    args.add_tensor(
-        ChipTensor.make(
-            data=domain.buffer_ptrs["scratch"],
-            shapes=(COUNT,),
-            dtype=DataType.FLOAT32,
-            child_memory=True,
-        ),
-        TensorArgType.INOUT,
-    )
+    args.add_tensor(domain.buffers["scratch"].tensor((COUNT,), _F32), TensorArgType.INOUT)
     args.add_scalar(domain.domain_size)
     args.add_scalar(domain.device_ctx)
 
@@ -223,12 +216,12 @@ def run(platform: str, device_ids: list[int]) -> int:
                         print(
                             f"[dual_domain_overlap] {domain_name} chip {worker_idx}: "
                             f"rank={domain.domain_rank}/{domain.domain_size} "
-                            f"scratch=0x{domain.buffer_ptrs['scratch']:x} ctx=0x{domain.device_ctx:x}"
+                            f"scratch=0x{domain.buffers['scratch'].base:x} ctx=0x{domain.device_ctx:x}"
                         )
                         args = TaskArgs()
-                        args.add_tensor(make_tensor_arg(host_x[worker_idx]), TensorArgType.INPUT)
+                        args.add_tensor(make_tensor_arg(worker, host_x[worker_idx]), TensorArgType.INPUT)
                         args.add_tensor(
-                            make_tensor_arg(reduce_out[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING
+                            make_tensor_arg(worker, reduce_out[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING
                         )
                         _add_domain_scratch(args, domain)
                         args_list.append(args)
@@ -241,10 +234,12 @@ def run(platform: str, device_ids: list[int]) -> int:
                 args_list = []
                 for worker_idx in worker_indices:
                     args = TaskArgs()
-                    args.add_tensor(make_tensor_arg(reduce_out[domain_name][worker_idx]), TensorArgType.INPUT)
-                    args.add_tensor(make_tensor_arg(scale[worker_idx]), TensorArgType.INPUT)
-                    args.add_tensor(make_tensor_arg(bias[worker_idx]), TensorArgType.INPUT)
-                    args.add_tensor(make_tensor_arg(affine_out[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(make_tensor_arg(worker, reduce_out[domain_name][worker_idx]), TensorArgType.INPUT)
+                    args.add_tensor(make_tensor_arg(worker, scale[worker_idx]), TensorArgType.INPUT)
+                    args.add_tensor(make_tensor_arg(worker, bias[worker_idx]), TensorArgType.INPUT)
+                    args.add_tensor(
+                        make_tensor_arg(worker, affine_out[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING
+                    )
                     args_list.append(args)
                 orch.submit_next_level_group(affine_handle, args_list, cfg, workers=worker_indices)
 

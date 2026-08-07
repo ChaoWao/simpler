@@ -73,12 +73,6 @@ inline constexpr uint32_t DESC_MAX_BYTES = 32;
 // a shorter body reads as a truncated pointer indistinguishable from a real one.
 inline constexpr uint32_t BACKEND_ADDRESS_BODY_BYTES = 8;
 
-// Memory space of a backing. Orthogonal to location (local/remote, derived) and to visibility.
-enum class AddressSpace : uint8_t {
-    HOST = 0,
-    DEVICE = 1,
-};
-
 // The backing's granted permission. A per-arg TensorArgType requests read/write and is validated
 // against this at submit (requested must be a subset of granted).
 enum class AccessMode : uint8_t {

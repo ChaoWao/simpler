@@ -404,12 +404,15 @@ TaskArgs scalar_args() {
 
 TaskArgs bare_pointer_args() {
     TaskArgs args;
-    ChipTensor tensor{};
-    tensor.buffer.addr = 0x1234;
-    tensor.ndims = 1;
-    tensor.shapes[0] = 1;
-    tensor.dtype = DataType::UINT8;
-    args.add_tensor(tensor, TensorArgType::INPUT);
+    Tensor ref{};
+    ref.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    ref.buffer.nbytes = 1;  // a local backing without a remote sidecar -> rejected by the remote endpoint
+    ref.buffer.identity.buffer_id = 0x1234;
+    ref.ndims = 1;
+    ref.shapes[0] = 1;
+    ref.strides[0] = 1;
+    ref.dtype = DataType::UINT8;
+    args.add_tensor(ref, TensorArgType::INPUT);
     return args;
 }
 
@@ -795,15 +798,15 @@ TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsRejectedAtSubmission) {
 
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
-    // Encoding happens while publishing, so an unsidecar'd bare host pointer is
+    // Encoding happens while publishing, so an unsidecar'd local backing is
     // rejected at submission rather than reported as a completion. Match the
     // message: submit_progress has several other runtime_error paths, and a
     // bare EXPECT_THROW would pass on any of them.
     try {
         endpoint.submit_progress(&ring, dispatch);
-        ADD_FAILURE() << "expected the bare host pointer to be rejected";
+        ADD_FAILURE() << "expected the local backing to be rejected";
     } catch (const std::runtime_error &e) {
-        EXPECT_NE(std::string(e.what()).find("bare host pointer"), std::string::npos) << e.what();
+        EXPECT_NE(std::string(e.what()).find("local backing"), std::string::npos) << e.what();
     }
     EXPECT_TRUE(transport->last_frame.empty());
     ring.shutdown();

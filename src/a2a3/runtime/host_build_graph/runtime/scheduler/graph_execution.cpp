@@ -475,7 +475,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
                     rebound.owner_task_id = boundary.owner_task_id;
                     rebound.start_offset = boundary.start_offset + ref.packed_offset;
                     rebound.version = boundary.version;
-                    rebound.child_memory = boundary.child_memory;
+                    rebound.address_space = boundary.address_space;
                     patch.source = static_cast<uint8_t>(GraphTensorAddressSource::BOUNDARY);
                     patch.source_index = ref.source_index;
                 } else if (ref.source == static_cast<uint8_t>(GraphTensorSource::INTERNAL) ||

@@ -85,7 +85,7 @@ public:
     DataType dtype;
     bool manual_dep;
     bool is_contiguous;                // Always true for create-info outputs
-    uint8_t __pad_flags__;             // → ChipTensor::child_memory (always 0 for create-info outputs)
+    uint8_t __pad_flags__;             // → ChipTensor::address_space (always HOST for create-info outputs)
     uint32_t shapes[MAX_TENSOR_DIMS];  // → ChipTensor::shapes
 
     TensorCreateInfo() = default;
@@ -99,7 +99,7 @@ static_assert(offsetof(TensorCreateInfo, ndims) == offsetof(ChipTensor, ndims));
 static_assert(offsetof(TensorCreateInfo, dtype) == offsetof(ChipTensor, dtype));
 static_assert(offsetof(TensorCreateInfo, manual_dep) == offsetof(ChipTensor, manual_dep));
 static_assert(offsetof(TensorCreateInfo, is_contiguous) == offsetof(ChipTensor, is_contiguous));
-static_assert(offsetof(TensorCreateInfo, __pad_flags__) == offsetof(ChipTensor, child_memory));
+static_assert(offsetof(TensorCreateInfo, __pad_flags__) == offsetof(ChipTensor, address_space));
 static_assert(offsetof(TensorCreateInfo, shapes) == offsetof(ChipTensor, shapes));
 
 // ============================================================================

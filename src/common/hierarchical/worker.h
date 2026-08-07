@@ -182,6 +182,32 @@ public:
     }
     void remote_release_import(const RemoteBufferHandle &handle) { manager_.control_remote_release_import(handle); }
 
+    // Device memory on a next-level worker. The Worker is the sole owner of buffer lifecycle; the
+    // Python Orchestrator's malloc/free/copy are thin wrappers that route back here. Each resolves
+    // the target worker thread and forwards to its control-plane op (CTRL_MALLOC / FREE / COPY).
+    uint64_t malloc(int worker_id, size_t size) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::malloc: invalid worker_id");
+        return wt->control_malloc(size);
+    }
+    void free(int worker_id, uint64_t ptr) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::free: invalid worker_id");
+        wt->control_free(ptr);
+    }
+    // Both ends of a copy are handles: the child resolves each descriptor through its
+    // ImportRegistry, so neither side is described by an address the parent minted.
+    void copy_to(int worker_id, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::copy_to: invalid worker_id");
+        wt->control_copy_to(dst, src, nbytes);
+    }
+    void copy_from(int worker_id, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::copy_from: invalid worker_id");
+        wt->control_copy_from(dst, src, nbytes);
+    }
+
     // Broadcast CTRL_REGISTER / CTRL_UNREGISTER for a ChipCallable digest to
     // every NEXT_LEVEL child in parallel. `blob_ptr`/`blob_size` describe
     // the contiguous ChipCallable bytes (see PyChipCallable::buffer_ptr /

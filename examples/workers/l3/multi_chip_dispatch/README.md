@@ -93,14 +93,14 @@ returns, 4 processes are alive: parent, sub, chip 0, chip 1.
 def orch_fn(orch, _args, cfg):
     for i in range(len(device_ids)):
         chip_args = TaskArgs()
-        chip_args.add_tensor(make_tensor_arg(host_a[i]),   TensorArgType.INPUT)
-        chip_args.add_tensor(make_tensor_arg(host_b[i]),   TensorArgType.INPUT)
-        chip_args.add_tensor(make_tensor_arg(host_out[i]), TensorArgType.OUTPUT_EXISTING)
+        chip_args.add_tensor(make_chip_tensor_arg(host_a[i]),   TensorArgType.INPUT)
+        chip_args.add_tensor(make_chip_tensor_arg(host_b[i]),   TensorArgType.INPUT)
+        chip_args.add_tensor(make_chip_tensor_arg(host_out[i]), TensorArgType.OUTPUT_EXISTING)
         orch.submit_next_level(chip_handle, chip_args, cfg, worker=i)
 
     sub_args = TaskArgs()
     for i in range(len(device_ids)):
-        sub_args.add_tensor(make_tensor_arg(host_out[i]), TensorArgType.INPUT)
+        sub_args.add_tensor(make_chip_tensor_arg(host_out[i]), TensorArgType.INPUT)
     orch.submit_sub(sub_handle, sub_args)
 ```
 

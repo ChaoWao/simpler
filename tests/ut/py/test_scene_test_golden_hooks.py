@@ -52,7 +52,7 @@ def _drive(inst, case, *, cli_skip=False):
     """Run one case through the L2 path with the device-touching steps stubbed."""
     inst._st_level = 2
     with (
-        patch.object(_SCENE_TEST_MOD, "_build_chip_task_args", return_value=(object(), list(_OUTPUT_NAMES))),
+        patch.object(_SCENE_TEST_MOD, "_build_l2_ref_args", return_value=(object(), list(_OUTPUT_NAMES))),
         patch.object(type(inst), "_build_config", return_value=object()),
     ):
         inst._run_and_validate_l2(MagicMock(), object(), case, skip_golden=cli_skip)

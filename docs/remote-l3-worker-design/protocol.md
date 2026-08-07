@@ -107,11 +107,14 @@ solely over the local fork/shm mailbox blob (full 128 B `ChipTensor` memcpy).
 `encode_tensor` asserts `is_contiguous && start_offset == 0` so a strided
 tensor fails loudly rather than being silently flattened.
 
-The session runner decodes these wire records into local `CallConfig` and
-`ChipTensor` values before calling `inner_worker.run()`. For tensors with
-a remote descriptor, the runner fills the local `ChipTensor.data` from
-its buffer/import registry after validating the descriptor. Local ABI structs
-therefore remain the in-process execution ABI, not the remote transport ABI.
+The session runner decodes these wire records into a local `CallConfig` and a
+wire `TaskArgs` before calling `inner_worker.run()`. Each tensor becomes a
+`Tensor` over a backing the runner holds: the validated descriptor selects the
+entry in its buffer/import registry, and an interior range becomes the view's
+`byte_offset` over that whole backing rather than a second identity. An
+orchestration function therefore receives the same container at a remote L3 as
+at any other level and forwards its args to a child unchanged; the
+`ChipTensor` conversion happens where it does everywhere else, at the L2 leaf.
 
 ## HELLO Payload
 
@@ -158,8 +161,8 @@ A TASK frame always resolves `callable_hash_digest` in the remote TASK
 dispatcher registry. The dispatcher is not a Worker: it resolves the digest to
 its private orchestration callable slot, materializes the remote arguments, and
 then invokes the embedded `inner_worker = Worker(level=3)`. The endpoint uses
-the sidecar descriptors captured at submit time to materialize local
-`ChipTensor` values on the session runner.
+the sidecar descriptors captured at submit time to name, on the session runner,
+the local backings the wire `TaskArgs` views.
 
 The current `RemoteL3Endpoint` implementation builds this payload from
 `TaskSlotState`, zeros every tensor metadata `data` field, and submits the
@@ -218,9 +221,9 @@ RemoteTensorDescWire:
 
 Rules:
 
-- `ChipTensor` remains the L2 ABI. The session runner translates
-  descriptors into local `ChipTensor` values immediately before
-  `inner_worker.run()`.
+- `ChipTensor` remains the L2 ABI. The session runner translates descriptors
+  into wire `Tensor` args immediately before `inner_worker.run()`; the L2 leaf
+  under it materializes those into `ChipTensor` as it does on every path.
 - When a descriptor is present, the incoming `TensorWire.data` is
   reserved and must be zero. The session runner derives the executable local
   address only from the validated descriptor and its live buffer/import

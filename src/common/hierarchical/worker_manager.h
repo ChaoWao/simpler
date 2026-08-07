@@ -39,6 +39,7 @@
 #include <queue>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -87,8 +88,8 @@ bool mailbox_compare_exchange_state(char *frame, MailboxState expected, MailboxS
 
 // Sized so the args region can hold any TaskArgs the runtime itself accepts
 // (CHIP_MAX_TENSOR_ARGS tensors + CHIP_MAX_SCALAR_ARGS scalars; see the
-// static_assert after MAILBOX_ARGS_CAPACITY). At the 256-tensor cap, tensors
-// occupy 32 KiB of the 64 KiB frame and leave room for scalars and protocol metadata.
+// static_assert after MAILBOX_ARGS_CAPACITY). At the 256-tensor cap, wire tensors
+// occupy 36 KiB of the 64 KiB frame and leave room for scalars and protocol metadata.
 static constexpr size_t MAILBOX_FRAME_SIZE = 65536;
 static constexpr size_t MAILBOX_TASK_FRAME_COUNT = 2;
 static constexpr size_t MAILBOX_CONTROL_FRAME = 0;
@@ -163,26 +164,22 @@ static_assert(
 // the args region a task frame accepts can never reach it.
 static constexpr size_t MAILBOX_ARGS_CAPACITY =
     static_cast<size_t>(MAILBOX_OFF_SHUTDOWN) - static_cast<size_t>(MAILBOX_OFF_TASK_ARGS_BLOB);
-static_assert(
-    MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE +
-                                 static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(ChipTensor) +
-                                 static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
-    "mailbox args region must hold the largest TaskArgs blob the runtime accepts (issue #1024)"
-);
-// The same bound against the wire element. `Tensor` is 144 B where `ChipTensor` is 128 B, so the
-// assert above does not cover it: the wire cutover swaps the blob's element without touching either
-// cap, and the region only has to grow by 16 B x 256 for the frame to overflow. Asserting it here
-// means a frozen descriptor size and a frame size that cannot hold 256 of them fail the build rather
-// than the first 256-tensor task.
+// The blob's element is the wire `Tensor` (144 B), not the device `ChipTensor` (128 B), so a frozen
+// descriptor size and a frame size that cannot hold CHIP_MAX_TENSOR_ARGS of them fail the build
+// rather than the first 256-tensor task.
 static_assert(
     MAILBOX_ARGS_CAPACITY >= TASK_ARGS_BLOB_HEADER_SIZE + static_cast<size_t>(CHIP_MAX_TENSOR_ARGS) * sizeof(Tensor) +
                                  static_cast<size_t>(CHIP_MAX_SCALAR_ARGS) * sizeof(uint64_t),
-    "mailbox args region must hold 256 wire Tensors, the element the blob carries after the cutover"
+    "mailbox args region must hold the largest args blob the runtime accepts (issue #1024)"
 );
 
 // Control sub-commands (written at MAILBOX_OFF_CALLABLE when state == CONTROL_*)
 static constexpr uint64_t CTRL_MALLOC = 0;
 static constexpr uint64_t CTRL_FREE = 1;
+// Host<->device copy. Both ends are handles: the payload is a ControlCopyRequest at
+// MAILBOX_OFF_ARGS, and the child resolves each descriptor through the same ImportRegistry that
+// resolves task arguments, so a backing is reached by canonical identity and never by an address
+// minted in the parent's address space.
 static constexpr uint64_t CTRL_COPY_TO = 2;
 static constexpr uint64_t CTRL_COPY_FROM = 3;
 // Pre-warm a chip child by callable digest; issued at end of init() so the
@@ -216,13 +213,9 @@ static constexpr uint64_t CTRL_WORKER_CHIP_REGION_RELEASE = 17;
 static constexpr uint64_t CTRL_COMMITTED_DEVICE_MEMORY = 18;
 
 // Control args occupy the base frame's config-sized region:
-//   offset 16: uint64 arg0 (size for malloc/register; ptr for free; dst for copy)
-//   offset 24: uint64 arg1 (src for copy)
-//   offset 32: uint64 arg2 (nbytes for copy)
+//   offset 16: uint64 arg0 (size for malloc/register; ptr for free; region id for region release)
 //   offset 40: uint64 result (returned ptr from malloc)
 static constexpr ptrdiff_t CTRL_OFF_ARG0 = 16;
-static constexpr ptrdiff_t CTRL_OFF_ARG1 = 24;
-static constexpr ptrdiff_t CTRL_OFF_ARG2 = 32;
 static constexpr ptrdiff_t CTRL_OFF_RESULT = 40;
 
 // CTRL_REGISTER puts the NUL-terminated POSIX shm name at MAILBOX_OFF_ARGS,
@@ -230,6 +223,41 @@ static constexpr ptrdiff_t CTRL_OFF_RESULT = 40;
 // immediately after the shm-name slot.
 // Fixed-width so the wire layout stays simple; well above the encoded length
 // of "simpler-cb-<pid>-<counter>" with pid < 32-bit max.
+
+// CTRL_COPY_TO / CTRL_COPY_FROM payload, written at MAILBOX_OFF_ARGS on the control frame. `dst`
+// and `src` are in the direction the sub-command names, matching ChipWorker::copy_to /
+// copy_from(dst, src, nbytes); which of the two is the device end follows from the sub-command.
+// `nbytes` travels with the pair it bounds, so the length can never be read from a slot a different
+// sub-command last wrote.
+struct ControlCopyRequest {
+    BufferDescriptor dst;
+    BufferDescriptor src;
+    uint64_t nbytes;
+};
+
+static_assert(std::is_trivially_copyable_v<ControlCopyRequest> && std::is_standard_layout_v<ControlCopyRequest>);
+static_assert(
+    MAILBOX_OFF_ARGS + static_cast<ptrdiff_t>(sizeof(ControlCopyRequest)) <= MAILBOX_OFF_SHUTDOWN,
+    "control copy request overflows the control frame's args region"
+);
+
+inline void write_control_copy_request(
+    char *mbox, uint64_t sub_cmd, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes
+) {
+    std::memcpy(mbox + MAILBOX_OFF_CALLABLE, &sub_cmd, sizeof(uint64_t));
+    ControlCopyRequest request{dst, src, nbytes};
+    std::memcpy(mbox + MAILBOX_OFF_ARGS, &request, sizeof(request));
+}
+
+// Both descriptors pass `validate_buffer_descriptor` before the child can act on them, so a
+// malformed or over-long backend body is refused at the same gate a task-args decode uses.
+inline ControlCopyRequest read_control_copy_request(const char *mbox) {
+    ControlCopyRequest request{};
+    std::memcpy(&request, mbox + MAILBOX_OFF_ARGS, sizeof(request));
+    validate_buffer_descriptor(request.dst);
+    validate_buffer_descriptor(request.src);
+    return request;
+}
 
 struct ControlResult {
     std::string worker_type;
@@ -305,8 +333,8 @@ public:
     virtual uint64_t control_malloc(size_t size);
     virtual uint64_t control_committed_device_memory();
     virtual void control_free(uint64_t ptr);
-    virtual void control_copy_to(uint64_t dst, uint64_t src, size_t size);
-    virtual void control_copy_from(uint64_t dst, uint64_t src, size_t size);
+    virtual void control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
+    virtual void control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
     virtual void control_prepare(const uint8_t *digest);
     virtual void control_register(const char *shm_name, size_t blob_size, const uint8_t *digest);
     virtual void control_unregister(const uint8_t *digest);
@@ -365,8 +393,8 @@ public:
     uint64_t control_malloc(size_t size) override;
     uint64_t control_committed_device_memory() override;
     void control_free(uint64_t ptr) override;
-    void control_copy_to(uint64_t dst, uint64_t src, size_t size) override;
-    void control_copy_from(uint64_t dst, uint64_t src, size_t size) override;
+    void control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) override;
+    void control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) override;
     void control_prepare(const uint8_t *digest) override;
     void control_register(const char *shm_name, size_t blob_size, const uint8_t *digest) override;
     void control_unregister(const uint8_t *digest) override;
@@ -527,8 +555,8 @@ public:
     uint64_t control_malloc(size_t size);
     uint64_t control_committed_device_memory();
     void control_free(uint64_t ptr);
-    void control_copy_to(uint64_t dst, uint64_t src, size_t size);
-    void control_copy_from(uint64_t dst, uint64_t src, size_t size);
+    void control_copy_to(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
+    void control_copy_from(const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes);
 
     // Pre-warm a chip child by triggering simpler_register_callable for the digest's
     // target-local slot via CTRL_PREPARE.
