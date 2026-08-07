@@ -131,6 +131,24 @@ from .callable_identity import (
     parse_python_callable_payload,
     parse_python_import_target,
 )
+from .comm_endpoints import (
+    DEVICE_AICORE,
+    DEVICE_AICPU,
+    HOST_CPU,
+    BackendPlan,
+    BackendResolver,
+    DefaultRegionAccessService,
+    EndpointRegistry,
+    RegionAccessService,
+    RegionLayoutSpec,
+    SingleOwner,
+    UnsupportedRegionPlan,
+    _EndpointTopologyEntry,
+    _EndpointTopologySnapshot,
+    _format_worker_path,
+    _normalize_node_identity,
+    parse_endpoint_path,
+)
 from .orchestrator import Orchestrator, _callback_run, direct_control
 from .remote_l3_protocol import HOST_TCP_TRANSPORT_PROFILE
 from .task_interface import (
@@ -3858,6 +3876,10 @@ class Worker:
         # starts the C++ scheduler; no comm work happens there.
         self._comm_base_ready: bool = False
 
+        self._endpoint_registry: EndpointRegistry | None = None
+        self._endpoint_registry_epoch: int = 0
+        self._region_access_service: RegionAccessService | None = None
+
         self._live_worker_chip_regions: list[Any] = []
         self._worker_chip_orch_comm_host_buffers: dict[int, int] = {}
 
@@ -3878,6 +3900,17 @@ class Worker:
         # (0 reserved), and the live handles this Worker owns. create_buffer allocates a handle whose
         # self-describing descriptor rides embedded in every Tensor built over it (no export
         # handshake); consumers materialize it lazily on receipt.
+        #
+        # The endpoint registry mints `EndpointIdentity.session_instance_id` from this same nonce,
+        # and the sharing is load-bearing rather than incidental: it is the key of the registry's
+        # `owner_instance_id -> owner endpoint` binding, which is the only way a consumer holding a
+        # `BufferDescriptor` can name the endpoint that minted it — the descriptor itself cannot,
+        # since the nonce is opaque, `owner_worker_path_id` is diagnostic by contract, and
+        # `address_space` does not say which card.
+        #
+        # Both identities therefore share this mint point. Moving it — to after fork/adoption, as
+        # owner-authority work requires — changes endpoint identity as well as buffer identity, so
+        # the two must move in one change.
         self._owner_instance_id: bytes = mint_owner_instance_id()
         self._buffer_id_counter: int = 1
         self._buffers: dict[int, Buffer] = {}
@@ -5156,6 +5189,117 @@ class Worker:
                 else:
                     self._lease_depth[tid] = depth
                 self._hierarchical_start_cv.notify_all()
+
+    def _invalidate_endpoint_registry(self) -> None:
+        self._endpoint_registry = None
+        self._region_access_service = None
+        self._endpoint_registry_epoch += 1
+
+    def _require_ready_for_region_planning(self, api: str = "region planning") -> None:
+        """Admit only a Worker that owns a control subtree to declare a region.
+
+        This is a control-tree visibility rule, not a capability decision: level says who may
+        *declare* a region over its own subtree, the same way it says an L4 submits only to its L3
+        children. It never decides whether two endpoints can share memory — that is deployment,
+        interconnect, backing and live attachment, none of which appear here. A level < 3 Worker has
+        no subtree to enumerate, so it has no members to name; it can still be a *member* of a
+        region its parent declares.
+
+        Lifecycle admission is deliberately absent: `_operation_lease` is the single fence for
+        READY, cleanup errors and the close race.
+        """
+        if self.level < 3:
+            raise RuntimeError(f"Worker.{api}: region planning requires a level >= 3 Worker")
+
+    def _endpoint_topology_snapshot(self) -> _EndpointTopologySnapshot:
+        self._require_ready_for_region_planning("_endpoint_topology_snapshot")
+        root_level = int(self.level)
+        root_path = _format_worker_path(root_level)
+        entries: list[_EndpointTopologyEntry] = []
+        self._append_endpoint_topology(entries, self, root_path, "local", include_self=True)
+        entries.sort(key=lambda entry: self._endpoint_topology_sort_key(entry, root_level))
+        return _EndpointTopologySnapshot(
+            root_level=root_level,
+            session_instance_id=self._owner_instance_id,
+            entries=tuple(entries),
+        )
+
+    def _append_endpoint_topology(
+        self,
+        entries: list[_EndpointTopologyEntry],
+        worker: Worker,
+        path: str,
+        node_identity: str,
+        *,
+        include_self: bool,
+    ) -> None:
+        if include_self:
+            # The Worker's own buffer-owner nonce rides along, so the registry can resolve a
+            # BufferDescriptor back to the endpoint that minted it. A remote child's nonce is
+            # minted in its own process and is deliberately left absent below.
+            entries.append(_EndpointTopologyEntry(path, HOST_CPU, node_identity, worker._owner_instance_id))
+        if int(worker.level) == 3:
+            self._append_device_endpoint_topology(entries, path, worker._config.get("device_ids", ()), node_identity)
+        for child_index, child in zip(worker._next_level_worker_ids, worker._next_level_workers):
+            child_path = _format_worker_path(int(child.level), parent_path=path, index=int(child_index))
+            self._append_endpoint_topology(entries, child, child_path, node_identity, include_self=True)
+        for child_index, spec in zip(worker._remote_worker_ids, worker._remote_worker_specs):
+            remote_path = _format_worker_path(3, parent_path=path, index=int(child_index))
+            remote_node_identity = self._node_identity_from_remote_endpoint(spec.endpoint)
+            entries.append(_EndpointTopologyEntry(remote_path, HOST_CPU, remote_node_identity))
+            self._append_device_endpoint_topology(entries, remote_path, spec.device_ids, remote_node_identity)
+
+    def _append_device_endpoint_topology(
+        self,
+        entries: list[_EndpointTopologyEntry],
+        path_to_l3: str,
+        device_ids,
+        node_identity: str,
+    ) -> None:
+        for child_index, _device_id in enumerate(tuple(device_ids)):
+            device_path = _format_worker_path(2, parent_path=path_to_l3, index=child_index)
+            entries.append(_EndpointTopologyEntry(device_path, DEVICE_AICORE, node_identity))
+            entries.append(_EndpointTopologyEntry(device_path, DEVICE_AICPU, node_identity))
+
+    def _node_identity_from_remote_endpoint(self, endpoint: str) -> str:
+        host, _port = self._parse_remote_endpoint(endpoint)
+        return _normalize_node_identity(host)
+
+    def _endpoint_topology_sort_key(self, entry: _EndpointTopologyEntry, root_level: int):
+        deployment_order = {HOST_CPU: 0, DEVICE_AICORE: 1, DEVICE_AICPU: 2}
+        return (parse_endpoint_path(entry.path, root_level=root_level).sort_key, deployment_order[entry.deployment])
+
+    def _get_endpoint_registry(self) -> EndpointRegistry:
+        self._require_ready_for_region_planning("_get_endpoint_registry")
+        registry = self._endpoint_registry
+        if registry is None:
+            registry = EndpointRegistry.from_snapshot(
+                self._endpoint_topology_snapshot(), registry_epoch=self._endpoint_registry_epoch
+            )
+            self._endpoint_registry = registry
+        return registry
+
+    def _get_region_access_service(self) -> RegionAccessService:
+        service = self._region_access_service
+        if service is None:
+            service = DefaultRegionAccessService()
+            self._region_access_service = service
+        return service
+
+    def _resolve_region_spec(self, members, topology: SingleOwner):
+        self._require_ready_for_region_planning("_resolve_region_spec")
+        with self._operation_lease("_resolve_region_spec"):
+            return self._get_endpoint_registry().resolve_region_spec(members, topology)
+
+    def _plan_region(
+        self, members, topology: SingleOwner, layout_summary: RegionLayoutSpec
+    ) -> BackendPlan | UnsupportedRegionPlan:
+        self._require_ready_for_region_planning("_plan_region")
+        with self._operation_lease("_plan_region"):
+            registry = self._get_endpoint_registry()
+            resolved = registry.resolve_region_spec(members, topology)
+            resolver = BackendResolver(registry, self._get_region_access_service())
+            return resolver.plan(resolved, layout_summary)
 
     def _register_into_snapshot_or_wait(self, reg: _CallableRegistration) -> CallableHandle | None:
         """Linearize a level>=3 register against the startup epoch.
@@ -8228,7 +8372,7 @@ class Worker:
             nbytes,
             owner_instance_id=self._owner_instance_id,
             buffer_id=buffer_id,
-            owner_worker_path=f"L{self.level}",
+            owner_worker_path=_format_worker_path(int(self.level)),
             generation=1,
         )
         with self._registry_lock:
@@ -8923,6 +9067,7 @@ class Worker:
                 # Claim: publish CLOSED (permanent admission fence) and install a
                 # fresh teardown attempt.
                 self._lifecycle = _Lifecycle.CLOSED
+                self._invalidate_endpoint_registry()
                 attempt = _CloseAttempt()
                 self._close_completion = attempt
                 self._hierarchical_start_cv.notify_all()
