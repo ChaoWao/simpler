@@ -728,7 +728,9 @@ remote_l3::TaskPayloadWire RemoteL3Endpoint::build_task_payload(const TaskSlotSt
     TaskArgsView view = slot.args_view(group_index);
     const RemoteTaskArgsSidecar &sidecar = slot.remote_sidecar_for(group_index);
     if (!sidecar.tensors.empty() && sidecar.tensors.size() != static_cast<size_t>(view.tensor_count)) {
-        throw std::runtime_error("RemoteL3Endpoint::run: remote sidecar tensor count does not match TaskArgs");
+        throw std::runtime_error(
+            "RemoteL3Endpoint::build_task_payload: remote sidecar tensor count does not match TaskArgs"
+        );
     }
     payload.args.inline_payload = sidecar.inline_payload;
     payload.args.tensor_metadata.reserve(static_cast<size_t>(view.tensor_count));
@@ -739,13 +741,19 @@ remote_l3::TaskPayloadWire RemoteL3Endpoint::build_task_payload(const TaskSlotSt
         RemoteTensorSidecar tensor_sidecar{};
         if (!sidecar.tensors.empty()) tensor_sidecar = sidecar.tensors[static_cast<size_t>(i)];
         if (tensor.buffer.addr != 0 && !tensor_sidecar.present) {
-            throw std::runtime_error("RemoteL3Endpoint::run: bare host pointer submitted without remote sidecar");
+            throw std::runtime_error(
+                "RemoteL3Endpoint::build_task_payload: bare host pointer submitted without remote sidecar"
+            );
         }
         if (tensor.is_child_memory() && !tensor_sidecar.present) {
-            throw std::runtime_error("RemoteL3Endpoint::run: child-memory tensor submitted without remote sidecar");
+            throw std::runtime_error(
+                "RemoteL3Endpoint::build_task_payload: child-memory tensor submitted without remote sidecar"
+            );
         }
         if (!tensor_sidecar.present && tensor.nbytes() != 0) {
-            throw std::runtime_error("RemoteL3Endpoint::run: tensor payload submitted without remote sidecar");
+            throw std::runtime_error(
+                "RemoteL3Endpoint::build_task_payload: tensor payload submitted without remote sidecar"
+            );
         }
         tensor.buffer.addr = 0;
         payload.args.tensor_metadata.push_back(tensor);
@@ -755,56 +763,6 @@ remote_l3::TaskPayloadWire RemoteL3Endpoint::build_task_payload(const TaskSlotSt
     for (int32_t i = 0; i < view.scalar_count; ++i)
         payload.args.scalars.push_back(view.scalars[i]);
     return payload;
-}
-
-WorkerCompletion RemoteL3Endpoint::run(Ring *ring, const WorkerDispatch &dispatch) {
-    if (ring == nullptr) throw std::invalid_argument("RemoteL3Endpoint::run: null ring");
-    TaskSlotState &slot = *ring->slot_state(dispatch.task_slot);
-
-    WorkerCompletion completion;
-    completion.task_slot = dispatch.task_slot;
-    completion.group_index = dispatch.group_index;
-
-    uint64_t sequence = 0;
-    std::unique_lock<std::mutex> command_lk(command_mu_);
-    try {
-        sequence = command_lane_.begin_command();
-        auto payload = remote_l3::encode_task_payload(build_task_payload(slot, dispatch.group_index));
-        remote_l3::FrameHeader header;
-        header.frame_type = remote_l3::FrameType::TASK;
-        header.session_id = session_id_;
-        header.worker_id = caps_.worker_id;
-        header.sequence = sequence;
-        transport_->submit_frame(remote_l3::encode_frame(header, payload));
-
-        auto reply_bytes = transport_->wait_for_reply(remote_l3::FrameType::COMPLETION, sequence);
-        auto reply = remote_l3::decode_frame(reply_bytes);
-        if (reply.header.frame_type != remote_l3::FrameType::COMPLETION) {
-            throw std::runtime_error("RemoteL3Endpoint::run: expected COMPLETION reply");
-        }
-        if (reply.header.session_id != session_id_ || reply.header.worker_id != caps_.worker_id) {
-            throw std::runtime_error("RemoteL3Endpoint::run: completion session or worker mismatch");
-        }
-        auto decoded = remote_l3::decode_completion(reply.payload.data(), reply.payload.size(), sequence);
-        command_lane_.finish_reply(sequence);
-
-        if (decoded.error_code == 0) {
-            completion.outcome = EndpointOutcome::SUCCESS;
-        } else {
-            completion.outcome = EndpointOutcome::TASK_FAILURE;
-            completion.error_message = decoded.error_message;
-        }
-    } catch (const std::exception &e) {
-        if (sequence != 0 && command_lane_.in_flight()) {
-            try {
-                command_lane_.finish_reply(sequence);
-            } catch (...) {}
-        }
-        completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
-        completion.error_message =
-            std::string("RemoteL3Endpoint::run(worker_id=") + std::to_string(caps_.worker_id) + "): " + e.what();
-    }
-    return completion;
 }
 
 void RemoteL3Endpoint::finish_progress_command(uint64_t sequence) {

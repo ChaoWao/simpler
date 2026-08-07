@@ -483,7 +483,7 @@ inline void bind_worker(nb::module_ &m) {
 
         // --- Mailbox control plane (parent side) ---
         // These hold the per-WorkerThread mailbox_mu_ inside C++, so they
-        // serialize against dispatch_process without any Python-side lock.
+        // serialize against task-frame publication without any Python-side lock.
         // Release the GIL during the spin-poll wait so other Python threads
         // (e.g. a concurrent Worker.run) can keep running.
         .def(

@@ -415,23 +415,6 @@ TaskArgs bare_pointer_args() {
 
 }  // namespace
 
-TEST(RemoteEndpoint, SuccessCompletionMapsToSuccess) {
-    Ring ring;
-    ring.init(1ULL << 20);
-    TaskSlot slot = make_slot(ring, scalar_args());
-
-    auto *transport = new FakeRemoteTransport();
-    RemoteL3Endpoint endpoint(3, 99, "fake", std::unique_ptr<RemoteL3Transport>(transport));
-
-    WorkerDispatch dispatch;
-    dispatch.task_slot = slot;
-    WorkerCompletion completion = endpoint.run(&ring, dispatch);
-
-    EXPECT_EQ(completion.outcome, EndpointOutcome::SUCCESS);
-    EXPECT_FALSE(transport->last_frame.empty());
-    ring.shutdown();
-}
-
 TEST(RemoteEndpoint, TaskDispatchUsesProgressSubmissionAndPolling) {
     Ring ring;
     ring.init(1ULL << 20);
@@ -440,7 +423,6 @@ TEST(RemoteEndpoint, TaskDispatchUsesProgressSubmissionAndPolling) {
     auto *transport = new FakeRemoteTransport();
     transport->progress_polls_before_ready = 1;
     RemoteL3Endpoint endpoint(3, 99, "fake", std::unique_ptr<RemoteL3Transport>(transport));
-    ASSERT_TRUE(endpoint.progressable());
 
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
@@ -453,6 +435,7 @@ TEST(RemoteEndpoint, TaskDispatchUsesProgressSubmissionAndPolling) {
     EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 7u);
     EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
+    EXPECT_FALSE(transport->last_frame.empty());
     ring.shutdown();
 }
 
@@ -474,10 +457,6 @@ TEST(RemoteEndpoint, ProgressStopReleasesWaitingControl) {
     EXPECT_EQ(control.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
 
     endpoint.request_progress_stop();
-    if (control.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
-        WorkerEndpointProgress progress;
-        EXPECT_TRUE(endpoint.poll_progress(progress));
-    }
     ASSERT_EQ(control.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
     EXPECT_THROW(control.get(), std::runtime_error);
     ring.shutdown();
@@ -495,10 +474,12 @@ TEST(RemoteEndpoint, RemoteTaskErrorMapsToTaskFailure) {
 
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
-    WorkerCompletion completion = endpoint.run(&ring, dispatch);
+    endpoint.submit_progress(&ring, dispatch);
 
-    EXPECT_EQ(completion.outcome, EndpointOutcome::TASK_FAILURE);
-    EXPECT_EQ(completion.error_message, "remote orch failed");
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::TASK_FAILURE);
+    EXPECT_EQ(progress.completion.error_message, "remote orch failed");
     ring.shutdown();
 }
 
@@ -804,7 +785,7 @@ TEST(RemoteSocketTransport, RuntimeWriteToStalledReaderTimesOut) {
     server.stop_and_join();
 }
 
-TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsEndpointFailure) {
+TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsRejectedAtSubmission) {
     Ring ring;
     ring.init(1ULL << 20);
     TaskSlot slot = make_slot(ring, bare_pointer_args());
@@ -814,10 +795,16 @@ TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsEndpointFailure) {
 
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
-    WorkerCompletion completion = endpoint.run(&ring, dispatch);
-
-    EXPECT_EQ(completion.outcome, EndpointOutcome::ENDPOINT_FAILURE);
-    EXPECT_NE(completion.error_message.find("bare host pointer"), std::string::npos);
+    // Encoding happens while publishing, so an unsidecar'd bare host pointer is
+    // rejected at submission rather than reported as a completion. Match the
+    // message: submit_progress has several other runtime_error paths, and a
+    // bare EXPECT_THROW would pass on any of them.
+    try {
+        endpoint.submit_progress(&ring, dispatch);
+        ADD_FAILURE() << "expected the bare host pointer to be rejected";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find("bare host pointer"), std::string::npos) << e.what();
+    }
     EXPECT_TRUE(transport->last_frame.empty());
     ring.shutdown();
 }

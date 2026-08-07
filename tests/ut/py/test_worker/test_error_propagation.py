@@ -209,12 +209,12 @@ class TestL4ChainedFailure:
         """A SentinelError in the innermost sub callable must reach the L4
         caller's run() with enough context to identify both layers.
 
-        The error first bubbles from the SubWorker through the parent's
-        dispatch_process as `std::runtime_error("sub_worker: ... SentinelError: ...")`.
+        The error first bubbles from the SubWorker through the parent's failed
+        completion as `std::runtime_error("sub_worker: ... SentinelError: ...")`.
         Inside the L3 orch fn this reaches the per-run wait, which rethrows. The L3
         child process catches that in _child_worker_loop and rewrites it
         as `child_worker level=3: RuntimeError: <original>`. The L4 parent's
-        dispatch_process rethrows again. The final string visible at the L4
+        completion path rethrows again. The final string visible at the L4
         caller contains both prefixes.
         """
 

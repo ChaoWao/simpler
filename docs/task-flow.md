@@ -538,7 +538,7 @@ Local mailbox path:
 ```text
 slot.callable.digest ─┐
 slot.config          ─┼─► memcpy into shm mailbox ─► child resolves digest
-slot.pipeline_lease  ─┤    (dispatch_process)         and runs local slot
+slot.pipeline_lease  ─┤    (submit_progress)         and runs local slot
 slot.task_args       ─┘
 ```
 

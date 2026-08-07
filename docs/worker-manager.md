@@ -141,13 +141,11 @@ private:
     std::array<LaneState, 2> lanes_;     // active and staged identities
 
     void loop();  // the sole progress owner for this endpoint
-    WorkerCompletion dispatch_process(WorkerDispatch d,
-                                      const std::function<void()> &on_accept);
 };
 ```
 
-Registered local and remote endpoints are progressable: the thread publishes
-queued work, forwards a latched activation when supported, and polls monotonic
+Every endpoint is progress-driven: the thread publishes queued work, forwards a
+latched activation when supported, and polls monotonic
 `FRAME_STAGED`, `ACCEPTED`, and `COMPLETED` events. The lane array owns task
 identity and disposition while `inflight_` independently enforces endpoint
 capacity. The forked child loop lives in Python (`_chip_process_loop`,
@@ -299,8 +297,8 @@ The parent reports `ACCEPTED` at most once per `dispatch_id`, before its termina
 completion when the real word is observed. A task that fails before launch
 still advances the run-level acceptance waiter at terminal completion so the
 waiter cannot hang, but that conservative fallback does not set the mailbox
-word. Blocking chip dispatch uses the same sticky marker. Endpoint paths with
-no earlier native marker retain completion-time acceptance.
+word. Endpoint paths with no earlier native marker retain completion-time
+acceptance.
 
 The child inherits the parent's full address space at fork time, so:
 
@@ -345,7 +343,7 @@ iteration alongside the state word.
 
 `Worker::close()` first asks the Scheduler to stop admitting dispatch, then
 calls `WorkerManager::stop_workers()` while Scheduler callbacks and worker pool
-entries are still valid. A progressable `WorkerThread` repeatedly publishes
+entries are still valid. A `WorkerThread` repeatedly publishes
 `SHUTDOWN` on the control base until its frames terminalize; the sticky
 shutdown word (section 3.4) is what makes the request itself unloseable, while
 the repetition keeps the *state* word from resting on a `CONTROL_DONE` a

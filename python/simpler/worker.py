@@ -1805,11 +1805,10 @@ def _run_mailbox_loop(
     parent_pid = os.getppid()
     liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
     shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
-    task_buf = None
-    task_state_addr = None
-    if len(buf) >= 2 * MAILBOX_FRAME_SIZE:
-        task_buf = buf[MAILBOX_FRAME_SIZE : 2 * MAILBOX_FRAME_SIZE]
-        task_state_addr = _buffer_field_addr(task_buf, _OFF_STATE)
+    # `buf` is a whole mailbox: a base frame followed by the task frames, so
+    # frame 1 always exists.
+    task_buf = buf[MAILBOX_FRAME_SIZE : 2 * MAILBOX_FRAME_SIZE]
+    task_state_addr = _buffer_field_addr(task_buf, _OFF_STATE)
     try:
         while True:
             state = _mailbox_load_i32(state_addr)
@@ -1817,16 +1816,10 @@ def _run_mailbox_loop(
                 if on_shutdown is not None:
                     on_shutdown()
                 break
-            if task_buf is not None and _mailbox_load_i32(task_state_addr) == _TASK_READY:
+            if _mailbox_load_i32(task_state_addr) == _TASK_READY:
                 code, msg = handle_task(task_buf)
                 _write_error(task_buf, code, msg)
                 _mailbox_store_i32(task_state_addr, _TASK_DONE)
-            elif state == _TASK_READY:
-                # Compatibility for a direct endpoint.run() caller. WorkerThread
-                # dispatches use the dedicated task frame.
-                code, msg = handle_task(buf)
-                _write_error(buf, code, msg)
-                _mailbox_store_i32(state_addr, _TASK_DONE)
             elif state == _CONTROL_REQUEST:
                 sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
                 code, msg = handle_control(int(sub_cmd))
@@ -1860,8 +1853,8 @@ def _sub_worker_loop(
 
     On success writes ``error=0`` and an empty message. On failure writes
     ``error=1`` and ``f"sub_worker: <ExcType>: <msg>"`` into the mailbox
-    error-message region; the parent's ``WorkerThread::dispatch_process``
-    rethrows it as ``std::runtime_error``.
+    error-message region; the parent's endpoint reports it as a failed
+    completion, which the run's waiter rethrows as ``std::runtime_error``.
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
