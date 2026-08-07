@@ -8,8 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#ifndef SCHEDULER_TYPES_H
-#define SCHEDULER_TYPES_H
+#pragma once
 
 #include <atomic>
 #include <cstddef>
@@ -504,7 +503,6 @@ struct SlotTransition {
 struct alignas(64) SchedChipSwimlaneCounters {
     bool chip_swimlane_enabled{false};
     uint64_t sched_start_ts{0};
-    uint64_t sched_scan_cycle{0};
     uint64_t sched_complete_cycle{0};
     uint64_t sched_dispatch_cycle{0};
     uint64_t sched_idle_cycle{0};
@@ -565,5 +563,3 @@ inline uint64_t sync_start_drain_next_attempt(uint64_t attempt) {
 inline uint64_t sync_start_drain_ack_subtree_token(uint64_t attempt) {
     return attempt | SYNC_START_DRAIN_ACK_SUBTREE_READY;
 }
-
-#endif  // SCHEDULER_TYPES_H

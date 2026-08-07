@@ -78,7 +78,7 @@ extern "C" void framework_bind_runtime(PTO2Runtime *rt);
 constexpr const char *DEFAULT_ORCH_ENTRY_SYMBOL = "aicpu_orchestration_entry";
 constexpr const char *DEFAULT_ORCH_CONFIG_SYMBOL = "aicpu_orchestration_config";
 
-static int32_t read_pto2_runtime_status(Runtime *runtime) {
+static int32_t read_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
         return 0;
     }
@@ -505,7 +505,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         uint64_t orch_cycle_start = 0;
 #endif
 #if SIMPLER_ORCH_PROFILING
-        int32_t pto2_submitted_tasks = -1;
+        int32_t submitted_tasks = -1;
 #endif
         // Orchestrator thread: load + run the device orchestration SO. The braces
         // scope the per-callable dlopen / SO-table locals to this block.
@@ -803,7 +803,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             }
 
 #if SIMPLER_ORCH_PROFILING
-            pto2_submitted_tasks = total_tasks;
+            submitted_tasks = total_tasks;
 #endif
 
             // Signal completion to the orchestrator state machine
@@ -823,9 +823,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             static_cast<uint64_t>(orch_cycle_start), static_cast<uint64_t>(orch_end_ts),
             cycles_to_us(orch_end_ts - orch_cycle_start)
         );
-        if (pto2_submitted_tasks >= 0) {
+        if (submitted_tasks >= 0) {
             LOG_INFO(
-                "PTO2 total submitted tasks = %d, already executed %d tasks", pto2_submitted_tasks,
+                "PTO2 total submitted tasks = %d, already executed %d tasks", submitted_tasks,
                 sched_ctx_.completed_tasks_count()
             );
         }
@@ -1015,9 +1015,9 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     // threads are still draining) open the window at its early exit, so the
     // cross-thread max(end)-min(start) reduction would absorb the orch-waits-for-
     // sched overlap into post_orch — inflating it well past the actual teardown.
-    // read_pto2_runtime_status is two atomic loads every thread needs, so it
+    // read_runtime_status is two atomic loads every thread needs, so it
     // stays outside the scope.
-    int32_t runtime_rc = read_pto2_runtime_status(runtime);
+    int32_t runtime_rc = read_runtime_status(runtime);
     if (g_aicpu_executor.finished_.load(std::memory_order_acquire)) {
         AicpuPhaseScope post_orch(AicpuPhase::PostOrch);
         LOG_INFO("aicpu_execute: Last thread finished, cleaning up");
