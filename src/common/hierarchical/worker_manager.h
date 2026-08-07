@@ -286,17 +286,12 @@ public:
     virtual ~WorkerEndpoint() = default;
 
     virtual const WorkerEndpointCaps &caps() const = 0;
-    virtual WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) = 0;
-    // Compatibility endpoints without progress support use completion-time
-    // acceptance unless they override this boundary.
-    virtual WorkerCompletion
-    run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept);
 
-    // Progressable endpoints are driven by the owning WorkerThread without a
-    // blocking call per frame. submit_progress publishes one complete frame;
-    // poll_progress reports monotonic events; activate_progress is a sticky
-    // FIFO-launch permission that may arrive before the child stages the frame.
-    virtual bool progressable() const { return false; }
+    // Every endpoint is progress-driven: the owning WorkerThread drives it
+    // without a blocking call per frame. submit_progress publishes one complete
+    // frame; poll_progress reports monotonic events; activate_progress is a
+    // sticky FIFO-launch permission that may arrive before the child stages the
+    // frame.
     virtual void submit_progress(Ring *ring, const WorkerDispatch &dispatch);
     virtual bool poll_progress(WorkerEndpointProgress &progress);
     virtual bool activate_progress(RunId run_id);
@@ -360,10 +355,6 @@ public:
     LocalMailboxEndpoint(int32_t worker_id, void *mailbox, int child_pid = -1, uint32_t task_frame_count = 1);
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
-    WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
-    WorkerCompletion
-    run_with_accept(Ring *ring, const WorkerDispatch &dispatch, const std::function<void()> &on_accept) override;
-    bool progressable() const override { return true; }
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override;
     bool poll_progress(WorkerEndpointProgress &progress) override;
     bool activate_progress(RunId run_id) override;
@@ -634,7 +625,6 @@ private:
     std::unordered_map<uint64_t, std::string> accept_errors_;
 
     void loop();
-    WorkerCompletion dispatch_process(WorkerDispatch d, const std::function<void()> &on_accept);
     EnqueueDispatchResult enqueue_dispatch(WorkerDispatch d, LaneKind lane, RunId expected_run_id = INVALID_RUN_ID);
     LaneState &lane(LaneKind kind) { return lanes_[static_cast<size_t>(kind)]; }
     const LaneState &lane(LaneKind kind) const { return lanes_[static_cast<size_t>(kind)]; }

@@ -147,6 +147,7 @@ def test_l3_sub_worker_maps_rewrites_and_unmaps_host_buffer(monkeypatch):
     mailbox = SharedMemory(create=True, size=MAILBOX_SIZE)
     host = SharedMemory(create=True, size=8)
     staged = None
+    task_frame = None
     mailbox_buf = mailbox.buf
     host_buf = host.buf
     assert mailbox_buf is not None
@@ -167,35 +168,48 @@ def test_l3_sub_worker_maps_rewrites_and_unmaps_host_buffer(monkeypatch):
 
         digest = bytes(range(32))
         # MAP, use the child mapping, UNMAP, verify rewriting stops, then exit.
-        states = iter(
+        # Tasks arrive on the dedicated task frame; the base frame carries only
+        # controls and shutdown.
+        base_states = iter(
             (
                 worker_mod._CONTROL_REQUEST,
-                worker_mod._TASK_READY,
+                worker_mod._IDLE,
                 worker_mod._CONTROL_REQUEST,
-                worker_mod._TASK_READY,
+                worker_mod._IDLE,
                 worker_mod._SHUTDOWN,
             )
         )
+        task_states = iter(
+            (
+                worker_mod._IDLE,
+                worker_mod._TASK_READY,
+                worker_mod._IDLE,
+                worker_mod._TASK_READY,
+                worker_mod._IDLE,
+            )
+        )
         called = []
-        # The loop polls two words per iteration; only the state word is
+        # The loop polls three words per iteration; only the state words are
         # scripted, so the sticky shutdown word always reads "not requested".
         shutdown_addr = worker_mod._buffer_field_addr(mailbox_buf, worker_mod._OFF_SHUTDOWN)
         task_state_addr = (
             worker_mod._buffer_field_addr(mailbox_buf, worker_mod._OFF_STATE) + worker_mod.MAILBOX_FRAME_SIZE
         )
+        task_frame = mailbox_buf[worker_mod.MAILBOX_FRAME_SIZE : 2 * worker_mod.MAILBOX_FRAME_SIZE]
 
         def load_state(state_addr):
             if state_addr == shutdown_addr:
                 return 0
             if state_addr == task_state_addr:
-                return worker_mod._IDLE
-            state = next(states)
-            if state == worker_mod._TASK_READY:
-                start = worker_mod._OFF_TASK_CALLABLE_HASH
-                mailbox_buf[start : start + len(digest)] = digest
-                struct.pack_into("<ii", mailbox_buf, worker_mod._OFF_TASK_ARGS_BLOB, 1, 0)
-                struct.pack_into("<Q", mailbox_buf, worker_mod._OFF_TASK_ARGS_BLOB + 8, parent_addr)
-            elif state == worker_mod._CONTROL_REQUEST and called:
+                state = next(task_states)
+                if state == worker_mod._TASK_READY:
+                    start = worker_mod._OFF_TASK_CALLABLE_HASH
+                    task_frame[start : start + len(digest)] = digest
+                    struct.pack_into("<ii", task_frame, worker_mod._OFF_TASK_ARGS_BLOB, 1, 0)
+                    struct.pack_into("<Q", task_frame, worker_mod._OFF_TASK_ARGS_BLOB + 8, parent_addr)
+                return state
+            state = next(base_states)
+            if state == worker_mod._CONTROL_REQUEST and called:
                 unmap_payload = worker_mod._HOST_BUF_UNMAP.pack(7)
                 assert staged is not None
                 staged_buf = staged.buf
@@ -235,6 +249,10 @@ def test_l3_sub_worker_maps_rewrites_and_unmaps_host_buffer(monkeypatch):
         assert called == [True, True], worker_mod._read_error_msg(mailbox_buf)
         assert struct.unpack_from("<Q", host_buf, 0)[0] == 42
     finally:
+        # Before mailbox_buf: releasing a buffer with an exported slice raises
+        # BufferError, which would replace a real assertion failure above.
+        if task_frame is not None:
+            task_frame.release()
         mailbox_buf.release()
         host_buf.release()
         mailbox.close()

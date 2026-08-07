@@ -273,14 +273,29 @@ public:
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
 
-    WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override {
-        (void)ring;
-        WorkerCompletion completion;
-        completion.task_slot = dispatch.task_slot;
-        completion.group_index = dispatch.group_index;
-        completion.outcome = EndpointOutcome::SUCCESS;
-        return completion;
+    // Immediate success: submit_progress queues the completion the very next
+    // poll_progress reports, so a dispatch through this endpoint finishes
+    // without any test-side stepping.
+    void submit_progress(Ring *, const WorkerDispatch &dispatch) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        WorkerEndpointProgress progress;
+        progress.kind = WorkerProgressKind::COMPLETED;
+        progress.dispatch = dispatch;
+        progress.completion.task_slot = dispatch.task_slot;
+        progress.completion.group_index = dispatch.group_index;
+        progress.completion.outcome = EndpointOutcome::SUCCESS;
+        events_.push_back(progress);
     }
+
+    bool poll_progress(WorkerEndpointProgress &progress) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (events_.empty()) return false;
+        progress = events_.front();
+        events_.pop_front();
+        return true;
+    }
+
+    bool activate_progress(RunId) override { return true; }
 
     void control_prepare(const uint8_t *) override {
         if (prepare_count_ != nullptr) prepare_count_->fetch_add(1, std::memory_order_relaxed);
@@ -289,6 +304,8 @@ public:
 private:
     WorkerEndpointCaps caps_;
     std::atomic<int> *prepare_count_{nullptr};
+    std::mutex mu_;
+    std::deque<WorkerEndpointProgress> events_;
 };
 
 class DeterministicProgressEndpoint final : public WorkerEndpoint {
@@ -300,11 +317,6 @@ public:
     }
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
-    bool progressable() const override { return true; }
-
-    WorkerCompletion run(Ring *, const WorkerDispatch &) override {
-        throw std::logic_error("progress endpoint must not use blocking run");
-    }
 
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override {
         ProgressCall call(*this);
@@ -573,6 +585,16 @@ static TaskSlot make_progress_slot(Ring &ring, RunId run_id, uint32_t pipeline_s
     slot->run_id = run_id;
     slot->pipeline_lease = PipelineSlotLease{pipeline_slot, 0, generation};
     return allocation.slot;
+}
+
+// Poll an endpoint until it reports one progress event, or the budget expires.
+static bool poll_until(WorkerEndpoint &endpoint, WorkerEndpointProgress &progress) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (endpoint.poll_progress(progress)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,7 +1230,6 @@ TEST(WorkerManagerTest, CapacityOneMailboxUsesTheProgressTaskFrame) {
     ASSERT_NE(task_slot, INVALID_SLOT);
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/1);
-    EXPECT_TRUE(endpoint.progressable());
     EXPECT_FALSE(endpoint.caps().supports_frame_staging);
 
     WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/41, /*prepare_only=*/false};
@@ -2041,54 +2062,50 @@ TEST_F(ProgressSchedulerFixture, PreparedSuccessorSingleCannotBypassItsReadyGrou
     if (orchestrator.run_done(second_run)) orchestrator.release_run(second_run);
 }
 
+// The endpoint must report acceptance as its own progress event, ahead of the
+// completion event, so a waiter on wait_run_accepted is released while the task
+// is still running rather than only once it finishes.
 TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
     MockMailboxWorker child;
     child.start();
 
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
-    AllocResult ar = allocator.alloc(/*heap_bytes=*/0, /*depth=*/0);
-    ASSERT_NE(ar.slot, INVALID_SLOT);
-    TaskSlotState *slot = allocator.slot_state(ar.slot);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/31, /*pipeline_slot=*/1, /*generation=*/7);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+    TaskSlotState *slot = allocator.slot_state(task_slot);
     ASSERT_NE(slot, nullptr);
-    slot->reset();
     slot->callable.digest[0] = 0x42;
-    slot->pipeline_lease = PipelineSlotLease{1, 0, 7};
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
-    std::promise<WorkerCompletion> result;
-    auto done = result.get_future();
-    std::atomic<bool> accepted{false};
-    std::thread caller([&] {
-        result.set_value(endpoint.run_with_accept(&allocator, WorkerDispatch{ar.slot, 0}, [&] {
-            accepted.store(true, std::memory_order_release);
-        }));
-    });
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/71, /*prepare_only=*/false};
+    endpoint.submit_progress(&allocator, dispatch);
 
     child.wait_running();
     EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
+    // The lease travels in the task frame the dispatch was published to, not
+    // the control base frame.
+    const char *published_frame =
+        static_cast<const char *>(child.mailbox_ptr()) + MAILBOX_FIRST_TASK_FRAME * MAILBOX_FRAME_SIZE;
     PipelineSlotLease wire_lease{};
-    std::memcpy(
-        &wire_lease, static_cast<char *>(child.mailbox_ptr()) + MAILBOX_OFF_PIPELINE_LEASE, sizeof(PipelineSlotLease)
-    );
+    std::memcpy(&wire_lease, published_frame + MAILBOX_OFF_PIPELINE_LEASE, sizeof(PipelineSlotLease));
     EXPECT_EQ(wire_lease.slot_id, 1u);
     EXPECT_EQ(wire_lease.generation, 7u);
-    child.write_task_accepted();
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!accepted.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_TRUE(accepted.load(std::memory_order_acquire));
-    EXPECT_EQ(done.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
 
-    // Non-fatal from here on: a fatal assertion would return with `caller`
-    // joinable, and ~std::thread would terminate the whole test binary.
+    child.write_task_accepted();
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(poll_until(endpoint, progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
+    EXPECT_EQ(progress.dispatch.dispatch_id, dispatch.dispatch_id);
+
+    // Acceptance is a distinct earlier event: the task is not complete yet.
+    WorkerEndpointProgress not_yet;
+    EXPECT_FALSE(endpoint.poll_progress(not_yet));
+
     child.complete();
-    EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    if (done.valid() && done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        EXPECT_EQ(done.get().outcome, EndpointOutcome::SUCCESS);
-    }
-    caller.join();
+    ASSERT_TRUE(poll_until(endpoint, progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
     allocator.shutdown();
 }
 
@@ -2098,8 +2115,8 @@ TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
 // state word observes none at all.
 //
 // This does not force the parent to skip a poll between the two writes: the
-// parent is already spinning by then and nothing here can stop it. What it
-// pins is the property that makes that interleaving harmless — acceptance is
+// parent is already polling by then and nothing here can stop it. What it pins
+// is the property that makes that interleaving harmless — acceptance is
 // readable after TASK_DONE, so losing a poll cannot lose the ACK.
 TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
     MockMailboxWorker child;
@@ -2107,23 +2124,15 @@ TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
 
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
-    AllocResult ar = allocator.alloc(/*heap_bytes=*/0, /*depth=*/0);
-    ASSERT_NE(ar.slot, INVALID_SLOT);
-    TaskSlotState *slot = allocator.slot_state(ar.slot);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/33, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+    TaskSlotState *slot = allocator.slot_state(task_slot);
     ASSERT_NE(slot, nullptr);
-    slot->reset();
     slot->callable.digest[0] = 0x42;
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
-    std::promise<WorkerCompletion> result;
-    auto done = result.get_future();
-    std::atomic<bool> accepted{false};
-
-    std::thread caller([&] {
-        result.set_value(endpoint.run_with_accept(&allocator, WorkerDispatch{ar.slot, 0}, [&] {
-            accepted.store(true, std::memory_order_release);
-        }));
-    });
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/73, /*prepare_only=*/false};
+    endpoint.submit_progress(&allocator, dispatch);
 
     child.wait_running();
     EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
@@ -2131,15 +2140,23 @@ TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
     child.write_task_accepted();
     child.complete();
 
-    // Non-fatal: a fatal assertion would return with `caller` joinable, and
-    // ~std::thread would terminate the whole test binary.
-    EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    if (done.valid() && done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        EXPECT_EQ(done.get().outcome, EndpointOutcome::SUCCESS);
+    bool saw_accepted = false;
+    bool saw_completed = false;
+    WorkerEndpointProgress progress;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!saw_completed && std::chrono::steady_clock::now() < deadline) {
+        if (!endpoint.poll_progress(progress)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        if (progress.kind == WorkerProgressKind::ACCEPTED) saw_accepted = true;
+        if (progress.kind == WorkerProgressKind::COMPLETED) {
+            saw_completed = true;
+            EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
+        }
     }
-    EXPECT_TRUE(accepted.load(std::memory_order_acquire))
-        << "the endpoint lost the launch ACK to a task that completed first";
-    caller.join();
+    EXPECT_TRUE(saw_completed);
+    EXPECT_TRUE(saw_accepted) << "the endpoint lost the launch ACK to a task that completed first";
     allocator.shutdown();
 }
 

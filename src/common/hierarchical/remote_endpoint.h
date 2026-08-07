@@ -95,8 +95,6 @@ public:
     );
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
-    WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
-    bool progressable() const override { return true; }
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override;
     bool poll_progress(WorkerEndpointProgress &progress) override;
     void request_progress_stop() noexcept override;
