@@ -1781,7 +1781,7 @@ def _run_mailbox_loop(
     chip processes all reach the parent through this one loop, differing only
     in what they do with a task and which control sub-commands they accept.
 
-    `handle_task()` and `handle_control(sub_cmd)` each return an
+    `handle_task(task_buf)` and `handle_control(sub_cmd)` each return an
     ``(error_code, message)`` pair and are responsible for catching their own
     exceptions, because the message wording is what the parent re-raises and
     only the caller knows its own context. The pair is published to the
@@ -1805,34 +1805,49 @@ def _run_mailbox_loop(
     parent_pid = os.getppid()
     liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
     shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
-    while True:
-        state = _mailbox_load_i32(state_addr)
-        if state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
-            if on_shutdown is not None:
-                on_shutdown()
-            break
-        if state == _TASK_READY:
-            code, msg = handle_task()
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _TASK_DONE)
-        elif state == _CONTROL_REQUEST:
-            sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-            code, msg = handle_control(int(sub_cmd))
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _CONTROL_DONE)
-        else:
-            liveness_countdown -= 1
-            if liveness_countdown <= 0:
-                liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
-                # Comparing against the pid captured at entry rather than
-                # testing for pid 1: a subreaper (container init, systemd
-                # user session) adopts orphans instead of init, so the pid
-                # changes but never becomes 1. A live parent's pid cannot
-                # change, so this cannot fire spuriously.
-                if os.getppid() != parent_pid:
-                    if on_shutdown is not None:
-                        on_shutdown()
-                    break
+    task_buf = None
+    task_state_addr = None
+    if len(buf) >= 2 * MAILBOX_FRAME_SIZE:
+        task_buf = buf[MAILBOX_FRAME_SIZE : 2 * MAILBOX_FRAME_SIZE]
+        task_state_addr = _buffer_field_addr(task_buf, _OFF_STATE)
+    try:
+        while True:
+            state = _mailbox_load_i32(state_addr)
+            if state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
+                if on_shutdown is not None:
+                    on_shutdown()
+                break
+            if task_buf is not None and _mailbox_load_i32(task_state_addr) == _TASK_READY:
+                code, msg = handle_task(task_buf)
+                _write_error(task_buf, code, msg)
+                _mailbox_store_i32(task_state_addr, _TASK_DONE)
+            elif state == _TASK_READY:
+                # Compatibility for a direct endpoint.run() caller. WorkerThread
+                # dispatches use the dedicated task frame.
+                code, msg = handle_task(buf)
+                _write_error(buf, code, msg)
+                _mailbox_store_i32(state_addr, _TASK_DONE)
+            elif state == _CONTROL_REQUEST:
+                sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
+                code, msg = handle_control(int(sub_cmd))
+                _write_error(buf, code, msg)
+                _mailbox_store_i32(state_addr, _CONTROL_DONE)
+            else:
+                liveness_countdown -= 1
+                if liveness_countdown <= 0:
+                    liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+                    # Comparing against the pid captured at entry rather than
+                    # testing for pid 1: a subreaper (container init, systemd
+                    # user session) adopts orphans instead of init, so the pid
+                    # changes but never becomes 1. A live parent's pid cannot
+                    # change, so this cannot fire spuriously.
+                    if os.getppid() != parent_pid:
+                        if on_shutdown is not None:
+                            on_shutdown()
+                        break
+    finally:
+        if task_buf is not None:
+            task_buf.release()
 
 
 def _sub_worker_loop(
@@ -1852,16 +1867,16 @@ def _sub_worker_loop(
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
     host_buf_ranges: list[tuple[int, int, int]] = []
 
-    def handle_task() -> tuple[int, str]:
-        digest = _read_task_digest(buf)
+    def handle_task(task_buf) -> tuple[int, str]:
+        digest = _read_task_digest(task_buf)
         cid = identity_table.get(digest)
         fn = registry.get(int(cid)) if cid is not None else None
         if fn is None:
             return 1, f"sub_worker: callable hash {_format_digest(digest)} not registered"
         try:
             if host_buf_ranges:
-                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-            args = _read_args_from_mailbox(buf)
+                _rewrite_blob_host_addrs(task_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+            args = _read_args_from_mailbox(task_buf)
             fn(args)
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker", e)
@@ -2262,10 +2277,11 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}  # token -> (shm, lo, hi, child_base)
     host_buf_ranges: list[tuple[int, int, int]] = []  # (parent_lo, parent_hi, child_base)
 
-    def handle_task() -> tuple[int, str]:
-        digest = _read_task_digest(buf)
+    def handle_task(task_buf) -> tuple[int, str]:
+        task_addr = ctypes.addressof(ctypes.c_char.from_buffer(task_buf))
+        digest = _read_task_digest(task_buf)
         cid = identity_table.get(digest)
-        cfg = _read_config_from_mailbox(buf)
+        cfg = _read_config_from_mailbox(task_buf)
 
         code = 0
         msg = ""
@@ -2286,9 +2302,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # blob to this child's own mapping before the runtime reads it.
             # No-op when nothing is registered.
             if host_buf_ranges:
-                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
+                _rewrite_blob_host_addrs(task_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
             pipeline_slot, pipeline_reserved, pipeline_generation = _PIPELINE_LEASE_FMT.unpack_from(
-                buf, _OFF_PIPELINE_LEASE
+                task_buf, _OFF_PIPELINE_LEASE
             )
             if pipeline_reserved != 0:
                 raise RuntimeError(f"chip_process dev={device_id}: invalid pipeline lease reserved field")
@@ -2299,10 +2315,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # is the source of truth.
             cw._impl.run_from_blob(
                 cid,
-                mailbox_addr + _OFF_TASK_ARGS_BLOB,
+                task_addr + _OFF_TASK_ARGS_BLOB,
                 _MAILBOX_ARGS_CAPACITY,
                 cfg,
-                mailbox_addr + _OFF_ACCEPTED,
+                task_addr + _OFF_ACCEPTED,
                 _TASK_ACCEPTED,
                 pipeline_slot,
                 pipeline_generation,
@@ -2992,15 +3008,15 @@ def _child_worker_loop(
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
 
-    def handle_task() -> tuple[int, str]:
-        digest = _read_task_digest(buf)
+    def handle_task(task_buf) -> tuple[int, str]:
+        digest = _read_task_digest(task_buf)
         cid = identity_table.get(digest)
         orch_fn = registry.get(int(cid)) if cid is not None else None
         if orch_fn is None:
             return 1, f"child_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            args = _read_args_from_mailbox(buf)
-            cfg = _read_config_from_mailbox(buf)
+            args = _read_args_from_mailbox(task_buf)
+            cfg = _read_config_from_mailbox(task_buf)
             inner_worker.run(orch_fn, args, cfg)
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc(f"child_worker level={inner_worker.level}", e)

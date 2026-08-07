@@ -12,6 +12,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@ namespace remote_l3 {
 // 2: CallConfig lost its block_dim field — a run always takes the whole
 // device, so the payload is one int32 shorter than v1's.
 static constexpr uint32_t PROTOCOL_VERSION = 2;
+inline constexpr size_t FRAME_HEADER_BYTES = 40;
 static constexpr uint32_t MAX_FRAME_PAYLOAD_BYTES = 16U * 1024U * 1024U;
 static constexpr uint32_t MAX_STRING_BYTES = 1024U;
 static constexpr uint32_t MAX_ERROR_BYTES = 4096U;

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,6 +28,9 @@ public:
     virtual ~RemoteL3Transport() = default;
     virtual void submit_frame(const std::vector<uint8_t> &frame) = 0;
     virtual std::vector<uint8_t> wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) = 0;
+    virtual void submit_progress_frame(const std::vector<uint8_t> &frame) = 0;
+    virtual bool
+    poll_progress_reply(remote_l3::FrameType frame_type, uint64_t sequence, std::vector<uint8_t> &reply) = 0;
     virtual void shutdown() {}
 };
 
@@ -41,6 +45,8 @@ public:
     void expect_hello_ready(uint64_t session_id, int32_t worker_id, const std::string &comm_profile);
     void submit_frame(const std::vector<uint8_t> &frame) override;
     std::vector<uint8_t> wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) override;
+    void submit_progress_frame(const std::vector<uint8_t> &frame) override;
+    bool poll_progress_reply(remote_l3::FrameType frame_type, uint64_t sequence, std::vector<uint8_t> &reply) override;
     void shutdown() override;
 
 private:
@@ -61,6 +67,13 @@ private:
     std::atomic<bool> health_failed_{false};
     std::mutex health_mu_;
     std::string health_error_;
+    std::vector<uint8_t> progress_write_;
+    size_t progress_write_offset_{0};
+    std::vector<uint8_t> progress_read_;
+    size_t progress_read_offset_{0};
+    size_t progress_read_size_{remote_l3::FRAME_HEADER_BYTES};
+    std::chrono::steady_clock::time_point progress_deadline_{};
+    bool progress_command_active_{false};
 
     void connect_socket();
     void close_socket();
@@ -72,6 +85,7 @@ private:
     void wait_writable(std::chrono::steady_clock::time_point deadline);
     void write_all(const uint8_t *data, size_t size, std::chrono::steady_clock::time_point deadline);
     std::vector<uint8_t> read_frame(std::chrono::steady_clock::time_point deadline);
+    void reset_progress_command() noexcept;
 };
 
 class RemoteL3Endpoint : public WorkerEndpoint {
@@ -82,6 +96,11 @@ public:
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
     WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override;
+    bool progressable() const override { return true; }
+    void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override;
+    bool poll_progress(WorkerEndpointProgress &progress) override;
+    void request_progress_stop() noexcept override;
+    void report_progress_error(const std::string &reason) noexcept override;
     void shutdown_child() override;
     void control_prepare(const uint8_t *digest) override;
     void control_remote_prepare_register(
@@ -117,8 +136,19 @@ private:
     std::unique_ptr<RemoteL3Transport> transport_;
     remote_l3::OrderedCommandLane command_lane_;
     std::mutex command_mu_;
+    std::condition_variable command_cv_;
+
+    struct PendingTask {
+        bool occupied{false};
+        WorkerDispatch dispatch{};
+        uint64_t sequence{0};
+    } pending_task_;
+    bool progress_stop_requested_{false};
+    std::string progress_stop_reason_;
 
     remote_l3::TaskPayloadWire build_task_payload(const TaskSlotState &slot, int32_t group_index) const;
+    // The caller holds command_mu_; this mutates pending_task_ and wakes waiters.
+    void finish_progress_command(uint64_t sequence);
     remote_l3::ControlReplyPayload
     run_control(remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes);
 };

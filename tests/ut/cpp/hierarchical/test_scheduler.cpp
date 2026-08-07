@@ -137,9 +137,11 @@ struct MockMailboxWorker {
 
     // The child publishes acceptance into the sticky word, not the state.
     void write_task_accepted() {
-        auto *ptr = reinterpret_cast<int32_t *>(static_cast<char *>(mailbox_ptr()) + MAILBOX_OFF_ACCEPTED);
         int32_t v = MAILBOX_TASK_ACCEPTED;
-        __atomic_store(ptr, &v, __ATOMIC_RELEASE);
+        auto *base_ptr = reinterpret_cast<int32_t *>(mailbox.data() + MAILBOX_OFF_ACCEPTED);
+        auto *task_ptr = reinterpret_cast<int32_t *>(task_frame() + MAILBOX_OFF_ACCEPTED);
+        __atomic_store(base_ptr, &v, __ATOMIC_RELEASE);
+        __atomic_store(task_ptr, &v, __ATOMIC_RELEASE);
     }
 
     void wait_running(int timeout_ms = 500) {
@@ -170,20 +172,37 @@ private:
         __atomic_store_n(ptr, static_cast<int32_t>(s), __ATOMIC_RELEASE);
     }
 
+    char *task_frame() { return mailbox.data() + MAILBOX_FIRST_TASK_FRAME * MAILBOX_FRAME_SIZE; }
+
+    MailboxState read_task_state() const {
+        const auto *ptr = reinterpret_cast<const volatile int32_t *>(
+            mailbox.data() + MAILBOX_FIRST_TASK_FRAME * MAILBOX_FRAME_SIZE + MAILBOX_OFF_STATE
+        );
+        int32_t v = __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+        return static_cast<MailboxState>(v);
+    }
+
+    void write_task_state(MailboxState state) {
+        auto *ptr = reinterpret_cast<volatile int32_t *>(task_frame() + MAILBOX_OFF_STATE);
+        __atomic_store_n(ptr, static_cast<int32_t>(state), __ATOMIC_RELEASE);
+    }
+
     void loop() {
         while (true) {
             if (stop_flag.load(std::memory_order_acquire)) return;
             MailboxState s = read_state();
-            if (s == MailboxState::TASK_READY) {
-                uint8_t callable_hash0 = static_cast<uint8_t>(mailbox[MAILBOX_OFF_TASK_CALLABLE_HASH]);
+            MailboxState task_state = read_task_state();
+            if (task_state == MailboxState::TASK_READY || s == MailboxState::TASK_READY) {
+                const bool progress_frame = task_state == MailboxState::TASK_READY;
+                char *frame = progress_frame ? task_frame() : mailbox.data();
+                uint8_t callable_hash0 = static_cast<uint8_t>(frame[MAILBOX_OFF_TASK_CALLABLE_HASH]);
                 int32_t t_count = 0;
-                std::memcpy(&t_count, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB, sizeof(int32_t));
+                std::memcpy(&t_count, frame + MAILBOX_OFF_TASK_ARGS_BLOB, sizeof(int32_t));
                 uint64_t tensor_key = 0;
                 if (t_count > 0) {
                     ChipTensor first{};
                     std::memcpy(
-                        &first, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB + TASK_ARGS_BLOB_HEADER_SIZE,
-                        sizeof(ChipTensor)
+                        &first, frame + MAILBOX_OFF_TASK_ARGS_BLOB + TASK_ARGS_BLOB_HEADER_SIZE, sizeof(ChipTensor)
                     );
                     tensor_key = first.buffer.addr;
                 }
@@ -212,13 +231,17 @@ private:
                 }
                 is_running.store(false, std::memory_order_release);
 
-                std::memcpy(mailbox.data() + MAILBOX_OFF_ERROR, &error_code, sizeof(int32_t));
-                std::memset(mailbox.data() + MAILBOX_OFF_ERROR_MSG, 0, MAILBOX_ERROR_MSG_SIZE);
+                std::memcpy(frame + MAILBOX_OFF_ERROR, &error_code, sizeof(int32_t));
+                std::memset(frame + MAILBOX_OFF_ERROR_MSG, 0, MAILBOX_ERROR_MSG_SIZE);
                 if (!error_msg.empty()) {
                     size_t n = std::min(error_msg.size(), MAILBOX_ERROR_MSG_SIZE - 1);
-                    std::memcpy(mailbox.data() + MAILBOX_OFF_ERROR_MSG, error_msg.data(), n);
+                    std::memcpy(frame + MAILBOX_OFF_ERROR_MSG, error_msg.data(), n);
                 }
-                write_state(MailboxState::TASK_DONE);
+                if (progress_frame) {
+                    write_task_state(MailboxState::TASK_DONE);
+                } else {
+                    write_state(MailboxState::TASK_DONE);
+                }
             } else if (s == MailboxState::CONTROL_REQUEST) {
                 // Acknowledge the control request so a future test using
                 // WorkerThread::control_* doesn't hang on the spin-poll.
@@ -1174,6 +1197,36 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, CapacityOneMailboxUsesTheProgressTaskFrame) {
+    alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/21, /*pipeline_slot=*/1, /*generation=*/7);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/1);
+    EXPECT_TRUE(endpoint.progressable());
+    EXPECT_FALSE(endpoint.caps().supports_frame_staging);
+
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/41, /*prepare_only=*/false};
+    endpoint.submit_progress(&allocator, dispatch);
+
+    char *frame = test_task_frame(mailbox, 0);
+    EXPECT_EQ(test_frame_state(frame), MailboxState::TASK_READY);
+    EXPECT_EQ(test_frame_dispatch_id(frame), 41u);
+
+    set_test_frame_accepted(frame);
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
+
+    set_test_frame_state(frame, MailboxState::TASK_DONE);
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
     allocator.shutdown();
 }
 
@@ -2689,6 +2742,7 @@ TEST(SchedulerDispatchPassTest, ActiveRunSwitchCannotBypassSuccessorGroupReserva
         TaskSlotState &state = *allocator.slot_state(allocation.slot);
         state.reset();
         state.run_id = run_id;
+        state.pipeline_lease = PipelineSlotLease{/*slot_id=*/0, /*reserved=*/0, /*generation=*/run_id};
         state.worker_type = WorkerType::NEXT_LEVEL;
         state.callable = C(callable_seed);
         state.target_worker_ids.push_back(worker_id);
