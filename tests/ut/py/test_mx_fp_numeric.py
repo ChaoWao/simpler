@@ -30,7 +30,7 @@ from simpler_setup.goldens.mx_fp_gemm import (
     mx_fp8_matmul_golden,
     pack_two_fp4,
 )
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup.torch_interop import make_chip_tensor_arg
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="torch.float8_e4m3fn required")
@@ -58,12 +58,12 @@ class TestFp8E4m3Numeric:
         ref = torch.matmul(a.to(torch.float32), b.to(torch.float32))
         assert torch.allclose(golden, ref, rtol=0, atol=0)
 
-    def test_make_tensor_arg_preserves_bytes_for_matmul(self):
+    def test_make_chip_tensor_arg_preserves_bytes_for_matmul(self):
         torch.manual_seed(2)
         a = torch.randn(4, 4).to(torch.float8_e4m3fn).contiguous()
         b = torch.randn(4, 4).to(torch.float8_e4m3fn).contiguous()
-        arg_a = make_tensor_arg(a)
-        arg_b = make_tensor_arg(b)
+        arg_a = make_chip_tensor_arg(a)
+        arg_b = make_chip_tensor_arg(b)
         assert arg_a.nbytes() == a.nbytes
         assert arg_b.nbytes() == b.nbytes
         a_round = a.view(torch.uint8).clone().view(torch.float8_e4m3fn).reshape(a.shape)
@@ -122,13 +122,13 @@ class TestMxFp8MatmulGolden:
         ref = fp8_matmul_golden(a, b)
         assert torch.allclose(got, ref, rtol=0, atol=0)
 
-    def test_make_tensor_arg_nbytes(self):
+    def test_make_chip_tensor_arg_nbytes(self):
         a, a_s, b, b_s, c, _ = make_mx_fp8_case(128, 64, 64)
-        assert make_tensor_arg(a).nbytes() == a.nbytes
-        assert make_tensor_arg(a_s).nbytes() == a_s.nbytes
-        assert make_tensor_arg(b).nbytes() == b.nbytes
-        assert make_tensor_arg(b_s).nbytes() == b_s.nbytes
-        assert make_tensor_arg(c).nbytes() == c.nbytes
+        assert make_chip_tensor_arg(a).nbytes() == a.nbytes
+        assert make_chip_tensor_arg(a_s).nbytes() == a_s.nbytes
+        assert make_chip_tensor_arg(b).nbytes() == b.nbytes
+        assert make_chip_tensor_arg(b_s).nbytes() == b_s.nbytes
+        assert make_chip_tensor_arg(c).nbytes() == c.nbytes
 
 
 @pytest.mark.skipif(
@@ -193,8 +193,8 @@ class TestFp4E2m1Numeric:
         b2 = b.view(torch.uint8).clone().view(torch.float4_e2m1fn_x2).reshape(b.shape)
         assert torch.allclose(golden, fp4_matmul_golden(a2, b2), rtol=0, atol=0)
 
-    def test_make_tensor_arg_nbytes(self):
+    def test_make_chip_tensor_arg_nbytes(self):
         t = torch.empty(2, 4, dtype=torch.float4_e2m1fn_x2)
         t.view(torch.uint8)[:] = 0x13
-        arg = make_tensor_arg(t)
+        arg = make_chip_tensor_arg(t)
         assert arg.nbytes() == 8

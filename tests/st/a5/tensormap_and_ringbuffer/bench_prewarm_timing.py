@@ -26,7 +26,7 @@ from simpler import _log
 from simpler.task_interface import CallConfig
 from simpler.worker import Worker
 
-from simpler_setup.scene_test import _build_chip_task_args
+from simpler_setup.scene_test import _build_l2_ref_args
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE / "dummy_task") not in sys.path:
@@ -93,14 +93,14 @@ def _run_scenario(*, device_id: int, platform: str, prewarm: bool) -> None:
         orch_sig = TestDummyTask.CALLABLE.get("orchestration", {}).get("signature", [])
 
         test_args = TestDummyTask().generate_args(params)
-        chip_args, _output_names = _build_chip_task_args(test_args, orch_sig)
+        args, _output_names = _build_l2_ref_args(test_args, orch_sig, worker)
 
         run_cfg = CallConfig()
         run_cfg.block_dim = config_dict.get("block_dim", 1)
         run_cfg.aicpu_thread_num = config_dict.get("aicpu_thread_num", 2)
         run_cfg.runtime_env.ring_task_window = _RING
 
-        worker.run(handle, chip_args, config=run_cfg)
+        worker.run(handle, args, config=run_cfg)
     finally:
         worker.close()
 

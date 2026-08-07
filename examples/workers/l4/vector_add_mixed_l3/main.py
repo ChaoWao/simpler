@@ -12,9 +12,7 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import ctypes
-from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +22,6 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipTensor,
     CoreCallable,
     DataType,
     RemoteBufferHandle,
@@ -175,33 +172,32 @@ def _expected(lhs: float, rhs: float) -> float:
     return (summed + 1.0) * (summed + 2.0) + summed
 
 
-def _tensor_from_shm(shm: shared_memory.SharedMemory) -> ChipTensor:
-    buf = shm.buf
-    assert buf is not None
-    data_ptr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
-    return ChipTensor.make(data_ptr, (ELEMENTS,), DataType.FLOAT32)
-
-
 def _make_local_group(
+    worker: Worker,
     values: tuple[float, float, float, float],
-) -> tuple[list[shared_memory.SharedMemory], list[Any], TaskArgs, dict[str, tuple[Any, float]]]:
+) -> tuple[list[Any], TaskArgs, dict[str, tuple[Any, float]]]:
+    """Six owner Buffers on ``worker`` plus the wire ``TaskArgs`` naming them.
+
+    ``worker`` must be initialized: ``create_buffer`` needs a forked child to reach the backing, and
+    the local L3 that consumes these tensors is that child. The views alias the buffers' shm, so every
+    one of them must be dropped before ``worker.close()`` releases the backings.
+    """
     a0_value, b0_value, a1_value, b1_value = values
     initial_values = (a0_value, b0_value, 0.0, a1_value, b1_value, 0.0)
-    shms: list[shared_memory.SharedMemory] = []
     views: list[Any] = []
     args = TaskArgs()
     for index, value in enumerate(initial_values):
-        shm = shared_memory.SharedMemory(create=True, size=TENSOR_NBYTES)
+        handle = worker.create_buffer(TENSOR_NBYTES)
+        shm = handle.shm
+        assert shm is not None
         buf = shm.buf
         assert buf is not None
         view = FloatArray.from_buffer(buf)
         _fill_array(view, value)
-        shms.append(shm)
         views.append(view)
         tag = TensorArgType.OUTPUT_EXISTING if index in (2, 5) else TensorArgType.INPUT
-        args.add_tensor(_tensor_from_shm(shm), tag)
+        args.add_tensor(handle.tensor(shapes=(ELEMENTS,), dtype=DataType.FLOAT32), tag)
     return (
-        shms,
         views,
         args,
         {
@@ -222,6 +218,19 @@ def _make_remote_group_args(handles: list[RemoteBufferHandle], digest: bytes) ->
     return args
 
 
+def _check_outputs(worker_label: str, output_map: dict[str, tuple[Any, float]]) -> None:
+    """Compare each output against its golden value.
+
+    The local outputs alias owner Buffers, so the iteration that binds them lives in its own frame:
+    a name still holding one when ``worker.close()`` runs blocks the shm release.
+    """
+    for name, (output_array, expected) in output_map.items():
+        max_diff = max(abs(float(output_array[index]) - expected) for index in range(ELEMENTS))
+        print(f"[vector-add-mixed-l3] {worker_label} output={name} max_diff={max_diff:.3e}")
+        if max_diff > 1e-4:
+            raise AssertionError(f"{worker_label} {name} golden mismatch: max_diff={max_diff}")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--remote", required=True, help="remote L3 daemon endpoint, HOST:PORT")
@@ -232,14 +241,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--session-timeout", type=float, default=120.0)
     parser.add_argument("--session-listen-host", default="0.0.0.0")
     return parser.parse_args()
-
-
-def _free_local_shms(shms: list[shared_memory.SharedMemory]) -> None:
-    for shm in reversed(shms):
-        with contextlib.suppress(BufferError):
-            shm.close()
-        with contextlib.suppress(FileNotFoundError):
-            shm.unlink()
 
 
 def main() -> int:
@@ -258,7 +259,6 @@ def main() -> int:
 
     worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=args.session_timeout)
     remote_buffers: list[RemoteBufferHandle] = []
-    local_shms: list[shared_memory.SharedMemory] = []
     local_views: list[Any] = []
     local_outputs: dict[str, tuple[Any, float]] = {}
     parent_keepalive: list[TaskArgs] = []
@@ -279,9 +279,10 @@ def main() -> int:
         local_handle = worker.register(local_l3_group_orch)
         remote_handle = worker.register(RemoteCallable(REMOTE_ORCH_TARGET), workers=[remote_worker])
 
-        local_shms, local_views, local_args, local_outputs = _make_local_group((2.0, 3.0, 4.0, 5.0))
-        _add_digest_scalars(local_args, chip_handle.digest)
         worker.init()
+
+        local_views, local_args, local_outputs = _make_local_group(worker, (2.0, 3.0, 4.0, 5.0))
+        _add_digest_scalars(local_args, chip_handle.digest)
 
         remote_handles = [worker.remote_malloc(worker=remote_worker, nbytes=TENSOR_NBYTES) for _ in range(TENSOR_COUNT)]
         remote_buffers.extend(remote_handles)
@@ -319,12 +320,8 @@ def main() -> int:
         worker.remote_copy_from(remote_handles[2], remote_outputs["f0"][0], TENSOR_NBYTES)
         worker.remote_copy_from(remote_handles[5], remote_outputs["f1"][0], TENSOR_NBYTES)
 
-        for worker_label, output_map in (("local", local_outputs), ("remote", remote_outputs)):
-            for name, (output_array, expected) in output_map.items():
-                max_diff = max(abs(float(output_array[index]) - expected) for index in range(ELEMENTS))
-                print(f"[vector-add-mixed-l3] {worker_label} output={name} max_diff={max_diff:.3e}")
-                if max_diff > 1e-4:
-                    raise AssertionError(f"{worker_label} {name} golden mismatch: max_diff={max_diff}")
+        _check_outputs("local", local_outputs)
+        _check_outputs("remote", remote_outputs)
 
         print(
             "vector_add_mixed_l3 passed: "
@@ -343,10 +340,10 @@ def main() -> int:
                 # The pod job diagnoses this example from stdout alone, so a
                 # leaked peer buffer has to name itself here or leave no trace.
                 print(f"[vector-add-mixed-l3] remote_free failed: {exc}")
-        worker.close()
+        # close() unlinks the owner Buffers, which fails while any view still aliases their shm.
         local_outputs.clear()
         local_views.clear()
-        _free_local_shms(local_shms)
+        worker.close()
 
 
 if __name__ == "__main__":

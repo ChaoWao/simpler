@@ -42,7 +42,6 @@ from simpler.task_interface import (  # noqa: E402
     CallConfig,
     ChipCallable,
     ChipDomainContext,
-    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
@@ -54,9 +53,9 @@ from simpler.worker import Worker  # noqa: E402
 from simpler_setup.elf_parser import extract_text_section  # noqa: E402
 from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.torch_interop import make_tensor_arg  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+_F32 = DataType.FLOAT32
 OVERLAP_DIR = os.path.join(HERE, "../dual_domain_overlap")
 COUNT = 256
 DTYPE_NBYTES = 4
@@ -117,15 +116,7 @@ def build_allreduce_callable(platform: str) -> ChipCallable:
 
 
 def _add_domain_scratch(args: TaskArgs, domain: ChipDomainContext) -> None:
-    args.add_tensor(
-        ChipTensor.make(
-            data=domain.buffer_ptrs["scratch"],
-            shapes=(COUNT,),
-            dtype=DataType.FLOAT32,
-            child_memory=True,
-        ),
-        TensorArgType.INOUT,
-    )
+    args.add_tensor(domain.buffers["scratch"].tensor((COUNT,), _F32), TensorArgType.INOUT)
     args.add_scalar(domain.domain_size)
     args.add_scalar(domain.device_ctx)
 
@@ -181,11 +172,11 @@ def run(platform: str, device_ids: list[int]) -> int:
                     domain = handle[chip_idx]
                     print(
                         f"[domain_rank_map] {name} chip {chip_idx}: domain_rank={domain.domain_rank} "
-                        f"domain_size={domain.domain_size} scratch=0x{domain.buffer_ptrs['scratch']:x}"
+                        f"domain_size={domain.domain_size} scratch=0x{domain.buffers['scratch'].base:x}"
                     )
                     if domain.domain_rank != expected_rank[name][chip_idx] or domain.domain_size != 2:
                         state["ok"] = False
-                    if domain.device_ctx == 0 or domain.buffer_ptrs["scratch"] == 0:
+                    if domain.device_ctx == 0 or domain.buffers["scratch"].base == 0:
                         state["ok"] = False
             # A non-member chip is absent from the domain handle.
             try:
@@ -195,7 +186,7 @@ def run(platform: str, device_ids: list[int]) -> int:
             except KeyError:
                 pass
             # Chip 2's two domains carve distinct scratch slices.
-            if even[2].buffer_ptrs["scratch"] == tail[2].buffer_ptrs["scratch"]:
+            if even[2].buffers["scratch"].base == tail[2].buffers["scratch"].base:
                 print("[domain_rank_map] chip 2 domains share a scratch pointer")
                 state["ok"] = False
         finally:
@@ -214,8 +205,14 @@ def run(platform: str, device_ids: list[int]) -> int:
                 for worker_idx in DOMAINS[domain_name]:
                     domain = handle[worker_idx]
                     args = TaskArgs()
-                    args.add_tensor(make_tensor_arg(host_inputs[worker_idx]), TensorArgType.INPUT)
-                    args.add_tensor(make_tensor_arg(outputs[domain_name][worker_idx]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(
+                        worker.make_tensor_arg(host_inputs[worker_idx], shapes=(COUNT,), dtype=_F32),
+                        TensorArgType.INPUT,
+                    )
+                    args.add_tensor(
+                        worker.make_tensor_arg(outputs[domain_name][worker_idx], shapes=(COUNT,), dtype=_F32),
+                        TensorArgType.OUTPUT_EXISTING,
+                    )
                     _add_domain_scratch(args, domain)
                     args_list.append(args)
                 orch.submit_next_level_group(allreduce_handle, args_list, cfg, workers=DOMAINS[domain_name])

@@ -44,20 +44,18 @@ def test_wire_tensor_and_device_pod_are_distinct_types():
     assert ChipTensor is not Tensor
 
 
-def test_wire_tensor_stays_off_the_public_submit_surface():
-    # `TaskArgs.add_tensor` still takes a ChipTensor, so re-exporting `Tensor` from
-    # simpler.task_interface would advertise a public type that its own submit call rejects. The two
-    # facts move together: the wire cutover that makes add_tensor accept a Tensor is what earns it a
-    # place on that module, and this test fails then to say so.
+def test_task_args_takes_the_wire_tensor():
+    # `TaskArgs.add_tensor` takes the wire `Tensor`, and simpler.task_interface re-exports it: the
+    # public submit surface names the type its own submit call accepts.
     import simpler.task_interface as ti  # noqa: PLC0415
 
-    assert not hasattr(ti, "Tensor")
+    assert ti.Tensor is Tensor
 
     h = create_host_shared_buffer(64, mint_owner_instance_id(), buffer_id=1)
     try:
         args = ti.TaskArgs()
-        with pytest.raises(TypeError):
-            args.add_tensor(h.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+        args.add_tensor(h.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+        assert args.tensor_count() == 1
     finally:
         h.close()
 

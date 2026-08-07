@@ -78,29 +78,17 @@ public:
     /// Terminal — the object cannot be reused after this.
     void finalize();
 
-    // Launch a cid previously staged via register_callable.
-    // Materializes a ChipStorageTaskArgs from `args` (one memcpy of T*40B + S*8B
-    // into a stack POD), then delegates to the overload below. Per-stage timing
-    // (host wall, on-NPU device wall + AICPU phase breakdown) is emitted by the
-    // platform as `[STRACE]` log markers — see src/common/log/.../strace.h — not
-    // returned, so the L3 dispatcher and L2 child are observed uniformly.
-    void run(int32_t callable_id, TaskArgsView args, const CallConfig &config);
-    void
-    run(int32_t callable_id, TaskArgsView args, const CallConfig &config, volatile int32_t *accepted_state,
-        int32_t accepted_value);
-    // Same launch, but the caller already holds the runtime.so-ABI POD —
-    // skip the view→storage memcpy and hand the pointer straight to the C ABI.
-    // Used by the ChipStorageTaskArgs path in the nanobind binding.
+    // Launch a cid previously staged via register_callable. `args` is the runtime.so-ABI POD, which
+    // every caller already holds: the wire blob is materialized into one before it gets here.
+    // Per-stage timing (host wall, on-NPU device wall + AICPU phase breakdown) is emitted by the
+    // platform as `[STRACE]` log markers — see src/common/log/.../strace.h — not returned, so the
+    // L3 dispatcher and L2 child are observed uniformly.
     void run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config);
     void
     run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config,
         volatile int32_t *accepted_state, int32_t accepted_value);
     void run_with_lease(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
-        volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
-    );
-    void run_with_lease(
-        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
         volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
     );
 
@@ -126,11 +114,6 @@ public:
      */
     ChipWorkerNativeRun prepare_native_run(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
-        uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
-        int32_t accepted_value = 0
-    );
-    ChipWorkerNativeRun prepare_native_run(
-        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
         uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
         int32_t accepted_value = 0
     );

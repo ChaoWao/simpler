@@ -92,7 +92,7 @@ class TestDynamicAllocateBasic:
                         "domain_size": tp[chip_idx].domain_size,
                         "device_ctx": int(tp[chip_idx].device_ctx),
                         "local_window_base": int(tp[chip_idx].local_window_base),
-                        "buffer_ptrs": dict(tp[chip_idx].buffer_ptrs),
+                        "buffer_bases": {name: h.base for name, h in tp[chip_idx].buffers.items()},
                     }
                     for chip_idx in tp.workers
                 }
@@ -134,8 +134,8 @@ class TestDynamicAllocateBasic:
         # (i.e. non-zero).
         assert ctx0["local_window_base"] != 0
         assert ctx1["local_window_base"] != 0
-        scratch0 = ctx0["buffer_ptrs"]
-        scratch1 = ctx1["buffer_ptrs"]
+        scratch0 = ctx0["buffer_bases"]
+        scratch1 = ctx1["buffer_bases"]
         assert isinstance(scratch0, dict) and scratch0["scratch"] == ctx0["local_window_base"]
         assert isinstance(scratch1, dict) and scratch1["scratch"] == ctx1["local_window_base"]
 

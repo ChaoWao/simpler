@@ -14,7 +14,7 @@ from .platform_info import parse_platform
 from .pto_isa import ensure_pto_isa_root
 from .runtime_builder import RuntimeBuilder
 from .scene_test import CallableNamespace, Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
-from .torch_interop import make_tensor_arg, torch_dtype_to_datatype
+from .torch_interop import make_chip_tensor_arg, torch_dtype_to_datatype
 
 __all__ = [
     "CallableNamespace",
@@ -26,7 +26,7 @@ __all__ = [
     "TaskArgsBuilder",
     "ensure_pto_isa_root",
     "extract_text_section",
-    "make_tensor_arg",
+    "make_chip_tensor_arg",
     "parse_platform",
     "scene_test",
     "torch_dtype_to_datatype",

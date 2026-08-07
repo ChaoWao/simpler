@@ -59,7 +59,6 @@ Usage::
 
 from __future__ import annotations
 
-import bisect
 import contextlib
 import ctypes
 import enum
@@ -83,7 +82,6 @@ from typing import Any, cast
 
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
-    CHIP_TENSOR_CHILD_MEMORY_OFFSET,
     MAX_REGISTERED_CALLABLE_IDS,
     PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
@@ -92,19 +90,34 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _l3_child_onboard_region_create,
     _mailbox_load_i32,
     _mailbox_store_i32,
+    _read_control_copy_request,
     _worker_host_mapped_region_ack_cleanup_error,
     _worker_host_mapped_region_close,
     _worker_host_mapped_region_import_onboard,
     _worker_host_mapped_region_import_sim,
     _worker_host_mapped_region_peek_cleanup_error,
+    get_element_size,
+    materialize_task_args,
+    materialize_tensor_blob,
     read_args_from_blob,
 )
 
 from . import _log as _simpler_log
 from .buffer import (
+    AccessMode,
+    AddressSpace,
+    BackendKind,
     Buffer,
+    BufferDescriptor,
+    CanonicalIdentity,
+    ImportRegistry,
     create_host_shared_buffer,
+    host_ptr_nbytes,
     mint_owner_instance_id,
+    re_export,
+    wrap_device_malloc,
+    wrap_fork_inherited,
+    wrap_vmm_window,
 )
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
@@ -128,7 +141,6 @@ from .task_interface import (
     CallConfig,
     ChipCallable,
     ChipDomainContext,
-    ChipTensor,
     ChipWorker,
     CommBufferSpec,
     CommDomainHandle,
@@ -191,12 +203,12 @@ _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
 _CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # The generation-safe pipeline lease follows CONFIG. Args start after the
 # lease, rounded up to 8 bytes so the first
-# ChipTensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
+# Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
 # SIGBUS on strict-alignment platforms (aarch64 atomics, some ARM cores).
 _PIPELINE_LEASE_FMT = struct.Struct("=IIQ")
 _OFF_PIPELINE_LEASE = (_OFF_CONFIG + _CFG_FMT.size + 7) & ~7
 _OFF_ARGS = (_OFF_PIPELINE_LEASE + _PIPELINE_LEASE_FMT.size + 7) & ~7
-assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for ChipTensor.data"
+assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for Tensor.data"
 _OFF_TASK_CALLABLE_HASH = _OFF_ARGS
 _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # MAILBOX_ARGS_CAPACITY mirrors the C++ constexpr in worker_manager.h so the
@@ -314,6 +326,9 @@ _RUN_CANCELLATION_ATTEMPTS = 2
 # Control sub-commands (written at _OFF_CALLABLE as uint64)
 _CTRL_MALLOC = 0
 _CTRL_FREE = 1
+# Host<->device copy. Both ends are handles: the payload at _OFF_ARGS carries the two descriptors
+# and the length, and the child resolves each through the ImportRegistry that also resolves task
+# arguments — the owner's mapped address is not the child's, and never crosses the fork.
 _CTRL_COPY_TO = 2
 _CTRL_COPY_FROM = 3
 # Pre-warm a chip child by callable digest. The child resolves the digest to
@@ -344,16 +359,6 @@ _CTRL_COMM_INIT = 9
 _CTRL_PY_REGISTER = 10
 _CTRL_PY_UNREGISTER = 11
 _CTRL_PY_IMPORT_REGISTER = 12
-# Host-buffer registration. MAP_HOST maps a named host-buffer shm
-# into every local L3 child *post-fork* and keeps it mapped so later runs can copy
-# through it; UNMAP_HOST drops one. The child also records the parent VA range
-# the shm stands in for, so the per-task blob's host pointers (raw parent VAs)
-# can be rewritten to the child's own mapping before the runtime dereferences
-# them. Unlike _CTRL_REGISTER (one-shot H2D then close), these mappings persist
-# for the buffer's registered lifetime — see docs/comm-domain.md.
-_CTRL_MAP_HOST = 14
-_CTRL_UNMAP_HOST = 15
-
 # Operation names a child puts in its error message when a control command
 # fails, so the parent's re-raised text names the operation and not just a
 # numeric sub-command. Absent entries fall back to the raw number.
@@ -365,20 +370,6 @@ _CTRL_OP_NAMES = {
     _CTRL_PY_UNREGISTER: "py_unregister",
 }
 
-# MAP_HOST payload: token (u64), parent_va (u64), nbytes (u64), then the
-# NUL-free host-buffer shm name as the trailing bytes. UNMAP_HOST payload is the
-# token alone.
-_HOST_BUF_MAP_HEADER = struct.Struct("<QQQ")
-_HOST_BUF_UNMAP = struct.Struct("<Q")
-
-# Wire layout of a ChipTensor inside a task-args blob, pinned by static_assert in
-# src/common/task_interface/tensor.h: each ChipTensor is 128 B and buffer.addr is its
-# first field (offset 0). The blob is [int32 T][int32 S][ChipTensor[T]][scalars], so
-# tensor i's host pointer lives at _OFF_TASK_ARGS_BLOB + 8 + i*128. The child
-# rewrites that u64 in place to redirect a registered host pointer at its own
-# mapping (the pure-Python blob-rewrite scheme, no runtime C++ change).
-_BLOB_TENSOR_STRIDE = 128
-_BLOB_HEADER_BYTES = 8
 _CTRL_WORKER_CHIP_REGION_CREATE = 16
 _CTRL_WORKER_CHIP_REGION_RELEASE = 17
 _CTRL_COMMITTED_DEVICE_MEMORY = 18
@@ -424,14 +415,19 @@ _OFF_DOMAIN_REPLY_COMMITTED = 0
 
 # Control args layout (reuses task mailbox fields when state == _CONTROL_*):
 #   offset  8 (_OFF_CALLABLE):  uint64  sub-command
-#   offset 16:                  uint64  arg0 (size for malloc/register; dev_ptr for free/copy)
-#   offset 24:                  uint64  arg1 (host_ptr for copy)
-#   offset 32:                  uint64  arg2 (nbytes for copy)
+#   offset 16:                  uint64  arg0 (size for malloc/register; ptr for free; region id)
 #   offset 40:                  uint64  result (returned ptr from malloc)
 _CTRL_OFF_ARG0 = 16
-_CTRL_OFF_ARG1 = 24
-_CTRL_OFF_ARG2 = 32
 _CTRL_OFF_RESULT = 40
+
+
+class _NoBufferConsumerError(RuntimeError):
+    """A level >= 3 Worker has no forked child, so a Buffer it owns can reach no consumer.
+
+    Typed so a caller whose buffers have an in-process consumer instead — the remote L3 runner, whose
+    orchestration fn dereferences the backing itself — can tell this refusal apart from every other
+    way ``create_buffer`` fails and supply its own backing.
+    """
 
 
 @dataclass
@@ -564,47 +560,6 @@ class _ChildProvEntry:
         if self.domain_allocation_ids:
             extent = max(extent, *self.domain_allocation_ids.values())
         return extent
-
-
-@dataclass
-class _HostBufEntry:
-    """Parent-side record for a born-shared post-fork host buffer.
-
-    The worker owns ``shm`` — a named buffer the local L3 children attach and
-    read/write through. The user builds a tensor over it (via the buffer
-    protocol on :class:`HostBuffer`), so the buffer *is* the shm: ``data_ptr ==
-    shm_base`` and no per-run copy is needed (the child reads and writes the same
-    physical pages the parent sees). ``shm_base`` caches the mapped address.
-    """
-
-    token: int
-    data_ptr: int
-    nbytes: int
-    shm: SharedMemory
-    shm_name: str
-    shm_base: int
-
-
-@dataclass(frozen=True, eq=False)
-class HostBuffer:
-    """Handle for a worker-allocated, born-shared host buffer (zero-copy).
-
-    Returned by ``Worker.create_host_buffer``. ``buffer`` is a ``memoryview``
-    over shared memory already attached into every local L3 child; wrap it with
-    ``torch.frombuffer`` / ``np.frombuffer`` to get a real tensor whose writes
-    land directly in the child-visible pages — no per-run copy. ``token`` /
-    ``data_ptr`` / ``nbytes`` identify the mapping; pass this handle back to
-    ``free_host_buffer`` to release it.
-
-    ``eq=False`` keeps object-identity equality/hash so the (unhashable)
-    ``memoryview`` field never blocks using the handle as a dict key or set
-    member.
-    """
-
-    token: int
-    data_ptr: int
-    nbytes: int
-    buffer: memoryview
 
 
 # Which Workers this thread already holds a control reservation on. One control
@@ -1231,115 +1186,11 @@ def _validate_domain_allocation(
     return resources
 
 
-class _NoHostBufferChildrenError(RuntimeError):
-    """The Worker has no process child that can attach a host buffer."""
-
-
-def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[int, int, int]]) -> None:
-    """Redirect registered host pointers in a task-args blob to child mappings.
-
-    ``ranges`` is ``(parent_lo, parent_hi, child_base)`` for each host buffer the
-    child has mapped via _CTRL_MAP_HOST. For every host tensor whose
-    ``buffer.addr`` (a parent VA) lands in a registered range, rewrite it in
-    place to ``child_base + (addr - parent_lo)`` so the runtime dereferences the
-    child's own mapping. ChipTensors outside every range (fork-inherited or
-    child-allocated) are left untouched. A ``child_memory`` tensor carries a
-    child-owned device pointer, never a host VA, so it is skipped even when its
-    address numerically falls inside a registered host range — rewriting it would
-    corrupt the device pointer. See _BLOB_TENSOR_STRIDE for the wire layout.
-    """
-    tensor_count = struct.unpack_from("<i", buf, blob_off)[0]
-    if tensor_count <= 0:
-        return
-    base = blob_off + _BLOB_HEADER_BYTES
-    for i in range(tensor_count):
-        addr_off = base + i * _BLOB_TENSOR_STRIDE
-        if buf[addr_off + CHIP_TENSOR_CHILD_MEMORY_OFFSET]:
-            continue
-        addr = struct.unpack_from("<Q", buf, addr_off)[0]
-        for parent_lo, parent_hi, child_base in ranges:
-            if parent_lo <= addr < parent_hi:
-                struct.pack_into("<Q", buf, addr_off, child_base + (addr - parent_lo))
-                break
-
-
 def _read_ctrl_staged_shm_name(buf: memoryview) -> str:
     """Decode the staged-payload shm name a broadcast_control_all left at _OFF_ARGS."""
     raw = bytes(buf[_OFF_ARGS : _OFF_ARGS + _CTRL_SHM_NAME_BYTES])
     nul = raw.find(b"\x00")
     return raw[: nul if nul >= 0 else _CTRL_SHM_NAME_BYTES].decode("utf-8", "replace")
-
-
-def _shm_base_addr(shm: SharedMemory) -> int:
-    """Mapped base address of ``shm``. The mapping outlives the temporary buffer
-    view, so the address stays valid until ``shm.close()``."""
-    view = shm.buf
-    assert view is not None
-    exporter = ctypes.c_char.from_buffer(view)
-    addr = ctypes.addressof(exporter)
-    del exporter
-    return addr
-
-
-def _rebuild_host_buf_ranges(
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]], host_buf_ranges: list[tuple[int, int, int]]
-) -> None:
-    host_buf_ranges.clear()
-    for _shm, lo, hi, base in host_buf_table.values():
-        host_buf_ranges.append((lo, hi, base))
-
-
-def _handle_ctrl_map_host(
-    buf: memoryview,
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]],
-    host_buf_ranges: list[tuple[int, int, int]],
-) -> None:
-    """Child handler for _CTRL_MAP_HOST: persist a host-buffer mapping.
-
-    The staged payload is ``token, parent_va, nbytes`` followed by the host
-    buffer's shm name. Map that shm and remember the parent VA range it stands
-    in for so the per-task blob rewrite can redirect host pointers to this base.
-    """
-    payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-    staged = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
-    try:
-        staged_buf = staged.buf
-        assert staged_buf is not None
-        payload = bytes(staged_buf[:payload_size])
-    finally:
-        staged.close()
-    token, parent_va, nbytes = _HOST_BUF_MAP_HEADER.unpack_from(payload, 0)
-    host_shm_name = payload[_HOST_BUF_MAP_HEADER.size :].decode("utf-8")
-    prior = host_buf_table.pop(token, None)
-    if prior is not None:
-        prior[0].close()
-    # Rebuild ranges in a finally so a raise from SharedMemory / _shm_base_addr
-    # cannot leave the just-popped prior mapping's stale range in host_buf_ranges.
-    try:
-        host_shm = SharedMemory(name=host_shm_name)
-        host_buf_table[token] = (host_shm, parent_va, parent_va + nbytes, _shm_base_addr(host_shm))
-    finally:
-        _rebuild_host_buf_ranges(host_buf_table, host_buf_ranges)
-
-
-def _handle_ctrl_unmap_host(
-    buf: memoryview,
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]],
-    host_buf_ranges: list[tuple[int, int, int]],
-) -> None:
-    """Child handler for _CTRL_UNMAP_HOST: drop a host-buffer mapping by token."""
-    payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-    staged = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
-    try:
-        staged_buf = staged.buf
-        assert staged_buf is not None
-        token = _HOST_BUF_UNMAP.unpack_from(bytes(staged_buf[:payload_size]), 0)[0]
-    finally:
-        staged.close()
-    entry = host_buf_table.pop(token, None)
-    if entry is not None:
-        entry[0].close()
-        _rebuild_host_buf_ranges(host_buf_table, host_buf_ranges)
 
 
 def _allocate_local_slot(registry: dict[int, Any]) -> int:
@@ -1740,24 +1591,30 @@ def _format_exc(prefix: str, exc: BaseException) -> str:
     return f"{prefix}: {type(exc).__name__}: {exc}"
 
 
-def _read_args_from_mailbox(buf) -> TaskArgs:
-    """Decode the TaskArgs blob written by C++ write_blob from the mailbox.
+def _reexport_args_from_mailbox(buf, worker: Worker) -> TaskArgs:
+    """Re-export the mailbox tensor args for an orchestrator (nested L4→L3) child.
 
-    Used by the Python-targeted child loops (sub_worker, nested L4+ child)
-    where the destination of `args` is a Python callable that needs a
-    typed TaskArgs object.  The chip-child loops that immediately forward
-    to C++ run use the zero-copy `run_from_blob` path
-    instead — see those loops for the matching comment.
+    Each received ref's backing is re-exported (per-backing, no map, canonical identity preserved), and
+    a new ref carrying the original view (byte_offset / shapes / strides / dtype) is built over it. The
+    inner orch fn forwards these to L2 with no map cost (no descriptor pass-through); dependency
+    inference keys on the invariant identity. The compute leaf downstream maps lazily.
 
-    Delegates to the nanobind helper so the ChipTensor layout is
-    parsed by C++ `read_blob` (single source of truth) instead of being
-    reimplemented in Python.  The Python re-implementation that lived
-    here previously dropped the `child_memory` byte (offset 33), which
-    silently broke any tensor carrying a chip-owned device pointer
-    (HCCL window slots etc.) — now structurally impossible.
+    Re-export is per-tensor; the container is the same ``TaskArgs`` the submitter built, so the
+    scalars ride across unchanged and an orch fn reads its args the same way at every level.
     """
-    mailbox_addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
-    return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
+    args_ptr = _buffer_field_addr(buf, _OFF_TASK_ARGS_BLOB)
+    args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+    out = TaskArgs()
+    for i in range(args.tensor_count()):
+        ref = args.tensor(i)
+        h_prime = worker._reexport(ref.buffer)
+        out.add_tensor(
+            h_prime.tensor(shapes=ref.shapes, dtype=ref.dtype, strides=ref.strides, byte_offset=ref.byte_offset),
+            args.tag(i),
+        )
+    for i in range(args.scalar_count()):
+        out.add_scalar(args.scalar(i))
+    return out
 
 
 # Idle mailbox polls between `getppid()` samples in a forked child. One poll
@@ -1857,8 +1714,7 @@ def _sub_worker_loop(
     completion, which the run's waiter rethrows as ``std::runtime_error``.
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
-    host_buf_ranges: list[tuple[int, int, int]] = []
+    import_registry = ImportRegistry()  # lazy per-endpoint import cache: canonical identity -> local base
 
     def handle_task(task_buf) -> tuple[int, str]:
         digest = _read_task_digest(task_buf)
@@ -1867,9 +1723,10 @@ def _sub_worker_loop(
         if fn is None:
             return 1, f"sub_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            if host_buf_ranges:
-                _rewrite_blob_host_addrs(task_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-            args = _read_args_from_mailbox(task_buf)
+            # Compute leaf: materialize each arg (map-once) into a MappedArg the Python
+            # callable computes on via torch.frombuffer(arg.buffer, ...).
+            args_ptr = _buffer_field_addr(task_buf, _OFF_TASK_ARGS_BLOB)
+            args = import_registry.mapped_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
             fn(args)
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker", e)
@@ -1877,19 +1734,14 @@ def _sub_worker_loop(
 
     def handle_control(sub_cmd: int) -> tuple[int, str]:
         try:
-            if sub_cmd == _CTRL_MAP_HOST:
-                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-            elif sub_cmd == _CTRL_UNMAP_HOST:
-                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-            else:
-                _handle_py_callable_control(
-                    buf,
-                    registry,
-                    identity_table,
-                    identity_refs,
-                    sub_cmd,
-                    context="sub_worker",
-                )
+            _handle_py_callable_control(
+                buf,
+                registry,
+                identity_table,
+                identity_refs,
+                sub_cmd,
+                context="sub_worker",
+            )
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker control", e)
         return 0, ""
@@ -1897,11 +1749,7 @@ def _sub_worker_loop(
     try:
         _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
-        for host_shm, _lo, _hi, _base in host_buf_table.values():
-            try:
-                host_shm.close()
-            except Exception:  # noqa: BLE001
-                pass
+        import_registry.close()
 
 
 def _read_shm_name(buf, offset: int) -> str:
@@ -2263,12 +2111,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     """
     prepared = prepared if prepared is not None else set()
     worker_chip_region_store = _HostWorkerChipRegionStore()
-    # Post-fork host buffers mapped into this child. `host_buf_table`
-    # owns the mmap per token (for unmap + teardown); `host_buf_ranges` is the
-    # parent-VA → child-VA translation table the per-task blob rewrite consults,
-    # rebuilt from the table on every map/unmap.
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}  # token -> (shm, lo, hi, child_base)
-    host_buf_ranges: list[tuple[int, int, int]] = []  # (parent_lo, parent_hi, child_base)
+    import_registry = ImportRegistry()  # lazy per-endpoint import cache: canonical identity -> local base
 
     def handle_task(task_buf) -> tuple[int, str]:
         task_addr = ctypes.addressof(ctypes.c_char.from_buffer(task_buf))
@@ -2291,25 +2134,23 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
                     f"(register via _CTRL_PREPARE first)"
                 )
-            # Redirect any registered host pointer (a parent VA) in the
-            # blob to this child's own mapping before the runtime reads it.
-            # No-op when nothing is registered.
-            if host_buf_ranges:
-                _rewrite_blob_host_addrs(task_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
             pipeline_slot, pipeline_reserved, pipeline_generation = _PIPELINE_LEASE_FMT.unpack_from(
                 task_buf, _OFF_PIPELINE_LEASE
             )
             if pipeline_reserved != 0:
                 raise RuntimeError(f"chip_process dev={device_id}: invalid pipeline lease reserved field")
-            # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
-            # the blob layout is what `write_blob` already wrote, so re-parsing
-            # it in Python is N x 40B of avoidable work and a permanent
-            # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
-            # is the source of truth.
-            cw._impl.run_from_blob(
+            # Materialize the tensor args into a chip-POD blob the runtime reads: resolve
+            # each ref's embedded handle to a local base (map-once, cached by canonical
+            # identity), then build the chip blob at those bases. Replaces the former
+            # parent-VA range rewrite — identities resolve exactly, not by numeric range.
+            args_ptr = task_addr + _OFF_TASK_ARGS_BLOB
+            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            chip_args = materialize_tensor_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            # The acceptance flag lives in the mailbox, not in the materialized args, so
+            # the fence still publishes through the address the parent polls.
+            cw._impl.run_materialized(
                 cid,
-                task_addr + _OFF_TASK_ARGS_BLOB,
-                _MAILBOX_ARGS_CAPACITY,
+                chip_args,
                 cfg,
                 task_addr + _OFF_ACCEPTED,
                 _TASK_ACCEPTED,
@@ -2340,16 +2181,16 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             elif sub_cmd == _CTRL_FREE:
                 ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
                 cw.free(ptr)
-            elif sub_cmd == _CTRL_COPY_TO:
-                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                cw.copy_to(dst, src, n)
-            elif sub_cmd == _CTRL_COPY_FROM:
-                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                cw.copy_from(dst, src, n)
+            elif sub_cmd in (_CTRL_COPY_TO, _CTRL_COPY_FROM):
+                # Both ends resolve through the same map-once cache the task-args path uses, so a
+                # backing already imported for a task is the one this copy reaches.
+                dst_desc, src_desc, n = _read_control_copy_request(mailbox_addr)
+                dst = import_registry.materialize(dst_desc).base
+                src = import_registry.materialize(src_desc).base
+                if sub_cmd == _CTRL_COPY_TO:
+                    cw.copy_to(dst, src, n)
+                else:
+                    cw.copy_from(dst, src, n)
             elif sub_cmd == _CTRL_PREPARE:
                 digest = _read_control_digest(buf)
                 cid = identity_table.get(digest)
@@ -2426,10 +2267,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_release_domain(cw, buf)
             elif sub_cmd == _CTRL_COMM_INIT:
                 _handle_ctrl_comm_init(cw, buf)
-            elif sub_cmd == _CTRL_MAP_HOST:
-                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-            elif sub_cmd == _CTRL_UNMAP_HOST:
-                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
             elif sub_cmd == _CTRL_WORKER_CHIP_REGION_CREATE:
                 _handle_ctrl_worker_chip_region_create(cw, buf, chip_platform, worker_chip_region_store)
             elif sub_cmd == _CTRL_WORKER_CHIP_REGION_RELEASE:
@@ -2516,10 +2353,16 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             if frame.native_run is not None:
                 return frame.native_run
             _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
-            frame.native_run = cw._impl._prepare_native_run_from_blob(
+            # The frame carries the wire blob; the runtime reads the chip POD. Resolve each
+            # tensor's descriptor to a local base (map-once, cached by canonical identity) and
+            # rebuild at those bases, as the non-pipelined task path does. The native prepare
+            # copies the args into its own storage, so this POD need not outlive the call.
+            args_ptr = frame.frame_addr + _OFF_TASK_ARGS_BLOB
+            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            chip_args = materialize_tensor_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            frame.native_run = cw._impl._prepare_native_run_materialized(
                 frame.cid,
-                frame.frame_addr + _OFF_TASK_ARGS_BLOB,
-                _MAILBOX_ARGS_CAPACITY,
+                chip_args,
                 frame.config,
                 slot_id,
                 generation,
@@ -2563,19 +2406,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         f"identity_generation={generation})"
                     )
 
-                tensor_count, scalar_count = struct.unpack_from("=ii", frame_buf, _OFF_TASK_ARGS_BLOB)
-                if tensor_count < 0 or scalar_count < 0:
-                    raise RuntimeError(
-                        f"task args has negative counts (tensors={tensor_count}, scalars={scalar_count})"
-                    )
-                args_bytes = (
-                    _BLOB_HEADER_BYTES + tensor_count * _BLOB_TENSOR_STRIDE + scalar_count * struct.calcsize("=Q")
-                )
-                if args_bytes > _MAILBOX_ARGS_CAPACITY:
-                    raise RuntimeError(
-                        f"task args needs {args_bytes} bytes but frame capacity is {_MAILBOX_ARGS_CAPACITY}"
-                    )
-
                 digest = _read_task_digest(frame_buf)
                 cid = identity_table.get(digest)
                 if cid is None:
@@ -2584,8 +2414,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     raise RuntimeError(
                         f"cid {cid} not prepared before task frame publication (register via _CTRL_PREPARE first)"
                     )
-                if host_buf_ranges:
-                    _rewrite_blob_host_addrs(frame_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
                 config = _read_config_from_mailbox(frame_buf)
                 activation_required = initial_state != _TASK_READY
                 return _StagedFrame(
@@ -2852,12 +2680,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         else:
             _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
+        import_registry.close()
         _sweep_host_worker_chip_regions(worker_chip_region_store)
-        for host_shm, _lo, _hi, _base in host_buf_table.values():
-            try:
-                host_shm.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins, identity tables, log config, prewarm sizing) must cross the fork as explicit COW args; the child cannot read parent state after os.fork
@@ -3008,7 +2832,10 @@ def _child_worker_loop(
         if orch_fn is None:
             return 1, f"child_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            args = _read_args_from_mailbox(task_buf)
+            # Orchestrator (not a compute leaf): re-export each received backing to a local
+            # handle H' (per-backing, no map) so the inner orch sees only its own handles;
+            # pure forwarding to L2 carries no map cost.
+            args = _reexport_args_from_mailbox(task_buf, inner_worker)
             cfg = _read_config_from_mailbox(task_buf)
             inner_worker.run(orch_fn, args, cfg)
         except Exception as e:  # noqa: BLE001
@@ -3898,13 +3725,6 @@ class Worker:
         # dispatch) is now handled at the C++ boundary via mailbox_mu_, so
         # no quiescent-state guard is needed.
         self._registry_lock = threading.Lock()
-        # Owner-side buffer identity. `_owner_instance_id` is a fresh random draw per Worker
-        # incarnation, so a buffer_id reused by a later process can never collide with a live
-        # identity; `_buffers` keeps every Buffer this Worker owns so close() can unlink
-        # the backings.
-        self._owner_instance_id: bytes = mint_owner_instance_id()
-        self._buffer_id_counter: int = 1
-        self._buffers: dict[int, Buffer] = {}
         self._pending_unregister_cids: set[int] = set()
         self._pending_remote_unregister_hashids: set[bytes] = set()
         self._py_control_timeout_s = float(config.get("py_control_timeout_s", _PY_CONTROL_TIMEOUT_S))
@@ -4054,28 +3874,32 @@ class Worker:
         self._child_alloc_prov: dict[tuple[int, int], _ChildProvEntry] = {}
         self._child_prov_lock = threading.Lock()
 
-        # Post-fork zero-copy host buffers (``create_host_buffer``). Keyed by the
-        # born-shared shm's mapped base (== the buffer's data_ptr); each entry maps
-        # a named shm into every local L3 child so memory created after the children
-        # were forked is still reachable by a later run — with no per-run copy.
-        self._host_buf_registry: dict[int, _HostBufEntry] = {}
-        # Immutable read snapshot for the lock-free per-submit lookup
-        # (``_find_host_buf_entry``): a ``(sorted_ptrs_tuple, registry_copy)`` pair
-        # rebuilt under ``_registry_lock`` on every create/free and rebound
-        # atomically. The reader loads it once, so the sorted keys and the dict it
-        # bisects into never mutate mid-lookup — no lock, no torn read, no
-        # IndexError from a concurrent free shrinking the list. Host buffers are
-        # distinct, non-overlapping allocations, so the unique candidate for an
-        # address is the entry with the greatest base <= addr.
-        self._host_buf_snapshot: tuple[tuple[int, ...], dict[int, _HostBufEntry]] = ((), {})
-        self._host_buf_token_counter: int = 0
+        # Owner-side Buffer state (P1-B): a per-incarnation opaque nonce, a monotonic buffer_id
+        # (0 reserved), and the live handles this Worker owns. create_buffer allocates a handle whose
+        # self-describing descriptor rides embedded in every Tensor built over it (no export
+        # handshake); consumers materialize it lazily on receipt.
+        self._owner_instance_id: bytes = mint_owner_instance_id()
+        self._buffer_id_counter: int = 1
+        self._buffers: dict[int, Buffer] = {}
+        # Re-export table (points 1-4): an upper-level ref received by this worker's orch is re-exported
+        # to a local handle H' under this worker's identity, per-backing (keyed by source identity),
+        # so each level's orch sees only its own handles. No map here — H' relabels the backing;
+        # a compute leaf maps lazily. Lifetime is worker-scoped for now.
+        self._reexport_by_source: dict[CanonicalIdentity, Buffer] = {}
+        # make_tensor_arg memo: a pre-fork host tensor's storage base -> its FORK_SHM handle, so every ref
+        # over the same storage shares one canonical identity (dependencies key on it). Worker-scoped.
+        self._fork_tensor_handles: dict[int, Buffer] = {}
+        # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own tensor
+        # args itself (no forked child, no mailbox), resolving each ref's descriptor to a local base
+        # map-once — the chip-child path minus the mailbox hop. Lazily created on first L2 run.
+        self._chip_import_registry: ImportRegistry | None = None
 
     @property
     def _initialized(self) -> bool:
         """True only in READY — the worker's tree is live and dispatchable.
 
         False once CLOSED (the moment close() claims the epoch), so a dispatch /
-        register / create_host_buffer that races an in-progress close() is
+        register / create_buffer that races an in-progress close() is
         rejected rather than entering the teardown window.
         """
         return self._lifecycle is _Lifecycle.READY
@@ -6304,7 +6128,7 @@ class Worker:
         raises after a bounded rollback that reaps the children it forked
         best-effort (a child wedged in native code past the deadline may be left
         behind — see the deferred un-reaped-child / nested-shm items).
-        ``run`` / ``create_host_buffer`` / the remote register/memory APIs never
+        ``run`` / ``create_buffer`` / the remote register/memory APIs never
         trigger startup.
 
         Args:
@@ -7062,15 +6886,13 @@ class Worker:
                 poisoned = True
         return poisoned
 
-    def _register_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, ChipTensor):
-            raise TypeError("L3-L2 host buffer registration expects a ChipTensor")
-        if tensor.child_memory:
-            raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
-        if not tensor.is_contiguous:
-            raise ValueError("L3-L2 payload buffer must be contiguous")
-        base = int(tensor.data)
-        nbytes = int(tensor.nbytes())
+    def _register_worker_chip_orch_comm_host_buffer(self, handle) -> None:
+        if not isinstance(handle, Buffer):
+            raise TypeError("L3-L2 host buffer registration expects a Buffer")
+        if handle.address_space != AddressSpace.HOST:
+            raise ValueError("L3-L2 payload buffer must be host storage, not device storage")
+        base = int(handle.base)
+        nbytes = int(handle.nbytes)
         if base <= 0 or nbytes <= 0:
             return
         resources = self._building_run_resources
@@ -7084,15 +6906,13 @@ class Worker:
             nbytes,
         )
 
-    def _validate_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, ChipTensor):
-            raise ValueError("L3-L2 payload buffer must be a ChipTensor returned by orch.alloc(...)")
-        if tensor.child_memory:
-            raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
-        if not tensor.is_contiguous:
-            raise ValueError("L3-L2 payload buffer must be contiguous")
-        base = int(tensor.data)
-        nbytes = int(tensor.nbytes())
+    def _validate_worker_chip_orch_comm_host_buffer(self, handle) -> None:
+        if not isinstance(handle, Buffer):
+            raise ValueError("L3-L2 payload buffer must be a Buffer returned by orch.alloc(...)")
+        if handle.address_space != AddressSpace.HOST:
+            raise ValueError("L3-L2 payload buffer must be host storage, not device storage")
+        base = int(handle.base)
+        nbytes = int(handle.nbytes)
         if base <= 0 or nbytes <= 0:
             raise ValueError("L3-L2 payload buffer must have a nonzero address and size")
         resources = self._building_run_resources
@@ -7103,10 +6923,10 @@ class Worker:
         )
         registered_nbytes = buffers.get(base)
         if registered_nbytes is None:
-            raise ValueError("L3-L2 payload ChipTensor is not registered; use a tensor returned by orch.alloc(...)")
+            raise ValueError("L3-L2 payload buffer is not registered; use a handle returned by orch.alloc(...)")
         if nbytes > int(registered_nbytes):
             raise ValueError(
-                f"L3-L2 payload ChipTensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
+                f"L3-L2 payload buffer size {nbytes} exceeds registered shared storage {registered_nbytes}"
             )
 
     def _consume_worker_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
@@ -7570,7 +7390,17 @@ class Worker:
                             device_ctx=int(device_ctx),
                             local_window_base=int(local_window_base),
                             actual_window_size=int(window_size),
-                            buffer_ptrs={b.name: ptrs[i] for i, b in enumerate(buffers)},
+                            buffers={
+                                b.name: wrap_vmm_window(
+                                    ptrs[i],
+                                    int(b.nbytes),
+                                    self._owner_instance_id,
+                                    self._next_buffer_id(),
+                                    f"L{self.level}",
+                                    owner_worker_id=int(chip_idx),
+                                )
+                                for i, b in enumerate(buffers)
+                            },
                         )
                     handle.contexts = contexts
                 finally:
@@ -7598,14 +7428,15 @@ class Worker:
             # The backend windows are now live: record each chip's window base
             # and every carved buffer pointer before the lifecycle publishes
             # success back to the interruptible caller.
-            buf_nbytes = {b.name: int(b.nbytes) for b in buffers}
             with self._child_prov_lock:
                 for chip_idx, ctx in contexts.items():
                     self._child_prov_record_domain(
                         chip_idx, int(ctx.local_window_base), allocation_id, int(ctx.actual_window_size)
                     )
-                    for buf_name, buf_ptr in ctx.buffer_ptrs.items():
-                        self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id, buf_nbytes[buf_name])
+                    # Each carved buffer's handle carries its own extent, so the copy-range check
+                    # reads it straight off the handle.
+                    for buf in ctx.buffers.values():
+                        self._child_prov_record_domain(chip_idx, int(buf.base), allocation_id, int(buf.nbytes))
 
         published_handle = _run_with_owned_shared_memory(
             len(workers) * 2,
@@ -7622,7 +7453,7 @@ class Worker:
         Called by ``CommDomainHandle.release()``.  We do NOT drive
         ``CTRL_RELEASE_DOMAIN`` here because the orch function is allowed
         to have already submitted DAG tasks that capture the handle's
-        ``device_ctx`` / ``buffer_ptrs``.  Those tasks must see live
+        ``device_ctx`` / ``buffers``.  Those tasks must see live
         memory through execution; the queue is drained by
         ``_execute_pending_domain_releases`` once the owning run's fence fires.
 
@@ -8002,12 +7833,17 @@ class Worker:
 
     @staticmethod
     def _child_ptrs_in_args(args: Any) -> list[tuple[int, int]]:
-        """Extract ``(device_ptr, arg_index)`` for every child_memory tensor in ``args``."""
+        """``(device_ptr, arg_index)`` for every device arg — used for kind4 device-pointer provenance.
+
+        A DEVICE_MALLOC (worker device malloc) or VMM_WINDOW (domain-carved) ref carries the device
+        pointer in its backend body (u64 LE); that pointer is the provenance key the guard validates
+        against ``_child_alloc_prov``. Host-backed refs (POSIX/fork shm) contribute nothing.
+        """
         out: list[tuple[int, int]] = []
         for i in range(args.tensor_count()):
-            tensor = args.tensor(i)
-            if tensor.child_memory:
-                out.append((int(tensor.data), i))
+            desc = args.tensor(i).buffer
+            if desc.backend_kind in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+                out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
 
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
@@ -8056,37 +7892,80 @@ class Worker:
         if worker_id < 0 or worker_id >= len(self._chip_shms):
             raise IndexError(f"worker_id {worker_id} out of range (have {len(self._chip_shms)} chips)")
 
-    def malloc(self, size: int, worker_id: int = 0) -> int:
-        """Allocate memory on next-level chip worker *worker_id*. Returns a pointer."""
-        with self._operation_lease("malloc"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                # L2 is a single chip; worker_id is meaningless there, so the
-                # provenance is keyed on the canonical worker 0.
-                with self._child_prov_lock:
-                    ptr = self._chip_worker.malloc(size)
-                    self._child_prov_record_malloc(0, int(ptr), int(size))
-                    return ptr
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            return self._orch.malloc(worker_id, size)
+    def malloc(self, size: int) -> Buffer:
+        """Allocate device memory on this L2 worker's own chip; returns a DEVICE_MALLOC ``Buffer``.
 
-    def free(self, ptr: int, worker_id: int = 0) -> None:
-        """Free memory allocated by ``malloc()``."""
-        with self._operation_lease("free"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                # Safety-first commit barrier (mirrors Orchestrator.free): revoke
-                # provenance BEFORE the native free so an async unwind after a
-                # successful free can never leave a freed address live.
-                with self._child_prov_lock:
-                    self._child_prov_require_malloc_base(0, int(ptr), api="free")
-                    self._child_prov_clear_malloc(0, int(ptr))
+        Name a task arg with ``handle.tensor(shapes, dtype)`` and release with ``worker.free(handle)``. L3+
+        allocates child device memory with ``alloc_child_tensor(worker_id, ...)`` instead — a Worker is
+        the only allocator, the Orchestrator never allocates.
+        """
+        if self.level != 2:
+            raise TypeError("worker.malloc is L2-only; at L3+ use worker.alloc_child_tensor(worker_id, ...)")
+        with self._operation_lease("malloc"):
+            assert self._chip_worker is not None
+            # L2 is a single chip; worker_id is meaningless there, so the provenance is keyed
+            # on the canonical worker 0.
+            with self._child_prov_lock:
+                ptr = int(self._chip_worker.malloc(int(size)))
+                self._child_prov_record_malloc(0, ptr, int(size))
+        return wrap_device_malloc(
+            ptr, int(size), self._owner_instance_id, self._next_buffer_id(), f"L{self.level}", owner_worker_id=0
+        )
+
+    def alloc_child_tensor(self, worker_id: int, shapes: tuple[int, ...], dtype) -> Buffer:
+        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype``; returns a
+        DEVICE_MALLOC ``Buffer`` (successor of ``orch.malloc`` + ``child_memory``).
+
+        Called from within an orchestration fn (capture the Worker in the closure). The pointer is
+        private to ``worker_id``; name the arg with ``handle.tensor(shapes, dtype)``, dispatch it only to
+        that worker, and load host data with ``copy_to``. Not auto-freed at end-of-task.
+        """
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        self._check_chip_worker_id(int(worker_id))
+        assert self._worker is not None
+        # The lease is re-entrant, so calling this inside the orch fn (the run already holds it) nests
+        # safely, and calling it outside a run acquires it fresh.
+        with (
+            self._operation_lease("alloc_child_tensor"),
+            self._device_control_admission("alloc_child_tensor"),
+            self._child_prov_lock,
+        ):
+            ptr = int(self._worker.malloc(int(worker_id), int(nbytes)))
+            self._child_prov_record_malloc(int(worker_id), ptr, int(nbytes))
+        return wrap_device_malloc(
+            ptr,
+            int(nbytes),
+            self._owner_instance_id,
+            self._next_buffer_id(),
+            f"L{self.level}",
+            owner_worker_id=int(worker_id),
+        )
+
+    def free(self, handle: Buffer) -> None:
+        """Free a device ``Buffer`` allocated by ``malloc`` / ``alloc_child_tensor``.
+
+        The operation lease is re-entrant, so an in-run ``orch.free`` that delegates here nests safely.
+        """
+        wid, ptr = int(handle.owner_worker_id), int(handle.base)
+        # Reject a non-chip target (L4+, or a bad id) before the lease and the fence: a device op is
+        # only meaningful on a next-level chip, and an invalid id must fail now rather than after a
+        # wait for the FIFO head.
+        if self.level != 2:
+            self._check_chip_worker_id(wid)
+        with self._operation_lease("free"), self._device_control_admission("free"):
+            with self._child_prov_lock:
+                # Safety-first commit barrier: revoke provenance BEFORE the native free so an async unwind
+                # after a successful free can never leave a freed address live.
+                self._child_prov_require_malloc_base(wid, ptr, api="free")
+                self._child_prov_clear_malloc(wid, ptr)
+                if self.level == 2:
+                    assert self._chip_worker is not None
                     self._chip_worker.free(ptr)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.free(worker_id, ptr)
+                else:
+                    assert self._worker is not None
+                    self._worker.free(wid, ptr)
 
     def committed_device_memory(self, worker_id: int = 0) -> int:
         """Total device HBM (bytes) committed by chip worker *worker_id*'s
@@ -8108,232 +7987,229 @@ class Worker:
             assert self._orch is not None
             return int(self._orch.committed_device_memory(worker_id))
 
-    def copy_to(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
-        """Copy *size* bytes from host *src* to chip worker *dst*."""
-        with self._operation_lease("copy_to"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                with self._child_prov_lock:
-                    self._child_prov_require_live_range(0, int(dst), int(size), api="copy_to")
-                    self._chip_worker.copy_to(dst, src, size)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.copy_to(worker_id, dst, src, size)
+    @staticmethod
+    def _check_copy_handle(handle: Buffer, nbytes: int, *, writing: bool, api: str) -> None:
+        """Require ``handle`` to be a device backing this copy may legally touch for ``nbytes``.
 
-    def copy_from(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
-        """Copy *size* bytes from chip worker *src* to host *dst*."""
-        with self._operation_lease("copy_from"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                with self._child_prov_lock:
-                    self._child_prov_require_live_range(0, int(src), int(size), api="copy_from")
-                    self._chip_worker.copy_from(dst, src, size)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.copy_from(worker_id, dst, src, size)
+        The transfer length comes from the *host* object, so without this check a host buffer larger
+        than the device backing writes past it, and a READ-only backing accepts a write.
+        """
+        if handle.address_space != AddressSpace.DEVICE:
+            raise ValueError(
+                f"Worker.{api}: expected a DEVICE handle, got {handle.address_space.name} "
+                f"({handle.backend_kind.name}); host-to-host copies do not go through this API"
+            )
+        if handle.backend_kind not in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+            raise ValueError(f"Worker.{api}: backend {handle.backend_kind.name} is not reachable from this process")
+        needed = AccessMode.WRITE if writing else AccessMode.READ
+        if handle.access not in (needed, AccessMode.READWRITE):
+            raise ValueError(
+                f"Worker.{api}: backing grants {handle.access.name} but this direction needs {needed.name}"
+            )
+        if nbytes > handle.nbytes:
+            raise ValueError(f"Worker.{api}: {nbytes} bytes exceeds the {handle.nbytes}-byte backing")
+
+    @staticmethod
+    def _host_side_of_copy(obj, *, writing: bool, api: str) -> tuple[Buffer | None, int, int]:
+        """``(buffer_or_None, address, nbytes)`` for the host end of a control-plane copy.
+
+        A ``Buffer`` carries a self-describing descriptor a consumer resolves for itself, so the
+        handle is what travels; a raw host object has only an address, which is meaningful in this
+        process alone. The decision is by TYPE, never by matching an address against a range of known
+        backings — an address range says nothing reliable about who owns memory.
+        """
+        if not isinstance(obj, Buffer):
+            addr, nbytes = host_ptr_nbytes(obj)
+            return None, addr, nbytes
+        if obj.address_space != AddressSpace.HOST:
+            raise ValueError(f"Worker.{api}: the host side must be a HOST handle, got {obj.address_space.name}")
+        needed = AccessMode.WRITE if writing else AccessMode.READ
+        if obj.access not in (needed, AccessMode.READWRITE):
+            raise ValueError(
+                f"Worker.{api}: host backing grants {obj.access.name} but this direction needs {needed.name}"
+            )
+        return obj, int(obj.base), int(obj.nbytes)
+
+    def _require_buffer_host_side(self, host: Buffer | None, api: str) -> Buffer:
+        """The host ``Buffer`` a child resolves for an L3+ control-plane copy.
+
+        A forked child reaches host memory only through a backing its ``ImportRegistry`` can
+        materialize, so at L3+ the host end of a copy is a handle, never bare memory.
+        """
+        if host is None:
+            raise TypeError(
+                f"Worker.{api}: an L{self.level} host side must be a Buffer from create_buffer "
+                "(write the payload into buffer.shm.buf); raw host memory is L2-only"
+            )
+        return host
+
+    def copy_to(self, dst: Buffer, src) -> None:
+        """H2D: copy host ``src`` into device handle ``dst``.
+
+        ``src`` is a host ``Buffer``; the chip child resolves both handles through its
+        ``ImportRegistry`` and reads the host backing directly. At L2 the chip worker shares this
+        process, so a torch tensor or any writable buffer works too.
+        """
+        host, src_addr, nbytes = self._host_side_of_copy(src, writing=False, api="copy_to")
+        self._check_copy_handle(dst, nbytes, writing=True, api="copy_to")
+        wid, dptr = int(dst.owner_worker_id), int(dst.base)
+        if self.level != 2:
+            self._check_chip_worker_id(wid)
+            host = self._require_buffer_host_side(host, "copy_to")
+        with self._operation_lease("copy_to"), self._device_control_admission("copy_to"):
+            with self._child_prov_lock:
+                self._child_prov_require_live_range(wid, dptr, nbytes, api="copy_to")
+                if self.level == 2:
+                    # No fork: the chip worker runs in this process, so the host address is valid.
+                    assert self._chip_worker is not None
+                    self._chip_worker.copy_to(dptr, src_addr, nbytes)
+                else:
+                    assert self._worker is not None
+                    assert host is not None
+                    self._worker.copy_to(wid, dst.to_descriptor(), host.to_descriptor(), nbytes)
+
+    def copy_from(self, dst, src: Buffer) -> None:
+        """D2H: copy device handle ``src`` into host ``dst``.
+
+        ``dst`` is a host ``Buffer``; the chip child resolves both handles through its
+        ``ImportRegistry`` and writes the host backing directly. At L2 the chip worker shares this
+        process, so a torch tensor or any writable buffer works too.
+        """
+        host, dst_addr, nbytes = self._host_side_of_copy(dst, writing=True, api="copy_from")
+        self._check_copy_handle(src, nbytes, writing=False, api="copy_from")
+        wid, sptr = int(src.owner_worker_id), int(src.base)
+        if self.level != 2:
+            self._check_chip_worker_id(wid)
+            host = self._require_buffer_host_side(host, "copy_from")
+        with self._operation_lease("copy_from"), self._device_control_admission("copy_from"):
+            with self._child_prov_lock:
+                self._child_prov_require_live_range(wid, sptr, nbytes, api="copy_from")
+                if self.level == 2:
+                    # No fork: the chip worker runs in this process, so the host address is valid.
+                    assert self._chip_worker is not None
+                    self._chip_worker.copy_from(dst_addr, sptr, nbytes)
+                else:
+                    assert self._worker is not None
+                    assert host is not None
+                    self._worker.copy_from(wid, host.to_descriptor(), src.to_descriptor(), nbytes)
 
     # ------------------------------------------------------------------
     # Post-fork zero-copy host buffers
     # ------------------------------------------------------------------
 
-    def create_host_buffer(self, nbytes: int) -> HostBuffer:
-        """Allocate a born-shared host buffer, attached into every local L3 child,
-        that a later ``run()`` reads/writes with **no per-run copy**.
-
-        Local L3 children are forked during ``init()``; host memory allocated
-        afterwards is not in their address space. This hands you memory that is
-        *born* in a shm already attached into every child, so there is nothing to
-        copy: the child reads and writes the same physical pages the parent sees.
-
-        Returns a :class:`HostBuffer` whose ``buffer`` is a ``memoryview`` over
-        that shm. Build a tensor over it with the buffer protocol, framework of
-        your choice, and pass it to ``run()`` as usual::
-
-            buf = worker.create_host_buffer(n * 4)
-            t = torch.frombuffer(buf.buffer, dtype=torch.float32, count=n)
-            t.uniform_(0, 1)                       # in place → lands in the shm
-            worker.run(orch(chip, t, out), args=None, config=CallConfig())
-            worker.free_host_buffer(buf)           # drop the tensor first
-
-        simpler stays framework-free: torch/numpy appear only on the user's side
-        (``frombuffer``). Blocks until every local L3 child has attached the buffer;
-        not thread-safe against a concurrent ``run`` / ``create`` / ``free`` on
-        the same Worker — drive them from one thread, as the L3 worker is
-        otherwise.
-        """
-        if self.level < 3:
-            raise TypeError("create_host_buffer requires a level >= 3 Worker")
-        with self._operation_lease("create_host_buffer"):
-            return self._create_host_buffer_locked(int(nbytes))
-
-    def _create_host_buffer_locked(self, nbytes: int) -> HostBuffer:
-        # A born-shared buffer is mapped into every direct process child (chip
-        # and sub alike, via _broadcast_host_control). Only a truly childless L3
-        # has nowhere to attach it.
-        if not self._chip_shms and not self._sub_shms:
-            raise _NoHostBufferChildrenError(
-                "create_host_buffer requires at least one forked chip or sub child (this Worker has none)"
-            )
-        assert self._worker is not None
-
-        if nbytes <= 0:
-            raise ValueError("create_host_buffer: nbytes must be positive")
-
-        # Create the shm up front, then guard everything after it — mapping the
-        # address (``_shm_base_addr``), reserving the registry slot, and the
-        # broadcast — under one ``try`` so any failure closes and unlinks the shm
-        # instead of leaking a /dev/shm segment. The registry mutation stays under
-        # ``_registry_lock`` (mirrors Worker.register's discipline); the slow
-        # broadcast runs *outside* the lock — wire-level concurrency is serialized
-        # at the C++ mailbox, not here. The born-shared shm's own mapped base is
-        # the buffer's data_ptr, so a tensor built over buffer.buffer resolves to
-        # this registered range.
-        shm = SharedMemory(create=True, size=nbytes)
-        token: int | None = None
-        data_ptr: int | None = None
-        try:
-            data_ptr = _shm_base_addr(shm)
-            with self._registry_lock:
-                token = self._host_buf_token_counter
-                self._host_buf_token_counter += 1
-                entry = _HostBufEntry(
-                    token=token,
-                    data_ptr=data_ptr,
-                    nbytes=nbytes,
-                    shm=shm,
-                    shm_name=shm.name,
-                    shm_base=data_ptr,
-                )
-                self._host_buf_registry[data_ptr] = entry
-                self._rebuild_host_buf_snapshot()
-
-            payload = _HOST_BUF_MAP_HEADER.pack(token, data_ptr, nbytes) + shm.name.encode("utf-8")
-            errors = self._broadcast_host_control(_CTRL_MAP_HOST, payload)
-            if errors:
-                raise RuntimeError(
-                    f"create_host_buffer: MAP_HOST failed on {len(errors)} local L3 children; first error: {errors[0]}"
-                )
-        except BaseException:
-            # Roll back on any failure — a staging error before the map, a partial
-            # map, or an exception from the broadcast itself (any of which would
-            # otherwise leak the shm): unmap any child that took it, drop the
-            # reservation, free the shm. No user view exists yet, so close() cannot
-            # be blocked by an exported buffer.
-            try:
-                if token is not None:
-                    self._broadcast_host_unmap(token)
-            except Exception as unmap_exc:  # noqa: BLE001 -- must not mask the original failure below
-                sys.stderr.write(
-                    f"[worker pid={os.getpid()}] WARN: create_host_buffer rollback UNMAP_HOST "
-                    f"failed (continuing best-effort): {unmap_exc}\n"
-                )
-                sys.stderr.flush()
-            finally:
-                with self._registry_lock:
-                    if data_ptr is not None and self._host_buf_registry.pop(data_ptr, None) is not None:
-                        self._rebuild_host_buf_snapshot()
-                shm.close()
-                try:
-                    shm.unlink()
-                except FileNotFoundError:
-                    pass
-            raise
-
-        buf_view = shm.buf
-        assert buf_view is not None
-        return HostBuffer(token=token, data_ptr=data_ptr, nbytes=nbytes, buffer=buf_view)
-
-    def free_host_buffer(self, handle: HostBuffer) -> None:
-        """Release a born-shared buffer created by ``create_host_buffer``.
-
-        Unmaps it from every local L3 child and frees the parent shm. Drop every
-        tensor / ``memoryview`` you built over ``handle.buffer`` *first*: a live
-        view keeps the shm's pages exported, so ``close()`` cannot release them
-        and the buffer only warns (and is reclaimed once the last view is gone).
-
-        Best-effort and idempotent: a stale handle whose token no longer matches
-        (e.g. freed twice) is a silent no-op.
-        """
-        if not isinstance(handle, HostBuffer):
-            raise TypeError("free_host_buffer expects a HostBuffer from create_host_buffer")
-        with self._operation_lease("free_host_buffer"):
-            self._free_host_buffer_locked(handle)
-
-    def _free_host_buffer_locked(self, handle: HostBuffer) -> None:
-        with self._registry_lock:
-            entry = self._host_buf_registry.get(handle.data_ptr)
-            if entry is None or entry.token != handle.token:
-                return
-            self._host_buf_registry.pop(handle.data_ptr, None)
-            self._rebuild_host_buf_snapshot()
-        errors: list[str] = []
-        try:
-            # Gate on resource presence, not lifecycle: the child mailboxes are
-            # driveable whenever the C++ _worker is up — including during close()
-            # teardown (CLOSED), when the children are still alive to unmap.
-            if self._worker is not None:
-                errors = self._broadcast_host_unmap(entry.token)
-        except Exception as exc:  # noqa: BLE001
-            errors = [str(exc)]
-        finally:
-            close_warn = self._close_host_shm(entry)
-            if close_warn:
-                errors.append(close_warn)
-        if errors:
-            sys.stderr.write(
-                f"[worker pid={os.getpid()}] WARN: free_host_buffer token={entry.token} "
-                f"failed on {len(errors)} local L3 children; first error: {errors[0]}\n"
-            )
-            sys.stderr.flush()
-
-    @staticmethod
-    def _close_host_shm(entry: _HostBufEntry) -> str | None:
-        """Close + unlink a host-buffer's parent shm.
-
-        Returns a warning string (else ``None``) when a still-live view over a
-        zero-copy buffer blocks ``close()``: ``memoryview.release()`` raises
-        ``BufferError`` while a tensor built via ``frombuffer`` still holds the
-        pages exported. The name is unlinked regardless, so the OS reclaims the
-        segment once the user drops that last view.
-        """
-        warn: str | None = None
-        try:
-            entry.shm.close()
-        except BufferError:
-            warn = (
-                f"host buffer token={entry.token} still has a live view (a tensor/memoryview over "
-                f"buffer.buffer); drop it before free_host_buffer/close() to release the shm promptly"
-            )
-        try:
-            entry.shm.unlink()
-        except FileNotFoundError:
-            pass
-        return warn
-
-    # ------------------------------------------------------------------
-    # Owner-side Buffer allocation
-    # ------------------------------------------------------------------
-
     def create_buffer(self, nbytes: int) -> Buffer:
-        """Allocate a shared ``Buffer`` owned by this Worker.
+        """Allocate a shared ``Buffer`` owned by this Worker (P1-B).
 
         The backing is a POSIX shm; the Buffer carries a typed canonical identity and a
-        self-describing descriptor, so a consumer can resolve it with no prior handshake. Build a
-        tensor over ``buffer.shm.buf`` with the buffer protocol. Not thread-safe against a concurrent
-        run/create/free on the same Worker.
+        self-describing descriptor, so a consumer can resolve it with no prior handshake: the
+        descriptor travels embedded in every ``Tensor`` built over this Buffer and the consumer
+        materializes it lazily on first receipt (map-once, keyed by canonical identity). At L3+ that
+        consumer is a forked child; at L2 (a leaf, no children) the Worker itself materializes the
+        tensor in-process on ``run``. Build a tensor over ``buffer.shm.buf`` with the buffer protocol.
+        Not thread-safe against a concurrent run/create/free on the same Worker.
         """
         if self.level < 2:
             raise TypeError("create_buffer requires a level >= 2 Worker")
         with self._operation_lease("create_buffer"):
             return self._create_buffer_locked(int(nbytes))
 
+    def alloc_shared_tensor(self, shapes: tuple[int, ...], dtype) -> Buffer:
+        """Allocate a runtime-managed intermediate buffer (the ``Tensor`` form of ``orch.alloc``).
+
+        Called inside an orchestration fn. The backing comes from the orchestrator's HeapRing
+        (MAP_SHARED, visible to forked children) and is **auto-reclaimed** once every downstream consumer
+        has completed and the scope ends — no manual free. Returns a ``FORK_SHM`` ``Buffer`` whose
+        canonical identity is registered in the tensormap so a view of it (``handle.tensor(shapes, dtype)``)
+        dependency-wires to this producer slot. Chip-A→chip-B intermediates: name it as an OUTPUT of the
+        producing task and an INPUT of the consumer.
+        """
+        assert self._orch is not None, "alloc_shared_tensor requires an L3+ orchestration context"
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        oid, buffer_id, path = self._owner_instance_id, self._next_buffer_id(), f"L{self.level}"
+        identity = CanonicalIdentity(oid, buffer_id)
+        va = int(self._orch._o.alloc(list(int(s) for s in shapes), dtype, identity))
+        # Wrap the ring VA under the SAME identity: the child materializes to that VA (fork-inherited,
+        # MAP_SHARED read-write) and infer_deps keys the ref to the slot registered above.
+        return wrap_fork_inherited(
+            va,
+            int(nbytes),
+            oid,
+            buffer_id,
+            path,
+            access=AccessMode.READWRITE,
+            backend_kind=BackendKind.FORK_SHM,
+        )
+
+    def make_tensor_arg(self, tensor, shapes: tuple[int, ...], dtype: int, *, strides: tuple[int, ...] | None = None):
+        """Name a **pre-fork** host tensor as a ``Tensor`` over a memoized ``FORK_SHM`` handle.
+
+        The torch (or buffer-protocol) tensor MUST be allocated before ``init()`` so its VA is
+        fork-inherited by the children (the mainline "fork-inherited" contract). A ``share_memory_()``
+        tensor is MAP_SHARED — read-write across the fork, so usable as an OUTPUT the parent reads back;
+        a plain tensor is COW read-only (input only). The handle is memoized by the tensor's storage
+        base, so every ref over the same storage shares one canonical identity and dependencies key on
+        it. At L2 (no fork) any host tensor works. ``dtype`` is the ``DataType`` int value.
+        """
+        untyped_storage = getattr(tensor, "untyped_storage", None)
+        if callable(untyped_storage):
+            st = untyped_storage()
+            base, nbytes = int(st.data_ptr()), int(st.nbytes())
+            byte_offset = int(tensor.data_ptr()) - base  # the view's start within its storage
+        else:
+            base, nbytes = host_ptr_nbytes(tensor)
+            byte_offset = 0
+        # Memoized per storage base so every view of one storage shares an identity and their
+        # dependencies key together. The allocator reuses addresses, though, so a hit whose size no
+        # longer matches is a *different* storage that happens to sit where the last one did: it must
+        # get a fresh identity, or the two would fuse into one node in the dependency graph.
+        handle = self._fork_tensor_handles.get(base)
+        if handle is not None and handle.nbytes != nbytes:
+            handle = None
+        if handle is None:
+            # Copy-on-write only bites when a fork stands between the writer and this process. An
+            # L2 leaf consumes its own args in-process, so any host tensor is writable there; at L3+
+            # the consumer is a forked child, and only a MAP_SHARED allocation carries its writes
+            # back. Measuring this rather than assuming it is what stops a plain tensor from being
+            # accepted as an OUTPUT and then silently losing every write in the child.
+            shared = self.level == 2 or bool(getattr(tensor, "is_shared", lambda: False)())
+            # The backend tag records whether a consumer's writes reach this process, which is what
+            # the FORK_COW rejection protects. At L2 the consumer IS this process, so they reach it
+            # trivially and FORK_COW's contract — a write splitting into a private copy the owner
+            # never sees — is the one that would be false; the tag therefore follows `shared`.
+            handle = wrap_fork_inherited(
+                base,
+                nbytes,
+                self._owner_instance_id,
+                self._next_buffer_id(),
+                f"L{self.level}",
+                access=AccessMode.READWRITE if shared else AccessMode.READ,
+                backend_kind=BackendKind.FORK_SHM if shared else BackendKind.FORK_COW,
+            )
+            self._fork_tensor_handles[base] = handle
+        return handle.tensor(shapes=tuple(shapes), dtype=dtype, strides=strides, byte_offset=byte_offset)
+
     def _next_buffer_id(self) -> int:
         with self._registry_lock:
             bid = self._buffer_id_counter
             self._buffer_id_counter += 1
         return bid
+
+    def _reexport(self, source: BufferDescriptor) -> Buffer:
+        """Re-export a received backing for forwarding (per-backing, memoized, no map).
+
+        An upper-level ref reaching this worker's orch is forwarded as a handle H' that keeps the
+        source's canonical identity unchanged (invariant across every edge, frozen model §5/§8) — H'
+        is never mapped here (a downstream compute leaf maps it lazily), and is built once per source
+        backing (keyed by identity). Worker-scoped lifetime for now.
+        """
+        key = source.identity
+        handle = self._reexport_by_source.get(key)
+        if handle is None:
+            handle = re_export(source)
+            self._reexport_by_source[key] = handle
+        return handle
 
     def _create_buffer_locked(self, nbytes: int) -> Buffer:
         # An L3+ buffer is consumed by a forked child that lazily maps it, so a childless L3+ buffer
@@ -8342,7 +8218,7 @@ class Worker:
         # are local L3 Workers can consume one. An L2 leaf has no children and materializes
         # in-process, so it needs none.
         if self.level >= 3 and not self._chip_shms and not self._sub_shms and not self._next_level_shms:
-            raise RuntimeError(
+            raise _NoBufferConsumerError(
                 "create_buffer requires at least one forked chip, sub, or next-level child (this Worker has none)"
             )
         if nbytes <= 0:
@@ -8359,12 +8235,33 @@ class Worker:
             self._buffers[buffer_id] = buffer
         return buffer
 
+    def _close_chip_import_registry(self) -> None:
+        """Close the L2 in-process consumer import cache (drops its mapped shm imports)."""
+        if self._chip_import_registry is not None:
+            self._chip_import_registry.close()
+            self._chip_import_registry = None
+
+    def _release_buffer(self, buffer: Buffer) -> None:
+        """Close + unlink one owner Buffer and drop its registry entry.
+
+        The entry survives a failed close, so ``_release_all_buffers`` still reports the leak at
+        close() rather than losing it here. Idempotent for a buffer already released. The slot is
+        dropped only when it still holds *this* buffer: a buffer_id minted elsewhere can collide
+        with a registry key, and evicting the live entry it names would strand that backing."""
+        buffer.close()
+        with self._registry_lock:
+            buffer_id = int(buffer.identity.buffer_id)
+            if self._buffers.get(buffer_id) is buffer:
+                del self._buffers[buffer_id]
+
     def _release_all_buffers(self) -> None:
         """Close + unlink every owner Buffer (called from close()).
 
-        Per-buffer best-effort: one buffer's failure never strands the rest, and the first error is
-        raised after all are attempted so close() reports the leak rather than swallowing it. A
-        buffer whose close fails keeps its registry entry so the cleanup journal can retry it."""
+        Children drop their own lazily-mapped imports when their loops exit; the owner unlinks the
+        backing shm here. Per-buffer best-effort: one buffer's failure never strands the rest, and the
+        first error is raised after all are attempted so close() reports the leak rather than
+        swallowing it. A buffer whose close fails keeps its registry entry so the cleanup journal can
+        retry it."""
         with self._registry_lock:
             entries = list(self._buffers.items())
         errors: list[BaseException] = []
@@ -8378,129 +8275,6 @@ class Worker:
                 self._buffers.pop(buffer_id, None)
         if errors:
             raise errors[0]
-
-    def _release_all_host_buffers(self) -> None:
-        """Unmap + free every still-registered host buffer (called from close()).
-
-        Per-buffer best-effort: one buffer's failure never strands the rest, and
-        the first error is raised after all are attempted so close() reports the
-        leak rather than swallowing it to stderr. A buffer whose unmap broadcast
-        fails keeps its registry entry so the cleanup journal can retry it."""
-        with self._registry_lock:
-            entries = list(self._host_buf_registry.items())
-        errors: list[BaseException] = []
-        for data_ptr, entry in entries:
-            try:
-                if self._worker is not None:  # resource presence, not lifecycle (see _close_host_shm)
-                    child_errors = self._broadcast_host_unmap(entry.token)
-                    if child_errors:
-                        raise RuntimeError(f"host buffer token={entry.token} unmap failed: {child_errors[0]}")
-                # Tolerates a still-live view over a zero-copy buffer at close():
-                # unlinks the name regardless so the OS reclaims it once dropped.
-                self._close_host_shm(entry)
-                with self._registry_lock:
-                    if self._host_buf_registry.get(data_ptr) is entry:
-                        self._host_buf_registry.pop(data_ptr)
-                        self._rebuild_host_buf_snapshot()
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            raise errors[0]
-
-    def _broadcast_host_unmap(self, token: int) -> list[str]:
-        """Broadcast _CTRL_UNMAP_HOST for ``token`` to every local L3 child."""
-        return self._broadcast_host_control(_CTRL_UNMAP_HOST, _HOST_BUF_UNMAP.pack(token))
-
-    def _broadcast_host_control(self, sub_cmd: int, payload: bytes) -> list[str]:
-        if self._worker is None:
-            return []
-        results = []
-        for worker_type in (WorkerType.NEXT_LEVEL, WorkerType.SUB):
-            results.extend(
-                self._worker.broadcast_control_all(
-                    worker_type,
-                    int(sub_cmd),
-                    payload,
-                    None,
-                    timeout_s=self._py_control_timeout_s,
-                )
-            )
-        return self._control_errors(results)
-
-    def _stage_host_buffers_for_chip_submit(self, args: Any) -> None:
-        """Validate the host tensors of one chip submit before dispatch.
-
-        Called from ``Orchestrator.submit_next_level`` on the LOCAL_CHIP path —
-        only there does the forked child dereference raw host pointers. Each host
-        tensor is either:
-
-        * inside a buffer from ``create_host_buffer`` → born-shared, so its bytes
-          already live in the child-visible shm and the child writes results back
-          into the same physical pages: nothing to copy. ``_find_host_buf_entry``
-          still validates the view fits inside the buffer (else the child would
-          read past its shm mapping);
-        * unregistered → forwarded unvalidated. A fork-inherited ``share_memory_``
-          tensor is the legitimate case; an unregistered post-fork tensor reads
-          stale/unmapped memory in the child — allocate it with
-          ``create_host_buffer`` instead.
-
-        The child rewrites in-range host pointers to its own mapping; see
-        _rewrite_blob_host_addrs.
-        """
-        for i in range(args.tensor_count()):
-            tensor = args.tensor(i)
-            if tensor.child_memory:
-                continue
-            addr = int(tensor.data)
-            if addr == 0:
-                continue
-            # Raises if an in-range view overruns its buffer; otherwise there is
-            # nothing to do — the born-shared bytes are already child-visible.
-            self._find_host_buf_entry(addr, int(tensor.nbytes()))
-
-    def _rebuild_host_buf_snapshot(self) -> None:
-        """Rebuild the lock-free read snapshot from the registry.
-
-        Caller must hold ``_registry_lock``. Rebinds ``_host_buf_snapshot`` to a
-        fresh ``(sorted_ptrs_tuple, registry_copy)`` pair so an in-flight
-        ``_find_host_buf_entry`` keeps reading the prior immutable snapshot until
-        the single atomic rebind swaps it — see ``_find_host_buf_entry``.
-        """
-        registry = dict(self._host_buf_registry)
-        self._host_buf_snapshot = (tuple(sorted(registry)), registry)
-
-    def _find_host_buf_entry(self, addr: int, nbytes: int) -> _HostBufEntry | None:
-        """Host buffer whose ``[data_ptr, data_ptr+nbytes)`` contains the whole
-        ``[addr, addr+nbytes)`` view, or None. Raises if a view starts inside a
-        buffer but runs past its end (would read past the shm in the child).
-
-        Host buffers are distinct, non-overlapping allocations, so the only
-        candidate for ``addr`` is the entry with the greatest base ``<= addr`` —
-        found by bisecting the snapshot's sorted keys so this stays log-time on
-        the per-submit hot path rather than scanning every buffer.
-
-        Sub-view matching assumes the blob's ``ChipTensor.buffer.addr`` is the
-        contiguous base of the host buffer (``make_tensor_arg`` builds tensors with
-        ``start_offset == 0``); a non-zero ``start_offset`` would shift ``addr``
-        and is not modelled here.
-        """
-        # Load the immutable snapshot once: sorted keys and the dict they index
-        # into are captured together, so a concurrent create/free (which rebinds a
-        # fresh snapshot) cannot mutate what we bisect and index here — no lock, no
-        # IndexError from a shrinking list, no torn key/dict pairing.
-        sorted_ptrs, registry = self._host_buf_snapshot
-        idx = bisect.bisect_right(sorted_ptrs, addr) - 1
-        if idx < 0:
-            return None
-        entry = registry.get(sorted_ptrs[idx])
-        if entry is None or addr >= entry.data_ptr + entry.nbytes:
-            return None
-        if addr + nbytes > entry.data_ptr + entry.nbytes:
-            raise RuntimeError(
-                f"Host tensor 0x{addr:x} (+{nbytes} B) overruns its host buffer "
-                f"0x{entry.data_ptr:x} (+{entry.nbytes} B); create a buffer at least as large."
-            )
-        return entry
 
     # ------------------------------------------------------------------
     # run — uniform entry point
@@ -8554,7 +8328,7 @@ class Worker:
         if self.level == 2:
             assert self._chip_worker is not None
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
-            self._chip_worker._run_slot(state.slot_id, args, cfg)
+            self._run_l2_materialized(state.slot_id, args, cfg)
             return RunHandle._completed(self)
 
         with self._submit_mu:
@@ -8681,6 +8455,16 @@ class Worker:
         """
         native = self._orch._o if self._orch is not None else None
         return direct_control(self, native, f"Worker.{api}")
+
+    def _device_control_admission(self, api: str):
+        """Ordering for one device-memory command that reaches a child outside any TaskSlot.
+
+        L2 owns its chip in-process and has no orchestrator to be ordered against,
+        so only L3+ takes the whole-run fence.
+        """
+        if self.level == 2:
+            return contextlib.nullcontext()
+        return self._control_admission(api)
 
     @contextlib.contextmanager
     def _control_reservation(self, api: str):
@@ -8909,6 +8693,28 @@ class Worker:
         # the reason the worker is now shut.
         return handle._finalization_error
 
+    def _run_l2_materialized(self, callable_id: int, args, cfg) -> None:
+        """Materialize an L2 leaf's tensor args to a chip-POD blob in-process and run the kernel.
+
+        The user builds args as ``TaskArgs`` (``Tensor``) at every level; an L2 leaf is the consumer of
+        its own args, so it does exactly what a chip child does — resolve each ref's embedded descriptor
+        to a local base (map-once, cached in ``_chip_import_registry``) and build the chip blob the
+        runtime reads — only without a mailbox, since the args are already in this process.
+
+        ``args`` is a ``TaskArgs`` or ``None`` (no args). The chip-only POD
+        ``ChipStorageTaskArgs`` is not accepted here — submit it through ``ChipWorker._run_slot``.
+        """
+        registry = self._chip_import_registry
+        if registry is None:
+            registry = ImportRegistry()
+            self._chip_import_registry = registry
+        if args is None:
+            args = TaskArgs()
+        resolved = registry.materialize_args(args)
+        chip_args = materialize_task_args(args, resolved)
+        assert self._chip_worker is not None
+        self._chip_worker._impl.run_materialized(callable_id, chip_args, cfg)
+
     @property
     def aicpu_dlopen_count(self) -> int:
         """L2 only: number of distinct callable identities the AICPU has dlopened for.
@@ -8963,7 +8769,6 @@ class Worker:
             or bool(self._sub_shms or self._chip_shms or self._next_level_shms)
             or bool(self._live_worker_chip_regions)
             or bool(self._live_domains)
-            or bool(self._host_buf_registry)
             or bool(self._remote_sessions)
             or bool(self._pending_remote_buffer_frees or self._pending_remote_import_releases)
             or not self._cleanup_journal.empty
@@ -8985,8 +8790,6 @@ class Worker:
             parts.append(f"{len(self._live_worker_chip_regions)} L3-L2 region(s)")
         if self._live_domains:
             parts.append(f"{len(self._live_domains)} comm domain(s)")
-        if self._host_buf_registry:
-            parts.append(f"{len(self._host_buf_registry)} host buffer(s)")
         if self._remote_sessions:
             parts.append(f"{len(self._remote_sessions)} remote session(s)")
         n_remote = len(self._pending_remote_buffer_frees) + len(self._pending_remote_import_releases)
@@ -9057,7 +8860,7 @@ class Worker:
             with self._hierarchical_start_cv:
                 if threading.get_ident() in self._lease_depth:
                     raise RuntimeError(
-                        "Worker.close(): cannot be called from within a run() / submit() / create_host_buffer() / "
+                        "Worker.close(): cannot be called from within a run() / submit() / create_buffer() / "
                         "register() / unregister() or other leased Worker operation on this thread"
                     )
                 if self._lifecycle is _Lifecycle.INITIALIZING:
@@ -9464,7 +9267,8 @@ class Worker:
             ("remote", "active remote slot references", self._release_active_remote_slot_refs),
             ("remote", "pending remote frees", self._flush_pending_remote_frees),
             ("buffer", "all owner Buffers", self._release_all_buffers),
-            ("host-buffer", "all host buffers", self._release_all_host_buffers),
+            ("buffer", "fork-inherited tensor buffers", self._fork_tensor_handles.clear),
+            ("buffer", "chip import registry", self._close_chip_import_registry),
         ):
             self._cleanup_journal.add_once(kind, identity, cleanup)
             pre_transport_keys.add((kind, identity))

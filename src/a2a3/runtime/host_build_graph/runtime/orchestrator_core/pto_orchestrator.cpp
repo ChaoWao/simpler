@@ -330,7 +330,7 @@ bool graph_tensor_exact(const ChipTensor &lhs, const ChipTensor &rhs) {
     if (lhs.ndims > MAX_TENSOR_DIMS || rhs.ndims > MAX_TENSOR_DIMS || lhs.buffer.addr != rhs.buffer.addr ||
         lhs.buffer.size != rhs.buffer.size || lhs.start_offset != rhs.start_offset || lhs.version != rhs.version ||
         lhs.ndims != rhs.ndims || lhs.dtype != rhs.dtype || lhs.manual_dep != rhs.manual_dep ||
-        lhs.is_contiguous != rhs.is_contiguous || lhs.child_memory != rhs.child_memory) {
+        lhs.is_contiguous != rhs.is_contiguous || lhs.address_space != rhs.address_space) {
         return false;
     }
     return std::equal(std::begin(lhs.shapes), std::begin(lhs.shapes) + lhs.ndims, std::begin(rhs.shapes)) &&

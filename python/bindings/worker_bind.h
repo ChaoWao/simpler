@@ -319,14 +319,6 @@ inline void bind_worker(nb::module_ &m) {
             "that let the active run finish."
         )
         .def(
-            "malloc",
-            [](Orchestrator &self, int worker_id, size_t size) {
-                return self.malloc(worker_id, size);
-            },
-            nb::arg("worker_id"), nb::arg("size"), nb::call_guard<nb::gil_scoped_release>(),
-            "Allocate memory on next-level worker."
-        )
-        .def(
             "committed_device_memory",
             [](Orchestrator &self, int worker_id) {
                 return self.committed_device_memory(worker_id);
@@ -336,37 +328,16 @@ inline void bind_worker(nb::module_ &m) {
             "(tensors + pooled arenas + runtime buffers)."
         )
         .def(
-            "free",
-            [](Orchestrator &self, int worker_id, uint64_t ptr) {
-                self.free(worker_id, ptr);
-            },
-            nb::arg("worker_id"), nb::arg("ptr"), nb::call_guard<nb::gil_scoped_release>(),
-            "Free memory on next-level worker."
-        )
-        .def(
-            "copy_to",
-            [](Orchestrator &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
-                self.copy_to(worker_id, dst, src, size);
-            },
-            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"),
-            nb::call_guard<nb::gil_scoped_release>(), "Copy host src to next-level worker."
-        )
-        .def(
-            "copy_from",
-            [](Orchestrator &self, int worker_id, uint64_t dst, uint64_t src, size_t size) {
-                self.copy_from(worker_id, dst, src, size);
-            },
-            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("size"),
-            nb::call_guard<nb::gil_scoped_release>(), "Copy worker src to next-level worker."
-        )
-        .def(
             "alloc",
-            [](Orchestrator &self, const std::vector<uint32_t> &shape, DataType dtype) {
-                return self.alloc(shape, dtype);
+            [](Orchestrator &self, const std::vector<uint32_t> &shape, DataType dtype,
+               const CanonicalIdentity &identity) {
+                return self.alloc(shape, dtype, identity);
             },
-            nb::arg("shape"), nb::arg("dtype"),
-            "Allocate an intermediate ChipTensor from the orchestrator's MAP_SHARED "
-            "pool (visible to forked child workers). Lifetime: until the next Worker.run() call."
+            nb::arg("shape"), nb::arg("dtype"), nb::arg("identity"),
+            "Managed HeapRing intermediate (MAP_SHARED, visible to forked children) registered under the "
+            "identity's canonical hash; returns its heap VA. The caller wraps the VA as a FORK_SHM "
+            "Buffer carrying `identity` so a ref dependency-wires to this slot (the alloc->Tensor "
+            "bridge). Backs Worker.alloc_shared_tensor / Orchestrator.alloc (Python)."
         )
         .def(
             "scope_begin", &Orchestrator::scope_begin, "Open a nested scope. Max nesting depth = MAX_SCOPE_DEPTH (64)."
@@ -452,6 +423,37 @@ inline void bind_worker(nb::module_ &m) {
             "MAILBOX_SIZE-byte MAP_SHARED region; the child process loop is "
             "Python-managed (fork + _sub_worker_loop). `child_pid` is that "
             "forked child, used to detect an exit before mailbox completion."
+        )
+        .def(
+            "malloc",
+            [](Worker &self, int worker_id, size_t size) {
+                return self.malloc(worker_id, size);
+            },
+            nb::arg("worker_id"), nb::arg("size"), "Allocate device memory on next-level worker."
+        )
+        .def(
+            "free",
+            [](Worker &self, int worker_id, uint64_t ptr) {
+                self.free(worker_id, ptr);
+            },
+            nb::arg("worker_id"), nb::arg("ptr"), "Free device memory on next-level worker."
+        )
+        .def(
+            "copy_to",
+            [](Worker &self, int worker_id, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
+                self.copy_to(worker_id, dst, src, nbytes);
+            },
+            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("nbytes"),
+            "H2D copy: host `src` into device `dst`, both named by descriptor. The child resolves each "
+            "through its ImportRegistry, so neither end is an address minted in this process."
+        )
+        .def(
+            "copy_from",
+            [](Worker &self, int worker_id, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
+                self.copy_from(worker_id, dst, src, nbytes);
+            },
+            nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("nbytes"),
+            "D2H copy: device `src` into host `dst`, both named by descriptor."
         )
         .def(
             "add_remote_l3_socket",
@@ -819,5 +821,15 @@ inline void bind_worker(nb::module_ &m) {
             mailbox_store_i32(addr, value);
         },
         nb::arg("addr"), nb::arg("value"), "Release-store a 32-bit mailbox word at `addr`."
+    );
+    m.def(
+        "_read_control_copy_request",
+        [](uint64_t frame_addr) {
+            ControlCopyRequest request = read_control_copy_request(reinterpret_cast<const char *>(frame_addr));
+            return nb::make_tuple(request.dst, request.src, request.nbytes);
+        },
+        nb::arg("frame_addr"),
+        "Decode the CTRL_COPY_TO / CTRL_COPY_FROM payload on the control frame at `frame_addr` into "
+        "`(dst_descriptor, src_descriptor, nbytes)`. Both descriptors are validated on the way out."
     );
 }

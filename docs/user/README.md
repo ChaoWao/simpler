@@ -32,7 +32,7 @@ Both `simpler` and `simpler_setup` are part of the surface you write against:
   `simpler.task_interface`.
 - **`simpler_setup`** — compilation and test scaffolding: `KernelCompiler`,
   `SceneTestCase` / `scene_test`, `Tensor`, `TaskArgsBuilder`,
-  `ensure_pto_isa_root`, `make_tensor_arg`. Also the analysis CLIs under
+  `ensure_pto_isa_root`, `make_chip_tensor_arg`. Also the analysis CLIs under
   `simpler_setup.tools`.
 
 You cannot compile a kernel without `simpler_setup`, so treat both as yours to

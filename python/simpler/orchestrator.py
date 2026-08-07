@@ -14,14 +14,14 @@ and passes the handle to the user's orch function::
 
     def my_orch(orch, args, cfg):
         # chip_handle/sub_handle come from Worker.register(...)
-        # build the args object yourself; tags drive dependency inference
+        # build the args object yourself as Tensors; tags drive dependency inference
         a = TaskArgs()
-        a.add_tensor(make_tensor_arg(input_tensor),  TensorArgType.INPUT)
-        a.add_tensor(make_tensor_arg(output_tensor), TensorArgType.OUTPUT)
-        orch.submit_next_level(chip_handle, a, cfg, worker=0)
+        a.add_tensor(input_handle.tensor(shape, dtype),  TensorArgType.INPUT)
+        a.add_tensor(output_handle.tensor(shape, dtype), TensorArgType.OUTPUT)
+        orch.submit_next_level(chip_handle, a, cfg, worker=0)  # handle from Worker.register(chip_callable)
 
         sub_args = TaskArgs()
-        sub_args.add_tensor(make_tensor_arg(output_tensor), TensorArgType.INPUT)
+        sub_args.add_tensor(output_handle.tensor(shape, dtype), TensorArgType.INPUT)
         orch.submit_sub(sub_handle, sub_args)
 
     handle = w.submit(my_orch, my_args, my_config)
@@ -42,11 +42,11 @@ from typing import Any
 
 from _task_interface import _Orchestrator as _COrchestrator  # pyright: ignore[reportMissingImports]
 
+from .buffer import AccessMode, BackendKind, Buffer, CanonicalIdentity, wrap_fork_inherited
 from .callable_identity import CallableHandle
 from .task_interface import (
     CallConfig,
     ChipCallable,
-    ChipTensor,
     CommBufferSpec,
     CommDomainHandle,
     DataType,
@@ -56,6 +56,7 @@ from .task_interface import (
     _remote_sidecar_for,
     _RemoteTaskArgsSidecar,
     _validate_remote_sidecar_access,
+    get_element_size,
 )
 
 
@@ -114,6 +115,26 @@ def _split_next_level_args(args: TaskArgs) -> tuple[TaskArgs, _RemoteTaskArgsSid
 def _reject_remote_sidecar_args(args: object, *, kind: str) -> None:
     if isinstance(args, TaskArgs) and _remote_sidecar_for(args) is not None:
         raise TypeError(f"RemoteTensorRef is only supported for RemoteCallable NEXT_LEVEL submits, not {kind}")
+
+
+def _reject_device_args(args: object, *, kind: str) -> None:
+    """Refuse a DEVICE-space tensor bound for a host endpoint.
+
+    A Python sub-worker maps its args into its own process and hands them to torch, so a device
+    address there is dereferenced as a host pointer. Rejecting at submit gives the caller an error
+    naming the argument instead of a segfault inside the child.
+    """
+    if not isinstance(args, TaskArgs):
+        return
+    from .buffer import AddressSpace  # noqa: PLC0415
+
+    for i in range(args.tensor_count()):
+        desc = args.tensor(i).buffer
+        if desc.address_space == AddressSpace.DEVICE:
+            raise ValueError(
+                f"{kind}: argument {i} is a DEVICE-space tensor ({desc.backend_kind.name}); a Python "
+                f"sub-worker runs on the host and can only take HOST-space tensors"
+            )
 
 
 def _remote_data_eligible_worker_ids(
@@ -314,11 +335,6 @@ class Orchestrator:
                 raise TypeError("RemoteTensorRef is only supported for RemoteCallable NEXT_LEVEL submits")
             remote_sidecar = None
         _validate_remote_sidecar_access(c_args, remote_sidecar)
-        # Validate the post-fork host buffers of this submit (issue #1027). Only
-        # the LOCAL_CHIP path dereferences raw host pointers in the forked child;
-        # zero-copy buffers need no per-run mirror, just an in-range fit check.
-        if target_namespace == "LOCAL_CHIP" and self._worker is not None:
-            self._worker._stage_host_buffers_for_chip_submit(c_args)
         final_worker_ids = _remote_data_eligible_worker_ids(remote_sidecar, eligible_worker_ids)
         worker = self._worker
         # Provenance validation precedes run ownership publication. Once a remote
@@ -392,11 +408,6 @@ class Orchestrator:
         if remote_sidecars is not None:
             for c_args, remote_sidecar in zip(c_args_list, remote_sidecars):
                 _validate_remote_sidecar_access(c_args, remote_sidecar)
-        # Validate post-fork host buffers for chip dispatch (issue #1027), same as
-        # the single submit path.
-        if target_namespace == "LOCAL_CHIP" and self._worker is not None:
-            for c_args in c_args_list:
-                self._worker._stage_host_buffers_for_chip_submit(c_args)
         worker_id_sets = (
             [
                 _remote_data_eligible_worker_ids(remote_sidecar, eligible_worker_ids)
@@ -446,6 +457,7 @@ class Orchestrator:
             expected_namespace="LOCAL_PYTHON",
         )
         _reject_remote_sidecar_args(args, kind="orch.submit_sub")
+        _reject_device_args(args, kind="orch.submit_sub")
         _admit_task_submission(self._worker)
         self._o.submit_sub(digest, kind, target_namespace, args)
 
@@ -459,6 +471,7 @@ class Orchestrator:
         )
         for args in args_list:
             _reject_remote_sidecar_args(args, kind="orch.submit_sub_group")
+            _reject_device_args(args, kind="orch.submit_sub_group")
         _admit_task_submission(self._worker)
         self._o.submit_sub_group(digest, kind, target_namespace, args_list)
 
@@ -482,7 +495,7 @@ class Orchestrator:
         the IPC handshake (HCCL: aclrtMalloc + IPC import; sim: shm + ftruncate).
         Returns a ``CommDomainHandle`` whose ``contexts[chip_idx]`` exposes
         the per-chip ``ChipDomainContext`` (``device_ctx``, ``local_window_base``,
-        ``buffer_ptrs`` by name).
+        ``buffers`` by name — each a device ``VMM_WINDOW`` Buffer).
 
         ``name`` is a local identifier (uniqueness checked against currently-live
         handles); peers do not need to agree on the string.  ``workers`` must be
@@ -595,23 +608,6 @@ class Orchestrator:
         """
         return direct_control(self._worker, self._o, f"Orchestrator.{api}")
 
-    def malloc(self, worker_id: int, size: int) -> int:
-        """Allocate memory on next-level worker *worker_id*. Returns a pointer.
-
-        This is the single L3 choke for kind4 device memory: ``Worker.malloc``
-        also funnels through here, as does a user's direct ``orch.malloc``. The
-        returned pointer's ``(worker_id, ptr)`` provenance is recorded so a later
-        free / copy / kind4 dispatch to the wrong worker is rejected.
-        """
-        with self._control_admission("malloc"):
-            wid, sz = int(worker_id), int(size)
-            if self._worker is None:
-                return int(self._o.malloc(wid, sz))
-            with self._worker._child_prov_lock:
-                ptr = int(self._o.malloc(wid, sz))
-                self._worker._child_prov_record_malloc(wid, ptr, sz)
-                return ptr
-
     def committed_device_memory(self, worker_id: int) -> int:
         """Total device HBM (bytes) committed by next-level worker *worker_id*'s ``MemoryAllocator``.
 
@@ -622,68 +618,74 @@ class Orchestrator:
         with self._control_admission("committed_device_memory"):
             return int(self._o.committed_device_memory(int(worker_id)))
 
-    def free(self, worker_id: int, ptr: int) -> None:
-        """Free memory on next-level worker *worker_id*."""
-        with self._control_admission("free"):
-            wid, p = int(worker_id), int(ptr)
-            if self._worker is None:
-                self._o.free(wid, p)
-                return
-            self._free_locked(wid, p)
+    # A Worker is the only allocator. The Orchestrator exposes thin wrappers that delegate to the
+    # bound Worker's implementation so an orchestration fn can allocate / copy / free without reaching
+    # for the Worker — each forwards to the Worker's no-lease in-run path (the run already holds it).
 
-    def _free_locked(self, wid: int, p: int) -> None:
-        assert self._worker is not None
-        with self._worker._child_prov_lock:
-            # Safety-first commit barrier: revoke provenance BEFORE the native
-            # free. If the native free succeeds and an async unwind (e.g. a
-            # KeyboardInterrupt delivered after the binding returns) fires before
-            # a post-free clear could run, a freed address would stay live and a
-            # later copy/dispatch would re-authorize it — a UAF. Revoking first
-            # turns a native-free failure into a terminal leak (recoverable) but
-            # never re-authorizes a maybe-freed address.
-            self._worker._child_prov_require_malloc_base(wid, p, api="free")
-            self._worker._child_prov_clear_malloc(wid, p)
-            self._o.free(wid, p)
+    def alloc_child_tensor(self, worker_id: int, shapes: tuple[int, ...], dtype: DataType) -> Buffer:
+        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype``; returns a
+        DEVICE_MALLOC ``Buffer``. Delegates to ``Worker.alloc_child_tensor``."""
+        if self._worker is None:
+            raise RuntimeError("orch.alloc_child_tensor requires a Worker context")
+        return self._worker.alloc_child_tensor(int(worker_id), tuple(shapes), dtype)
 
-    def copy_to(self, worker_id: int, dst: int, src: int, size: int) -> None:
-        """Copy *size* bytes from host *src* to worker *dst*."""
-        with self._control_admission("copy_to"):
-            wid, d = int(worker_id), int(dst)
-            if self._worker is None:
-                self._o.copy_to(wid, d, int(src), int(size))
-                return
-            with self._worker._child_prov_lock:
-                self._worker._child_prov_require_live_range(wid, d, int(size), api="copy_to")
-                self._o.copy_to(wid, d, int(src), int(size))
+    def free(self, handle: Buffer) -> None:
+        """Free a device ``Buffer`` (from ``alloc_child_tensor``). Delegates to ``Worker.free``."""
+        if self._worker is None:
+            raise RuntimeError("orch.free requires a Worker context")
+        self._worker.free(handle)
 
-    def copy_from(self, worker_id: int, dst: int, src: int, size: int) -> None:
-        """Copy *size* bytes from worker *src* to host *dst*."""
-        with self._control_admission("copy_from"):
-            wid, s = int(worker_id), int(src)
-            if self._worker is None:
-                self._o.copy_from(wid, int(dst), s, int(size))
-                return
-            with self._worker._child_prov_lock:
-                self._worker._child_prov_require_live_range(wid, s, int(size), api="copy_from")
-                self._o.copy_from(wid, int(dst), s, int(size))
+    def copy_to(self, dst: Buffer, src) -> None:
+        """H2D: copy host ``src`` into device handle ``dst``. Delegates to ``Worker.copy_to``."""
+        if self._worker is None:
+            raise RuntimeError("orch.copy_to requires a Worker context")
+        self._worker.copy_to(dst, src)
 
-    def alloc(self, shape: Sequence[int], dtype: DataType) -> ChipTensor:
-        """Allocate a runtime-managed intermediate buffer.
+    def copy_from(self, dst, src: Buffer) -> None:
+        """D2H: copy device handle ``src`` into host ``dst``. Delegates to ``Worker.copy_from``."""
+        if self._worker is None:
+            raise RuntimeError("orch.copy_from requires a Worker context")
+        self._worker.copy_from(dst, src)
 
-        Returns a ``ChipTensor`` whose backing memory comes from a
-        per-allocation MAP_SHARED mmap (visible to forked child workers).
-        Lifetime is bound to a synthetic task slot that the Orchestrator
-        treats as the buffer's producer; the buffer is freed when all
-        downstream consumers have completed and the run's scope ends.
+    def alloc(self, shape: Sequence[int], dtype: DataType) -> Buffer:
+        """Allocate a runtime-managed intermediate buffer; returns a ``Buffer``.
 
-        Use this for chip-A → chip-B intermediate buffers instead of
-        pre-allocating with ``torch.share_memory_()`` — the runtime owns
-        the lifecycle.
+        The backing is a MAP_SHARED slab (visible to forked child workers), auto-reclaimed once every
+        downstream consumer has completed and the run's scope ends — no manual free. Name it in a task
+        arg with ``handle.tensor(shape, dtype)``: its canonical identity dependency-wires to this
+        alloc's synthetic producer slot (tag it OUTPUT/INOUT on the producer, INPUT on the consumer).
+
+        Use this for chip-A → chip-B intermediate buffers instead of pre-allocating with
+        ``torch.share_memory_()`` — the runtime owns the lifecycle. Equivalent to
+        ``worker.alloc_shared_tensor``, additionally registered as an L3-L2 orch-comm host buffer so it
+        may back an L3-L2 message-queue payload.
         """
-        tensor = self._o.alloc(list(shape), dtype)
-        if self._worker is not None:
-            self._worker._register_worker_chip_orch_comm_host_buffer(tensor)
-        return tensor
+        assert self._worker is not None, "orch.alloc requires an L3+ orchestration context"
+        shape_t = tuple(int(s) for s in shape)
+        nbytes = get_element_size(dtype)
+        for s in shape_t:
+            nbytes *= s
+        oid, buffer_id, path = (
+            self._worker._owner_instance_id,
+            self._worker._next_buffer_id(),
+            f"L{self._worker.level}",
+        )
+        identity = CanonicalIdentity(oid, buffer_id)
+        # alloc keys the synthetic producer slot by the ref's canonical identity (not a raw VA), so a
+        # consumer named via handle.tensor(...) dependency-wires to it. Same managed backing as
+        # worker.alloc_shared_tensor; additionally registered as an L3-L2 orch-comm host buffer.
+        va = int(self._o.alloc(list(shape_t), dtype, identity))
+        handle = wrap_fork_inherited(
+            va,
+            int(nbytes),
+            oid,
+            buffer_id,
+            path,
+            access=AccessMode.READWRITE,
+            backend_kind=BackendKind.FORK_SHM,
+        )
+        self._worker._register_worker_chip_orch_comm_host_buffer(handle)
+        return handle
 
     # ------------------------------------------------------------------
     # Internal (called by Worker.submit)

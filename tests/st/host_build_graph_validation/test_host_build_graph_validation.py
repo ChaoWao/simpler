@@ -18,10 +18,10 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipStorageTaskArgs,
-    ChipTensor,
     CoreCallable,
     DataType,
+    TaskArgs,
+    TensorArgType,
 )
 from simpler.worker import Worker
 
@@ -87,10 +87,10 @@ def test_invalid_input_reports_code_five(st_platform, st_device_ids, case_name, 
 
         host_value = torch.zeros(1, dtype=torch.int32)
         buffer = worker.malloc(host_value.nbytes)
-        worker.copy_to(buffer, host_value.data_ptr(), host_value.nbytes)
+        worker.copy_to(buffer, host_value)
 
-        args = ChipStorageTaskArgs()
-        args.add_tensor(ChipTensor.make(buffer, (1,), DataType.INT32))
+        args = TaskArgs()
+        args.add_tensor(buffer.tensor(shapes=(1,), dtype=DataType.INT32), TensorArgType.INOUT)
         args.add_scalar(CASES[case_name])
 
         config = CallConfig()

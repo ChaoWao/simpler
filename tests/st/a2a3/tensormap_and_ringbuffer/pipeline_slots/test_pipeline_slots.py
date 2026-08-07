@@ -23,7 +23,7 @@ import torch
 from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
-from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
+from simpler_setup.scene_test import _build_chip_task_args, _build_l2_ref_args, _compare_outputs
 
 _VECTOR_KERNELS = "../../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
 
@@ -89,15 +89,22 @@ class TestPipelineSlotsTmr(SceneTestCase):
         args.f[:] = (a + b + 1) * (a + b + 2) + (a + b)
 
     def _run(self, worker, handle, *, slot_id=None):
-        """One run, on the ordinary path or through a lease, result checked."""
+        """One run, on the ordinary path or through a lease, result checked.
+
+        The two entry points take different argument types: ``Worker.run`` takes ``Tensor`` args and
+        materializes them in-process, while the lease is the direct chip API and takes the
+        runtime.so-ABI POD.
+        """
         test_args = self.generate_args({})
         golden = test_args.clone()
         self.compute_golden(golden, {})
-        chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
+        signature = self.CALLABLE["orchestration"]["signature"]
         config = self._build_config(self.CASES[0]["config"])
         if slot_id is None:
-            worker.run(handle, chip_args, config=config)
+            args, output_names = _build_l2_ref_args(test_args, signature, worker)
+            worker.run(handle, args, config=config)
         else:
+            chip_args, output_names = _build_chip_task_args(test_args, signature)
             state = worker._resolve_handle(handle)
             worker._chip_worker._run_slot_with_pipeline_lease(
                 state.slot_id, chip_args, slot_id, next(self._generation_counter), config=config

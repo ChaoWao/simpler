@@ -544,8 +544,11 @@ slot.task_args       ─┘
 
 For SUB children the same mailbox layout is reused; the Python child
 runs `_sub_worker_loop`, which decodes the args blob via
-`_read_args_from_mailbox` into a `TaskArgs` object and calls
-`fn(args)` directly — no C++ leaf involved.
+`ImportRegistry.mapped_args_from_blob` into a `MappedArgs` object — every
+tensor mapped into this process, the scalars alongside — and calls
+`fn(args)` directly — no C++ leaf involved. A nested next-level child
+runs `_child_worker_loop` instead, which re-exports rather than maps
+(`_reexport_args_from_mailbox`) and hands its orch function a `TaskArgs`.
 
 The mailbox layout, fork ordering, and child loop are in
 [worker-manager.md](worker-manager.md).

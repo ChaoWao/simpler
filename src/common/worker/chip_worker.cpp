@@ -468,18 +468,6 @@ void ChipWorker::register_callable(int32_t callable_id, const void *callable) {
     }
 }
 
-void ChipWorker::run(int32_t callable_id, TaskArgsView args, const CallConfig &config) {
-    run(callable_id, args, config, nullptr, 0);
-}
-
-void ChipWorker::run(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, volatile int32_t *accepted_state,
-    int32_t accepted_value
-) {
-    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    run(callable_id, &chip_storage, config, accepted_state, accepted_value);
-}
-
 void ChipWorker::run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config) {
     run(callable_id, args, config, nullptr, 0);
 }
@@ -525,14 +513,6 @@ uint64_t ChipWorker::retained_temp_addr(uint32_t slot_id) const {
 }
 
 void ChipWorker::run_with_lease(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
-    volatile int32_t *accepted_state, int32_t accepted_value
-) {
-    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    run_with_lease(callable_id, &chip_storage, config, lease, accepted_state, accepted_value);
-}
-
-void ChipWorker::run_with_lease(
     int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
     volatile int32_t *accepted_state, int32_t accepted_value
 ) {
@@ -564,16 +544,6 @@ void ChipWorker::run_on_slot(
     if (rc != 0) {
         throw std::runtime_error("run failed with code " + std::to_string(rc));
     }
-}
-
-ChipWorkerNativeRun ChipWorker::prepare_native_run(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease, uint64_t run_id,
-    uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value
-) {
-    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    return prepare_native_run(
-        callable_id, &chip_storage, config, lease, run_id, dispatch_id, accepted_state, accepted_value
-    );
 }
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run(

@@ -7,7 +7,7 @@ How this repo organizes Python packages, the build system, and example / test di
 | Package | Source | What's in wheel | Use for |
 | ------- | ------ | --------------- | ------- |
 | `simpler` | `python/simpler/` | `task_interface`, `worker`, `env_manager` only | Runtime user API: `Worker` plus the task/callable types |
-| `simpler_setup` | `simpler_setup/` | All files + `_assets/{src,build/lib}` | **Also user-facing**, not internal-only: `KernelCompiler`, `SceneTestCase` / `scene_test`, `Tensor`, `Scalar`, `TaskArgsBuilder`, `ensure_pto_isa_root`, `make_tensor_arg`, plus the `simpler_setup.tools` CLIs. A kernel cannot be compiled without it |
+| `simpler_setup` | `simpler_setup/` | All files + `_assets/{src,build/lib}` | **Also user-facing**, not internal-only: `KernelCompiler`, `SceneTestCase` / `scene_test`, `Tensor`, `Scalar`, `TaskArgsBuilder`, `ensure_pto_isa_root`, `make_chip_tensor_arg`, plus the `simpler_setup.tools` CLIs. A kernel cannot be compiled without it |
 | `_task_interface` | `python/bindings/` | nanobind `.so` at wheel root | Internal nanobind module |
 
 `simpler` exposes `Worker` and the `task_interface` submodule lazily (PEP 562

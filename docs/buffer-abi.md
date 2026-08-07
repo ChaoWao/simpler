@@ -29,20 +29,16 @@ forget it on.
 | Type | What it is | Where it lives |
 | ---- | ---------- | -------------- |
 | **`Buffer`** | An owned backing (POSIX shm / fork-COW / device malloc) with a canonical identity + lifecycle. Stays with the Worker that created it. | owner side (L3+) |
-| **`Tensor`** | A **self-describing task argument**: the full buffer descriptor embedded + a strided view `(byte_offset, shapes, strides, dtype)`. The wire element of `TaskArgs`. Carries no materialized address. | `simpler.buffer`, foundation-only until the wire flip |
+| **`Tensor`** | A **self-describing task argument**: the full buffer descriptor embedded + a strided view `(byte_offset, shapes, strides, dtype)`. The wire element of `TaskArgs`. Carries no materialized address. | `simpler.buffer`, re-exported from `simpler.task_interface` |
 | **`ChipTensor`** | The materialized POD the device runtime ABI reads (address + strided view). Exists **only** at the L2 device-runtime boundary. | L2 leaf, internal |
 
 **You never build a `ChipTensor`.** Name a `Tensor` over a buffer and submit it;
 the address is resolved on the consuming endpoint, and the C++ orchestration on
 the chip receives the resolved form.
 
-> **Status.** That is the model this page describes, not what the tree does yet.
-> `TaskArgs.add_tensor` still takes a `ChipTensor`, so `Tensor` lives in
-> `simpler.buffer` and is deliberately **not** re-exported from
-> `simpler.task_interface` — a public type whose own submit call rejects it would
-> be worse than no public type. It moves onto that surface in the wire flip that
-> makes `TaskArgs` carry it. The Scope / status section at the end of this page says what else
-> the wire flip brings.
+> **Status.** `TaskArgs.add_tensor` takes a `Tensor`, and `simpler.task_interface`
+> re-exports it: the public submit surface names the type its own submit call accepts.
+> The Scope / status section at the end of this page says what is and is not connected.
 
 ## Why `Tensor` and `ChipTensor` are two types
 
@@ -140,7 +136,7 @@ whose own comment records the hazard.
 Both are called what they are, and by the **same** name in both languages, which
 is what [codestyle rule 13](../.claude/rules/codestyle.md) requires of a public
 type. The L3+ wire type is `Tensor` — `simpler.buffer.Tensor` in Python (it joins
-`simpler.task_interface` in the wire cutover, per the Status note above), the
+`simpler.task_interface`), the
 global `Tensor` of `src/common/task_interface/buffer.h` in C++. The device
 POD is `ChipTensor` in both, from `src/common/task_interface/tensor.h`.
 
@@ -310,24 +306,22 @@ completion token for a downstream task to depend on.
 
 ## Scope / status
 
-This page describes the memory model end to end. What the tree has today is the
-ABI itself — the three types, the canonical identity, the shared validator — plus
-`create_buffer` and the owner/consumer registries. **The dispatch wire is not
-connected yet**: `TaskArgs` still carries the device POD, so `buffer.tensor(...)`
-has no consumer, the other allocators (`alloc_shared_tensor`,
-`alloc_child_tensor`) do not exist, and the submit-time checks above are not
-reachable. Those land with the wire flip, which is what every section from
-"Submitting a task" onward describes.
+This page describes the memory model end to end. **The dispatch wire is
+connected**: `TaskArgs` carries the `Tensor`, `buffer.tensor(...)` reaches a
+consumer, and the submit-time checks above run on every submit. Still absent are
+the other allocators (`alloc_shared_tensor`, `alloc_child_tensor`), and the
+endpoint x `address_space` check inside `materialize` — a device backing resolved
+there yields a pointer meaningful only on its owner chip, and today that is
+enforced where a task is submitted rather than where it is materialized.
 
 **There is no second blob format.** A `Tensor` travels in the TaskArgs mailbox
-blob that `write_blob` / `read_blob` already implement in
-[`task_args.h`](../src/common/task_interface/task_args.h); the wire flip swaps
-that blob's element from `ChipTensor` to `Tensor` and updates `TaskArgsView` with
-it. `ChipTensor` then survives only in `ChipStorageTaskArgs`, the POD
-`ChipWorker` consumes — an L2 worker materializes into it inside `run` before
-calling down.
+blob that `write_blob` / `read_blob` implement in
+[`task_args.h`](../src/common/task_interface/task_args.h); that blob's element is
+the `Tensor`, and `TaskArgsView::tensors` validates each one as it decodes it.
+`ChipTensor` survives only in `ChipStorageTaskArgs`, the POD `ChipWorker`
+consumes — an L2 worker materializes into it inside `run` before calling down.
 
 Single-machine (host + device) L3→L2 and L4→L3→L2 dispatch is implemented and
-verified in `a2a3sim` and onboard `a2a3` on that branch. The remote **receive**
+verified in `a2a3sim` and onboard `a2a3`. The remote **receive**
 side and the buffer lifecycle robustness (`release_buffer`, in-flight retain /
 deferred-free) are later phases (P2).

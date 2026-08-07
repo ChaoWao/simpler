@@ -21,7 +21,7 @@ import os
 import time
 
 import pytest
-from simpler.task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, CoreCallable
+from simpler.task_interface import CallConfig, ChipCallable, CoreCallable
 from simpler.worker import Worker
 
 from simpler_setup.elf_parser import extract_text_section
@@ -108,7 +108,7 @@ def _exercise_aicore_timeout(st_platform, st_device_ids, monkeypatch, tmp_path, 
             # SDMA run stream early so reset precedes DEV_RUNNING_DOWN.
             error_codes = r"(-100|507(046|018|015|000))"
         with pytest.raises(RuntimeError, match=rf"run failed with code {error_codes}"):
-            worker.run(handle, ChipStorageTaskArgs(), config)
+            worker.run(handle, None, config)
         elapsed = time.monotonic() - t0
 
         # CI-tight env keeps the timeout chain short; default local values are

@@ -1021,7 +1021,7 @@ class TestLevel2Lifecycle:
         w._worker = types.SimpleNamespace(close=lambda: None)  # look "started" for the L3 branch
 
         # A slow pre-child cleanup step (runs before the SHUTDOWN broadcast).
-        monkeypatch.setattr(Worker, "_release_all_host_buffers", lambda self: time.sleep(0.6))
+        monkeypatch.setattr(Worker, "_release_all_buffers", lambda self: time.sleep(0.6))
         captured: dict = {}
 
         def capture_reap(groups, deadline):

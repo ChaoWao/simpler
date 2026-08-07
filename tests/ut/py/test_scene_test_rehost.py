@@ -26,31 +26,41 @@ import torch
 from simpler_setup.scene_test import Scalar, TaskArgsBuilder, Tensor, _RehostedTaskArgs
 
 
-class _FakeHostBuffer:
-    def __init__(self, nbytes: int):
+class _FakeHandle:
+    """Stands in for a ``create_buffer`` Buffer: a POSIX shm the rehost view is built over."""
+
+    def __init__(self, nbytes: int, worker: _FakeWorker):
         self.shm = SharedMemory(create=True, size=nbytes)
-        self.buffer = self.shm.buf
+        self._worker = worker
+        self._closed = False
+
+    @property
+    def buffer(self):
+        return self.shm.buf
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._worker.freed.append(self)
+        self.shm.close()
+        self.shm.unlink()
 
 
 class _FakeWorker:
-    """Stands in for a started L3 Worker's host-buffer allocator."""
+    """Stands in for a started L3 Worker's ``create_buffer`` allocator."""
 
     def __init__(self, fail_on_create: int | None = None):
-        self.created: list[_FakeHostBuffer] = []
-        self.freed: list[_FakeHostBuffer] = []
+        self.created: list[_FakeHandle] = []
+        self.freed: list[_FakeHandle] = []
         self._fail_on_create = fail_on_create
 
-    def create_host_buffer(self, nbytes: int) -> _FakeHostBuffer:
+    def create_buffer(self, nbytes: int) -> _FakeHandle:
         if self._fail_on_create is not None and len(self.created) >= self._fail_on_create:
-            raise RuntimeError("injected create_host_buffer failure")
-        buf = _FakeHostBuffer(nbytes)
-        self.created.append(buf)
-        return buf
-
-    def free_host_buffer(self, buf: _FakeHostBuffer) -> None:
-        self.freed.append(buf)
-        buf.shm.close()
-        buf.shm.unlink()
+            raise RuntimeError("injected create_buffer failure")
+        handle = _FakeHandle(nbytes, self)
+        self.created.append(handle)
+        return handle
 
 
 def test_rehost_preserves_values_and_frees_lifo():
@@ -87,7 +97,7 @@ def test_rehost_partial_failure_rolls_back():
         Tensor("c", torch.zeros(4, dtype=torch.float32)),
     )
     w = _FakeWorker(fail_on_create=2)  # third allocation fails
-    with pytest.raises(RuntimeError, match="injected create_host_buffer failure"):
+    with pytest.raises(RuntimeError, match="injected create_buffer failure"):
         _RehostedTaskArgs(w, ta)
     # The two successfully-created buffers are freed, and the builder is
     # restored to its original tensors (no half-rehosted state).
@@ -142,7 +152,7 @@ def test_rehost_rejects_noncontiguous():
 #   - a size-1 dimension's stride is normalized away, and
 #   - non-overlapping views of one storage are split into independent buffers.
 #
-# SCOPE: they cover the rehost adapter and `make_tensor_arg` output only. They
+# SCOPE: they cover the rehost adapter and `make_chip_tensor_arg` output only. They
 # do NOT exercise the C++ orchestrator's dependency-key derivation
 # (`TensorKey::local_host` in src/common/hierarchical/orchestrator.cpp), which
 # runs inside a real submit and is out of device-free reach here. The
@@ -151,15 +161,15 @@ def test_rehost_rejects_noncontiguous():
 # ---------------------------------------------------------------------------
 
 
-def _make_tensor_arg(t):
+def _make_chip_tensor_arg(t):
     # Imported lazily: torch_interop pulls in the task_interface binding, which
     # the builder-only tests above do not need.
-    from simpler_setup.torch_interop import make_tensor_arg  # noqa: PLC0415
+    from simpler_setup.torch_interop import make_chip_tensor_arg  # noqa: PLC0415
 
-    return make_tensor_arg(t)
+    return make_chip_tensor_arg(t)
 
 
-def test_char_singleton_stride_dropped_by_make_tensor_arg():
+def test_char_singleton_stride_dropped_by_make_chip_tensor_arg():
     # The wire Tensor's strides are a pure function of shape (row-major), so a
     # size-1 dimension's stride value never survives into the Tensor. Two tensors
     # equal in shape+values but differing ONLY in their singleton-dim stride get
@@ -174,12 +184,12 @@ def test_char_singleton_stride_dropped_by_make_tensor_arg():
     assert weird.stride() == (1, 7)
     assert canon.stride() == (1, 1)
     # Both are contiguous per torch (a size-1 dim's stride is free), so
-    # make_tensor_arg accepts them rather than rejecting as non-contiguous.
+    # make_chip_tensor_arg accepts them rather than rejecting as non-contiguous.
     assert weird.is_contiguous() and canon.is_contiguous()
     assert torch.equal(weird, canon)
 
-    w_weird = _make_tensor_arg(weird)
-    w_canon = _make_tensor_arg(canon)
+    w_weird = _make_chip_tensor_arg(weird)
+    w_canon = _make_chip_tensor_arg(canon)
     # The 7 is normalized to the row-major 1; consumer-visible geometry matches.
     assert tuple(w_weird.strides) == (1, 1)
     assert tuple(w_weird.strides) == tuple(w_canon.strides)
@@ -223,21 +233,21 @@ def test_char_nonoverlapping_shared_storage_not_rejected():
         rehosted.release()
 
 
-def test_char_make_tensor_arg_carries_backing_as_addr_only():
-    # `make_tensor_arg` records backing location solely as the raw address
+def test_char_make_chip_tensor_arg_carries_backing_as_addr_only():
+    # `make_chip_tensor_arg` records backing location solely as the raw address
     # (`data` == buffer.addr); there is no separate backing-identity field. Two
     # non-overlapping views of one storage therefore get DISTINCT `data` values,
     # offset by the view's byte offset.
     #
-    # NOTE: this characterizes make_tensor_arg's output only, NOT the
+    # NOTE: this characterizes make_chip_tensor_arg's output only, NOT the
     # orchestrator's dependency key. It does not, on its own, pin what a future
     # typed handle must change — a handle could add a canonical identity while
     # leaving these addresses as-is. The dependency-key path is not exercised
     # here (see SCOPE above).
     base = torch.zeros(8, dtype=torch.float32)
     a, b = base[:4], base[4:]  # both 1-D contiguous slices
-    w_a = _make_tensor_arg(a)
-    w_b = _make_tensor_arg(b)
+    w_a = _make_chip_tensor_arg(a)
+    w_b = _make_chip_tensor_arg(b)
     assert w_b.data - w_a.data == 4 * a.element_size()
     assert w_a.data != w_b.data
 

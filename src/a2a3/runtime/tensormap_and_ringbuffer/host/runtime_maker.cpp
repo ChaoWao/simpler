@@ -341,7 +341,7 @@ public:
         size_t required = 0;
         for (int i = 0; i < orch_args->tensor_count(); i++) {
             ChipTensor t = orch_args->tensor(i);
-            if (t.is_child_memory() || t.nbytes() == 0) {
+            if (t.is_device_memory() || t.nbytes() == 0) {
                 continue;
             }
             required += align_up(static_cast<size_t>(t.nbytes()));
@@ -555,7 +555,7 @@ static bool stage_device_args(
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
-        if (t.is_child_memory()) {
+        if (t.is_device_memory()) {
             LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             out->add_tensor(t);
             continue;
@@ -603,7 +603,7 @@ static bool stage_device_args(
         }
         // Read-only INPUT tensors are never written by the kernel, so there is
         // no point copying them back D2H at the end. Index the signature
-        // by the orch tensor index `i` (child_memory tensors are skipped above
+        // by the orch tensor index `i` (device-space tensors are skipped above
         // but do not consume a separate signature slot — scalars follow the
         // tensor entries). Anything not provably IN keeps the safe default of
         // copying back.

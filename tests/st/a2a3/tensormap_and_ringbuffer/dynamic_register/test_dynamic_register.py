@@ -148,8 +148,8 @@ def test_prepare_new_identity_after_start_then_run(st_platform, st_device_ids):
     expected = _golden(a, b)
     args_pre = _make_args(a, b)
     args_post = _make_args(a, b)
-    chip_args_pre, output_names_pre = _build_l3_task_args(args_pre, _ORCH_SIG)
-    chip_args_post, output_names_post = _build_l3_task_args(args_post, _ORCH_SIG)
+    chip_args_pre, output_names_pre = _build_l3_task_args(args_pre, _ORCH_SIG, worker)
+    chip_args_post, output_names_post = _build_l3_task_args(args_post, _ORCH_SIG, worker)
     assert output_names_pre == ["f"] and output_names_post == ["f"]
 
     worker.init()
@@ -220,8 +220,8 @@ def test_prepare_new_identity_after_start_parallel_broadcast(st_platform, st_dev
     # by both broadcast targets.
     args_pre = _make_args(a, b)
     args_post = [_make_args(a, b) for _ in device_ids]
-    chip_args_pre, _ = _build_l3_task_args(args_pre, _ORCH_SIG)
-    chip_args_post = [_build_l3_task_args(args, _ORCH_SIG)[0] for args in args_post]
+    chip_args_pre, _ = _build_l3_task_args(args_pre, _ORCH_SIG, worker)
+    chip_args_post = [_build_l3_task_args(args, _ORCH_SIG, worker)[0] for args in args_post]
 
     worker.init()
     try:
@@ -276,7 +276,7 @@ def test_prepare_capacity_overflow_post_start(st_platform, st_device_ids):
 
     a, b = 2.0, 3.0
     args_pre = _make_args(a, b)
-    chip_args_pre, _ = _build_l3_task_args(args_pre, _ORCH_SIG)
+    chip_args_pre, _ = _build_l3_task_args(args_pre, _ORCH_SIG, worker)
 
     worker.init()
     try:
@@ -323,8 +323,8 @@ def test_duplicate_prepare_same_hashid_survives_one_unregister(st_platform, st_d
     # the share_memory_ mappings are inherited by the forked chip child.
     args_one = _make_args(a, b)
     args_two = _make_args(a, b)
-    chip_args_one, _ = _build_l3_task_args(args_one, _ORCH_SIG)
-    chip_args_two, _ = _build_l3_task_args(args_two, _ORCH_SIG)
+    chip_args_one, _ = _build_l3_task_args(args_one, _ORCH_SIG, worker)
+    chip_args_two, _ = _build_l3_task_args(args_two, _ORCH_SIG, worker)
 
     worker.init()
     try:
@@ -391,9 +391,9 @@ def test_unregister_last_handle_allows_reprepare_same_hashid(st_platform, st_dev
     args_one = _make_args(a, b)
     args_two = _make_args(a, b)
     args_three = _make_args(a, b)
-    chip_args_one, _ = _build_l3_task_args(args_one, _ORCH_SIG)
-    chip_args_two, _ = _build_l3_task_args(args_two, _ORCH_SIG)
-    chip_args_three, _ = _build_l3_task_args(args_three, _ORCH_SIG)
+    chip_args_one, _ = _build_l3_task_args(args_one, _ORCH_SIG, worker)
+    chip_args_two, _ = _build_l3_task_args(args_two, _ORCH_SIG, worker)
+    chip_args_three, _ = _build_l3_task_args(args_three, _ORCH_SIG, worker)
 
     worker.init()
     try:

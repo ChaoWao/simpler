@@ -18,8 +18,8 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import TaskArgs, TensorArgType
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, make_tensor_arg, scene_test
-from simpler_setup.scene_test import _build_l3_task_args
+from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup.scene_test import _build_l3_task_args, _rehosted_ref
 
 KERNELS_BASE = "../../../../examples/a5/tensormap_and_ringbuffer/vector_example/kernels"
 
@@ -38,7 +38,7 @@ def run_dag(orch, callables, task_args, config):
 
     # SubTask: tag the chip output as INPUT — Orchestrator wires the dep via TensorMap.
     sub_args = TaskArgs()
-    sub_args.add_tensor(make_tensor_arg(task_args.f), TensorArgType.INPUT)
+    sub_args.add_tensor(_rehosted_ref(task_args, "f"), TensorArgType.INPUT)
     orch.submit_sub(callables.verify, sub_args)
 
 

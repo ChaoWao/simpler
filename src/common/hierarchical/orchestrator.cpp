@@ -538,34 +538,10 @@ void Orchestrator::await_run_admission(RunId run_id) {
     });
 }
 
-uint64_t Orchestrator::malloc(int worker_id, size_t size) {
-    auto *wt = manager_->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
-    if (!wt) throw std::runtime_error("Orchestrator::malloc: invalid worker_id");
-    return wt->control_malloc(size);
-}
-
 uint64_t Orchestrator::committed_device_memory(int worker_id) {
     auto *wt = manager_->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
     if (!wt) throw std::runtime_error("Orchestrator::committed_device_memory: invalid worker_id");
     return wt->control_committed_device_memory();
-}
-
-void Orchestrator::free(int worker_id, uint64_t ptr) {
-    auto *wt = manager_->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
-    if (!wt) throw std::runtime_error("Orchestrator::free: invalid worker_id");
-    wt->control_free(ptr);
-}
-
-void Orchestrator::copy_to(int worker_id, uint64_t dst, uint64_t src, size_t size) {
-    auto *wt = manager_->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
-    if (!wt) throw std::runtime_error("Orchestrator::copy_to: invalid worker_id");
-    wt->control_copy_to(dst, src, size);
-}
-
-void Orchestrator::copy_from(int worker_id, uint64_t dst, uint64_t src, size_t size) {
-    auto *wt = manager_->get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
-    if (!wt) throw std::runtime_error("Orchestrator::copy_from: invalid worker_id");
-    wt->control_copy_from(dst, src, size);
 }
 
 TaskSlotState &Orchestrator::slot_state(TaskSlot s) {
@@ -580,12 +556,11 @@ TaskSlotState &Orchestrator::slot_state(TaskSlot s) {
 
 uint64_t Orchestrator::output_alloc_bytes(const ChipTensor &t) { return align_up(t.nbytes(), HEAP_ALIGN); }
 
-ChipTensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype) {
+uint64_t Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity) {
     auto run = current_building_run();
     if (shape.empty()) {
-        // Rank-0 tensors are not supported across the ABI (ChipTensor enforces
-        // ndims > 0). Reject here so we never allocate + register a buffer in
-        // the tensormap only to hand back an unusable addr==0 sentinel.
+        // Rank-0 tensors are not supported across the ABI, and a buffer no
+        // consumer can name is not worth allocating or registering.
         throw std::invalid_argument("Orchestrator::alloc: shape must have at least one dimension");
     }
     if (shape.size() > MAX_TENSOR_DIMS) {
@@ -598,11 +573,6 @@ ChipTensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtyp
     uint64_t bytes = numel * get_element_size(dtype);
     uint64_t aligned = align_up(bytes, HEAP_ALIGN);
 
-    // 0-byte request (e.g. shape with a zero dim) flows straight through the
-    // allocator as a slot-only claim — matches reserve_outputs_and_slot.
-    // Skip tensormap registration when the returned heap_ptr is nullptr,
-    // since 0 is the sentinel for "no tensor" in infer_deps.
-    //
     // Inherit the caller's scope depth so alloc buffers land in the same
     // ring as any tasks submitted inside that scope — an alloc inside a
     // nested `with orch.scope():` uses the nested ring and reclaims
@@ -652,8 +622,12 @@ ChipTensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtyp
     }
 
     uint64_t ptr = reinterpret_cast<uint64_t>(ar.heap_ptr);
+    // A 0-byte request has no buffer for anyone to depend on, so registering a
+    // mapping would only wire a consumer to a backing that does not exist.
     if (ptr != 0) {
-        TensorKey key = TensorKey::local_host(ptr);
+        // A ChipTensor over this VA carries the same identity, so keying on the
+        // identity's canonical hash is what lets infer_deps resolve it here.
+        TensorKey key = TensorKey::local_host(CanonicalIdentityHash{}(identity));
         // Prepare the cleanup journal before publishing the TensorMap entry.
         // A failed insert then leaves either no mapping or a mapping cancellation
         // can erase; the reverse order can leak an unjournaled producer entry.
@@ -671,18 +645,7 @@ ChipTensor Orchestrator::alloc(const std::vector<uint32_t> &shape, DataType dtyp
     s.fanout_released.store(1, std::memory_order_relaxed);
 
     s.state.store(TaskState::COMPLETED, std::memory_order_release);
-
-    // Build a contiguous external ChipTensor over the allocated buffer. ptr may be
-    // 0 for a 0-byte request (a shape with a zero dim), in which case
-    // init_external sets buffer.addr == 0 — the "no tensor" sentinel honored by
-    // infer_deps; buffer.size carries numel*elem. shape is non-empty (rejected
-    // at entry), so ndims >= 1 holds for init_external's assertion.
-    ChipTensor t{};
-    t.init_external(
-        reinterpret_cast<void *>(ptr), bytes, shape.data(), static_cast<uint32_t>(shape.size()), dtype,
-        /*version=*/0
-    );
-    return t;
+    return ptr;
 }
 
 // =============================================================================
@@ -736,6 +699,7 @@ SubmitResult Orchestrator::submit_impl(
     config.validate();
     validate_worker_eligibility(worker_type, args_list.size(), target_worker_ids, eligible_worker_ids);
     validate_remote_sidecars(args_list, remote_sidecars, eligible_worker_ids);
+    validate_submit_args(args_list);
 
     {
         std::lock_guard<std::mutex> lk(run->completion_mu);
@@ -1083,22 +1047,23 @@ void Orchestrator::validate_remote_sidecars(
             }
         }
         for (int32_t i = 0; i < args.tensor_count(); ++i) {
-            const ChipTensor &tensor = args.tensor(i);
+            const Tensor &ref = args.tensor(i);
             const RemoteTensorSidecar &tensor_sidecar = sidecar.tensors[static_cast<size_t>(i)];
-            if (tensor_sidecar.present && tensor.buffer.addr != 0) {
-                throw std::invalid_argument("Orchestrator: remote tensor metadata data field must be zero");
+            // A remote arg carries no local backing: its Tensor is a placeholder (nbytes 0 or a
+            // REMOTE_SIDECAR backend) and the real descriptor lives in the sidecar.
+            bool has_local_backing =
+                ref.buffer.nbytes != 0 && ref.buffer.backend_kind != static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+            if (tensor_sidecar.present && has_local_backing) {
+                throw std::invalid_argument("Orchestrator: remote tensor metadata must not carry a local backing");
             }
-            if (!tensor_sidecar.present && tensor.buffer.addr != 0) {
-                throw std::invalid_argument("Orchestrator: remote tensor uses a bare host pointer without sidecar");
+            if (!tensor_sidecar.present && has_local_backing) {
+                throw std::invalid_argument("Orchestrator: remote tensor uses a local backing without sidecar");
             }
-            if (args.tag(i) == TensorArgType::OUTPUT && tensor.buffer.addr == 0 && !tensor_sidecar.present) {
+            if (args.tag(i) == TensorArgType::OUTPUT && !has_local_backing && !tensor_sidecar.present) {
                 throw std::invalid_argument("Orchestrator: remote OUTPUT tensor requires a RemoteTensorRef sidecar");
             }
-            if (!tensor_sidecar.present && tensor.nbytes() != 0) {
-                throw std::invalid_argument("Orchestrator: remote tensor payload requires a RemoteTensorRef sidecar");
-            }
-            if (tensor.is_child_memory() && !tensor_sidecar.present) {
-                throw std::invalid_argument("Orchestrator: remote child-memory tensor requires a sidecar");
+            if (ref.buffer.address_space == static_cast<uint8_t>(AddressSpace::DEVICE) && !tensor_sidecar.present) {
+                throw std::invalid_argument("Orchestrator: remote device-memory tensor requires a sidecar");
             }
             if (tensor_sidecar.present && tensor_sidecar.desc.address_space != RemoteAddressSpace::HOST_INLINE) {
                 if (tensor_sidecar.desc.owner_worker_id < 0) {
@@ -1124,55 +1089,20 @@ void Orchestrator::validate_remote_sidecars(
 }
 
 // =============================================================================
-// reserve_outputs_and_slot — atomic slot + heap carve-up for this submit
+// reserve_slot — claim this submit's task slot
 // =============================================================================
 //
-// Walks every OUTPUT-tagged tensor that arrived with `data == 0` and reserves
-// aligned slabs out of a single contiguous HeapRing allocation. OUTPUT tensors
-// with a user-supplied data pointer are left untouched (that's the
-// OUTPUT_EXISTING-equivalent back-compat path for callers that pre-fill
-// OUTPUT.data themselves). The single allocator call owns both the slot and
-// the heap range, so there is no partial-failure rollback.
+// A slot-only allocation (0 heap bytes). Args are Tensors backed by buffers the
+// caller already owns (create_buffer), so the orchestrator no
+// longer auto-allocates OUTPUT memory — an OUTPUT is a handle-backed ref like any
+// other, tracked by canonical identity in infer_deps.
 
 AllocResult Orchestrator::reserve_outputs_and_slot(
     std::vector<TaskArgs> &args_list, const std::vector<RemoteTaskArgsSidecar> &remote_sidecars
 ) {
-    uint64_t total_bytes = 0;
-    for (size_t g = 0; g < args_list.size(); ++g) {
-        const TaskArgs &a = args_list[g];
-        for (int32_t i = 0; i < a.tensor_count(); ++i) {
-            if (a.tag(i) != TensorArgType::OUTPUT) continue;
-            if (a.tensor(i).buffer.addr != 0) continue;  // user supplied a pointer — leave alone
-            bool remote_output = !remote_sidecars.empty() &&
-                                 static_cast<size_t>(i) < remote_sidecars[g].tensors.size() &&
-                                 remote_sidecars[g].tensors[static_cast<size_t>(i)].present;
-            if (remote_output) continue;
-            total_bytes += output_alloc_bytes(a.tensor(i));
-        }
-    }
-
-    AllocResult ar = allocator_->alloc(total_bytes, scope_->current_depth());
-    if (ar.slot == INVALID_SLOT) return ar;
-
-    // Hand slabs out in the same order we counted them.
-    uint64_t off = 0;
-    char *base = static_cast<char *>(ar.heap_ptr);
-    for (size_t g = 0; g < args_list.size(); ++g) {
-        TaskArgs &a = args_list[g];
-        for (int32_t i = 0; i < a.tensor_count(); ++i) {
-            if (a.tag(i) != TensorArgType::OUTPUT) continue;
-            ChipTensor &t = a.tensor(i);
-            if (t.buffer.addr != 0) continue;
-            bool remote_output = !remote_sidecars.empty() &&
-                                 static_cast<size_t>(i) < remote_sidecars[g].tensors.size() &&
-                                 remote_sidecars[g].tensors[static_cast<size_t>(i)].present;
-            if (remote_output) continue;
-            uint64_t slab = output_alloc_bytes(t);
-            t.buffer.addr = reinterpret_cast<uint64_t>(base + off);
-            off += slab;
-        }
-    }
-    return ar;
+    (void)args_list;
+    (void)remote_sidecars;
+    return allocator_->alloc(0, scope_->current_depth());
 }
 
 // =============================================================================
@@ -1218,7 +1148,7 @@ void Orchestrator::infer_deps(
         int32_t worker_id = (g < target_worker_ids.size()) ? target_worker_ids[g] : -1;
         const TaskArgs &a = args_list[g];
         for (int32_t i = 0; i < a.tensor_count(); ++i) {
-            const ChipTensor &t = a.tensor(i);
+            const Tensor &r = a.tensor(i);
             TensorKey key{};
             bool has_key = false;
             if (!remote_sidecars.empty()) {
@@ -1236,9 +1166,18 @@ void Orchestrator::infer_deps(
                 }
             }
             if (!has_key) {
-                if (t.buffer.addr == 0) continue;  // null tensor — nothing to track
-                key = t.is_child_memory() ? TensorKey::local_child(t.buffer.addr, worker_id) :
-                                            TensorKey::local_host(t.buffer.addr);
+                if (r.buffer.nbytes == 0) continue;  // placeholder / null ref — nothing to track
+                // Key a local Tensor by its canonical identity alone (buffer granularity) — the
+                // successor of the former buffer-address key now that Tensor carries identity, not
+                // an address. Any two refs to the same buffer collide (a candidate dependency); the
+                // byte_offset/footprint overlap that would refine this to only *conflicting* sub-views
+                // is a future precision pass, not part of the key (folding it in would split
+                // same-buffer refs into distinct keys and miss real dependencies).
+                CanonicalIdentityHash idh;
+                uint64_t k = idh(r.buffer.identity);
+                key = r.buffer.address_space == static_cast<uint8_t>(AddressSpace::DEVICE) ?
+                          TensorKey::local_child(k, worker_id) :
+                          TensorKey::local_host(k);
                 has_key = true;
             }
             TensorArgType tag = a.tag(i);

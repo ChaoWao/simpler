@@ -34,7 +34,6 @@ from simpler.task_interface import (  # noqa: E402
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
@@ -46,9 +45,9 @@ from simpler.worker import Worker  # noqa: E402
 from simpler_setup.elf_parser import extract_text_section  # noqa: E402
 from simpler_setup.kernel_compiler import KernelCompiler  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.torch_interop import make_tensor_arg  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+_F32 = DataType.FLOAT32
 
 _KERNEL_AIV = os.path.join(HERE, "kernels", "aiv", "allreduce_onephase_kernel.cpp")
 _KERNEL_ORCH = os.path.join(HERE, "kernels", "orchestration", "allreduce_onephase_orch.cpp")
@@ -155,17 +154,15 @@ def run(device_ids: list[int], platform: str = "a2a3") -> int:
                 for i in range(nranks):
                     domain = handle[i]
                     chip_args = TaskArgs()
-                    chip_args.add_tensor(make_tensor_arg(host_inputs[i]), TensorArgType.INPUT)
-                    chip_args.add_tensor(make_tensor_arg(host_outputs[i]), TensorArgType.OUTPUT_EXISTING)
                     chip_args.add_tensor(
-                        ChipTensor.make(
-                            data=domain.buffer_ptrs["scratch"],
-                            shapes=(float_elems,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
+                        worker.make_tensor_arg(host_inputs[i], shapes=(ALLREDUCE_COUNT,), dtype=_F32),
+                        TensorArgType.INPUT,
                     )
+                    chip_args.add_tensor(
+                        worker.make_tensor_arg(host_outputs[i], shapes=(ALLREDUCE_COUNT,), dtype=_F32),
+                        TensorArgType.OUTPUT_EXISTING,
+                    )
+                    chip_args.add_tensor(domain.buffers["scratch"].tensor((float_elems,), _F32), TensorArgType.INOUT)
                     chip_args.add_scalar(domain.domain_size)
                     chip_args.add_scalar(domain.device_ctx)
                     args_list.append(chip_args)

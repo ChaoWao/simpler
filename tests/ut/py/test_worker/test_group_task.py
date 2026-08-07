@@ -27,13 +27,15 @@ import os
 import struct
 from multiprocessing.shared_memory import SharedMemory
 
+from simpler.buffer import mint_owner_instance_id, wrap_fork_inherited
 from simpler.task_interface import (
-    ChipTensor,
-    DataType,
     TaskArgs,
     TensorArgType,
 )
 from simpler.worker import Worker
+
+_U8 = 5  # DataType.UINT8 value
+_OID = mint_owner_instance_id()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,12 +56,13 @@ def _read(shm: SharedMemory) -> int:
 
 def _sync_args(ptr: int, tag: TensorArgType) -> TaskArgs:
     """Build a TaskArgs whose only purpose is to register a synthetic
-    tensor-pointer key with the TensorMap so a downstream task can wire a
-    dep on it. SUB callables don't actually read tensors, so the pointer
-    value just needs to be a unique non-zero key.
+    dependency key with the TensorMap so a downstream task can wire a
+    dep on it. SUB callables don't actually read data, so ``ptr`` just
+    needs to yield a unique canonical identity (here the handle buffer_id).
     """
     args = TaskArgs()
-    args.add_tensor(ChipTensor.make(ptr, (1,), DataType.UINT8), tag)
+    ref = wrap_fork_inherited(ptr, 1, _OID, buffer_id=ptr).tensor(shapes=(1,), dtype=_U8)
+    args.add_tensor(ref, tag)
     return args
 
 

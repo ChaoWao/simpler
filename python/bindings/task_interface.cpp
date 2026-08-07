@@ -51,7 +51,6 @@
 #include <vector>
 
 #include "arg_direction.h"
-#include "buffer.h"
 #include "callable.h"
 #include "callable_protocol.h"
 #include "chip_worker.h"
@@ -904,6 +903,40 @@ nb::tuple dims_tuple(const uint32_t *dims, uint32_t ndims) {
     return nb::tuple(out);
 }
 
+// Resolve one wire tensor onto a local base and build the address-bearing device POD.
+// `resolved` maps CanonicalIdentity -> (local_base, address_space); the caller populates it by
+// materializing each embedded descriptor.
+ChipTensor materialize_one(const Tensor &r, nb::dict resolved) {
+    uint64_t elem = get_element_size(r.dtype);
+    if (elem == 0) {
+        throw std::runtime_error("materialize: unknown dtype");
+    }
+    if (r.byte_offset % elem != 0) {
+        throw std::runtime_error("materialize: byte_offset is not a multiple of dtype size");
+    }
+    nb::object key = nb::cast(r.buffer.identity);
+    if (!resolved.contains(key)) {
+        throw std::runtime_error("materialize: canonical identity not in the import registry");
+    }
+    nb::tuple val = nb::cast<nb::tuple>(resolved[key]);
+    auto base = nb::cast<uint64_t>(val[0]);
+    auto addr_space = nb::cast<int>(val[1]);
+    // The view origin is base + byte_offset (start_offset folded into addr); strides carry any
+    // non-row-major layout (transpose / permute / step-slice), which ChipTensor expresses natively.
+    return make_tensor_strided(
+        reinterpret_cast<void *>(static_cast<uintptr_t>(base + r.byte_offset)), r.shapes, r.strides, r.ndims, r.dtype,
+        /*manual_dep=*/false, /*version=*/0, static_cast<AddressSpace>(addr_space)
+    );
+}
+
+// The same rule the submit point enforces, applied early so a mistake surfaces at the offending
+// add_tensor call rather than at submit. A tag can change afterwards, which is why submit re-checks.
+void check_access_subset(uint8_t granted, TensorArgType tag) {
+    if (!access_permits(granted, tag)) {
+        throw std::invalid_argument("TaskArgs.add_tensor: arg TensorArgType requires access not granted by the buffer");
+    }
+}
+
 }  // namespace
 
 // ============================================================================
@@ -958,12 +991,12 @@ NB_MODULE(_task_interface, m) {
     m.attr("MAX_TENSOR_DIMS") = MAX_TENSOR_DIMS;
     m.attr("MAX_REGISTERED_CALLABLE_IDS") = MAX_REGISTERED_CALLABLE_IDS;
     m.attr("RUNTIME_ENV_RING_COUNT") = RUNTIME_ENV_RING_COUNT;
-    // Byte size of a ChipTensor and the offset of its child_memory flag within it.
+    // Byte size of a ChipTensor and the offset of its address_space field within it.
     // A task-args blob stores ChipTensors as a raw memcpy array, so a Python-side
     // blob walker locates tensor i's fields at i * CHIP_TENSOR_STRIDE_BYTES without
     // reimplementing the struct layout.
     m.attr("CHIP_TENSOR_STRIDE_BYTES") = static_cast<int>(sizeof(ChipTensor));
-    m.attr("CHIP_TENSOR_CHILD_MEMORY_OFFSET") = static_cast<int>(offsetof(ChipTensor, child_memory));
+    m.attr("CHIP_TENSOR_ADDRESS_SPACE_OFFSET") = static_cast<int>(offsetof(ChipTensor, address_space));
 
     // Width of the opaque per-incarnation nonce, so the owner can draw one of the right size.
     // The struct sizes stay unexported: no Python path turns these types into bytes or back, so a
@@ -1240,9 +1273,12 @@ NB_MODULE(_task_interface, m) {
                 // start_offset == 0, buffer.size == numel * element_size.
                 return make_tensor_external(
                     reinterpret_cast<void *>(static_cast<uintptr_t>(data)), shp, static_cast<uint32_t>(n), dtype,
-                    /*manual_dep=*/false, /*version=*/0, child_memory ? 1 : 0
+                    /*manual_dep=*/false, /*version=*/0, child_memory ? AddressSpace::DEVICE : AddressSpace::HOST
                 );
             },
+            // The keyword stays `child_memory` while the C++ field is `address_space`: it is the
+            // name of a u8 on the remote-L3 tensor wire (see remote_wire.cpp encode_tensor), which
+            // renaming here would not change and which this constructor decodes into.
             nb::arg("data"), nb::arg("shapes"), nb::arg("dtype"), nb::arg("child_memory") = false,
             "Create a contiguous ChipTensor over pre-allocated memory. Set child_memory=True when "
             "data is a device pointer allocated by the child process (skips H2D copy in "
@@ -1285,7 +1321,7 @@ NB_MODULE(_task_interface, m) {
                 // Re-establish a contiguous layout over the same buffer base.
                 self.init_external(
                     reinterpret_cast<void *>(self.buffer.addr), numel * get_element_size(self.dtype), shp,
-                    static_cast<uint32_t>(n), self.dtype, self.version, self.manual_dep, self.child_memory
+                    static_cast<uint32_t>(n), self.dtype, self.version, self.manual_dep, self.address_space
                 );
             }
         )
@@ -1314,10 +1350,10 @@ NB_MODULE(_task_interface, m) {
         .def_prop_rw(
             "child_memory",
             [](const ChipTensor &self) -> bool {
-                return self.is_child_memory();
+                return self.is_device_memory();
             },
             [](ChipTensor &self, bool v) {
-                self.child_memory = v ? 1 : 0;
+                self.address_space = v ? AddressSpace::DEVICE : AddressSpace::HOST;
             }
         )
 
@@ -1360,7 +1396,7 @@ NB_MODULE(_task_interface, m) {
                 os << self.shapes[i];
             }
             os << "), dtype=" << get_dtype_name(self.dtype);
-            if (self.is_child_memory()) os << ", child_memory=True";
+            if (self.is_device_memory()) os << ", child_memory=True";
             os << ")";
             return os.str();
         });
@@ -1442,11 +1478,14 @@ NB_MODULE(_task_interface, m) {
 
         .def(
             "add_tensor",
-            [](TaskArgs &self, const ChipTensor &t, TensorArgType tag) {
+            [](TaskArgs &self, const Tensor &t, TensorArgType tag) {
+                validate_tensor(t);
+                check_access_subset(t.buffer.access, tag);
                 self.add_tensor(t, tag);
             },
             nb::arg("t"), nb::arg("tag") = TensorArgType::INPUT,
-            "Add a ChipTensor with an optional TensorArgType tag (default INPUT)."
+            "Add a Tensor arg (the self-describing wire view built by Buffer.tensor) with an "
+            "optional TensorArgType tag (default INPUT)."
         )
 
         .def(
@@ -1456,11 +1495,11 @@ NB_MODULE(_task_interface, m) {
 
         .def(
             "tensor",
-            [](const TaskArgs &self, int32_t i) -> const ChipTensor & {
+            [](const TaskArgs &self, int32_t i) -> Tensor {
                 if (i < 0 || i >= self.tensor_count()) throw std::out_of_range("TaskArgs tensor index out of range");
                 return self.tensor(i);
             },
-            nb::arg("i"), nb::rv_policy::reference_internal, "Return the ChipTensor at index i."
+            nb::arg("i"), "Return the Tensor at index i."
         )
 
         .def(
@@ -2036,44 +2075,14 @@ NB_MODULE(_task_interface, m) {
             "None; per-stage timing is emitted as `[STRACE]` log markers."
         )
         .def(
-            "run",
-            [](ChipWorker &self, int32_t callable_id, TaskArgs &args, const CallConfig &config) {
-                TaskArgsView view = make_view(args);
-                self.run(callable_id, view, config);
-            },
-            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"),
-            "Launch a callable_id from a TaskArgs (used for in-process callers). "
-            "Returns None; timing is emitted as `[STRACE]` log markers."
-        )
-        .def(
-            "_run_with_pipeline_lease",
-            [](ChipWorker &self, int32_t callable_id, TaskArgs &args, const CallConfig &config, uint32_t slot_id,
-               uint64_t generation) {
-                self.run_with_lease(callable_id, make_view(args), config, PipelineSlotLease{slot_id, 0, generation});
-            },
-            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
-            "Internal generation-safe pipeline-slot launch used by hierarchical admission."
-        )
-        .def(
             "_run_with_pipeline_lease",
             [](ChipWorker &self, int32_t callable_id, ChipStorageTaskArgs &args, const CallConfig &config,
                uint32_t slot_id, uint64_t generation) {
                 self.run_with_lease(callable_id, &args, config, PipelineSlotLease{slot_id, 0, generation});
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
-            "Internal generation-safe pipeline-slot launch for pre-encoded task args."
-        )
-        .def(
-            "_prepare_native_run_with_pipeline_lease",
-            [](ChipWorker &self, int32_t callable_id, TaskArgs &args, const CallConfig &config, uint32_t slot_id,
-               uint64_t generation) {
-                return self.prepare_native_run(
-                    callable_id, make_view(args), config, PipelineSlotLease{slot_id, 0, generation}
-                );
-            },
-            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
-            nb::call_guard<nb::gil_scoped_release>(),
-            "Prepare a native run after lease admission without crossing its device launch fence."
+            "Internal generation-safe pipeline-slot launch. Takes the runtime.so-ABI POD, "
+            "which is what every lease caller already holds."
         )
         .def(
             "_prepare_native_run_with_pipeline_lease",
@@ -2086,20 +2095,19 @@ NB_MODULE(_task_interface, m) {
             "Prepare a native run from pre-encoded task args after lease admission."
         )
         .def(
-            "_prepare_native_run_from_blob",
-            [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
-               const CallConfig &config, uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id,
+            "_prepare_native_run_materialized",
+            [](ChipWorker &self, int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config,
+               uint32_t slot_id, uint64_t generation, uint64_t run_id, uint64_t dispatch_id,
                uint64_t accepted_state_addr, int32_t accepted_value) {
-                TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
                 return self.prepare_native_run(
-                    callable_id, view, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id,
+                    callable_id, &args, config, PipelineSlotLease{slot_id, 0, generation}, run_id, dispatch_id,
                     reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value
                 );
             },
-            nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
-            nb::arg("slot_id"), nb::arg("generation"), nb::arg("run_id") = 0, nb::arg("dispatch_id") = 0,
-            nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0, nb::call_guard<nb::gil_scoped_release>(),
-            "Prepare a native run from a raw mailbox TaskArgs blob after lease admission."
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("slot_id"), nb::arg("generation"),
+            nb::arg("run_id") = 0, nb::arg("dispatch_id") = 0, nb::arg("accepted_state_addr") = 0,
+            nb::arg("accepted_value") = 0, nb::call_guard<nb::gil_scoped_release>(),
+            "Prepare a native run from materialized task args after lease admission."
         )
         .def(
             "_launch_native_run", &ChipWorker::launch_native_run, nb::arg("run"),
@@ -2120,36 +2128,26 @@ NB_MODULE(_task_interface, m) {
             "Validate, copy back, emit diagnostics, and destroy a prepared native run."
         )
         .def(
-            "run_from_blob",
-            [](ChipWorker &self, int32_t callable_id, uint64_t args_blob_ptr, size_t blob_capacity,
-               const CallConfig &config, uint64_t accepted_state_addr, int32_t accepted_value, uint32_t pipeline_slot,
+            "run_materialized",
+            [](ChipWorker &self, int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config,
+               uint64_t accepted_state_addr, int32_t accepted_value, uint32_t pipeline_slot,
                uint64_t pipeline_generation) {
-                // The mailbox region is the on-wire format `write_blob` produced;
-                // `read_blob` is the matching reader that returns a zero-copy
-                // TaskArgsView into the caller-owned bytes. Forwards to the
-                // existing `run(cid, view, config)` path so chip-child
-                // loops never re-implement the tensor/scalar layout in Python
-                // (where it has historically dropped fields like child_memory).
-                TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(args_blob_ptr), blob_capacity);
                 if (pipeline_generation == 0) {
                     self.run(
-                        callable_id, view, config, reinterpret_cast<volatile int32_t *>(accepted_state_addr),
+                        callable_id, &args, config, reinterpret_cast<volatile int32_t *>(accepted_state_addr),
                         accepted_value
                     );
                 } else {
                     self.run_with_lease(
-                        callable_id, view, config, PipelineSlotLease{pipeline_slot, 0, pipeline_generation},
+                        callable_id, &args, config, PipelineSlotLease{pipeline_slot, 0, pipeline_generation},
                         reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value
                     );
                 }
             },
-            nb::arg("callable_id"), nb::arg("args_blob_ptr"), nb::arg("blob_capacity"), nb::arg("config"),
-            nb::arg("accepted_state_addr") = 0, nb::arg("accepted_value") = 0, nb::arg("pipeline_slot") = 0,
-            nb::arg("pipeline_generation") = 0,
-            "Launch a callable_id from a raw mailbox-blob pointer + capacity "
-            "(used by chip-child mailbox loops to avoid Python-side re-deserialisation "
-            "of the per-task tensor/scalar layout). The blob must be in the format "
-            "produced by `write_blob`; read_blob enforces capacity bounds against shm corruption."
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("accepted_state_addr") = 0,
+            nb::arg("accepted_value") = 0, nb::arg("pipeline_slot") = 0, nb::arg("pipeline_generation") = 0,
+            "Launch a callable_id from the runtime.so-ABI POD a chip-child mailbox loop built with "
+            "materialize_tensor_blob, so no Python code re-implements the tensor/scalar layout."
         )
         .def(
             "unregister_callable",
@@ -2272,10 +2270,51 @@ NB_MODULE(_task_interface, m) {
         .def("comm_destroy_all", &ChipWorker::comm_destroy_all, "Destroy all owned communicators in LIFO order.");
 
     // --- Standalone blob helpers ---
+
+    m.def(
+        "materialize_tensor_blob",
+        [](uint64_t blob_ptr, size_t capacity, nb::dict resolved) -> ChipStorageTaskArgs {
+            TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(blob_ptr), capacity);
+            ChipStorageTaskArgs args;
+            for (int32_t i = 0; i < view.tensor_count; i++) {
+                args.add_tensor(materialize_one(view.tensors(i), resolved));
+            }
+            for (int32_t i = 0; i < view.scalar_count; i++) {
+                args.add_scalar(view.scalars[i]);
+            }
+            return args;
+        },
+        nb::arg("blob_ptr"), nb::arg("capacity"), nb::arg("resolved"),
+        "Materialize a Tensor blob into the runtime.so-ABI ChipStorageTaskArgs POD. Each tensor's "
+        "embedded buffer identity is resolved via `resolved` {CanonicalIdentity: (local_base, "
+        "address_space)}; addr = base + byte_offset. The caller pre-populates `resolved` by "
+        "materializing each embedded descriptor (see read_args_from_blob) on first receipt. "
+        "Strided views (transpose / permute / step-slice) materialize to strided ChipTensors. "
+        "Rejects an unknown identity and a non-dtype-aligned byte_offset."
+    );
+
+    m.def(
+        "materialize_task_args",
+        [](const TaskArgs &args, nb::dict resolved) -> ChipStorageTaskArgs {
+            ChipStorageTaskArgs out;
+            for (int32_t i = 0; i < args.tensor_count(); i++) {
+                out.add_tensor(materialize_one(args.tensor(i), resolved));
+            }
+            for (int32_t i = 0; i < args.scalar_count(); i++) {
+                out.add_scalar(args.scalar(i));
+            }
+            return out;
+        },
+        nb::arg("args"), nb::arg("resolved"),
+        "Materialize a TaskArgs held in this process into the runtime.so-ABI ChipStorageTaskArgs "
+        "POD. An L2 leaf consumes its own args, so it takes this path instead of the mailbox blob; "
+        "`resolved` has the same shape as for materialize_tensor_blob."
+    );
+
     m.def(
         "read_args_from_blob",
-        [](uint64_t blob_ptr) {
-            TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(blob_ptr), MAILBOX_ARGS_CAPACITY);
+        [](uint64_t blob_ptr, size_t capacity) -> TaskArgs {
+            TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(blob_ptr), capacity);
             TaskArgs args;
             for (int32_t i = 0; i < view.tensor_count; i++) {
                 args.add_tensor(view.tensors(i));
@@ -2285,9 +2324,11 @@ NB_MODULE(_task_interface, m) {
             }
             return args;
         },
-        nb::arg("blob_ptr"),
-        "Reconstruct a TaskArgs from a length-prefixed blob at blob_ptr. "
-        "Tags are not preserved (blob wire format strips them)."
+        nb::arg("blob_ptr"), nb::arg("capacity"),
+        "Reconstruct a TaskArgs from the length-prefixed blob at blob_ptr. `capacity` bounds how far "
+        "the reader may walk and belongs to the caller's mapping — the mailbox frame's args region, "
+        "or the length of a buffer the caller owns. Every element is gated by validate_tensor on the "
+        "way out. Tags are not preserved (the wire format strips them)."
     );
 
     nb::class_<ChipChildOnboardRegionExport>(m, "_ChipChildOnboardRegionExport")

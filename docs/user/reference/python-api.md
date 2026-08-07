@@ -62,9 +62,9 @@ else raises. Remote-worker and remote-memory calls require `level >= 4`.
 | ------ | ----- |
 | `malloc(size, worker_id=0) -> int` | Returns a device pointer as an integer |
 | `free(ptr, worker_id=0)` | |
-| `copy_to(dst, src, size, worker_id=0)` | H2D; `dst` is a device pointer, `src` a host address. `dst` may be a `base + offset` interior address as long as `[dst, dst + size)` lies within one live allocation (partial update of a persistent buffer) |
-| `copy_from(dst, src, size, worker_id=0)` | D2H; `dst` is the host address. `src` may be an interior address whose `[src, src + size)` lies within one live device allocation |
-| `create_host_buffer(nbytes) -> HostBuffer` / `free_host_buffer(handle)` | Host-side buffer the device can reach |
+| `copy_to(dst, src)` | H2D; `dst` is a device `Buffer`, `src` a host `Buffer` from `create_buffer` (at L2, also any torch tensor or writable buffer). `dst` may be a `base + offset` interior handle as long as `[dst, dst + size)` lies within one live allocation (partial update of a persistent buffer) |
+| `copy_from(dst, src)` | D2H; `dst` is the host `Buffer` (at L2, also any writable buffer). `src` may be an interior handle whose `[src, src + size)` lies within one live device allocation |
+| `create_buffer(nbytes) -> Buffer` / `Buffer.close()` | Shared host backing this Worker owns; build a view over `handle.shm.buf`, name it on the wire with `handle.tensor(shapes, dtype)` |
 | `remote_malloc` / `remote_free` / `remote_copy_to` / `remote_copy_from` / `remote_export` / `remote_import` / `remote_release_import` | L4 only |
 
 ### Execution
@@ -143,7 +143,7 @@ Compilation and test scaffolding. Exported from the package root:
 | `extract_text_section(binary)` | Required on hardware platforms before wrapping a kernel `.o` |
 | `scene_test(level, runtime)` / `SceneTestCase` | The decorator and base class for declarative examples and tests |
 | `Tensor`, `Scalar`, `TaskArgsBuilder`, `CallableNamespace` | Scene-test arg construction |
-| `make_tensor_arg`, `torch_dtype_to_datatype` | torch interop |
+| `make_chip_tensor_arg`, `torch_dtype_to_datatype` | torch interop |
 | `parse_platform` | Platform string parsing |
 | `RuntimeBuilder` | Runtime build orchestration |
 
