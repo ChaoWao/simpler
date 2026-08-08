@@ -22,7 +22,7 @@ import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.goldens.mx_fp_gemm import make_mx_fp4_case, make_mx_fp8_case
 
 M, K, N = 128, 64, 64
@@ -89,11 +89,11 @@ class TestMxFpGemm(SceneTestCase):
                 pytest.skip("torch.float4_e2m1fn_x2 / float8_e8m0fnu required")
             a, a_s, b, b_s, c, _ = make_mx_fp4_case(M, K, N)
         return TaskArgsBuilder(
-            Tensor("A", a.reshape(-1)),
-            Tensor("As", a_s.reshape(-1)),
-            Tensor("B", b.reshape(-1)),
-            Tensor("Bs", b_s.reshape(-1)),
-            Tensor("C", c.reshape(-1)),
+            TensorArg("A", a.reshape(-1)),
+            TensorArg("As", a_s.reshape(-1)),
+            TensorArg("B", b.reshape(-1)),
+            TensorArg("Bs", b_s.reshape(-1)),
+            TensorArg("C", c.reshape(-1)),
             Scalar("mode", mode),
         )
 

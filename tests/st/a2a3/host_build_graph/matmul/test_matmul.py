@@ -16,7 +16,7 @@ Diamond topology: t0(AIV) -> t1(AIC), t2(AIC) -> t3(AIV).
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -76,10 +76,10 @@ class TestMatmulHostBuildGraph(SceneTestCase):
         f = torch.zeros(SIZE, dtype=torch.float32)
 
         return TaskArgsBuilder(
-            Tensor("a", a),
-            Tensor("w1", w1),
-            Tensor("w2", w2),
-            Tensor("f", f),
+            TensorArg("a", a),
+            TensorArg("w1", w1),
+            TensorArg("w2", w2),
+            TensorArg("f", f),
         )
 
     def compute_golden(self, args, params):

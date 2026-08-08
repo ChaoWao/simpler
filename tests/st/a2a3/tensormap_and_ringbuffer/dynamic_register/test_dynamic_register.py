@@ -31,7 +31,7 @@ from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CallConfig, ChipCallable
 from simpler.worker import Worker
 
-from simpler_setup import TaskArgsBuilder, Tensor
+from simpler_setup import TaskArgsBuilder, TensorArg
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.scene_test import _build_l3_task_args
 
@@ -106,9 +106,9 @@ def _unique_py_callable(index: int):
 def _make_args(a: float, b: float) -> TaskArgsBuilder:
     size = 128 * 128
     return TaskArgsBuilder(
-        Tensor("a", torch.full((size,), a, dtype=torch.float32).share_memory_()),
-        Tensor("b", torch.full((size,), b, dtype=torch.float32).share_memory_()),
-        Tensor("f", torch.zeros(size, dtype=torch.float32).share_memory_()),
+        TensorArg("a", torch.full((size,), a, dtype=torch.float32).share_memory_()),
+        TensorArg("b", torch.full((size,), b, dtype=torch.float32).share_memory_()),
+        TensorArg("f", torch.zeros(size, dtype=torch.float32).share_memory_()),
     )
 
 

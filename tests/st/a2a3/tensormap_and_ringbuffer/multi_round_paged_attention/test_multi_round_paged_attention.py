@@ -15,7 +15,7 @@ Run with --rounds 10 --skip-golden for benchmarking.
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.goldens.paged_attention import compute_golden as _pa_compute_golden
 from simpler_setup.goldens.paged_attention import generate_inputs as _pa_generate_inputs
 
@@ -134,16 +134,16 @@ class TestMultiRoundPagedAttention(SceneTestCase):
         specs = []
         for name, value in result:
             if isinstance(value, torch.Tensor):
-                specs.append(Tensor(name, value))
+                specs.append(TensorArg(name, value))
             else:
                 specs.append(Scalar(name, value))
         return TaskArgsBuilder(*specs)
 
     def compute_golden(self, args, params):
-        tensors = {s.name: s.value for s in args.specs if isinstance(s, Tensor)}
+        tensors = {s.name: s.value for s in args.specs if isinstance(s, TensorArg)}
         _pa_compute_golden(tensors, params)
         for s in args.specs:
-            if isinstance(s, Tensor) and s.name in tensors:
+            if isinstance(s, TensorArg) and s.name in tensors:
                 getattr(args, s.name)[:] = tensors[s.name]
 
 

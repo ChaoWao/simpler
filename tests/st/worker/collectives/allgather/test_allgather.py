@@ -21,7 +21,7 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import Scalar as SScalar
 from simpler_setup import SceneTestCase, TaskArgsBuilder, scene_test
-from simpler_setup import Tensor as STensor
+from simpler_setup import TensorArg as STensor
 
 from .._helpers import (
     COUNT_PER_RANK,

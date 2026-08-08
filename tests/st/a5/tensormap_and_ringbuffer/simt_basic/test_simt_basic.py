@@ -18,7 +18,7 @@ budget, sync) rather than at the scatter index semantics.
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 TILE_ROWS = 8
 TILE_COLS = 32
@@ -65,9 +65,9 @@ class TestSimtBasic(SceneTestCase):
         indices = torch.arange(DST_LEN, dtype=torch.int32)
         out = torch.zeros(DST_LEN, dtype=torch.float32)
         return TaskArgsBuilder(
-            Tensor("src", src),
-            Tensor("indices", indices),
-            Tensor("out", out),
+            TensorArg("src", src),
+            TensorArg("indices", indices),
+            TensorArg("out", out),
         )
 
     def compute_golden(self, args, params):

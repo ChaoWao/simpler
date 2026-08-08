@@ -15,7 +15,7 @@ import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
 from simpler_setup.tools.strace_timing import group_invocations, parse_spans
 
@@ -61,9 +61,9 @@ class TestNativeRunLifecycle(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("a", torch.full((_SIZE,), params["a"], dtype=torch.float32)),
-            Tensor("b", torch.full((_SIZE,), params["b"], dtype=torch.float32)),
-            Tensor("out", torch.zeros(_SIZE, dtype=torch.float32)),
+            TensorArg("a", torch.full((_SIZE,), params["a"], dtype=torch.float32)),
+            TensorArg("b", torch.full((_SIZE,), params["b"], dtype=torch.float32)),
+            TensorArg("out", torch.zeros(_SIZE, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

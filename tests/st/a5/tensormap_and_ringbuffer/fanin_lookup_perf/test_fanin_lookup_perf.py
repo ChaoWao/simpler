@@ -20,7 +20,7 @@ import ctypes
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -63,8 +63,8 @@ class TestFaninLookupPerf(SceneTestCase):
         producer_count = int(params["producer_count"])
         consumer_count = int(params["consumer_count"])
         return TaskArgsBuilder(
-            Tensor("producer_out", torch.full((producer_count * slot_elems,), -1.0, dtype=torch.float32)),
-            Tensor("consumer_out", torch.full((consumer_count * slot_elems,), -1.0, dtype=torch.float32)),
+            TensorArg("producer_out", torch.full((producer_count * slot_elems,), -1.0, dtype=torch.float32)),
+            TensorArg("consumer_out", torch.full((consumer_count * slot_elems,), -1.0, dtype=torch.float32)),
             Scalar("producer_count", ctypes.c_int64(producer_count)),
             Scalar("consumer_count", ctypes.c_int64(consumer_count)),
             Scalar("use_real_kernels", ctypes.c_int64(int(params["use_real_kernels"]))),

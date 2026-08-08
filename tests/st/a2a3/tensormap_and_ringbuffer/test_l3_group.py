@@ -19,7 +19,7 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import TaskArgs, TensorArgType
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _rehosted_ref_for
 
 KERNELS_BASE = "../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
@@ -104,12 +104,12 @@ class TestL3Group(SceneTestCase):
     def generate_args(self, params):
         SIZE = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a0", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
-            Tensor("b0", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
-            Tensor("f0", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
-            Tensor("a1", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
-            Tensor("b1", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
-            Tensor("f1", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
+            TensorArg("a0", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
+            TensorArg("b0", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
+            TensorArg("f0", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
+            TensorArg("a1", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
+            TensorArg("b1", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
+            TensorArg("f1", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
         )
 
     def compute_golden(self, args, params):

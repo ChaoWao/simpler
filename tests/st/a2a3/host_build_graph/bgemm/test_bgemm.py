@@ -16,7 +16,7 @@ Tests AIC (Cube) + AIV (Vector) cooperation with tile-first memory layout.
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 TILE_M = 64
 TILE_K = 64
@@ -74,9 +74,9 @@ class TestBgemmHostBuildGraph(SceneTestCase):
         C = torch.full((BATCH, GRID_M, GRID_N, TILE_M, TILE_N), C_BASE, dtype=torch.float32)
 
         return TaskArgsBuilder(
-            Tensor("A", A.flatten()),
-            Tensor("B", B.flatten()),
-            Tensor("C", C.flatten()),
+            TensorArg("A", A.flatten()),
+            TensorArg("B", B.flatten()),
+            TensorArg("C", C.flatten()),
         )
 
     def compute_golden(self, args, params):
