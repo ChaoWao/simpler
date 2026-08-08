@@ -287,3 +287,25 @@ class TestRunStreamReuseHbg(SceneTestCase):
             assert st_worker.run_stream_set_create_count == stream_sets
         finally:
             st_worker.unregister(add_handle)
+
+
+@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+class TestRunStreamFreshTmr(SceneTestCase):
+    """TMR preparation keeps the same fresh run-owned AICore stream rule."""
+
+    CALLABLE = TestRunStreamReuseHbg.CALLABLE
+    CASES = TestRunStreamReuseHbg.CASES
+
+    generate_args = TestRunStreamReuseHbg.generate_args
+    compute_golden = TestRunStreamReuseHbg.compute_golden
+
+    def test_every_run_creates_its_own_aicore_stream(self, st_platform, st_worker):
+        if st_platform != "a2a3":
+            pytest.skip("run stream sets are an a2a3 onboard resource")
+
+        callable_obj = self.build_callable(st_platform)
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=1)
+        after_first = st_worker.run_stream_set_create_count
+        rounds = _REPEATED_RUNS - 1
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=rounds)
+        assert st_worker.run_stream_set_create_count == after_first + rounds

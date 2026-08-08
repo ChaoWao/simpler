@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -346,6 +347,10 @@ private:
     uint32_t arena_bank_for_slot(uint32_t slot_id) const;
 
     enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHED, REAPED, FINALIZING };
+    class PreparedRunIncompatible : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
     struct NativeRunSlotState {
         uint64_t lease_generation{0};
         uint64_t run_epoch{0};

@@ -39,6 +39,7 @@ struct ChipRunState {
     bool pipeline_leased{true};
     bool activated{false};
     bool crossed_launch_fence{false};
+    bool depth_one_fallback{false};
     std::exception_ptr error;
 };
 
@@ -137,10 +138,13 @@ struct ChipRunLaneState {
 
     void prepare_successor_if_eligible(const std::shared_ptr<ChipRunState> &run) {
         if (fifo.size() != 2 || fifo.back() != run || fifo.front() == run) return;
-        if (run->phase != ChipRunState::Phase::QUEUED) return;
+        if (run->phase != ChipRunState::Phase::QUEUED || run->depth_one_fallback) return;
         if (!permits_native_successor(*fifo.front(), *run)) return;
         try {
             prepare(run);
+        } catch (const ChipWorker::PreparedRunIncompatible &) {
+            run->depth_one_fallback = true;
+            return;
         } catch (...) {
             run->error = std::current_exception();
             run->phase = ChipRunState::Phase::TERMINAL;

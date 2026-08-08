@@ -72,6 +72,7 @@ typedef void *DeviceContextHandle;
 
 enum {
     PTO_RUNTIME_ERR_UNSUPPORTED = -2,
+    PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE = -3,
 };
 
 /** Return values from simpler_poll_run(). */
