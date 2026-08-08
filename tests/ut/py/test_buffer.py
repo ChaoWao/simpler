@@ -24,6 +24,7 @@ from simpler.buffer import (
     BackendKind,
     BufferDescriptor,
     CanonicalIdentity,
+    ImportContext,
     ImportRegistry,
     Tensor,
     create_host_shared_buffer,
@@ -195,7 +196,7 @@ def test_device_malloc_wrap_materialize():
     assert h.backend_kind == BackendKind.DEVICE_MALLOC
     assert h.address_space == AddressSpace.DEVICE
     assert h.shm is None and h.base == 0xDEAD0000
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
     imp = reg.materialize(h.to_descriptor())
     assert imp.base == 0xDEAD0000
     assert imp.address_space == AddressSpace.DEVICE
@@ -227,7 +228,7 @@ def test_materialize_rejects_a_conflicting_descriptor_for_a_live_identity():
     # carrying the same identity and a different nbytes describes something the existing mapping is
     # not, so returning that mapping would hand back a base under a size nothing stands behind.
     oid = mint_owner_instance_id()
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
     first = reg.materialize(_device_descriptor(oid, 1, nbytes=4096))
 
     for conflicting in (
@@ -247,7 +248,7 @@ def test_conflict_error_names_only_the_fields_that_differ():
     # A whole repr of both descriptors would carry a 32-byte body twice for what is usually a
     # one-field disagreement, and leave the reader to diff them by eye.
     oid = mint_owner_instance_id()
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
     reg.materialize(_device_descriptor(oid, 1, nbytes=4096))
     with pytest.raises(ValueError) as excinfo:
         reg.materialize(_device_descriptor(oid, 1, nbytes=8192))

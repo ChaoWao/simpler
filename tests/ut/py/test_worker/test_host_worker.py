@@ -170,6 +170,7 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
             {},
             {},
             {},
+            worker_mod.mint_owner_instance_id(),
             platform="a2a3",
             runtime="tensormap_and_ringbuffer",
         )
@@ -595,6 +596,7 @@ class _TwoFrameLoopHarness:
                 self.registry,
                 self.identity_table,
                 self.identity_refs,
+                worker_mod.mint_owner_instance_id(),
             ),
             kwargs={
                 "chip_platform": "a2a3",
@@ -7299,6 +7301,7 @@ class TestChipMainLoopDigestRegister:
 
     @staticmethod
     def _spawn_loop(cw, buf, state_addr, registry=None, identity_table=None, identity_refs=None):
+        from simpler.buffer import mint_owner_instance_id  # noqa: PLC0415
         from simpler.worker import _run_chip_main_loop  # noqa: PLC0415
 
         if registry is None:
@@ -7309,7 +7312,7 @@ class TestChipMainLoopDigestRegister:
             identity_refs = {}
         t = threading.Thread(
             target=_run_chip_main_loop,
-            args=(cw, buf, 0, state_addr, 0, registry, identity_table, identity_refs),
+            args=(cw, buf, 0, state_addr, 0, registry, identity_table, identity_refs, mint_owner_instance_id()),
             kwargs={"chip_platform": ""},
             daemon=True,
         )

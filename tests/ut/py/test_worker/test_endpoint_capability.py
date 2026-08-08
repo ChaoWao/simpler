@@ -19,6 +19,7 @@ import pytest
 from simpler.buffer import (
     AccessMode,
     AddressSpace,
+    ImportContext,
     ImportRegistry,
     mint_owner_instance_id,
     wrap_device_malloc,
@@ -94,3 +95,24 @@ def test_sub_worker_materialization_refuses_a_device_tensor():
             reg.mapped_args_from_blob(ctypes.addressof(src), len(blob))
     finally:
         reg.close()
+
+
+def test_host_endpoint_materialize_refuses_a_device_tensor_directly():
+    # The same backstop, exercised through materialize() itself rather than mapped_args_from_blob —
+    # any entry point onto a host ImportRegistry must refuse a DEVICE backing, not just the one that
+    # mapped_args_from_blob happens to guard.
+    dev = _device_handle()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    with pytest.raises(ValueError, match="host endpoint"):
+        reg.materialize(dev.to_descriptor())
+
+
+def test_chip_materialization_refuses_a_foreign_chips_device_tensor():
+    # Depth behind the submit-time provenance check (_child_prov_check_dispatch's exact
+    # (target_worker_id, ptr) match): handed a blob directly, a chip endpoint's own ImportRegistry
+    # still refuses a device backing minted for a different chip's owner.
+    dev = _device_handle()
+    foreign_chip_owner = mint_owner_instance_id()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=foreign_chip_owner))
+    with pytest.raises(ValueError, match="different chip's owner"):
+        reg.materialize(dev.to_descriptor())
