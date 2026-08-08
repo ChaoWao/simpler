@@ -84,6 +84,12 @@ enum class MailboxState : int32_t {
     PREPARE_READY = 12,
 };
 
+enum class MailboxPreparationDisposition : int32_t {
+    NONE = 0,
+    VALIDATED_ONLY = 1,
+    NATIVE_PREPARED = 2,
+};
+
 bool mailbox_compare_exchange_state(char *frame, MailboxState expected, MailboxState desired) noexcept;
 
 // Sized so the args region can hold any TaskArgs the runtime itself accepts
@@ -95,7 +101,7 @@ static constexpr size_t MAILBOX_TASK_FRAME_COUNT = 2;
 static constexpr size_t MAILBOX_CONTROL_FRAME = 0;
 static constexpr size_t MAILBOX_FIRST_TASK_FRAME = 1;
 static constexpr size_t MAILBOX_SIZE = MAILBOX_FRAME_SIZE * (1 + MAILBOX_TASK_FRAME_COUNT);
-static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 2;
+static constexpr uint32_t MAILBOX_TASK_PROTOCOL_VERSION = 3;
 
 // Error message region lives at the mailbox tail. 256 B of headroom is
 // enough for `<ExceptionType>: <short message>` produced by the child-side
@@ -137,6 +143,9 @@ static constexpr ptrdiff_t MAILBOX_OFF_ERROR_MSG =
 // that task frame, so nothing else can overwrite it in between.
 static constexpr int32_t MAILBOX_TASK_ACCEPTED = 1;
 static constexpr ptrdiff_t MAILBOX_OFF_ACCEPTED = MAILBOX_OFF_ERROR_MSG - 8;
+// Preparation disposition occupies the four bytes of trailer padding after
+// the sticky int32 launch ACK. It is independent of the phase state word.
+static constexpr ptrdiff_t MAILBOX_OFF_PREPARATION_DISPOSITION = MAILBOX_OFF_ACCEPTED + 4;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_PROTOCOL = MAILBOX_OFF_ACCEPTED - 40;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_RUN_ID = MAILBOX_OFF_ACCEPTED - 32;
 static constexpr ptrdiff_t MAILBOX_OFF_FRAME_SLOT_ID = MAILBOX_OFF_ACCEPTED - 24;
@@ -291,6 +300,7 @@ struct WorkerEndpointProgress {
     WorkerProgressKind kind{WorkerProgressKind::FRAME_STAGED};
     WorkerDispatch dispatch{};
     WorkerCompletion completion{};
+    MailboxPreparationDisposition preparation_disposition{MailboxPreparationDisposition::NONE};
 };
 
 enum class WorkerEndpointKind : int32_t {

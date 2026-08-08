@@ -212,6 +212,7 @@ add_library(hierarchical_objs OBJECT
     ${HIERARCHICAL_SRC_DIR}/worker_manager.cpp
     ${HIERARCHICAL_SRC_DIR}/scheduler.cpp
     ${HIERARCHICAL_SRC_DIR}/worker.cpp
+    ${WORKER_SRC_DIR}/chip_run_lane.cpp
     ${WORKER_SRC_DIR}/chip_worker.cpp
     # Host-side assert_impl / get_stacktrace for the unified Tensor's
     # always_assert (init_external, reached via make_tensor_external in
@@ -392,6 +393,7 @@ add_hierarchical_test(test_ring  hierarchical/test_ring.cpp)
 add_hierarchical_test(test_scope      hierarchical/test_scope.cpp)
 add_hierarchical_test(test_orchestrator hierarchical/test_orchestrator.cpp)
 add_hierarchical_test(test_scheduler  hierarchical/test_scheduler.cpp)
+add_hierarchical_test(test_chip_run_lane hierarchical/test_chip_run_lane.cpp)
 add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
 add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)

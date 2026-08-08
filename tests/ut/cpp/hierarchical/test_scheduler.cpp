@@ -1225,10 +1225,13 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     WorkerEndpointProgress progress;
     EXPECT_FALSE(endpoint.poll_progress(progress));
 
+    const int32_t native_prepared = static_cast<int32_t>(MailboxPreparationDisposition::NATIVE_PREPARED);
+    std::memcpy(lower_frame + MAILBOX_OFF_PREPARATION_DISPOSITION, &native_prepared, sizeof(native_prepared));
     set_test_frame_state(lower_frame, MailboxState::FRAME_STAGED);
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::FRAME_STAGED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
+    EXPECT_EQ(progress.preparation_disposition, MailboxPreparationDisposition::NATIVE_PREPARED);
     EXPECT_EQ(test_frame_state(lower_frame), MailboxState::ACTIVATE);
 
     set_test_frame_state(lower_frame, MailboxState::TASK_LAUNCHED);
