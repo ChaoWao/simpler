@@ -49,6 +49,7 @@ __all__ = [
     "Buffer",
     "BufferDescriptor",
     "CanonicalIdentity",
+    "ImportContext",
     "ImportRegistry",
     "ImportedBuffer",
     "MappedArg",
@@ -496,6 +497,30 @@ class MappedArgs(Sequence):
         return self._scalars[i]
 
 
+@dataclass(frozen=True)
+class ImportContext:
+    """What owner nonce this endpoint may materialize a DEVICE ``address_space`` backing under.
+
+    A host endpoint (Python SUB, or any host-process consumer) may never materialize a DEVICE
+    backing — no device VA is ever valid there. A device (chip) endpoint may materialize one only
+    if the descriptor's ``owner_instance_id`` matches ``owning_chip_instance_id``.
+
+    This is a Worker-level check, not a chip-level one: ``owner_instance_id`` is minted once per
+    Worker incarnation (in ``Worker.init()``), not once per chip, so a Worker with more than one
+    entry in ``device_ids`` gives every one of its chip children the same nonce here — the wire
+    ``BufferDescriptor`` has no field that distinguishes sibling chips (``owner_worker_id`` is
+    host-side-only free/copy provenance, never serialized). A DEVICE backing minted for chip 0
+    of such a Worker therefore also passes this check on sibling chip 1. It still rejects a
+    *different* Worker's device buffer, and any host endpoint outright. The exact-chip half of
+    the endpoint x address_space matrix is enforced at submit time by the
+    ``(target_worker_id, ptr)`` check in ``orchestrator.py``; this is a backstop for a path that
+    reaches ``materialize`` without going through it, not a replacement for that check.
+    """
+
+    is_host_endpoint: bool
+    owning_chip_instance_id: bytes | None = None
+
+
 class ImportRegistry:
     """Per-consumer-endpoint lazy import cache: materialize a ``Tensor``'s embedded descriptor to a
     local base on first receipt (map-once), keyed by canonical identity.
@@ -510,8 +535,9 @@ class ImportRegistry:
     still describes the backing that was mapped, so one identity can never come to mean two things.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, context: ImportContext | None = None) -> None:
         self._by_identity: dict[CanonicalIdentity, ImportedBuffer] = {}
+        self._context = context
 
     def materialize(self, desc: BufferDescriptor) -> ImportedBuffer:
         """Map ``desc``'s backing into this process on first sight of its identity; reuse the
@@ -526,9 +552,11 @@ class ImportRegistry:
         POSIX shm object smaller than the ``nbytes`` its descriptor claims — every view bound check
         is computed against that number, so an unverified one makes them all vacuous.
 
-        Adds no endpoint check of its own: a DEVICE backing resolved here yields a device pointer,
-        which is only meaningful on its owner chip. The endpoint x ``address_space`` matrix is a
-        separate change; until it lands, that invariant rests on the caller.
+        A DEVICE backing is rejected unless ``context`` names this endpoint's owning Worker: the
+        endpoint x ``address_space`` matrix's materialize-side half, the backstop for a path that
+        reaches here without going through submit-time dispatch. This check is Worker-grained, not
+        chip-grained (see ``ImportContext``) — it cannot by itself tell apart two chips forked from
+        the same multi-device Worker.
         """
         key = desc.identity
         cached = self._by_identity.get(key)
@@ -544,6 +572,16 @@ class ImportRegistry:
                     f"this is refused"
                 )
             return cached
+        if desc.address_space == AddressSpace.DEVICE:
+            if self._context is None or self._context.is_host_endpoint:
+                raise ValueError(
+                    f"ImportRegistry: refusing to materialize a DEVICE backing ({desc.identity}) on a host endpoint"
+                )
+            if bytes(desc.identity.owner_instance_id) != self._context.owning_chip_instance_id:
+                raise ValueError(
+                    f"ImportRegistry: refusing to materialize a DEVICE backing ({desc.identity}) "
+                    f"minted for a different chip's owner"
+                )
         if desc.backend_kind in (
             BackendKind.FORK_SHM,
             BackendKind.FORK_COW,
@@ -554,7 +592,9 @@ class ImportRegistry:
             # FORK_SHM / FORK_COW: a host VA inherited across the fork, so the child already holds
             # the same address (they differ in write semantics, not in how they resolve).
             # DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on the chip that allocated / carved
-            # it (the tensor must only reach that chip — a topology invariant).
+            # it (the tensor must only reach that chip — a topology invariant). The check above
+            # enforces the owning-Worker half of that (see ImportContext); the exact-chip half for
+            # a Worker with several chips is submit-time's job, not this cache's.
             base = int.from_bytes(desc.body, "little")
             imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None, desc)
         elif desc.backend_kind == BackendKind.POSIX_SHM:

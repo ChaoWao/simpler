@@ -110,6 +110,7 @@ from .buffer import (
     Buffer,
     BufferDescriptor,
     CanonicalIdentity,
+    ImportContext,
     ImportRegistry,
     create_host_shared_buffer,
     host_ptr_nbytes,
@@ -1833,7 +1834,8 @@ def _sub_worker_loop(
     completion, which the run's waiter rethrows as ``std::runtime_error``.
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
-    import_registry = ImportRegistry()  # lazy per-endpoint import cache: canonical identity -> local base
+    # SUB is a Python host process: no device VA is ever valid here.
+    import_registry = ImportRegistry(ImportContext(is_host_endpoint=True))
 
     def handle_task(task_buf) -> tuple[int, str]:
         digest = _read_task_digest(task_buf)
@@ -2442,6 +2444,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
     identity_refs: dict[bytes, int],
+    owner_instance_id: bytes,
     *,
     chip_platform: str,
     chip_runtime: str = "",
@@ -2463,10 +2466,13 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     via ``prepared``), and callables registered dynamically after startup
     arrive via ``_CTRL_PREPARE``. A task frame for an unprepared slot is a
     control-flow error and fails rather than lazily preparing it.
+
+    ``owner_instance_id`` is the parent Worker's nonce — the only owner whose
+    DEVICE_MALLOC/VMM_WINDOW backings this chip may materialize.
     """
     prepared = prepared if prepared is not None else set()
     worker_chip_region_store = _HostWorkerChipRegionStore()
-    import_registry = ImportRegistry()  # lazy per-endpoint import cache: canonical identity -> local base
+    import_registry = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=owner_instance_id))
     global_domain_store = _L2GlobalDomainStore()
 
     def handle_task(task_buf) -> tuple[int, str]:
@@ -2928,6 +2934,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
     identity_refs: dict[bytes, int],
+    owner_instance_id: bytes,
     log_level: int = 25,
     platform: str = "",
     runtime: str = "",
@@ -3005,6 +3012,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
             registry,
             identity_table,
             identity_refs,
+            owner_instance_id,
             chip_platform=platform,
             chip_runtime=runtime,
             prepared=prepared,
@@ -4250,9 +4258,12 @@ class Worker:
         # since the nonce is opaque, `owner_worker_path_id` is diagnostic by contract, and
         # `address_space` does not say which card.
         #
-        # Both identities therefore share this mint point. Moving it — to after fork/adoption, as
-        # owner-authority work requires — changes endpoint identity as well as buffer identity, so
-        # the two must move in one change.
+        # Both identities share this mint point. init() re-mints it (see the
+        # `_lifecycle = _Lifecycle.INITIALIZING` assignment) rather than trusting the value from
+        # here: for a next-level child, init() only ever runs inside the process that forked to
+        # host it, so that later mint is the one that names the real incarnation and is never older
+        # than its fork. The value assigned here exists only so a Worker that never reaches init()
+        # (e.g. a test double that pokes `_lifecycle` directly) still has a well-formed nonce.
         self._owner_instance_id: bytes = mint_owner_instance_id()
         self._buffer_id_counter: int = 1
         self._buffers: dict[int, Buffer] = {}
@@ -6783,6 +6794,11 @@ class Worker:
             if _startup_deadline is None:
                 self._assign_shm_namespace()
             self._lifecycle = _Lifecycle.INITIALIZING
+            # Generated after this Worker's own fork: a next-level child's init() runs only inside
+            # the process that forked to host it (see _start_hierarchical), so this nonce is never
+            # older than the incarnation it names. Buffer and endpoint identity share this mint
+            # point (see the Owner-side Buffer state comment in __init__).
+            self._owner_instance_id: bytes = mint_owner_instance_id()
             if self.level >= 3:
                 self._is_startup_root = _startup_deadline is None
                 own_deadline = time.monotonic() + self._startup_timeout_s
@@ -7088,6 +7104,7 @@ class Worker:
                                 callable_kind="CHIP_CALLABLE",
                                 target_namespace="LOCAL_CHIP",
                             ),
+                            self._owner_instance_id,
                             log_level=chip_log_level,
                             platform=str(self._config["platform"]),
                             runtime=str(self._config["runtime"]),
@@ -10077,7 +10094,10 @@ class Worker:
         """
         registry = self._chip_import_registry
         if registry is None:
-            registry = ImportRegistry()
+            # This worker runs its own chip in-process (no fork, no mailbox): it is its own device
+            # endpoint, so DEVICE backings it materializes must be its own.
+            context = ImportContext(is_host_endpoint=False, owning_chip_instance_id=self._owner_instance_id)
+            registry = ImportRegistry(context)
             self._chip_import_registry = registry
         if args is None:
             args = TaskArgs()
