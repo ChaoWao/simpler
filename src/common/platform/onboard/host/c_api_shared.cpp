@@ -853,6 +853,12 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
 
     int execution_rc = state->completion_rc;
+    // The launch transaction hands back an ActiveExecution only once it has
+    // reached the device (LaunchProgress::Partial or Complete); a NotStarted
+    // launch returns its PreparedExecution instead and leaves this null. So
+    // `launched` means "this run owns device work" — it is what separates a run
+    // that must be drained, whose rc is the run's result, and whose runtime
+    // holds a live GM/SM pointer, from one that never touched a stream.
     const bool launched = state->active_execution != nullptr;
     // Both drain_execution() and validate_runtime_impl() touch the device, so
     // the attach covers each of them. rtSetDevice is idempotent on an
