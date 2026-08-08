@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cerrno>
 #include <array>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <cstdint>
@@ -2023,6 +2024,32 @@ NB_MODULE(_task_interface, m) {
         .def_prop_ro("lane_poisoned", &ChipRun::lane_poisoned)
         .def_prop_ro("preparation_disposition", &ChipRun::preparation_disposition)
         .def(
+            "wait",
+            [](ChipRun &self, double timeout) {
+                // NaN compares false against everything, so it reaches the cast
+                // unless it is rejected by name. Converting a non-finite or
+                // out-of-range double to the clock's integral rep is undefined,
+                // and this timeout comes straight from Python.
+                if (std::isnan(timeout)) throw std::invalid_argument("ChipRun.wait timeout must not be NaN");
+                if (timeout < 0) return self.wait_until(ChipRun::Deadline::max());
+                const std::chrono::duration<double> requested(timeout);
+                const auto limit =
+                    std::chrono::duration_cast<std::chrono::duration<double>>(ChipRun::Clock::duration::max());
+                // Saturate rather than reject: a caller asking to wait longer
+                // than the clock can express means "effectively forever", and
+                // the unbounded path is the one that blocks on the device
+                // instead of polling.
+                if (requested >= limit) return self.wait_until(ChipRun::Deadline::max());
+                return self.wait_until(
+                    ChipRun::Clock::now() + std::chrono::duration_cast<ChipRun::Clock::duration>(requested)
+                );
+            },
+            nb::arg("timeout") = -1.0, nb::call_guard<nb::gil_scoped_release>(),
+            "Wait for this run's completion fence. A negative timeout waits without a deadline and blocks on the "
+            "device rather than polling, as does one past the clock's range. Rejects NaN. Returns whether the run "
+            "reached terminal; raises the run's error."
+        )
+        .def(
             "_raise_if_failed",
             [](ChipRun &self) {
                 if (!self.done()) throw std::logic_error("ChipRun is not terminal");
@@ -2133,6 +2160,15 @@ NB_MODULE(_task_interface, m) {
         .def(
             "_close_chip_run_lane", &ChipWorker::close_chip_run_lane, nb::call_guard<nb::gil_scoped_release>(),
             "Drain active native ownership, abandon unlaunched work, and close the chip run lane."
+        )
+        .def(
+            "_submit_chip_run_direct",
+            [](ChipWorker &self, int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config) {
+                return self.submit_chip_run(callable_id, args, config);
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::call_guard<nb::gil_scoped_release>(),
+            "Submit materialized task args to the chip native-run lane without a pipeline lease and return the live "
+            "run. The lane admits at capacity one: this call drains its predecessor before admitting."
         )
         .def(
             "_prepare_native_run_materialized",
