@@ -1658,8 +1658,7 @@ bool DeviceRunnerBase::try_reserve_native_run(
     const NativeRunReservation *existing = nullptr;
     for (const NativeRunReservation &reservation : native_run_reservations_) {
         if (reservation.owner == nullptr) continue;
-        if (reservation.owner == owner || reservation.pipeline_slot == pipeline_slot ||
-            reservation.arena_bank == arena_bank) {
+        if (reservation.owner == owner || reservation.pipeline_slot == pipeline_slot) {
             return false;
         }
         ++occupied;

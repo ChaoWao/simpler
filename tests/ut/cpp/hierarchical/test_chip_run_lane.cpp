@@ -39,6 +39,8 @@ std::array<int, 2> g_launch_rc{};
 std::array<int, 2> g_poll_rc{};
 std::array<int, 2> g_wait_rc{};
 std::array<int, 2> g_finalize_rc{};
+std::array<size_t, 2> g_prepare_count{};
+std::array<bool, 2> g_reject_first_prepare{};
 size_t g_poll_count{0};
 // When nonzero, the poll stub completes the run after this many polls. Only
 // UnboundedWaitBlocksInsteadOfPolling sets it, so that a regression there fails
@@ -54,6 +56,10 @@ int prepare_run(
     EXPECT_EQ(slot_of(runtime), descriptor->pipeline_slot);
     g_complete[descriptor->pipeline_slot] = false;
     g_events.push_back("prepare" + std::to_string(descriptor->pipeline_slot));
+    ++g_prepare_count[descriptor->pipeline_slot];
+    if (g_reject_first_prepare[descriptor->pipeline_slot] && g_prepare_count[descriptor->pipeline_slot] == 1) {
+        return -3;
+    }
     return g_prepare_rc[descriptor->pipeline_slot];
 }
 
@@ -94,6 +100,8 @@ void prime_worker(ChipWorker &worker) {
     g_poll_rc = {};
     g_wait_rc = {};
     g_finalize_rc = {};
+    g_prepare_count = {};
+    g_reject_first_prepare = {};
     g_poll_count = 0;
     g_poll_completes_after = 0;
     g_events.clear();
@@ -162,6 +170,31 @@ TEST(ChipRunLaneTest, ValidationOnlySuccessorPreparesAfterPromotion) {
     EXPECT_TRUE(first.done());
     EXPECT_FALSE(second.done());
     EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "finalize0", "prepare1", "launch1"}));
+    lane.close();
+    worker.finalize();
+}
+
+TEST(ChipRunLaneTest, IncompatibleSuccessorRetriesAfterPredecessorFence) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+    g_reject_first_prepare[1] = true;
+
+    ChipRun first = submit(lane, 101, 0);
+    ChipRun second = submit(lane, 102, 1, false);
+    EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::VALIDATED_ONLY);
+    EXPECT_EQ(g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1"}));
+
+    second.activate();
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
+    EXPECT_TRUE(second.launched());
+    EXPECT_EQ(
+        g_events, (std::vector<std::string>{"prepare0", "launch0", "prepare1", "finalize0", "prepare1", "launch1"})
+    );
+
+    g_complete[1] = true;
+    EXPECT_TRUE(second.done());
     lane.close();
     worker.finalize();
 }
