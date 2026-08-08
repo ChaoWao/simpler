@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -39,6 +40,10 @@ std::array<int, 2> g_poll_rc{};
 std::array<int, 2> g_wait_rc{};
 std::array<int, 2> g_finalize_rc{};
 size_t g_poll_count{0};
+// When nonzero, the poll stub completes the run after this many polls. Only
+// UnboundedWaitBlocksInsteadOfPolling sets it, so that a regression there fails
+// on the poll count instead of looping forever.
+size_t g_poll_completes_after{0};
 std::vector<std::string> g_events;
 
 uint32_t slot_of(void *runtime) { return g_slots.at(runtime); }
@@ -62,6 +67,7 @@ int poll_run(void *, void *runtime) {
     ++g_poll_count;
     const uint32_t slot = slot_of(runtime);
     if (g_poll_rc[slot] != 0) return g_poll_rc[slot];
+    if (g_poll_completes_after != 0 && g_poll_count >= g_poll_completes_after) g_complete[slot] = true;
     return g_complete[slot] ? SIMPLER_NATIVE_RUN_POLL_COMPLETE : SIMPLER_NATIVE_RUN_POLL_NOT_READY;
 }
 
@@ -89,6 +95,7 @@ void prime_worker(ChipWorker &worker) {
     g_wait_rc = {};
     g_finalize_rc = {};
     g_poll_count = 0;
+    g_poll_completes_after = 0;
     g_events.clear();
     worker.initialized_ = true;
     worker.pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 2, {}};
@@ -282,6 +289,33 @@ TEST(ChipRunLaneTest, ExpiredWaitLeavesTheRunLive) {
     EXPECT_FALSE(run.done());
     g_complete[0] = true;
     EXPECT_TRUE(run.wait_until(ChipRunLane::Deadline::max()));
+    lane.close();
+    worker.finalize();
+}
+
+// An unbounded wait has no deadline to end its loop, so it must reach the
+// device's blocking wait rather than re-polling until the run completes. The
+// poll bound is what makes that observable: a re-polling implementation calls
+// poll_run without limit, and no assertion on the run's result can see it.
+TEST(ChipRunLaneTest, UnboundedWaitBlocksInsteadOfPolling) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+    ChipRun run = submit(lane, 101, 0);
+
+    // Nothing completes this run except wait_run, so a re-polling implementation
+    // would loop forever. The escape hatch keeps that a fast failure with a
+    // readable message rather than a wedged suite: past the bound the stub
+    // completes the run itself, and the assertions below report the poll count.
+    ASSERT_FALSE(g_complete[0]);
+    g_poll_count = 0;
+    g_poll_completes_after = 64;
+    EXPECT_TRUE(run.wait_until(ChipRunLane::Deadline::max()));
+    g_poll_completes_after = 0;
+
+    EXPECT_NE(std::find(g_events.begin(), g_events.end(), "wait0"), g_events.end())
+        << "unbounded wait never reached the device's blocking wait";
+    EXPECT_LE(g_poll_count, 1u) << "unbounded wait polled " << g_poll_count << " times instead of blocking";
     lane.close();
     worker.finalize();
 }

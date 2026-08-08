@@ -268,22 +268,6 @@ bool ChipRun::wait_until(Deadline deadline) {
     }
 }
 
-bool ChipRun::wait_until_launched(Deadline deadline) {
-    if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
-    while (true) {
-        {
-            std::lock_guard<std::mutex> lk(lane_->mu);
-            if (run_->crossed_launch_fence) return true;
-            if (run_->phase == ChipRunState::Phase::TERMINAL) {
-                ChipRunLaneState::rethrow_run_error(run_);
-                return false;
-            }
-            (void)lane_->progress(run_);
-        }
-        if (Clock::now() >= deadline) return false;
-    }
-}
-
 void ChipRun::activate() {
     if (lane_ == nullptr || run_ == nullptr) throw std::runtime_error("empty ChipRun handle");
     std::lock_guard<std::mutex> lk(lane_->mu);
