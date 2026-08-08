@@ -730,7 +730,25 @@ int simpler_prepare_run(
                 );
             }
             if (compatibility_rc <= 0) {
-                if (compatibility_rc == 0) compatibility_rc = PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE;
+                // A miss is normal — the successor keeps its lease and prepares
+                // after the predecessor's fence — so it is reported at INFO and
+                // kept distinct from a probe that failed to answer at all.
+                // Without this the two are indistinguishable from outside: a
+                // pipeline that silently never overlaps looks the same whether
+                // the runtime_env disagrees or the feature is broken.
+                if (compatibility_rc == 0) {
+                    LOG_INFO(
+                        "simpler_prepare_run: shared-arena layout differs from the active run; preparing at depth one "
+                        "after its fence (%s)",
+                        state->trace_attrs
+                    );
+                    compatibility_rc = PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE;
+                } else {
+                    LOG_ERROR(
+                        "simpler_prepare_run: prepared-run compatibility probe failed: %d (%s)", compatibility_rc,
+                        state->trace_attrs
+                    );
+                }
                 return cleanup_failed_prepare(state, compatibility_rc, true);
             }
         }
