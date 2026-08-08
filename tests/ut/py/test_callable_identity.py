@@ -681,6 +681,44 @@ def test_remote_session_manifest_uses_endpoint_host_as_default_bind():
         worker.close()
 
 
+def test_remote_manifest_carries_pre_registered_inner_chip_callable():
+    worker = Worker(level=4, num_sub_workers=0)
+    chip = ChipCallable.build(signature=[], func_name="x", binary=b"\x01", children=[])
+    try:
+        worker_id = worker.add_remote_worker(
+            RemoteWorkerSpec(
+                endpoint="127.0.0.1:19073",
+                platform="a2a3sim",
+                device_ids=(0,),
+            )
+        )
+        handle = worker.register(chip)
+        manifest = worker._build_remote_manifest(
+            spec=worker._remote_worker_specs[0],
+            worker_id=worker_id,
+            session_id=1,
+            startup_remaining_s=30.0,
+        )
+
+        assert len(manifest["inner_l3_worker"]) == 1
+        entry = manifest["inner_l3_worker"][0]
+        assert entry["hashid"] == handle.digest.hex()
+        command = encode_register_callable_command(
+            RemoteRegistryTarget.INNER_L3_WORKER,
+            CallableKind.CHIP_CALLABLE,
+            handle.digest,
+            1,
+            bytes.fromhex(entry["payload_hex"]),
+        )
+        digest, kind, registry, target = _prepare_register_callable(command, manifest)
+        assert digest == handle.digest
+        assert kind is CallableKind.CHIP_CALLABLE
+        assert registry is RemoteRegistryTarget.INNER_L3_WORKER
+        assert isinstance(target, ChipCallable)
+    finally:
+        worker.close()
+
+
 def test_remote_session_manifest_requires_wildcard_bind_opt_in():
     worker = Worker(level=4, num_sub_workers=0)
     try:
@@ -1579,7 +1617,12 @@ def test_remote_sim_imported_buffer_runs_on_peer_worker():
         owner_daemon.await_ready()
         peer_daemon.await_ready()
         owner_worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{owner_port}", platform="a2a3sim", transport="host_tcp")
+            RemoteWorkerSpec(
+                endpoint=f"127.0.0.1:{owner_port}",
+                platform="a2a3sim",
+                transport="host_tcp",
+                device_ids=(0,),
+            )
         )
         peer_worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{peer_port}", platform="a2a3sim", transport="host_tcp")

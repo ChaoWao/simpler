@@ -35,6 +35,8 @@ workers/
     child_memory/           # orch.malloc + child_memory=True, weight reuse across tasks
   l4/                       # Multi-machine examples (one L3 here, one over TCP)
     vector_add_mixed_l3/    # Worker(level=4) + add_remote_worker, golden checked on both sides
+    global_tload_mixed_l3/  # Global CommDomain build + cross-machine peer TLOAD on both ranks
+    compute_then_tload_mixed_l3/  # compute round on both L2s, then peer TLOAD through the same domain
 ```
 
 Why no `tensormap_and_ringbuffer/` layer? Because every example here hard-codes
