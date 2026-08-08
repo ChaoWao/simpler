@@ -442,9 +442,11 @@ class ImportedBuffer:
 @dataclass
 class MappedArg:
     """A Python compute (sub-worker) task arg: a ``Tensor`` materialized into this process, exposing a
-    writable ``buffer`` at the view origin plus the view geometry. The callable computes with e.g.
+    ``buffer`` at the view origin plus the view geometry. The callable computes with e.g.
     ``torch.frombuffer(arg.buffer, dtype=<from arg.dtype>, count=prod(arg.shapes))`` — reads/writes
-    land in the shared backing the owner sees.
+    land in the shared backing the owner sees, except when the descriptor's ``access`` is
+    ``AccessMode.READ``, where ``buffer`` is a read-only view (a ``FORK_COW`` backing's writes are
+    invisible to the owner and are the reason ``access`` is forced to ``READ`` for it).
     """
 
     imported: ImportedBuffer
@@ -455,7 +457,8 @@ class MappedArg:
 
     @property
     def buffer(self) -> memoryview:
-        """A memoryview over the mapped backing at this view's origin (``byte_offset``)."""
+        """A memoryview over the mapped backing at this view's origin (``byte_offset``); read-only
+        when the descriptor's ``access`` is ``AccessMode.READ``."""
         ib = self.imported
         if ib.shm is not None:
             base = ib.shm.buf
@@ -464,7 +467,10 @@ class MappedArg:
             # FORK_SHM / FORK_COW: no shm object — the base is a host VA inherited across the
             # fork, so wrap that range directly.
             base = memoryview((ctypes.c_char * ib.nbytes).from_address(ib.base))
-        return base[self.byte_offset :]
+        view = base[self.byte_offset :]
+        if ib.descriptor is not None and ib.descriptor.access == AccessMode.READ:
+            return view.toreadonly()
+        return view
 
 
 class MappedArgs(Sequence):
@@ -617,23 +623,25 @@ class ImportRegistry:
         self._by_identity[key] = imported
         return imported
 
-    def materialization_map(self) -> dict[CanonicalIdentity, tuple[int, int]]:
-        """Snapshot for ``materialize_tensor_blob`` / ``materialize_task_args``:
-        identity -> (local base, address_space)."""
-        return {key: (ib.base, int(ib.address_space)) for key, ib in self._by_identity.items()}
-
     def materialize_blob(self, blob_ptr: int, capacity: int) -> dict[CanonicalIdentity, tuple[int, int]]:
-        """Materialize every embedded descriptor in a task-args blob and return the resolved map."""
+        """Materialize every embedded descriptor in a task-args blob and return the resolved map:
+        identity -> (local base, address_space), scoped to this call's own tensors."""
         args = read_args_from_blob(blob_ptr, capacity)
+        resolved: dict[CanonicalIdentity, tuple[int, int]] = {}
         for i in range(args.tensor_count()):
-            self.materialize(args.tensor(i).buffer)
-        return self.materialization_map()
+            desc = args.tensor(i).buffer
+            imported = self.materialize(desc)
+            resolved[desc.identity] = (imported.base, int(imported.address_space))
+        return resolved
 
     def materialize_args(self, args) -> dict[CanonicalIdentity, tuple[int, int]]:
         """The same, for a ``TaskArgs`` already held in this process (the L2-leaf path)."""
+        resolved: dict[CanonicalIdentity, tuple[int, int]] = {}
         for i in range(args.tensor_count()):
-            self.materialize(args.tensor(i).buffer)
-        return self.materialization_map()
+            desc = args.tensor(i).buffer
+            imported = self.materialize(desc)
+            resolved[desc.identity] = (imported.base, int(imported.address_space))
+        return resolved
 
     def mapped_args_from_blob(self, blob_ptr: int, capacity: int) -> MappedArgs:
         """Materialize a task-args blob into a Python compute callable's args: every tensor becomes a
@@ -662,13 +670,6 @@ class ImportRegistry:
         if imported is None:
             raise KeyError(f"ImportRegistry: no buffer registered for {identity}")
         return imported
-
-    def unregister(self, identity: CanonicalIdentity) -> None:
-        """Drop one import and close its mapping. The owner still holds the backing; only this
-        endpoint's view of it goes away. A no-op for an identity that was never materialized."""
-        imported = self._by_identity.pop(identity, None)
-        if imported is not None and imported.shm is not None:
-            imported.shm.close()
 
     def close(self) -> None:
         """Close every mapping this endpoint made. Consumer-side only — unlinking belongs to the

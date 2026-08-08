@@ -16,6 +16,8 @@ Imports come from `simpler.buffer` because that is where a caller reaches them, 
 registry and the Buffer constructors that are genuinely defined there.
 """
 
+import ctypes
+
 import pytest
 from _task_interface import OWNER_INSTANCE_ID_BYTES, DataType
 from simpler.buffer import (
@@ -26,6 +28,7 @@ from simpler.buffer import (
     CanonicalIdentity,
     ImportContext,
     ImportRegistry,
+    MappedArg,
     Tensor,
     create_host_shared_buffer,
     intern_worker_path,
@@ -201,6 +204,30 @@ def test_device_malloc_wrap_materialize():
     assert imp.base == 0xDEAD0000
     assert imp.address_space == AddressSpace.DEVICE
     assert imp.shm is None
+
+
+def test_materialize_args_scopes_the_returned_map_to_this_calls_tensors():
+    # materialize_args must not hand back an endpoint's entire materialize-once history — only the
+    # identities the tensors in THIS call touched. A dispatch that reuses a registry across many
+    # tasks (the real chip/L2-leaf usage) would otherwise pay O(every identity ever seen) per call.
+    import simpler.task_interface as ti  # noqa: PLC0415
+
+    oid = mint_owner_instance_id()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
+    h1 = wrap_device_malloc(0xDEAD0000, 4096, oid, buffer_id=1)
+    h2 = wrap_device_malloc(0xBEEF0000, 4096, oid, buffer_id=2)
+
+    args1 = ti.TaskArgs()
+    args1.add_tensor(h1.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+    resolved1 = reg.materialize_args(args1)
+    assert set(resolved1) == {h1.identity}
+
+    args2 = ti.TaskArgs()
+    args2.add_tensor(h2.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+    resolved2 = reg.materialize_args(args2)
+    # h1 is still live in the registry's own history (map-once), but this call's args never
+    # referenced it, so it must not appear in this call's returned map.
+    assert set(resolved2) == {h2.identity}
 
 
 def test_materialize_remote_sidecar_rejected():
@@ -429,3 +456,23 @@ def test_fork_backend_is_stated_not_inferred_from_access():
     )
     with pytest.raises(ValueError, match="FORK_COW"):
         bad.to_descriptor()
+
+
+def test_mapped_arg_buffer_is_read_only_for_a_read_access_descriptor():
+    # FORK_COW's whole contract is that a write is invisible to the owner (copy-on-write splits the
+    # page privately), so `MappedArg.buffer` must not hand back a writable view for it. `.cast("B")`
+    # is what makes the write attempt itself meaningful: the raw `<c` format memoryview this property
+    # returns for a ctypes-backed mapping does not support slice assignment at all (readonly or not),
+    # so asserting through the native format would prove nothing about the readonly flag specifically.
+    data = bytearray(16)
+    addr = ctypes.addressof((ctypes.c_char * 16).from_buffer(data))
+    oid = mint_owner_instance_id()
+    buf = wrap_fork_inherited(addr, 16, oid, buffer_id=1)  # default: access=READ, backend=FORK_COW
+    reg = ImportRegistry()
+    imported = reg.materialize(buf.to_descriptor())
+    arg = MappedArg(imported, byte_offset=0, shapes=(16,), strides=(1,), dtype=DataType.UINT8)
+
+    view = arg.buffer
+    assert view.readonly
+    with pytest.raises(TypeError):
+        view.cast("B")[0:4] = b"\x01\x02\x03\x04"
