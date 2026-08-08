@@ -15,7 +15,7 @@ Args layout (15 tensors): [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O]
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 MATMUL_SIZE = 128
 TILE_ELEMS = 128 * 128
@@ -122,21 +122,21 @@ class TestMixedExample(SceneTestCase):
             return torch.zeros(num_iters * TILE_ELEMS, dtype=torch.float32)
 
         return TaskArgsBuilder(
-            Tensor("A", A.flatten()),
-            Tensor("B", B.flatten()),
-            Tensor("C", z()),
-            Tensor("D", D_t),
-            Tensor("E", E),
-            Tensor("F", z()),
-            Tensor("G", G),
-            Tensor("H", H),
-            Tensor("I", z()),
-            Tensor("J", z()),
-            Tensor("K", z()),
-            Tensor("L", z()),
-            Tensor("M", z()),
-            Tensor("N", z()),
-            Tensor("O", z()),
+            TensorArg("A", A.flatten()),
+            TensorArg("B", B.flatten()),
+            TensorArg("C", z()),
+            TensorArg("D", D_t),
+            TensorArg("E", E),
+            TensorArg("F", z()),
+            TensorArg("G", G),
+            TensorArg("H", H),
+            TensorArg("I", z()),
+            TensorArg("J", z()),
+            TensorArg("K", z()),
+            TensorArg("L", z()),
+            TensorArg("M", z()),
+            TensorArg("N", z()),
+            TensorArg("O", z()),
         )
 
     def compute_golden(self, args, params):

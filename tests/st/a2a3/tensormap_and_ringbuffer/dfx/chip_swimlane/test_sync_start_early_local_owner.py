@@ -31,7 +31,7 @@ from pathlib import Path
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.tools.swimlane_converter import read_perf_data
 
 FLOATS_PER_CACHE_LINE = 16
@@ -109,7 +109,7 @@ class TestSyncStartEarlyLocalOwner(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("output", torch.zeros(OUTPUT_CACHE_LINES * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            TensorArg("output", torch.zeros(OUTPUT_CACHE_LINES * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
             Scalar("mode", int(params["mode"])),
             Scalar("consumer_blocks", int(params["consumer_blocks"])),
         )

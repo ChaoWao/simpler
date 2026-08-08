@@ -26,7 +26,7 @@ import time
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 
 KERNELS_BASE = "../../../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
@@ -94,9 +94,9 @@ class TestArgsDump(SceneTestCase):
     def generate_args(self, params):
         SIZE = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
-            Tensor("f", torch.zeros(SIZE, dtype=torch.float32)),
+            TensorArg("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(SIZE, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):
@@ -179,7 +179,7 @@ class TestArgsDump(SceneTestCase):
             # 0 + 2, not arg 1 (e).
             t02 = sorted(t["arg_index"] for t in tensor_entries if t["task_id"] == "0x0000000100000002")
             assert t02 == [0, 2]
-            # Tensor-only task granularity: dump() captured all three tensor args.
+            # TensorArg-only task granularity: dump() captured all three tensor args.
             t03 = sorted(t["arg_index"] for t in tensor_entries if t["task_id"] == "0x0000000100000003")
             assert t03 == [0, 1, 2]
             scalar_by_task = {

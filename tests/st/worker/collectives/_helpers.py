@@ -20,7 +20,7 @@ import ctypes
 import torch
 from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
 
-from simpler_setup import Tensor as STensor
+from simpler_setup import TensorArg as STensor
 from simpler_setup.scene_test import TaskArgsBuilder, _rehosted_ref_for
 
 _F32 = DataType.FLOAT32

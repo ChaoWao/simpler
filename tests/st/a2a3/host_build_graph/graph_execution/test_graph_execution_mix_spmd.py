@@ -12,7 +12,7 @@
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
@@ -64,9 +64,9 @@ class TestGraphExecutionMixSpmdHostBuildGraph(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("blocks_1", torch.zeros(TOTAL_FLOATS, dtype=torch.float32)),
-            Tensor("blocks_2", torch.zeros(TOTAL_FLOATS, dtype=torch.float32)),
-            Tensor("blocks_3", torch.zeros(TOTAL_FLOATS, dtype=torch.float32)),
+            TensorArg("blocks_1", torch.zeros(TOTAL_FLOATS, dtype=torch.float32)),
+            TensorArg("blocks_2", torch.zeros(TOTAL_FLOATS, dtype=torch.float32)),
+            TensorArg("blocks_3", torch.zeros(TOTAL_FLOATS, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

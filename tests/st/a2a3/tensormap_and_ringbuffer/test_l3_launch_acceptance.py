@@ -27,7 +27,7 @@ from simpler.worker import (
     _mailbox_load_i32,
 )
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_l3_task_args
 
 KERNELS_BASE = "../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
@@ -91,9 +91,9 @@ class TestL3LaunchAcceptance(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("a", torch.full((_SIZE,), 2.0, dtype=torch.float32).share_memory_()),
-            Tensor("b", torch.full((_SIZE,), 3.0, dtype=torch.float32).share_memory_()),
-            Tensor("f", torch.zeros(_SIZE, dtype=torch.float32).share_memory_()),
+            TensorArg("a", torch.full((_SIZE,), 2.0, dtype=torch.float32).share_memory_()),
+            TensorArg("b", torch.full((_SIZE,), 3.0, dtype=torch.float32).share_memory_()),
+            TensorArg("f", torch.zeros(_SIZE, dtype=torch.float32).share_memory_()),
         )
 
     def compute_golden(self, args, params):

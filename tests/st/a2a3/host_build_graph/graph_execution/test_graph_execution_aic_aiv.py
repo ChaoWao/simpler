@@ -12,7 +12,7 @@
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -64,12 +64,12 @@ class TestGraphExecutionAicAivHostBuildGraph(SceneTestCase):
         input_value = torch.exp(torch.tensor(4.0)).item()
         weight_value = 1.0 / (2 * columns)
         return TaskArgsBuilder(
-            Tensor("input", torch.full((size,), input_value, dtype=torch.float16)),
-            Tensor("weight_1", torch.full((size,), weight_value, dtype=torch.float16)),
-            Tensor("weight_2", torch.full((size,), weight_value, dtype=torch.float16)),
-            Tensor("output_1", torch.zeros(size, dtype=torch.float32)),
-            Tensor("output_2", torch.zeros(size, dtype=torch.float32)),
-            Tensor("output_3", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("input", torch.full((size,), input_value, dtype=torch.float16)),
+            TensorArg("weight_1", torch.full((size,), weight_value, dtype=torch.float16)),
+            TensorArg("weight_2", torch.full((size,), weight_value, dtype=torch.float16)),
+            TensorArg("output_1", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("output_2", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("output_3", torch.zeros(size, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

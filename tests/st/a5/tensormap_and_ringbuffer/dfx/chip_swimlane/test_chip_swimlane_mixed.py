@@ -31,7 +31,7 @@ import time
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 
 from ._swimlane_validate import validate_perf_artifact
@@ -100,14 +100,14 @@ class TestChipSwimlaneMixed(SceneTestCase):
         E = torch.randn(_TILE_ELEMS, dtype=torch.float32) * 0.01
 
         return TaskArgsBuilder(
-            Tensor("A", A.flatten()),
-            Tensor("B", B.flatten()),
-            Tensor("D", D_t),
-            Tensor("E", E),
-            Tensor("ws_aic", torch.zeros(_WS_ELEMS, dtype=torch.float32)),
-            Tensor("ws_aiv", torch.zeros(_WS_ELEMS, dtype=torch.float32)),
-            Tensor("aic_out", torch.zeros(_TILE_ELEMS, dtype=torch.float32)),
-            Tensor("aiv_out", torch.zeros(_TILE_ELEMS, dtype=torch.float32)),
+            TensorArg("A", A.flatten()),
+            TensorArg("B", B.flatten()),
+            TensorArg("D", D_t),
+            TensorArg("E", E),
+            TensorArg("ws_aic", torch.zeros(_WS_ELEMS, dtype=torch.float32)),
+            TensorArg("ws_aiv", torch.zeros(_WS_ELEMS, dtype=torch.float32)),
+            TensorArg("aic_out", torch.zeros(_TILE_ELEMS, dtype=torch.float32)),
+            TensorArg("aiv_out", torch.zeros(_TILE_ELEMS, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

@@ -18,7 +18,7 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import TaskArgs, TensorArgType
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_l3_task_args, _rehosted_ref
 
 KERNELS_BASE = "../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
@@ -93,9 +93,9 @@ class TestL3Dependency(SceneTestCase):
     def generate_args(self, params):
         SIZE = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
-            Tensor("b", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
-            Tensor("f", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
+            TensorArg("a", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
+            TensorArg("b", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
+            TensorArg("f", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
         )
 
     def compute_golden(self, args, params):

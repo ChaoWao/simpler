@@ -12,7 +12,7 @@
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -95,7 +95,10 @@ class TestBenchmarkBgemm(SceneTestCase):
         C = torch.zeros(incore_loop * num_groups, tile_size, tile_size, dtype=torch.float32)
         config = torch.tensor([tile_size, grid_k, num_groups, incore_loop], dtype=torch.int64)
         return TaskArgsBuilder(
-            Tensor("A", A.flatten()), Tensor("B", B.flatten()), Tensor("C", C.flatten()), Tensor("config", config)
+            TensorArg("A", A.flatten()),
+            TensorArg("B", B.flatten()),
+            TensorArg("C", C.flatten()),
+            TensorArg("config", config),
         )
 
     def compute_golden(self, args, params):

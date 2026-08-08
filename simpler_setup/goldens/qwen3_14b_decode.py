@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import torch
 
-from simpler_setup.scene_test import TaskArgsBuilder, Tensor
+from simpler_setup.scene_test import TaskArgsBuilder, TensorArg
 
 # ── Model architecture (Qwen3-14B) ──
 NUM_HEADS = 40
@@ -172,8 +172,8 @@ def generate_inputs(
         "w_down": s0(rn([INTERMEDIATE, HIDDEN], 0.0004).to(torch.bfloat16)),
         "post_rms_weight": s0(rn([1, HIDDEN], 0.1, 1.0).float()),
     }
-    specs = [Tensor(name, tensors[name]) for name in INPUT_NAMES]
-    specs.append(Tensor("out", torch.zeros([BATCH, HIDDEN], dtype=torch.bfloat16)))
+    specs = [TensorArg(name, tensors[name]) for name in INPUT_NAMES]
+    specs.append(TensorArg("out", torch.zeros([BATCH, HIDDEN], dtype=torch.bfloat16)))
     return TaskArgsBuilder(*specs)
 
 

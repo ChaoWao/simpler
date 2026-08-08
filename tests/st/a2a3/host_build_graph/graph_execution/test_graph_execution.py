@@ -12,7 +12,7 @@
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -66,11 +66,11 @@ class TestGraphExecutionHostBuildGraph(SceneTestCase):
     def generate_args(self, params):
         shape = params["shape"]
         return TaskArgsBuilder(
-            Tensor("a", torch.full(shape, 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full(shape, 3.0, dtype=torch.float32)),
-            Tensor("output_1", torch.zeros(shape, dtype=torch.float32)),
-            Tensor("output_3", torch.zeros(shape, dtype=torch.float32)),
-            Tensor("output_5", torch.zeros(shape, dtype=torch.float32)),
+            TensorArg("a", torch.full(shape, 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full(shape, 3.0, dtype=torch.float32)),
+            TensorArg("output_1", torch.zeros(shape, dtype=torch.float32)),
+            TensorArg("output_3", torch.zeros(shape, dtype=torch.float32)),
+            TensorArg("output_5", torch.zeros(shape, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

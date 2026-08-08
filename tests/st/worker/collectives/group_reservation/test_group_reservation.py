@@ -14,7 +14,7 @@ from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CommBufferSpec, TaskArgs, TensorArgType
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, scene_test
-from simpler_setup import Tensor as STensor
+from simpler_setup import TensorArg as STensor
 from simpler_setup.scene_test import _rehosted_ref_for
 
 FIRST_GROUP = 0

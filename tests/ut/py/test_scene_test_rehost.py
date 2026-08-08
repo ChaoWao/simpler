@@ -23,7 +23,7 @@ from multiprocessing.shared_memory import SharedMemory
 import pytest
 import torch
 
-from simpler_setup.scene_test import Scalar, TaskArgsBuilder, Tensor, _RehostedTaskArgs
+from simpler_setup.scene_test import Scalar, TaskArgsBuilder, TensorArg, _RehostedTaskArgs
 
 
 class _FakeHandle:
@@ -65,8 +65,8 @@ class _FakeWorker:
 
 def test_rehost_preserves_values_and_frees_lifo():
     ta = TaskArgsBuilder(
-        Tensor("a", torch.arange(4, dtype=torch.float32)),
-        Tensor("b", torch.zeros(4, dtype=torch.float32)),
+        TensorArg("a", torch.arange(4, dtype=torch.float32)),
+        TensorArg("b", torch.zeros(4, dtype=torch.float32)),
     )
     w = _FakeWorker()
     rehosted = _RehostedTaskArgs(w, ta)
@@ -92,9 +92,9 @@ def test_rehost_partial_failure_rolls_back():
     orig_a = torch.zeros(4, dtype=torch.float32)
     orig_b = torch.ones(4, dtype=torch.float32)
     ta = TaskArgsBuilder(
-        Tensor("a", orig_a),
-        Tensor("b", orig_b),
-        Tensor("c", torch.zeros(4, dtype=torch.float32)),
+        TensorArg("a", orig_a),
+        TensorArg("b", orig_b),
+        TensorArg("c", torch.zeros(4, dtype=torch.float32)),
     )
     w = _FakeWorker(fail_on_create=2)  # third allocation fails
     with pytest.raises(RuntimeError, match="injected create_buffer failure"):
@@ -104,12 +104,12 @@ def test_rehost_partial_failure_rolls_back():
     assert len(w.freed) == 2
     assert ta.a is orig_a
     assert ta.b is orig_b
-    assert [s.value for s in ta.specs if isinstance(s, Tensor)][:2] == [orig_a, orig_b]
+    assert [s.value for s in ta.specs if isinstance(s, TensorArg)][:2] == [orig_a, orig_b]
 
 
 def test_rehost_rejects_aliased_tensors():
     base = torch.zeros(8, dtype=torch.float32)
-    ta = TaskArgsBuilder(Tensor("a", base[:4]), Tensor("b", base[2:6]))
+    ta = TaskArgsBuilder(TensorArg("a", base[:4]), TensorArg("b", base[2:6]))
     w = _FakeWorker()
     with pytest.raises(ValueError, match="alias overlapping storage"):
         _RehostedTaskArgs(w, ta)
@@ -120,7 +120,7 @@ def test_rehost_rejects_aliased_tensors():
 
 def test_rehost_skips_empty_tensor():
     empty = torch.zeros(0, dtype=torch.float32)
-    ta = TaskArgsBuilder(Tensor("a", torch.arange(4, dtype=torch.float32)), Tensor("e", empty))
+    ta = TaskArgsBuilder(TensorArg("a", torch.arange(4, dtype=torch.float32)), TensorArg("e", empty))
     w = _FakeWorker()
     rehosted = _RehostedTaskArgs(w, ta)
     try:
@@ -134,7 +134,7 @@ def test_rehost_skips_empty_tensor():
 def test_rehost_rejects_noncontiguous():
     noncontig = torch.zeros(4, 4, dtype=torch.float32)[:, ::2]
     assert not noncontig.is_contiguous()
-    ta = TaskArgsBuilder(Tensor("a", noncontig))
+    ta = TaskArgsBuilder(TensorArg("a", noncontig))
     w = _FakeWorker()
     with pytest.raises(ValueError, match="contiguous"):
         _RehostedTaskArgs(w, ta)
@@ -170,8 +170,8 @@ def _make_chip_tensor_arg(t):
 
 
 def test_char_singleton_stride_dropped_by_make_chip_tensor_arg():
-    # The wire Tensor's strides are a pure function of shape (row-major), so a
-    # size-1 dimension's stride value never survives into the Tensor. Two tensors
+    # The wire TensorArg's strides are a pure function of shape (row-major), so a
+    # size-1 dimension's stride value never survives into the TensorArg. Two tensors
     # equal in shape+values but differing ONLY in their singleton-dim stride get
     # identical consumer-visible geometry (shape / stride / start_offset); the
     # inactive-dim and padding bytes are unspecified, so this is a geometry
@@ -204,7 +204,7 @@ def test_char_singleton_stride_dropped_by_rehost():
     base = torch.arange(4, dtype=torch.float32)
     weird = base.as_strided((4, 1), (1, 7))
     assert weird.stride() == (1, 7)  # pin fixture (see note above)
-    ta = TaskArgsBuilder(Tensor("a", weird))
+    ta = TaskArgsBuilder(TensorArg("a", weird))
     w = _FakeWorker()
     rehosted = _RehostedTaskArgs(w, ta)
     try:
@@ -222,7 +222,7 @@ def test_char_nonoverlapping_shared_storage_not_rejected():
     base = torch.zeros(8, dtype=torch.float32)
     a, b = base[:4], base[4:]  # non-overlapping byte ranges, same storage
     assert a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
-    ta = TaskArgsBuilder(Tensor("a", a), Tensor("b", b))
+    ta = TaskArgsBuilder(TensorArg("a", a), TensorArg("b", b))
     w = _FakeWorker()
     rehosted = _RehostedTaskArgs(w, ta)
     try:
@@ -260,15 +260,15 @@ def test_char_make_chip_tensor_arg_carries_backing_as_addr_only():
 def test_builder_constructor_rejects_duplicate_tensor():
     with pytest.raises(ValueError, match="duplicate argument name 'a'"):
         TaskArgsBuilder(
-            Tensor("a", torch.zeros(4)),
-            Tensor("a", torch.ones(4)),
+            TensorArg("a", torch.zeros(4)),
+            TensorArg("a", torch.ones(4)),
         )
 
 
 def test_builder_constructor_rejects_tensor_scalar_name_clash():
     with pytest.raises(ValueError, match="duplicate argument name 'x'"):
         TaskArgsBuilder(
-            Tensor("x", torch.zeros(4)),
+            TensorArg("x", torch.zeros(4)),
             Scalar("x", ctypes.c_float(1.0)),
         )
 
@@ -277,16 +277,16 @@ def test_builder_rejects_name_shadowing_builder_attribute():
     # A name that resolves to a real attribute/method would shadow it, so
     # `args.specs` returns the property instead of the argument. Reject it.
     with pytest.raises(ValueError, match="conflicts with builder attributes/methods"):
-        TaskArgsBuilder(Tensor("specs", torch.zeros(4)))
+        TaskArgsBuilder(TensorArg("specs", torch.zeros(4)))
     with pytest.raises(ValueError, match="conflicts with builder attributes/methods"):
         TaskArgsBuilder(Scalar("clone", ctypes.c_int64(1)))
     # A name that is not a builder member is still accepted.
-    ta = TaskArgsBuilder(Tensor("value", torch.zeros(4)))
+    ta = TaskArgsBuilder(TensorArg("value", torch.zeros(4)))
     assert torch.equal(ta.value, torch.zeros(4))
 
 
 def test_builder_incremental_add_rejects_duplicate():
-    ta = TaskArgsBuilder(Tensor("a", torch.zeros(4)))
+    ta = TaskArgsBuilder(TensorArg("a", torch.zeros(4)))
     with pytest.raises(ValueError, match="duplicate argument name 'a'"):
         ta.add_tensor("a", torch.ones(4))
 
@@ -294,7 +294,7 @@ def test_builder_incremental_add_rejects_duplicate():
 def test_builder_duplicate_scalar_leaves_state_unchanged():
     # A rejected duplicate scalar must not flip `_has_scalar`, so a legal tensor
     # can still be added afterwards (tensor-before-scalar ordering intact).
-    ta = TaskArgsBuilder(Tensor("a", torch.zeros(4)))
+    ta = TaskArgsBuilder(TensorArg("a", torch.zeros(4)))
     ta.add_scalar("s", ctypes.c_int64(7))
     with pytest.raises(ValueError, match="duplicate argument name 's'"):
         ta.add_scalar("s", ctypes.c_int64(9))
@@ -307,7 +307,7 @@ def test_builder_duplicate_scalar_leaves_state_unchanged():
     # tensor. Fresh tensor-only builder → reject a name-clashing scalar → a
     # subsequent add_tensor must still succeed. (Catches moving the
     # `_has_scalar = True` assignment ahead of the duplicate check.)
-    tb = TaskArgsBuilder(Tensor("a", torch.zeros(4)))
+    tb = TaskArgsBuilder(TensorArg("a", torch.zeros(4)))
     orig_a = tb.a
     with pytest.raises(ValueError, match="duplicate argument name 'a'"):
         tb.add_scalar("a", ctypes.c_int64(3))
@@ -318,8 +318,8 @@ def test_builder_duplicate_scalar_leaves_state_unchanged():
 
 def test_builder_valid_args_order_named_access_and_clone():
     ta = TaskArgsBuilder(
-        Tensor("a", torch.arange(4, dtype=torch.float32)),
-        Tensor("b", torch.ones(4, dtype=torch.float32)),
+        TensorArg("a", torch.arange(4, dtype=torch.float32)),
+        TensorArg("b", torch.ones(4, dtype=torch.float32)),
         Scalar("scale", ctypes.c_float(1.5)),
     )
     assert [s.name for s in ta.specs] == ["a", "b", "scale"]

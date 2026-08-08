@@ -617,7 +617,7 @@ Create a `test_*.py` file using the `@scene_test` decorator:
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -644,8 +644,8 @@ class TestMyKernel(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("x", torch.ones(1024, dtype=torch.float32)),
-            Tensor("y", torch.zeros(1024, dtype=torch.float32)),
+            TensorArg("x", torch.ones(1024, dtype=torch.float32)),
+            TensorArg("y", torch.zeros(1024, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

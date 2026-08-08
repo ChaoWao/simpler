@@ -18,7 +18,7 @@ import ctypes
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
@@ -89,12 +89,12 @@ class TestAlternatingMatmulAdd(SceneTestCase):
         Z = torch.zeros(batch, N, add_rows, add_cols, dtype=torch.float32)
 
         return TaskArgsBuilder(
-            Tensor("A", A.flatten()),
-            Tensor("B", B.flatten()),
-            Tensor("C", C.flatten()),
-            Tensor("X", X.flatten()),
-            Tensor("Y", Y.flatten()),
-            Tensor("Z", Z.flatten()),
+            TensorArg("A", A.flatten()),
+            TensorArg("B", B.flatten()),
+            TensorArg("C", C.flatten()),
+            TensorArg("X", X.flatten()),
+            TensorArg("Y", Y.flatten()),
+            TensorArg("Z", Z.flatten()),
             Scalar("batch", ctypes.c_int64(batch)),
             Scalar("M_val", ctypes.c_int64(M)),
             Scalar("N_val", ctypes.c_int64(N)),

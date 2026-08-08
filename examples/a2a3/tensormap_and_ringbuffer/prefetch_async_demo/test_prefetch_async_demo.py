@@ -33,7 +33,7 @@ import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 N = 128
 
@@ -73,8 +73,8 @@ class TestPrefetchAsyncDemo(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("src", torch.arange(N, dtype=torch.float32) / 8.0),
-            Tensor("out", torch.full((N,), -1.0, dtype=torch.float32)),
+            TensorArg("src", torch.arange(N, dtype=torch.float32) / 8.0),
+            TensorArg("out", torch.full((N,), -1.0, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

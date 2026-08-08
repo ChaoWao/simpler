@@ -29,7 +29,7 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.worker import Worker
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _build_l2_ref_args, _compare_outputs
 
 _VECTOR_KERNELS = "../vector_example/kernels"
@@ -114,9 +114,9 @@ class TestRunStreamReuseHbg(SceneTestCase):
     def generate_args(self, params):
         size = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((size,), 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full((size,), 3.0, dtype=torch.float32)),
-            Tensor("f", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("a", torch.full((size,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((size,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(size, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):
@@ -142,7 +142,7 @@ class TestRunStreamReuseHbg(SceneTestCase):
     def _run_registered(self, worker, handle, *, subtract):
         params = self.CASES[0]["params"]
         test_args = self.generate_args(params)
-        # Worker.run takes Tensor args and materializes them in-process; the runtime.so-ABI POD is
+        # Worker.run takes TensorArg args and materializes them in-process; the runtime.so-ABI POD is
         # the direct chip API's shape, used by the lease path below.
         args, output_names = _build_l2_ref_args(test_args, self.CALLABLE["orchestration"]["signature"], worker)
         golden_args = test_args.clone()

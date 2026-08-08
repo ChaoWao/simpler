@@ -19,7 +19,7 @@ import itertools
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _build_l2_ref_args, _compare_outputs
 
 _VECTOR_KERNELS = "../../../../../examples/a5/tensormap_and_ringbuffer/vector_example/kernels"
@@ -76,9 +76,9 @@ class TestPipelineSlotsTmr(SceneTestCase):
     def generate_args(self, params):
         size = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((size,), 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full((size,), 3.0, dtype=torch.float32)),
-            Tensor("f", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("a", torch.full((size,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((size,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(size, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):
@@ -88,7 +88,7 @@ class TestPipelineSlotsTmr(SceneTestCase):
     def _run(self, worker, handle, *, slot_id=None):
         """Run normally or through a lease, then check the result.
 
-        The two entry points take different argument types: ``Worker.run`` takes ``Tensor`` args and
+        The two entry points take different argument types: ``Worker.run`` takes ``TensorArg`` args and
         materializes them in-process, while the lease is the direct chip API and takes the
         runtime.so-ABI POD.
         """
