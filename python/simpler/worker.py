@@ -9668,8 +9668,7 @@ class Worker:
         Dispatch:
           - L2: ``callable`` is a ``CallableHandle`` returned by
             ``Worker.register(chip_callable)``. Routes to the private slot
-            carried by the handle. The current L2 backend remains blocking, so
-            the returned handle is already complete.
+            carried by the handle and returns a live completion handle.
           - L3+: ``callable`` is a Python orch fn invoked with the
             ``Orchestrator`` handle. Graph construction completes synchronously;
             device completion is reported by the returned handle.
@@ -9907,11 +9906,10 @@ class Worker:
     def _submit_l2_locked(self, callable_id: int, args, cfg: CallConfig) -> RunHandle:
         """Admit one direct-chip run and return a handle to it while it runs.
 
-        The lane is the sole admission authority and takes runs at capacity one:
-        submitting drains the predecessor first, so a second submit blocks here
-        rather than overlapping device work. What the handle adds is that the
-        *first* submit no longer waits — the caller owns the completion fence
-        through :meth:`RunHandle.wait`.
+        The lane is the sole admission authority. Its runtime contract permits
+        one active plus one prepared compatible run; otherwise submission drains
+        the predecessor and retains depth-one behavior. The caller owns the
+        completion fence through :meth:`RunHandle.wait`.
         """
         assert self._chip_worker is not None
         chip_args = self._materialize_l2_args(args)
