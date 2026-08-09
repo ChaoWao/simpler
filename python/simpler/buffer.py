@@ -143,9 +143,12 @@ class Buffer:
     # backing lives on (0 for a host backing or an L2 own-device malloc). The device-pointer provenance
     # guard and free/copy key on (owner_worker_id, base).
     owner_worker_id: int = 0
+    closed: bool = False
 
     def to_descriptor(self) -> BufferDescriptor:
         """The wire descriptor for this backing — what a consumer needs to resolve it."""
+        if self.closed:
+            raise ValueError(f"Buffer: cannot derive a descriptor from a released buffer ({self.identity})")
         return BufferDescriptor(
             identity=self.identity,
             address_space=self.address_space,
@@ -182,11 +185,19 @@ class Buffer:
 
     def close(self) -> None:
         """Release the backing. The owner unlinks it, so a later consumer map fails rather than
-        resolving a name whose bytes are gone. Idempotent."""
-        if self.shm is not None:
-            self.shm.close()
-            self.shm.unlink()
-            self.shm = None
+        resolving a name whose bytes are gone. Idempotent; a released Buffer's ``tensor()``/
+        ``to_descriptor()`` are refused rather than building a view over memory that may already be
+        gone."""
+        if self.closed:
+            return
+        self.closed = True
+        shm = self.shm
+        self.shm = None
+        if shm is not None:
+            try:
+                shm.close()
+            finally:
+                shm.unlink()
 
 
 def create_host_shared_buffer(

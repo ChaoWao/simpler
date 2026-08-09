@@ -17,6 +17,7 @@ registry and the Buffer constructors that are genuinely defined there.
 """
 
 import ctypes
+from unittest.mock import patch
 
 import pytest
 from _task_interface import OWNER_INSTANCE_ID_BYTES, DataType
@@ -145,6 +146,35 @@ def test_create_export_import_resolve_zero_copy():
     finally:
         reg.close()
         buffer.close()
+
+
+def test_close_unlinks_even_when_shm_close_raises():
+    # A close() failure must not skip owner unlink: the shm's named backing is the actual leak risk,
+    # not the local close() call, so unlink must run regardless of whether close() itself succeeded.
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=mint_owner_instance_id(), buffer_id=1)
+    shm = buffer.shm
+    assert shm is not None
+    with (
+        patch.object(shm, "close", side_effect=OSError("injected close failure")),
+        patch.object(shm, "unlink") as unlink,
+    ):
+        with pytest.raises(OSError, match="injected close failure"):
+            buffer.close()
+        unlink.assert_called_once()
+    assert buffer.closed
+    shm.unlink()  # the mock above swallowed the real unlink; do it for real so the test leaves no /dev/shm litter
+
+
+def test_closed_buffer_refuses_to_derive_a_tensor():
+    # A released Buffer's identity may already be unlinked, so deriving a Tensor from it would embed
+    # a descriptor for memory that no longer exists.
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=mint_owner_instance_id(), buffer_id=1)
+    buffer.close()
+    assert buffer.closed
+    with pytest.raises(ValueError, match="released buffer"):
+        buffer.to_descriptor()
+    with pytest.raises(ValueError, match="released buffer"):
+        buffer.tensor(shapes=(16,), dtype=DataType.FLOAT32)
 
 
 def test_resolve_unregistered_raises():
