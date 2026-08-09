@@ -3493,6 +3493,10 @@ class _RunResources:
     pending_release_global_domains: list[GlobalCommDomainHandle] = field(default_factory=list)
     worker_chip_regions: list[Any] = field(default_factory=list)
     worker_chip_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
+    # Every Buffer identity a NEXT_LEVEL dispatch (submit_next_level / _group) sent as a Tensor
+    # arg during this run. release_buffer() checks this set across every not-yet-settled run before
+    # releasing, so a Buffer never goes away while a dispatched task still names it.
+    touched_identities: set[CanonicalIdentity] = field(default_factory=set)
     # True once the owning run's fence has claimed the domains above. A release
     # that arrives after this has no fence left to run behind and frees inline.
     # Read and written only under `domain_lock`.
@@ -9228,6 +9232,20 @@ class Worker:
                 out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
 
+    def _record_touched_identities(self, args: Any) -> None:
+        """Add every tensor arg's identity in ``args`` to the current run's touched set.
+
+        A no-op when no run is being built (``_building_run_resources is None``) — tracking is
+        opportunistic, only meaningful inside ``submit_next_level``/``submit_next_level_group``'s
+        run context, per the ``current_resources = self._building_run_resources; if ... is not
+        None`` idiom used elsewhere for the same "attach to the open run, if any" shape.
+        """
+        resources = self._building_run_resources
+        if resources is None:
+            return
+        for i in range(args.tensor_count()):
+            resources.touched_identities.add(args.tensor(i).buffer.identity)
+
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
         """Validate every child_memory pointer against its exact target worker."""
         if not child_ptrs:
@@ -9623,13 +9641,26 @@ class Worker:
             self._chip_import_registry.close()
             self._chip_import_registry = None
 
-    def _release_buffer(self, buffer: Buffer) -> None:
+    def release_buffer(self, buffer: Buffer) -> None:
         """Close + unlink one owner Buffer and drop its registry entry.
 
-        The entry survives a failed close, so ``_release_all_buffers`` still reports the leak at
-        close() rather than losing it here. Idempotent for a buffer already released. The slot is
-        dropped only when it still holds *this* buffer: a buffer_id minted elsewhere can collide
-        with a registry key, and evicting the live entry it names would strand that backing."""
+        Rejects outright if any currently in-flight run (not yet past ``_cleanup_published``) sent
+        this identity as a NEXT_LEVEL Tensor arg — a Buffer never goes away while a dispatched task
+        still names it. Takes ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles``
+        before its orchestration callback (where ``touched_identities`` gets populated) has run, and
+        that callback is what ``_submit_mu`` already serializes graph construction against, so taking
+        it here means the check only ever runs between callbacks, never mid-callback with a
+        not-yet-complete touched set. Not checked once ``buffer`` is already closed, matching
+        ``Buffer.close()``'s own idempotency. The entry survives a failed close, so
+        ``_release_all_buffers`` still reports the leak at close() rather than losing it here. The
+        slot is dropped only when it still holds *this* buffer: a buffer_id minted elsewhere can
+        collide with a registry key, and evicting the live entry it names would strand that
+        backing."""
+        if not buffer.closed:
+            with self._submit_mu, self._hierarchical_start_cv:
+                for handle in self._accepted_run_handles:
+                    if not handle._cleanup_published and buffer.identity in handle._resources.touched_identities:
+                        raise RuntimeError(f"release_buffer: {buffer.identity} is still referenced by an in-flight run")
         buffer.close()
         with self._registry_lock:
             buffer_id = int(buffer.identity.buffer_id)

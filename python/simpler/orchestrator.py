@@ -351,6 +351,7 @@ class Orchestrator:
                 worker._child_prov_check_dispatch(child_ptrs, cpp_worker_id, api="submit_next_level")
             if worker is not None:
                 worker._adopt_remote_sidecar_refs((remote_sidecar,))
+                worker._record_touched_identities(c_args)
             _admit_task_submission(self._worker)
             self._o.submit_next_level(
                 digest, kind, target_namespace, c_args, cfg, cpp_worker_id, final_worker_ids, remote_sidecar
@@ -440,6 +441,9 @@ class Orchestrator:
                 worker._child_prov_check_dispatch(child_ptrs, target_worker_id, api="submit_next_level_group")
             if worker is not None and remote_sidecars is not None:
                 worker._adopt_remote_sidecar_refs(remote_sidecars)
+            if worker is not None:
+                for c_args in c_args_list:
+                    worker._record_touched_identities(c_args)
             _admit_task_submission(self._worker)
             self._o.submit_next_level_group(
                 digest, kind, target_namespace, c_args_list, cfg, worker_ids, worker_id_sets, remote_sidecars
