@@ -27,7 +27,7 @@ Task IDs are widened from 32-bit to 64-bit to carry the ring identity:
 task_id.raw = (ring_id << 32) | local_id
 ```
 
-`PTO2TaskId` exposes direct accessors in `pto_runtime2_types.h`:
+`PTO2TaskId` exposes direct accessors in `src/common/task_interface/pto_task_id.h`:
 
 | API | Purpose |
 | --- | ------- |

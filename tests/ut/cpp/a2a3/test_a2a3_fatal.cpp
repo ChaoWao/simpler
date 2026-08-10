@@ -50,6 +50,9 @@ struct FakeRuntime {
 };
 
 static_assert(offsetof(FakeRuntime, ops) == 0);  // Guard: reinterpret_cast below assumes ops is first member.
+static_assert(
+    offsetof(FakeRuntime, pending_scope_mode) == offsetof(PTO2Runtime, pending_scope_mode)
+);  // ...and pending_scope_mode follows ops, matching the PTO2Runtime prefix the inline scope wrappers pun through.
 
 FakeRuntime *as_fake(PTO2Runtime *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
 
@@ -189,6 +192,8 @@ TEST(A2A3Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
     FakeRuntime runtime{};
     runtime.ops = &kFakeOps;
     RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
+
+    runtime.pending_scope_mode = PTO2ScopeMode::MANUAL;
 
     {
         PTO2_SCOPE_GUARD();
