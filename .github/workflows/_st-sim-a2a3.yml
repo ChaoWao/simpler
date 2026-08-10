@@ -97,7 +97,7 @@ jobs:
           if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
             source .venv/bin/activate
           fi
-          python -m pytest examples tests/st -m "not pod" --platform a2a3sim --device 0-15 -v \
+          python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
       - name: dep_gen smoke (a2a3)
