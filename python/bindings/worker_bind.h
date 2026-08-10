@@ -839,6 +839,33 @@ inline void bind_worker(nb::module_ &m) {
     m.attr("MAILBOX_FRAME_SIZE") = static_cast<int>(MAILBOX_FRAME_SIZE);
     m.attr("MAILBOX_OFF_ERROR_MSG") = static_cast<int>(MAILBOX_OFF_ERROR_MSG);
     m.attr("MAILBOX_ERROR_MSG_SIZE") = static_cast<int>(MAILBOX_ERROR_MSG_SIZE);
+    // The MailboxState values as the C++ side defines them, keyed by
+    // enumerator name. They are a cross-process wire contract: the word at
+    // MAILBOX_OFF_STATE is written by a parent and read by its forked child,
+    // so a Python constant that disagrees with this table is a protocol
+    // mismatch between two live processes, not a compile error. simpler.worker
+    // declares its own constants for use in hot paths and checks them against
+    // this table at import.
+    nb::dict mailbox_states;
+    mailbox_states["IDLE"] = static_cast<int32_t>(MailboxState::IDLE);
+    mailbox_states["TASK_READY"] = static_cast<int32_t>(MailboxState::TASK_READY);
+    mailbox_states["TASK_DONE"] = static_cast<int32_t>(MailboxState::TASK_DONE);
+    mailbox_states["SHUTDOWN"] = static_cast<int32_t>(MailboxState::SHUTDOWN);
+    mailbox_states["CONTROL_REQUEST"] = static_cast<int32_t>(MailboxState::CONTROL_REQUEST);
+    mailbox_states["CONTROL_DONE"] = static_cast<int32_t>(MailboxState::CONTROL_DONE);
+    mailbox_states["INIT_READY"] = static_cast<int32_t>(MailboxState::INIT_READY);
+    mailbox_states["INIT_FAILED"] = static_cast<int32_t>(MailboxState::INIT_FAILED);
+    mailbox_states["FRAME_STAGED"] = static_cast<int32_t>(MailboxState::FRAME_STAGED);
+    mailbox_states["TASK_LAUNCHED"] = static_cast<int32_t>(MailboxState::TASK_LAUNCHED);
+    mailbox_states["TASK_FAILED"] = static_cast<int32_t>(MailboxState::TASK_FAILED);
+    mailbox_states["ACTIVATE"] = static_cast<int32_t>(MailboxState::ACTIVATE);
+    mailbox_states["PREPARE_READY"] = static_cast<int32_t>(MailboxState::PREPARE_READY);
+    m.attr("MAILBOX_STATE_VALUES") = mailbox_states;
+    nb::dict mailbox_dispositions;
+    mailbox_dispositions["NONE"] = static_cast<int32_t>(MailboxPreparationDisposition::NONE);
+    mailbox_dispositions["VALIDATED_ONLY"] = static_cast<int32_t>(MailboxPreparationDisposition::VALIDATED_ONLY);
+    mailbox_dispositions["NATIVE_PREPARED"] = static_cast<int32_t>(MailboxPreparationDisposition::NATIVE_PREPARED);
+    m.attr("MAILBOX_PREPARATION_DISPOSITION_VALUES") = mailbox_dispositions;
     m.attr("PTO_PIPELINE_MAX_DEPTH") = static_cast<uint32_t>(PTO_PIPELINE_MAX_DEPTH);
     m.attr("MAX_RING_DEPTH") = static_cast<int32_t>(MAX_RING_DEPTH);
     m.attr("MAX_SCOPE_DEPTH") = static_cast<int32_t>(MAX_SCOPE_DEPTH);

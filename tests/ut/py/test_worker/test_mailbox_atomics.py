@@ -215,3 +215,73 @@ class TestWorkerSmoke:
         finally:
             counter_shm.close()
             counter_shm.unlink()
+
+
+class TestWireConstantAgreement:
+    """The mailbox state and disposition words are a cross-process contract.
+
+    A parent writes them and its forked child reads them, so a Python constant
+    that disagrees with the C++ enum is a protocol mismatch between two live
+    processes: the value is legal, just different, so it surfaces as a hung or
+    misrouted child rather than as an error. The two declarations are in
+    different languages, so no compiler catches it.
+    """
+
+    def test_every_declared_state_matches_the_native_enum(self):
+        from _task_interface import MAILBOX_STATE_VALUES  # noqa: PLC0415
+        from simpler import worker as worker_mod  # noqa: PLC0415
+
+        declared = {
+            "IDLE": worker_mod._IDLE,
+            "TASK_READY": worker_mod._TASK_READY,
+            "TASK_DONE": worker_mod._TASK_DONE,
+            "SHUTDOWN": worker_mod._SHUTDOWN,
+            "CONTROL_REQUEST": worker_mod._CONTROL_REQUEST,
+            "CONTROL_DONE": worker_mod._CONTROL_DONE,
+            "INIT_READY": worker_mod._INIT_READY,
+            "INIT_FAILED": worker_mod._INIT_FAILED,
+            "FRAME_STAGED": worker_mod._FRAME_STAGED,
+            "TASK_LAUNCHED": worker_mod._TASK_LAUNCHED,
+            "TASK_FAILED": worker_mod._TASK_FAILED,
+            "ACTIVATE": worker_mod._ACTIVATE,
+            "PREPARE_READY": worker_mod._PREPARE_READY,
+        }
+        assert declared == dict(MAILBOX_STATE_VALUES)
+
+    def test_every_declared_disposition_matches_the_native_enum(self):
+        from _task_interface import MAILBOX_PREPARATION_DISPOSITION_VALUES  # noqa: PLC0415
+        from simpler import worker as worker_mod  # noqa: PLC0415
+
+        declared = {
+            "NONE": worker_mod._DISPOSITION_NONE,
+            "VALIDATED_ONLY": worker_mod._VALIDATED_ONLY,
+            "NATIVE_PREPARED": worker_mod._NATIVE_PREPARED,
+        }
+        assert declared == dict(MAILBOX_PREPARATION_DISPOSITION_VALUES)
+
+    def test_the_guard_rejects_a_renumbered_constant(self):
+        """The import-time check fails on a divergence rather than passing it through."""
+        from simpler import worker as worker_mod  # noqa: PLC0415
+
+        original = worker_mod._TASK_LAUNCHED
+        worker_mod._TASK_LAUNCHED = original + 100
+        try:
+            with pytest.raises(RuntimeError, match="disagree with the C"):
+                worker_mod._assert_mailbox_wire_constants()
+        finally:
+            worker_mod._TASK_LAUNCHED = original
+        # Restoring is what lets the rest of the suite keep running.
+        worker_mod._assert_mailbox_wire_constants()
+
+    def test_the_guard_rejects_an_undeclared_enumerator(self):
+        """A state the child can publish but Python does not know is also a failure."""
+        from simpler import worker as worker_mod  # noqa: PLC0415
+
+        original = worker_mod.MAILBOX_STATE_VALUES
+        worker_mod.MAILBOX_STATE_VALUES = {**dict(original), "FUTURE_STATE": 13}
+        try:
+            with pytest.raises(RuntimeError, match="does not declare"):
+                worker_mod._assert_mailbox_wire_constants()
+        finally:
+            worker_mod.MAILBOX_STATE_VALUES = original
+        worker_mod._assert_mailbox_wire_constants()
