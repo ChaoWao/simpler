@@ -186,11 +186,16 @@ class _RemoteBufferEntry:
             # A Buffer always unlinks its own backing on close, so ``unlink`` does not apply here.
             # Releasing through the owning Worker is what additionally drops its registry entry; a
             # session-scoped Buffer has no such entry and closes directly.
-            owner, self.owner = self.owner, None
+            owner = self.owner
             if owner is None:
                 self.data.close()
             else:
-                owner._release_buffer(self.data)  # noqa: SLF001
+                # release_buffer() can raise (the Buffer is still referenced by an in-flight run):
+                # self.owner must stay set until it actually succeeds, or a retried close() would
+                # see owner=None and fall through to self.data.close() -- bypassing the in-flight
+                # guard entirely and leaving the owner's registry entry behind.
+                owner.release_buffer(self.data)
+            self.owner = None
             return
         if not isinstance(self.data, shared_memory.SharedMemory):
             self.owner = None

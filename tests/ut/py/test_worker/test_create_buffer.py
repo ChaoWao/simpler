@@ -34,6 +34,10 @@ def _bare_worker(level: int, *, chip: int = 0, sub: int = 0, next_level: int = 0
     w._owner_instance_id = mint_owner_instance_id()
     w._buffer_id_counter = 1
     w._buffers = {}
+    w._hierarchical_start_mu = threading.Lock()
+    w._hierarchical_start_cv = threading.Condition(w._hierarchical_start_mu)
+    w._accepted_run_handles = set()
+    w._submit_mu = threading.Lock()
     return w
 
 
@@ -123,11 +127,11 @@ def test_release_buffer_drops_only_its_own_entry():
     try:
         keep = w._create_buffer_locked(32)
         drop = w._create_buffer_locked(32)
-        w._release_buffer(drop)
+        w.release_buffer(drop)
         assert drop.shm is None
         assert list(w._buffers.values()) == [keep]
         # A second release of the same buffer is a no-op, not a KeyError on the registry.
-        w._release_buffer(drop)
+        w.release_buffer(drop)
         assert list(w._buffers.values()) == [keep]
     finally:
         _drain(w)
@@ -146,7 +150,7 @@ def test_release_buffer_keeps_the_entry_when_close_fails():
 
     bad.close = boom  # type: ignore[method-assign]
     with pytest.raises(OSError, match="close failed"):
-        w._release_buffer(bad)
+        w.release_buffer(bad)
     assert bad_id in w._buffers
     bad.close = real_close  # type: ignore[method-assign]
     _drain(w)
