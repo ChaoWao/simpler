@@ -137,7 +137,8 @@ Relevant code paths:
   - `_child_worker_loop()` runs a nested `Worker` child via shm mailbox.
   - `_run_chip_main_loop()` handles task and control mailbox states.
 - `src/common/hierarchical/worker_manager.{h,cpp}`
-  - `WorkerThread` owns one local mailbox and blocks until `TASK_DONE`.
+  - `WorkerThread` owns one local mailbox; the Scheduler thread advances it
+    to `TASK_DONE` through non-blocking submit/poll calls.
   - Control commands share the same mailbox and serialize on `mailbox_mu_`.
   - Errors are reported through `MAILBOX_OFF_ERROR` and
     `MAILBOX_OFF_ERROR_MSG`.
@@ -517,8 +518,8 @@ run as if the producer succeeded.
 
 Required parent-side behavior:
 
-- `RemoteL3Endpoint::run()` blocks for the matching completion sequence.
-- `LocalMailboxEndpoint::run()` maps a non-zero mailbox error to
+- `RemoteL3Endpoint::poll_progress()` reports the matching completion sequence.
+- `LocalMailboxEndpoint::poll_progress()` maps a non-zero mailbox error to
   `task_failure` instead of reporting a successful completion.
 - Non-zero task or endpoint errors become candidates for the worker's first
   reported error.

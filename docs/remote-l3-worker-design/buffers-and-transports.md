@@ -332,8 +332,9 @@ CONTROL, CONTROL_REPLY, COMPLETION, and SHUTDOWN frames use the HCOMM RPC
 adapter; tensor data and remote buffer copies use the HCOMM data adapter.
 
 The endpoint owns the adapter objects. `Orchestrator`, Scheduler, and
-`WorkerThread` see only `WorkerEndpoint::run()`, `WorkerEndpoint::control()`,
-and logical capability bits from `WorkerEndpoint::caps()`.
+`WorkerThread` see only the progress calls (`WorkerEndpoint::submit_progress()`,
+`poll_progress()`, `activate_progress()`), the `control_*` commands, and logical
+capability bits from `WorkerEndpoint::caps()`.
 
 Current status: `RemoteL3Endpoint` owns a transport-neutral
 `RemoteL3Transport` and the ordered TASK/COMPLETION boundary. The HCOMM RPC
