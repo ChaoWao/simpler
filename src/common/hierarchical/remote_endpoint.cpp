@@ -863,6 +863,21 @@ void RemoteL3Endpoint::report_progress_error(const std::string &reason) noexcept
     } catch (...) {}
 }
 
+bool RemoteL3Endpoint::report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) noexcept {
+    try {
+        std::lock_guard<std::mutex> command_lk(command_mu_);
+        const bool endpoint_owned =
+            pending_task_.occupied && pending_task_.dispatch.dispatch_id == dispatch.dispatch_id;
+        progress_stop_requested_ = true;
+        progress_stop_reason_ = "RemoteL3Endpoint submission failed: " + reason;
+        command_cv_.notify_all();
+        transport_->shutdown();
+        return endpoint_owned;
+    } catch (...) {
+        return false;
+    }
+}
+
 remote_l3::ControlReplyPayload
 RemoteL3Endpoint::run_control(remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes) {
     std::unique_lock<std::mutex> command_lk(command_mu_);

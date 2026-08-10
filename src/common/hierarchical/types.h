@@ -543,6 +543,7 @@ public:
     bool try_front_group(RunId run_id, TaskSlot &out);
     bool try_pop_group(TaskSlot &out);
     bool try_pop_group(RunId run_id, TaskSlot &out);
+    bool groups_empty() const;
     bool groups_empty(RunId run_id) const;
     bool single_empty(int32_t worker_id, RunId run_id) const;
     bool singles_empty(RunId run_id) const;

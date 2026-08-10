@@ -1,4 +1,4 @@
-# Worker Manager — Pool, Threading, and Dispatch
+# Worker Manager — Pool, Progress, and Dispatch
 
 Local task frames carry the submitted callable's 32-byte digest. The child
 resolves that digest to its private execution slot; no child-local slot crosses
@@ -48,11 +48,12 @@ public:
 
     // Lifecycle
     void start(Ring *ring, OnCompleteFn on_complete,
-               OnAcceptFn on_accept);              // starts all WorkerThreads
-    void stop_workers();                            // joins, retains pool entries
+               OnAcceptFn on_accept);              // creates all endpoint lanes
+    void stop_workers();                            // marks lanes stopping
     void stop();
 
     // Scheduler API
+    void progress();
     WorkerThread *get_worker_by_id(WorkerType type, int32_t worker_id) const;
     std::vector<int32_t> next_level_worker_ids() const;
     WorkerThread *pick_idle_sub_excluding(
@@ -90,9 +91,11 @@ the public worker id from the local worker vector index.
   another NEXT_LEVEL worker
 - **SUB-only idle selection**: `pick_idle_sub_excluding` chooses an idle SUB
   worker not already used by the same SUB group
-- **Two-step stop**: `stop_workers()` joins the execution threads while
-  retaining their pool entries, so Scheduler completion callbacks still see
-  stable worker objects; `stop()` then clears the pools
+- **Scheduler-owned progress**: `progress()` advances every endpoint lane from
+  the single Scheduler thread
+- **Two-step stop**: `stop_workers()` marks lanes stopping while retaining their
+  pool entries; Scheduler progress drains terminal events, then `stop()` clears
+  the pools
 
 Callable and remote-buffer eligibility is validated against the exact target
 during Orchestrator submission. It is not scheduling metadata and is not
@@ -102,15 +105,16 @@ stored on the task slot.
 
 ## 2. `WorkerThread`
 
-There is one `WorkerThread` and one `std::thread` per endpoint (for a local
-endpoint, per forked child). The same thread owns its dispatch queue, lane
-records, activation, acceptance, and completion progress.
+There is one `WorkerThread` endpoint-lane object per endpoint (for a local
+endpoint, per forked child), but it does not own a thread or dispatch queue.
+The single Scheduler thread submits work and owns activation, acceptance,
+completion, and shutdown progress across every lane.
 
 ```cpp
 struct WorkerDispatch {
     TaskSlot task_slot;
     int32_t  group_index = 0;    // 0 for non-group; 0..N-1 for group members
-    uint64_t dispatch_id = 0;    // assigned by WorkerThread after queue commit
+    uint64_t dispatch_id = 0;    // assigned by WorkerThread on submission
     bool prepare_only = false;   // stage for the FIFO successor
 };
 
@@ -121,9 +125,10 @@ public:
                const std::function<void(WorkerDispatch)> &on_accept,
                std::unique_ptr<WorkerEndpoint> endpoint);
     void stop();
-    void dispatch(WorkerDispatch d);          // reserve the active lane
-    void dispatch_prepared(WorkerDispatch d); // reserve the staged lane
+    void dispatch(WorkerDispatch d);          // submit on the active lane
+    void dispatch_prepared(WorkerDispatch d); // submit on the staged lane
     bool activate_prepared(RunId run_id);
+    void progress();                          // called only by Scheduler
     bool idle() const;                        // active lane is free
     bool can_stage() const;                   // staged lane is free
     bool busy() const;                        // either lane owns work
@@ -133,19 +138,13 @@ public:
 private:
     Ring *ring_;                       // reads slot state via ring->slot_state(id)
     std::unique_ptr<WorkerEndpoint> endpoint_;
-    std::thread thread_;
-    std::queue<WorkerDispatch> queue_;
-    std::mutex mu_;
-    std::condition_variable cv_;
     std::atomic<uint32_t> inflight_;     // endpoint capacity accounting
     std::array<LaneState, 2> lanes_;     // active and staged identities
-
-    void loop();  // the sole progress owner for this endpoint
 };
 ```
 
-Every endpoint is progress-driven: the thread publishes queued work, forwards a
-latched activation when supported, and polls monotonic
+Every endpoint is progress-driven: Scheduler submission publishes work,
+forwards a latched activation when supported, and polls monotonic
 `FRAME_STAGED`, `ACCEPTED`, and `COMPLETED` events. The lane array owns task
 identity and disposition while `inflight_` independently enforces endpoint
 capacity. The forked child loop lives in Python (`_chip_process_loop`,
@@ -153,8 +152,8 @@ capacity. The forked child loop lives in Python (`_chip_process_loop`,
 parent does not fork children.
 
 `WorkerDispatch` begins with `{task_slot, group_index}`. `WorkerThread` assigns
-`dispatch_id` under the queue lock only after the queue insertion succeeds, so
-a failed insertion consumes neither capacity nor identity. It also sets
+`dispatch_id` under the lane lock before endpoint submission. A submission
+failure terminalizes that same identity exactly once. It also sets
 `prepare_only` for the one staged successor. The endpoint combines this carrier
 with `slot.run_id`, `slot.pipeline_lease`, `slot.callable`, `slot.task_args`,
 and `slot.config` read from `ring->slot_state(task_slot)`. The task frame's
@@ -208,8 +207,8 @@ advance their framed transport incrementally.
 
 `LocalMailboxEndpoint::submit_progress` copies `CallConfig`,
 `PipelineSlotLease`, the 32-byte callable digest, and the length-prefixed
-`TaskArgs` blob into task frame 0 and publishes `TASK_READY`. The owning
-`WorkerThread` keeps driving its endpoint and observes acceptance or completion
+`TaskArgs` blob into task frame 0 and publishes `TASK_READY`. The Scheduler
+keeps driving the owning endpoint lane and observes acceptance or completion
 through `poll_progress`; it does not wait inside one task call. A steady-clock
 liveness sample turns a child that exits before completion into
 `ENDPOINT_FAILURE`.
@@ -223,7 +222,7 @@ the separate frame prevents a control request from overwriting task state.
 
 A two-frame `LocalMailboxEndpoint` advertises `supports_frame_staging` and is
 driven through `submit_progress`, `activate_progress`, and `poll_progress`.
-The owning `WorkerThread` is the only parent-side progress owner. The child also
+The Scheduler thread is the only parent-side progress owner. The child also
 uses one `run_two_frame_loop`; it services the separate control base, stages
 both task frames, and owns the bounded active/prepared native lifecycles.
 
