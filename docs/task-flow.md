@@ -590,11 +590,11 @@ reclaim independently of outer-scope tasks. See
 
 ## 8. Data flow on completion
 
-When the child finishes the kernel, it writes `TASK_DONE` to the mailbox;
-`LocalMailboxEndpoint::run` exits its spin-poll, reads the mailbox error
-fields, and returns a `WorkerCompletion`. `MAILBOX_OFF_ERROR == 0` maps to
-success; a non-zero child error maps to task failure. The parent
-`WorkerThread` pushes that completion onto `Scheduler::completion_queue_`.
+When the child finishes the kernel, it writes `TASK_DONE` to the mailbox. The
+Scheduler calls `LocalMailboxEndpoint::poll_progress`, which reads the mailbox
+error fields and returns a `WorkerCompletion`. `MAILBOX_OFF_ERROR == 0` maps to
+success; a non-zero child error maps to task failure. The endpoint lane reports
+that completion through `Scheduler::worker_done`.
 
 At this point:
 

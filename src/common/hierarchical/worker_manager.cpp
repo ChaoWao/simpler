@@ -156,6 +156,10 @@ bool WorkerEndpoint::poll_progress(WorkerEndpointProgress &) { return false; }
 bool WorkerEndpoint::activate_progress(RunId) { return false; }
 void WorkerEndpoint::request_progress_stop() noexcept {}
 void WorkerEndpoint::report_progress_error(const std::string &) { request_progress_stop(); }
+bool WorkerEndpoint::report_submission_error(const WorkerDispatch &, const std::string &reason) {
+    report_progress_error(reason);
+    return false;
+}
 
 // =============================================================================
 // LocalMailboxEndpoint — mailbox helpers
@@ -276,14 +280,12 @@ char *LocalMailboxEndpoint::task_frame(size_t index) const {
 
 void WorkerThread::start(
     Ring *ring, const std::function<void(WorkerCompletion)> &on_complete,
-    const std::function<void(WorkerDispatch)> &on_accept, const std::function<void()> &on_idle,
-    std::unique_ptr<WorkerEndpoint> endpoint
+    const std::function<void(WorkerDispatch)> &on_accept, std::unique_ptr<WorkerEndpoint> endpoint
 ) {
     if (!endpoint) throw std::invalid_argument("WorkerThread::start: null endpoint");
     ring_ = ring;
     on_complete_ = on_complete;
     on_accept_ = on_accept;
-    on_idle_ = on_idle;
     endpoint_ = std::move(endpoint);
     shutdown_ = false;
     if (endpoint_->caps().max_inflight_tasks == 0) {
@@ -294,7 +296,6 @@ void WorkerThread::start(
         std::lock_guard<std::mutex> lane_lk(lane_mu_);
         lanes_ = {};
     }
-    thread_ = std::thread(&WorkerThread::loop, this);
 }
 
 void WorkerThread::dispatch(WorkerDispatch d) {
@@ -313,21 +314,21 @@ void WorkerThread::dispatch(WorkerDispatch d) {
         complete_unpublished(d, "WorkerThread::dispatch: active lane is occupied");
         return;
     }
-    EnqueueDispatchResult result;
+    SubmitDispatchResult result;
     try {
-        result = enqueue_dispatch(d, LaneKind::ACTIVE);
+        result = submit_dispatch(d, LaneKind::ACTIVE);
     } catch (const std::exception &e) {
         release_lane_unconditional(LaneKind::ACTIVE);
-        complete_unpublished(d, std::string("WorkerThread::dispatch: enqueue failed: ") + e.what());
+        complete_unpublished(d, std::string("WorkerThread::dispatch: submit failed: ") + e.what());
         return;
     } catch (...) {
         release_lane_unconditional(LaneKind::ACTIVE);
-        complete_unpublished(d, "WorkerThread::dispatch: enqueue failed");
+        complete_unpublished(d, "WorkerThread::dispatch: submit failed");
         return;
     }
-    if (result == EnqueueDispatchResult::QUEUED) return;
+    if (result == SubmitDispatchResult::SUBMITTED) return;
     release_lane_unconditional(LaneKind::ACTIVE);
-    if (result == EnqueueDispatchResult::STOPPING) {
+    if (result == SubmitDispatchResult::STOPPING) {
         complete_unpublished(d, "WorkerThread::dispatch: worker is stopping");
     } else {
         complete_unpublished(d, "WorkerThread::dispatch: endpoint capacity exceeded");
@@ -364,37 +365,37 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: worker already owns a staged run");
         return;
     }
-    EnqueueDispatchResult result;
+    SubmitDispatchResult result;
     try {
-        result = enqueue_dispatch(d, LaneKind::STAGED, slot->run_id);
+        result = submit_dispatch(d, LaneKind::STAGED, slot->run_id);
     } catch (const std::exception &e) {
         release_lane_unconditional(LaneKind::STAGED);
-        complete_unpublished(d, std::string("WorkerThread::dispatch_prepared: enqueue failed: ") + e.what());
+        complete_unpublished(d, std::string("WorkerThread::dispatch_prepared: submit failed: ") + e.what());
         return;
     } catch (...) {
         release_lane_unconditional(LaneKind::STAGED);
-        complete_unpublished(d, "WorkerThread::dispatch_prepared: enqueue failed");
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: submit failed");
         return;
     }
-    if (result == EnqueueDispatchResult::QUEUED) return;
+    if (result == SubmitDispatchResult::SUBMITTED) return;
     release_lane_unconditional(LaneKind::STAGED);
-    if (result == EnqueueDispatchResult::STOPPING) {
+    if (result == SubmitDispatchResult::STOPPING) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: worker is stopping");
-    } else if (result == EnqueueDispatchResult::CAPACITY_EXCEEDED) {
+    } else if (result == SubmitDispatchResult::CAPACITY_EXCEEDED) {
         complete_unpublished(d, "WorkerThread::dispatch_prepared: endpoint capacity exceeded");
     } else {
-        complete_unpublished(d, "WorkerThread::dispatch_prepared: staged lane identity changed before enqueue");
+        complete_unpublished(d, "WorkerThread::dispatch_prepared: staged lane identity changed before submission");
     }
 }
 
-WorkerThread::EnqueueDispatchResult
-WorkerThread::enqueue_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expected_run_id) {
-    std::lock_guard<std::mutex> lk(mu_);
+WorkerThread::SubmitDispatchResult
+WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expected_run_id) {
+    std::lock_guard<std::mutex> admission_lk(admission_mu_);
     if (shutdown_.load(std::memory_order_acquire)) {
-        return EnqueueDispatchResult::STOPPING;
+        return SubmitDispatchResult::STOPPING;
     }
     if (inflight_.load(std::memory_order_acquire) >= endpoint_->caps().max_inflight_tasks) {
-        return EnqueueDispatchResult::CAPACITY_EXCEEDED;
+        return SubmitDispatchResult::CAPACITY_EXCEEDED;
     }
     d.dispatch_id = next_dispatch_id_;
     {
@@ -402,28 +403,26 @@ WorkerThread::enqueue_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expec
         LaneState &dispatch_lane = lane(lane_kind);
         if (!dispatch_lane.occupied || dispatch_lane.dispatch_id != 0 ||
             (expected_run_id != INVALID_RUN_ID && dispatch_lane.run_id != expected_run_id)) {
-            return EnqueueDispatchResult::STAGED_IDENTITY_CHANGED;
+            return SubmitDispatchResult::STAGED_IDENTITY_CHANGED;
         }
         dispatch_lane.dispatch_id = d.dispatch_id;
     }
-    try {
-        queue_.push(d);  // A failed allocation consumes neither capacity nor dispatch identity.
-    } catch (...) {
-        std::lock_guard<std::mutex> lane_lk(lane_mu_);
-        LaneState &dispatch_lane = lane(lane_kind);
-        if (dispatch_lane.dispatch_id == d.dispatch_id) {
-            dispatch_lane.dispatch_id = 0;
-        }
-        throw;
-    }
     ++next_dispatch_id_;
     inflight_.fetch_add(1, std::memory_order_release);
-    cv_.notify_one();
-    return EnqueueDispatchResult::QUEUED;
+    try {
+        endpoint_->submit_progress(ring_, d);
+    } catch (const std::exception &e) {
+        fail_submission(d, std::string("submit_progress failed: ") + e.what());
+    } catch (...) {
+        fail_submission(d, "submit_progress failed with unknown exception");
+    }
+    return SubmitDispatchResult::SUBMITTED;
 }
 
 bool WorkerThread::activate_prepared(RunId run_id) {
     if (run_id == INVALID_RUN_ID) return false;
+    std::lock_guard<std::mutex> admission_lk(admission_mu_);
+    if (shutdown_.load(std::memory_order_acquire)) return false;
     std::lock_guard<std::mutex> lane_lk(lane_mu_);
     LaneState &active = lane(LaneKind::ACTIVE);
     LaneState &staged = lane(LaneKind::STAGED);
@@ -433,7 +432,6 @@ bool WorkerThread::activate_prepared(RunId run_id) {
     active = staged;
     active.activation_requested = true;
     staged = {};
-    cv_.notify_one();
     return true;
 }
 
@@ -476,12 +474,8 @@ void WorkerThread::complete_unpublished(WorkerDispatch dispatch, const std::stri
 }
 
 void WorkerThread::stop() {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        shutdown_ = true;
-    }
-    cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    std::lock_guard<std::mutex> admission_lk(admission_mu_);
+    shutdown_.store(true, std::memory_order_release);
 }
 
 void WorkerThread::shutdown_child() {
@@ -496,101 +490,69 @@ const WorkerEndpointCaps &WorkerThread::caps() const {
 int32_t WorkerThread::worker_id() const { return caps().worker_id; }
 
 // =============================================================================
-// WorkerThread — main loop + per-mode dispatch
+// WorkerThread — Scheduler-owned endpoint progress
 // =============================================================================
 
-void WorkerThread::loop() {
-    while (true) {
-        WorkerDispatch dispatch;
-        bool have_dispatch = false;
-        {
-            std::unique_lock<std::mutex> lk(mu_);
-            if (queue_.empty() && inflight_.load(std::memory_order_acquire) == 0 &&
-                !shutdown_.load(std::memory_order_acquire)) {
-                cv_.wait(lk, [this] {
-                    return !queue_.empty() || shutdown_.load(std::memory_order_acquire);
-                });
-            }
-            if (!queue_.empty()) {
-                dispatch = queue_.front();
-                queue_.pop();
-                have_dispatch = true;
-            } else if (shutdown_.load(std::memory_order_acquire) && inflight_.load(std::memory_order_acquire) == 0) {
-                break;
-            }
-        }
+void WorkerThread::progress() {
+    if (shutdown_.load(std::memory_order_acquire)) {
+        // A child finishing a control handler may overwrite an earlier stop
+        // state, so the request remains level-triggered until terminalization.
+        endpoint_->request_progress_stop();
+    }
 
-        if (shutdown_.load(std::memory_order_acquire)) {
-            // Repeat until every frame terminalizes. A child finishing a
-            // control handler may publish CONTROL_DONE after an earlier
-            // SHUTDOWN store; the next pass restores the stop request.
-            endpoint_->request_progress_stop();
-        }
-
-        if (have_dispatch) {
-            if (shutdown_.load(std::memory_order_acquire)) {
-                WorkerEndpointProgress progress;
-                progress.kind = WorkerProgressKind::COMPLETED;
-                progress.dispatch = dispatch;
-                progress.completion = WorkerCompletion{
-                    dispatch.task_slot, dispatch.group_index, EndpointOutcome::ENDPOINT_FAILURE,
-                    "WorkerThread endpoint stopped before frame publication"
-                };
-                finish_progress_dispatch(progress);
-            } else {
+    RunId activated = INVALID_RUN_ID;
+    {
+        std::lock_guard<std::mutex> admission_lk(admission_mu_);
+        if (!shutdown_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lane_lk(lane_mu_);
+                const LaneState &active = lane(LaneKind::ACTIVE);
+                if (active.occupied && active.activation_requested) activated = active.run_id;
+            }
+            if (activated != INVALID_RUN_ID) {
                 try {
-                    endpoint_->submit_progress(ring_, dispatch);
+                    if (endpoint_->activate_progress(activated)) {
+                        std::lock_guard<std::mutex> lane_lk(lane_mu_);
+                        LaneState &active = lane(LaneKind::ACTIVE);
+                        if (active.occupied && active.run_id == activated) active.activation_requested = false;
+                    }
                 } catch (const std::exception &e) {
-                    WorkerEndpointProgress progress;
-                    progress.kind = WorkerProgressKind::COMPLETED;
-                    progress.dispatch = dispatch;
-                    progress.completion = WorkerCompletion{
-                        dispatch.task_slot, dispatch.group_index, EndpointOutcome::ENDPOINT_FAILURE,
-                        std::string("WorkerThread endpoint failed before frame publication: ") + e.what()
-                    };
-                    finish_progress_dispatch(progress);
+                    fail_progress_driver(std::string("activate_progress failed: ") + e.what());
                 } catch (...) {
-                    WorkerEndpointProgress progress;
-                    progress.kind = WorkerProgressKind::COMPLETED;
-                    progress.dispatch = dispatch;
-                    progress.completion = WorkerCompletion{
-                        dispatch.task_slot, dispatch.group_index, EndpointOutcome::ENDPOINT_FAILURE,
-                        "WorkerThread endpoint failed before frame publication with unknown exception"
-                    };
-                    finish_progress_dispatch(progress);
+                    fail_progress_driver("activate_progress failed with unknown exception");
                 }
             }
-        }
-
-        RunId activated = INVALID_RUN_ID;
-        {
-            std::lock_guard<std::mutex> lane_lk(lane_mu_);
-            const LaneState &active = lane(LaneKind::ACTIVE);
-            if (active.occupied && active.activation_requested) activated = active.run_id;
-        }
-        if (activated != INVALID_RUN_ID) {
-            try {
-                if (endpoint_->activate_progress(activated)) {
-                    std::lock_guard<std::mutex> lane_lk(lane_mu_);
-                    LaneState &active = lane(LaneKind::ACTIVE);
-                    if (active.occupied && active.run_id == activated) active.activation_requested = false;
-                }
-            } catch (const std::exception &e) {
-                fail_progress_driver(std::string("activate_progress failed: ") + e.what());
-            } catch (...) {
-                fail_progress_driver("activate_progress failed with unknown exception");
-            }
-        }
-
-        WorkerEndpointProgress progress;
-        try {
-            if (endpoint_->poll_progress(progress)) finish_progress_dispatch(progress);
-        } catch (const std::exception &e) {
-            fail_progress_driver(std::string("poll_progress failed: ") + e.what());
-        } catch (...) {
-            fail_progress_driver("poll_progress failed with unknown exception");
         }
     }
+
+    WorkerEndpointProgress progress;
+    try {
+        if (endpoint_->poll_progress(progress)) finish_progress_dispatch(progress);
+    } catch (const std::exception &e) {
+        fail_progress_driver(std::string("poll_progress failed: ") + e.what());
+    } catch (...) {
+        fail_progress_driver("poll_progress failed with unknown exception");
+    }
+}
+
+void WorkerThread::fail_submission(const WorkerDispatch &dispatch, const std::string &reason) {
+    shutdown_.store(true, std::memory_order_release);
+    bool endpoint_owned = false;
+    try {
+        endpoint_owned = endpoint_->report_submission_error(dispatch, reason);
+    } catch (...) {
+        endpoint_->request_progress_stop();
+    }
+    if (endpoint_owned) return;
+
+    WorkerEndpointProgress progress;
+    progress.kind = WorkerProgressKind::COMPLETED;
+    progress.dispatch = dispatch;
+    progress.completion = WorkerCompletion{
+        dispatch.task_slot, dispatch.group_index, EndpointOutcome::ENDPOINT_FAILURE,
+        "WorkerThread endpoint rejected publication: " + reason
+    };
+    finish_progress_dispatch(progress);
 }
 
 void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progress) {
@@ -647,8 +609,6 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
         }
     }
     inflight_.fetch_sub(1, std::memory_order_acq_rel);
-    cv_.notify_one();
-    if (on_idle_) on_idle_();
 }
 
 void WorkerThread::fail_progress_driver(const std::string &reason) noexcept {
@@ -658,7 +618,6 @@ void WorkerThread::fail_progress_driver(const std::string &reason) noexcept {
     } catch (...) {
         endpoint_->request_progress_stop();
     }
-    cv_.notify_all();
 }
 
 void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dispatch) {
@@ -945,6 +904,16 @@ void LocalMailboxEndpoint::report_progress_error(const std::string &reason) {
     poison_progress("endpoint progress driver failed: " + reason);
 }
 
+bool LocalMailboxEndpoint::report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) {
+    std::lock_guard<std::mutex> lk(progress_mu_);
+    bool endpoint_owned = false;
+    for (const FrameRecord &record : frames_) {
+        endpoint_owned = endpoint_owned || (record.occupied && record.dispatch.dispatch_id == dispatch.dispatch_id);
+    }
+    poison_progress("endpoint submission failed: " + reason);
+    return endpoint_owned;
+}
+
 // =============================================================================
 // WorkerManager
 // =============================================================================
@@ -965,9 +934,7 @@ void WorkerManager::add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endp
 
 void WorkerManager::add_sub(void *mailbox, int child_pid) { sub_entries_.push_back(LocalSubEntry{mailbox, child_pid}); }
 
-void WorkerManager::start(
-    Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept, const OnIdleFn &on_idle
-) {
+void WorkerManager::start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept) {
     if (ring == nullptr) throw std::invalid_argument("WorkerManager::start: null ring");
 
     std::vector<int32_t> next_level_worker_ids;
@@ -997,7 +964,7 @@ void WorkerManager::start(
             auto endpoint = std::make_unique<LocalMailboxEndpoint>(
                 entry.worker_id, entry.mailbox, entry.child_pid, entry.task_frame_count
             );
-            wt->start(ring, on_complete, on_accept, on_idle, std::move(endpoint));
+            wt->start(ring, on_complete, on_accept, std::move(endpoint));
             next_level_threads_.push_back(std::move(wt));
         }
     };
@@ -1008,14 +975,14 @@ void WorkerManager::start(
             auto endpoint = std::make_unique<LocalMailboxEndpoint>(
                 static_cast<int32_t>(i), entries[i].mailbox, entries[i].child_pid
             );
-            wt->start(ring, on_complete, on_accept, on_idle, std::move(endpoint));
+            wt->start(ring, on_complete, on_accept, std::move(endpoint));
             threads.push_back(std::move(wt));
         }
     };
     make_next_level_threads();
     for (auto &endpoint : next_level_endpoint_entries_) {
         auto wt = std::make_unique<WorkerThread>();
-        wt->start(ring, on_complete, on_accept, on_idle, std::move(endpoint));
+        wt->start(ring, on_complete, on_accept, std::move(endpoint));
         next_level_threads_.push_back(std::move(wt));
     }
     next_level_endpoint_entries_.clear();
@@ -1033,6 +1000,13 @@ void WorkerManager::stop() {
     stop_workers();
     next_level_threads_.clear();
     sub_threads_.clear();
+}
+
+void WorkerManager::progress() {
+    for (auto &worker : next_level_threads_)
+        worker->progress();
+    for (auto &worker : sub_threads_)
+        worker->progress();
 }
 
 WorkerThread *WorkerManager::get_worker_by_id(WorkerType type, int32_t worker_id) const {
@@ -1068,7 +1042,7 @@ WorkerThread *WorkerManager::pick_idle_sub_excluding(const std::vector<WorkerThr
 }
 
 // =============================================================================
-// LocalMailboxEndpoint — memory control (orch thread, concurrent with worker thread)
+// LocalMailboxEndpoint — memory control (orch thread, concurrent with Scheduler progress)
 // =============================================================================
 
 static void write_control_args(char *mbox, uint64_t sub_cmd, uint64_t a0 = 0) {
@@ -1875,7 +1849,7 @@ WorkerManager::broadcast_register_all(const void *blob_ptr, size_t blob_size, co
     PosixShmHolder shm(shm_name, blob_size);
     std::memcpy(shm.addr(), blob_ptr, blob_size);
 
-    // Fan out to every WorkerThread in parallel. Per-WorkerThread mailbox_mu_
+    // Fan out to every endpoint lane in parallel. Per-endpoint mailbox_mu_
     // is independent, so N control_register calls run concurrently — latency
     // is 1 × prepare_cost instead of N × prepare_cost.
     std::vector<std::thread> workers;

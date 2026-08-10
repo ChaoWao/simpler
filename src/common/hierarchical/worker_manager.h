@@ -12,12 +12,12 @@
 /**
  * WorkerManager — worker pool lifecycle and dispatch.
  *
- * Owns WorkerThread instances (one per registered worker).
+ * Owns one endpoint lane per registered worker.
  * Provides idle-worker selection and dispatch to the Scheduler.
- * The Scheduler drives the DAG; the Manager drives the workers.
+ * The Scheduler drives both the DAG and endpoint progress through the Manager.
  *
- * Each WorkerThread owns one endpoint-progress loop. Every registered local
- * and remote endpoint advances through submit/poll without blocking that loop.
+ * Every registered local and remote endpoint advances through non-blocking
+ * submit/poll calls on the Scheduler thread.
  * A two-frame local endpoint may additionally publish one PREPARE_READY
  * successor while the active frame runs; FIFO promotion changes it to ACTIVATE.
  * The Python child resolves each frame's callable digest to a child-local slot
@@ -29,16 +29,13 @@
 #include <atomic>
 #include <array>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -325,11 +322,10 @@ public:
 
     virtual const WorkerEndpointCaps &caps() const = 0;
 
-    // Every endpoint is progress-driven: the owning WorkerThread drives it
-    // without a blocking call per frame. submit_progress publishes one complete
-    // frame; poll_progress reports monotonic events; activate_progress is a
-    // sticky FIFO-launch permission that may arrive before the child stages the
-    // frame.
+    // Every endpoint is progress-driven by the Scheduler without a blocking
+    // call per frame. submit_progress publishes one complete frame;
+    // poll_progress reports monotonic events; activate_progress is a sticky
+    // FIFO-launch permission that may arrive before the child stages the frame.
     virtual void submit_progress(Ring *ring, const WorkerDispatch &dispatch);
     virtual bool poll_progress(WorkerEndpointProgress &progress);
     virtual bool activate_progress(RunId run_id);
@@ -338,6 +334,10 @@ public:
     // Implementations must turn already-published work into terminal progress
     // only after their child/device resources are quiescent.
     virtual void report_progress_error(const std::string &reason);
+    // The return value says whether `dispatch` was published and will therefore
+    // produce terminal progress through poll_progress(). A false result leaves
+    // the unpublished dispatch with the caller after endpoint quiescence.
+    virtual bool report_submission_error(const WorkerDispatch &dispatch, const std::string &reason);
 
     virtual void shutdown_child() {}
     virtual uint64_t control_malloc(size_t size);
@@ -400,6 +400,7 @@ public:
     bool activate_progress(RunId run_id) override;
     void request_progress_stop() noexcept override;
     void report_progress_error(const std::string &reason) override;
+    bool report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) override;
 
     void shutdown_child() override;
     uint64_t control_malloc(size_t size) override;
@@ -500,17 +501,17 @@ private:
 };
 
 // =============================================================================
-// WorkerThread — one worker, one std::thread, mailbox-IPC dispatch.
+// WorkerThread — one Scheduler-driven endpoint lane.
 // =============================================================================
 
 class WorkerThread {
 public:
     WorkerThread() = default;
-    ~WorkerThread() { stop(); }
+    ~WorkerThread() = default;
     WorkerThread(const WorkerThread &) = delete;
     WorkerThread &operator=(const WorkerThread &) = delete;
 
-    // Start the worker thread.
+    // Initialize the endpoint lane.
     //
     // `mailbox` points to a MAILBOX_SIZE-byte MAP_SHARED region managed
     // by the Python facade — the real worker (a `ChipWorker` for
@@ -518,24 +519,15 @@ public:
     // and consumes the mailbox via `_chip_process_loop` / `_sub_worker_loop`.
     //
     // `ring` is a borrowed pointer to the engine's slot-state pool —
-    // the thread reads callable/args/config from
+    // the Scheduler thread reads callable/args/config from
     // `ring->slot_state(task_slot)` on each dispatch.
-    // on_complete(completion) is called (in the WorkerThread) after each
-    // endpoint run().
-    //
-    // on_idle() is called (in the WorkerThread) after the lane state for a
-    // finished dispatch is published, so `idle()` and `busy()` already report
-    // the post-completion values when it runs. on_complete() runs strictly
-    // before that publication — a scheduler that treats the completion as its
-    // only wake can therefore still observe this worker as occupied, and
-    // on_idle() is the edge that says otherwise.
+    // on_complete(completion) is called after each endpoint run.
     void start(
         Ring *ring, const std::function<void(WorkerCompletion)> &on_complete,
-        const std::function<void(WorkerDispatch)> &on_accept, const std::function<void()> &on_idle,
-        std::unique_ptr<WorkerEndpoint> endpoint
+        const std::function<void(WorkerDispatch)> &on_accept, std::unique_ptr<WorkerEndpoint> endpoint
     );
 
-    // Enqueue a dispatch for the worker. Non-blocking.
+    // Submit a dispatch to the endpoint. Non-blocking.
     void dispatch(WorkerDispatch d);
     void dispatch_prepared(WorkerDispatch d);
     // Complete a slot the scheduler already claimed when publication fails.
@@ -544,6 +536,7 @@ public:
     void complete_unpublished(WorkerDispatch d, const std::string &error_message);
     bool has_staged_run(RunId run_id) const;
     bool activate_prepared(RunId run_id);
+    void progress();
 
     // The active lane and staged-successor lane are intentionally distinct.
     // A staged successor must not make a second task from the active run
@@ -560,7 +553,7 @@ public:
     // Does NOT waitpid — the Python facade owns the child PID.
     void shutdown_child();
 
-    // Memory control — callable from the orch thread while the worker thread
+    // Memory control — callable from the orch thread while the Scheduler thread
     // may be running a task. Commands serialize with each other on
     // `mailbox_mu_`. Task dispatch uses separate task frames, so the single
     // child progress owner may observe a control request while a task is active.
@@ -629,8 +622,8 @@ public:
     void control_worker_chip_region_release(uint64_t region_id);
 
 private:
-    enum class EnqueueDispatchResult : uint8_t {
-        QUEUED,
+    enum class SubmitDispatchResult : uint8_t {
+        SUBMITTED,
         STOPPING,
         CAPACITY_EXCEEDED,
         STAGED_IDENTITY_CHANGED,
@@ -652,27 +645,23 @@ private:
     std::unique_ptr<WorkerEndpoint> endpoint_;
     std::function<void(WorkerCompletion)> on_complete_;
     std::function<void(WorkerDispatch)> on_accept_;
-    std::function<void()> on_idle_;
-
-    std::thread thread_;
-    std::queue<WorkerDispatch> queue_;
-    std::mutex mu_;
-    std::condition_variable cv_;
     std::atomic<bool> shutdown_{false};
     std::atomic<uint32_t> inflight_{0};
     uint64_t next_dispatch_id_{1};
+    // Linearizes stop with endpoint publication and prepared activation.
+    std::mutex admission_mu_;
     mutable std::mutex lane_mu_;
     std::array<LaneState, 2> lanes_{};
     std::unordered_set<uint64_t> accepted_dispatch_ids_;
     std::unordered_map<uint64_t, std::string> accept_errors_;
 
-    void loop();
-    EnqueueDispatchResult enqueue_dispatch(WorkerDispatch d, LaneKind lane, RunId expected_run_id = INVALID_RUN_ID);
+    SubmitDispatchResult submit_dispatch(WorkerDispatch d, LaneKind lane, RunId expected_run_id = INVALID_RUN_ID);
     LaneState &lane(LaneKind kind) { return lanes_[static_cast<size_t>(kind)]; }
     const LaneState &lane(LaneKind kind) const { return lanes_[static_cast<size_t>(kind)]; }
     void release_lane(LaneKind kind, uint64_t dispatch_id);
     void release_lane_unconditional(LaneKind kind);
     void finish_progress_dispatch(const WorkerEndpointProgress &progress);
+    void fail_submission(const WorkerDispatch &dispatch, const std::string &reason);
     void fail_progress_driver(const std::string &reason) noexcept;
 };
 
@@ -684,7 +673,6 @@ class WorkerManager {
 public:
     using OnCompleteFn = std::function<void(WorkerCompletion)>;
     using OnAcceptFn = std::function<void(WorkerDispatch)>;
-    using OnIdleFn = std::function<void()>;
 
     // Register a worker. `mailbox` is a MAILBOX_SIZE-byte MAP_SHARED
     // region; the real worker (a `ChipWorker` for NEXT_LEVEL, a Python
@@ -696,21 +684,16 @@ public:
     void add_next_level_endpoint(std::unique_ptr<WorkerEndpoint> endpoint);
     void add_sub(void *mailbox, int child_pid = -1);
 
-    // `on_complete` and `on_accept` are non-throwing contracts: WorkerThread invokes
+    // `on_complete` and `on_accept` are non-throwing contracts: the endpoint lane invokes
     // `on_complete` after endpoint ownership has ended, so no lower layer can
     // reconstruct run accounting if it unwinds. `on_accept` advances the run's
     // launch fence; pass an empty function only when nothing waits on that
     // fence, since an omitted callback leaves pending_accepts non-zero forever.
     // No default: the choice is the caller's.
-    //
-    // `on_idle` fires once per finished dispatch, after that worker's lane
-    // state is published. An edge-triggered scheduler must supply it: a
-    // completion alone does not prove the worker is dispatchable again. It is
-    // defaulted empty because pools driven by no scheduler have nothing to
-    // wake.
-    void start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept, const OnIdleFn &on_idle = {});
+    void start(Ring *ring, const OnCompleteFn &on_complete, const OnAcceptFn &on_accept);
     void stop_workers();
     void stop();
+    void progress();
 
     WorkerThread *get_worker_by_id(WorkerType type, int32_t worker_id) const;
     std::vector<int32_t> next_level_worker_ids() const;
@@ -725,7 +708,7 @@ public:
 
     // Forward CTRL_PREPARE to a specific NEXT_LEVEL worker. Thin wrapper
     // over WorkerThread::control_prepare; exposed at manager level so the
-    // Python facade can prewarm without reaching into individual WorkerThreads.
+    // Python facade can prewarm without reaching into individual endpoint lanes.
     void control_prepare(int worker_id, const uint8_t *digest);
 
     // Forward CTRL_ALLOC_DOMAIN / CTRL_RELEASE_DOMAIN to a specific NEXT_LEVEL
@@ -777,7 +760,7 @@ public:
     // Broadcast CTRL_REGISTER for `digest` to every NEXT_LEVEL worker in
     // parallel. Stages `blob_size` bytes from `blob_ptr` into a per-call
     // POSIX shm under name "simpler-cb-<pid>-<counter>", spawns one
-    // std::thread per WorkerThread, and joins. Returns one ControlResult per
+    // std::thread per endpoint lane, and joins. Returns one ControlResult per
     // target so the Python facade can clean up only targets that confirmed
     // install/refcount increment on a partial failure.
     std::vector<ControlResult> broadcast_register_all(const void *blob_ptr, size_t blob_size, const uint8_t *digest);

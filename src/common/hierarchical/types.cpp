@@ -281,6 +281,7 @@ bool NextLevelReadyQueues::try_front_group(RunId run_id, TaskSlot &out) { return
 bool NextLevelReadyQueues::try_pop_group(TaskSlot &out) { return group_queue_.try_pop(out); }
 bool NextLevelReadyQueues::try_pop_group(RunId run_id, TaskSlot &out) { return group_queue_.try_pop(run_id, out); }
 
+bool NextLevelReadyQueues::groups_empty() const { return group_queue_.empty(); }
 bool NextLevelReadyQueues::groups_empty(RunId run_id) const { return group_queue_.empty(run_id); }
 
 bool NextLevelReadyQueues::single_empty(int32_t worker_id, RunId run_id) const {

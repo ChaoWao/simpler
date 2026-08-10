@@ -15,28 +15,21 @@
  * The Scheduler thread routes tasks through the DAG lifecycle:
  *   ready_queue → dispatch (via WorkerManager) → completion → fanout release → new ready
  *
- * Worker pool management (WorkerThread creation and dispatch) is delegated to
- * WorkerManager. NEXT_LEVEL placement is fixed at submit; SUB remains free.
+ * Worker endpoint ownership and dispatch are delegated to WorkerManager.
+ * NEXT_LEVEL placement is fixed at submit; SUB remains free.
  *
  * Flow:
  *   Orch: submit() → directed NEXT_LEVEL queue or shared SUB queue + notify
  *
  *   Scheduler thread:
- *     wait on cv (completion queue OR unconsumed wake generation)
+ *     wait on cv while no endpoint is active
+ *     poll every active endpoint through WorkerManager
  *     drain completion_queue → on_task_complete → fanout release → ready_queue
  *     launch directed NEXT_LEVEL tasks, then freely scheduled SUB tasks
  *
- *   WorkerThread (managed by WorkerManager):
- *     loop: task_queue.pop() → endpoint.run(dispatch) →
- *           completion callback → Scheduler.worker_done(completion)
- *           → lane state published → idle callback → Scheduler.notify_ready()
- *
- * The wait is edge-triggered, so it carries an obligation on everything that
- * feeds it: any state change that turns already-queued work into placeable
- * work must push a completion or advance the wake generation. Queue occupancy
- * is no longer re-read by the predicate, so a change that only mutates it —
- * a requeue from dispatch, a worker publishing itself idle, a run reaching the
- * FIFO head — is invisible until someone posts the matching edge.
+ * The idle wait is edge-triggered, so any state change that turns already-
+ * queued work into placeable work must advance the wake generation. Active
+ * endpoints keep the loop running until all endpoint-owned work terminalizes.
  */
 
 #pragma once
@@ -119,6 +112,9 @@ public:
         // exercise the losing side of the claim has to be let in here.
         // Unset in production.
         std::function<void(TaskSlot)> before_claim_cb;
+        // Test seam for a group arriving after the group phase observed an
+        // empty queue but before this pass starts claiming singles.
+        std::function<void()> after_group_phase_cb;
     };
 
     void start(const Config &cfg);
@@ -130,8 +126,7 @@ public:
     // scheduler from one spinning on unplaceable work. Orders nothing.
     uint64_t dispatch_round_count() const { return dispatch_round_count_.load(std::memory_order_relaxed); }
 
-    // Called by WorkerManager (from WorkerThread) after endpoint run() reaches
-    // a terminal outcome.
+    // Called by WorkerManager after endpoint progress reaches a terminal outcome.
     void worker_done(WorkerCompletion completion);
 
     // Called by Orchestrator after it pushes a newly-ready root task. ReadyQueue
@@ -148,7 +143,7 @@ private:
     Config cfg_;
     std::mutex loop_mu_;
 
-    // Shared completion queue (WorkerThread → Scheduler)
+    // Endpoint completion queue owned and drained by the Scheduler thread.
     std::queue<WorkerCompletion> completion_queue_;
     std::mutex completion_mu_;
     std::condition_variable completion_cv_;
@@ -188,8 +183,9 @@ private:
     void dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared);
     void dispatch_preparable_next_level_singles();
     NextLevelGroupDispatchResult dispatch_next_level_group(const std::optional<RunId> &run_snapshot);
-    void dispatch_next_level_singles(
-        const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot
+    bool dispatch_next_level_singles(
+        const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot,
+        bool verify_group_barrier
     );
     void dispatch_sub_ready(const std::optional<RunId> &run_snapshot);
     void update_reservation_stall(const NextLevelGroupDispatchResult &dispatch_result);

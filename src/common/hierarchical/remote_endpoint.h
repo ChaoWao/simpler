@@ -99,6 +99,7 @@ public:
     bool poll_progress(WorkerEndpointProgress &progress) override;
     void request_progress_stop() noexcept override;
     void report_progress_error(const std::string &reason) noexcept override;
+    bool report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) noexcept override;
     void shutdown_child() override;
     void control_prepare(const uint8_t *digest) override;
     void control_remote_prepare_register(

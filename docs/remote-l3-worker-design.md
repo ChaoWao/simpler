@@ -193,8 +193,8 @@ success/failure outcome.
 ## Fork-Safe Remote Process Model
 
 The remote runtime must preserve the repository's fork ordering invariant:
-all chip/sub child processes are forked before any C++ Scheduler,
-`WorkerThread`, transport, or health threads are started.
+all chip/sub child processes are forked before any C++ Scheduler, transport, or
+health threads are started.
 
 Use a two-process remote model:
 

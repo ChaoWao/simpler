@@ -99,12 +99,13 @@ See [orchestrator.md](orchestrator.md) for the 7-step submit flow and state mach
 
 ### Scheduler (Scheduler thread)
 
-The **DAG executor**. A dedicated C++ thread that handles:
+The **DAG executor and endpoint progress owner**. A dedicated C++ thread that handles:
 
 - **directed NEXT_LEVEL queues** — one single-task FIFO per stable worker ID
   plus one all-targets-ready group FIFO
 - **shared SUB queue** — freely select idle SUB WorkerThreads
 - **completion queue** — slots whose worker finished; release fanout, wake downstream consumers, retire slot
+- **endpoint progress** — submit, activate, poll, and stop every endpoint lane
 
 The Scheduler never inspects task data — it just moves slot ids between queues
 and consults TaskSlotState metadata.
@@ -113,14 +114,14 @@ See [scheduler.md](scheduler.md) for the dispatch loop and coordination.
 
 ### Worker / WorkerManager / WorkerThread
 
-The **execution layer**. `WorkerManager` holds two pools of `WorkerThread`s
-(next-level pool and sub pool). Each `WorkerThread` owns one std::thread that
-owns one shared-memory mailbox region and returns explicit progress/completion
-events to the Scheduler. Compatibility endpoints encode one task in the base
-frame and wait for `TASK_DONE`. Direct A2/A3 onboard chip endpoints instead
-multiplex two task frames: the same progress owner can poll the active native
-run while validating a staged successor, then activate that successor only
-after the predecessor's native finalization fence.
+The **execution layer**. `WorkerManager` holds two pools of `WorkerThread`
+endpoint-lane objects (next-level pool and sub pool). The Scheduler thread owns
+progress across those lanes; each local lane owns one shared-memory mailbox
+region and returns explicit progress/completion events. Compatibility endpoints
+encode one task in the base frame and wait for `TASK_DONE`. Direct A2/A3 onboard
+chip endpoints instead multiplex two task frames: the same Scheduler progress
+owner can poll the active native run while validating a staged successor, then
+activate that successor only after the predecessor's native finalization fence.
 
 - Next-level (chip) children run `_chip_process_loop`, which constructs a
   `ChipWorker` and dispatches each kernel through it.
@@ -138,7 +139,7 @@ what flows through `ChipWorker::run`.
 ## 3. Component Coordination
 
 ```text
-                   Orch thread                    Scheduler thread             Worker threads
+                   Orch thread                    Scheduler thread             Endpoint lanes
                    ───────────                    ────────────────             ──────────────
   User code ──► Orchestrator                      Scheduler
                  │                                 │
@@ -170,7 +171,7 @@ Communication channels:
 | ---- | --------- | ------- |
 | Orchestrator/Scheduler → ready queues | direct `enqueue_ready` queue push | slot id |
 | Orchestrator/Scheduler → Scheduler loop | condition-variable notification | ready wake-up |
-| Scheduler → WorkerThread | WorkerThread internal queue | slot id |
+| Scheduler → WorkerThread | direct endpoint-lane submission | slot id |
 | WorkerThread → Scheduler | completion_queue (mutex + CV) | slot id + group index + outcome |
 | WorkerThread ↔ child | shm mailbox (state + error + task data) | encoded blob |
 | Python ↔ C++ | nanobind bindings | TaskArgs / CallConfig / callable handle |
