@@ -11,9 +11,9 @@
 
 The L3 orch is a pure DAG builder over views: it names task args as Tensors built from handles
 (create_buffer + handle.ref), never touching data. torch is used only OUTSIDE run() to fill inputs
-and read the output. The owner writes a Tensor blob to the chip mailbox; the chip child
-materializes it back to Tensors (ImportRegistry -> materialize_tensor_blob) and runs the kernel;
-the result lands in the shared output buffer with no per-run copy.
+and read the output. The owner writes a Tensor blob to the chip mailbox; the chip child materializes
+it back to Tensors (read_args_from_blob -> ImportRegistry -> materialize_task_args) and runs the
+kernel; the result lands in the shared output buffer with no per-run copy.
 """
 
 import torch

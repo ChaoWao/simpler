@@ -2224,7 +2224,7 @@ NB_MODULE(_task_interface, m) {
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::arg("accepted_state_addr") = 0,
             nb::arg("accepted_value") = 0, nb::arg("pipeline_slot") = 0, nb::arg("pipeline_generation") = 0,
             "Launch a callable_id from the runtime.so-ABI POD a chip-child mailbox loop built with "
-            "materialize_tensor_blob, so no Python code re-implements the tensor/scalar layout."
+            "materialize_task_args, so no Python code re-implements the tensor/scalar layout."
         )
         .def(
             "unregister_callable",
@@ -2379,28 +2379,6 @@ NB_MODULE(_task_interface, m) {
     // --- Standalone blob helpers ---
 
     m.def(
-        "materialize_tensor_blob",
-        [](uint64_t blob_ptr, size_t capacity, nb::dict resolved) -> ChipStorageTaskArgs {
-            TaskArgsView view = read_blob(reinterpret_cast<const uint8_t *>(blob_ptr), capacity);
-            ChipStorageTaskArgs args;
-            for (int32_t i = 0; i < view.tensor_count; i++) {
-                args.add_tensor(materialize_one(view.tensors(i), resolved));
-            }
-            for (int32_t i = 0; i < view.scalar_count; i++) {
-                args.add_scalar(view.scalars[i]);
-            }
-            return args;
-        },
-        nb::arg("blob_ptr"), nb::arg("capacity"), nb::arg("resolved"),
-        "Materialize a Tensor blob into the runtime.so-ABI ChipStorageTaskArgs POD. Each tensor's "
-        "embedded buffer identity is resolved via `resolved` {CanonicalIdentity: (local_base, "
-        "address_space)}; addr = base + byte_offset. The caller pre-populates `resolved` by "
-        "materializing each embedded descriptor (see read_args_from_blob) on first receipt. "
-        "Strided views (transpose / permute / step-slice) materialize to strided ChipTensors. "
-        "Rejects an unknown identity and a non-dtype-aligned byte_offset."
-    );
-
-    m.def(
         "materialize_task_args",
         [](const TaskArgs &args, nb::dict resolved) -> ChipStorageTaskArgs {
             ChipStorageTaskArgs out;
@@ -2414,8 +2392,13 @@ NB_MODULE(_task_interface, m) {
         },
         nb::arg("args"), nb::arg("resolved"),
         "Materialize a TaskArgs held in this process into the runtime.so-ABI ChipStorageTaskArgs "
-        "POD. An L2 leaf consumes its own args, so it takes this path instead of the mailbox blob; "
-        "`resolved` has the same shape as for materialize_tensor_blob."
+        "POD — the sole path to that POD, whether the args are an L2 leaf's own or a chip child's "
+        "read back from its mailbox with read_args_from_blob. Each tensor's embedded buffer "
+        "identity is resolved via `resolved` {CanonicalIdentity: (local_base, address_space)}; "
+        "addr = base + byte_offset. The caller pre-populates `resolved` by materializing each "
+        "embedded descriptor on first receipt. Strided views (transpose / permute / step-slice) "
+        "materialize to strided ChipTensors. Rejects an unknown identity and a non-dtype-aligned "
+        "byte_offset."
     );
 
     m.def(
