@@ -58,9 +58,9 @@ PullRequest
 | `st-sim-a2a3` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a2a3sim` |
 | `st-sim-a5` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a5sim` |
 | `ut-a2a3` | a2a3 self-hosted | `pytest tests/ut --platform a2a3` + `ctest -L "^requires_hardware(_a2a3)?$" --resource-spec-file ...` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (host + cross-compiled device SO, link smoke only) |
-| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --device ...`, then a separate `-m sdma` step, then the DFX per-feature smokes |
+| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + `ctest -L "^requires_hardware(_a5)?$"` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
-| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --device ...`; x86_64 runners add `-m "not sdma"` |
+| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --device ...`, then adaptive-parallel DFX feature smokes; x86_64 runners add `-m "not sdma"` to the main sweep |
 | `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | the L4 mixed local/remote examples, one L3 per machine |
 
 ### Multi-machine pod jobs
@@ -261,6 +261,18 @@ Compilation is serial by default; both onboard jobs pass `--compile-workers 8`,
 which assumes the runner's CPU is theirs alone — it starts eight `ccec`
 processes at once. The sim jobs run on ephemeral GitHub-hosted runners with no
 restored cache, so they compile cold every time and get no warm-up step.
+
+The DFX smokes reuse the runner's device allocation after the main scene-test
+sweep. The `run-onboard-dfx-smokes` CI action distributes `dep_gen`, chip
+swimlane, PMU, and args dump round-robin across the allocated devices and keeps
+`-p no:xdist` inside each pytest process. Those are the four a5 smokes; a2a3
+adds a fifth smoke for host-build-graph `dep_gen`. A device runs at most one
+smoke at a time, so a one-device allocation runs serially while multiple
+devices run as many independent lanes as both the allocation and platform's
+smoke count permit. With four or fewer a2a3 devices, the fifth smoke waits to
+reuse its round-robin device. Each smoke retains its own log and exit status,
+so one failure does not suppress the remaining DFX results; the aggregate step
+fails after all logs have been reported.
 
 A warm-up that cannot compile a class reports it and keeps going: the pass only
 fills a cache, so the locked pytest run that follows is what recompiles the
