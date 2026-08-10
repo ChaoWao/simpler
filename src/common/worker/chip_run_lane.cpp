@@ -65,9 +65,13 @@ struct ChipRunLaneState {
         if (run->error != nullptr) std::rethrow_exception(run->error);
     }
 
-    bool permits_native_successor(const ChipRunState &predecessor, const ChipRunState &successor) const {
+    bool permits_native_successor(const ChipRunState &predecessor, const CallConfig &successor_config) const {
         return worker->supports_concurrent_native_prepare() && !predecessor.config.diagnostics_any() &&
-               !successor.config.diagnostics_any() && predecessor.phase == ChipRunState::Phase::LAUNCHED;
+               !successor_config.diagnostics_any() && predecessor.phase == ChipRunState::Phase::LAUNCHED;
+    }
+
+    bool permits_native_successor(const ChipRunState &predecessor, const ChipRunState &successor) const {
+        return permits_native_successor(predecessor, successor.config);
     }
 
     void prepare(const std::shared_ptr<ChipRunState> &run) {
@@ -155,7 +159,11 @@ struct ChipRunLaneState {
     bool progress(const std::shared_ptr<ChipRunState> &target) {
         if (target->phase == ChipRunState::Phase::TERMINAL) return true;
         if (fifo.empty()) throw std::runtime_error("chip run lane lost a nonterminal run");
-        if (fifo.front() != target) return false;
+        if (fifo.front() != target) {
+            (void)progress(fifo.front());
+            if (target->phase == ChipRunState::Phase::TERMINAL) return true;
+            if (fifo.empty() || fifo.front() != target) return false;
+        }
 
         launch_front();
         if (fifo.size() == 2 && fifo.front() == target) prepare_successor_if_eligible(fifo.back());
@@ -405,9 +413,34 @@ ChipRun ChipRunLane::submit(
 ) {
     std::lock_guard<std::mutex> lk(state_->mu);
     state_->require_usable();
-    if (!state_->fifo.empty()) state_->drain_front();
-    state_->require_usable();
     if (state_->generations.empty()) throw std::runtime_error("chip run lane has no runtime slots");
+
+    // Direct admission follows the runtime contract but keeps the lane as its
+    // only authority. A compatible active run may own one prepared successor;
+    // otherwise admission drains the front and retains depth-one behavior.
+    // In particular, the third submit waits here before a slot generation is
+    // minted or native preparation begins.
+    while (!state_->fifo.empty()) {
+        const bool has_successor_capacity =
+            state_->fifo.size() == 1 && state_->permits_native_successor(*state_->fifo.front(), config);
+        if (has_successor_capacity) break;
+        state_->drain_front();
+        state_->require_usable();
+        state_->launch_front();
+    }
+
+    uint32_t slot_id = 0;
+    for (; slot_id < state_->generations.size(); ++slot_id) {
+        const bool occupied = std::any_of(
+            state_->fifo.begin(), state_->fifo.end(), [slot_id](const std::shared_ptr<ChipRunState> &candidate) {
+                return candidate->lease.slot_id == slot_id;
+            }
+        );
+        if (!occupied) break;
+    }
+    if (slot_id == state_->generations.size()) {
+        throw std::runtime_error("chip run lane has no free direct runtime slot after admission");
+    }
     if (state_->direct_generation == std::numeric_limits<uint64_t>::max()) {
         throw std::overflow_error("chip run lane exhausted its direct generation space");
     }
@@ -417,13 +450,17 @@ ChipRun ChipRunLane::submit(
     run->callable_id = callable_id;
     run->args = args;
     run->config = config;
-    run->lease = PipelineSlotLease{0, 0, state_->direct_generation};
+    run->lease = PipelineSlotLease{slot_id, 0, state_->direct_generation};
     run->accepted_state = accepted_state;
     run->accepted_value = accepted_value;
     run->pipeline_leased = false;
     run->activated = true;
     state_->fifo.push_back(run);
-    state_->launch_front();
+    if (state_->fifo.front() == run) {
+        state_->launch_front();
+    } else {
+        state_->prepare_successor_if_eligible(run);
+    }
     return ChipRun(state_, std::move(run));
 }
 

@@ -2168,7 +2168,8 @@ NB_MODULE(_task_interface, m) {
             },
             nb::arg("callable_id"), nb::arg("args"), nb::arg("config"), nb::call_guard<nb::gil_scoped_release>(),
             "Submit materialized task args to the chip native-run lane without a pipeline lease and return the live "
-            "run. The lane admits at capacity one: this call drains its predecessor before admitting."
+            "run. The lane follows the runtime PipelineContract: compatible runs admit one active plus one prepared "
+            "successor; otherwise this call drains its predecessor before admitting."
         )
         .def(
             "_prepare_native_run_materialized",
