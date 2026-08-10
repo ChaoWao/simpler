@@ -149,6 +149,7 @@ from .comm_endpoints import (
     _normalize_node_identity,
     parse_endpoint_path,
 )
+from .comm_region import MaterializationContext, RegionInstance, materialize_region_instance
 from .global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
@@ -5786,6 +5787,19 @@ class Worker:
             resolver = BackendResolver(registry, self._get_region_access_service())
             return resolver.plan(resolved, layout_summary)
 
+    def _materialize_region_instance(
+        self, members, topology: SingleOwner, layout_summary: RegionLayoutSpec
+    ) -> RegionInstance:
+        self._require_ready_for_region_planning("_materialize_region_instance")
+        with self._operation_lease("_materialize_region_instance"):
+            registry = self._get_endpoint_registry()
+            resolved = registry.resolve_region_spec(members, topology)
+            resolver = BackendResolver(registry, self._get_region_access_service())
+            plan = resolver.plan(resolved, layout_summary)
+            return materialize_region_instance(
+                MaterializationContext(worker=self, registry=registry, plan=plan, layout=layout_summary)
+            )
+
     def _register_into_snapshot_or_wait(self, reg: _CallableRegistration) -> CallableHandle | None:
         """Linearize a level>=3 register against the startup epoch.
 
@@ -7785,6 +7799,59 @@ class Worker:
                 except (BufferError, FileNotFoundError, OSError):
                     pass
 
+    def _close_worker_chip_region(self, region, resources: _RunResources | None = None) -> None:
+        region_errors: list[BaseException] = []
+        try:
+            region._close_worker_host_mapping()
+        except BaseException as exc:  # noqa: BLE001
+            region_errors.append(exc)
+        try:
+            if self._worker is not None:
+                self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
+        except BaseException as exc:  # noqa: BLE001
+            region_errors.append(exc)
+        # End-of-run cleanup is poisoned and terminal for that run, so it still
+        # expires both sides after attempting both debts. Whole-tree close
+        # instead retains the region for journal replay.
+        if region_errors and resources is None:
+            raise region_errors[0]
+        try:
+            region._expire()
+        except BaseException as exc:  # noqa: BLE001
+            region_errors.append(exc)
+        try:
+            self._retire_worker_chip_region_tracking(region, resources)
+        except BaseException as exc:  # noqa: BLE001
+            region_errors.append(exc)
+        if region_errors:
+            raise region_errors[0]
+
+    def _retire_worker_chip_region_tracking(self, region, resources: _RunResources | None = None) -> None:
+        tracking_lists = [self._live_worker_chip_regions]
+        if resources is not None and resources.worker_chip_regions is not self._live_worker_chip_regions:
+            tracking_lists.insert(0, resources.worker_chip_regions)
+        errors: list[BaseException] = []
+        next_tracking_list = 0
+
+        def retire_tracking() -> None:
+            nonlocal next_tracking_list
+            try:
+                while next_tracking_list < len(tracking_lists):
+                    owned_regions = tracking_lists[next_tracking_list]
+                    owned_regions[:] = [owned for owned in owned_regions if owned is not region]
+                    next_tracking_list += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                next_tracking_list += 1
+                retire_tracking()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+                retire_tracking()
+
+        retire_tracking()
+        if errors:
+            raise errors[0]
+
     def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
         # A region stays tracked until both ownership debts commit. This makes a
         # failed close replayable by the cleanup journal instead of publishing a
@@ -7795,49 +7862,10 @@ class Worker:
         regions = list(tracked)
         errors: list[BaseException] = []
         for region in regions:
-            region_errors: list[BaseException] = []
             try:
-                region._close_worker_host_mapping()
-            except BaseException as exc:  # noqa: BLE001
-                region_errors.append(exc)
-            try:
-                if self._worker is not None:
-                    self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
-            except BaseException as exc:  # noqa: BLE001
-                region_errors.append(exc)
-            # End-of-run cleanup is poisoned and terminal for that run, so it
-            # still expires both sides after attempting both debts. Whole-tree
-            # close instead retains the region for journal replay.
-            if region_errors and resources is None:
-                errors.extend(region_errors)
-                continue
-            try:
-                region._expire()
+                self._close_worker_chip_region(region, resources)
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
-            errors.extend(region_errors)
-
-            tracking_lists = (
-                (tracked,) if tracked is self._live_worker_chip_regions else (tracked, self._live_worker_chip_regions)
-            )
-            next_tracking_list = 0
-
-            def retire_tracking() -> None:
-                nonlocal next_tracking_list
-                try:
-                    while next_tracking_list < len(tracking_lists):
-                        owned_regions = tracking_lists[next_tracking_list]
-                        owned_regions[:] = [owned for owned in owned_regions if owned is not region]
-                        next_tracking_list += 1
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(exc)
-                    next_tracking_list += 1
-                    retire_tracking()
-                except BaseException as exc:  # noqa: BLE001
-                    errors.append(exc)
-                    retire_tracking()
-
-            retire_tracking()
         if errors:
             raise errors[0]
 
