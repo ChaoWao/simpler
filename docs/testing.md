@@ -46,21 +46,21 @@ ctest --test-dir tests/ut/cpp/build -L "^requires_hardware(_a2a3)?$" --output-on
 # Scene tests (pytest, @scene_test classes)
 pytest examples tests/st                          # all sim platforms (auto-parametrized)
 pytest examples tests/st --platform a2a3sim       # specific sim
-pytest examples tests/st -m "not sdma" --platform a2a3          # hardware
-pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7  # hardware with device pool
+pytest examples tests/st -m "not sdma and not pod" --platform a2a3          # hardware
+pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device 4-7  # hardware with device pool
 
 # Compile the selected hardware batch without creating a Worker or using an NPU
 python -m simpler_setup.tools.scene_test_compile examples tests/st \
-    -m "not sdma" --platform a2a3 --require-pto-isa --compile-workers 8
+    -m "not sdma and not pod" --platform a2a3 --require-pto-isa --compile-workers 8
 
 # SDMA cases run separately, as they do in CI: they are quarantined by
 # @pytest.mark.sdma so no fault-injection case shares a device with a
 # provisioned SDMA workspace (issue #1425)
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 
-# A5 ARM64 runs the full corpus; A5 x86_64 deselects SDMA tests
-pytest examples tests/st --platform a5 --device 0-7
-pytest examples tests/st -m "not sdma" --platform a5 --device 0-7
+# A5 ARM64 runs the non-pod corpus; A5 x86_64 also deselects SDMA tests
+pytest examples tests/st -m "not pod" --platform a5 --device 0-7
+pytest examples tests/st -m "not sdma and not pod" --platform a5 --device 0-7
 
 # Single scene test (standalone)
 python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
@@ -665,7 +665,7 @@ pytest examples tests/st --platform a2a3sim
 python test_my_kernel.py -p a2a3sim
 
 # On hardware (SDMA cases quarantined by marker; run them with -m sdma)
-pytest examples tests/st -m "not sdma" --platform a2a3
+pytest examples tests/st -m "not sdma and not pod" --platform a2a3
 ```
 
 Key fields:

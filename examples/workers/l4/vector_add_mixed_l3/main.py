@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 from pathlib import Path
 from typing import Any
@@ -243,35 +244,47 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def run(
+    *,
+    remote: str,
+    local_devices: str,
+    remote_devices: str,
+    platform: str = "a2a3",
+    runtime: str = "tensormap_and_ringbuffer",
+    session_timeout: float = 120.0,
+    session_listen_host: str = "0.0.0.0",  # noqa: S104 - Remote peer callbacks need a reachable listener.
+) -> int:
     # The local L3 is a fork of this process, so its orchestration function
     # reaches the handle only through module state; a local would not survive
     # into the child.
     global _LOCAL_CHIP_HANDLE  # noqa: PLW0603
 
-    args = _parse_args()
-    local_devices = _parse_device_ids(args.local_devices, label="local")
-    remote_devices = _parse_device_ids(args.remote_devices, label="remote")
+    local_device_ids = _parse_device_ids(local_devices, label="local")
+    remote_device_ids = _parse_device_ids(remote_devices, label="remote")
 
-    chip_callable = _build_vector_chip_callable(args.platform, args.runtime)
-    local_l3 = Worker(level=3, platform=args.platform, runtime=args.runtime, device_ids=local_devices)
-    _LOCAL_CHIP_HANDLE = local_l3.register(chip_callable)
-
-    worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=args.session_timeout)
+    local_l3: Worker | None = None
+    local_l3_attached = False
+    worker: Worker | None = None
     remote_buffers: list[RemoteBufferHandle] = []
     local_views: list[Any] = []
     local_outputs: dict[str, tuple[Any, float]] = {}
     parent_keepalive: list[TaskArgs] = []
     try:
+        chip_callable = _build_vector_chip_callable(platform, runtime)
+        local_l3 = Worker(level=3, platform=platform, runtime=runtime, device_ids=local_device_ids)
+        _LOCAL_CHIP_HANDLE = local_l3.register(chip_callable)
+
+        worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=session_timeout)
         local_worker = worker.add_worker(local_l3)
+        local_l3_attached = True
         remote_worker = worker.add_remote_worker(
             RemoteWorkerSpec(
-                endpoint=args.remote,
-                platform=args.platform,
-                runtime=args.runtime,
-                device_ids=remote_devices,
+                endpoint=remote,
+                platform=platform,
+                runtime=runtime,
+                device_ids=remote_device_ids,
                 transport=HOST_TCP_TRANSPORT_PROFILE,
-                session_listen_host=args.session_listen_host,
+                session_listen_host=session_listen_host,
                 allow_wildcard_session_bind=True,
             )
         )
@@ -325,7 +338,7 @@ def main() -> int:
 
         print(
             "vector_add_mixed_l3 passed: "
-            f"local[devices={args.local_devices}], remote={args.remote}[devices={args.remote_devices}], "
+            f"local[devices={local_devices}], remote={remote}[devices={remote_devices}], "
             f"elements={ELEMENTS}"
         )
         return 0
@@ -333,17 +346,37 @@ def main() -> int:
         parent_keepalive.clear()
         _LOCAL_GROUP_KEEPALIVE.clear()
         _REMOTE_GROUP_KEEPALIVE.clear()
-        for handle in reversed(remote_buffers):
-            try:
-                worker.remote_free(handle)
-            except Exception as exc:  # noqa: BLE001
-                # The pod job diagnoses this example from stdout alone, so a
-                # leaked peer buffer has to name itself here or leave no trace.
-                print(f"[vector-add-mixed-l3] remote_free failed: {exc}")
+        if worker is not None:
+            for handle in reversed(remote_buffers):
+                try:
+                    worker.remote_free(handle)
+                except Exception as exc:  # noqa: BLE001
+                    # The pod job diagnoses this example from stdout alone, so a
+                    # leaked peer buffer has to name itself here or leave no trace.
+                    print(f"[vector-add-mixed-l3] remote_free failed: {exc}")
         # close() unlinks the owner Buffers, which fails while any view still aliases their shm.
         local_outputs.clear()
         local_views.clear()
-        worker.close()
+        try:
+            if worker is not None:
+                worker.close()
+        finally:
+            if local_l3 is not None and not local_l3_attached:
+                with contextlib.suppress(Exception):
+                    local_l3.close()
+
+
+def main() -> int:
+    args = _parse_args()
+    return run(
+        remote=args.remote,
+        local_devices=args.local_devices,
+        remote_devices=args.remote_devices,
+        platform=args.platform,
+        runtime=args.runtime,
+        session_timeout=args.session_timeout,
+        session_listen_host=args.session_listen_host,
+    )
 
 
 if __name__ == "__main__":

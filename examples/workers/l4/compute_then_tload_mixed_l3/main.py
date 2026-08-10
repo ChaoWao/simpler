@@ -245,45 +245,58 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:  # noqa: PLR0915 -- one linear two-phase scenario; splitting it would scatter the phase ordering this example exists to show
+def run(  # noqa: PLR0915 -- one linear two-phase scenario; splitting it would scatter the phase ordering this example exists to show
+    *,
+    remote: str,
+    local_devices: str,
+    remote_devices: str,
+    platform: str = "a2a3",
+    runtime: str = "tensormap_and_ringbuffer",
+    comm_profile: str = "a3-fabric-v1",
+    session_timeout: float = 120.0,
+    session_listen_host: str = "0.0.0.0",  # noqa: S104 - Remote peer callbacks need a reachable listener.
+) -> int:
     # The local L3 is a fork of this process, so its orchestration functions
     # reach the handles only through module state; locals would not survive
     # into the child.
     global _LOCAL_COMPUTE_HANDLE, _LOCAL_TLOAD_HANDLE  # noqa: PLW0603
 
-    args = _parse_args()
-    local_device = _parse_first_device(args.local_devices, label="local")
-    remote_device = _parse_first_device(args.remote_devices, label="remote")
+    local_device = _parse_first_device(local_devices, label="local")
+    remote_device = _parse_first_device(remote_devices, label="remote")
 
-    compute_callable = _build_compute_callable(args.platform, args.runtime)
-    tload_callable = _build_tload_callable(args.platform, args.runtime)
-    local_l3 = Worker(
-        level=3,
-        device_ids=[local_device],
-        num_sub_workers=0,
-        platform=args.platform,
-        runtime=args.runtime,
-        comm_profile=args.comm_profile,
-        global_device_ranks=(0,),
-    )
-    _LOCAL_COMPUTE_HANDLE = local_l3.register(compute_callable)
-    _LOCAL_TLOAD_HANDLE = local_l3.register(tload_callable)
-
-    worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=args.session_timeout)
+    local_l3: Worker | None = None
+    local_l3_attached = False
+    worker: Worker | None = None
     domain_handle: GlobalCommDomainHandle | None = None
     parent_keepalive: list[TaskArgs] = []
     try:
+        compute_callable = _build_compute_callable(platform, runtime)
+        tload_callable = _build_tload_callable(platform, runtime)
+        local_l3 = Worker(
+            level=3,
+            device_ids=[local_device],
+            num_sub_workers=0,
+            platform=platform,
+            runtime=runtime,
+            comm_profile=comm_profile,
+            global_device_ranks=(0,),
+        )
+        _LOCAL_COMPUTE_HANDLE = local_l3.register(compute_callable)
+        _LOCAL_TLOAD_HANDLE = local_l3.register(tload_callable)
+
+        worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=session_timeout)
         local_node = worker.add_worker(local_l3)
+        local_l3_attached = True
         remote_node = worker.add_remote_worker(
             RemoteWorkerSpec(
-                endpoint=args.remote,
-                platform=args.platform,
-                runtime=args.runtime,
+                endpoint=remote,
+                platform=platform,
+                runtime=runtime,
                 device_ids=(remote_device,),
                 transport=HOST_TCP_TRANSPORT_PROFILE,
-                comm_profile=args.comm_profile,
+                comm_profile=comm_profile,
                 global_device_ranks=(1,),
-                session_listen_host=args.session_listen_host,
+                session_listen_host=session_listen_host,
                 allow_wildcard_session_bind=True,
             )
         )
@@ -378,7 +391,27 @@ def main() -> int:  # noqa: PLR0915 -- one linear two-phase scenario; splitting 
         if domain_handle is not None and not domain_handle.freed:
             with contextlib.suppress(Exception):
                 domain_handle.release()
-        worker.close()
+        try:
+            if worker is not None:
+                worker.close()
+        finally:
+            if local_l3 is not None and not local_l3_attached:
+                with contextlib.suppress(Exception):
+                    local_l3.close()
+
+
+def main() -> int:
+    args = _parse_args()
+    return run(
+        remote=args.remote,
+        local_devices=args.local_devices,
+        remote_devices=args.remote_devices,
+        platform=args.platform,
+        runtime=args.runtime,
+        comm_profile=args.comm_profile,
+        session_timeout=args.session_timeout,
+        session_listen_host=args.session_listen_host,
+    )
 
 
 if __name__ == "__main__":
