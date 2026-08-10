@@ -582,22 +582,36 @@ class TestProvenanceTransactions:
             w.free(h)
 
     def test_free_holds_lock_across_native_free(self):
-        # Deterministic mutual-exclusion check: the native free runs while
-        # _child_prov_lock is held, so a concurrent free/copy/dispatch cannot
-        # interleave with a half-completed free.
+        # Deterministic mutual-exclusion check, in the narrower form this exclusion
+        # now takes: the native free runs under *that worker's* lock, so a
+        # concurrent free/copy/dispatch on the same chip still cannot interleave
+        # with a half-completed free — but `_child_prov_lock` is released, so a
+        # slow free on one chip no longer blocks provenance work for another.
+        # Safe because provenance is keyed by (worker_id, ptr) and the revoke
+        # commits first: a concurrent dispatch reading the table under
+        # `_child_prov_lock` finds this address already gone, or is about a
+        # different chip entirely.
         w, nw = _l3_ready(0x1000)
         h = w.alloc_child_tensor(0, (64,), DataType.UINT8)
-        held = {}
+        seen = {}
 
         def _sf(wid, p):
-            acquired = w._child_prov_lock.acquire(blocking=False)
-            held["locked_during_native"] = not acquired
-            if acquired:
+            worker_lock = w._child_prov_worker_lock(wid)
+            free_to_take = worker_lock.acquire(blocking=False)
+            seen["worker_lock_held"] = not free_to_take
+            if free_to_take:
+                worker_lock.release()
+            shared_free = w._child_prov_lock.acquire(blocking=False)
+            seen["shared_lock_released"] = shared_free
+            if shared_free:
                 w._child_prov_lock.release()
+            seen["revoke_committed"] = (wid, p) not in w._child_alloc_prov
 
         nw.free.side_effect = _sf
         w.free(h)
-        assert held["locked_during_native"] is True
+        assert seen["worker_lock_held"] is True
+        assert seen["shared_lock_released"] is True
+        assert seen["revoke_committed"] is True
 
     def test_capture_refs_after_provenance_analysis(self, _fake_handle, monkeypatch):
         # blocker: the kind4 provenance analysis must run BEFORE remote slot refs

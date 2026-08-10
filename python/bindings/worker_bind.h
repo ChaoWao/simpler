@@ -429,14 +429,16 @@ inline void bind_worker(nb::module_ &m) {
             [](Worker &self, int worker_id, size_t size) {
                 return self.malloc(worker_id, size);
             },
-            nb::arg("worker_id"), nb::arg("size"), "Allocate device memory on next-level worker."
+            nb::arg("worker_id"), nb::arg("size"), nb::call_guard<nb::gil_scoped_release>(),
+            "Allocate device memory on next-level worker."
         )
         .def(
             "free",
             [](Worker &self, int worker_id, uint64_t ptr) {
                 self.free(worker_id, ptr);
             },
-            nb::arg("worker_id"), nb::arg("ptr"), "Free device memory on next-level worker."
+            nb::arg("worker_id"), nb::arg("ptr"), nb::call_guard<nb::gil_scoped_release>(),
+            "Free device memory on next-level worker."
         )
         .def(
             "copy_to",
@@ -444,6 +446,7 @@ inline void bind_worker(nb::module_ &m) {
                 self.copy_to(worker_id, dst, src, nbytes);
             },
             nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("nbytes"),
+            nb::call_guard<nb::gil_scoped_release>(),
             "H2D copy: host `src` into device `dst`, both named by descriptor. The child resolves each "
             "through its ImportRegistry, so neither end is an address minted in this process."
         )
@@ -453,6 +456,7 @@ inline void bind_worker(nb::module_ &m) {
                 self.copy_from(worker_id, dst, src, nbytes);
             },
             nb::arg("worker_id"), nb::arg("dst"), nb::arg("src"), nb::arg("nbytes"),
+            nb::call_guard<nb::gil_scoped_release>(),
             "D2H copy: device `src` into host `dst`, both named by descriptor."
         )
         .def(
