@@ -67,7 +67,8 @@ l4/<your_example>/
   README.md
   kernels/aiv/*.cpp
   kernels/orchestration/*.cpp
-  main.py                   # entry point: argparse + main()
+  main.py                   # entry point: argparse + main() delegating to run()
+  test_<your_example>.py    # @pytest.mark.pod wrapper collected by pod CI
   run_parent.sh             # maps environment variables onto main.py's flags
 ```
 
@@ -88,9 +89,8 @@ it. Three things are load-bearing:
 
 ### The environment-variable contract
 
-`run_parent.sh` exists to turn environment variables into `main.py`'s flags,
-because that is the interface CI drives it through. Pick a prefix and read
-these five; CI sets exactly them:
+`run_parent.sh` exists to turn environment variables into `main.py`'s flags for
+manual two-machine runs. Pick a prefix and read these five:
 
 | Variable | Meaning |
 | -------- | ------- |
@@ -105,11 +105,10 @@ Anything else — platform, runtime — defaults inside `run_parent.sh`.
 ### Running it in CI
 
 The `st-pod-onboard-a2a3` job runs L4 examples across a pair of a2a3 machines.
-Adding yours to it is one block plus one line, and the wiring, the log
-artifact, and the failure semantics are described in
-[`docs/ci.md`](../../docs/ci.md#multi-machine-pod-jobs). Read that before adding the
-block — in particular why a step that reports green there may still have
-failed.
+The job runs one `pytest examples tests/st -m pod` sweep, so adding yours means
+adding a `test_*.py` wrapper carrying `@pytest.mark.pod`. Do not edit
+`_st-pod.yml`. The wiring and the log artifact are described in
+[`docs/ci.md`](../../docs/ci.md#multi-machine-pod-jobs).
 
 ## Prerequisites
 

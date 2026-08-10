@@ -1262,25 +1262,30 @@ def st_pod_peer():
     """Pod endpoint and remote device pool from the pod runner environment."""
     endpoint = os.environ.get("POD_REMOTE_ENDPOINT")
     if not endpoint:
-        pytest.fail("POD_REMOTE_ENDPOINT is required for pod tests")
+        pytest.skip("POD_REMOTE_ENDPOINT is required for pod tests")
     remote_devices = os.environ.get("POD_REMOTE_DEVICES")
     if not remote_devices:
-        pytest.fail("POD_REMOTE_DEVICES is required for pod tests")
+        pytest.skip("POD_REMOTE_DEVICES is required for pod tests")
     try:
         session_timeout_s = float(os.environ.get("POD_L3_SESSION_TIMEOUT_S", "120"))
     except ValueError as e:
         pytest.fail(f"POD_L3_SESSION_TIMEOUT_S must be a float: {e}")
+    # The remote peer connects back to the parent session runner.
     return PodPeer(
         endpoint=endpoint,
         remote_device_ids=tuple(_parse_device_range(remote_devices)),
         session_timeout_s=session_timeout_s,
-        session_listen_host=os.environ.get("POD_L3_SESSION_LISTEN_HOST", "0.0.0.0"),
+        session_listen_host=os.environ.get("POD_L3_SESSION_LISTEN_HOST", "0.0.0.0"),  # noqa: S104
     )
 
 
 @pytest.fixture()
 def st_pod_remote_device_ids(request, st_pod_peer):
-    """Allocate remote device IDs from the pod peer's default device pool."""
+    """Allocate remote device IDs from the pod peer's default device pool.
+
+    Every pod test gets the same leading slice, so this is collision-free only
+    while the pod job serializes the sweep with ``--max-parallel 1``.
+    """
     marker = request.node.get_closest_marker("pod_remote_device_count")
     n = marker.args[0] if marker else 1
     if n > len(st_pod_peer.remote_device_ids):
@@ -1297,6 +1302,8 @@ def st_pod_logs(request, monkeypatch):
         pytest.fail("st_pod_logs requires @pytest.mark.pod")
     run_dir = os.environ.get("RUN_DIR")
     if not run_dir:
+        if not os.environ.get("POD_REMOTE_ENDPOINT") or not os.environ.get("POD_REMOTE_DEVICES"):
+            pytest.skip("pod runner environment is required for pod tests")
         pytest.fail("RUN_DIR is required for pod tests")
     machine = os.environ.get("POD_MACHINE", "parent")
     nodeid = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.nodeid)

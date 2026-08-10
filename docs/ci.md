@@ -241,7 +241,7 @@ runner pools, branched at run time on the host arch (`uname -m`):
   `--device ${DEVICE_RANGE}`.
 
 a5 runners always use `task-submit`. The x86_64 A5 scene-test sweep deselects
-the `sdma` marker; ARM64 runs the full corpus, including SDMA tests. Steps that
+the `sdma` marker; ARM64 runs the full non-pod corpus, including SDMA tests. Steps that
 only build (cmake, `RuntimeBuilder`, the
 `cann-examples` smokes) take no lock on either arch. The same device-lock rule
 applies to local onboard work — see

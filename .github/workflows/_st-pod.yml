@@ -86,7 +86,7 @@ jobs:
           set_default POD_REMOTE_STAGING_ROOT /data/workspace/ci-runner/pod-ci
           set_default POD_REMOTE_STAGING_TTL_DAYS 2
           set_default POD_DAEMON_WAIT_S 120
-          set_default POD_SMOKE_TIMEOUT_S 1800
+          set_default POD_SMOKE_TIMEOUT_S 2400
           set_default POD_CANN_ENV /usr/local/Ascend/cann/set_env.sh
           set_default POD_REMOTE_CANN_ENV "$POD_CANN_ENV"
           set_default POD_HTTP_PROXY ""

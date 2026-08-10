@@ -160,7 +160,7 @@ def run(
     runtime: str = "tensormap_and_ringbuffer",
     comm_profile: str = "a3-fabric-v1",
     session_timeout: float = 120.0,
-    session_listen_host: str = "0.0.0.0",
+    session_listen_host: str = "0.0.0.0",  # noqa: S104 - Remote peer callbacks need a reachable listener.
 ) -> int:
     # The local L3 is a fork of this process, so its orchestration function
     # reaches the handle only through module state; a local would not survive
@@ -170,23 +170,27 @@ def run(
     local_device = _parse_first_device(local_devices, label="local")
     remote_device = _parse_first_device(remote_devices, label="remote")
 
-    chip_callable = _build_tload_callable(platform, runtime)
-    local_l3 = Worker(
-        level=3,
-        device_ids=[local_device],
-        num_sub_workers=0,
-        platform=platform,
-        runtime=runtime,
-        comm_profile=comm_profile,
-        global_device_ranks=(0,),
-    )
-    _LOCAL_CHIP_HANDLE = local_l3.register(chip_callable)
-
-    worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=session_timeout)
+    local_l3: Worker | None = None
+    local_l3_attached = False
+    worker: Worker | None = None
     domain_handle: GlobalCommDomainHandle | None = None
     parent_keepalive: list[TaskArgs] = []
     try:
+        chip_callable = _build_tload_callable(platform, runtime)
+        local_l3 = Worker(
+            level=3,
+            device_ids=[local_device],
+            num_sub_workers=0,
+            platform=platform,
+            runtime=runtime,
+            comm_profile=comm_profile,
+            global_device_ranks=(0,),
+        )
+        _LOCAL_CHIP_HANDLE = local_l3.register(chip_callable)
+
+        worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=session_timeout)
         local_node = worker.add_worker(local_l3)
+        local_l3_attached = True
         remote_node = worker.add_remote_worker(
             RemoteWorkerSpec(
                 endpoint=remote,
@@ -271,7 +275,13 @@ def run(
         if domain_handle is not None and not domain_handle.freed:
             with contextlib.suppress(Exception):
                 domain_handle.release()
-        worker.close()
+        try:
+            if worker is not None:
+                worker.close()
+        finally:
+            if local_l3 is not None and not local_l3_attached:
+                with contextlib.suppress(Exception):
+                    local_l3.close()
 
 
 def main() -> int:
