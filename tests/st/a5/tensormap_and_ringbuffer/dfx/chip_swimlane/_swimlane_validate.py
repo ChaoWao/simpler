@@ -52,6 +52,7 @@ def validate_perf_artifact(
     since: float,
     expected_task_count: int | None = None,
     expected_complete_finishes: int | None = None,
+    required_sched_phases: tuple[str, ...] = (),
 ) -> None:
     """Locate this invocation's output dir for ``case_label`` and run the full
     capture-→-tools-→-differential sequence.
@@ -70,6 +71,8 @@ def validate_perf_artifact(
         expected_complete_finishes: when provided, assert the sum of
             Complete-phase ``tasks_processed`` values. This is a FIN/retire
             count, so an SPMD workload can exceed its logical task count.
+        required_sched_phases: scheduler phases that must each carry positive
+            ``tasks_processed`` work in this capture.
     """
     safe_label = _sanitize_for_filename(case_label)
     matches = [p for p in _outputs_dir().glob(f"{safe_label}_*") if p.stat().st_mtime >= since]
@@ -103,6 +106,12 @@ def validate_perf_artifact(
         assert complete_finishes == expected_complete_finishes, (
             f"got {complete_finishes} Complete FINs, expected {expected_complete_finishes} under {perf}"
         )
+    phase_records = [record for thread_records in data.get("aicpu_scheduler_phases", []) for record in thread_records]
+    for phase in required_sched_phases:
+        phase_work = sum(
+            int(record.get("tasks_processed", 0)) for record in phase_records if record.get("phase") == phase
+        )
+        assert phase_work > 0, f"scheduler phase {phase!r} carried no work under {perf}"
     # Spot-check a single record's required fields — guards against drift in
     # the swimlane schema that swimlane_converter.py / deps_viewer.py rely on.
     first = tasks[0]
