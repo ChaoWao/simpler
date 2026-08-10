@@ -4177,6 +4177,10 @@ class Worker:
         # handle back to its run so waiting and finalization can find it.
         self._chip_runs: dict[int, Any] = {}
         self._chip_run_seq: int = 0
+        # Mirrors _chip_runs' own lifecycle (added/removed at the same two points) so
+        # release_buffer() can see an L2 run in flight: L2 dispatch never touches
+        # _accepted_run_handles/_submit_mu, so it is otherwise invisible to that check.
+        self._chip_run_touched_identities: dict[int, set[CanonicalIdentity]] = {}
 
         # Level-3+ internals
         self._worker: _Worker | None = None
@@ -9234,6 +9238,11 @@ class Worker:
                 out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
 
+    @staticmethod
+    def _identities_in_args(args: Any) -> set[CanonicalIdentity]:
+        """Every tensor arg's identity in ``args``."""
+        return {args.tensor(i).buffer.identity for i in range(args.tensor_count())}
+
     def _record_touched_identities(self, args: Any) -> None:
         """Add every tensor arg's identity in ``args`` to the current run's touched set.
 
@@ -9245,8 +9254,7 @@ class Worker:
         resources = self._building_run_resources
         if resources is None:
             return
-        for i in range(args.tensor_count()):
-            resources.touched_identities.add(args.tensor(i).buffer.identity)
+        resources.touched_identities.update(self._identities_in_args(args))
 
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
         """Validate every child_memory pointer against its exact target worker."""
@@ -9646,23 +9654,33 @@ class Worker:
     def release_buffer(self, buffer: Buffer) -> None:
         """Close + unlink one owner Buffer and drop its registry entry.
 
-        Rejects outright if any currently in-flight run (not yet past ``_cleanup_published``) sent
-        this identity as a NEXT_LEVEL Tensor arg — a Buffer never goes away while a dispatched task
-        still names it. Takes ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles``
-        before its orchestration callback (where ``touched_identities`` gets populated) has run, and
-        that callback is what ``_submit_mu`` already serializes graph construction against, so taking
-        it here means the check only ever runs between callbacks, never mid-callback with a
-        not-yet-complete touched set. Not checked once ``buffer`` is already closed, matching
-        ``Buffer.close()``'s own idempotency. The entry survives a failed close, so
-        ``_release_all_buffers`` still reports the leak at close() rather than losing it here. The
-        slot is dropped only when it still holds *this* buffer: a buffer_id minted elsewhere can
-        collide with a registry key, and evicting the live entry it names would strand that
-        backing."""
+        Rejects outright if any currently in-flight L3+ run (not yet past ``_cleanup_published``)
+        sent this identity as a NEXT_LEVEL Tensor arg, or any in-flight L2 direct-chip run sent it —
+        a Buffer never goes away while a dispatched task still names it. The L3+ check takes
+        ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles`` before its
+        orchestration callback (where ``touched_identities`` gets populated) has run, and that
+        callback is what ``_submit_mu`` already serializes graph construction against, so taking it
+        here means the check only ever runs between callbacks, never mid-callback with a
+        not-yet-complete touched set. The L2 check is independent (a separate run-id namespace with
+        no callback to serialize against — ``_chip_run_touched_identities`` is written atomically
+        alongside ``_chip_runs`` under ``_registry_lock`` instead, see ``_submit_l2_locked``), so the
+        two checks run sequentially rather than under one shared lock. Neither is checked once
+        ``buffer`` is already closed, matching ``Buffer.close()``'s own idempotency. The entry
+        survives a failed close, so ``_release_all_buffers`` still reports the leak at close() rather
+        than losing it here. The slot is dropped only when it still holds *this* buffer: a buffer_id
+        minted elsewhere can collide with a registry key, and evicting the live entry it names would
+        strand that backing."""
         if not buffer.closed:
             with self._submit_mu, self._hierarchical_start_cv:
                 for handle in self._accepted_run_handles:
                     if not handle._cleanup_published and buffer.identity in handle._resources.touched_identities:
                         raise RuntimeError(f"release_buffer: {buffer.identity} is still referenced by an in-flight run")
+            with self._registry_lock:
+                for touched in self._chip_run_touched_identities.values():
+                    if buffer.identity in touched:
+                        raise RuntimeError(
+                            f"release_buffer: {buffer.identity} is still referenced by an in-flight L2 run"
+                        )
         buffer.close()
         with self._registry_lock:
             buffer_id = int(buffer.identity.buffer_id)
@@ -9945,11 +9963,24 @@ class Worker:
         completion fence through :meth:`RunHandle.wait`.
         """
         assert self._chip_worker is not None
+        touched = self._identities_in_args(args) if args is not None else set()
         chip_args = self._materialize_l2_args(args)
-        chip_run = self._chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, cfg)
-        self._chip_run_seq += 1
-        run_id = self._chip_run_seq
-        self._chip_runs[run_id] = chip_run
+        # Publish touched_identities BEFORE dispatch, not after: release_buffer() reads this
+        # dict to decide whether a Buffer is still in flight, so if it were only written after
+        # _submit_chip_run_direct() returns, a release racing the window between dispatch and
+        # publication would see no entry for a run that is already running on the chip.
+        with self._registry_lock:
+            self._chip_run_seq += 1
+            run_id = self._chip_run_seq
+            self._chip_run_touched_identities[run_id] = touched
+        try:
+            chip_run = self._chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, cfg)
+        except BaseException:
+            with self._registry_lock:
+                self._chip_run_touched_identities.pop(run_id, None)
+            raise
+        with self._registry_lock:
+            self._chip_runs[run_id] = chip_run
         # chip_args is kept alive by the handle: the lane copies the args into
         # its own storage, but the keepalive also pins the buffers the resolved
         # descriptors point at for as long as the run can still read them.
@@ -10037,7 +10068,7 @@ class Worker:
         assert self._orch is not None
         self._orch._wait_run_accepted(run_id)
 
-    def _finalize_run_handle(
+    def _finalize_run_handle(  # noqa: PLR0912 -- one extra branch for the L2 pop-under-lock guard
         self,
         handle: RunHandle,
         run_id: int,
@@ -10051,9 +10082,14 @@ class Worker:
         # domains, remote slots or chip regions for it. Retiring the lane entry
         # is the whole of its cleanup, so it never enters the cursor below —
         # driving those steps here would report a cleanup failure for state that
-        # was never created.
-        if run_id in self._chip_runs:
-            del self._chip_runs[run_id]
+        # was never created. The membership check and both removals share one lock
+        # acquisition (pop(..., None), not del) so a concurrent Worker.close() clearing
+        # these same dicts can never make this raise KeyError or read a half-updated pair.
+        with self._registry_lock:
+            was_l2_run = self._chip_runs.pop(run_id, None) is not None
+            if was_l2_run:
+                self._chip_run_touched_identities.pop(run_id, None)
+        if was_l2_run:
             return native_error
 
         # Two different failures, deliberately not merged. A task that failed is
@@ -10793,7 +10829,9 @@ class Worker:
                         except Exception:
                             if undelivered:
                                 raise
-                    self._chip_runs.clear()
+                    with self._registry_lock:
+                        self._chip_runs.clear()
+                        self._chip_run_touched_identities.clear()
                     self._chip_worker.finalize()
                     self._chip_worker = None
 

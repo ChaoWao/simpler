@@ -9,22 +9,26 @@
 """``Worker.release_buffer()``: rejects release while an in-flight run still references the
 buffer's identity, and how that identity gets tracked in the first place.
 
-L2 never needs this: a run completes synchronously inside ``submit()`` (``RunHandle._completed``),
-so there is never an in-flight window. Tracking hooks the two L3+ async dispatch entry points,
-``Orchestrator.submit_next_level`` / ``.submit_next_level_group``, device-free via the same
-fake-C++-orchestrator harness ``test_child_addr_guard.py`` already established.
+L3+ tracking hooks the two async dispatch entry points, ``Orchestrator.submit_next_level`` /
+``.submit_next_level_group``, device-free via the same fake-C++-orchestrator harness
+``test_child_addr_guard.py`` already established. L2's direct-chip dispatch
+(``_submit_l2_locked``) is a separate run-id namespace that never touches
+``_accepted_run_handles``/``_submit_mu`` at all, so it gets its own parallel tracking dict
+(``_chip_run_touched_identities``, mirroring ``_chip_runs``' own add/remove lifecycle) and its
+own independent check in ``release_buffer``.
 """
 
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from _task_interface import DataType, TensorArgType
 from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
 from simpler.orchestrator import Orchestrator
-from simpler.task_interface import TaskArgs
+from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import RunHandle, Worker, _RunResources
 
 _F32 = 0  # DataType.FLOAT32 value
@@ -192,3 +196,97 @@ class TestReleaseBuffer:
         releaser.join(timeout=5)
         assert release_returned.is_set()
         assert not buf.closed  # correctly rejected once it could finally check -- not released mid-race
+
+
+class _FakeChipImpl:
+    """Stands in for ChipWorker._impl: records the dispatch, hands back a run object whose only
+    used surface is .wait() (never exercised by these tests, kept for interface completeness)."""
+
+    def __init__(self):
+        self.calls: list[tuple[int, object, object]] = []
+
+    def _submit_chip_run_direct(self, callable_id, chip_args, cfg):
+        self.calls.append((callable_id, chip_args, cfg))
+        return SimpleNamespace(wait=lambda timeout: True)
+
+
+def _l2_with_registered_buffer(nbytes: int = 64):
+    """An L2 Worker (its own chip, no fork needed) plus one buffer already registered in
+    w._buffers, the way Worker.create_buffer() would leave it."""
+    w = Worker(level=2)
+    w._chip_worker = SimpleNamespace(_impl=_FakeChipImpl())
+    buf = w._create_buffer_locked(nbytes)
+    return w, buf
+
+
+class TestL2TouchedIdentityTracking:
+    def test_submit_l2_locked_records_touched_identity(self):
+        w, buf = _l2_with_registered_buffer()
+        handle = w._submit_l2_locked(3, _buffer_args(buf), CallConfig())
+        assert handle._run_id is not None
+        assert w._chip_run_touched_identities[handle._run_id] == {buf.identity}
+
+    def test_submit_l2_locked_with_no_args_is_empty(self):
+        w, _buf = _l2_with_registered_buffer()
+        handle = w._submit_l2_locked(3, None, CallConfig())
+        assert handle._run_id is not None
+        assert w._chip_run_touched_identities[handle._run_id] == set()
+
+    def test_finalize_run_handle_clears_l2_touched_identities(self):
+        w, buf = _l2_with_registered_buffer()
+        handle = w._submit_l2_locked(3, _buffer_args(buf), CallConfig())
+        run_id = handle._run_id
+        assert run_id in w._chip_runs
+        assert run_id in w._chip_run_touched_identities
+        w._finalize_run_handle(handle, run_id, None)
+        assert run_id not in w._chip_runs
+        assert run_id not in w._chip_run_touched_identities
+
+    def test_publishes_touched_identities_before_dispatch_not_after(self):
+        # _submit_l2_locked must publish _chip_run_touched_identities BEFORE calling
+        # _submit_chip_run_direct, not after -- otherwise a release_buffer() landing in the
+        # window between dispatch and publication would see no entry for a run already
+        # running on the chip. Block dispatch mid-call and confirm release_buffer already
+        # sees (and rejects on) the identity at that point, not only after dispatch returns.
+        w, buf = _l2_with_registered_buffer()
+        entered_dispatch = threading.Event()
+        proceed = threading.Event()
+
+        class _BlockingChipImpl(_FakeChipImpl):
+            def _submit_chip_run_direct(self, callable_id, chip_args, cfg):
+                entered_dispatch.set()
+                proceed.wait(timeout=5)
+                return super()._submit_chip_run_direct(callable_id, chip_args, cfg)
+
+        w._chip_worker = SimpleNamespace(_impl=_BlockingChipImpl())
+
+        submit_thread = threading.Thread(target=lambda: w._submit_l2_locked(3, _buffer_args(buf), CallConfig()))
+        submit_thread.start()
+        assert entered_dispatch.wait(timeout=5)
+
+        try:
+            with pytest.raises(RuntimeError, match="in-flight L2 run"):
+                w.release_buffer(buf)
+        finally:
+            proceed.set()
+            submit_thread.join(timeout=5)
+        assert not buf.closed
+
+
+class TestReleaseBufferL2InFlight:
+    def test_rejects_while_an_l2_run_is_in_flight(self):
+        w, buf = _l2_with_registered_buffer()
+        w._chip_run_touched_identities[1] = {buf.identity}
+        with pytest.raises(RuntimeError, match="in-flight L2 run"):
+            w.release_buffer(buf)
+        assert not buf.closed
+        buffer_id = int(buf.identity.buffer_id)
+        assert w._buffers.get(buffer_id) is buf  # rejection must not half-apply the registry drop
+
+    def test_succeeds_once_the_l2_run_is_gone(self):
+        w, buf = _l2_with_registered_buffer()
+        w._chip_run_touched_identities[1] = {buf.identity}
+        del w._chip_run_touched_identities[1]
+        w.release_buffer(buf)
+        assert buf.closed
+        assert int(buf.identity.buffer_id) not in w._buffers
