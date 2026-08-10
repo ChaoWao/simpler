@@ -958,6 +958,7 @@ def _bare_l3_worker():
     w._hierarchical_start_cv = threading.Condition(w._hierarchical_start_mu)
     w._accepted_run_handles = set()
     w._submit_mu = threading.Lock()
+    w._chip_run_touched_identities = {}
     return w
 
 
