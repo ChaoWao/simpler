@@ -344,6 +344,19 @@ PTO2Runtime *runtime_init_data_from_layout(
     return runtime_init_data_from_layout(arena, layout, mode, sm_dev_base, 0, gm_heap_dev_base, heap_sizes);
 }
 
+/**
+ * Populate the prebuilt runtime-arena image in place (host build path).
+ *
+ * Zeroes the PTO2Runtime header at layout.off_runtime, records the GM heap,
+ * and initializes the scheduler (ready / sync / dummy / graph queues) against
+ * the device SM. The orchestrator is deliberately left zeroed: the host-orch
+ * path (run_host_orchestration) initializes it against the host SM once that
+ * buffer exists, then relocates it for the device. Initializing it here would
+ * be dead work — overwritten by that re-init, and the orchestrator arena block
+ * is never uploaded to the device. Caller must follow up with
+ * runtime_wire_arena_pointers. Returns the arena-resident PTO2Runtime*, or
+ * nullptr on failure.
+ */
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
     uint64_t /*sm_size*/, void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
@@ -365,11 +378,13 @@ PTO2Runtime *runtime_init_data_from_layout(
     rt->gm_heap_owned = false;
     rt->total_cycles = 0;
 
-    if (!rt->orchestrator.init_data_from_layout(
-            layout.orch, arena, sm_dev_base, gm_heap_dev_base, heap_sizes[0], layout.task_window_sizes[0]
-        )) {
-        return nullptr;
-    }
+    // The orchestrator is initialized by the host-orch path
+    // (run_host_orchestration) against the host SM once it is allocated, then
+    // relocated for the device. Initializing it here would be dead work: its
+    // arena content (tensormap + seen_epoch memset) is immediately overwritten by
+    // that re-init, and the orchestrator arena block is not uploaded to the device
+    // (the scheduler boots without it). So only the scheduler is initialized here;
+    // rt->orchestrator stays zeroed (from the memset above) until run_host_orchestration.
     if (!rt->scheduler.init_data_from_layout(layout.sched, arena, sm_dev_base)) {
         return nullptr;
     }
