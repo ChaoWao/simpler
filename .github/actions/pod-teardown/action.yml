@@ -1,8 +1,8 @@
 name: Clear the pod staging tree
 description: >-
-  Remove this run's tree from the peer. Call once, with `if: always()`. Each
-  pod-run-example already stopped its own daemon; the sweep here only catches an
-  example that died before reaching that step.
+  Remove this run's tree from the peer. Call once, with `if: always()`. The pod
+  pytest action already stopped its own daemon; the sweep here only catches a
+  run that died before reaching that step.
 
 runs:
   using: composite

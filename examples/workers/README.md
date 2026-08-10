@@ -149,9 +149,10 @@ require an Ascend NPU box with `ASCEND_HOME_PATH` set.
 
 L2 and L3 examples follow that uniform CLI. **L4 examples do not** — they need
 a peer's address and a device split on each side, so they take `--remote`,
-`--local-devices` and `--remote-devices` instead of `-p`/`-d`, and are normally
-launched through their `run_parent.sh`. See each L4 example's README for the
-two-machine sequence.
+`--local-devices` and `--remote-devices` instead of `-p`/`-d`. Each L4 example
+now also ships a `test_*.py` wrapper for pytest collection; CI uses that wrapper
+and `run_parent.sh` remains the manual entry point. See each L4 example's README
+for the two-machine sequence.
 
 ## Related documentation
 

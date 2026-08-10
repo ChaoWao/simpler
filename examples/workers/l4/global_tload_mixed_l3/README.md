@@ -81,4 +81,5 @@ Any `max_diff` above the tolerance exits non-zero.
 
 The peer `TLOAD` needs real cross-device windows, so the default profile is
 `a3-fabric-v1` and requires real A3 devices on both machines. In CI the pod
-job drives this script through `pod-run-example` with the same variables.
+job runs the `test_global_tload_mixed_l3.py` wrapper through `pod-run-pytest`
+with the same variables; `run_parent.sh` remains the manual entry point.

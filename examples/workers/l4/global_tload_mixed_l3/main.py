@@ -151,43 +151,52 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def run(
+    *,
+    remote: str,
+    local_devices: str,
+    remote_devices: str,
+    platform: str = "a2a3",
+    runtime: str = "tensormap_and_ringbuffer",
+    comm_profile: str = "a3-fabric-v1",
+    session_timeout: float = 120.0,
+    session_listen_host: str = "0.0.0.0",
+) -> int:
     # The local L3 is a fork of this process, so its orchestration function
     # reaches the handle only through module state; a local would not survive
     # into the child.
     global _LOCAL_CHIP_HANDLE  # noqa: PLW0603
 
-    args = _parse_args()
-    local_device = _parse_first_device(args.local_devices, label="local")
-    remote_device = _parse_first_device(args.remote_devices, label="remote")
+    local_device = _parse_first_device(local_devices, label="local")
+    remote_device = _parse_first_device(remote_devices, label="remote")
 
-    chip_callable = _build_tload_callable(args.platform, args.runtime)
+    chip_callable = _build_tload_callable(platform, runtime)
     local_l3 = Worker(
         level=3,
         device_ids=[local_device],
         num_sub_workers=0,
-        platform=args.platform,
-        runtime=args.runtime,
-        comm_profile=args.comm_profile,
+        platform=platform,
+        runtime=runtime,
+        comm_profile=comm_profile,
         global_device_ranks=(0,),
     )
     _LOCAL_CHIP_HANDLE = local_l3.register(chip_callable)
 
-    worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=args.session_timeout)
+    worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=session_timeout)
     domain_handle: GlobalCommDomainHandle | None = None
     parent_keepalive: list[TaskArgs] = []
     try:
         local_node = worker.add_worker(local_l3)
         remote_node = worker.add_remote_worker(
             RemoteWorkerSpec(
-                endpoint=args.remote,
-                platform=args.platform,
-                runtime=args.runtime,
+                endpoint=remote,
+                platform=platform,
+                runtime=runtime,
                 device_ids=(remote_device,),
                 transport=HOST_TCP_TRANSPORT_PROFILE,
-                comm_profile=args.comm_profile,
+                comm_profile=comm_profile,
                 global_device_ranks=(1,),
-                session_listen_host=args.session_listen_host,
+                session_listen_host=session_listen_host,
                 allow_wildcard_session_bind=True,
             )
         )
@@ -263,6 +272,20 @@ def main() -> int:
             with contextlib.suppress(Exception):
                 domain_handle.release()
         worker.close()
+
+
+def main() -> int:
+    args = _parse_args()
+    return run(
+        remote=args.remote,
+        local_devices=args.local_devices,
+        remote_devices=args.remote_devices,
+        platform=args.platform,
+        runtime=args.runtime,
+        comm_profile=args.comm_profile,
+        session_timeout=args.session_timeout,
+        session_listen_host=args.session_listen_host,
+    )
 
 
 if __name__ == "__main__":
