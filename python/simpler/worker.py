@@ -98,7 +98,6 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _worker_host_mapped_region_peek_cleanup_error,
     get_element_size,
     materialize_task_args,
-    materialize_tensor_blob,
     read_args_from_blob,
 )
 
@@ -2501,13 +2500,14 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             )
             if pipeline_reserved != 0:
                 raise RuntimeError(f"chip_process dev={device_id}: invalid pipeline lease reserved field")
-            # Materialize the tensor args into a chip-POD blob the runtime reads: resolve
-            # each ref's embedded handle to a local base (map-once, cached by canonical
-            # identity), then build the chip blob at those bases. Replaces the former
-            # parent-VA range rewrite — identities resolve exactly, not by numeric range.
+            # The mailbox bytes decode once, into the wire TaskArgs; the mapping pass and the
+            # chip-POD build both read that object. Each tensor's embedded handle resolves to a
+            # local base by canonical identity (map-once, cached), and the POD is built at those
+            # bases — an exact resolution, not the parent-VA numeric-range rewrite it replaced.
             args_ptr = task_addr + _OFF_TASK_ARGS_BLOB
-            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
-            chip_args = materialize_tensor_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            resolved = import_registry.materialize_args(args)
+            chip_args = materialize_task_args(args, resolved)
             # The acceptance flag lives in the mailbox, not in the materialized args, so
             # the fence still publishes through the address the parent polls.
             cw._impl.run_materialized(
@@ -2759,13 +2759,15 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
 
         def submit_frame(frame: _StagedFrame) -> None:
             _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
-            # The frame carries the wire blob; the runtime reads the chip POD. Resolve each
-            # tensor's descriptor to a local base (map-once, cached by canonical identity) and
-            # rebuild at those bases, as the non-pipelined task path does. The lane copies the
-            # args into its own storage, so this POD need not outlive the call.
+            # The frame carries the wire blob; the runtime reads the chip POD. The bytes decode
+            # once into the wire TaskArgs, whose tensors resolve to local bases (map-once, cached
+            # by canonical identity) and rebuild at those bases, as the non-pipelined task path
+            # does. The lane copies the args into its own storage, so this POD need not outlive
+            # the call.
             args_ptr = frame.frame_addr + _OFF_TASK_ARGS_BLOB
-            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
-            chip_args = materialize_tensor_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            resolved = import_registry.materialize_args(args)
+            chip_args = materialize_task_args(args, resolved)
             frame.chip_run = cw._impl._submit_chip_run_materialized(
                 frame.cid,
                 chip_args,

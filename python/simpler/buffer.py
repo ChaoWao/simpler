@@ -634,19 +634,9 @@ class ImportRegistry:
         self._by_identity[key] = imported
         return imported
 
-    def materialize_blob(self, blob_ptr: int, capacity: int) -> dict[CanonicalIdentity, tuple[int, int]]:
-        """Materialize every embedded descriptor in a task-args blob and return the resolved map:
-        identity -> (local base, address_space), scoped to this call's own tensors."""
-        args = read_args_from_blob(blob_ptr, capacity)
-        resolved: dict[CanonicalIdentity, tuple[int, int]] = {}
-        for i in range(args.tensor_count()):
-            desc = args.tensor(i).buffer
-            imported = self.materialize(desc)
-            resolved[desc.identity] = (imported.base, int(imported.address_space))
-        return resolved
-
     def materialize_args(self, args) -> dict[CanonicalIdentity, tuple[int, int]]:
-        """The same, for a ``TaskArgs`` already held in this process (the L2-leaf path)."""
+        """Materialize every embedded descriptor in a ``TaskArgs`` and return the resolved map:
+        identity -> (local base, address_space), scoped to this call's own tensors."""
         resolved: dict[CanonicalIdentity, tuple[int, int]] = {}
         for i in range(args.tensor_count()):
             desc = args.tensor(i).buffer
