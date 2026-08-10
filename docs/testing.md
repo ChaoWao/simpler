@@ -58,9 +58,8 @@ python -m simpler_setup.tools.scene_test_compile examples tests/st \
 # provisioned SDMA workspace (issue #1425)
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 
-# A5 ARM64 runs the non-pod corpus; A5 x86_64 also deselects SDMA tests
+# A5 runs the non-pod corpus, including SDMA tests, on both host architectures
 pytest examples tests/st -m "not pod" --platform a5 --device 0-7
-pytest examples tests/st -m "not sdma and not pod" --platform a5 --device 0-7
 
 # Single scene test (standalone)
 python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
