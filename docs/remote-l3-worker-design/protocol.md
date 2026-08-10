@@ -88,24 +88,8 @@ encodes these fields explicitly and rejects drift through decode-time bounds
 checks. The local fork/shm mailbox continues to memcpy the packed `CallConfig`
 POD because it is same-binary IPC, not the cross-host protocol.
 
-`TensorWire v1` encodes tensor metadata explicitly. In remote TASK
-frames, `data` is not a transferable pointer; it is reserved and must be zero.
-
-```text
-data: uint64  # reserved in remote TASK frames; must be 0
-shapes: uint32[MAX_TENSOR_DIMS]
-ndims: uint32
-dtype: uint32
-child_memory: uint8
-reserved: uint8[7]
-```
-
-The wire carries only the contiguous-defining fields; it does **not** carry
-`strides` / `start_offset`, and `decode_tensor` rebuilds them as row-major.
-The remote wire is therefore **contiguous-only**: strided views round-trip
-solely over the local fork/shm mailbox blob (full 128 B `ChipTensor` memcpy).
-`encode_tensor` asserts `is_contiguous && start_offset == 0` so a strided
-tensor fails loudly rather than being silently flattened.
+A remote TASK argument is a `TensorWire`, defined with the rest of the TASK
+payload below.
 
 The session runner decodes these wire records into a local `CallConfig` and a
 wire `TaskArgs` before calling `inner_worker.run()`. Each tensor becomes a
@@ -152,7 +136,8 @@ args: RemoteTaskArgsWire v1
 
 The TASK payload has exactly these top-level fields: callable digest,
 `CallConfigWire`, and `RemoteTaskArgsWire`. `RemoteTaskArgsWire` then carries
-tensor metadata, remote tensor descriptors, scalars, and optional inline bytes.
+the argument tensors, remote tensor descriptors, scalars, and optional inline
+bytes.
 
 TASK frames carry the raw digest from the submitted parent-facing
 `CallableHandle.hashid`. Parent-side dependency inference has already consumed
@@ -165,7 +150,7 @@ the sidecar descriptors captured at submit time to name, on the session runner,
 the local backings the wire `TaskArgs` views.
 
 The current `RemoteL3Endpoint` implementation builds this payload from
-`TaskSlotState`, zeros every tensor metadata `data` field, and submits the
+`TaskSlotState`, carrying each argument's `Tensor` verbatim, and submits the
 encoded frame through `RemoteL3Transport`. The simulation session runner
 resolves the digest in its dispatcher registry, materializes the sidecar
 descriptors, and calls `inner_worker.run()`.
@@ -175,22 +160,28 @@ descriptors, and calls `inner_worker.run()`.
 ```text
 tensor_count: uint32
 scalar_count: uint32
-tensor_metadata: TensorWire[tensor_count]
+tensors: TensorWire[tensor_count]
 remote_desc: OptionalRemoteTensorDescWire[tensor_count]
 scalars: uint64[scalar_count]
 inline_payload_bytes_len: uint32
 inline_payload_bytes: uint8[inline_payload_bytes_len]
 ```
 
-For each tensor index, exactly one of these is true:
+`TensorWire` is the wire `Tensor` of `src/common/task_interface/buffer.h`: the
+embedded `BufferDescriptor` (identity nonce, `buffer_id`, `generation`,
+`address_space`, `access`, `backend_kind`, `nbytes`, `owner_worker_path_id`, a
+length-delimited backend body) followed by the view (`byte_offset`, `ndims`,
+`ndims`-many `shapes` and `strides`, `dtype`). Shapes and strides travel as
+`ndims`-many entries, so the slots past `ndims` that `validate_tensor` requires
+zero are never on the wire.
 
-- `remote_desc[i]` is present and names a remote buffer, imported peer buffer,
-  UB mapping, or allowed small `HOST_INLINE` payload.
-- The tensor is metadata-only and has no data pointer and no remote descriptor.
-
-`tensor_metadata[i].data` must be zero in both cases. Bare host pointers are
-rejected for remote endpoints unless an explicit staging API has produced a
-remote handle and sidecar descriptor.
+Every argument's `remote_desc[i]` is present and names a remote buffer,
+imported peer buffer, UB mapping, or allowed small `HOST_INLINE` payload. That
+sidecar is the sole authority for the argument's backing, so `tensors[i]` must
+carry no backing of its own: its `backend_kind` is `REMOTE_SIDECAR` and its
+`byte_offset` is zero, both rejected otherwise on encode and on decode. Bare
+host pointers are rejected for remote endpoints unless an explicit staging API
+has produced a remote handle and sidecar descriptor.
 
 `HOST_INLINE` is for small payloads that should travel inside the TASK frame.
 It still requires a `RemoteTensorDescWire` with `address_space=HOST_INLINE`;
@@ -221,14 +212,13 @@ RemoteTensorDescWire:
 
 Rules:
 
-- `ChipTensor` remains the L2 ABI. The session runner translates descriptors
-  into wire `Tensor` args immediately before `inner_worker.run()`; the L2 leaf
-  under it materializes those into `ChipTensor` as it does on every path.
-- When a descriptor is present, the incoming `TensorWire.data` is
-  reserved and must be zero. The session runner derives the executable local
-  address only from the validated descriptor and its live buffer/import
-  registry.
-- Metadata-only tensors also require `TensorWire.data == 0`.
+- `ChipTensor` remains the L2 ABI. The session runner rebuilds each incoming
+  `TensorWire`'s view over the local backing its descriptor names, immediately
+  before `inner_worker.run()`; the L2 leaf under it materializes those into
+  `ChipTensor` as it does on every path.
+- The incoming `TensorWire` carries no address and no local backing. The
+  session runner derives the executable local address only from the validated
+  descriptor and its live buffer/import registry.
 - Parent-side dependency keys use a stable logical start-address key derived at
   submit time:
   `(address_kind, owner_worker_id, buffer_id, generation, offset)`.
@@ -769,7 +759,8 @@ The frame codec must reject:
 - descriptor offsets outside the referenced handle;
 - `HOST_INLINE` payload offsets or lengths outside the inline byte arena;
 - non-`HOST_INLINE` descriptors with non-zero inline payload lengths;
-- non-zero `TensorWire.data` in remote TASK frames;
+- a remote TASK argument that carries a local backing (any `backend_kind` other
+  than `REMOTE_SIDECAR`) or a non-zero `TensorWire.byte_offset`;
 - stale generations;
 - unknown control names or control versions;
 - completion sequence mismatch;

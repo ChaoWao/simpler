@@ -416,6 +416,24 @@ TaskArgs bare_pointer_args() {
     return args;
 }
 
+TaskArgs sidecar_free_placeholder_args() {
+    TaskArgs args;
+    Tensor ref{};
+    ref.buffer.magic = BUFFER_DESCRIPTOR_MAGIC;
+    ref.buffer.address_space = static_cast<uint8_t>(AddressSpace::HOST);
+    ref.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    ref.buffer.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+    ref.buffer.identity.buffer_id = 0x1234;
+    ref.buffer.identity.generation = 1;
+    ref.buffer.nbytes = 1;
+    ref.ndims = 1;
+    ref.shapes[0] = 1;
+    ref.strides[0] = 1;
+    ref.dtype = DataType::UINT8;
+    args.add_tensor(ref, TensorArgType::INPUT);
+    return args;
+}
+
 }  // namespace
 
 TEST(RemoteEndpoint, TaskDispatchUsesProgressSubmissionAndPolling) {
@@ -807,6 +825,29 @@ TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsRejectedAtSubmission) {
         ADD_FAILURE() << "expected the local backing to be rejected";
     } catch (const std::runtime_error &e) {
         EXPECT_NE(std::string(e.what()).find("local backing"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(transport->last_frame.empty());
+    ring.shutdown();
+}
+
+TEST(RemoteEndpoint, SidecarFreePlaceholderIsRejectedAtSubmission) {
+    Ring ring;
+    ring.init(1ULL << 20);
+    TaskSlot slot = make_slot(ring, sidecar_free_placeholder_args());
+
+    auto *transport = new FakeRemoteTransport();
+    RemoteL3Endpoint endpoint(3, 99, "fake", std::unique_ptr<RemoteL3Transport>(transport));
+
+    WorkerDispatch dispatch;
+    dispatch.task_slot = slot;
+    // A REMOTE_SIDECAR placeholder names its backing only through its sidecar, so one submitted
+    // without a sidecar names nothing the runner could resolve. Match the message: submit_progress
+    // has several other runtime_error paths.
+    try {
+        endpoint.submit_progress(&ring, dispatch);
+        ADD_FAILURE() << "expected the sidecar-free placeholder to be rejected";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find("without remote sidecar"), std::string::npos) << e.what();
     }
     EXPECT_TRUE(transport->last_frame.empty());
     ring.shutdown();

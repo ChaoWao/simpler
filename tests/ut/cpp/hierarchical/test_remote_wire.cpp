@@ -21,13 +21,24 @@
 
 namespace {
 
-ChipTensor metadata_tensor() {
-    // Build through the canonical factory so the tensor is a valid contiguous
-    // descriptor (is_contiguous = true, start_offset = 0, row-major strides) —
-    // encode_tensor enforces contiguity on the wire. addr = 0 keeps it a
-    // metadata-only remote tensor.
-    const uint32_t shapes[1] = {4};
-    return make_tensor_external(nullptr, shapes, 1, DataType::UINT8);
+// A task arg bound for a remote worker: a REMOTE_SIDECAR placeholder naming remote buffer 9 on
+// worker 3, with no local backing of its own. That is the only backend this wire accepts.
+Tensor remote_arg_tensor() {
+    Tensor tensor{};
+    tensor.buffer.magic = BUFFER_DESCRIPTOR_MAGIC;
+    tensor.buffer.address_space = static_cast<uint8_t>(AddressSpace::HOST);
+    tensor.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    tensor.buffer.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+    tensor.buffer.identity.owner_instance_id[0] = 3;
+    tensor.buffer.identity.buffer_id = 9;
+    tensor.buffer.identity.generation = 1;
+    tensor.buffer.nbytes = 4;
+    tensor.ndims = 1;
+    tensor.shapes[0] = 4;
+    tensor.strides[0] = 1;
+    tensor.dtype = DataType::UINT8;
+    validate_tensor(tensor);
+    return tensor;
 }
 
 }  // namespace
@@ -75,20 +86,74 @@ TEST(RemoteWire, FrameRejectsBadVersionFlagsAndUnknownType) {
     EXPECT_THROW((void)remote_l3::decode_frame(bad_flags), std::runtime_error);
 }
 
-TEST(RemoteWire, TaskPayloadRejectsNonZeroTensorData) {
+TEST(RemoteWire, TaskPayloadRoundTripsTheArgTensorVerbatim) {
     remote_l3::TaskPayloadWire payload;
     payload.callable_digest.fill(0xAB);
-    payload.args.tensor_metadata.push_back(metadata_tensor());
+    Tensor arg = remote_arg_tensor();
+    // A strided view: strides are carried explicitly, so the wire does not flatten one.
+    arg.buffer.nbytes = 16;
+    arg.ndims = 2;
+    arg.shapes[0] = 2;
+    arg.shapes[1] = 2;
+    arg.strides[0] = 8;
+    arg.strides[1] = 1;
+    validate_tensor(arg);
+    payload.args.tensors.push_back(arg);
     payload.args.scalars.push_back(0xCAFE);
 
     auto encoded = remote_l3::encode_task_payload(payload);
     auto decoded = remote_l3::decode_task_payload(encoded.data(), encoded.size());
-    ASSERT_EQ(decoded.args.tensor_metadata.size(), 1u);
+    ASSERT_EQ(decoded.args.tensors.size(), 1u);
     EXPECT_EQ(decoded.callable_digest[0], 0xAB);
     EXPECT_EQ(decoded.args.scalars[0], 0xCAFEu);
 
-    payload.args.tensor_metadata[0].buffer.addr = 0x1234;
+    const Tensor &back = decoded.args.tensors[0];
+    EXPECT_TRUE(back.buffer == arg.buffer);
+    EXPECT_EQ(back.byte_offset, arg.byte_offset);
+    EXPECT_EQ(back.ndims, 2u);
+    EXPECT_EQ(back.shapes[0], 2u);
+    EXPECT_EQ(back.shapes[1], 2u);
+    EXPECT_EQ(back.strides[0], 8u);
+    EXPECT_EQ(back.strides[1], 1u);
+    EXPECT_EQ(back.dtype, DataType::UINT8);
+    // Slots past ndims never cross, so a decoded record compares clean against a fresh one.
+    EXPECT_EQ(back.shapes[2], 0u);
+    EXPECT_EQ(back.strides[2], 0u);
+}
+
+TEST(RemoteWire, TaskPayloadRejectsAnArgWithALocalBacking) {
+    remote_l3::TaskPayloadWire payload;
+    payload.callable_digest.fill(0xAB);
+    Tensor arg = remote_arg_tensor();
+    // A backing this endpoint could materialize locally is a second source of truth for a backing
+    // the sidecar already names, so it never crosses this wire.
+    arg.buffer.backend_kind = static_cast<uint8_t>(BackendKind::DEVICE_MALLOC);
+    payload.args.tensors.push_back(arg);
+
     EXPECT_THROW((void)remote_l3::encode_task_payload(payload), std::runtime_error);
+}
+
+TEST(RemoteWire, TensorRecordRejectsAByteOffsetOnEncodeAndOnDecode) {
+    Tensor arg = remote_arg_tensor();
+    arg.buffer.nbytes = 8;
+    arg.byte_offset = 4;
+    arg.shapes[0] = 4;
+    validate_tensor(arg);
+    // The sidecar carries where the view sits in the backing, so a record naming its own origin
+    // fails at the sender rather than after transport.
+    EXPECT_THROW((void)remote_l3::encode_tensor(arg), std::runtime_error);
+
+    arg.byte_offset = 0;
+    auto encoded = remote_l3::encode_tensor(arg);
+    // byte_offset follows the 39-byte descriptor head of a record whose backend body is empty:
+    // identity nonce(8) + buffer_id(8) + generation(4) + address_space/access/backend(3) +
+    // nbytes(8) + owner_worker_path_id(4) + body_len(4).
+    constexpr size_t kByteOffsetPos = 39;
+    ASSERT_GT(encoded.size(), kByteOffsetPos + sizeof(uint64_t));
+    encoded[kByteOffsetPos] = 4;
+
+    size_t offset = 0;
+    EXPECT_THROW((void)remote_l3::decode_tensor(encoded.data(), encoded.size(), offset), std::runtime_error);
 }
 
 TEST(RemoteWire, TaskPayloadPreservesScopeStatsCallConfig) {
@@ -98,7 +163,7 @@ TEST(RemoteWire, TaskPayloadPreservesScopeStatsCallConfig) {
     payload.config.enable_scope_stats = 1;
     const char *prefix = "/tmp/remote-scope";
     std::memcpy(payload.config.output_prefix, prefix, std::strlen(prefix));
-    payload.args.tensor_metadata.push_back(metadata_tensor());
+    payload.args.tensors.push_back(remote_arg_tensor());
 
     auto encoded = remote_l3::encode_task_payload(payload);
     auto decoded = remote_l3::decode_task_payload(encoded.data(), encoded.size());
@@ -115,7 +180,7 @@ TEST(RemoteWire, TruncatedControlPayloadIsRejected) {
 
 TEST(RemoteWire, HostInlineDescriptorBoundsAreChecked) {
     remote_l3::RemoteTaskArgsWire args;
-    args.tensor_metadata.push_back(metadata_tensor());
+    args.tensors.push_back(remote_arg_tensor());
     args.inline_payload = {1, 2, 3, 4};
 
     RemoteTensorSidecar sidecar;
@@ -142,7 +207,7 @@ TEST(RemoteWire, HostInlineDescriptorBoundsAreChecked) {
 
 TEST(RemoteWire, NonHostInlineDescriptorRejectsInlinePayloadFields) {
     remote_l3::RemoteTaskArgsWire args;
-    args.tensor_metadata.push_back(metadata_tensor());
+    args.tensors.push_back(remote_arg_tensor());
 
     RemoteTensorSidecar sidecar;
     sidecar.present = true;
@@ -159,7 +224,7 @@ TEST(RemoteWire, NonHostInlineDescriptorRejectsInlinePayloadFields) {
 
 TEST(RemoteWire, NonHostInlineDescriptorRejectsMissingBufferIdentity) {
     remote_l3::RemoteTaskArgsWire args;
-    args.tensor_metadata.push_back(metadata_tensor());
+    args.tensors.push_back(remote_arg_tensor());
 
     RemoteTensorSidecar sidecar;
     sidecar.present = true;

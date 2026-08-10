@@ -335,50 +335,95 @@ CallConfig decode_call_config(const uint8_t *data, size_t size, size_t &offset) 
     return config;
 }
 
-// Wire format carries only the contiguous-defining fields (addr, shapes, ndims,
-// dtype, child_memory +
-// 7 reserved bytes). The unified ChipTensor's derived state (strides / start_offset
-// / is_contiguous) is recomputed as row-major on decode. The wire is therefore
-// contiguous-only: a strided ChipTensor would be silently flattened. Guard against
-// that here so the loss is loud, not silent — strided views only round-trip
-// over the local fork/shm mailbox blob, never this remote wire.
-std::vector<uint8_t> encode_tensor(const ChipTensor &tensor) {
+// The record is the wire `Tensor` itself: the embedded BufferDescriptor (identity, backing
+// properties, length-delimited backend body) followed by the strided view (byte_offset, ndims,
+// shapes, strides, dtype). Shapes and strides travel as ndims-many entries, so the slots past
+// `ndims` that validate_tensor requires zero are never on the wire and cannot arrive dirty.
+//
+// A remote TASK argument carries no local backing — the authoritative descriptor of its backing is
+// the per-argument RemoteTensorDesc sidecar — so the only backend this wire accepts is
+// REMOTE_SIDECAR, in both directions. That sidecar also carries where the view sits in the backing,
+// which is why the record's own `byte_offset` is zero: a non-zero one would name a second, weaker
+// origin for the same view. Both are rejected on encode and on decode.
+std::vector<uint8_t> encode_tensor(const Tensor &tensor) {
+    const BufferDescriptor &desc = tensor.buffer;
     ensure(
-        tensor.is_contiguous && tensor.start_offset == 0,
-        "remote_wire: only contiguous, zero-offset tensors are supported on the wire"
+        desc.backend_kind == static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR),
+        "remote_wire: a remote TASK tensor must carry no local backing"
     );
+    ensure(tensor.byte_offset == 0, "remote_wire: a remote TASK tensor must carry no byte_offset");
+    ensure(
+        tensor.ndims > 0 && tensor.ndims <= static_cast<uint32_t>(MAX_TENSOR_DIMS),
+        "remote_wire: tensor ndims out of range"
+    );
+    ensure(desc.body_len <= DESC_MAX_BYTES, "remote_wire: buffer descriptor body exceeds maximum");
     std::vector<uint8_t> out;
-    put_u64(out, tensor.buffer.addr);
-    for (uint32_t shape : tensor.shapes)
-        put_u32(out, shape);
+    put_bytes(out, desc.identity.owner_instance_id, OWNER_INSTANCE_ID_BYTES);
+    put_u64(out, desc.identity.buffer_id);
+    put_u32(out, desc.identity.generation);
+    put_u8(out, desc.address_space);
+    put_u8(out, desc.access);
+    put_u8(out, desc.backend_kind);
+    put_u64(out, desc.nbytes);
+    put_u32(out, desc.owner_worker_path_id);
+    put_u32(out, desc.body_len);
+    put_bytes(out, reinterpret_cast<const uint8_t *>(desc.body), desc.body_len);
+    put_u64(out, tensor.byte_offset);
     put_u32(out, tensor.ndims);
+    for (uint32_t i = 0; i < tensor.ndims; ++i)
+        put_u32(out, tensor.shapes[i]);
+    for (uint32_t i = 0; i < tensor.ndims; ++i)
+        put_u32(out, tensor.strides[i]);
     put_u32(out, static_cast<uint32_t>(tensor.dtype));
-    put_u8(out, static_cast<uint8_t>(tensor.address_space));
-    for (int i = 0; i < 7; ++i)
-        put_u8(out, 0);
     return out;
 }
 
-ChipTensor decode_tensor(const uint8_t *data, size_t size, size_t &offset, bool remote_task) {
-    uint64_t addr = get_u64(data, size, offset);
-    if (remote_task) ensure(addr == 0, "remote_wire: remote TASK tensor data must be zero");
-    uint32_t shapes[MAX_TENSOR_DIMS];
-    for (uint32_t &shape : shapes)
-        shape = get_u32(data, size, offset);
+Tensor decode_tensor(const uint8_t *data, size_t size, size_t &offset) {
+    Tensor tensor{};
+    BufferDescriptor &desc = tensor.buffer;
+    desc.magic = BUFFER_DESCRIPTOR_MAGIC;
+    ensure_available(size, offset, OWNER_INSTANCE_ID_BYTES, "buffer identity nonce");
+    std::memcpy(desc.identity.owner_instance_id, data + offset, OWNER_INSTANCE_ID_BYTES);
+    offset += OWNER_INSTANCE_ID_BYTES;
+    desc.identity.buffer_id = get_u64(data, size, offset);
+    desc.identity.generation = get_u32(data, size, offset);
+    desc.address_space = get_u8(data, size, offset);
+    desc.access = get_u8(data, size, offset);
+    desc.backend_kind = get_u8(data, size, offset);
+    ensure(
+        desc.backend_kind == static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR),
+        "remote_wire: a remote TASK tensor must carry no local backing"
+    );
+    desc.nbytes = get_u64(data, size, offset);
+    desc.owner_worker_path_id = get_u32(data, size, offset);
+    uint32_t body_len = get_u32(data, size, offset);
+    ensure(body_len <= DESC_MAX_BYTES, "remote_wire: buffer descriptor body exceeds maximum");
+    ensure_available(size, offset, body_len, "buffer descriptor body");
+    std::memcpy(desc.body, data + offset, body_len);
+    offset += body_len;
+    desc.body_len = static_cast<uint16_t>(body_len);
+
+    tensor.byte_offset = get_u64(data, size, offset);
+    ensure(tensor.byte_offset == 0, "remote_wire: a remote TASK tensor must carry no byte_offset");
     uint32_t ndims = get_u32(data, size, offset);
-    ensure(ndims > 0 && ndims <= MAX_TENSOR_DIMS, "remote_wire: tensor ndims out of range");
+    ensure(ndims > 0 && ndims <= static_cast<uint32_t>(MAX_TENSOR_DIMS), "remote_wire: tensor ndims out of range");
+    tensor.ndims = ndims;
+    for (uint32_t i = 0; i < ndims; ++i)
+        tensor.shapes[i] = get_u32(data, size, offset);
+    for (uint32_t i = 0; i < ndims; ++i)
+        tensor.strides[i] = get_u32(data, size, offset);
     uint32_t dtype = get_u32(data, size, offset);
     ensure(valid_dtype(dtype), "remote_wire: unknown tensor dtype");
-    uint8_t address_space = get_u8(data, size, offset);
-    ensure(address_space == 0 || address_space == 1, "remote_wire: tensor address_space must be 0 or 1");
-    for (int i = 0; i < 7; ++i) {
-        ensure(get_u8(data, size, offset) == 0, "remote_wire: ChipTensor reserved bytes must be zero");
+    tensor.dtype = static_cast<DataType>(dtype);
+
+    // validate_tensor is the single gate every Tensor trust boundary runs; it throws
+    // std::invalid_argument, which this codec re-raises as its own std::runtime_error.
+    try {
+        validate_tensor(tensor);
+    } catch (const std::invalid_argument &e) {
+        throw std::runtime_error(std::string("remote_wire: ") + e.what());
     }
-    // Reconstruct a contiguous external ChipTensor (owner=invalid, row-major strides).
-    return make_tensor_external(
-        reinterpret_cast<void *>(addr), shapes, ndims, static_cast<DataType>(dtype), /*manual_dep=*/false,
-        /*version=*/0, static_cast<AddressSpace>(address_space)
-    );
+    return tensor;
 }
 
 std::vector<uint8_t> encode_remote_tensor_desc(const RemoteTensorDesc &desc) {
@@ -416,22 +461,21 @@ RemoteTensorDesc decode_remote_tensor_desc(const uint8_t *data, size_t size, siz
 }
 
 std::vector<uint8_t> encode_remote_task_args(const RemoteTaskArgsWire &args) {
-    ensure(args.tensor_metadata.size() <= MAX_TENSORS, "remote_wire: tensor count exceeds maximum");
+    ensure(args.tensors.size() <= MAX_TENSORS, "remote_wire: tensor count exceeds maximum");
     ensure(args.scalars.size() <= MAX_SCALARS, "remote_wire: scalar count exceeds maximum");
     ensure(args.inline_payload.size() <= MAX_INLINE_PAYLOAD_BYTES, "remote_wire: inline payload exceeds maximum");
     ensure(
-        args.remote_desc.empty() || args.remote_desc.size() == args.tensor_metadata.size(),
+        args.remote_desc.empty() || args.remote_desc.size() == args.tensors.size(),
         "remote_wire: remote descriptor count must match tensor count"
     );
     std::vector<uint8_t> out;
-    put_u32(out, static_cast<uint32_t>(args.tensor_metadata.size()));
+    put_u32(out, static_cast<uint32_t>(args.tensors.size()));
     put_u32(out, static_cast<uint32_t>(args.scalars.size()));
-    for (const auto &tensor : args.tensor_metadata) {
-        ensure(tensor.buffer.addr == 0, "remote_wire: remote TASK tensor data must be zero");
+    for (const auto &tensor : args.tensors) {
         auto encoded = encode_tensor(tensor);
         put_bytes(out, encoded.data(), encoded.size());
     }
-    for (size_t i = 0; i < args.tensor_metadata.size(); ++i) {
+    for (size_t i = 0; i < args.tensors.size(); ++i) {
         RemoteTensorSidecar sidecar{};
         if (!args.remote_desc.empty()) sidecar = args.remote_desc[i];
         put_u8(out, sidecar.present ? 1 : 0);
@@ -456,9 +500,9 @@ RemoteTaskArgsWire decode_remote_task_args(const uint8_t *data, size_t size) {
     ensure(scalar_count <= MAX_SCALARS, "remote_wire: scalar count exceeds maximum");
 
     RemoteTaskArgsWire args;
-    args.tensor_metadata.reserve(tensor_count);
+    args.tensors.reserve(tensor_count);
     for (uint32_t i = 0; i < tensor_count; ++i)
-        args.tensor_metadata.push_back(decode_tensor(data, size, offset, true));
+        args.tensors.push_back(decode_tensor(data, size, offset));
 
     args.remote_desc.reserve(tensor_count);
     for (uint32_t i = 0; i < tensor_count; ++i) {

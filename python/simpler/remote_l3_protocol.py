@@ -15,17 +15,30 @@ import socket
 import struct
 from dataclasses import dataclass
 
-from .task_interface import MAX_TENSOR_DIMS, CallConfig, ChipTensor, DataType
+from .buffer import (
+    OWNER_INSTANCE_ID_BYTES,
+    AccessMode,
+    AddressSpace,
+    BackendKind,
+    BufferDescriptor,
+    CanonicalIdentity,
+    Tensor,
+)
+from .task_interface import MAX_TENSOR_DIMS, CallConfig, DataType
 
-# 2: CallConfig lost its block_dim field — a run always takes the whole
-# device, so the payload is one int32 shorter than v1's.
-PROTOCOL_VERSION = 2
+# 3: a TASK's per-argument record is the self-describing wire ``Tensor`` — the embedded
+# BufferDescriptor plus the strided view. Both ends of a run come from one ``pip install``,
+# so this constant is a mismatch alarm at the frame header, not a dual-decode selector.
+PROTOCOL_VERSION = 3
 MAX_FRAME_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_STRING_BYTES = 1024
 MAX_ERROR_BYTES = 4096
 MAX_TENSORS = 4096
 MAX_SCALARS = 4096
 MAX_INLINE_PAYLOAD_BYTES = 1024 * 1024
+# Mirrors DESC_MAX_BYTES in src/common/task_interface/buffer.h. ``BufferDescriptor`` construction
+# re-checks it, so this bound only makes an over-long body fail at the field that carries it.
+MAX_BUFFER_DESCRIPTOR_BODY_BYTES = 32
 MAX_TRANSPORT_PROFILE_BYTES = 128
 MAX_TRANSPORT_DESCRIPTOR_BYTES = 4096
 HOST_TCP_TRANSPORT_PROFILE = "host_tcp"
@@ -146,7 +159,7 @@ class RemoteTensorSidecar:
 
 @dataclass(frozen=True)
 class RemoteTaskArgsWire:
-    tensor_metadata: tuple[ChipTensor, ...]
+    tensors: tuple[Tensor, ...]
     remote_desc: tuple[RemoteTensorSidecar, ...]
     scalars: tuple[int, ...]
     inline_payload: bytes
@@ -431,22 +444,47 @@ def decode_call_config(reader: _Reader) -> CallConfig:
     return cfg
 
 
-def decode_tensor(reader: _Reader) -> ChipTensor:
-    data = reader.u64()
-    if data != 0:
-        raise ValueError("remote_wire: remote TASK tensor data must be zero")
-    shapes = [reader.u32() for _ in range(MAX_TENSOR_DIMS)]
+def decode_tensor(reader: _Reader) -> Tensor:
+    """The wire ``Tensor`` a remote TASK carries per argument: embedded descriptor plus view.
+
+    Shapes and strides are ``ndims``-many, so the slots past ``ndims`` that ``validate_tensor``
+    requires zero are never on the wire. ``Tensor`` construction runs that validator, which is what
+    keeps this decode behind the same gate as every other Tensor trust boundary.
+    """
+    owner_instance_id = reader.raw(OWNER_INSTANCE_ID_BYTES, "buffer identity nonce")
+    buffer_id = reader.u64()
+    generation = reader.u32()
+    address_space = reader.u8()
+    access = reader.u8()
+    backend_kind = reader.u8()
+    # An arg bound for a remote worker has no local backing: the authoritative descriptor of its
+    # backing is the per-argument RemoteTensorDesc sidecar.
+    if backend_kind != int(BackendKind.REMOTE_SIDECAR):
+        raise ValueError("remote_wire: a remote TASK tensor must carry no local backing")
+    nbytes = reader.u64()
+    owner_worker_path_id = reader.u32()
+    body = reader.blob(MAX_BUFFER_DESCRIPTOR_BODY_BYTES, "BufferDescriptor.body")
+    byte_offset = reader.u64()
+    # The sidecar's own offset is where the view sits in the backing, so the record's view spans
+    # exactly the backing its descriptor advertises.
+    if byte_offset != 0:
+        raise ValueError("remote_wire: a remote TASK tensor must carry no byte_offset")
     ndims = reader.u32()
     if ndims == 0 or ndims > MAX_TENSOR_DIMS:
         raise ValueError("remote_wire: tensor ndims out of range")
+    shapes = tuple(reader.u32() for _ in range(ndims))
+    strides = tuple(reader.u32() for _ in range(ndims))
     dtype = DataType(reader.u32())
-    child_memory = reader.u8()
-    if child_memory not in (0, 1):
-        raise ValueError("remote_wire: tensor child_memory must be 0 or 1")
-    for _ in range(7):
-        if reader.u8() != 0:
-            raise ValueError("remote_wire: ChipTensor reserved bytes must be zero")
-    return ChipTensor.make(0, tuple(shapes[:ndims]), dtype, bool(child_memory))
+    descriptor = BufferDescriptor(
+        identity=CanonicalIdentity(owner_instance_id, buffer_id, generation),
+        address_space=AddressSpace(address_space),
+        access=AccessMode(access),
+        backend_kind=BackendKind(backend_kind),
+        nbytes=nbytes,
+        body=body,
+        owner_worker_path_id=owner_worker_path_id,
+    )
+    return Tensor(buffer=descriptor, byte_offset=byte_offset, shapes=shapes, strides=strides, dtype=dtype)
 
 
 def decode_remote_tensor_desc(reader: _Reader) -> RemoteTensorDesc:
