@@ -291,8 +291,8 @@ wins; a losing claim cannot overwrite cancellation's terminal bookkeeping.
 At dispatch time the Scheduler checks the group FIFO head and resolves every
 entry in `workers` to that exact stable worker ID. It dispatches only if the
 entire target set is idle. A blocked group reserves all of its targets against
-new singles but does not cause a scan past the FIFO head. Each WorkerThread
-runs `worker->run` with its own `task_args_list[i]`. Completion remains
+new singles but does not cause a scan past the FIFO head. Each member lane is
+submitted with its own `task_args_list[i]`. Completion remains
 aggregated at the group slot, so downstream consumers are released once after
 every member is terminal. Completion validates both bookkeeping-vector sizes;
 repair preserves already-terminal and still-running members before indexing.
