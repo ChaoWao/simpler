@@ -248,13 +248,13 @@ orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char 
         return;
     }
 
-    char message[1024];
-    vsnprintf(message, sizeof(message), fmt, args);
+    std::array<char, 1024> message{};
+    vsnprintf(message.data(), message.size(), fmt, args);
     if (latched_code != PTO2_ERROR_NONE && latched_code != error_code) {
-        unified_log_error(func, "FATAL(code=%d, latched=%d): %s", error_code, latched_code, message);
+        unified_log_error(func, "FATAL(code=%d, latched=%d): %s", error_code, latched_code, message.data());
         return;
     }
-    unified_log_error(func, "FATAL(code=%d): %s", error_code, message);
+    unified_log_error(func, "FATAL(code=%d): %s", error_code, message.data());
 }
 
 void PTO2OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
@@ -1133,9 +1133,13 @@ static TaskOutputTensors submit_task_common(
     // fanout now that the swimlane hot path no longer records it.
     const bool capture_dep_graph = dep_gen_host_graph_enabled();
     if (capture_dep_graph) {
-        const int32_t kernel_ids_capture[3] = {aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id};
+        const std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids_capture{
+            aic_kernel_id,
+            aiv0_kernel_id,
+            aiv1_kernel_id,
+        };
         dep_gen_host_graph_begin_task(
-            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), kernel_ids_capture,
+            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), kernel_ids_capture.data(),
             args.launch_spec.block_num(), args.tensor_count(), args.tensor_data(), args.tag_data()
         );
     }
