@@ -11,8 +11,8 @@
 /**
  * Unit tests for the a5 AICoreCompletionMailbox MPSC push protocol.
  *
- * Mirrors tests/ut/cpp/a2a3/test_aicore_completion_mailbox.cpp but adapted
- * to a5's simpler CompletionCondition (no completion_type field; counter-only).
+ * This source is compiled against both a5 runtime variants so their mirrored
+ * deferred-completion transports cannot drift apart.
  */
 
 #include <gtest/gtest.h>
