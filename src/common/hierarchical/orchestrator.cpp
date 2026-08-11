@@ -459,11 +459,6 @@ void Orchestrator::decrement_run_tasks(RunId run_id) {
     if (remaining <= 0) finish_run_if_ready(run);
 }
 
-void Orchestrator::increment_run_accepts(RunId run_id, int32_t count) {
-    if (count <= 0) throw std::logic_error("Orchestrator: run acceptance count must be positive");
-    get_run(run_id)->pending_accepts.fetch_add(count, std::memory_order_relaxed);
-}
-
 void Orchestrator::decrement_run_accepts(RunId run_id) {
     auto run = find_run(run_id);
     if (run == nullptr) return;
@@ -830,8 +825,6 @@ SubmitResult Orchestrator::submit_impl(
         }
     }
 
-    increment_run_accepts(run->id, s.group_size());
-
     // --- Step 6: Publication — the one point where the slot leaves BUILDING.
     //
     // fanin_count and the transition out of BUILDING are published together,
@@ -851,6 +844,23 @@ SubmitResult Orchestrator::submit_impl(
                 expected, published, std::memory_order_acq_rel, std::memory_order_acquire
             )) {
             ready_now = satisfied;
+            // Counted here, under the same lock and in the same step that
+            // publishes the slot, because this branch is the only moment at
+            // which the slot is certain to reach an endpoint. mark_task_accepted
+            // is the sole matching decrement, and a slot that fails instead
+            // never reaches one, so counting a failed slot would leave
+            // pending_accepts permanently above zero: the run would still
+            // finish, since acceptance_ready() also accepts a terminal phase,
+            // but the fence would open at completion rather than at acceptance
+            // and serialise the next submission behind the whole run. Counting
+            // after the lock is released would be equally wrong in the other
+            // direction — a published slot is visible to Scheduler::poison_task,
+            // which can claim and fail it before the count lands.
+            //
+            // pending_accepts is incremented directly here; the run pointer is
+            // already resolved, so this avoids taking runs_mu_ while holding
+            // fanout_mu.
+            run->pending_accepts.fetch_add(s.group_size(), std::memory_order_relaxed);
         } else {
             // Only a failure claim moves a BUILDING slot, and it stops there
             // precisely so this thread — the one that knows the wiring is

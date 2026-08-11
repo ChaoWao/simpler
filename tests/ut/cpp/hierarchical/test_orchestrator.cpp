@@ -217,6 +217,49 @@ TEST_F(OrchestratorFixture, SubmitAfterFailedProducerPoisonsConsumer) {
     EXPECT_EQ(S(b.task_slot).state.load(), TaskState::CONSUMED);
 }
 
+// A poisoned slot never reaches an endpoint, so nothing ever calls
+// mark_task_accepted for it. Counting it as a pending accept would leave the
+// count permanently above zero and push the acceptance fence out to run
+// completion — the run still finishes, because acceptance_ready() also accepts
+// a terminal phase, so the symptom is a lost overlap rather than a hang. The
+// live sibling here is what makes that observable: its own accept is the only
+// one owing, so the fence must open when it lands, while the run is still live.
+TEST_F(OrchestratorFixture, PoisonedConsumerIsNotCountedAsAPendingAccept) {
+    orch.scope_begin();
+
+    auto args_a = single_tensor_args(0xD00D, TensorArgType::OUTPUT);
+    auto a = orch.submit_next_level(C(42), args_a, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+    ASSERT_EQ(ready, a.task_slot);
+
+    // Submitted before the poison: once a run records an error, submit_next_level
+    // rethrows it rather than admitting anything more, so the live sibling has to
+    // exist first. It owes the only accept the run can still receive.
+    auto live = orch.submit_next_level(C(44), single_tensor_args(0xFEED, TensorArgType::OUTPUT), cfg, 0);
+    TaskSlot live_ready;
+    ASSERT_TRUE(rq.try_pop(live_ready));
+    ASSERT_EQ(live_ready, live.task_slot);
+
+    TaskSlotState &producer = S(a.task_slot);
+    producer.failure_message = "producer failed";
+    producer.state.store(TaskState::FAILED, std::memory_order_release);
+    producer.fanout_released.store(1, std::memory_order_release);
+
+    auto args_b = single_tensor_args(0xD00D, TensorArgType::INPUT);
+    auto poisoned = orch.submit_next_level(C(43), args_b, cfg, 0);
+    ASSERT_EQ(S(poisoned.task_slot).state.load(), TaskState::FAILED);
+
+    orch.close_run_submission(run_id);
+    EXPECT_FALSE(orch.run_accepted(run_id)) << "the live task has not been accepted yet";
+
+    orch.mark_task_accepted(a.task_slot);
+    orch.mark_task_accepted(live.task_slot);
+    EXPECT_TRUE(orch.run_accepted(run_id)) << "the poisoned slot is still owing an accept it can never receive";
+
+    orch.scope_end();
+}
+
 TEST_F(OrchestratorFixture, TensorMapTracksProducer) {
     auto args_a = single_tensor_args(0x1234, TensorArgType::OUTPUT);
     auto a = orch.submit_next_level(C(42), args_a, cfg, 0);
