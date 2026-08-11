@@ -10,6 +10,7 @@
 import contextlib
 import ctypes
 import hashlib
+import itertools
 import os
 import socket
 import subprocess
@@ -23,6 +24,7 @@ from typing import cast
 import pytest
 import simpler.worker as worker_mod
 from simpler import callable_identity
+from simpler.buffer import ImportRegistry, mint_owner_instance_id, wrap_fork_inherited
 from simpler.callable_identity import (
     CallableHandle,
     CallableKindName,
@@ -53,7 +55,6 @@ from simpler.remote_l3_session import (
 )
 from simpler.task_interface import (
     ChipCallable,
-    ChipTensor,
     DataType,
     RemoteAddressSpace,
     RemoteBufferExport,
@@ -61,6 +62,7 @@ from simpler.task_interface import (
     RemoteTensorRef,
     TaskArgs,
     TensorArgType,
+    get_element_size,
 )
 from simpler.worker import (
     RemoteCallable,
@@ -69,6 +71,19 @@ from simpler.worker import (
     _pack_py_callable_payload,
     _read_raw_payload_from_shm,
 )
+
+_LOCAL_REF_BID = itertools.count(1)
+
+
+def _local_ref(addr, shapes, dtype):
+    """A local host (non-remote, non-child-memory) ``Tensor`` at ``addr`` — a bare arg carrying no
+    sidecar. FORK_SHM (host) so it is not treated as a child device pointer by the dispatch guard."""
+    nbytes = get_element_size(dtype)
+    for s in shapes:
+        nbytes *= int(s)
+    return wrap_fork_inherited(addr, nbytes, mint_owner_instance_id(), next(_LOCAL_REF_BID), "L3").tensor(
+        tuple(shapes), int(dtype.value)
+    )
 
 
 def _py_target(args):
@@ -87,10 +102,23 @@ def _remote_sleep_orch(orch, args, cfg):
     time.sleep(1.0)
 
 
+# A remote runner's orchestration function receives address-free wire ``Tensor`` args, so one that
+# computes in-process reaches the bytes the way every other consumer does: map the embedded
+# descriptor once, keyed by canonical identity, and index the view from the mapped base.
+_REMOTE_ORCH_IMPORTS = ImportRegistry()
+
+
+def _remote_u8_view(tensor):
+    nbytes = int(get_element_size(DataType(tensor.dtype)))
+    for extent in tensor.shapes:
+        nbytes *= int(extent)
+    base = _REMOTE_ORCH_IMPORTS.materialize(tensor.buffer).base
+    return (ctypes.c_ubyte * nbytes).from_address(base + int(tensor.byte_offset))
+
+
 def _remote_increment_u8_orch(orch, args, cfg):
-    tensor = args.tensor(0)
-    data = (ctypes.c_ubyte * tensor.nbytes()).from_address(tensor.data)
-    for i in range(tensor.nbytes()):
+    data = _remote_u8_view(args.tensor(0))
+    for i in range(len(data)):
         data[i] = (int(data[i]) + 1) & 0xFF
 
 
@@ -99,9 +127,8 @@ def _remote_fail_before_write_orch(orch, args, cfg):
 
 
 def _remote_mark_u8_orch(orch, args, cfg):
-    tensor = args.tensor(0)
-    data = (ctypes.c_ubyte * tensor.nbytes()).from_address(tensor.data)
-    for i in range(tensor.nbytes()):
+    data = _remote_u8_view(args.tensor(0))
+    for i in range(len(data)):
         data[i] = 99
 
 
@@ -110,11 +137,9 @@ def _remote_exit_orch(orch, args, cfg):
 
 
 def _remote_sum_u8_orch(orch, args, cfg):
-    src = args.tensor(0)
-    dst = args.tensor(1)
-    src_data = (ctypes.c_ubyte * src.nbytes()).from_address(src.data)
-    dst_data = (ctypes.c_ubyte * dst.nbytes()).from_address(dst.data)
-    dst_data[0] = sum(int(src_data[i]) for i in range(src.nbytes())) & 0xFF
+    src_data = _remote_u8_view(args.tensor(0))
+    dst_data = _remote_u8_view(args.tensor(1))
+    dst_data[0] = sum(int(b) for b in src_data) & 0xFF
 
 
 class _FakeRemoteControlResult:
@@ -145,6 +170,27 @@ def _remote_submit_inner_sub_orch(orch, args, cfg):
     sub_args = TaskArgs()
     sub_args.add_scalar(17)
     orch.submit_sub(get_inner_handle(_INNER_SUB_HASHID), sub_args)
+
+
+def _remote_inner_sub_increments_u8(args):
+    view = args[0].buffer
+    for i in range(int(args[0].shapes[0])):
+        view[i] = (int(view[i]) + 1) & 0xFF
+
+
+_INNER_SUB_INCREMENT_HASHID = compute_callable_hashid(
+    build_python_import_descriptor("tests.ut.py.test_callable_identity", "_remote_inner_sub_increments_u8")
+)
+
+
+def _remote_forward_args_to_sub_orch(orch, args, cfg):
+    """Forward the args this runner received, unmodified, to a forked child of its inner Worker."""
+    from simpler.remote_l3_session import get_inner_handle  # noqa: PLC0415
+
+    sub_args = TaskArgs()
+    for i in range(args.tensor_count()):
+        sub_args.add_tensor(args.tensor(i), TensorArgType.INOUT)
+    orch.submit_sub(get_inner_handle(_INNER_SUB_INCREMENT_HASHID), sub_args)
 
 
 def _remote_chip_register_payload(chip: ChipCallable, *, platform: str, runtime: str) -> tuple[bytes, bytes]:
@@ -635,6 +681,44 @@ def test_remote_session_manifest_uses_endpoint_host_as_default_bind():
         worker.close()
 
 
+def test_remote_manifest_carries_pre_registered_inner_chip_callable():
+    worker = Worker(level=4, num_sub_workers=0)
+    chip = ChipCallable.build(signature=[], func_name="x", binary=b"\x01", children=[])
+    try:
+        worker_id = worker.add_remote_worker(
+            RemoteWorkerSpec(
+                endpoint="127.0.0.1:19073",
+                platform="a2a3sim",
+                device_ids=(0,),
+            )
+        )
+        handle = worker.register(chip)
+        manifest = worker._build_remote_manifest(
+            spec=worker._remote_worker_specs[0],
+            worker_id=worker_id,
+            session_id=1,
+            startup_remaining_s=30.0,
+        )
+
+        assert len(manifest["inner_l3_worker"]) == 1
+        entry = manifest["inner_l3_worker"][0]
+        assert entry["hashid"] == handle.digest.hex()
+        command = encode_register_callable_command(
+            RemoteRegistryTarget.INNER_L3_WORKER,
+            CallableKind.CHIP_CALLABLE,
+            handle.digest,
+            1,
+            bytes.fromhex(entry["payload_hex"]),
+        )
+        digest, kind, registry, target = _prepare_register_callable(command, manifest)
+        assert digest == handle.digest
+        assert kind is CallableKind.CHIP_CALLABLE
+        assert registry is RemoteRegistryTarget.INNER_L3_WORKER
+        assert isinstance(target, ChipCallable)
+    finally:
+        worker.close()
+
+
 def test_remote_session_manifest_requires_wildcard_bind_opt_in():
     worker = Worker(level=4, num_sub_workers=0)
     try:
@@ -798,7 +882,7 @@ def test_remote_callable_submit_passes_remote_sidecar_to_cpp_facade():
         assert sidecar.tensors[0].desc.owner_worker_id == worker_id
 
         bare = TaskArgs()
-        bare.add_tensor(ChipTensor.make(0x1234, (1,), DataType.UINT8), TensorArgType.INPUT)
+        bare.add_tensor(_local_ref(0x1234, (1,), DataType.UINT8), TensorArgType.INPUT)
         orch.submit_next_level(handle, bare, worker=worker_id)
 
         bare_sidecar = fake.submit_next_level_args[7]
@@ -1461,6 +1545,68 @@ def test_remote_sim_buffer_copy_roundtrip():
         daemon.stop()
 
 
+def test_remote_sim_task_args_forward_to_an_inner_forked_child():
+    # A remote orchestration function receives the same wire TaskArgs every other level does, so it
+    # forwards its own args to a child of its inner Worker with no conversion. The child resolves
+    # each embedded descriptor through its own import registry — the resolution a chip child makes
+    # for a next-level submit — and its write lands in the backing the parent reads back.
+    port = _free_tcp_port()
+    daemon = _RemoteL3Daemon(port)
+    worker = Worker(level=4, num_sub_workers=0, remote_session_timeout_s=10)
+    inner_digest = hashid_to_digest(_INNER_SUB_INCREMENT_HASHID)
+    inner_committed = False
+    try:
+        daemon.await_ready()
+        worker_id = worker.add_remote_worker(
+            RemoteWorkerSpec(
+                endpoint=f"127.0.0.1:{port}",
+                platform="a2a3sim",
+                transport="host_tcp",
+                num_sub_workers=1,
+            )
+        )
+        handle = worker.register(
+            RemoteCallable("tests.ut.py.test_callable_identity:_remote_forward_args_to_sub_orch"),
+            workers=[worker_id],
+        )
+        worker.init()
+        assert worker._worker is not None
+        target = b"tests.ut.py.test_callable_identity:_remote_inner_sub_increments_u8"
+        result = worker._worker.remote_prepare_register(
+            worker_id, "INNER_L3_WORKER", "PYTHON_IMPORT", target, inner_digest
+        )
+        assert result.ok, result.error_message
+        result = worker._worker.remote_commit_register(worker_id, "INNER_L3_WORKER", "PYTHON_IMPORT", inner_digest)
+        assert result.ok, result.error_message
+        inner_committed = True
+
+        remote_buf = worker.remote_malloc(worker=worker_id, nbytes=4)
+        worker.remote_copy_to(remote_buf, (ctypes.c_ubyte * 4)(1, 2, 3, 4), 4)
+
+        def parent_orch(orch, _args, cfg):
+            task_args = TaskArgs()
+            task_args.add_tensor(
+                RemoteTensorRef(remote_buf, shape=(4,), dtype=DataType.UINT8),
+                TensorArgType.INOUT,
+            )
+            orch.submit_next_level(handle, task_args, cfg, worker=worker_id)
+
+        worker.run(parent_orch)
+
+        dst = (ctypes.c_ubyte * 4)()
+        worker.remote_copy_from(remote_buf, dst, 4)
+        assert bytes(dst) == b"\x02\x03\x04\x05"
+        worker.remote_free(remote_buf)
+    finally:
+        if inner_committed and worker._worker is not None:
+            try:
+                worker._worker.remote_unregister(worker_id, "INNER_L3_WORKER", "PYTHON_IMPORT", inner_digest)
+            except Exception:
+                pass
+        worker.close()
+        daemon.stop()
+
+
 def test_remote_sim_imported_buffer_runs_on_peer_worker():
     owner_port = _free_tcp_port()
     peer_port = _free_tcp_port()
@@ -1471,7 +1617,12 @@ def test_remote_sim_imported_buffer_runs_on_peer_worker():
         owner_daemon.await_ready()
         peer_daemon.await_ready()
         owner_worker_id = worker.add_remote_worker(
-            RemoteWorkerSpec(endpoint=f"127.0.0.1:{owner_port}", platform="a2a3sim", transport="host_tcp")
+            RemoteWorkerSpec(
+                endpoint=f"127.0.0.1:{owner_port}",
+                platform="a2a3sim",
+                transport="host_tcp",
+                device_ids=(0,),
+            )
         )
         peer_worker_id = worker.add_remote_worker(
             RemoteWorkerSpec(endpoint=f"127.0.0.1:{peer_port}", platform="a2a3sim", transport="host_tcp")

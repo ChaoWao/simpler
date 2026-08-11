@@ -141,13 +141,17 @@ Endpoint rules:
   pointer.
 - `RemoteL3Endpoint` requires a sidecar for every tensor payload that crosses
   the remote protocol, including `HOST_INLINE` payloads.
-- Remote TASK frames write `TensorWire.data == 0`; parent virtual
-  addresses never cross the remote protocol.
+- Remote TASK frames carry each argument's `Tensor` verbatim, and that `Tensor`
+  is a `REMOTE_SIDECAR` placeholder: it names the remote backing but describes
+  none of its own. Parent virtual addresses and the parent's own backings never
+  cross the remote protocol.
 - A remote tensor with `child_memory=True` and no sidecar is invalid. Local
   child-memory pointers are meaningful only inside fork/shm topology.
-- The remote session runner translates each `RemoteTensorDesc` into a local
-  `ChipTensor` and fills `data` from its validated local mapping
-  immediately before invoking `inner_worker.run()`.
+- The remote session runner translates each `RemoteTensorDesc` into a wire
+  `Tensor` over the backing its validated local mapping names, immediately
+  before invoking `inner_worker.run()`. A `HOST_INLINE` payload has no
+  standing backing, so the runner mints a session-scoped POSIX-shm `Buffer`
+  for it, copies the payload in, and releases it once the run returns.
 
 ## Remote OUTPUT Allocation Policy
 
@@ -328,8 +332,9 @@ CONTROL, CONTROL_REPLY, COMPLETION, and SHUTDOWN frames use the HCOMM RPC
 adapter; tensor data and remote buffer copies use the HCOMM data adapter.
 
 The endpoint owns the adapter objects. `Orchestrator`, Scheduler, and
-`WorkerThread` see only `WorkerEndpoint::run()`, `WorkerEndpoint::control()`,
-and logical capability bits from `WorkerEndpoint::caps()`.
+`WorkerThread` see only the progress calls (`WorkerEndpoint::submit_progress()`,
+`poll_progress()`, `activate_progress()`), the `control_*` commands, and logical
+capability bits from `WorkerEndpoint::caps()`.
 
 Current status: `RemoteL3Endpoint` owns a transport-neutral
 `RemoteL3Transport` and the ordered TASK/COMPLETION boundary. The HCOMM RPC

@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
+from simpler.task_interface import DataType, TaskArgs, TensorArgType, scalar_to_uint64
 from simpler.worker import (
     _FRAME_STAGED,
     _OFF_ACCEPTED,
@@ -36,14 +37,29 @@ from simpler.worker import (
     _mailbox_load_i32,
 )
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
-from simpler_setup.scene_test import _build_l3_task_args
+from simpler_setup import SceneTestCase, scene_test
 
 _VECTOR_KERNELS = "../vector_example/kernels"
 _PIPELINED_VECTOR_ORCH = "kernels/orchestration/pipelined_vector_orch.cpp"
 _CHAIN_LENGTH = 512
 _DEVICE_SPIN_ITERS = 200_000_000
 _SIZE = 128 * 128
+
+_DIR_TAGS = {
+    D.IN: TensorArgType.INPUT,
+    D.OUT: TensorArgType.OUTPUT_EXISTING,
+    D.INOUT: TensorArgType.INOUT,
+}
+
+
+def _chip_args(handles, orch_signature, *scalars):
+    """A ``TaskArgs`` naming each ``Buffer`` as a whole-buffer float32 view, tagged by the signature."""
+    args = TaskArgs()
+    for handle, direction in zip(handles, orch_signature):
+        args.add_tensor(handle.tensor((_SIZE,), DataType.FLOAT32), _DIR_TAGS[direction])
+    for value in scalars:
+        args.add_scalar(scalar_to_uint64(value))
+    return args
 
 
 class _FileSignal:
@@ -160,8 +176,8 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
 
     @staticmethod
     def _tensor_from_host_buffer(worker, value):
-        buffer = worker.create_host_buffer(_SIZE * torch.float32.itemsize)
-        tensor = torch.frombuffer(buffer.buffer, dtype=torch.float32, count=_SIZE)
+        buffer = worker.create_buffer(_SIZE * torch.float32.itemsize)
+        tensor = torch.frombuffer(buffer.shm.buf, dtype=torch.float32, count=_SIZE)
         tensor.fill_(value)
         return buffer, tensor
 
@@ -232,20 +248,13 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                 buffer, tensor = self._tensor_from_host_buffer(st_worker, value)
                 buffers.append(buffer)
                 tensors.append(tensor)
-            first_a, first_b, first_out = tensors
 
             vector_handle = type(self)._st_chip_handles["vector"]
             vector_signature = type(self)._st_chip_handles["vector_sig"]
             sub_handle = type(self)._st_sub_handles["wait_for_release"]
 
             def first_graph(orch, _args, _cfg):
-                builder = TaskArgsBuilder(
-                    Tensor("a", first_a),
-                    Tensor("b", first_b),
-                    Tensor("f", first_out),
-                    Scalar("spin_iters", 0),
-                )
-                chip_args, _ = _build_l3_task_args(builder, vector_signature)
+                chip_args = _chip_args(buffers, vector_signature, 0)
                 orch.submit_next_level(vector_handle, chip_args, self._build_config(self.CASES[0]["config"]), worker=0)
                 orch.submit_sub(sub_handle)
 
@@ -257,9 +266,9 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             # first run releases the FIFO head.
             def second_graph(orch, _args, _cfg):
                 entered_callback.set()
-                ptr = orch.malloc(0, 4096)
+                handle = orch.alloc_child_tensor(0, (1024,), DataType.FLOAT32)
                 control_returned.set()
-                orch.free(0, ptr)
+                orch.free(handle)
 
             def submit_second():
                 try:
@@ -294,10 +303,9 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                         handle.wait(30.0)
             tensors.clear()
             tensor = None
-            first_a = first_b = first_out = None
             if all(handle is None or handle.done for handle in handles):
                 for buffer in buffers:
-                    st_worker.free_host_buffer(buffer)
+                    buffer.close()
 
     def test_a_run_whose_cleanup_touches_the_device_degrades_to_depth_one(self, st_platform, st_worker):
         """A CommDomain release is mailbox control the whole-run FIFO cannot order.
@@ -387,23 +395,19 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
                 buffers.append(buffer)
                 tensors.append(tensor)
             first_a, first_b, first_out, second_a, second_b, second_out = tensors
+            first_bufs, second_bufs = buffers[:3], buffers[3:]
             vector_handle = type(self)._st_chip_handles["vector"]
             vector_signature = type(self)._st_chip_handles["vector_sig"]
             sub_handle = type(self)._st_sub_handles["wait_for_release"]
 
-            def submit_vector(orch, a, b, out, *, spin_iters=0, hold_open=False):
-                builder = TaskArgsBuilder(
-                    Tensor("a", a), Tensor("b", b), Tensor("f", out), Scalar("spin_iters", spin_iters)
-                )
-                chip_args, _ = _build_l3_task_args(builder, vector_signature)
+            def submit_vector(orch, arg_buffers, *, spin_iters=0, hold_open=False):
+                chip_args = _chip_args(arg_buffers, vector_signature, spin_iters)
                 orch.submit_next_level(vector_handle, chip_args, self._build_config(self.CASES[0]["config"]), worker=0)
                 if hold_open:
                     orch.submit_sub(sub_handle)
 
             first = st_worker.submit(
-                lambda orch, _args, _cfg: submit_vector(
-                    orch, first_a, first_b, first_out, spin_iters=_DEVICE_SPIN_ITERS, hold_open=True
-                )
+                lambda orch, _args, _cfg: submit_vector(orch, first_bufs, spin_iters=_DEVICE_SPIN_ITERS, hold_open=True)
             )
             first_expected = first_a + first_b + _CHAIN_LENGTH
             # Run-level acceptance also includes the intentionally blocked SUB
@@ -415,7 +419,7 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             second_graph_done = threading.Event()
 
             def second_graph(orch, _args, _cfg):
-                submit_vector(orch, second_a, second_b, second_out)
+                submit_vector(orch, second_bufs)
                 second_graph_done.set()
 
             second = st_worker.submit(second_graph)
@@ -476,7 +480,76 @@ class TestWorkerAsyncWholeRunFifo(SceneTestCase):
             first_a = first_b = first_out = second_a = second_b = second_out = None
             if all(handle is None or handle.done for handle in handles):
                 for buffer in buffers:
-                    st_worker.free_host_buffer(buffer)
+                    buffer.close()
+
+
+@scene_test(level=3, runtime="tensormap_and_ringbuffer")
+class TestWorkerAsyncWholeRunFifoTmr(TestWorkerAsyncWholeRunFifo):
+    """TMR uses the common FIFO with shared-arena compatibility fallback."""
+
+    def test_incompatible_runtime_env_falls_back_to_depth_one(self, st_platform, st_worker):
+        if st_platform != "a2a3":
+            pytest.skip("TMR prepared-state validation requires an a2a3 onboard worker")
+
+        _SUB_ENTERED.clear()
+        _SUB_RELEASE.clear()
+        buffers = []
+        tensors = []
+        first = None
+        second = None
+        try:
+            for value in (2.0, 3.0, 0.0, 5.0, 7.0, 0.0):
+                buffer, tensor = self._tensor_from_host_buffer(st_worker, value)
+                buffers.append(buffer)
+                tensors.append(tensor)
+            first_a, first_b, first_out, second_a, second_b, second_out = tensors
+            first_bufs, second_bufs = buffers[:3], buffers[3:]
+            vector_handle = type(self)._st_chip_handles["vector"]
+            vector_signature = type(self)._st_chip_handles["vector_sig"]
+            sub_handle = type(self)._st_sub_handles["wait_for_release"]
+
+            def submit_vector(orch, arg_buffers, config, *, spin_iters=0, hold_open=False):
+                chip_args = _chip_args(arg_buffers, vector_signature, spin_iters)
+                orch.submit_next_level(vector_handle, chip_args, config, worker=0)
+                if hold_open:
+                    orch.submit_sub(sub_handle)
+
+            default_config = self._build_config(self.CASES[0]["config"])
+            incompatible_config = self._build_config(
+                {
+                    **self.CASES[0]["config"],
+                    "runtime_env": {"ring_heap": [128 * 1024 * 1024] * 4},
+                }
+            )
+            first = st_worker.submit(
+                lambda orch, _args, _cfg: submit_vector(
+                    orch, first_bufs, default_config, spin_iters=_DEVICE_SPIN_ITERS, hold_open=True
+                )
+            )
+            _wait_for_active_device_run(st_worker, 10.0)
+            assert _SUB_ENTERED.wait(10.0)
+
+            second = st_worker.submit(lambda orch, _args, _cfg: submit_vector(orch, second_bufs, incompatible_config))
+            _wait_for_backend_prepared_successor(st_worker, 10.0)
+            assert torch.count_nonzero(second_out).item() == 0
+
+            _SUB_RELEASE.set()
+            first.wait(30.0)
+            second.wait(30.0)
+            assert torch.allclose(first_out, first_a + first_b + _CHAIN_LENGTH)
+            assert torch.allclose(second_out, second_a + second_b + _CHAIN_LENGTH)
+        finally:
+            _SUB_RELEASE.set()
+            for handle in (first, second):
+                if handle is not None:
+                    with suppress(Exception):
+                        handle.wait(30.0)
+            tensors.clear()
+            tensor = None
+            first_a = first_b = first_out = second_a = second_b = second_out = None
+            if all(handle is None or handle.done for handle in (first, second)):
+                for buffer in buffers:
+                    buffer.close()
 
 
 if __name__ == "__main__":

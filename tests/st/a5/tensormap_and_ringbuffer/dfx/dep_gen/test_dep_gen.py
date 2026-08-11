@@ -38,7 +38,7 @@ import time
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 
 KERNELS_BASE = "../../../../../../examples/a5/tensormap_and_ringbuffer/vector_example/kernels"
@@ -95,9 +95,9 @@ class TestDepGen(SceneTestCase):
     def generate_args(self, params):
         SIZE = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
-            Tensor("f", torch.zeros(SIZE, dtype=torch.float32)),
+            TensorArg("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(SIZE, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):
@@ -153,7 +153,7 @@ class TestDepGen(SceneTestCase):
         )
         with deps_path.open() as f:
             deps = json.load(f)
-        # Strided-Tensor schema: annotated edges with tasks[] / tensors[]
+        # Strided-TensorArg schema: annotated edges with tasks[] / tensors[]
         # sidecars carrying strided slice descriptors (start_offset +
         # stride[]). Project annotated edges down to a (pred, succ) set for
         # the existing structural checks; the annotation sanity check below

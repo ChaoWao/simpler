@@ -385,8 +385,8 @@ struct alignas(64) PTO2ReadyQueue {
 // as non-member so PTO2ReadyQueue stays a POD-like struct with cache-line
 // alignment. Storage is owned by the caller-supplied arena.
 //   reserve_layout: declare the slots[] region on the arena (must precede commit)
-//   init_from_layout: bind slots pointer from arena.region_ptr(off) and
-//                     initialize sequence counters
+//   init_data_from_layout: initialize sequence counters and queue metadata
+//   wire_arena_pointers: bind slots pointer from arena.region_ptr(off)
 //   destroy: forget the slots pointer (arena owns the buffer)
 size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity);
 // Writes everything *except* the arena-internal `slots` pointer field
@@ -412,7 +412,7 @@ struct CompletionStats {
 /**
  * Layout descriptor produced by PTO2SchedulerState::reserve_layout(). Holds
  * the arena offsets of every sub-region the scheduler needs plus the
- * capacities used at layout time (init_from_layout reuses them).
+ * capacities used at layout time (init_data_from_layout reuses them).
  */
 struct PTO2SchedulerLayout {
     size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
@@ -1352,10 +1352,6 @@ struct PTO2SchedulerState {
     static PTO2SchedulerLayout reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
     static PTO2SchedulerLayout
     reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]);
-    static PTO2SchedulerLayout reserve_layout(
-        DeviceArena &arena, const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH],
-        const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH]
-    );
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never

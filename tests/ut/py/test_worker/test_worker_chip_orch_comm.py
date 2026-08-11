@@ -20,7 +20,8 @@ from typing import Any, Optional, cast
 import pytest
 from simpler import worker as worker_module
 from simpler import worker_chip_orch_comm
-from simpler.task_interface import ChipTensor, DataType
+from simpler.buffer import mint_owner_instance_id, wrap_fork_inherited
+from simpler.task_interface import DataType
 from simpler.worker import (
     _IDLE,
     _OFF_STATE,
@@ -230,7 +231,7 @@ def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monke
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
-        payload = ChipTensor.make(0x1234_0000, (16,), DataType.UINT8)
+        payload = wrap_fork_inherited(0x1234_0000, 16, mint_owner_instance_id(), 1, "L3")
         region.payload_write(0, payload, nbytes=8)
         region.payload_read(8, payload, nbytes=8)
         result = region.counter(64).test(7, WaitCmp.EQ)
@@ -1274,7 +1275,7 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
         )
 
         region = worker._create_worker_chip_region(0, 64, 128)
-        payload = ChipTensor.make(0x1234_0000, (16,), DataType.UINT8)
+        payload = wrap_fork_inherited(0x1234_0000, 16, mint_owner_instance_id(), 1, "L3")
         with pytest.raises(RuntimeError, match="copy failed"):
             region.payload_write(0, payload, nbytes=8)
         with pytest.raises(RuntimeError, match="poisoned"):
@@ -1338,7 +1339,7 @@ def test_sim_worker_region_payload_roundtrip(platform):
         def orch(orch_handle, _args, _cfg):
             host = orch_handle.alloc([16], DataType.UINT8)
             buf_t = ctypes.c_uint8 * 16
-            buf = buf_t.from_address(int(host.data))
+            buf = buf_t.from_address(int(host.base))
             for i in range(16):
                 buf[i] = (i + 41) & 0xFF
             region = orch_handle.create_worker_chip_region(worker_id=0, payload_bytes=16, counter_bytes=128)

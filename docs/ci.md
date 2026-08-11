@@ -58,10 +58,10 @@ PullRequest
 | `st-sim-a2a3` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a2a3sim` |
 | `st-sim-a5` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a5sim` |
 | `ut-a2a3` | a2a3 self-hosted | `pytest tests/ut --platform a2a3` + `ctest -L "^requires_hardware(_a2a3)?$" --resource-spec-file ...` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (host + cross-compiled device SO, link smoke only) |
-| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --device ...`, then a separate `-m sdma` step, then the DFX per-feature smokes |
+| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + `ctest -L "^requires_hardware(_a5)?$"` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
-| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --device ...`; x86_64 runners add `-m "not sdma"` |
-| `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | the L4 mixed local/remote examples, one L3 per machine |
+| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st -m "not pod" --platform a5 --device ...`, then adaptive-parallel DFX feature smokes; x86_64 runners use `-m "not sdma and not pod"` |
+| `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st -m pod --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
 
 ### Multi-machine pod jobs
 
@@ -73,32 +73,28 @@ addresses, the device split, ports, the staging root, proxies — comes from a
 Adding or re-addressing a machine is an edit to that file. Only a machine
 hosting a runner needs one.
 
-Its body splits by what is per-run and what is per-example:
+Its body splits by what is per-run and what is per-pytest session:
 
 | Action | Called | What it does |
 | ------ | ------ | ------------ |
 | `pod-stage` | once | rsync this run's tree onto the peer and build it there |
-| `pod-run-example` | once per example | start the peer's L3 daemon, run the example's parent, stop the daemon and pull its logs |
+| `pod-run-pytest` | once | start the peer's L3 daemon, set the pod pytest environment, run `pytest examples tests/st -m pod`, stop the daemon and pull its logs |
 | `pod-teardown` | once, `if: always()` | remove the run's tree from the peer |
 
-Staging and the peer-side build are the job's whole cost, and every example
-runs against that same tree and venv, so they happen once; only the daemon and
-the parent repeat. A job-level matrix over examples would instead repeat the
-staging and both venvs per branch.
+Staging and the peer-side build are the job's whole cost, and every pod test
+runs against that same tree and venv, so they happen once. The pytest command
+owns selection: adding an L4 pod example means adding a `test_*.py` wrapper with
+`@pytest.mark.pod`, not editing `_st-pod.yml`.
 
-Examples run with `continue-on-error` and a summary step decides the result:
-one round holds two machines, so learning about only the first failure wastes
-the second half of it. **A step reporting green there has not necessarily
-passed** — `continue-on-error` rewrites a failed step's `conclusion` to success
-and leaves the truth in `outcome`, which only the summary step reads.
+Pod logs go to `output/pod-ci-<run>-<attempt>/pytest/` and the whole directory
+is uploaded as one artifact. Parent-side `ASCEND_PROCESS_LOG_PATH` is split per
+pytest nodeid by `st_pod_logs`; peer-side daemon/device logs are grouped for the
+pytest session. Reach for the artifact first on a device-side failure: the host
+traceback only says the peer's scheduler gave up, and the sub-class saying why
+is printed on the device.
 
-Each example's logs go to `output/pod-ci-<run>-<attempt>/<example>/` and the
-whole directory is uploaded as one artifact. Reach for it first on a
-device-side failure: the host traceback only says the peer's scheduler gave
-up, and the sub-class saying why is printed on the device.
-
-Writing an example — the files, the entry module, the environment variables
-`pod-run-example` sets — is covered in
+Writing an example — the files, the entry module, the `run(...)` entry point,
+the `test_*.py` pod wrapper, and the manual `run_parent.sh` — is covered in
 [`examples/workers/README.md`](../examples/workers/README.md).
 
 ### Nightly sanitizer sweep
@@ -134,16 +130,16 @@ benefit — device bin-packing for L3, xdist fanout for L2, and a shared
 `ChipWorker` per `(runtime, device)`:
 
 ```bash
-# Recommended CI invocation — a2a3 deselects the SDMA marker, as the job does,
-# and runs it as a second pass afterwards
-pytest examples tests/st -m "not sdma" --platform a2a3 --device 4-7 -x
+# Recommended CI invocation — a2a3 deselects SDMA and pod tests, as the job does,
+# and runs SDMA as a second pass afterwards
+pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device 4-7 -x
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5 -x
 
-# A5 ARM64 runners run the full corpus
-pytest examples tests/st --platform a5 --device 0-7 -x
+# A5 ARM64 runners run the non-pod corpus
+pytest examples tests/st -m "not pod" --platform a5 --device 0-7 -x
 
-# A5 x86_64 runners deselect SDMA tests
-pytest examples tests/st -m "not sdma" --platform a5 --device 0-7 -x
+# A5 x86_64 runners deselect SDMA and pod tests
+pytest examples tests/st -m "not sdma and not pod" --platform a5 --device 0-7 -x
 ```
 
 `-x` (`--exitfirst`) is appropriate for CI, where aborting on first
@@ -195,7 +191,7 @@ not need `--max-parallel` manually.
 
   The arch flags subtract `NON_CODE` before deciding, so a non-code-only change already makes both `false`. An arch-gated job therefore needs no separate non-code check. See [`.claude/rules/ci-change-detection.md`](../.claude/rules/ci-change-detection.md) for the invariants these gates must keep.
 
-- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The sweep deselects them with `-m "not sdma"` and a later step runs `-m sdma`. Ordering is what the two paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection is by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Nothing outside `st-onboard-a2a3` filters on the marker, so a local `pytest examples tests/st` still runs everything.
+- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them with `-m "not sdma and not pod"` and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection is by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Pod tests are selected by `-m pod` in `st-pod-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
 
 ### CPU emergency lane (`ci-self-cpu.yml`) and the `/run-cpu` button
 
@@ -245,7 +241,7 @@ runner pools, branched at run time on the host arch (`uname -m`):
   `--device ${DEVICE_RANGE}`.
 
 a5 runners always use `task-submit`. The x86_64 A5 scene-test sweep deselects
-the `sdma` marker; ARM64 runs the full corpus, including SDMA tests. Steps that
+the `sdma` marker; ARM64 runs the full non-pod corpus, including SDMA tests. Steps that
 only build (cmake, `RuntimeBuilder`, the
 `cann-examples` smokes) take no lock on either arch. The same device-lock rule
 applies to local onboard work — see
@@ -261,6 +257,18 @@ Compilation is serial by default; both onboard jobs pass `--compile-workers 8`,
 which assumes the runner's CPU is theirs alone — it starts eight `ccec`
 processes at once. The sim jobs run on ephemeral GitHub-hosted runners with no
 restored cache, so they compile cold every time and get no warm-up step.
+
+The DFX smokes reuse the runner's device allocation after the main scene-test
+sweep. The `run-onboard-dfx-smokes` CI action distributes `dep_gen`, chip
+swimlane, PMU, and args dump round-robin across the allocated devices and keeps
+`-p no:xdist` inside each pytest process. Those are the four a5 smokes; a2a3
+adds a fifth smoke for host-build-graph `dep_gen`. A device runs at most one
+smoke at a time, so a one-device allocation runs serially while multiple
+devices run as many independent lanes as both the allocation and platform's
+smoke count permit. With four or fewer a2a3 devices, the fifth smoke waits to
+reuse its round-robin device. Each smoke retains its own log and exit status,
+so one failure does not suppress the remaining DFX results; the aggregate step
+fails after all logs have been reported.
 
 A warm-up that cannot compile a class reports it and keeps going: the pass only
 fills a cache, so the locked pytest run that follows is what recompiles the

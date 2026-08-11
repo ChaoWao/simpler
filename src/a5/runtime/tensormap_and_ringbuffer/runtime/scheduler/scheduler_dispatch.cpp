@@ -749,6 +749,7 @@ void SchedulerContext::dispatch_ready_tasks(
 // =============================================================================
 
 int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_idx) {
+    always_assert(sched_ != nullptr);
     CoreTracker &tracker = core_trackers_[thread_idx];
 
     PTO2SharedMemoryHeader *header = sched_->sm_header;
@@ -1013,17 +1014,32 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
 
         // Phase 2 drain check
         if (drain_state_.sync_start_pending.load(std::memory_order_acquire) != 0) {
+#if SIMPLER_DFX
+            uint64_t drain_t0 = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
+            uint64_t drain_stage_wall = 0;
+            int32_t drain_staged_blocks = 0;
+            handle_drain_mode(thread_idx, &drain_stage_wall, &drain_staged_blocks);
+            if (drain_t0 != 0 && drain_stage_wall != 0) {
+                chip_swimlane_aicpu_record_sched_phase(
+                    thread_idx, ChipSwimlaneSchedPhaseKind::Drain, drain_t0, get_sys_cnt_aicpu(),
+                    chip_swimlane.sched_loop_count, static_cast<uint32_t>(drain_staged_blocks)
+                );
+            }
+#else
             handle_drain_mode(thread_idx);
+#endif
             continue;
         }
 
-        // Phase 3: Drain dummy ready queue (thread 0 only).
+        // Phase 3: Drain dummy ready queue (S0/S1/S2/S3).
         //
         // Dependency-only tasks bypass AICore dispatch: they go through the
         // scheduler so fanin/fanout edges stay consistent, but completion is
-        // signalled inline here. Pinned to thread 0 to avoid cross-thread races.
-        if (thread_idx == 0) {
-            constexpr int DUMMY_DRAIN_BATCH = 16;
+        // signalled inline here. The ready queue is MPMC, and the fanout path
+        // uses per-slot locks/atomics, so multiple scheduler threads can share
+        // the dependency-only resolve work.
+        if (thread_idx < PLATFORM_MAX_AICPU_THREADS - 1) {
+            constexpr int DUMMY_DRAIN_BATCH = 8;
             PTO2TaskSlotState *dummy_batch[DUMMY_DRAIN_BATCH];
             int dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH);
 #if SIMPLER_DFX
@@ -1039,12 +1055,21 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
 #endif
 #if SIMPLER_SCHED_PROFILING
-                sched_->on_task_complete(dummy_slot, thread_idx);
+                [[maybe_unused]] uint32_t consumers_resolved =
+                    sched_->on_task_complete(dummy_slot, thread_idx).fanout_edges;
 #else
-                sched_->on_task_complete(dummy_slot);
+                [[maybe_unused]] uint32_t consumers_resolved = sched_->on_task_complete(dummy_slot);
 #endif
 #if SIMPLER_DFX
                 if (dummy_resolve_t0 != 0) {
+                    uint64_t resolve_t1 = get_sys_cnt_aicpu();
+                    constexpr uint64_t RESOLVE_EMIT_MIN_CYCLES = PLATFORM_PROF_SYS_CNT_FREQ / 1'000'000;
+                    if (resolve_t1 - dummy_resolve_t0 >= RESOLVE_EMIT_MIN_CYCLES) {
+                        chip_swimlane_aicpu_record_sched_phase(
+                            thread_idx, ChipSwimlaneSchedPhaseKind::Resolve, dummy_resolve_t0, resolve_t1,
+                            chip_swimlane.sched_loop_count, consumers_resolved
+                        );
+                    }
                     if (dummy_slot.task_attrs.has_predicate()) {
                         chip_swimlane_aicpu_record_predicated_skip(
                             thread_idx, dummy_resolve_t0, sched_chip_swimlane_[thread_idx].sched_loop_count,
@@ -1169,6 +1194,13 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             idle_iterations = 0;
             last_progress_ts = get_sys_cnt_aicpu();
         } else {
+#if SIMPLER_DFX
+            uint64_t release_t0 =
+                (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && deferred_release_count > 0) ?
+                    get_sys_cnt_aicpu() :
+                    0;
+            uint32_t released_count = static_cast<uint32_t>(deferred_release_count);
+#endif
             while (deferred_release_count > 0) {
 #if SIMPLER_SCHED_PROFILING
                 (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
@@ -1176,6 +1208,14 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count]);
 #endif
             }
+#if SIMPLER_DFX
+            if (release_t0 != 0) {
+                chip_swimlane_aicpu_record_sched_phase(
+                    thread_idx, ChipSwimlaneSchedPhaseKind::Release, release_t0, get_sys_cnt_aicpu(),
+                    chip_swimlane.sched_loop_count, released_count
+                );
+            }
+#endif
             // Deferred consumed-head advances retry from the no-progress path.
             // During a ring-heap stall, a CONSUMED head with its pending bit
             // still set means no retry has acquired advance_lock and cleared

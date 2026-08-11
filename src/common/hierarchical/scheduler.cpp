@@ -121,6 +121,7 @@ void Scheduler::start(const Config &cfg) {
 
 void Scheduler::request_stop() {
     stop_requested_.store(true, std::memory_order_release);
+    if (running_.load(std::memory_order_acquire)) cfg_.manager->stop_workers();
     {
         std::lock_guard<std::mutex> lk(completion_mu_);
         ++wake_generation_;
@@ -137,7 +138,7 @@ void Scheduler::stop() {
 }
 
 // =============================================================================
-// WorkerThread completion callback (called from WorkerThread via Manager)
+// Endpoint completion callback
 // =============================================================================
 
 void Scheduler::worker_done(WorkerCompletion completion) {
@@ -258,11 +259,13 @@ void Scheduler::run() {
             auto ready = [this, &observed_wake_generation] {
                 return !completion_queue_.empty() || wake_generation_ != observed_wake_generation;
             };
-            const auto stall_deadline = reservation_stall_deadline();
-            if (stall_deadline.has_value()) {
-                completion_cv_.wait_until(lk, *stall_deadline, ready);
-            } else {
-                completion_cv_.wait(lk, ready);
+            if (!cfg_.manager->any_busy()) {
+                const auto stall_deadline = reservation_stall_deadline();
+                if (stall_deadline.has_value()) {
+                    completion_cv_.wait_until(lk, *stall_deadline, ready);
+                } else {
+                    completion_cv_.wait(lk, ready);
+                }
             }
             observed_wake_generation = wake_generation_;
         }
@@ -271,6 +274,8 @@ void Scheduler::run() {
         // compaction cannot free TaskSlotStates while on_task_complete or
         // dispatch_ready is still reading them.
         std::lock_guard<std::mutex> loop_lk(loop_mu_);
+
+        cfg_.manager->progress();
 
         // Phase 1: drain completions
         while (true) {
@@ -416,7 +421,7 @@ void Scheduler::try_consume(TaskSlot slot) {
 
 // The NEXT_LEVEL worker-id set is fixed by Worker::init() (NextLevelReadyQueues
 // is reset once, before scheduling starts) and every queued/targeted worker id
-// is validated in Orchestrator::submit_impl. WorkerThread resolves expected
+// is validated in Orchestrator::submit_impl. The endpoint lane resolves expected
 // lane/capacity/stopping rejections through exactly one complete_unpublished
 // call, under the same non-throwing completion-callback contract as ordinary
 // endpoint completion.
@@ -434,9 +439,15 @@ void Scheduler::dispatch_ready() {
 
     // Group reservations and every queue pop in one pass belong to the same
     // whole-run FIFO head, even if a completion advances the head mid-pass.
-    const NextLevelGroupDispatchResult group_result = dispatch_next_level_group(run_snapshot);
-    update_reservation_stall(group_result);
-    dispatch_next_level_singles(group_result.reserved_worker_ids, run_snapshot);
+    bool group_arrived_between_phases = false;
+    do {
+        const NextLevelGroupDispatchResult group_result = dispatch_next_level_group(run_snapshot);
+        update_reservation_stall(group_result);
+        if (cfg_.after_group_phase_cb) cfg_.after_group_phase_cb();
+        group_arrived_between_phases = dispatch_next_level_singles(
+            group_result.reserved_worker_ids, run_snapshot, group_result.blocked_group_slot == INVALID_SLOT
+        );
+    } while (group_arrived_between_phases);
     dispatch_sub_ready(run_snapshot);
 }
 
@@ -448,7 +459,7 @@ bool claim_for_dispatch(TaskSlotState &s) {
 }
 
 void Scheduler::dispatch_claimed(WorkerThread *worker, WorkerDispatch dispatch, bool prepared) {
-    // WorkerThread owns publication failure through its one terminal callback.
+    // The endpoint lane owns publication failure through one terminal callback.
     // Retrying here after that callback starts can duplicate a partially
     // published completion. The callback contract is the same non-throwing
     // contract used by ordinary endpoint completions.
@@ -472,6 +483,10 @@ void Scheduler::dispatch_preparable_next_level_singles() {
         if (worker == nullptr || !worker->can_stage()) continue;
         TaskSlot slot;
         if (!cfg_.ready_next_level_queues->try_pop_single(worker_id, run_id, slot)) continue;
+        if (!cfg_.ready_next_level_queues->groups_empty(run_id)) {
+            cfg_.enqueue_ready_cb(slot);
+            return;
+        }
         TaskSlotState &state = *cfg_.ring->slot_state(slot);
         if (state.state.load(std::memory_order_acquire) != TaskState::READY) continue;
         if (state.run_id != run_id || state.worker_type != WorkerType::NEXT_LEVEL || state.is_group() ||
@@ -684,8 +699,9 @@ std::optional<std::chrono::steady_clock::time_point> Scheduler::reservation_stal
     return reservation_stall_episode_->started_at + cfg_.reservation_stall_warn_after;
 }
 
-void Scheduler::dispatch_next_level_singles(
-    const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot
+bool Scheduler::dispatch_next_level_singles(
+    const std::unordered_set<int32_t> &reserved_worker_ids, const std::optional<RunId> &run_snapshot,
+    bool verify_group_barrier
 ) {
     for (int32_t worker_id : cfg_.ready_next_level_queues->worker_ids()) {
         if (reserved_worker_ids.find(worker_id) != reserved_worker_ids.end()) continue;
@@ -707,6 +723,13 @@ void Scheduler::dispatch_next_level_singles(
                 cfg_.enqueue_ready_cb(slot);
                 break;
             }
+            const bool group_waiting =
+                verify_group_barrier && (run_snapshot ? !cfg_.ready_next_level_queues->groups_empty(*run_snapshot) :
+                                                        !cfg_.ready_next_level_queues->groups_empty());
+            if (group_waiting) {
+                cfg_.enqueue_ready_cb(slot);
+                return true;
+            }
             if (s.worker_type != WorkerType::NEXT_LEVEL || s.is_group() || s.target_worker_id(0) != worker_id) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_singles: misrouted task slot");
             }
@@ -716,4 +739,5 @@ void Scheduler::dispatch_next_level_singles(
             break;
         }
     }
+    return false;
 }

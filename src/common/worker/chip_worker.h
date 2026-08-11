@@ -14,11 +14,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "../platform_comm/comm.h"
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
 #include "pipeline_slot_pool.h"
@@ -37,6 +42,10 @@ struct ChipWorkerNativeRun {
     uint64_t run_id{0};
     uint64_t dispatch_id{0};
 };
+
+class ChipRun;
+class ChipRunLane;
+struct ChipRunLaneState;
 
 class ChipWorker {
 public:
@@ -78,29 +87,17 @@ public:
     /// Terminal — the object cannot be reused after this.
     void finalize();
 
-    // Launch a cid previously staged via register_callable.
-    // Materializes a ChipStorageTaskArgs from `args` (one memcpy of T*40B + S*8B
-    // into a stack POD), then delegates to the overload below. Per-stage timing
-    // (host wall, on-NPU device wall + AICPU phase breakdown) is emitted by the
-    // platform as `[STRACE]` log markers — see src/common/log/.../strace.h — not
-    // returned, so the L3 dispatcher and L2 child are observed uniformly.
-    void run(int32_t callable_id, TaskArgsView args, const CallConfig &config);
-    void
-    run(int32_t callable_id, TaskArgsView args, const CallConfig &config, volatile int32_t *accepted_state,
-        int32_t accepted_value);
-    // Same launch, but the caller already holds the runtime.so-ABI POD —
-    // skip the view→storage memcpy and hand the pointer straight to the C ABI.
-    // Used by the ChipStorageTaskArgs path in the nanobind binding.
+    // Launch a cid previously staged via register_callable. `args` is the runtime.so-ABI POD, which
+    // every caller already holds: the wire blob is materialized into one before it gets here.
+    // Per-stage timing (host wall, on-NPU device wall + AICPU phase breakdown) is emitted by the
+    // platform as `[STRACE]` log markers — see src/common/log/.../strace.h — not returned, so the
+    // L3 dispatcher and L2 child are observed uniformly.
     void run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config);
     void
     run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config,
         volatile int32_t *accepted_state, int32_t accepted_value);
     void run_with_lease(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
-        volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
-    );
-    void run_with_lease(
-        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
         volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
     );
 
@@ -129,15 +126,24 @@ public:
         uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
         int32_t accepted_value = 0
     );
-    ChipWorkerNativeRun prepare_native_run(
-        int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
-        uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
-        int32_t accepted_value = 0
-    );
     void launch_native_run(const ChipWorkerNativeRun &run);
     bool poll_native_run(const ChipWorkerNativeRun &run);
     void wait_native_run(const ChipWorkerNativeRun &run);
     void finalize_native_run(const ChipWorkerNativeRun &run);
+
+    ChipRun submit_chip_run(
+        int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config, const PipelineSlotLease &lease,
+        uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0,
+        bool activated = true
+    );
+    // Direct submission: no pipeline lease, so the lane admits at capacity one
+    // by draining its predecessor before this run enters the FIFO. run() is the
+    // blocking composition of this call and ChipRun::wait_until.
+    ChipRun submit_chip_run(
+        int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config,
+        volatile int32_t *accepted_state = nullptr, int32_t accepted_value = 0
+    );
+    void close_chip_run_lane();
 
     // Per-callable_id preparation. Requires init() first and a callable_id
     // in [0, MAX_REGISTERED_CALLABLE_IDS) (cap 64).
@@ -205,6 +211,11 @@ public:
     /// inside the backend's per-allocation record).
     void
     comm_release_domain_windows(uint64_t comm_handle, uint64_t allocation_id, size_t rank_count, uint32_t domain_rank);
+    std::tuple<std::vector<uint8_t>, uint64_t, size_t> comm_global_domain_prepare(
+        uint64_t domain_id, uint32_t domain_rank, uint32_t rank_count, size_t window_size, uint32_t profile
+    );
+    uint64_t comm_global_domain_import(uint64_t domain_id, const std::vector<uint8_t> &descriptors);
+    void comm_global_domain_release(uint64_t domain_id);
     void comm_barrier(uint64_t comm_handle);
     void comm_destroy(uint64_t comm_handle);
     void comm_destroy_all();
@@ -268,6 +279,10 @@ private:
     using CommAllocDomainWindowsFn =
         int (*)(void *, uint64_t, const uint32_t *, size_t, uint32_t, size_t, uint64_t *, uint64_t *);
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
+    using CommGlobalDomainPrepareFn =
+        int (*)(uint64_t, uint32_t, uint32_t, size_t, uint32_t, CommGlobalDomainDescriptor *, uint64_t *);
+    using CommGlobalDomainImportFn = int (*)(uint64_t, const CommGlobalDomainDescriptor *, size_t, uint64_t *);
+    using CommGlobalDomainReleaseFn = int (*)(uint64_t);
     using CommBarrierFn = int (*)(void *);
     using CommDestroyFn = int (*)(void *);
 
@@ -325,24 +340,24 @@ private:
     CommDeriveContextFn comm_derive_context_fn_ = nullptr;
     CommAllocDomainWindowsFn comm_alloc_domain_windows_fn_ = nullptr;
     CommReleaseDomainWindowsFn comm_release_domain_windows_fn_ = nullptr;
+    CommGlobalDomainPrepareFn comm_global_domain_prepare_fn_ = nullptr;
+    CommGlobalDomainImportFn comm_global_domain_import_fn_ = nullptr;
+    CommGlobalDomainReleaseFn comm_global_domain_release_fn_ = nullptr;
     CommBarrierFn comm_barrier_fn_ = nullptr;
     CommDestroyFn comm_destroy_fn_ = nullptr;
     void *device_ctx_ = nullptr;
     std::vector<CommSession> comm_sessions_;
     std::unordered_map<uint64_t, size_t> comm_session_index_;
+    std::unordered_set<uint64_t> global_domain_ids_;
     uint64_t base_comm_handle_ = 0;
 
-    // Slot 0 with no generation bookkeeping: an unleased run is a caller that
-    // is not using the pipeline, and minting a generation for it here would
-    // advance the filter past the leases a real pool later presents.
-    static constexpr uint32_t UNLEASED_SLOT = 0;
-    void run_on_slot(
-        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-        volatile int32_t *accepted_state, int32_t accepted_value
-    );
     uint32_t arena_bank_for_slot(uint32_t slot_id) const;
 
     enum class NativeRunPhase : uint8_t { EMPTY, PREPARING, PREPARED, LAUNCHED, REAPED, FINALIZING };
+    class PreparedRunIncompatible : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
     struct NativeRunSlotState {
         uint64_t lease_generation{0};
         uint64_t run_epoch{0};
@@ -353,9 +368,16 @@ private:
     ChipWorkerNativeRun prepare_native_run_on_slot(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
         uint64_t generation, uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state,
-        int32_t accepted_value
+        int32_t accepted_value, bool admit_pipeline_generation
+    );
+    ChipWorkerNativeRun prepare_native_run_for_lane(
+        int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+        uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value,
+        bool pipeline_leased
     );
     void cleanup_native_runs_noexcept() noexcept;
+
+    friend struct ChipRunLaneState;
 
     class RuntimeStorage {
     public:
@@ -382,6 +404,7 @@ private:
     mutable std::mutex native_run_mu_;
     PipelineSlotGenerationFilter pipeline_generations_;
     PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
+    std::unique_ptr<ChipRunLane> run_lane_;
     // device_id_ is set once in init() and never modified afterward. All
     // ChipWorker callers run on the thread that called init() (the same
     // thread is the only one that subsequently calls malloc / copy_to /

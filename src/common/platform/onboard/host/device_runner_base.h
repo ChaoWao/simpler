@@ -108,7 +108,9 @@ public:
     /**
      * Reserve caller-owned native-run storage before binding starts. A
      * concurrent reservation is admitted only while the first reservation
-     * owns the execution claim and selects distinct per-run resources.
+     * owns the execution claim and selects a distinct pipeline slot. A backend
+     * that shares an arena bank must reject or defer incompatible preparation
+     * before mutating that bank.
      */
     bool try_reserve_native_run(
         const void *owner, uint32_t pipeline_slot, uint32_t arena_bank, bool allow_prepared_successor

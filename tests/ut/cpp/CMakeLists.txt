@@ -212,10 +212,10 @@ add_library(hierarchical_objs OBJECT
     ${HIERARCHICAL_SRC_DIR}/worker_manager.cpp
     ${HIERARCHICAL_SRC_DIR}/scheduler.cpp
     ${HIERARCHICAL_SRC_DIR}/worker.cpp
+    ${WORKER_SRC_DIR}/chip_run_lane.cpp
     ${WORKER_SRC_DIR}/chip_worker.cpp
-    # Host-side assert_impl / get_stacktrace for the unified Tensor's
-    # always_assert (init_external, reached via make_tensor_external in
-    # remote_wire.cpp / orchestrator.cpp). Mirrors the binding's CMake.
+    # Host-side assert_impl / get_stacktrace for the unified ChipTensor's
+    # always_assert (init_external and the view ops). Mirrors the binding's CMake.
     # ODR invariant: assert_impl / get_stacktrace are ALSO defined in the runtime
     # orchestration/common.cpp. No target may link both that and this file, or
     # the linker sees duplicate symbols. This target links neither runtime
@@ -224,6 +224,7 @@ add_library(hierarchical_objs OBJECT
 )
 target_include_directories(hierarchical_objs PUBLIC
     ${HIERARCHICAL_SRC_DIR}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
     ${WORKER_SRC_DIR}
 )
@@ -391,6 +392,7 @@ add_hierarchical_test(test_ring  hierarchical/test_ring.cpp)
 add_hierarchical_test(test_scope      hierarchical/test_scope.cpp)
 add_hierarchical_test(test_orchestrator hierarchical/test_orchestrator.cpp)
 add_hierarchical_test(test_scheduler  hierarchical/test_scheduler.cpp)
+add_hierarchical_test(test_chip_run_lane hierarchical/test_chip_run_lane.cpp)
 add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
 add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)
@@ -785,6 +787,10 @@ add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cp
 add_a2a3_hbg_runtime_test(test_graph_cache a2a3/test_graph_cache.cpp)
 target_sources(test_graph_cache PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/runtime/scheduler/graph_execution.cpp
+)
+add_a5_hbg_runtime_test(test_a5_graph_cache a5/test_graph_cache.cpp)
+target_sources(test_a5_graph_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/scheduler/graph_execution.cpp
 )
 # PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.

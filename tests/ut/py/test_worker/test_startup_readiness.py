@@ -53,6 +53,15 @@ _TEST_WALL_BUDGET_S = TEST_WALL_BUDGET_S
 _hard_timeout = hard_timeout
 
 
+def _raiser(exc: BaseException):
+    """A stand-in whose call always raises ``exc``."""
+
+    def _fn(*_a, **_k):
+        raise exc
+
+    return _fn
+
+
 def _run_catch(fn):
     """Run ``fn`` in a thread body, returning None on success or the exception."""
     try:
@@ -731,7 +740,7 @@ class TestLevel2Lifecycle:
             # A second close is a clean no-op (does not re-block on the epoch cv).
             w.close()
 
-    def test_l2_submit_returns_completed_handle(self, monkeypatch):
+    def test_l2_submit_returns_live_handle(self, monkeypatch):
         from simpler.task_interface import ChipCallable  # noqa: PLC0415
 
         w = self._make_l2(monkeypatch)
@@ -741,9 +750,125 @@ class TestLevel2Lifecycle:
             w.init()
             run_handle = w.submit(callable_handle)
             assert isinstance(run_handle, RunHandle)
+            # The handle is backed by a live lane run rather than born terminal:
+            # a fake chip reaches its fence immediately, so `done` says nothing
+            # here, but the run must be registered and waiting must reach it.
+            run_id = run_handle._run_id
+            assert run_id is not None
+            assert w._chip_run_for(run_id) is not None
+            assert run_handle.wait() is None
+            # Waiting retires the lane entry; the handle stays terminal and
+            # waiting again is idempotent rather than a second submit.
+            assert w._chip_run_for(run_id) is None
             assert run_handle.done
             assert run_handle.wait() is None
             w.close()
+
+    @pytest.mark.parametrize("timeout", [float("nan"), float("inf")])
+    def test_l2_wait_rejects_unrepresentable_timeout_before_the_binding(self, monkeypatch, timeout):
+        """A timeout the steady clock cannot express never reaches ``duration_cast``.
+
+        ``_ChipRun.wait`` converts a ``double`` to the clock's integral
+        representation, and converting NaN or an infinity that way is
+        undefined. The public surface never gets there: ``RunHandle._deadline``
+        rejects both as non-finite first, so this pins the outer gate that makes
+        the binding's own check defence in depth rather than the only guard.
+        """
+        from simpler.task_interface import ChipCallable  # noqa: PLC0415
+
+        w = self._make_l2(monkeypatch)
+        callable_handle = w.register(ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[]))
+        with _hard_timeout(_TEST_WALL_BUDGET_S):
+            w.init()
+            handle = w.submit(callable_handle)
+            with pytest.raises(ValueError, match="non-negative finite"):
+                handle.wait(timeout)
+            handle.wait()
+            w.close()
+
+    def test_l2_run_equals_submit_then_wait(self, monkeypatch):
+        """``run`` is the blocking composition of ``submit`` and ``wait``."""
+        from simpler.task_interface import ChipCallable  # noqa: PLC0415
+
+        w = self._make_l2(monkeypatch)
+        callable = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
+        callable_handle = w.register(callable)
+        with _hard_timeout(_TEST_WALL_BUDGET_S):
+            w.init()
+            assert w._chip_worker is not None
+            impl = w._chip_worker._impl
+            w.run(callable_handle)
+            w.submit(callable_handle).wait()
+            # Both forms admit through the same lane entry point, so the direct
+            # path has one authority rather than a blocking bypass beside it.
+            assert len(impl.submitted) == 2
+            assert all(run.wait_count >= 1 for _cid, run in impl.submitted)
+            w.close()
+
+    def test_l2_unwaited_handle_is_drained_by_close(self, monkeypatch):
+        """A handle the caller drops still owns device work until close drains it."""
+        from simpler.task_interface import ChipCallable  # noqa: PLC0415
+
+        w = self._make_l2(monkeypatch)
+        callable = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
+        callable_handle = w.register(callable)
+        with _hard_timeout(_TEST_WALL_BUDGET_S):
+            w.init()
+            assert w._chip_worker is not None
+            impl = w._chip_worker._impl
+            w.submit(callable_handle)  # deliberately never waited
+            assert not impl.lane_closed
+            w.close()
+            # close() drives the lane's own drain, where a failure is reported
+            # through the cleanup journal instead of being swallowed by the
+            # lane destructor — and it does so while the device is still up,
+            # since draining after finalize would wait on a device that is gone.
+            assert impl.lane_closed
+            assert impl.lane_closed_before_finalize is True
+
+    def test_l2_close_reports_lane_failure_only_when_undelivered(self, monkeypatch):
+        """Close re-raises the lane's poison only if no wait already delivered it.
+
+        The lane rethrows its poison on every close. A run whose handle was
+        waited on has already raised that error at the wait, so repeating it at
+        close would turn a failure the caller handled into an unhandled one —
+        which is what the onboard fault-injection scene tests do: they assert
+        ``run()`` raises and then close in a ``finally``.
+        """
+        from simpler.task_interface import ChipCallable  # noqa: PLC0415
+
+        callable = ChipCallable.build(signature=[], func_name="x", binary=b"\x00", children=[])
+        boom = RuntimeError("chip run lane is poisoned")
+
+        # Waited: the error reached the caller at wait(), so close is silent.
+        w = self._make_l2(monkeypatch)
+        handle = w.register(callable)
+        with _hard_timeout(_TEST_WALL_BUDGET_S):
+            w.init()
+            assert w._chip_worker is not None
+            impl = w._chip_worker._impl
+            # The run itself fails, so waiting on the handle raises boom — the
+            # lane's poison and the caller's error are the same failure, which
+            # is what makes the close below a repeat rather than news.
+            impl.run_error = boom
+            monkeypatch.setattr(impl, "_close_chip_run_lane", _raiser(boom))
+            with pytest.raises(RuntimeError, match="poisoned"):
+                w.submit(handle).wait()
+            assert not w._chip_runs
+            w.close()
+
+        # Never waited: nobody has been told, so close is the first report.
+        w2 = self._make_l2(monkeypatch)
+        handle2 = w2.register(callable)
+        with _hard_timeout(_TEST_WALL_BUDGET_S):
+            w2.init()
+            assert w2._chip_worker is not None
+            impl2 = w2._chip_worker._impl
+            monkeypatch.setattr(impl2, "_close_chip_run_lane", _raiser(boom))
+            w2.submit(handle2)
+            assert w2._chip_runs
+            with pytest.raises(RuntimeError, match="poisoned"):
+                w2.close()
 
     def test_l2_close_without_init_is_noop(self, monkeypatch):
         w = self._make_l2(monkeypatch)
@@ -1021,7 +1146,7 @@ class TestLevel2Lifecycle:
         w._worker = types.SimpleNamespace(close=lambda: None)  # look "started" for the L3 branch
 
         # A slow pre-child cleanup step (runs before the SHUTDOWN broadcast).
-        monkeypatch.setattr(Worker, "_release_all_host_buffers", lambda self: time.sleep(0.6))
+        monkeypatch.setattr(Worker, "_release_all_buffers", lambda self: time.sleep(0.6))
         captured: dict = {}
 
         def capture_reap(groups, deadline):

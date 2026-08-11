@@ -417,8 +417,8 @@ bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostSta
         if (definition == nullptr || definition->full_key != submission->graph_key || definition->task_count == 0 ||
             definition->task_count > GRAPH_MAX_NODES ||
             !graph_execution_storage_bytes(
-                static_cast<int32_t>(definition->task_count), definition->tensor_arg_count, definition->total_bytes,
-                &execution_bytes
+                static_cast<int32_t>(definition->task_count), definition->tensor_arg_count,
+                definition->scalar_arg_count, definition->total_bytes, &execution_bytes
             )) {
             LOG_ERROR("host-orch: invalid Graph execution storage request");
             return false;
@@ -748,7 +748,7 @@ extern "C" int bind_callable_to_runtime_impl(
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
-        if (t.is_child_memory()) {
+        if (t.is_device_memory()) {
             LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             device_args.add_tensor(t);
             continue;
@@ -778,7 +778,7 @@ extern "C" int bind_callable_to_runtime_impl(
         }
         // Read-only INPUT tensors are never written by the kernel, so there is
         // no point copying them back D2H at the end. Index the signature
-        // by the orch tensor index `i` (child_memory tensors are skipped above
+        // by the orch tensor index `i` (device-space tensors are skipped above
         // but do not consume a separate signature slot — scalars follow the
         // tensor entries). Anything not provably IN keeps the safe default of
         // copying back.

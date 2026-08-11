@@ -438,11 +438,9 @@ struct TaskSlotState {
         return remote_sidecar;
     }
 
-    // Zero-copy view over the i-th worker's args (THREAD-mode dispatch).
+    // The i-th worker's Tensor args (the L3→L2 wire element).
     // `i` must be 0 for non-group slots; 0..group_size()-1 for groups.
-    TaskArgsView args_view(int32_t i) const {
-        return is_group_ ? make_view(task_args_list[static_cast<size_t>(i)]) : make_view(task_args);
-    }
+    const TaskArgs &args(int32_t i) const { return is_group_ ? task_args_list[static_cast<size_t>(i)] : task_args; }
 
     TaskSlotState() = default;
     TaskSlotState(const TaskSlotState &) = delete;
@@ -545,6 +543,7 @@ public:
     bool try_front_group(RunId run_id, TaskSlot &out);
     bool try_pop_group(TaskSlot &out);
     bool try_pop_group(RunId run_id, TaskSlot &out);
+    bool groups_empty() const;
     bool groups_empty(RunId run_id) const;
     bool single_empty(int32_t worker_id, RunId run_id) const;
     bool singles_empty(RunId run_id) const;

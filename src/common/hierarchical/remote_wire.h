@@ -12,19 +12,22 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
+#include "../task_interface/buffer.h"
 #include "../task_interface/call_config.h"
-#include "../task_interface/tensor.h"
 #include "types.h"
 
 namespace remote_l3 {
 
-// 2: CallConfig lost its block_dim field — a run always takes the whole
-// device, so the payload is one int32 shorter than v1's.
-static constexpr uint32_t PROTOCOL_VERSION = 2;
+// 3: a TASK's per-argument record is the self-describing wire `Tensor` — the embedded
+// BufferDescriptor plus the strided view. Both ends of a run come from one `pip install`,
+// so this constant is a mismatch alarm at the frame header, not a dual-decode selector.
+static constexpr uint32_t PROTOCOL_VERSION = 3;
+inline constexpr size_t FRAME_HEADER_BYTES = 40;
 static constexpr uint32_t MAX_FRAME_PAYLOAD_BYTES = 16U * 1024U * 1024U;
 static constexpr uint32_t MAX_STRING_BYTES = 1024U;
 static constexpr uint32_t MAX_ERROR_BYTES = 4096U;
@@ -63,6 +66,8 @@ enum class ControlName : uint32_t {
     COMM_INIT = 13,
     ALLOC_DOMAIN = 14,
     RELEASE_DOMAIN = 15,
+    COPY_TO_DOMAIN = 16,
+    COPY_FROM_DOMAIN = 17,
 };
 
 enum class ReadyState : uint32_t {
@@ -99,7 +104,7 @@ struct HelloPayload {
 };
 
 struct RemoteTaskArgsWire {
-    std::vector<ChipTensor> tensor_metadata;
+    std::vector<Tensor> tensors;
     std::vector<RemoteTensorSidecar> remote_desc;
     std::vector<uint64_t> scalars;
     std::vector<uint8_t> inline_payload;
@@ -166,8 +171,8 @@ HelloPayload decode_hello(const uint8_t *data, size_t size);
 std::vector<uint8_t> encode_call_config(const CallConfig &config);
 CallConfig decode_call_config(const uint8_t *data, size_t size, size_t &offset);
 
-std::vector<uint8_t> encode_tensor(const ChipTensor &tensor);
-ChipTensor decode_tensor(const uint8_t *data, size_t size, size_t &offset, bool remote_task);
+std::vector<uint8_t> encode_tensor(const Tensor &tensor);
+Tensor decode_tensor(const uint8_t *data, size_t size, size_t &offset);
 
 std::vector<uint8_t> encode_remote_tensor_desc(const RemoteTensorDesc &desc);
 RemoteTensorDesc decode_remote_tensor_desc(const uint8_t *data, size_t size, size_t &offset);

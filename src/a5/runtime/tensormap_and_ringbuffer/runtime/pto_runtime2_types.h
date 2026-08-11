@@ -22,8 +22,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
-#define SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
+#pragma once
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -366,7 +365,7 @@ static_assert(
  * Per-task slot scheduling state (scheduler-private, NOT in shared memory)
  *
  * Consolidates all hot-path scheduling fields into a single cache-friendly
- * structure (32 bytes = half a cache line). Accessing any field of a task's
+ * structure (64 bytes = one cache line). Accessing any field of a task's
  * slot state brings all related fields into the same cache line.
  *
  * Concurrency notes:
@@ -587,5 +586,3 @@ struct alignas(64) PTO2TaskSlotState {
 };
 
 static_assert(sizeof(PTO2TaskSlotState) == 64);
-
-#endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_

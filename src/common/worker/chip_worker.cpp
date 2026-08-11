@@ -11,6 +11,7 @@
 
 #include "chip_worker.h"
 
+#include "chip_run_lane.h"
 #include "pipeline_contract.h"
 
 #include <dlfcn.h>
@@ -192,6 +193,9 @@ void ChipWorker::init(
         comm_alloc_domain_windows_fn_ = load_symbol<CommAllocDomainWindowsFn>(handle, "comm_alloc_domain_windows");
         comm_release_domain_windows_fn_ =
             load_symbol<CommReleaseDomainWindowsFn>(handle, "comm_release_domain_windows");
+        comm_global_domain_prepare_fn_ = load_symbol<CommGlobalDomainPrepareFn>(handle, "comm_global_domain_prepare");
+        comm_global_domain_import_fn_ = load_symbol<CommGlobalDomainImportFn>(handle, "comm_global_domain_import");
+        comm_global_domain_release_fn_ = load_symbol<CommGlobalDomainReleaseFn>(handle, "comm_global_domain_release");
         comm_barrier_fn_ = load_symbol<CommBarrierFn>(handle, "comm_barrier");
         comm_destroy_fn_ = load_symbol<CommDestroyFn>(handle, "comm_destroy");
     } catch (...) {
@@ -313,6 +317,9 @@ void ChipWorker::init(
         comm_get_window_size_fn_ = nullptr;
         comm_alloc_domain_windows_fn_ = nullptr;
         comm_release_domain_windows_fn_ = nullptr;
+        comm_global_domain_prepare_fn_ = nullptr;
+        comm_global_domain_import_fn_ = nullptr;
+        comm_global_domain_release_fn_ = nullptr;
         comm_barrier_fn_ = nullptr;
         comm_destroy_fn_ = nullptr;
         runtime_bufs_.clear();
@@ -364,6 +371,9 @@ void ChipWorker::init(
         comm_derive_context_fn_ = nullptr;
         comm_alloc_domain_windows_fn_ = nullptr;
         comm_release_domain_windows_fn_ = nullptr;
+        comm_global_domain_prepare_fn_ = nullptr;
+        comm_global_domain_import_fn_ = nullptr;
+        comm_global_domain_release_fn_ = nullptr;
         comm_barrier_fn_ = nullptr;
         comm_destroy_fn_ = nullptr;
         runtime_bufs_.clear();
@@ -391,10 +401,29 @@ void ChipWorker::init(
             );
         }
     }
+    run_lane_ = std::make_unique<ChipRunLane>(*this);
 }
 
 void ChipWorker::finalize() {
+    if (run_lane_ != nullptr) {
+        try {
+            run_lane_->close();
+        } catch (...) {
+            // Final device teardown below is the last-resort reclamation path;
+            // destructors must not terminate while reporting a prior run error.
+        }
+        run_lane_.reset();
+    }
     cleanup_native_runs_noexcept();
+    // Global domains are independent of the legacy communicator sessions.
+    // Release them while the host runtime and device context are still alive.
+    if (comm_global_domain_release_fn_ != nullptr) {
+        for (uint64_t domain_id : global_domain_ids_) {
+            comm_global_domain_release_fn_(domain_id);
+        }
+    }
+    global_domain_ids_.clear();
+
     // Defensive: if the user never called comm_destroy, reclaim all owned
     // communicator handles and streams before tearing down the device context.
     clear_comm_sessions();
@@ -445,6 +474,9 @@ void ChipWorker::finalize() {
     comm_derive_context_fn_ = nullptr;
     comm_alloc_domain_windows_fn_ = nullptr;
     comm_release_domain_windows_fn_ = nullptr;
+    comm_global_domain_prepare_fn_ = nullptr;
+    comm_global_domain_import_fn_ = nullptr;
+    comm_global_domain_release_fn_ = nullptr;
     comm_barrier_fn_ = nullptr;
     comm_destroy_fn_ = nullptr;
     runtime_bufs_.clear();
@@ -468,18 +500,6 @@ void ChipWorker::register_callable(int32_t callable_id, const void *callable) {
     }
 }
 
-void ChipWorker::run(int32_t callable_id, TaskArgsView args, const CallConfig &config) {
-    run(callable_id, args, config, nullptr, 0);
-}
-
-void ChipWorker::run(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, volatile int32_t *accepted_state,
-    int32_t accepted_value
-) {
-    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    run(callable_id, &chip_storage, config, accepted_state, accepted_value);
-}
-
 void ChipWorker::run(int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config) {
     run(callable_id, args, config, nullptr, 0);
 }
@@ -488,7 +508,9 @@ void ChipWorker::run(
     int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, volatile int32_t *accepted_state,
     int32_t accepted_value
 ) {
-    run_on_slot(callable_id, args, config, UNLEASED_SLOT, accepted_state, accepted_value);
+    if (args == nullptr) throw std::runtime_error("run requires task args");
+    ChipRun run = submit_chip_run(callable_id, *args, config, accepted_state, accepted_value);
+    (void)run.wait_until(ChipRun::Deadline::max());
 }
 
 uint32_t ChipWorker::arena_bank_for_slot(uint32_t slot_id) const {
@@ -525,55 +547,18 @@ uint64_t ChipWorker::retained_temp_addr(uint32_t slot_id) const {
 }
 
 void ChipWorker::run_with_lease(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease,
-    volatile int32_t *accepted_state, int32_t accepted_value
-) {
-    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    run_with_lease(callable_id, &chip_storage, config, lease, accepted_state, accepted_value);
-}
-
-void ChipWorker::run_with_lease(
     int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
     volatile int32_t *accepted_state, int32_t accepted_value
 ) {
     if (lease.reserved != 0 || lease.generation == 0 || lease.slot_id >= pipeline_contract_.pipeline_depth) {
         throw std::runtime_error("run pipeline lease is outside the runtime PipelineContract");
     }
-    if (!pipeline_generations_.admit(lease)) {
-        throw std::runtime_error("run pipeline lease generation is stale");
-    }
-    run_on_slot(callable_id, args, config, lease.slot_id, accepted_state, accepted_value);
-}
-
-void ChipWorker::run_on_slot(
-    int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-    volatile int32_t *accepted_state, int32_t accepted_value
-) {
-    config.validate();
-    if (!initialized_) {
-        throw std::runtime_error("ChipWorker not initialized; call init() first");
-    }
-
-    const NativeRunDescriptor descriptor{slot_id,       arena_bank_for_slot(slot_id), 0, 0, 0, 0, accepted_state,
-                                         accepted_value};
-    void *rt = runtime_bufs_[slot_id].data();
-    // Per-stage timing is emitted by the platform as `[STRACE]` log markers, not
-    // returned (see chip_worker.h::run). CallConfig is threaded through to the C
-    // ABI as a single pointer rather than unpacked into per-field args.
-    int rc = run_fn_(device_ctx_, rt, callable_id, args, &config, &descriptor);
-    if (rc != 0) {
-        throw std::runtime_error("run failed with code " + std::to_string(rc));
-    }
-}
-
-ChipWorkerNativeRun ChipWorker::prepare_native_run(
-    int32_t callable_id, TaskArgsView args, const CallConfig &config, const PipelineSlotLease &lease, uint64_t run_id,
-    uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value
-) {
-    ChipStorageTaskArgs chip_storage = view_to_chip_storage(args);
-    return prepare_native_run(
-        callable_id, &chip_storage, config, lease, run_id, dispatch_id, accepted_state, accepted_value
+    if (args == nullptr) throw std::runtime_error("run_with_lease requires task args");
+    if (run_lane_ == nullptr) throw std::runtime_error("ChipWorker run lane is not initialized");
+    ChipRun run = run_lane_->submit(
+        callable_id, *args, config, lease, /*run_id=*/0, /*dispatch_id=*/0, accepted_state, accepted_value, true
     );
+    (void)run.wait_until(ChipRun::Deadline::max());
 }
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run(
@@ -584,7 +569,19 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run(
         throw std::runtime_error("native-run pipeline lease is outside the runtime PipelineContract");
     }
     return prepare_native_run_on_slot(
-        callable_id, args, config, lease.slot_id, lease.generation, run_id, dispatch_id, accepted_state, accepted_value
+        callable_id, args, config, lease.slot_id, lease.generation, run_id, dispatch_id, accepted_state, accepted_value,
+        true
+    );
+}
+
+ChipWorkerNativeRun ChipWorker::prepare_native_run_for_lane(
+    int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, const PipelineSlotLease &lease,
+    uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value,
+    bool pipeline_leased
+) {
+    return prepare_native_run_on_slot(
+        callable_id, args, config, lease.slot_id, lease.generation, run_id, dispatch_id, accepted_state, accepted_value,
+        pipeline_leased
     );
 }
 
@@ -595,7 +592,8 @@ bool ChipWorker::supports_concurrent_native_prepare() const {
 
 ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
     int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
-    uint64_t generation, uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value
+    uint64_t generation, uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state,
+    int32_t accepted_value, bool admit_pipeline_generation
 ) {
     config.validate();
     if (!initialized_) {
@@ -631,14 +629,13 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
                 );
             }
         }
-        // The loop above already rejected every predecessor that may not carry a
-        // successor, so more than one survivor means a successor is staged.
         if (occupied > 1) {
             throw std::runtime_error(
                 "prepare_native_run already owns a prepared successor " + format_native_run_identity(run_identity)
             );
         }
-        if (!pipeline_generations_.admit(PipelineSlotLease{slot_id, 0, generation})) {
+        if (admit_pipeline_generation &&
+            !pipeline_generations_.is_admissible(PipelineSlotLease{slot_id, 0, generation})) {
             throw std::runtime_error(
                 "native-run pipeline lease generation is stale " + format_native_run_identity(run_identity)
             );
@@ -671,6 +668,11 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
         if (state.run_epoch == run_epoch && state.phase == NativeRunPhase::PREPARING) {
             state = NativeRunSlotState{};
         }
+        if (rc == PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE) {
+            throw PreparedRunIncompatible(
+                "native prepare requires depth-one fallback " + format_native_run_identity(run_identity)
+            );
+        }
         throw std::runtime_error(
             "prepare_native_run failed with code " + std::to_string(rc) + " " + format_native_run_identity(run_identity)
         );
@@ -684,9 +686,39 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
             state = NativeRunSlotState{};
             throw std::runtime_error("native-run identity changed while prepare was in progress");
         }
+        if (admit_pipeline_generation && !pipeline_generations_.admit(PipelineSlotLease{slot_id, 0, generation})) {
+            (void)finalize_run_fn_(device_ctx_, runtime_bufs_[slot_id].data());
+            state = NativeRunSlotState{};
+            throw std::runtime_error(
+                "native-run pipeline lease generation became stale while prepare was in progress " +
+                format_native_run_identity(run_identity)
+            );
+        }
         state.phase = NativeRunPhase::PREPARED;
     }
     return run_identity;
+}
+
+ChipRun ChipWorker::submit_chip_run(
+    int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config, const PipelineSlotLease &lease,
+    uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state, int32_t accepted_value, bool activated
+) {
+    if (run_lane_ == nullptr) throw std::runtime_error("ChipWorker run lane is not initialized");
+    return run_lane_->submit(
+        callable_id, args, config, lease, run_id, dispatch_id, accepted_state, accepted_value, activated
+    );
+}
+
+ChipRun ChipWorker::submit_chip_run(
+    int32_t callable_id, const ChipStorageTaskArgs &args, const CallConfig &config, volatile int32_t *accepted_state,
+    int32_t accepted_value
+) {
+    if (run_lane_ == nullptr) throw std::runtime_error("ChipWorker run lane is not initialized");
+    return run_lane_->submit(callable_id, args, config, accepted_state, accepted_value);
+}
+
+void ChipWorker::close_chip_run_lane() {
+    if (run_lane_ != nullptr) run_lane_->close();
 }
 
 void ChipWorker::launch_native_run(const ChipWorkerNativeRun &run) {
@@ -1124,6 +1156,67 @@ void ChipWorker::comm_release_domain_windows(
     if (rc != 0) {
         throw std::runtime_error("comm_release_domain_windows failed with code " + std::to_string(rc));
     }
+}
+
+std::tuple<std::vector<uint8_t>, uint64_t, size_t> ChipWorker::comm_global_domain_prepare(
+    uint64_t domain_id, uint32_t domain_rank, uint32_t rank_count, size_t window_size, uint32_t profile
+) {
+    if (comm_global_domain_prepare_fn_ == nullptr) {
+        throw std::runtime_error("comm_global_domain_prepare is not supported by this runtime");
+    }
+    auto [tracked, inserted] = global_domain_ids_.insert(domain_id);
+    if (!inserted) {
+        throw std::runtime_error("comm_global_domain_prepare received a duplicate domain_id");
+    }
+    CommGlobalDomainDescriptor descriptor{};
+    uint64_t local_window_base = 0;
+    int rc = comm_global_domain_prepare_fn_(
+        domain_id, domain_rank, rank_count, window_size, profile, &descriptor, &local_window_base
+    );
+    if (rc != 0) {
+        global_domain_ids_.erase(tracked);
+        throw std::runtime_error("comm_global_domain_prepare failed with code " + std::to_string(rc));
+    }
+    if (local_window_base == 0 || descriptor.mapping_size == 0) {
+        comm_global_domain_release_fn_(domain_id);
+        global_domain_ids_.erase(domain_id);
+        throw std::runtime_error("comm_global_domain_prepare returned an invalid window");
+    }
+    const auto *begin = reinterpret_cast<const uint8_t *>(&descriptor);
+    std::vector<uint8_t> descriptor_bytes(begin, begin + sizeof(descriptor));
+    return {std::move(descriptor_bytes), local_window_base, static_cast<size_t>(descriptor.mapping_size)};
+}
+
+uint64_t ChipWorker::comm_global_domain_import(uint64_t domain_id, const std::vector<uint8_t> &descriptors) {
+    if (comm_global_domain_import_fn_ == nullptr) {
+        throw std::runtime_error("comm_global_domain_import is not supported by this runtime");
+    }
+    if (descriptors.empty() || descriptors.size() % sizeof(CommGlobalDomainDescriptor) != 0) {
+        throw std::runtime_error("comm_global_domain_import descriptor table size is invalid");
+    }
+    uint64_t device_ctx = 0;
+    int rc = comm_global_domain_import_fn_(
+        domain_id, reinterpret_cast<const CommGlobalDomainDescriptor *>(descriptors.data()),
+        descriptors.size() / sizeof(CommGlobalDomainDescriptor), &device_ctx
+    );
+    if (rc != 0) {
+        throw std::runtime_error("comm_global_domain_import failed with code " + std::to_string(rc));
+    }
+    if (device_ctx == 0) {
+        throw std::runtime_error("comm_global_domain_import returned a null device context");
+    }
+    return device_ctx;
+}
+
+void ChipWorker::comm_global_domain_release(uint64_t domain_id) {
+    if (comm_global_domain_release_fn_ == nullptr) {
+        throw std::runtime_error("comm_global_domain_release is not supported by this runtime");
+    }
+    int rc = comm_global_domain_release_fn_(domain_id);
+    if (rc != 0) {
+        throw std::runtime_error("comm_global_domain_release failed with code " + std::to_string(rc));
+    }
+    global_domain_ids_.erase(domain_id);
 }
 
 void ChipWorker::comm_barrier(uint64_t comm_handle) {

@@ -16,7 +16,7 @@ tail = workers [1, 2]        # chip 2 is in both
 | ----------------------------- | ------------- |
 | **`domain_rank` is dense and follows `workers` order** | `even` gives chip 0 → rank 0 and chip 2 → rank 1; `tail` gives chip 1 → rank 0 and chip 2 → rank 1. A chip's rank is per domain, not global — chip 2 is rank 1 in both, chip 0 is rank 0 in one and absent from the other. |
 | **A non-member chip is absent, not zero-valued** | `tail[0]` raises `KeyError`. Indexing is the membership test. |
-| **Overlapping domains carve separate buffers** | `even[2].buffer_ptrs["scratch"] != tail[2].buffer_ptrs["scratch"]` — chip 2's two memberships do not alias. |
+| **Overlapping domains carve separate buffers** | `even[2].buffers["scratch"].base != tail[2].buffers["scratch"].base` — chip 2's two memberships do not alias. |
 | **`device_ctx` and buffer pointers are non-null** | Both must be set before a kernel can address the window. |
 | **Two lifetime styles** | The inspection pass allocates both domains and releases them in a `finally` via `handle.release()`; the reduce pass uses `with orch.allocate_domain(...) as handle`. |
 

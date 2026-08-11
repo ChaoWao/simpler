@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
@@ -38,6 +39,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     CanonicalIdentity,
     DataType,
     Tensor,
+    read_args_from_blob,
 )
 
 __all__ = [
@@ -47,14 +49,18 @@ __all__ = [
     "Buffer",
     "BufferDescriptor",
     "CanonicalIdentity",
+    "ImportContext",
     "ImportRegistry",
     "ImportedBuffer",
+    "MappedArg",
+    "MappedArgs",
     "Tensor",
     "create_host_shared_buffer",
     "host_ptr_nbytes",
     "intern_worker_path",
     "mint_owner_instance_id",
     "re_export",
+    "remote_backing_identity",
     "remote_sidecar_tensor",
     "worker_path_for_id",
     "wrap_device_malloc",
@@ -138,9 +144,12 @@ class Buffer:
     # backing lives on (0 for a host backing or an L2 own-device malloc). The device-pointer provenance
     # guard and free/copy key on (owner_worker_id, base).
     owner_worker_id: int = 0
+    closed: bool = False
 
     def to_descriptor(self) -> BufferDescriptor:
         """The wire descriptor for this backing — what a consumer needs to resolve it."""
+        if self.closed:
+            raise ValueError(f"Buffer: cannot derive a descriptor from a released buffer ({self.identity})")
         return BufferDescriptor(
             identity=self.identity,
             address_space=self.address_space,
@@ -177,11 +186,19 @@ class Buffer:
 
     def close(self) -> None:
         """Release the backing. The owner unlinks it, so a later consumer map fails rather than
-        resolving a name whose bytes are gone. Idempotent."""
-        if self.shm is not None:
-            self.shm.close()
-            self.shm.unlink()
-            self.shm = None
+        resolving a name whose bytes are gone. Idempotent; a released Buffer's ``tensor()``/
+        ``to_descriptor()`` are refused rather than building a view over memory that may already be
+        gone."""
+        if self.closed:
+            return
+        self.closed = True
+        shm = self.shm
+        self.shm = None
+        if shm is not None:
+            try:
+                shm.close()
+            finally:
+                shm.unlink()
 
 
 def create_host_shared_buffer(
@@ -238,6 +255,20 @@ def re_export(source: BufferDescriptor) -> Buffer:
     )
 
 
+def remote_backing_identity(owner_worker_id: int, buffer_id: int, generation: int) -> CanonicalIdentity:
+    """The canonical identity of a backing that lives on another machine's worker.
+
+    A remote owner's ``owner_instance_id`` never crosses the remote L3 wire, so the nonce is the
+    owning worker's id instead. This is the single rule for naming a remote backing: the submitting
+    L4's ``REMOTE_SIDECAR`` placeholder and the importing session runner both derive from it, so one
+    remote backing carries one identity on both sides of the hop.
+    """
+    oid = int(owner_worker_id).to_bytes(OWNER_INSTANCE_ID_BYTES, "little")
+    # A HOST_INLINE placeholder has no backing and so no generation of its own; 0 is the reserved
+    # "uninitialized" value a decoder rejects, so it carries the initial generation instead.
+    return CanonicalIdentity(oid, int(buffer_id), int(generation) or 1)
+
+
 def remote_sidecar_tensor(
     shapes: tuple[int, ...],
     dtype: int,
@@ -255,13 +286,11 @@ def remote_sidecar_tensor(
     descriptor rides in the per-task RemoteTaskArgsSidecar). The identity encodes the remote buffer
     (``owner_worker_id`` folded into the opaque nonce, plus ``buffer_id`` / ``generation``) so
     dependency inference and routing stay stable across the hop.
+
+    This placeholder is what the remote L3 wire carries verbatim as the task's per-argument record.
     """
-    oid = int(owner_worker_id).to_bytes(OWNER_INSTANCE_ID_BYTES, "little")
-    # A HOST_INLINE placeholder has no backing and so no generation of its own; 0 is the reserved
-    # "uninitialized" value a decoder rejects, so the placeholder carries the initial generation.
-    identity = CanonicalIdentity(oid, buffer_id, int(generation) or 1)
     descriptor = BufferDescriptor(
-        identity=identity,
+        identity=remote_backing_identity(owner_worker_id, buffer_id, generation),
         owner_worker_path_id=intern_worker_path(f"remote/{owner_worker_id}"),
         address_space=address_space,
         access=AccessMode.READWRITE,
@@ -434,6 +463,94 @@ class ImportedBuffer:
     descriptor: BufferDescriptor | None = None
 
 
+@dataclass
+class MappedArg:
+    """A Python compute (sub-worker) task arg: a ``Tensor`` materialized into this process, exposing a
+    ``buffer`` at the view origin plus the view geometry. The callable computes with e.g.
+    ``torch.frombuffer(arg.buffer, dtype=<from arg.dtype>, count=prod(arg.shapes))`` — reads/writes
+    land in the shared backing the owner sees, except when the descriptor's ``access`` is
+    ``AccessMode.READ``, where ``buffer`` is a read-only view (a ``FORK_COW`` backing's writes are
+    invisible to the owner and are the reason ``access`` is forced to ``READ`` for it).
+    """
+
+    imported: ImportedBuffer
+    byte_offset: int
+    shapes: tuple[int, ...]
+    strides: tuple[int, ...]
+    dtype: int  # DataType value
+
+    @property
+    def buffer(self) -> memoryview:
+        """A memoryview over the mapped backing at this view's origin (``byte_offset``); read-only
+        when the descriptor's ``access`` is ``AccessMode.READ``."""
+        ib = self.imported
+        if ib.shm is not None:
+            base = ib.shm.buf
+            assert base is not None
+        else:
+            # FORK_SHM / FORK_COW: no shm object — the base is a host VA inherited across the
+            # fork, so wrap that range directly.
+            base = memoryview((ctypes.c_char * ib.nbytes).from_address(ib.base))
+        view = base[self.byte_offset :]
+        if ib.descriptor is not None and ib.descriptor.access == AccessMode.READ:
+            return view.toreadonly()
+        return view
+
+
+class MappedArgs(Sequence):
+    """A Python sub-worker's task args: the mapped tensor args plus the scalar args.
+
+    Indexes and iterates as the tensor ``MappedArg`` list (``args[i].buffer``, ``len(args)``) — the
+    common compute-leaf access — and additionally exposes the blob's scalars via ``scalar_count()`` /
+    ``scalar(i)`` (uint64, in submission order), mirroring the owner-side ``TaskArgs`` scalar API.
+    """
+
+    __slots__ = ("_scalars", "_tensors")
+
+    def __init__(self, tensors: list[MappedArg], scalars: tuple[int, ...]) -> None:
+        self._tensors = list(tensors)
+        self._scalars = tuple(int(s) for s in scalars)
+
+    def __getitem__(self, i):
+        return self._tensors[i]
+
+    def __len__(self) -> int:
+        return len(self._tensors)
+
+    def tensor_count(self) -> int:
+        return len(self._tensors)
+
+    def scalar_count(self) -> int:
+        return len(self._scalars)
+
+    def scalar(self, i: int) -> int:
+        return self._scalars[i]
+
+
+@dataclass(frozen=True)
+class ImportContext:
+    """What owner nonce this endpoint may materialize a DEVICE ``address_space`` backing under.
+
+    A host endpoint (Python SUB, or any host-process consumer) may never materialize a DEVICE
+    backing — no device VA is ever valid there. A device (chip) endpoint may materialize one only
+    if the descriptor's ``owner_instance_id`` matches ``owning_chip_instance_id``.
+
+    This is a Worker-level check, not a chip-level one: ``owner_instance_id`` is minted once per
+    Worker incarnation (in ``Worker.init()``), not once per chip, so a Worker with more than one
+    entry in ``device_ids`` gives every one of its chip children the same nonce here — the wire
+    ``BufferDescriptor`` has no field that distinguishes sibling chips (``owner_worker_id`` is
+    host-side-only free/copy provenance, never serialized). A DEVICE backing minted for chip 0
+    of such a Worker therefore also passes this check on sibling chip 1. It still rejects a
+    *different* Worker's device buffer, and any host endpoint outright. The exact-chip half of
+    the endpoint x address_space matrix is enforced at submit time by the
+    ``(target_worker_id, ptr)`` check in ``orchestrator.py``; this is a backstop for a path that
+    reaches ``materialize`` without going through it, not a replacement for that check.
+    """
+
+    is_host_endpoint: bool
+    owning_chip_instance_id: bytes | None = None
+
+
 class ImportRegistry:
     """Per-consumer-endpoint lazy import cache: materialize a ``Tensor``'s embedded descriptor to a
     local base on first receipt (map-once), keyed by canonical identity.
@@ -448,8 +565,9 @@ class ImportRegistry:
     still describes the backing that was mapped, so one identity can never come to mean two things.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, context: ImportContext | None = None) -> None:
         self._by_identity: dict[CanonicalIdentity, ImportedBuffer] = {}
+        self._context = context
 
     def materialize(self, desc: BufferDescriptor) -> ImportedBuffer:
         """Map ``desc``'s backing into this process on first sight of its identity; reuse the
@@ -464,9 +582,11 @@ class ImportRegistry:
         POSIX shm object smaller than the ``nbytes`` its descriptor claims — every view bound check
         is computed against that number, so an unverified one makes them all vacuous.
 
-        Adds no endpoint check of its own: a DEVICE backing resolved here yields a device pointer,
-        which is only meaningful on its owner chip. The endpoint x ``address_space`` matrix is a
-        separate change; until it lands, that invariant rests on the caller.
+        A DEVICE backing is rejected unless ``context`` names this endpoint's owning Worker: the
+        endpoint x ``address_space`` matrix's materialize-side half, the backstop for a path that
+        reaches here without going through submit-time dispatch. This check is Worker-grained, not
+        chip-grained (see ``ImportContext``) — it cannot by itself tell apart two chips forked from
+        the same multi-device Worker.
         """
         key = desc.identity
         cached = self._by_identity.get(key)
@@ -482,6 +602,16 @@ class ImportRegistry:
                     f"this is refused"
                 )
             return cached
+        if desc.address_space == AddressSpace.DEVICE:
+            if self._context is None or self._context.is_host_endpoint:
+                raise ValueError(
+                    f"ImportRegistry: refusing to materialize a DEVICE backing ({desc.identity}) on a host endpoint"
+                )
+            if bytes(desc.identity.owner_instance_id) != self._context.owning_chip_instance_id:
+                raise ValueError(
+                    f"ImportRegistry: refusing to materialize a DEVICE backing ({desc.identity}) "
+                    f"minted for a different chip's owner"
+                )
         if desc.backend_kind in (
             BackendKind.FORK_SHM,
             BackendKind.FORK_COW,
@@ -492,7 +622,9 @@ class ImportRegistry:
             # FORK_SHM / FORK_COW: a host VA inherited across the fork, so the child already holds
             # the same address (they differ in write semantics, not in how they resolve).
             # DEVICE_MALLOC / VMM_WINDOW: a device pointer valid on the chip that allocated / carved
-            # it (the tensor must only reach that chip — a topology invariant).
+            # it (the tensor must only reach that chip — a topology invariant). The check above
+            # enforces the owning-Worker half of that (see ImportContext); the exact-chip half for
+            # a Worker with several chips is submit-time's job, not this cache's.
             base = int.from_bytes(desc.body, "little")
             imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None, desc)
         elif desc.backend_kind == BackendKind.POSIX_SHM:
@@ -515,6 +647,36 @@ class ImportRegistry:
         self._by_identity[key] = imported
         return imported
 
+    def materialize_args(self, args) -> dict[CanonicalIdentity, tuple[int, int]]:
+        """Materialize every embedded descriptor in a ``TaskArgs`` and return the resolved map:
+        identity -> (local base, address_space), scoped to this call's own tensors."""
+        resolved: dict[CanonicalIdentity, tuple[int, int]] = {}
+        for i in range(args.tensor_count()):
+            desc = args.tensor(i).buffer
+            imported = self.materialize(desc)
+            resolved[desc.identity] = (imported.base, int(imported.address_space))
+        return resolved
+
+    def mapped_args_from_blob(self, blob_ptr: int, capacity: int) -> MappedArgs:
+        """Materialize a task-args blob into a Python compute callable's args: every tensor becomes a
+        MappedArg (map-once, buffer at the view origin) and the blob's scalars ride alongside. This is
+        the compute-leaf map (a sub-worker reads/writes), distinct from pure forwarding (re-export,
+        which never maps).
+        """
+        args = read_args_from_blob(blob_ptr, capacity)
+        tensors = []
+        for i in range(args.tensor_count()):
+            t = args.tensor(i)
+            if t.buffer.address_space == AddressSpace.DEVICE:
+                # Depth behind the submit-time endpoint check: this process is a host compute leaf, so
+                # a device address here would be handed to torch as a host pointer.
+                raise ValueError(
+                    f"sub-worker argument {i} is a DEVICE-space tensor "
+                    f"({t.buffer.backend_kind.name}); it cannot be mapped into a host process"
+                )
+            tensors.append(MappedArg(self.materialize(t.buffer), t.byte_offset, t.shapes, t.strides, t.dtype))
+        return MappedArgs(tensors, tuple(args.scalar(i) for i in range(args.scalar_count())))
+
     def resolve(self, identity: CanonicalIdentity) -> ImportedBuffer:
         """The already-materialized import for ``identity``. Raises ``KeyError`` if this endpoint has
         not materialized that backing — resolution never maps as a side effect."""
@@ -522,13 +684,6 @@ class ImportRegistry:
         if imported is None:
             raise KeyError(f"ImportRegistry: no buffer registered for {identity}")
         return imported
-
-    def unregister(self, identity: CanonicalIdentity) -> None:
-        """Drop one import and close its mapping. The owner still holds the backing; only this
-        endpoint's view of it goes away. A no-op for an identity that was never materialized."""
-        imported = self._by_identity.pop(identity, None)
-        if imported is not None and imported.shm is not None:
-            imported.shm.close()
 
     def close(self) -> None:
         """Close every mapping this endpoint made. Consumer-side only — unlinking belongs to the

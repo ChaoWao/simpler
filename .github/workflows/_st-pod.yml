@@ -86,7 +86,7 @@ jobs:
           set_default POD_REMOTE_STAGING_ROOT /data/workspace/ci-runner/pod-ci
           set_default POD_REMOTE_STAGING_TTL_DAYS 2
           set_default POD_DAEMON_WAIT_S 120
-          set_default POD_SMOKE_TIMEOUT_S 1800
+          set_default POD_SMOKE_TIMEOUT_S 2400
           set_default POD_CANN_ENV /usr/local/Ascend/cann/set_env.sh
           set_default POD_REMOTE_CANN_ENV "$POD_CANN_ENV"
           set_default POD_HTTP_PROXY ""
@@ -170,42 +170,28 @@ jobs:
           https-proxy: ${{ env.POD_HTTPS_PROXY }}
           no-proxy: ${{ env.POD_NO_PROXY }}
 
-      # Staging and the peer-side build are per-run: every example below runs
-      # against the same tree and the same venv, so re-staging per example
-      # would repeat the whole cost of the job.
+      # Staging and the peer-side build are per-run: the pod pytest sweep runs
+      # against the same tree and the same venv, so re-staging per test would
+      # repeat the whole cost of the job.
       - name: Stage the checkout on the peer
         uses: ./.github/actions/pod-stage
 
-      # continue-on-error so a second example still runs when the first fails —
-      # one round of this job occupies two machines, and finding out about only
-      # the first failure wastes the second half of it. The summary step below
-      # is what makes the job red.
-      - name: vector_add_mixed_l3
-        id: vector-add-mixed-l3
-        continue-on-error: true
-        uses: ./.github/actions/pod-run-example
+      - name: Run pod pytest
+        uses: ./.github/actions/pod-run-pytest
         with:
-          example: vector_add_mixed_l3
-          env-prefix: SIMPLER_VECTOR_ADD_MIXED_L3
-          parent-script: examples/workers/l4/vector_add_mixed_l3/run_parent.sh
+          pytest-args: >-
+            examples tests/st
+            -m pod
+            --platform ${{ inputs.platform }}
+            --device ${{ env.POD_LOCAL_DEVICES }}
+            --max-parallel 1
+            -v
+            --require-pto-isa
+            --pto-session-timeout 1200
 
       - name: Clear the pod staging tree
         if: always()
         uses: ./.github/actions/pod-teardown
-
-      # continue-on-error rewrites a failed example's `conclusion` to success
-      # and leaves the truth in `outcome`, so this is the only step whose
-      # result means the examples passed.
-      - name: Report pod example results
-        if: always()
-        run: |
-          FAILED=""
-          [ "${{ steps.vector-add-mixed-l3.outcome }}" = "success" ] || FAILED="$FAILED vector_add_mixed_l3"
-          if [ -n "$FAILED" ]; then
-            echo "::error::pod examples failed:$FAILED"
-            exit 1
-          fi
-          echo "all pod examples passed"
 
       # Both sides' device logs and each daemon's output land under the run
       # directory and stay on the runner otherwise. A device-side failure — a

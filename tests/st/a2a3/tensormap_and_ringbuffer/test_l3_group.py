@@ -19,7 +19,8 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import TaskArgs, TensorArgType
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, make_tensor_arg, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from simpler_setup.scene_test import _rehosted_ref_for
 
 KERNELS_BASE = "../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
 
@@ -28,27 +29,27 @@ def verify(args):
     """SubCallable — runs after group completes."""
 
 
-def _chip_args(in_a, in_b, out_f) -> TaskArgs:
-    """Build per-chip TaskArgs with INPUT/INPUT/OUTPUT_EXISTING tags."""
+def _chip_args(task_args, in_a, in_b, out_f) -> TaskArgs:
+    """Build per-chip TaskArgs (Tensors) with INPUT/INPUT/OUTPUT_EXISTING tags."""
     a = TaskArgs()
-    a.add_tensor(make_tensor_arg(in_a), TensorArgType.INPUT)
-    a.add_tensor(make_tensor_arg(in_b), TensorArgType.INPUT)
-    a.add_tensor(make_tensor_arg(out_f), TensorArgType.OUTPUT_EXISTING)
+    a.add_tensor(_rehosted_ref_for(task_args, in_a), TensorArgType.INPUT)
+    a.add_tensor(_rehosted_ref_for(task_args, in_b), TensorArgType.INPUT)
+    a.add_tensor(_rehosted_ref_for(task_args, out_f), TensorArgType.OUTPUT_EXISTING)
     return a
 
 
 def run_dag(orch, callables, task_args, config):
     """L3 orchestration: group of 2 chips → SubTask dependency."""
-    args0 = _chip_args(task_args.a0, task_args.b0, task_args.f0)
-    args1 = _chip_args(task_args.a1, task_args.b1, task_args.f1)
+    args0 = _chip_args(task_args, task_args.a0, task_args.b0, task_args.f0)
+    args1 = _chip_args(task_args, task_args.a1, task_args.b1, task_args.f1)
     callables.keep(args0, args1)  # prevent GC before drain
 
     orch.submit_next_level_group(callables.vector_kernel, [args0, args1], config, workers=[0, 1])
 
     # SubTask depends on both group outputs (f0, f1) — tag both as INPUT.
     sub_args = TaskArgs()
-    sub_args.add_tensor(make_tensor_arg(task_args.f0), TensorArgType.INPUT)
-    sub_args.add_tensor(make_tensor_arg(task_args.f1), TensorArgType.INPUT)
+    sub_args.add_tensor(_rehosted_ref_for(task_args, task_args.f0), TensorArgType.INPUT)
+    sub_args.add_tensor(_rehosted_ref_for(task_args, task_args.f1), TensorArgType.INPUT)
     orch.submit_sub(callables.verify, sub_args)
 
 
@@ -103,12 +104,12 @@ class TestL3Group(SceneTestCase):
     def generate_args(self, params):
         SIZE = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a0", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
-            Tensor("b0", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
-            Tensor("f0", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
-            Tensor("a1", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
-            Tensor("b1", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
-            Tensor("f1", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
+            TensorArg("a0", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
+            TensorArg("b0", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
+            TensorArg("f0", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
+            TensorArg("a1", torch.full((SIZE,), 2.0, dtype=torch.float32).share_memory_()),
+            TensorArg("b1", torch.full((SIZE,), 3.0, dtype=torch.float32).share_memory_()),
+            TensorArg("f1", torch.zeros(SIZE, dtype=torch.float32).share_memory_()),
         )
 
     def compute_golden(self, args, params):

@@ -23,7 +23,7 @@ widths in `layout` and the golden is rebuilt from them.
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 FLOATS_PER_CACHE_LINE = 16
 SLOTS_PER_BLOCK = 3
@@ -92,8 +92,8 @@ class TestSpmdSyncStartMixSpill(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("output", torch.zeros(MAX_TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
-            Tensor("layout", torch.zeros(2, dtype=torch.int32)),
+            TensorArg("output", torch.zeros(MAX_TOTAL_CL * FLOATS_PER_CACHE_LINE, dtype=torch.float32)),
+            TensorArg("layout", torch.zeros(2, dtype=torch.int32)),
             Scalar("early_on", int(params.get("early_on", 1))),
         )
 

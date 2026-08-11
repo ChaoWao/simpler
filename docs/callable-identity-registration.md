@@ -520,7 +520,7 @@ WorkerDispatch: task_slot, group_index, dispatch_id, prepare_only
 task-frame trailer: protocol, run_id, pipeline_slot, generation, dispatch_id
 ```
 
-`WorkerThread` assigns `dispatch_id` only after its queue insertion succeeds.
+`WorkerThread` assigns `dispatch_id` under its lane lock before endpoint submission.
 The callable digest remains part of the immutable payload, while the trailer
 lets both sides reject a stale activation, acceptance, or completion from an
 older use of the same pipeline frame. `FRAME_STAGED` confirms that this exact

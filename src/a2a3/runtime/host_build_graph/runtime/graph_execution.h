@@ -47,7 +47,7 @@ struct GraphTensor {
     uint8_t dtype;
     uint8_t manual_dep;
     uint8_t is_contiguous;
-    uint8_t child_memory;
+    uint8_t address_space;
     uint8_t reserved[3];
 };
 
@@ -60,6 +60,17 @@ struct GraphTensorSourceRef {
     uint16_t source_index;
     uint32_t reserved2;
     uint64_t packed_offset;
+};
+
+enum class GraphScalarSource : uint8_t {
+    STATIC_VALUE = 0,
+    BOUNDARY = 1,
+};
+
+struct GraphScalarSourceRef {
+    uint16_t source_index;
+    uint8_t source;
+    uint8_t reserved;
 };
 
 struct GraphNodeDefinition {
@@ -98,6 +109,7 @@ struct GraphDefinition {
     uint32_t edge_count;
     uint32_t root_count;
     uint32_t boundary_count;
+    uint32_t boundary_scalar_count;
     uint32_t tensor_arg_count;
     uint32_t scalar_arg_count;
     uint32_t off_fanout_offsets;
@@ -110,6 +122,7 @@ struct GraphDefinition {
     uint32_t off_tensors;
     uint32_t off_tensor_sources;
     uint32_t off_scalars;
+    uint32_t off_scalar_sources;
     uint32_t off_boundary_signatures;
 };
 
@@ -123,13 +136,16 @@ struct GraphSubmission {
     uint32_t definition_offset;
     uint32_t tensors_offset;
     uint32_t tensor_count;
-    uint32_t reserved;
+    uint32_t scalars_offset;
+    uint32_t scalar_count;
 };
 
 static_assert(std::is_trivially_copyable_v<GraphTensorSourceRef>);
 static_assert(std::is_standard_layout_v<GraphTensorSourceRef>);
 static_assert(std::is_trivially_copyable_v<GraphTensor>);
 static_assert(std::is_standard_layout_v<GraphTensor>);
+static_assert(std::is_trivially_copyable_v<GraphScalarSourceRef>);
+static_assert(std::is_standard_layout_v<GraphScalarSourceRef>);
 static_assert(std::is_trivially_copyable_v<GraphNodeDefinition>);
 static_assert(std::is_standard_layout_v<GraphNodeDefinition>);
 static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);
@@ -155,7 +171,7 @@ inline GraphTensor graph_tensor_pack(const ChipTensor &tensor) {
     packed.dtype = static_cast<uint8_t>(tensor.dtype);
     packed.manual_dep = tensor.manual_dep ? 1 : 0;
     packed.is_contiguous = tensor.is_contiguous ? 1 : 0;
-    packed.child_memory = tensor.child_memory;
+    packed.address_space = static_cast<uint8_t>(tensor.address_space);
     return packed;
 }
 
@@ -169,7 +185,7 @@ inline void graph_tensor_unpack(const GraphTensor &packed, ChipTensor *tensor) {
     tensor->dtype = static_cast<DataType>(packed.dtype);
     tensor->manual_dep = packed.manual_dep != 0;
     tensor->is_contiguous = packed.is_contiguous != 0;
-    tensor->child_memory = packed.child_memory;
+    tensor->address_space = static_cast<AddressSpace>(packed.address_space);
     for (uint32_t i = 0; i < MAX_TENSOR_DIMS; ++i) {
         tensor->shapes[i] = packed.shapes[i];
         tensor->strides[i] = packed.strides[i];
@@ -181,7 +197,7 @@ inline void graph_tensor_unpack(const GraphTensor &packed, ChipTensor *tensor) {
 inline bool graph_tensor_wire_valid(const GraphTensor &tensor) {
     if (tensor.buffer_addr == 0 || tensor.ndims == 0 || tensor.ndims > MAX_TENSOR_DIMS ||
         tensor.dtype >= static_cast<uint8_t>(DataType::DATA_TYPE_NUM) || tensor.manual_dep > 1 ||
-        tensor.is_contiguous > 1 || tensor.child_memory > 1) {
+        tensor.is_contiguous > 1 || tensor.address_space > 1) {
         return false;
     }
 
@@ -243,6 +259,18 @@ inline const GraphTensor *graph_submission_tensors(const GraphSubmission &submis
     );
 }
 
+inline const uint64_t *graph_submission_scalars(const GraphSubmission &submission) {
+    if (submission.scalar_count == 0) return nullptr;
+    if (submission.scalars_offset == 0 || submission.scalars_offset % alignof(uint64_t) != 0 ||
+        submission.scalars_offset > submission.total_bytes ||
+        submission.scalar_count > (submission.total_bytes - submission.scalars_offset) / sizeof(uint64_t)) {
+        return nullptr;
+    }
+    return reinterpret_cast<const uint64_t *>(
+        reinterpret_cast<const uint8_t *>(&submission) + submission.scalars_offset
+    );
+}
+
 enum class GraphExecutionState : uint8_t {
     SUBMITTED = 0,
     MATERIALIZING = 1,
@@ -277,6 +305,18 @@ static_assert(std::is_trivially_copyable_v<GraphTensorAddressPatch>);
 static_assert(std::is_standard_layout_v<GraphTensorAddressPatch>);
 static_assert(sizeof(GraphTensorAddressPatch) == 16);
 
+struct GraphScalarPatch {
+    uint16_t node_index;
+    uint8_t node_scalar_index;
+    uint8_t boundary_scalar_index;
+};
+
+static_assert(std::is_trivially_copyable_v<GraphScalarPatch>);
+static_assert(std::is_standard_layout_v<GraphScalarPatch>);
+static_assert(sizeof(GraphScalarPatch) == 4);
+static_assert(GRAPH_MAX_NODES <= UINT16_MAX);
+static_assert(MAX_SCALAR_ARGS <= UINT8_MAX);
+
 struct alignas(64) GraphNodeStorage {
     PTO2TaskDescriptor task;
     PTO2TaskPayload payload;
@@ -300,6 +340,9 @@ struct GraphExecution {
     uint32_t tensor_patch_capacity{0};
     uint32_t materialized_tensor_patches{0};
     uint32_t materialized_tensor_patch_count{0};
+    uint32_t scalar_patch_capacity{0};
+    uint32_t materialized_scalar_patches{0};
+    uint32_t materialized_scalar_patch_count{0};
     size_t allocation_bytes{0};
     size_t definition_capacity{0};
     uint64_t graph_key{0};
@@ -312,25 +355,30 @@ struct GraphExecution {
     GraphNodeStorage *nodes{nullptr};
     GraphNodeStorage *node_storage{nullptr};
     GraphTensorAddressPatch *tensor_patches{nullptr};
+    GraphScalarPatch *scalar_patches{nullptr};
     void *definition_storage{nullptr};
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
     const GraphTensor *boundary_tensors{nullptr};
     uint32_t boundary_tensor_count{0};
+    const uint64_t *boundary_scalars{nullptr};
+    uint32_t boundary_scalar_count{0};
 };
 
 static_assert(std::is_trivially_destructible_v<GraphNodeStorage>);
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
 
 inline bool graph_execution_storage_layout(
-    int32_t node_capacity, uint32_t tensor_patch_capacity, size_t definition_capacity, size_t *nodes_offset,
-    size_t *tensor_patches_offset, size_t *definition_offset, size_t *storage_bytes
+    int32_t node_capacity, uint32_t tensor_patch_capacity, uint32_t scalar_patch_capacity, size_t definition_capacity,
+    size_t *nodes_offset, size_t *tensor_patches_offset, size_t *scalar_patches_offset, size_t *definition_offset,
+    size_t *storage_bytes
 ) {
-    if (nodes_offset == nullptr || tensor_patches_offset == nullptr || definition_offset == nullptr ||
-        storage_bytes == nullptr || node_capacity <= 0 ||
+    if (nodes_offset == nullptr || tensor_patches_offset == nullptr || scalar_patches_offset == nullptr ||
+        definition_offset == nullptr || storage_bytes == nullptr || node_capacity <= 0 ||
         static_cast<size_t>(node_capacity) > SIZE_MAX / sizeof(GraphNodeStorage) ||
-        tensor_patch_capacity > GRAPH_MAX_NODES * MAX_TENSOR_ARGS) {
+        tensor_patch_capacity > GRAPH_MAX_NODES * MAX_TENSOR_ARGS ||
+        scalar_patch_capacity > GRAPH_MAX_NODES * MAX_SCALAR_ARGS) {
         return false;
     }
     auto checked_align_up = [](size_t value, size_t alignment, size_t *result) {
@@ -340,11 +388,16 @@ inline bool graph_execution_storage_layout(
     };
     const size_t nodes_bytes = static_cast<size_t>(node_capacity) * sizeof(GraphNodeStorage);
     const size_t tensor_patches_bytes = static_cast<size_t>(tensor_patch_capacity) * sizeof(GraphTensorAddressPatch);
+    const size_t scalar_patches_bytes = static_cast<size_t>(scalar_patch_capacity) * sizeof(GraphScalarPatch);
     if (!checked_align_up(sizeof(GraphExecution), alignof(GraphNodeStorage), nodes_offset) ||
         *nodes_offset > SIZE_MAX - nodes_bytes ||
         !checked_align_up(*nodes_offset + nodes_bytes, alignof(GraphTensorAddressPatch), tensor_patches_offset) ||
         *tensor_patches_offset > SIZE_MAX - tensor_patches_bytes ||
-        !checked_align_up(*tensor_patches_offset + tensor_patches_bytes, alignof(GraphDefinition), definition_offset) ||
+        !checked_align_up(
+            *tensor_patches_offset + tensor_patches_bytes, alignof(GraphScalarPatch), scalar_patches_offset
+        ) ||
+        *scalar_patches_offset > SIZE_MAX - scalar_patches_bytes ||
+        !checked_align_up(*scalar_patches_offset + scalar_patches_bytes, alignof(GraphDefinition), definition_offset) ||
         *definition_offset > SIZE_MAX - definition_capacity) {
         return false;
     }
@@ -352,14 +405,16 @@ inline bool graph_execution_storage_layout(
 }
 
 inline bool graph_execution_storage_bytes(
-    int32_t node_capacity, uint32_t tensor_patch_capacity, size_t definition_capacity, size_t *storage_bytes
+    int32_t node_capacity, uint32_t tensor_patch_capacity, uint32_t scalar_patch_capacity, size_t definition_capacity,
+    size_t *storage_bytes
 ) {
     size_t nodes_offset = 0;
     size_t tensor_patches_offset = 0;
+    size_t scalar_patches_offset = 0;
     size_t definition_offset = 0;
     return graph_execution_storage_layout(
-        node_capacity, tensor_patch_capacity, definition_capacity, &nodes_offset, &tensor_patches_offset,
-        &definition_offset, storage_bytes
+        node_capacity, tensor_patch_capacity, scalar_patch_capacity, definition_capacity, &nodes_offset,
+        &tensor_patches_offset, &scalar_patches_offset, &definition_offset, storage_bytes
     );
 }
 

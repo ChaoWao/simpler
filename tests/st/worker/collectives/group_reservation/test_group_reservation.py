@@ -14,8 +14,8 @@ from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CommBufferSpec, TaskArgs, TensorArgType
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, scene_test
-from simpler_setup import Tensor as STensor
-from simpler_setup.torch_interop import make_tensor_arg
+from simpler_setup import TensorArg as STensor
+from simpler_setup.scene_test import _rehosted_ref_for
 
 FIRST_GROUP = 0
 RELEASE_FIRST_GROUP = 1
@@ -36,9 +36,11 @@ def group_reservation_orch_fn(orch, callables, task_args, config):
         def make_args(worker_id, output_name, operation):
             domain = handle[worker_id]
             args = TaskArgs()
-            args.add_tensor(make_tensor_arg(getattr(task_args, output_name)), TensorArgType.OUTPUT_EXISTING)
+            args.add_tensor(
+                _rehosted_ref_for(task_args, getattr(task_args, output_name)), TensorArgType.OUTPUT_EXISTING
+            )
             args.add_scalar(operation)
-            args.add_scalar(domain.buffer_ptrs["state"])
+            args.add_scalar(domain.buffers["state"].base)
             args.add_scalar(domain.device_ctx)
             return args
 

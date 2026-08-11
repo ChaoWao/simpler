@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg
 
 _SCENE_TEST_MOD = sys.modules["simpler_setup.scene_test"]
 
@@ -39,7 +39,7 @@ class _Recorder(SceneTestCase):
         self.compare_calls = []
 
     def generate_args(self, params):
-        return TaskArgsBuilder(Tensor("y", torch.zeros(4, dtype=torch.float32)))
+        return TaskArgsBuilder(TensorArg("y", torch.zeros(4, dtype=torch.float32)))
 
     def compute_golden(self, args, params):
         self.golden_calls += 1
@@ -52,7 +52,7 @@ def _drive(inst, case, *, cli_skip=False):
     """Run one case through the L2 path with the device-touching steps stubbed."""
     inst._st_level = 2
     with (
-        patch.object(_SCENE_TEST_MOD, "_build_chip_task_args", return_value=(object(), list(_OUTPUT_NAMES))),
+        patch.object(_SCENE_TEST_MOD, "_build_l2_ref_args", return_value=(object(), list(_OUTPUT_NAMES))),
         patch.object(type(inst), "_build_config", return_value=object()),
     ):
         inst._run_and_validate_l2(MagicMock(), object(), case, skip_golden=cli_skip)
@@ -107,7 +107,7 @@ def test_compare_outputs_override_replaces_the_default_allclose():
         CASES = []
 
         def generate_args(self, params):
-            return TaskArgsBuilder(Tensor("y", torch.zeros(4, dtype=torch.float32)))
+            return TaskArgsBuilder(TensorArg("y", torch.zeros(4, dtype=torch.float32)))
 
         def compute_golden(self, args, params):
             args.y[:] = 1.0  # deliberately unequal to the un-run test tensor
@@ -126,7 +126,7 @@ def test_default_compare_outputs_raises_on_mismatch():
         CASES = []
 
         def generate_args(self, params):
-            return TaskArgsBuilder(Tensor("y", torch.zeros(4, dtype=torch.float32)))
+            return TaskArgsBuilder(TensorArg("y", torch.zeros(4, dtype=torch.float32)))
 
         def compute_golden(self, args, params):
             args.y[:] = 1.0

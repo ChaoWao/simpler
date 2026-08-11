@@ -1,0 +1,179 @@
+name: Run onboard DFX smokes
+description: Run the per-feature DFX smoke suites across the allocated devices.
+
+inputs:
+  platform:
+    description: Onboard platform, either a2a3 or a5.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run ${{ inputs.platform }} DFX smokes
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        DFX_PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+
+        case "$DFX_PLATFORM" in
+          a2a3)
+            source /usr/local/Ascend/cann/set_env.sh
+            ;;
+          a5) ;;
+          *)
+            echo "::error::unsupported onboard platform: $DFX_PLATFORM"
+            exit 2
+            ;;
+        esac
+        source .venv/bin/activate
+
+        DRIVER="$RUNNER_TEMP/run-onboard-dfx-smokes-${DFX_PLATFORM}.sh"
+        trap 'rm -f "$DRIVER"' EXIT
+        cat > "$DRIVER" <<'DFX_DRIVER'
+        set -uo pipefail
+
+        platform=$1
+        device_list=${2//[[:space:]]/}
+        IFS=',' read -r -a devices <<< "$device_list"
+        if [[ -z "$device_list" ]] || [[ ${#devices[@]} -eq 0 ]]; then
+          echo "DFX smokes require at least one device" >&2
+          exit 2
+        fi
+
+        declare -a seen_devices=()
+        for device in "${devices[@]}"; do
+          if [[ ! "$device" =~ ^[0-9]+$ ]] || [[ -n "${seen_devices[$device]:-}" ]]; then
+            echo "DFX smokes require distinct numeric device ids, got: $device_list" >&2
+            exit 2
+          fi
+          seen_devices[$device]=1
+        done
+
+        log_dir=$(mktemp -d)
+        declare -a job_labels=()
+        declare -a job_pids=()
+        declare -a job_logs=()
+        declare -a job_rcs=()
+        declare -a job_devices=()
+        declare -a active_device_jobs=()
+
+        cleanup_children() {
+          local pid
+          for pid in "${job_pids[@]}"; do
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+            fi
+          done
+          for pid in "${job_pids[@]}"; do
+            if [[ -n "$pid" ]]; then
+              wait "$pid" 2>/dev/null || true
+            fi
+          done
+        }
+
+        trap 'rm -rf -- "$log_dir"' EXIT
+        trap 'cleanup_children; exit 130' INT
+        trap 'cleanup_children; exit 143' TERM HUP
+
+        start_job() {
+          local label=$1
+          shift
+
+          local index=${#job_labels[@]}
+          local device=${devices[$((index % ${#devices[@]}))]}
+          local active_index=${active_device_jobs[$device]:-}
+          if [[ -n "$active_index" ]]; then
+            wait_job "$active_index"
+          fi
+
+          local log_file="$log_dir/$index.log"
+          job_labels+=("$label")
+          job_logs+=("$log_file")
+          job_rcs+=(-1)
+          job_devices+=("$device")
+
+          echo "Starting $label on device $device"
+          python -m pytest "$@" \
+            --platform "$platform" --device "$device" -p no:xdist \
+            --pto-session-timeout 600 --require-pto-isa >"$log_file" 2>&1 &
+          job_pids+=("$!")
+          active_device_jobs[$device]=$index
+        }
+
+        wait_job() {
+          local index=$1
+          local pid=${job_pids[$index]}
+          if [[ ${job_rcs[$index]} -ne -1 ]]; then
+            return
+          fi
+
+          if wait "$pid"; then
+            job_rcs[$index]=0
+          else
+            job_rcs[$index]=$?
+          fi
+          job_pids[$index]=""
+        }
+
+        if [[ "$platform" == "a2a3" ]]; then
+          start_job "dep_gen (tensormap_and_ringbuffer)" \
+            tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+            --enable-dep-gen
+        else
+          start_job "dep_gen" \
+            tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+            --enable-dep-gen
+        fi
+
+        start_job "chip_swimlane" \
+          "tests/st/$platform/tensormap_and_ringbuffer/dfx/chip_swimlane/" \
+          --enable-chip-swimlane --enable-dep-gen
+
+        start_job "PMU" \
+          "tests/st/$platform/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py" \
+          --enable-pmu 2
+
+        start_job "args_dump" \
+          "tests/st/$platform/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py" \
+          --dump-args
+
+        if [[ "$platform" == "a2a3" ]]; then
+          start_job "dep_gen (host_build_graph)" \
+            tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+            --enable-dep-gen
+        fi
+
+        for index in "${!job_labels[@]}"; do
+          wait_job "$index"
+        done
+
+        failed=0
+        for index in "${!job_labels[@]}"; do
+          label=${job_labels[$index]}
+          rc=${job_rcs[$index]}
+          echo "::group::DFX $label (exit=$rc)"
+          cat "${job_logs[$index]}"
+          echo "::endgroup::"
+          if [[ $rc -ne 0 ]]; then
+            echo "::error title=DFX smoke failed::$label failed on ${platform} device ${job_devices[$index]} with exit code $rc"
+            failed=1
+          fi
+        done
+
+        exit "$failed"
+        DFX_DRIVER
+
+        if [[ "$DFX_PLATFORM" == "a2a3" && "$(uname -m)" != "x86_64" ]]; then
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+            --run "bash '$DRIVER' a2a3 \$TASK_DEVICE"
+        else
+          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
+          if [[ "$DFX_PLATFORM" == "a2a3" ]]; then
+            bash "$DRIVER" a2a3 "$DEVICE_LIST"
+          else
+            task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" \
+              --run "bash '$DRIVER' a5 \$TASK_DEVICE"
+          fi
+        fi

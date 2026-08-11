@@ -31,7 +31,7 @@ never stalls on it. Chain:
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 SENTINEL = 42.0
 POISON = 999.0  # what the clobber writes if the predicate lets it dispatch
@@ -105,9 +105,9 @@ class TestPredicatedDispatch(SceneTestCase):
         y = torch.full((16,), INIT_VAL, dtype=torch.float32)
         gate = torch.full((16,), -1, dtype=torch.int32)
         return TaskArgsBuilder(
-            Tensor("x", x),
-            Tensor("y", y),
-            Tensor("gate", gate),
+            TensorArg("x", x),
+            TensorArg("y", y),
+            TensorArg("gate", gate),
             Scalar("case", int(params["case"])),
         )
 

@@ -186,8 +186,11 @@ void format_core_status(
         );
     } else {
         snprintf(
-            buf, buf_size, "core%d(busy kernel=%d task=%" PRId64 " cond_reg_state=%s ANOMALY)", core_id, kernel,
-            task_id_raw, cond_reg_state_str
+            buf, buf_size,
+            "core%d(busy kernel=%d task=%" PRId64
+            " cond_reg_state=%s ANOMALY cond_tok=%d running_tok=%d pending_tok=%d)",
+            core_id, kernel, task_id_raw, cond_reg_state_str, EXTRACT_TASK_ID(cond_reg),
+            core_state->running_reg_task_id, core_state->pending_reg_task_id
         );
     }
 }
@@ -315,7 +318,7 @@ void SchedulerContext::log_stall_diagnostics(
     // round-robin assignment in assign_cores_to_threads.
     int32_t ast = active_sched_threads_ > 0 ? active_sched_threads_ : aicpu_thread_num_;
     for (int32_t cli = 0; cli < tracker.get_cluster_count() && cli < STALL_DUMP_CORE_MAX; cli++) {
-        int32_t offset = cli * 3;
+        int32_t offset = cli * PLATFORM_CORES_PER_BLOCKDIM;
         int32_t aic_id = tracker.get_aic_core_id(offset);
         int32_t aiv0_id = tracker.get_aiv0_core_id(offset);
         int32_t aiv1_id = tracker.get_aiv1_core_id(offset);
@@ -506,8 +509,7 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, [[maybe_unu
     );
 
     uint64_t sched_total = chip_swimlane.sched_complete_cycle + chip_swimlane.sched_async_cycle +
-                           chip_swimlane.sched_scan_cycle + chip_swimlane.sched_dispatch_cycle +
-                           chip_swimlane.sched_idle_cycle;
+                           chip_swimlane.sched_dispatch_cycle + chip_swimlane.sched_idle_cycle;
     if (sched_total == 0) sched_total = 1;
 
     {
@@ -603,11 +605,6 @@ void SchedulerContext::log_chip_swimlane_summary(int32_t thread_idx, [[maybe_unu
             "Thread %d:     setup        : %.3fus (%.1f%%)", thread_idx,
             cycles_to_us(chip_swimlane.sched_dispatch_setup_cycle),
             chip_swimlane.sched_dispatch_setup_cycle * 100.0 / d_parent
-        );
-
-        LOG_INFO(
-            "Thread %d:   scan           : %.3fus (%.1f%%)", thread_idx, cycles_to_us(chip_swimlane.sched_scan_cycle),
-            chip_swimlane.sched_scan_cycle * 100.0 / sched_total
         );
 
         LOG_INFO(
@@ -800,7 +797,7 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
 // set instead of a contiguous slice.
 void SchedulerContext::handshake_owned_clusters(Runtime *runtime, int32_t tidx, int32_t active_threads) {
     Handshake *all_handshakes = reinterpret_cast<Handshake *>(runtime->dev.workers);
-    const int32_t aic_n = cores_total_num_ / 3;
+    const int32_t aic_n = cores_total_num_ / PLATFORM_CORES_PER_BLOCKDIM;
 
     int32_t owned[RUNTIME_MAX_WORKER];
     int32_t own_n = 0;
@@ -900,7 +897,7 @@ void SchedulerContext::handshake_owned_clusters(Runtime *runtime, int32_t tidx, 
 // right after handshaking its own clusters, with no all-thread barrier.
 // =============================================================================
 void SchedulerContext::assign_own_clusters(int32_t tidx) {
-    const int32_t aic_n = cores_total_num_ / 3;
+    const int32_t aic_n = cores_total_num_ / PLATFORM_CORES_PER_BLOCKDIM;
     const int32_t active = active_sched_threads_;
 
     CoreTracker &tracker = core_trackers_[tidx];
@@ -930,7 +927,7 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     // Per-cluster GlobalContext sub_block_id (mirrors post_handshake_init) for
     // this thread's owned cores only — a thread only ever dispatches to its own.
     for (int32_t c = 0; c < tracker.get_cluster_count(); c++) {
-        int32_t cluster_offset = c * 3;
+        int32_t cluster_offset = c * PLATFORM_CORES_PER_BLOCKDIM;
         int32_t aiv0_id = tracker.get_core_id_by_offset(tracker.get_aiv0_core_offset(cluster_offset));
         int32_t aiv1_id = tracker.get_core_id_by_offset(tracker.get_aiv1_core_offset(cluster_offset));
         payload_per_core_[aiv0_id][0].global_context.sub_block_id = 0;
@@ -942,8 +939,8 @@ void SchedulerContext::assign_own_clusters(int32_t tidx) {
     // Per-dispatch AsyncCtx constant prefill + one-time slab clear for owned cores
     // (mirrors post_handshake_init's all-core loop, restricted to this thread's).
     for (int32_t c = 0; c < tracker.get_cluster_count(); c++) {
-        for (int32_t sub = 0; sub < 3; sub++) {
-            int32_t core_id = tracker.get_core_id_by_offset(c * 3 + sub);
+        for (int32_t sub = 0; sub < PLATFORM_CORES_PER_BLOCKDIM; sub++) {
+            int32_t core_id = tracker.get_core_id_by_offset(c * PLATFORM_CORES_PER_BLOCKDIM + sub);
             for (int32_t buf = 0; buf < 2; buf++) {
                 PTO2DispatchPayload &dp = payload_per_core_[core_id][buf];
                 AsyncCtx &ac = dp.local_context.async_ctx;
@@ -998,7 +995,7 @@ bool SchedulerContext::assign_cores_to_threads() {
 
     // Max clusters any single sched thread can hold: ceil(cluster_count / active_sched_threads_).
     int32_t max_clusters_per_thread = (cluster_count + active_sched_threads_ - 1) / active_sched_threads_;
-    int32_t thread_cores_num = max_clusters_per_thread * 3;
+    int32_t thread_cores_num = max_clusters_per_thread * PLATFORM_CORES_PER_BLOCKDIM;
 
     if (thread_cores_num > CoreTracker::MAX_CORE_PER_THREAD) {
         LOG_ERROR("Can't assign more then 64 cores in per scheduler");
@@ -1135,8 +1132,11 @@ int32_t SchedulerContext::pre_handshake_init(
     // AIV cores [3*(N/3), N) in no cluster — unhandshaked, their windows never open,
     // and the run hangs at the op-execute timeout. assign_cores_to_threads pairs
     // aiv_worker_ids_[2*ci]/[2*ci+1] on the serial path too, so this holds for both.
-    if (cores_total_num_ % 3 != 0) {
-        LOG_ERROR("cores_total_num %d is not a multiple of 3 (blocked 1 AIC : 2 AIV layout)", cores_total_num_);
+    if (cores_total_num_ % PLATFORM_CORES_PER_BLOCKDIM != 0) {
+        LOG_ERROR(
+            "cores_total_num %d is not a multiple of %d (blocked 1 AIC : 2 AIV layout)", cores_total_num_,
+            PLATFORM_CORES_PER_BLOCKDIM
+        );
         return -1;
     }
     // Blocked core layout ([0,N/3) AIC, [N/3,N) AIV) with a fixed 1:2 AIC:AIV
@@ -1235,7 +1235,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     for (int32_t t = 0; t < sched_thread_num_; t++) {
         CoreTracker &tracker = core_trackers_[t];
         for (int32_t c = 0; c < tracker.get_cluster_count(); c++) {
-            int32_t cluster_offset = c * 3;  // Each cluster = 1 AIC + 2 AIV
+            int32_t cluster_offset = c * PLATFORM_CORES_PER_BLOCKDIM;  // Each cluster = 1 AIC + 2 AIV
             auto aiv0_id = tracker.get_core_id_by_offset(tracker.get_aiv0_core_offset(cluster_offset));
             auto aiv1_id = tracker.get_core_id_by_offset(tracker.get_aiv1_core_offset(cluster_offset));
             payload_per_core_[aiv0_id][0].global_context.sub_block_id = 0;

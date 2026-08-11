@@ -25,7 +25,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _worker_host_mapped_region_close,
 )
 
-from .task_interface import ChipTensor
+from .buffer import AddressSpace, Buffer
 
 
 class NotifyOp(IntEnum):
@@ -226,13 +226,11 @@ def validate_region_create_reply(
 class _PinnedBuffer:
     def __init__(self, obj: Any, *, writable: bool = False) -> None:
         self._keepalive: Any = obj
-        if isinstance(obj, ChipTensor):
-            if obj.child_memory:
-                raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
-            if not obj.is_contiguous:
-                raise ValueError("L3-L2 payload buffer must be contiguous")
-            self.addr = int(obj.data)
-            self.nbytes = int(obj.nbytes())
+        if isinstance(obj, Buffer):
+            if obj.address_space != AddressSpace.HOST:
+                raise ValueError("L3-L2 payload buffer must be host storage, not device storage")
+            self.addr = int(obj.base)
+            self.nbytes = int(obj.nbytes)
             return
 
         try:

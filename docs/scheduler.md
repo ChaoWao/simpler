@@ -57,17 +57,21 @@ work must push a completion or advance the generation.** The predicate no
 longer re-reads queue occupancy or worker state, so a change that only mutates
 those is invisible to a parked Scheduler.
 
-Two producers are easy to miss because the change happens outside the
-Scheduler thread and outside `Orchestrator`. `dispatch_ready` re-queues work it
-could not place — through `enqueue_ready_cb`, which by design does not notify —
-so the retry depends entirely on a later edge. And a `WorkerThread` publishes
-its completion *before* it publishes its lane state: it calls `on_complete` and
-only then stores `active_inflight_`/`inflight_`. That order is deliberate, so a
-stopping Scheduler cannot read a worker as no longer busy while its final
-completion is still unqueued — which means the completion wake alone can land
-on a worker that still reads as occupied, and the dispatch pass it triggers
-finds nothing placeable. The `on_idle` callback fires after that publication
-and supplies the edge that makes the retry happen.
+Two producers are easy to miss because neither pushes a completion.
+`dispatch_ready` re-queues work it could not place — through
+`enqueue_ready_cb`, which by design does not notify — so the retry depends
+entirely on a later edge. And an endpoint lane publishes its completion *before*
+it publishes its lane state: it calls `on_complete` and only then decrements
+`inflight_`. That order is deliberate, so a stopping Scheduler cannot read a
+worker as no longer busy while its final completion is still unqueued — which
+means the completion wake alone can land on a worker that still reads as
+occupied, and the dispatch pass it triggers finds nothing placeable.
+
+What makes the retry happen is that the Scheduler does not park while any lane
+is busy: the wait on `completion_cv_` is taken only when
+`WorkerManager::any_busy()` is false. A lane that is still occupied therefore
+gets another progress round and another dispatch pass without needing an edge
+at all, and the edge-triggered predicate governs only the genuinely idle case.
 
 Popping a slot is not the same as owning it. A run whose graph callback throws
 fails and consumes its own unstarted slots, so the Scheduler claims each slot

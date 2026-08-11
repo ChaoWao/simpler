@@ -8,8 +8,10 @@ L4 parent on machine A -> local L3 on machine A  -> local NPU 0 + NPU 1 vector g
                        -> remote L3 on machine B -> remote NPU 0 + NPU 1 vector group
 ```
 
-The parent stages local inputs through fork-inherited shared host buffers and
-remote inputs through `remote_malloc` / `remote_copy_to`. It dispatches both L3
+The parent stages local inputs through owner Buffers it allocates with
+`create_buffer` — the forked local L3 maps each one lazily from the descriptor
+embedded in the tensor — and remote inputs through `remote_malloc` /
+`remote_copy_to`. It dispatches both L3
 tasks in one L4 run, downloads the remote outputs with `remote_copy_from`, and
 checks the golden result on both sides. No `mpirun` is used.
 

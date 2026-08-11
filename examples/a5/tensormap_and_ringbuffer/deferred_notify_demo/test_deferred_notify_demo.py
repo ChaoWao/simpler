@@ -20,7 +20,6 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
@@ -136,26 +135,10 @@ def run(
                 for rank in range(nranks):
                     domain = handle[rank]
                     args = TaskArgs()
-                    args.add_tensor(make_tensor_arg(partial[rank]), TensorArgType.INPUT)
-                    args.add_tensor(
-                        ChipTensor.make(
-                            data=domain.buffer_ptrs["mailbox"],
-                            shapes=(N,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
-                    args.add_tensor(make_tensor_arg(result[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_tensor(
-                        ChipTensor.make(
-                            data=domain.buffer_ptrs["notify_counter"],
-                            shapes=(1,),
-                            dtype=DataType.INT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INPUT,
-                    )
+                    args.add_tensor(make_tensor_arg(worker, partial[rank]), TensorArgType.INPUT)
+                    args.add_tensor(domain.buffers["mailbox"].tensor((N,), DataType.FLOAT32), TensorArgType.INOUT)
+                    args.add_tensor(make_tensor_arg(worker, result[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(domain.buffers["notify_counter"].tensor((1,), DataType.INT32), TensorArgType.INPUT)
                     args.add_scalar(domain.device_ctx)
                     orch.submit_next_level(chip_handle, args, cfg, worker=rank)
 

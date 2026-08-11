@@ -59,7 +59,6 @@ Usage::
 
 from __future__ import annotations
 
-import bisect
 import contextlib
 import ctypes
 import enum
@@ -83,7 +82,6 @@ from typing import Any, cast
 
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
-    CHIP_TENSOR_CHILD_MEMORY_OFFSET,
     MAX_REGISTERED_CALLABLE_IDS,
     PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
@@ -92,19 +90,34 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _l3_child_onboard_region_create,
     _mailbox_load_i32,
     _mailbox_store_i32,
+    _read_control_copy_request,
     _worker_host_mapped_region_ack_cleanup_error,
     _worker_host_mapped_region_close,
     _worker_host_mapped_region_import_onboard,
     _worker_host_mapped_region_import_sim,
     _worker_host_mapped_region_peek_cleanup_error,
+    get_element_size,
+    materialize_task_args,
     read_args_from_blob,
 )
 
 from . import _log as _simpler_log
 from .buffer import (
+    AccessMode,
+    AddressSpace,
+    BackendKind,
     Buffer,
+    BufferDescriptor,
+    CanonicalIdentity,
+    ImportContext,
+    ImportRegistry,
     create_host_shared_buffer,
+    host_ptr_nbytes,
     mint_owner_instance_id,
+    re_export,
+    wrap_device_malloc,
+    wrap_fork_inherited,
+    wrap_vmm_window,
 )
 from .callable_identity import (
     CALLABLE_HASH_DIGEST_BYTES,
@@ -118,20 +131,86 @@ from .callable_identity import (
     parse_python_callable_payload,
     parse_python_import_target,
 )
+from .comm_endpoints import (
+    DEVICE_AICORE,
+    DEVICE_AICPU,
+    HOST_CPU,
+    BackendPlan,
+    BackendResolver,
+    DefaultRegionAccessService,
+    EndpointRegistry,
+    RegionAccessService,
+    RegionLayoutSpec,
+    SingleOwner,
+    UnsupportedRegionPlan,
+    _EndpointTopologyEntry,
+    _EndpointTopologySnapshot,
+    _format_worker_path,
+    _normalize_node_identity,
+    parse_endpoint_path,
+)
+from .global_comm_domain import (
+    CTRL_GLOBAL_DOMAIN_COPY_FROM,
+    CTRL_GLOBAL_DOMAIN_COPY_TO,
+    CTRL_GLOBAL_DOMAIN_IMPORT,
+    CTRL_GLOBAL_DOMAIN_PREPARE,
+    CTRL_GLOBAL_DOMAIN_RELEASE,
+    GLOBAL_DOMAIN_DESCRIPTOR_BYTES,
+    GLOBAL_DOMAIN_MAX_COPY_BYTES,
+    GLOBAL_DOMAIN_MAX_RANKS,
+    GLOBAL_DOMAIN_MAX_STRING_BYTES,
+    GLOBAL_DOMAIN_PROFILE_IDS,
+    GLOBAL_DOMAIN_VERSION,
+    LOCAL_COPY_REPLY,
+    LOCAL_COPY_REQUEST,
+    LOCAL_DOMAIN_MAGIC,
+    LOCAL_IMPORT_REPLY,
+    LOCAL_IMPORT_REQUEST,
+    LOCAL_PREPARE_REPLY,
+    LOCAL_PREPARE_REQUEST,
+    LOCAL_RELEASE_REQUEST,
+    GlobalCommInitCommand,
+    GlobalDomainBuffer,
+    GlobalDomainCommand,
+    GlobalDomainCopyCommand,
+    GlobalDomainDescriptor,
+    GlobalDomainMember,
+    GlobalDomainPhase,
+    GlobalDomainReleaseCommand,
+    decode_comm_init,
+    decode_comm_init_result,
+    decode_copy_command,
+    decode_copy_result,
+    decode_descriptor_table,
+    decode_domain_command,
+    decode_release_command,
+    encode_comm_init,
+    encode_comm_init_result,
+    encode_copy_command,
+    encode_copy_result,
+    encode_descriptor_table,
+    encode_domain_command,
+    encode_release_command,
+    resolve_global_comm_capability,
+    validate_descriptor_table,
+)
 from .orchestrator import Orchestrator, _callback_run, direct_control
 from .remote_l3_protocol import HOST_TCP_TRANSPORT_PROFILE
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
+    MAILBOX_PREPARATION_DISPOSITION_VALUES,
     MAILBOX_SIZE,
+    MAILBOX_STATE_VALUES,
     CallConfig,
     ChipCallable,
     ChipDomainContext,
-    ChipTensor,
     ChipWorker,
     CommBufferSpec,
     CommDomainHandle,
+    GlobalCommDomainHandle,
+    GlobalCommDomainView,
     RemoteAddressSpace,
     RemoteBufferExport,
     RemoteBufferHandle,
@@ -191,12 +270,12 @@ _RUNTIME_ENV_UINT64_FIELD_COUNT = 3 * RUNTIME_ENV_RING_COUNT
 _CFG_FMT = struct.Struct("=iiiiii" + ("Q" * _RUNTIME_ENV_UINT64_FIELD_COUNT) + "1024s")
 # The generation-safe pipeline lease follows CONFIG. Args start after the
 # lease, rounded up to 8 bytes so the first
-# ChipTensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
+# Tensor.data (uint64_t at OFF_ARGS+8) is 8-byte aligned, avoiding
 # SIGBUS on strict-alignment platforms (aarch64 atomics, some ARM cores).
 _PIPELINE_LEASE_FMT = struct.Struct("=IIQ")
 _OFF_PIPELINE_LEASE = (_OFF_CONFIG + _CFG_FMT.size + 7) & ~7
 _OFF_ARGS = (_OFF_PIPELINE_LEASE + _PIPELINE_LEASE_FMT.size + 7) & ~7
-assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for ChipTensor.data"
+assert _OFF_ARGS % 8 == 0, "_OFF_ARGS must be 8-aligned for Tensor.data"
 _OFF_TASK_CALLABLE_HASH = _OFF_ARGS
 _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # MAILBOX_ARGS_CAPACITY mirrors the C++ constexpr in worker_manager.h so the
@@ -208,12 +287,19 @@ _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 # clears it when it publishes the next task frame.
 _OFF_ACCEPTED = MAILBOX_FRAME_SIZE - MAILBOX_ERROR_MSG_SIZE - 8
 _TASK_ACCEPTED = 1
+_OFF_PREPARATION_DISPOSITION = _OFF_ACCEPTED + 4
+# The parent resets the disposition word to NONE when it claims a frame, so a
+# child never publishes it: staging reports VALIDATED_ONLY or NATIVE_PREPARED
+# and nothing else. Declared so the wire check below covers the whole enum.
+_DISPOSITION_NONE = 0
+_VALIDATED_ONLY = 1
+_NATIVE_PREPARED = 2
 _OFF_FRAME_PROTOCOL = _OFF_ACCEPTED - 40
 _OFF_FRAME_RUN_ID = _OFF_ACCEPTED - 32
 _OFF_FRAME_SLOT_ID = _OFF_ACCEPTED - 24
 _OFF_FRAME_GENERATION = _OFF_ACCEPTED - 16
 _OFF_FRAME_DISPATCH_ID = _OFF_ACCEPTED - 8
-_TASK_PROTOCOL_VERSION = 2
+_TASK_PROTOCOL_VERSION = 3
 # Mirrors MAILBOX_OFF_SHUTDOWN / MAILBOX_SHUTDOWN_REQUESTED: termination is a
 # sticky one-way word on the control frame, not a MailboxState. _OFF_STATE has
 # three writers (parent CONTROL_REQUEST, child CONTROL_DONE, C++
@@ -248,6 +334,68 @@ _TASK_FAILED = 10
 _ACTIVATE = 11
 _PREPARE_READY = 12
 _TASK_FRAME_COUNT = 2
+
+
+def _assert_mailbox_wire_constants() -> None:
+    """Fail import if these constants disagree with the C++ enums.
+
+    The state word and the disposition word are a cross-process contract: a
+    parent writes them and its forked child reads them, so a value that differs
+    from the C++ side is a protocol mismatch between two live processes. Nothing
+    else catches it — the two declarations are in different languages, so there
+    is no compile error, and a wrong value reads as a legal-but-different state
+    rather than as corruption. The constants stay literals because they are read
+    on the mailbox polling path; this checks them instead of replacing them.
+    """
+    declared = {
+        "IDLE": _IDLE,
+        "TASK_READY": _TASK_READY,
+        "TASK_DONE": _TASK_DONE,
+        "SHUTDOWN": _SHUTDOWN,
+        "CONTROL_REQUEST": _CONTROL_REQUEST,
+        "CONTROL_DONE": _CONTROL_DONE,
+        "INIT_READY": _INIT_READY,
+        "INIT_FAILED": _INIT_FAILED,
+        "FRAME_STAGED": _FRAME_STAGED,
+        "TASK_LAUNCHED": _TASK_LAUNCHED,
+        "TASK_FAILED": _TASK_FAILED,
+        "ACTIVATE": _ACTIVATE,
+        "PREPARE_READY": _PREPARE_READY,
+    }
+    dispositions = {
+        "NONE": _DISPOSITION_NONE,
+        "VALIDATED_ONLY": _VALIDATED_ONLY,
+        "NATIVE_PREPARED": _NATIVE_PREPARED,
+    }
+    for name, table, native in (
+        ("MailboxState", declared, MAILBOX_STATE_VALUES),
+        ("MailboxPreparationDisposition", dispositions, MAILBOX_PREPARATION_DISPOSITION_VALUES),
+    ):
+        # Report every disagreement at once: a renumbering usually moves several
+        # values, and fixing them one import at a time is needless.
+        mismatched = sorted(
+            f"{key}: python={value} c++={native[key]}"
+            for key, value in table.items()
+            if key not in native or native[key] != value
+        )
+        if mismatched:
+            raise RuntimeError(
+                f"{name} constants in simpler.worker disagree with the C++ enum: "
+                + "; ".join(mismatched)
+                + ". These cross a process boundary, so the mismatch would surface as a hung or "
+                "misrouted child rather than an error."
+            )
+        # A value the C++ side has and Python does not is a state a child can
+        # legitimately publish and this module would not recognise.
+        missing = sorted(set(native) - set(table))
+        if missing:
+            raise RuntimeError(
+                f"{name} has enumerators the Python side does not declare: {', '.join(missing)}. "
+                "A child can publish them and this module would not recognise the value."
+            )
+
+
+_assert_mailbox_wire_constants()
 
 
 def _local_task_frame_count(platform: str, _runtime: str, pipeline_depth: int) -> int:
@@ -314,6 +462,9 @@ _RUN_CANCELLATION_ATTEMPTS = 2
 # Control sub-commands (written at _OFF_CALLABLE as uint64)
 _CTRL_MALLOC = 0
 _CTRL_FREE = 1
+# Host<->device copy. Both ends are handles: the payload at _OFF_ARGS carries the two descriptors
+# and the length, and the child resolves each through the ImportRegistry that also resolves task
+# arguments — the owner's mapped address is not the child's, and never crosses the fork.
 _CTRL_COPY_TO = 2
 _CTRL_COPY_FROM = 3
 # Pre-warm a chip child by callable digest. The child resolves the digest to
@@ -344,16 +495,6 @@ _CTRL_COMM_INIT = 9
 _CTRL_PY_REGISTER = 10
 _CTRL_PY_UNREGISTER = 11
 _CTRL_PY_IMPORT_REGISTER = 12
-# Host-buffer registration. MAP_HOST maps a named host-buffer shm
-# into every local L3 child *post-fork* and keeps it mapped so later runs can copy
-# through it; UNMAP_HOST drops one. The child also records the parent VA range
-# the shm stands in for, so the per-task blob's host pointers (raw parent VAs)
-# can be rewritten to the child's own mapping before the runtime dereferences
-# them. Unlike _CTRL_REGISTER (one-shot H2D then close), these mappings persist
-# for the buffer's registered lifetime — see docs/comm-domain.md.
-_CTRL_MAP_HOST = 14
-_CTRL_UNMAP_HOST = 15
-
 # Operation names a child puts in its error message when a control command
 # fails, so the parent's re-raised text names the operation and not just a
 # numeric sub-command. Absent entries fall back to the raw number.
@@ -365,23 +506,15 @@ _CTRL_OP_NAMES = {
     _CTRL_PY_UNREGISTER: "py_unregister",
 }
 
-# MAP_HOST payload: token (u64), parent_va (u64), nbytes (u64), then the
-# NUL-free host-buffer shm name as the trailing bytes. UNMAP_HOST payload is the
-# token alone.
-_HOST_BUF_MAP_HEADER = struct.Struct("<QQQ")
-_HOST_BUF_UNMAP = struct.Struct("<Q")
-
-# Wire layout of a ChipTensor inside a task-args blob, pinned by static_assert in
-# src/common/task_interface/tensor.h: each ChipTensor is 128 B and buffer.addr is its
-# first field (offset 0). The blob is [int32 T][int32 S][ChipTensor[T]][scalars], so
-# tensor i's host pointer lives at _OFF_TASK_ARGS_BLOB + 8 + i*128. The child
-# rewrites that u64 in place to redirect a registered host pointer at its own
-# mapping (the pure-Python blob-rewrite scheme, no runtime C++ change).
-_BLOB_TENSOR_STRIDE = 128
-_BLOB_HEADER_BYTES = 8
 _CTRL_WORKER_CHIP_REGION_CREATE = 16
 _CTRL_WORKER_CHIP_REGION_RELEASE = 17
 _CTRL_COMMITTED_DEVICE_MEMORY = 18
+# L4-to-local-L3 envelope for the Global CommDomain control protocol. The
+# enclosed command uses remote_l3_protocol.ControlName; values 18-23 belong to
+# chip-child controls.
+_CTRL_GLOBAL_DOMAIN_NODE = 24
+_LOCAL_GLOBAL_CONTROL_HEADER = struct.Struct("<IIQ")
+_CTRL_OP_NAMES[_CTRL_GLOBAL_DOMAIN_NODE] = "global_domain"
 
 # Layout of the CTRL_COMM_INIT request shm.
 _COMM_INIT_HEADER = struct.Struct("<II")  # rank (u32), nranks (u32)
@@ -424,14 +557,19 @@ _OFF_DOMAIN_REPLY_COMMITTED = 0
 
 # Control args layout (reuses task mailbox fields when state == _CONTROL_*):
 #   offset  8 (_OFF_CALLABLE):  uint64  sub-command
-#   offset 16:                  uint64  arg0 (size for malloc/register; dev_ptr for free/copy)
-#   offset 24:                  uint64  arg1 (host_ptr for copy)
-#   offset 32:                  uint64  arg2 (nbytes for copy)
+#   offset 16:                  uint64  arg0 (size for malloc/register; ptr for free; region id)
 #   offset 40:                  uint64  result (returned ptr from malloc)
 _CTRL_OFF_ARG0 = 16
-_CTRL_OFF_ARG1 = 24
-_CTRL_OFF_ARG2 = 32
 _CTRL_OFF_RESULT = 40
+
+
+class _NoBufferConsumerError(RuntimeError):
+    """A level >= 3 Worker has no forked child, so a Buffer it owns can reach no consumer.
+
+    Typed so a caller whose buffers have an in-process consumer instead — the remote L3 runner, whose
+    orchestration fn dereferences the backing itself — can tell this refusal apart from every other
+    way ``create_buffer`` fails and supply its own backing.
+    """
 
 
 @dataclass
@@ -485,6 +623,8 @@ class RemoteWorkerSpec:
     device_ids: tuple[int, ...] = ()
     num_sub_workers: int = 0
     transport: str = HOST_TCP_TRANSPORT_PROFILE
+    comm_profile: str = "sim"
+    global_device_ranks: tuple[int, ...] = ()
     session_listen_host: str | None = None
     allow_wildcard_session_bind: bool = False
 
@@ -499,6 +639,7 @@ class RemoteWorkerSpec:
         object.__setattr__(self, "platform", str(self.platform))
         object.__setattr__(self, "runtime", str(self.runtime))
         object.__setattr__(self, "transport", str(self.transport))
+        object.__setattr__(self, "comm_profile", str(self.comm_profile))
         object.__setattr__(
             self,
             "session_listen_host",
@@ -506,9 +647,26 @@ class RemoteWorkerSpec:
         )
         object.__setattr__(self, "allow_wildcard_session_bind", bool(self.allow_wildcard_session_bind))
         object.__setattr__(self, "device_ids", tuple(int(x) for x in self.device_ids))
+        object.__setattr__(self, "global_device_ranks", tuple(int(x) for x in self.global_device_ranks))
         object.__setattr__(self, "num_sub_workers", int(self.num_sub_workers))
         if self.num_sub_workers < 0:
             raise ValueError("RemoteWorkerSpec.num_sub_workers must be non-negative")
+        if self.transport != HOST_TCP_TRANSPORT_PROFILE:
+            raise ValueError(
+                f"RemoteWorkerSpec.transport must be {HOST_TCP_TRANSPORT_PROFILE!r} for the TCP daemon control plane"
+            )
+        if self.comm_profile not in GLOBAL_DOMAIN_PROFILE_IDS:
+            raise ValueError(f"RemoteWorkerSpec.comm_profile {self.comm_profile!r} is not supported")
+        if self.comm_profile == "a3-fabric-v1" and not self.platform.startswith("a2a3"):
+            raise ValueError("RemoteWorkerSpec.comm_profile 'a3-fabric-v1' requires an a2a3 platform")
+        if self.comm_profile == "a3-fabric-v1" and self.platform.endswith("sim"):
+            raise ValueError("RemoteWorkerSpec.comm_profile 'a3-fabric-v1' requires real A3 devices")
+        if self.global_device_ranks and len(self.global_device_ranks) != len(self.device_ids):
+            raise ValueError("RemoteWorkerSpec.global_device_ranks must match device_ids length")
+        if any(rank < 0 for rank in self.global_device_ranks) or len(set(self.global_device_ranks)) != len(
+            self.global_device_ranks
+        ):
+            raise ValueError("RemoteWorkerSpec.global_device_ranks must be unique and non-negative")
 
 
 @dataclass(frozen=True)
@@ -520,6 +678,31 @@ class _RemoteSession:
     health_host: str
     health_port: int
     pid: int
+
+
+@dataclass
+class _GlobalNodeDomainState:
+    command: GlobalDomainCommand
+    prepared_domain_ranks: set[int] = field(default_factory=set)
+    descriptors: dict[int, GlobalDomainDescriptor] = field(default_factory=dict)
+    local_window_bases: dict[int, int] = field(default_factory=dict)
+    mapping_sizes: dict[int, int] = field(default_factory=dict)
+    contexts: dict[int, ChipDomainContext] = field(default_factory=dict)
+    view: GlobalCommDomainView | None = None
+    phase: GlobalDomainPhase = GlobalDomainPhase.PREPARE_EXPORT
+
+
+@dataclass(frozen=True)
+class _GlobalNodeRuntime:
+    worker_id: int
+    device_ids: tuple[int, ...]
+    platform: str
+    comm_profile: str
+    global_device_ranks: tuple[int, ...]
+    node_rank: int
+    node_count: int
+    cluster_id: str
+    is_remote: bool
 
 
 _IdentitySnapshotEntry = tuple[bytes, Any, int, str, str]
@@ -564,47 +747,6 @@ class _ChildProvEntry:
         if self.domain_allocation_ids:
             extent = max(extent, *self.domain_allocation_ids.values())
         return extent
-
-
-@dataclass
-class _HostBufEntry:
-    """Parent-side record for a born-shared post-fork host buffer.
-
-    The worker owns ``shm`` — a named buffer the local L3 children attach and
-    read/write through. The user builds a tensor over it (via the buffer
-    protocol on :class:`HostBuffer`), so the buffer *is* the shm: ``data_ptr ==
-    shm_base`` and no per-run copy is needed (the child reads and writes the same
-    physical pages the parent sees). ``shm_base`` caches the mapped address.
-    """
-
-    token: int
-    data_ptr: int
-    nbytes: int
-    shm: SharedMemory
-    shm_name: str
-    shm_base: int
-
-
-@dataclass(frozen=True, eq=False)
-class HostBuffer:
-    """Handle for a worker-allocated, born-shared host buffer (zero-copy).
-
-    Returned by ``Worker.create_host_buffer``. ``buffer`` is a ``memoryview``
-    over shared memory already attached into every local L3 child; wrap it with
-    ``torch.frombuffer`` / ``np.frombuffer`` to get a real tensor whose writes
-    land directly in the child-visible pages — no per-run copy. ``token`` /
-    ``data_ptr`` / ``nbytes`` identify the mapping; pass this handle back to
-    ``free_host_buffer`` to release it.
-
-    ``eq=False`` keeps object-identity equality/hash so the (unhashable)
-    ``memoryview`` field never blocks using the handle as a dict key or set
-    member.
-    """
-
-    token: int
-    data_ptr: int
-    nbytes: int
-    buffer: memoryview
 
 
 # Which Workers this thread already holds a control reservation on. One control
@@ -1231,115 +1373,11 @@ def _validate_domain_allocation(
     return resources
 
 
-class _NoHostBufferChildrenError(RuntimeError):
-    """The Worker has no process child that can attach a host buffer."""
-
-
-def _rewrite_blob_host_addrs(buf: memoryview, blob_off: int, ranges: list[tuple[int, int, int]]) -> None:
-    """Redirect registered host pointers in a task-args blob to child mappings.
-
-    ``ranges`` is ``(parent_lo, parent_hi, child_base)`` for each host buffer the
-    child has mapped via _CTRL_MAP_HOST. For every host tensor whose
-    ``buffer.addr`` (a parent VA) lands in a registered range, rewrite it in
-    place to ``child_base + (addr - parent_lo)`` so the runtime dereferences the
-    child's own mapping. ChipTensors outside every range (fork-inherited or
-    child-allocated) are left untouched. A ``child_memory`` tensor carries a
-    child-owned device pointer, never a host VA, so it is skipped even when its
-    address numerically falls inside a registered host range — rewriting it would
-    corrupt the device pointer. See _BLOB_TENSOR_STRIDE for the wire layout.
-    """
-    tensor_count = struct.unpack_from("<i", buf, blob_off)[0]
-    if tensor_count <= 0:
-        return
-    base = blob_off + _BLOB_HEADER_BYTES
-    for i in range(tensor_count):
-        addr_off = base + i * _BLOB_TENSOR_STRIDE
-        if buf[addr_off + CHIP_TENSOR_CHILD_MEMORY_OFFSET]:
-            continue
-        addr = struct.unpack_from("<Q", buf, addr_off)[0]
-        for parent_lo, parent_hi, child_base in ranges:
-            if parent_lo <= addr < parent_hi:
-                struct.pack_into("<Q", buf, addr_off, child_base + (addr - parent_lo))
-                break
-
-
 def _read_ctrl_staged_shm_name(buf: memoryview) -> str:
     """Decode the staged-payload shm name a broadcast_control_all left at _OFF_ARGS."""
     raw = bytes(buf[_OFF_ARGS : _OFF_ARGS + _CTRL_SHM_NAME_BYTES])
     nul = raw.find(b"\x00")
     return raw[: nul if nul >= 0 else _CTRL_SHM_NAME_BYTES].decode("utf-8", "replace")
-
-
-def _shm_base_addr(shm: SharedMemory) -> int:
-    """Mapped base address of ``shm``. The mapping outlives the temporary buffer
-    view, so the address stays valid until ``shm.close()``."""
-    view = shm.buf
-    assert view is not None
-    exporter = ctypes.c_char.from_buffer(view)
-    addr = ctypes.addressof(exporter)
-    del exporter
-    return addr
-
-
-def _rebuild_host_buf_ranges(
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]], host_buf_ranges: list[tuple[int, int, int]]
-) -> None:
-    host_buf_ranges.clear()
-    for _shm, lo, hi, base in host_buf_table.values():
-        host_buf_ranges.append((lo, hi, base))
-
-
-def _handle_ctrl_map_host(
-    buf: memoryview,
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]],
-    host_buf_ranges: list[tuple[int, int, int]],
-) -> None:
-    """Child handler for _CTRL_MAP_HOST: persist a host-buffer mapping.
-
-    The staged payload is ``token, parent_va, nbytes`` followed by the host
-    buffer's shm name. Map that shm and remember the parent VA range it stands
-    in for so the per-task blob rewrite can redirect host pointers to this base.
-    """
-    payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-    staged = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
-    try:
-        staged_buf = staged.buf
-        assert staged_buf is not None
-        payload = bytes(staged_buf[:payload_size])
-    finally:
-        staged.close()
-    token, parent_va, nbytes = _HOST_BUF_MAP_HEADER.unpack_from(payload, 0)
-    host_shm_name = payload[_HOST_BUF_MAP_HEADER.size :].decode("utf-8")
-    prior = host_buf_table.pop(token, None)
-    if prior is not None:
-        prior[0].close()
-    # Rebuild ranges in a finally so a raise from SharedMemory / _shm_base_addr
-    # cannot leave the just-popped prior mapping's stale range in host_buf_ranges.
-    try:
-        host_shm = SharedMemory(name=host_shm_name)
-        host_buf_table[token] = (host_shm, parent_va, parent_va + nbytes, _shm_base_addr(host_shm))
-    finally:
-        _rebuild_host_buf_ranges(host_buf_table, host_buf_ranges)
-
-
-def _handle_ctrl_unmap_host(
-    buf: memoryview,
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]],
-    host_buf_ranges: list[tuple[int, int, int]],
-) -> None:
-    """Child handler for _CTRL_UNMAP_HOST: drop a host-buffer mapping by token."""
-    payload_size = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-    staged = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
-    try:
-        staged_buf = staged.buf
-        assert staged_buf is not None
-        token = _HOST_BUF_UNMAP.unpack_from(bytes(staged_buf[:payload_size]), 0)[0]
-    finally:
-        staged.close()
-    entry = host_buf_table.pop(token, None)
-    if entry is not None:
-        entry[0].close()
-        _rebuild_host_buf_ranges(host_buf_table, host_buf_ranges)
 
 
 def _allocate_local_slot(registry: dict[int, Any]) -> int:
@@ -1740,24 +1778,30 @@ def _format_exc(prefix: str, exc: BaseException) -> str:
     return f"{prefix}: {type(exc).__name__}: {exc}"
 
 
-def _read_args_from_mailbox(buf) -> TaskArgs:
-    """Decode the TaskArgs blob written by C++ write_blob from the mailbox.
+def _reexport_args_from_mailbox(buf, worker: Worker) -> TaskArgs:
+    """Re-export the mailbox tensor args for an orchestrator (nested L4→L3) child.
 
-    Used by the Python-targeted child loops (sub_worker, nested L4+ child)
-    where the destination of `args` is a Python callable that needs a
-    typed TaskArgs object.  The chip-child loops that immediately forward
-    to C++ run use the zero-copy `run_from_blob` path
-    instead — see those loops for the matching comment.
+    Each received ref's backing is re-exported (per-backing, no map, canonical identity preserved), and
+    a new ref carrying the original view (byte_offset / shapes / strides / dtype) is built over it. The
+    inner orch fn forwards these to L2 with no map cost (no descriptor pass-through); dependency
+    inference keys on the invariant identity. The compute leaf downstream maps lazily.
 
-    Delegates to the nanobind helper so the ChipTensor layout is
-    parsed by C++ `read_blob` (single source of truth) instead of being
-    reimplemented in Python.  The Python re-implementation that lived
-    here previously dropped the `child_memory` byte (offset 33), which
-    silently broke any tensor carrying a chip-owned device pointer
-    (HCCL window slots etc.) — now structurally impossible.
+    Re-export is per-tensor; the container is the same ``TaskArgs`` the submitter built, so the
+    scalars ride across unchanged and an orch fn reads its args the same way at every level.
     """
-    mailbox_addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
-    return read_args_from_blob(mailbox_addr + _OFF_TASK_ARGS_BLOB)
+    args_ptr = _buffer_field_addr(buf, _OFF_TASK_ARGS_BLOB)
+    args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+    out = TaskArgs()
+    for i in range(args.tensor_count()):
+        ref = args.tensor(i)
+        h_prime = worker._reexport(ref.buffer)
+        out.add_tensor(
+            h_prime.tensor(shapes=ref.shapes, dtype=ref.dtype, strides=ref.strides, byte_offset=ref.byte_offset),
+            args.tag(i),
+        )
+    for i in range(args.scalar_count()):
+        out.add_scalar(args.scalar(i))
+    return out
 
 
 # Idle mailbox polls between `getppid()` samples in a forked child. One poll
@@ -1781,7 +1825,7 @@ def _run_mailbox_loop(
     chip processes all reach the parent through this one loop, differing only
     in what they do with a task and which control sub-commands they accept.
 
-    `handle_task()` and `handle_control(sub_cmd)` each return an
+    `handle_task(task_buf)` and `handle_control(sub_cmd)` each return an
     ``(error_code, message)`` pair and are responsible for catching their own
     exceptions, because the message wording is what the parent re-raises and
     only the caller knows its own context. The pair is published to the
@@ -1805,34 +1849,42 @@ def _run_mailbox_loop(
     parent_pid = os.getppid()
     liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
     shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
-    while True:
-        state = _mailbox_load_i32(state_addr)
-        if state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
-            if on_shutdown is not None:
-                on_shutdown()
-            break
-        if state == _TASK_READY:
-            code, msg = handle_task()
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _TASK_DONE)
-        elif state == _CONTROL_REQUEST:
-            sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-            code, msg = handle_control(int(sub_cmd))
-            _write_error(buf, code, msg)
-            _mailbox_store_i32(state_addr, _CONTROL_DONE)
-        else:
-            liveness_countdown -= 1
-            if liveness_countdown <= 0:
-                liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
-                # Comparing against the pid captured at entry rather than
-                # testing for pid 1: a subreaper (container init, systemd
-                # user session) adopts orphans instead of init, so the pid
-                # changes but never becomes 1. A live parent's pid cannot
-                # change, so this cannot fire spuriously.
-                if os.getppid() != parent_pid:
-                    if on_shutdown is not None:
-                        on_shutdown()
-                    break
+    # `buf` is a whole mailbox: a base frame followed by the task frames, so
+    # frame 1 always exists.
+    task_buf = buf[MAILBOX_FRAME_SIZE : 2 * MAILBOX_FRAME_SIZE]
+    task_state_addr = _buffer_field_addr(task_buf, _OFF_STATE)
+    try:
+        while True:
+            state = _mailbox_load_i32(state_addr)
+            if state == _SHUTDOWN or _mailbox_load_i32(shutdown_addr) == _SHUTDOWN_REQUESTED:
+                if on_shutdown is not None:
+                    on_shutdown()
+                break
+            if _mailbox_load_i32(task_state_addr) == _TASK_READY:
+                code, msg = handle_task(task_buf)
+                _write_error(task_buf, code, msg)
+                _mailbox_store_i32(task_state_addr, _TASK_DONE)
+            elif state == _CONTROL_REQUEST:
+                sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
+                code, msg = handle_control(int(sub_cmd))
+                _write_error(buf, code, msg)
+                _mailbox_store_i32(state_addr, _CONTROL_DONE)
+            else:
+                liveness_countdown -= 1
+                if liveness_countdown <= 0:
+                    liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+                    # Comparing against the pid captured at entry rather than
+                    # testing for pid 1: a subreaper (container init, systemd
+                    # user session) adopts orphans instead of init, so the pid
+                    # changes but never becomes 1. A live parent's pid cannot
+                    # change, so this cannot fire spuriously.
+                    if os.getppid() != parent_pid:
+                        if on_shutdown is not None:
+                            on_shutdown()
+                        break
+    finally:
+        if task_buf is not None:
+            task_buf.release()
 
 
 def _sub_worker_loop(
@@ -1845,23 +1897,24 @@ def _sub_worker_loop(
 
     On success writes ``error=0`` and an empty message. On failure writes
     ``error=1`` and ``f"sub_worker: <ExcType>: <msg>"`` into the mailbox
-    error-message region; the parent's ``WorkerThread::dispatch_process``
-    rethrows it as ``std::runtime_error``.
+    error-message region; the parent's endpoint reports it as a failed
+    completion, which the run's waiter rethrows as ``std::runtime_error``.
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}
-    host_buf_ranges: list[tuple[int, int, int]] = []
+    # SUB is a Python host process: no device VA is ever valid here.
+    import_registry = ImportRegistry(ImportContext(is_host_endpoint=True))
 
-    def handle_task() -> tuple[int, str]:
-        digest = _read_task_digest(buf)
+    def handle_task(task_buf) -> tuple[int, str]:
+        digest = _read_task_digest(task_buf)
         cid = identity_table.get(digest)
         fn = registry.get(int(cid)) if cid is not None else None
         if fn is None:
             return 1, f"sub_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            if host_buf_ranges:
-                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-            args = _read_args_from_mailbox(buf)
+            # Compute leaf: materialize each arg (map-once) into a MappedArg the Python
+            # callable computes on via torch.frombuffer(arg.buffer, ...).
+            args_ptr = _buffer_field_addr(task_buf, _OFF_TASK_ARGS_BLOB)
+            args = import_registry.mapped_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
             fn(args)
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker", e)
@@ -1869,19 +1922,14 @@ def _sub_worker_loop(
 
     def handle_control(sub_cmd: int) -> tuple[int, str]:
         try:
-            if sub_cmd == _CTRL_MAP_HOST:
-                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-            elif sub_cmd == _CTRL_UNMAP_HOST:
-                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
-            else:
-                _handle_py_callable_control(
-                    buf,
-                    registry,
-                    identity_table,
-                    identity_refs,
-                    sub_cmd,
-                    context="sub_worker",
-                )
+            _handle_py_callable_control(
+                buf,
+                registry,
+                identity_table,
+                identity_refs,
+                sub_cmd,
+                context="sub_worker",
+            )
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker control", e)
         return 0, ""
@@ -1889,11 +1937,7 @@ def _sub_worker_loop(
     try:
         _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
-        for host_shm, _lo, _hi, _base in host_buf_table.values():
-            try:
-                host_shm.close()
-            except Exception:  # noqa: BLE001
-                pass
+        import_registry.close()
 
 
 def _read_shm_name(buf, offset: int) -> str:
@@ -2020,6 +2064,25 @@ class _HostWorkerChipRegionStore:
 
     regions: dict[int, _HostWorkerChipRegion] = field(default_factory=dict)
     next_region_id: int = 1
+
+
+@dataclass
+class _L2GlobalDomain:
+    domain_id: int
+    generation: int
+    domain_rank: int
+    rank_count: int
+    descriptor: GlobalDomainDescriptor
+    local_window_base: int
+    mapping_size: int
+    requested_window_size: int
+    device_ctx: int = 0
+    descriptor_table: bytes = b""
+
+
+@dataclass
+class _L2GlobalDomainStore:
+    domains: dict[int, _L2GlobalDomain] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2183,6 +2246,223 @@ def _sweep_host_worker_chip_regions(store: _HostWorkerChipRegionStore) -> None:
             pass
 
 
+def _open_global_domain_payload(buf: memoryview) -> tuple[SharedMemory, memoryview, int]:
+    payload_size = int(struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0])
+    if payload_size <= 0:
+        raise RuntimeError("Global CommDomain control payload must be non-empty")
+    staged = SharedMemory(name=_read_ctrl_staged_shm_name(buf))
+    staged_buf = cast(memoryview, staged.buf)
+    if payload_size > staged.size:
+        staged_buf.release()
+        staged.close()
+        raise RuntimeError("Global CommDomain control payload exceeds staged shm")
+    return staged, staged_buf, payload_size
+
+
+def _validate_local_global_header(
+    magic: bytes, version: int, domain_id: int, generation: int, *, operation: str
+) -> None:
+    if magic != LOCAL_DOMAIN_MAGIC or version != GLOBAL_DOMAIN_VERSION:
+        raise RuntimeError(f"{operation}: local protocol magic or version mismatch")
+    if domain_id == 0 or generation == 0:
+        raise RuntimeError(f"{operation}: domain identity must be positive")
+
+
+def _handle_ctrl_global_domain_prepare(cw: ChipWorker, buf: memoryview, store: _L2GlobalDomainStore) -> None:
+    staged, payload, payload_size = _open_global_domain_payload(buf)
+    try:
+        if payload_size < max(LOCAL_PREPARE_REQUEST.size, LOCAL_PREPARE_REPLY.size + GLOBAL_DOMAIN_DESCRIPTOR_BYTES):
+            raise RuntimeError("Global CommDomain prepare payload is too small")
+        fields = LOCAL_PREPARE_REQUEST.unpack_from(payload, 0)
+        magic, version, domain_id, generation, domain_rank, rank_count, profile_id, window_size = fields
+        _validate_local_global_header(magic, version, domain_id, generation, operation="prepare")
+        if rank_count <= 0 or rank_count > GLOBAL_DOMAIN_MAX_RANKS or domain_rank >= rank_count:
+            raise RuntimeError("Global CommDomain prepare rank identity is invalid")
+        if profile_id not in GLOBAL_DOMAIN_PROFILE_IDS.values() or window_size <= 0:
+            raise RuntimeError("Global CommDomain prepare profile or window size is invalid")
+        prior = store.domains.get(int(domain_id))
+        if prior is not None:
+            if (
+                prior.generation != generation
+                or prior.domain_rank != domain_rank
+                or prior.rank_count != rank_count
+                or prior.descriptor.profile_id != profile_id
+                or prior.requested_window_size != window_size
+            ):
+                raise RuntimeError("Global CommDomain prepare conflicts with a live domain")
+            descriptor = prior.descriptor
+            local_base = prior.local_window_base
+            mapping_size = prior.mapping_size
+        else:
+            descriptor_bytes, local_base, mapping_size = cw._impl.comm_global_domain_prepare(
+                int(domain_id),
+                int(domain_rank),
+                int(rank_count),
+                int(window_size),
+                int(profile_id),
+            )
+            descriptor = GlobalDomainDescriptor.decode(bytes(descriptor_bytes))
+            if (
+                descriptor.domain_rank != domain_rank
+                or descriptor.rank_count != rank_count
+                or descriptor.profile_id != profile_id
+                or descriptor.mapping_size != mapping_size
+                or descriptor.mapping_size < window_size
+            ):
+                cw._impl.comm_global_domain_release(int(domain_id))
+                raise RuntimeError("Global CommDomain backend returned an inconsistent descriptor")
+            store.domains[int(domain_id)] = _L2GlobalDomain(
+                domain_id=int(domain_id),
+                generation=int(generation),
+                domain_rank=int(domain_rank),
+                rank_count=int(rank_count),
+                descriptor=descriptor,
+                local_window_base=int(local_base),
+                mapping_size=int(mapping_size),
+                requested_window_size=int(window_size),
+            )
+        LOCAL_PREPARE_REPLY.pack_into(
+            payload,
+            0,
+            LOCAL_DOMAIN_MAGIC,
+            GLOBAL_DOMAIN_VERSION,
+            int(domain_id),
+            int(generation),
+            int(local_base),
+            int(mapping_size),
+        )
+        start = LOCAL_PREPARE_REPLY.size
+        payload[start : start + GLOBAL_DOMAIN_DESCRIPTOR_BYTES] = descriptor.encode()
+    finally:
+        payload.release()
+        staged.close()
+
+
+def _handle_ctrl_global_domain_import(cw: ChipWorker, buf: memoryview, store: _L2GlobalDomainStore) -> None:
+    staged, payload, payload_size = _open_global_domain_payload(buf)
+    try:
+        if payload_size < LOCAL_IMPORT_REQUEST.size:
+            raise RuntimeError("Global CommDomain import payload is truncated")
+        magic, version, domain_id, generation, descriptor_count = LOCAL_IMPORT_REQUEST.unpack_from(payload, 0)
+        _validate_local_global_header(magic, version, domain_id, generation, operation="import")
+        expected_size = LOCAL_IMPORT_REQUEST.size + int(descriptor_count) * GLOBAL_DOMAIN_DESCRIPTOR_BYTES
+        if descriptor_count <= 0 or descriptor_count > GLOBAL_DOMAIN_MAX_RANKS or expected_size > payload_size:
+            raise RuntimeError("Global CommDomain import descriptor table size is invalid")
+        entry = store.domains.get(int(domain_id))
+        if entry is None or entry.generation != generation:
+            raise RuntimeError("Global CommDomain import requires a matching prepared domain")
+        descriptor_bytes = bytes(payload[LOCAL_IMPORT_REQUEST.size : expected_size])
+        descriptors = tuple(
+            GlobalDomainDescriptor.decode(descriptor_bytes[offset : offset + GLOBAL_DOMAIN_DESCRIPTOR_BYTES])
+            for offset in range(0, len(descriptor_bytes), GLOBAL_DOMAIN_DESCRIPTOR_BYTES)
+        )
+        profile = next(
+            name for name, profile_id in GLOBAL_DOMAIN_PROFILE_IDS.items() if profile_id == entry.descriptor.profile_id
+        )
+        validate_descriptor_table(descriptors, rank_count=entry.rank_count, profile=profile)
+        if descriptors[entry.domain_rank] != entry.descriptor:
+            raise RuntimeError("Global CommDomain import table does not contain the local exported descriptor")
+        if entry.descriptor_table and entry.descriptor_table != descriptor_bytes:
+            raise RuntimeError("Global CommDomain repeated import carries a different descriptor table")
+        if entry.device_ctx == 0:
+            entry.device_ctx = int(cw._impl.comm_global_domain_import(int(domain_id), descriptor_bytes))
+            if entry.device_ctx == 0:
+                raise RuntimeError("Global CommDomain backend returned a zero device context")
+            entry.descriptor_table = descriptor_bytes
+        if payload_size < LOCAL_IMPORT_REPLY.size:
+            raise RuntimeError("Global CommDomain import reply capacity is too small")
+        LOCAL_IMPORT_REPLY.pack_into(
+            payload,
+            0,
+            LOCAL_DOMAIN_MAGIC,
+            GLOBAL_DOMAIN_VERSION,
+            int(domain_id),
+            int(generation),
+            entry.device_ctx,
+            entry.local_window_base,
+            entry.mapping_size,
+        )
+    finally:
+        payload.release()
+        staged.close()
+
+
+def _handle_ctrl_global_domain_release(cw: ChipWorker, buf: memoryview, store: _L2GlobalDomainStore) -> None:
+    staged, payload, payload_size = _open_global_domain_payload(buf)
+    try:
+        if payload_size < LOCAL_RELEASE_REQUEST.size:
+            raise RuntimeError("Global CommDomain release payload is truncated")
+        magic, version, domain_id, generation = LOCAL_RELEASE_REQUEST.unpack_from(payload, 0)
+        _validate_local_global_header(magic, version, domain_id, generation, operation="release")
+        entry = store.domains.get(int(domain_id))
+        if entry is not None and entry.generation != generation:
+            raise RuntimeError("Global CommDomain release generation mismatch")
+        if entry is not None:
+            cw._impl.comm_global_domain_release(int(domain_id))
+            store.domains.pop(int(domain_id), None)
+    finally:
+        payload.release()
+        staged.close()
+
+
+def _handle_ctrl_global_domain_copy(
+    cw: ChipWorker, buf: memoryview, store: _L2GlobalDomainStore, *, copy_to_device: bool
+) -> None:
+    staged, payload, payload_size = _open_global_domain_payload(buf)
+    try:
+        if payload_size < LOCAL_COPY_REQUEST.size:
+            raise RuntimeError("Global CommDomain copy payload is truncated")
+        magic, version, domain_id, generation, offset, nbytes = LOCAL_COPY_REQUEST.unpack_from(payload, 0)
+        operation = "copy-to" if copy_to_device else "copy-from"
+        _validate_local_global_header(magic, version, domain_id, generation, operation=operation)
+        entry = store.domains.get(int(domain_id))
+        if entry is None or entry.generation != generation or entry.device_ctx == 0:
+            raise RuntimeError(f"Global CommDomain {operation} requires an imported live domain")
+        if nbytes <= 0 or nbytes > GLOBAL_DOMAIN_MAX_COPY_BYTES:
+            raise RuntimeError(f"Global CommDomain {operation} size is invalid")
+        if offset > entry.mapping_size or nbytes > entry.mapping_size - offset:
+            raise RuntimeError(f"Global CommDomain {operation} range exceeds the local window")
+        if copy_to_device:
+            data_offset = LOCAL_COPY_REQUEST.size
+            if data_offset + nbytes > payload_size:
+                raise RuntimeError("Global CommDomain copy-to data is truncated")
+            exported = ctypes.c_char.from_buffer(payload, data_offset)
+            try:
+                cw.copy_to(entry.local_window_base + int(offset), ctypes.addressof(exported), int(nbytes))
+            finally:
+                del exported
+        else:
+            data_offset = LOCAL_COPY_REPLY.size
+            if data_offset + nbytes > payload_size:
+                raise RuntimeError("Global CommDomain copy-from reply capacity is too small")
+            exported = ctypes.c_char.from_buffer(payload, data_offset)
+            try:
+                cw.copy_from(ctypes.addressof(exported), entry.local_window_base + int(offset), int(nbytes))
+            finally:
+                del exported
+        LOCAL_COPY_REPLY.pack_into(
+            payload,
+            0,
+            LOCAL_DOMAIN_MAGIC,
+            GLOBAL_DOMAIN_VERSION,
+            int(domain_id),
+            int(generation),
+            int(nbytes),
+        )
+    finally:
+        payload.release()
+        staged.close()
+
+
+def _sweep_l2_global_domains(cw: ChipWorker, store: _L2GlobalDomainStore) -> None:
+    for domain_id in list(store.domains):
+        store.domains.pop(domain_id, None)
+        try:
+            cw._impl.comm_global_domain_release(int(domain_id))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _handle_ctrl_release_domain(cw: ChipWorker, buf: memoryview) -> None:
     """CTRL_RELEASE_DOMAIN handler — collective free for one allocation."""
     request_shm_name = _read_shm_name(buf, _OFF_ARGS)
@@ -2231,6 +2511,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
     identity_refs: dict[bytes, int],
+    owner_instance_id: bytes,
     *,
     chip_platform: str,
     chip_runtime: str = "",
@@ -2252,20 +2533,20 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     via ``prepared``), and callables registered dynamically after startup
     arrive via ``_CTRL_PREPARE``. A task frame for an unprepared slot is a
     control-flow error and fails rather than lazily preparing it.
+
+    ``owner_instance_id`` is the parent Worker's nonce — the only owner whose
+    DEVICE_MALLOC/VMM_WINDOW backings this chip may materialize.
     """
     prepared = prepared if prepared is not None else set()
     worker_chip_region_store = _HostWorkerChipRegionStore()
-    # Post-fork host buffers mapped into this child. `host_buf_table`
-    # owns the mmap per token (for unmap + teardown); `host_buf_ranges` is the
-    # parent-VA → child-VA translation table the per-task blob rewrite consults,
-    # rebuilt from the table on every map/unmap.
-    host_buf_table: dict[int, tuple[SharedMemory, int, int, int]] = {}  # token -> (shm, lo, hi, child_base)
-    host_buf_ranges: list[tuple[int, int, int]] = []  # (parent_lo, parent_hi, child_base)
+    import_registry = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=owner_instance_id))
+    global_domain_store = _L2GlobalDomainStore()
 
-    def handle_task() -> tuple[int, str]:
-        digest = _read_task_digest(buf)
+    def handle_task(task_buf) -> tuple[int, str]:
+        task_addr = ctypes.addressof(ctypes.c_char.from_buffer(task_buf))
+        digest = _read_task_digest(task_buf)
         cid = identity_table.get(digest)
-        cfg = _read_config_from_mailbox(buf)
+        cfg = _read_config_from_mailbox(task_buf)
 
         code = 0
         msg = ""
@@ -2282,27 +2563,26 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     f"chip_process dev={device_id}: cid {cid} not prepared before TASK_READY "
                     f"(register via _CTRL_PREPARE first)"
                 )
-            # Redirect any registered host pointer (a parent VA) in the
-            # blob to this child's own mapping before the runtime reads it.
-            # No-op when nothing is registered.
-            if host_buf_ranges:
-                _rewrite_blob_host_addrs(buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
             pipeline_slot, pipeline_reserved, pipeline_generation = _PIPELINE_LEASE_FMT.unpack_from(
-                buf, _OFF_PIPELINE_LEASE
+                task_buf, _OFF_PIPELINE_LEASE
             )
             if pipeline_reserved != 0:
                 raise RuntimeError(f"chip_process dev={device_id}: invalid pipeline lease reserved field")
-            # Hand the mailbox bytes straight to C++ (zero-copy zero-decode):
-            # the blob layout is what `write_blob` already wrote, so re-parsing
-            # it in Python is N x 40B of avoidable work and a permanent
-            # opportunity to drop a field.  C++ reinterpret_cast<ChipStorageTaskArgs*>
-            # is the source of truth.
-            cw._impl.run_from_blob(
+            # The mailbox bytes decode once, into the wire TaskArgs; the mapping pass and the
+            # chip-POD build both read that object. Each tensor's embedded handle resolves to a
+            # local base by canonical identity (map-once, cached), and the POD is built at those
+            # bases — an exact resolution, not the parent-VA numeric-range rewrite it replaced.
+            args_ptr = task_addr + _OFF_TASK_ARGS_BLOB
+            args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            resolved = import_registry.materialize_args(args)
+            chip_args = materialize_task_args(args, resolved)
+            # The acceptance flag lives in the mailbox, not in the materialized args, so
+            # the fence still publishes through the address the parent polls.
+            cw._impl.run_materialized(
                 cid,
-                mailbox_addr + _OFF_TASK_ARGS_BLOB,
-                _MAILBOX_ARGS_CAPACITY,
+                chip_args,
                 cfg,
-                mailbox_addr + _OFF_ACCEPTED,
+                task_addr + _OFF_ACCEPTED,
                 _TASK_ACCEPTED,
                 pipeline_slot,
                 pipeline_generation,
@@ -2320,7 +2600,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             code, msg = on_task_done_success()
         return code, msg
 
-    def handle_control(sub_cmd: int) -> tuple[int, str]:  # noqa: PLR0912 -- one branch per control sub-command
+    def handle_control(  # noqa: PLR0912, PLR0915 -- one branch per control sub-command
+        sub_cmd: int,
+    ) -> tuple[int, str]:
         code = 0
         msg = ""
         try:
@@ -2331,16 +2613,16 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             elif sub_cmd == _CTRL_FREE:
                 ptr = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
                 cw.free(ptr)
-            elif sub_cmd == _CTRL_COPY_TO:
-                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                cw.copy_to(dst, src, n)
-            elif sub_cmd == _CTRL_COPY_FROM:
-                dst = struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0]
-                src = struct.unpack_from("Q", buf, _CTRL_OFF_ARG1)[0]
-                n = struct.unpack_from("Q", buf, _CTRL_OFF_ARG2)[0]
-                cw.copy_from(dst, src, n)
+            elif sub_cmd in (_CTRL_COPY_TO, _CTRL_COPY_FROM):
+                # Both ends resolve through the same map-once cache the task-args path uses, so a
+                # backing already imported for a task is the one this copy reaches.
+                dst_desc, src_desc, n = _read_control_copy_request(mailbox_addr)
+                dst = import_registry.materialize(dst_desc).base
+                src = import_registry.materialize(src_desc).base
+                if sub_cmd == _CTRL_COPY_TO:
+                    cw.copy_to(dst, src, n)
+                else:
+                    cw.copy_from(dst, src, n)
             elif sub_cmd == _CTRL_PREPARE:
                 digest = _read_control_digest(buf)
                 cid = identity_table.get(digest)
@@ -2417,16 +2699,32 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_release_domain(cw, buf)
             elif sub_cmd == _CTRL_COMM_INIT:
                 _handle_ctrl_comm_init(cw, buf)
-            elif sub_cmd == _CTRL_MAP_HOST:
-                _handle_ctrl_map_host(buf, host_buf_table, host_buf_ranges)
-            elif sub_cmd == _CTRL_UNMAP_HOST:
-                _handle_ctrl_unmap_host(buf, host_buf_table, host_buf_ranges)
             elif sub_cmd == _CTRL_WORKER_CHIP_REGION_CREATE:
                 _handle_ctrl_worker_chip_region_create(cw, buf, chip_platform, worker_chip_region_store)
             elif sub_cmd == _CTRL_WORKER_CHIP_REGION_RELEASE:
                 _handle_ctrl_worker_chip_region_release(buf, worker_chip_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
+            elif sub_cmd == CTRL_GLOBAL_DOMAIN_PREPARE:
+                _handle_ctrl_global_domain_prepare(cw, buf, global_domain_store)
+            elif sub_cmd == CTRL_GLOBAL_DOMAIN_IMPORT:
+                _handle_ctrl_global_domain_import(cw, buf, global_domain_store)
+            elif sub_cmd == CTRL_GLOBAL_DOMAIN_RELEASE:
+                _handle_ctrl_global_domain_release(cw, buf, global_domain_store)
+            elif sub_cmd == CTRL_GLOBAL_DOMAIN_COPY_TO:
+                _handle_ctrl_global_domain_copy(
+                    cw,
+                    buf,
+                    global_domain_store,
+                    copy_to_device=True,
+                )
+            elif sub_cmd == CTRL_GLOBAL_DOMAIN_COPY_FROM:
+                _handle_ctrl_global_domain_copy(
+                    cw,
+                    buf,
+                    global_domain_store,
+                    copy_to_device=False,
+                )
             else:
                 raise RuntimeError(f"unknown control sub-command {int(sub_cmd)}")
         except Exception as e:  # noqa: BLE001
@@ -2454,27 +2752,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             cid: int
             config: CallConfig
             activated: bool
-            native_run: Any = None
-            published: bool = False
+            chip_run: Any = None
+            launched_published: bool = False
 
-        supports_concurrent_native_prepare = bool(cw._impl.supports_concurrent_native_prepare)
         staged_frames: dict[int, _StagedFrame] = {}
-        active_frame: _StagedFrame | None = None
-        active_run: Any = None
-
-        def config_has_diagnostics(config: CallConfig) -> bool:
-            # Mirrors CallConfig::diagnostics_any(); these modes share native
-            # diagnostic state and therefore use the serial prepare fallback.
-            return bool(
-                config.enable_chip_swimlane
-                or config.enable_dump_args
-                or config.enable_pmu
-                or config.enable_dep_gen
-                or config.enable_scope_stats
-            )
-
-        def has_backend_prepared_frame() -> bool:
-            return any(frame.native_run is not None for frame in staged_frames.values())
 
         def read_identity(frame_buf: memoryview) -> tuple[int, int, int, int, int]:
             return (
@@ -2497,38 +2778,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         def fail_frame(frame: _StagedFrame, message: str) -> None:
             _write_error(frame.frame_buf, 1, message)
             _mailbox_store_i32(frame.frame_addr + _OFF_STATE, _TASK_FAILED)
-
-        def publish_frame_staged(frame: _StagedFrame) -> None:
-            _write_error(frame.frame_buf, 0, "")
-            _mailbox_store_i32(frame.frame_addr + _OFF_STATE, _FRAME_STAGED)
-            frame.published = True
-
-        def prepare_frame_native_run(frame: _StagedFrame) -> Any:
-            if frame.native_run is not None:
-                return frame.native_run
-            _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
-            frame.native_run = cw._impl._prepare_native_run_from_blob(
-                frame.cid,
-                frame.frame_addr + _OFF_TASK_ARGS_BLOB,
-                _MAILBOX_ARGS_CAPACITY,
-                frame.config,
-                slot_id,
-                generation,
-                run_id,
-                dispatch_id,
-                frame.frame_addr + _OFF_ACCEPTED,
-                _TASK_ACCEPTED,
-            )
-            return frame.native_run
-
-        def finalize_frame_native_run(frame: _StagedFrame) -> None:
-            native_run = frame.native_run
-            if native_run is None:
-                return
-            # Clearing ownership before the native call makes every unwind path
-            # attempt this token exactly once, including when finalization fails.
-            frame.native_run = None
-            cw._impl._finalize_native_run(native_run)
 
         def stage_frame(index: int, initial_state: int) -> _StagedFrame | None:
             frame_buf = frame_bufs[index]
@@ -2554,19 +2803,6 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         f"identity_generation={generation})"
                     )
 
-                tensor_count, scalar_count = struct.unpack_from("=ii", frame_buf, _OFF_TASK_ARGS_BLOB)
-                if tensor_count < 0 or scalar_count < 0:
-                    raise RuntimeError(
-                        f"task args has negative counts (tensors={tensor_count}, scalars={scalar_count})"
-                    )
-                args_bytes = (
-                    _BLOB_HEADER_BYTES + tensor_count * _BLOB_TENSOR_STRIDE + scalar_count * struct.calcsize("=Q")
-                )
-                if args_bytes > _MAILBOX_ARGS_CAPACITY:
-                    raise RuntimeError(
-                        f"task args needs {args_bytes} bytes but frame capacity is {_MAILBOX_ARGS_CAPACITY}"
-                    )
-
                 digest = _read_task_digest(frame_buf)
                 cid = identity_table.get(digest)
                 if cid is None:
@@ -2575,30 +2811,56 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     raise RuntimeError(
                         f"cid {cid} not prepared before task frame publication (register via _CTRL_PREPARE first)"
                     )
-                if host_buf_ranges:
-                    _rewrite_blob_host_addrs(frame_buf, _OFF_TASK_ARGS_BLOB, host_buf_ranges)
-                config = _read_config_from_mailbox(frame_buf)
-                activation_required = initial_state != _TASK_READY
                 return _StagedFrame(
                     index=index,
                     frame_buf=frame_buf,
                     frame_addr=frame_addr,
                     identity=identity,
                     cid=int(cid),
-                    config=config,
-                    activated=not activation_required or initial_state == _ACTIVATE,
+                    config=_read_config_from_mailbox(frame_buf),
+                    activated=initial_state in (_TASK_READY, _ACTIVATE),
                 )
             except Exception as e:  # noqa: BLE001
                 _write_error(frame_buf, 1, _format_exc(f"chip_process dev={device_id} frame={index}", e))
                 _mailbox_store_i32(frame_addr + _OFF_STATE, _TASK_FAILED)
                 return None
 
+        def submit_frame(frame: _StagedFrame) -> None:
+            _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
+            # The frame carries the wire blob; the runtime reads the chip POD. The bytes decode
+            # once into the wire TaskArgs, whose tensors resolve to local bases (map-once, cached
+            # by canonical identity) and rebuild at those bases, as the non-pipelined task path
+            # does. The lane copies the args into its own storage, so this POD need not outlive
+            # the call.
+            args_ptr = frame.frame_addr + _OFF_TASK_ARGS_BLOB
+            args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            resolved = import_registry.materialize_args(args)
+            chip_args = materialize_task_args(args, resolved)
+            frame.chip_run = cw._impl._submit_chip_run_materialized(
+                frame.cid,
+                chip_args,
+                frame.config,
+                slot_id,
+                generation,
+                run_id,
+                dispatch_id,
+                frame.frame_addr + _OFF_ACCEPTED,
+                _TASK_ACCEPTED,
+                False,
+            )
+            raw_disposition = frame.chip_run.preparation_disposition
+            disposition = int(getattr(raw_disposition, "value", raw_disposition))
+            if disposition not in (_VALIDATED_ONLY, _NATIVE_PREPARED):
+                raise RuntimeError(f"chip run lane returned invalid preparation disposition {disposition}")
+            _mailbox_store_i32(frame.frame_addr + _OFF_PREPARATION_DISPOSITION, disposition)
+            _write_error(frame.frame_buf, 0, "")
+            _mailbox_store_i32(frame.frame_addr + _OFF_STATE, _FRAME_STAGED)
+            if frame.activated:
+                frame.chip_run.activate()
+
         parent_pid = os.getppid()
         liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
         shutdown_message = f"chip_process dev={device_id}: task loop shut down"
-        # The sticky shutdown word outlives the _CONTROL_DONE this loop
-        # publishes for an in-flight control command, which overwrites a
-        # concurrent _SHUTDOWN store on the state word.
         shutdown_addr = _buffer_field_addr(buf, _OFF_SHUTDOWN)
         try:
             while True:
@@ -2608,8 +2870,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 if control_state == _CONTROL_REQUEST:
                     sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
                     registry_control = sub_cmd in (_CTRL_PREPARE, _CTRL_REGISTER, _CTRL_UNREGISTER)
-                    backend_prepared = has_backend_prepared_frame()
-                    defer_control = registry_control and (active_frame is not None or backend_prepared)
+                    defer_control = registry_control and bool(staged_frames)
                     if sub_cmd == _CTRL_UNREGISTER:
                         defer_control = defer_control or task_frame_references_digest(_read_control_digest(buf))
                     if not defer_control:
@@ -2617,7 +2878,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         _write_error(buf, code, msg)
                         _mailbox_store_i32(state_addr, _CONTROL_DONE)
 
-                stop_after_frame_scan = False
+                new_frames: list[_StagedFrame] = []
                 for index in range(_TASK_FRAME_COUNT):
                     frame_state = _mailbox_load_i32(frame_addrs[index] + _OFF_STATE)
                     staged = staged_frames.get(index)
@@ -2625,204 +2886,92 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         if frame_state in (_TASK_READY, _PREPARE_READY, _ACTIVATE):
                             staged = stage_frame(index, frame_state)
                             if staged is not None:
-                                staged_frames[index] = staged
+                                new_frames.append(staged)
                         continue
-                    if frame_state == _ACTIVATE:
+                    if frame_state == _ACTIVATE and not staged.activated:
                         if read_identity(staged.frame_buf) != staged.identity:
                             stale_message = f"chip_process dev={device_id}: stale activation identity"
-                            finalize_failed = False
                             try:
-                                finalize_frame_native_run(staged)
+                                staged.chip_run.abandon()
                             except Exception as e:  # noqa: BLE001
-                                finalize_failed = True
-                                stale_message += "; " + _format_exc("native finalize", e)
-                            fail_frame(staged, stale_message)
-                            if active_frame is not staged:
-                                staged_frames.pop(index, None)
-                            if finalize_failed:
+                                stale_message += "; " + _format_exc("chip run abandonment", e)
                                 shutdown_message = stale_message
-                                stop_after_frame_scan = True
                                 break
+                            fail_frame(staged, stale_message)
+                            staged_frames.pop(index, None)
                             continue
-                        staged.activated = True
-
-                if stop_after_frame_scan:
-                    break
-
-                next_active = None
-                if active_frame is None:
-                    activated_frames = [frame for frame in staged_frames.values() if frame.activated]
-                    if activated_frames:
-                        next_active = min(activated_frames, key=lambda frame: frame.identity[4])
-
-                for staged in sorted(staged_frames.values(), key=lambda frame: frame.identity[4]):
-                    # A frame published before any active claim is validation-only.
-                    # Keep considering it so activation or a later predecessor
-                    # claim can add the missing native token.
-                    native_prepare_now = (
-                        staged.native_run is None
-                        and supports_concurrent_native_prepare
-                        and not config_has_diagnostics(staged.config)
-                        and (
-                            (active_frame is None and staged is next_active)
-                            or (
-                                active_frame is not None
-                                and staged is not active_frame
-                                and not config_has_diagnostics(active_frame.config)
-                            )
-                        )
-                    )
-                    if staged.published and not native_prepare_now:
-                        continue
-                    try:
-                        if native_prepare_now:
-                            prepare_frame_native_run(staged)
-                        if not staged.published:
-                            publish_frame_staged(staged)
-                    except Exception as e:  # noqa: BLE001
-                        prepare_message = _format_exc(f"chip_process dev={device_id}: native prepare", e)
-                        finalize_failed = False
                         try:
-                            finalize_frame_native_run(staged)
-                        except Exception as finalize_error:  # noqa: BLE001
-                            finalize_failed = True
-                            prepare_message += "; " + _format_exc("native finalize", finalize_error)
-                        fail_frame(staged, prepare_message)
-                        staged_frames.pop(staged.index, None)
-                        if finalize_failed:
-                            shutdown_message = prepare_message
-                            stop_after_frame_scan = True
+                            staged.chip_run.activate()
+                            staged.activated = True
+                        except Exception as e:  # noqa: BLE001
+                            shutdown_message = _format_exc(f"chip_process dev={device_id}: native activation", e)
                             break
-
-                if stop_after_frame_scan:
-                    break
-
-                if active_frame is not None:
-                    try:
-                        run_complete = bool(cw._impl._poll_native_run(active_run))
-                    except Exception as e:  # noqa: BLE001
-                        poll_message = _format_exc(f"chip_process dev={device_id}: native poll", e)
+                else:
+                    for staged in sorted(new_frames, key=lambda frame: frame.identity[4]):
                         try:
-                            finalize_frame_native_run(active_frame)
-                        except Exception as finalize_error:  # noqa: BLE001
-                            poll_message += "; " + _format_exc("native finalize", finalize_error)
-                        fail_frame(active_frame, poll_message)
-                        staged_frames.pop(active_frame.index, None)
-                        active_frame = None
-                        active_run = None
-                        # A failed native progress/finalize fence cannot prove
-                        # that device state is reusable. Stop this endpoint so
-                        # an already-staged successor is failed, never launched
-                        # into potentially poisoned native state.
-                        shutdown_message = poll_message
-                        break
-                    else:
-                        if run_complete:
-                            completed_frame = active_frame
+                            submit_frame(staged)
+                        except Exception as e:  # noqa: BLE001
+                            fail_frame(staged, _format_exc(f"chip_process dev={device_id}: chip run submit", e))
+                        else:
+                            staged_frames[staged.index] = staged
+
+                    stop_progress = False
+                    for staged in sorted(staged_frames.values(), key=lambda frame: frame.identity[4]):
+                        try:
+                            if staged.chip_run.launched and not staged.launched_published:
+                                _mailbox_store_i32(staged.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
+                                staged.launched_published = True
+                                continue
+                            run_complete = bool(staged.chip_run.done())
+                            if not run_complete and staged.chip_run.launched and not staged.launched_published:
+                                _mailbox_store_i32(staged.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
+                                staged.launched_published = True
+                            if not run_complete:
+                                continue
+
                             code = 0
                             msg = ""
-                            finalize_failed = False
                             try:
-                                finalize_frame_native_run(active_frame)
+                                staged.chip_run._raise_if_failed()
                             except Exception as e:  # noqa: BLE001
                                 code = 1
-                                finalize_failed = True
-                                msg = _format_exc(f"chip_process dev={device_id}: native finalize", e)
-                            active_frame = None
-                            active_run = None
+                                msg = _format_exc(f"chip_process dev={device_id}: chip run", e)
                             if code == 0 and on_task_done_success is not None:
                                 try:
                                     code, msg = on_task_done_success()
                                 except Exception as e:  # noqa: BLE001
                                     code = 1
                                     msg = _format_exc(f"chip_process dev={device_id}: task completion hook", e)
-                            _write_error(completed_frame.frame_buf, code, msg)
+                            _write_error(staged.frame_buf, code, msg)
                             _mailbox_store_i32(
-                                completed_frame.frame_addr + _OFF_STATE,
+                                staged.frame_addr + _OFF_STATE,
                                 _TASK_DONE if code == 0 else _TASK_FAILED,
                             )
-                            staged_frames.pop(completed_frame.index, None)
-                            if finalize_failed:
-                                # Finalization is the native reuse fence. Its
-                                # failure terminalizes the endpoint before a
-                                # staged successor can cross the launch fence.
+                            staged_frames.pop(staged.index, None)
+                            if code != 0 and staged.chip_run.lane_poisoned:
                                 shutdown_message = msg
+                                stop_progress = True
                                 break
-
-                if active_frame is None:
-                    eligible = sorted(
-                        (frame for frame in staged_frames.values() if frame.activated and frame.published),
-                        key=lambda frame: frame.identity[4],
-                    )
-                    if eligible:
-                        next_frame = eligible[0]
-                        frame_state = _mailbox_load_i32(next_frame.frame_addr + _OFF_STATE)
-                        expected_states = (_FRAME_STAGED, _ACTIVATE)
-                        if (
-                            read_identity(next_frame.frame_buf) != next_frame.identity
-                            or frame_state not in expected_states
-                        ):
-                            launch_message = f"chip_process dev={device_id}: staged task frame changed before launch"
-                            finalize_failed = False
-                            try:
-                                finalize_frame_native_run(next_frame)
-                            except Exception as e:  # noqa: BLE001
-                                finalize_failed = True
-                                launch_message += "; " + _format_exc("native finalize", e)
-                            fail_frame(next_frame, launch_message)
-                            staged_frames.pop(next_frame.index, None)
-                            if finalize_failed:
-                                shutdown_message = launch_message
+                        except Exception as e:  # noqa: BLE001
+                            shutdown_message = _format_exc(f"chip_process dev={device_id}: chip run progress", e)
+                            stop_progress = True
+                            break
+                    if not stop_progress:
+                        liveness_countdown -= 1
+                        if liveness_countdown <= 0:
+                            liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
+                            if os.getppid() != parent_pid:
+                                shutdown_message = f"chip_process dev={device_id}: parent exited"
                                 break
-                        else:
-                            native_run = None
-                            try:
-                                native_run = prepare_frame_native_run(next_frame)
-                                cw._impl._launch_native_run(native_run)
-                            except Exception as e:  # noqa: BLE001
-                                launch_message = _format_exc(f"chip_process dev={device_id}: native launch", e)
-                                finalize_failed = False
-                                if native_run is not None:
-                                    try:
-                                        finalize_frame_native_run(next_frame)
-                                    except Exception as finalize_error:  # noqa: BLE001
-                                        finalize_failed = True
-                                        launch_message += "; " + _format_exc("native finalize", finalize_error)
-                                fail_frame(next_frame, launch_message)
-                                staged_frames.pop(next_frame.index, None)
-                                if finalize_failed:
-                                    # The launch cleanup did not establish the
-                                    # native reuse fence. Stop before any other
-                                    # staged frame can enter poisoned state.
-                                    shutdown_message = launch_message
-                                    break
-                            else:
-                                active_frame = next_frame
-                                active_run = native_run
-                                _mailbox_store_i32(next_frame.frame_addr + _OFF_STATE, _TASK_LAUNCHED)
-
-                liveness_countdown -= 1
-                if liveness_countdown <= 0:
-                    liveness_countdown = _PARENT_LIVENESS_POLL_INTERVAL
-                    if os.getppid() != parent_pid:
-                        shutdown_message = f"chip_process dev={device_id}: parent exited"
-                        break
+                        continue
+                break
         finally:
-            if active_frame is not None:
-                active_message = shutdown_message
-                try:
-                    finalize_frame_native_run(active_frame)
-                except Exception as e:  # noqa: BLE001
-                    active_message += "; " + _format_exc("native finalize", e)
-                fail_frame(active_frame, active_message)
-                staged_frames.pop(active_frame.index, None)
+            try:
+                cw._impl._close_chip_run_lane()
+            except Exception as e:  # noqa: BLE001
+                shutdown_message += "; " + _format_exc("chip run lane close", e)
             for staged in staged_frames.values():
-                staged_message = shutdown_message
-                try:
-                    finalize_frame_native_run(staged)
-                except Exception as e:  # noqa: BLE001
-                    staged_message += "; " + _format_exc("native finalize", e)
-                fail_frame(staged, staged_message)
+                fail_frame(staged, shutdown_message)
             for index, frame_buf in enumerate(frame_bufs):
                 frame_state_addr = frame_addrs[index] + _OFF_STATE
                 if _mailbox_load_i32(frame_state_addr) in (
@@ -2843,12 +2992,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
         else:
             _run_mailbox_loop(buf, state_addr, handle_task=handle_task, handle_control=handle_control)
     finally:
+        import_registry.close()
+        _sweep_l2_global_domains(cw, global_domain_store)
         _sweep_host_worker_chip_regions(worker_chip_region_store)
-        for host_shm, _lo, _hi, _base in host_buf_table.values():
-            try:
-                host_shm.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins, identity tables, log config, prewarm sizing) must cross the fork as explicit COW args; the child cannot read parent state after os.fork
@@ -2858,6 +3004,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
     identity_refs: dict[bytes, int],
+    owner_instance_id: bytes,
     log_level: int = 25,
     platform: str = "",
     runtime: str = "",
@@ -2935,6 +3082,7 @@ def _chip_process_loop(  # noqa: PLR0913 -- fork-child entry: all context (bins,
             registry,
             identity_table,
             identity_refs,
+            owner_instance_id,
             chip_platform=platform,
             chip_runtime=runtime,
             prepared=prepared,
@@ -2974,12 +3122,91 @@ def _read_config_from_mailbox(buf: memoryview) -> CallConfig:
     return cfg
 
 
+def _run_local_global_domain_control(  # noqa: PLR0912 -- one ordered dispatcher for the Global CommDomain protocol
+    inner_worker: Worker,
+    runtime: _GlobalNodeRuntime,
+    comm_inits: dict[str, GlobalCommInitCommand],
+    control_name: int,
+    request: bytes,
+) -> bytes:
+    """Execute one Global CommDomain command inside an add_worker L3 child."""
+    from .remote_l3_protocol import ControlName  # noqa: PLC0415
+
+    control = ControlName(control_name)
+    if control is ControlName.COMM_INIT:
+        command = decode_comm_init(request)
+        if command.cluster_id != runtime.cluster_id:
+            raise ValueError("COMM_INIT cluster_id does not match the local L3 topology")
+        if command.profile != runtime.comm_profile:
+            raise ValueError("COMM_INIT profile does not match the local L3 topology")
+        if command.node_rank != runtime.node_rank or command.node_count != runtime.node_count:
+            raise ValueError("COMM_INIT node identity does not match the local L3 topology")
+        local_members = tuple(member for member in command.members if member.node_worker_id == runtime.worker_id)
+        if not local_members:
+            raise ValueError("COMM_INIT topology has no local members")
+        for member in local_members:
+            if member.local_worker_id < 0 or member.local_worker_id >= len(runtime.global_device_ranks):
+                raise ValueError("COMM_INIT local worker id exceeds the local L3 device list")
+            if member.global_device_rank != runtime.global_device_ranks[member.local_worker_id]:
+                raise ValueError("COMM_INIT global device rank does not match the local L3 topology")
+        prior = comm_inits.get(command.topology_hash)
+        if prior is not None and prior != command:
+            raise ValueError("COMM_INIT topology hash conflicts with an earlier command")
+        capability = resolve_global_comm_capability(
+            platform=runtime.platform,
+            profile=runtime.comm_profile,
+            local_device_count=len(runtime.global_device_ranks),
+        )
+        comm_inits[command.topology_hash] = command
+        return encode_comm_init_result(capability)
+
+    if control is ControlName.ALLOC_DOMAIN:
+        command = decode_domain_command(request)
+        if not any(init.profile == command.profile and init.members == command.members for init in comm_inits.values()):
+            raise RuntimeError("ALLOC_DOMAIN requires a matching COMM_INIT topology")
+        if command.phase is GlobalDomainPhase.PREPARE_EXPORT:
+            if command.descriptors:
+                raise ValueError("PREPARE_EXPORT must not carry descriptors")
+            return encode_descriptor_table(inner_worker._prepare_global_domain_node(command, runtime.worker_id))
+        if command.phase is GlobalDomainPhase.IMPORT:
+            inner_worker._import_global_domain_node(command, runtime.worker_id)
+            return b""
+        if command.phase is GlobalDomainPhase.COMMIT:
+            inner_worker._commit_global_domain_node(command)
+            return b""
+        if command.phase is GlobalDomainPhase.ABORT:
+            inner_worker._release_global_domain_node(
+                GlobalDomainReleaseCommand(command.domain_id, command.generation),
+                suppress_errors=True,
+            )
+            return b""
+        raise ValueError("ALLOC_DOMAIN phase is not supported")
+
+    if control is ControlName.RELEASE_DOMAIN:
+        inner_worker._release_global_domain_node(decode_release_command(request))
+        return b""
+    if control is ControlName.COPY_TO_DOMAIN:
+        inner_worker._copy_global_domain_node(
+            decode_copy_command(request, include_data=True),
+            copy_to_device=True,
+        )
+        return b""
+    if control is ControlName.COPY_FROM_DOMAIN:
+        result = inner_worker._copy_global_domain_node(
+            decode_copy_command(request, include_data=False),
+            copy_to_device=False,
+        )
+        return encode_copy_result(result)
+    raise ValueError(f"unsupported local Global CommDomain control {int(control)}")
+
+
 def _child_worker_loop(
     buf: memoryview,
     registry: dict[int, Any],
     identity_table: dict[bytes, int],
     identity_refs: dict[bytes, int],
     inner_worker: Worker,
+    global_node: _GlobalNodeRuntime | None = None,
 ) -> None:
     """Runs in forked child process. Any-level Worker as child of its parent.
 
@@ -2991,16 +3218,20 @@ def _child_worker_loop(
     into the inner Worker (see docs section 7).
     """
     state_addr = _buffer_field_addr(buf, _OFF_STATE)
+    global_comm_inits: dict[str, GlobalCommInitCommand] = {}
 
-    def handle_task() -> tuple[int, str]:
-        digest = _read_task_digest(buf)
+    def handle_task(task_buf) -> tuple[int, str]:
+        digest = _read_task_digest(task_buf)
         cid = identity_table.get(digest)
         orch_fn = registry.get(int(cid)) if cid is not None else None
         if orch_fn is None:
             return 1, f"child_worker: callable hash {_format_digest(digest)} not registered"
         try:
-            args = _read_args_from_mailbox(buf)
-            cfg = _read_config_from_mailbox(buf)
+            # Orchestrator (not a compute leaf): re-export each received backing to a local
+            # handle H' (per-backing, no map) so the inner orch sees only its own handles;
+            # pure forwarding to L2 carries no map cost.
+            args = _reexport_args_from_mailbox(task_buf, inner_worker)
+            cfg = _read_config_from_mailbox(task_buf)
             inner_worker.run(orch_fn, args, cfg)
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc(f"child_worker level={inner_worker.level}", e)
@@ -3041,6 +3272,41 @@ def _child_worker_loop(
                     sub_cmd,
                     context=f"child_worker level={inner_worker.level}",
                 )
+            elif sub_cmd == _CTRL_GLOBAL_DOMAIN_NODE:
+                if global_node is None:
+                    raise RuntimeError("Global CommDomain control requires a local L3 child")
+                staged, payload, payload_size = _open_global_domain_payload(buf)
+                try:
+                    if payload_size < _LOCAL_GLOBAL_CONTROL_HEADER.size:
+                        raise RuntimeError("local Global CommDomain control payload is truncated")
+                    control_name, request_size, response_size = _LOCAL_GLOBAL_CONTROL_HEADER.unpack_from(payload, 0)
+                    capacity = payload_size - _LOCAL_GLOBAL_CONTROL_HEADER.size
+                    if request_size > capacity:
+                        raise RuntimeError("local Global CommDomain request exceeds staged payload")
+                    if response_size != 0:
+                        raise RuntimeError("local Global CommDomain request contains a response")
+                    start = _LOCAL_GLOBAL_CONTROL_HEADER.size
+                    request = bytes(payload[start : start + request_size])
+                    response = _run_local_global_domain_control(
+                        inner_worker,
+                        global_node,
+                        global_comm_inits,
+                        int(control_name),
+                        request,
+                    )
+                    if len(response) > capacity:
+                        raise RuntimeError("local Global CommDomain response exceeds staged payload")
+                    payload[start : start + len(response)] = response
+                    _LOCAL_GLOBAL_CONTROL_HEADER.pack_into(
+                        payload,
+                        0,
+                        int(control_name),
+                        int(request_size),
+                        len(response),
+                    )
+                finally:
+                    payload.release()
+                    staged.close()
             else:
                 raise RuntimeError(f"unknown control sub-command {sub_cmd}")
         except Exception as e:  # noqa: BLE001
@@ -3293,8 +3559,14 @@ class _RunResources:
     remote_slot_refs: list[_RemoteSlotRefClaim | RemoteBufferHandle] = field(default_factory=list)
     live_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
     pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
+    live_global_domains: dict[str, GlobalCommDomainHandle] = field(default_factory=dict)
+    pending_release_global_domains: list[GlobalCommDomainHandle] = field(default_factory=list)
     worker_chip_regions: list[Any] = field(default_factory=list)
     worker_chip_orch_comm_host_buffers: dict[int, int] = field(default_factory=dict)
+    # Every Buffer identity a NEXT_LEVEL dispatch (submit_next_level / _group) sent as a Tensor
+    # arg during this run. release_buffer() checks this set across every not-yet-settled run before
+    # releasing, so a Buffer never goes away while a dispatched task still names it.
+    touched_identities: set[CanonicalIdentity] = field(default_factory=set)
     # True once the owning run's fence has claimed the domains above. A release
     # that arrives after this has no fence left to run behind and frees inline.
     # Read and written only under `domain_lock`.
@@ -3889,13 +4161,6 @@ class Worker:
         # dispatch) is now handled at the C++ boundary via mailbox_mu_, so
         # no quiescent-state guard is needed.
         self._registry_lock = threading.Lock()
-        # Owner-side buffer identity. `_owner_instance_id` is a fresh random draw per Worker
-        # incarnation, so a buffer_id reused by a later process can never collide with a live
-        # identity; `_buffers` keeps every Buffer this Worker owns so close() can unlink
-        # the backings.
-        self._owner_instance_id: bytes = mint_owner_instance_id()
-        self._buffer_id_counter: int = 1
-        self._buffers: dict[int, Buffer] = {}
         self._pending_unregister_cids: set[int] = set()
         self._pending_remote_unregister_hashids: set[bytes] = set()
         self._py_control_timeout_s = float(config.get("py_control_timeout_s", _PY_CONTROL_TIMEOUT_S))
@@ -3975,6 +4240,15 @@ class Worker:
 
         # Level-2 internals
         self._chip_worker: ChipWorker | None = None
+        # Live direct-chip runs by the run id their RunHandle carries. The lane
+        # is the admission authority and holds its own FIFO; this only maps a
+        # handle back to its run so waiting and finalization can find it.
+        self._chip_runs: dict[int, Any] = {}
+        self._chip_run_seq: int = 0
+        # Mirrors _chip_runs' own lifecycle (added/removed at the same two points) so
+        # release_buffer() can see an L2 run in flight: L2 dispatch never touches
+        # _accepted_run_handles/_submit_mu, so it is otherwise invisible to that check.
+        self._chip_run_touched_identities: dict[int, set[CanonicalIdentity]] = {}
 
         # Level-3+ internals
         self._worker: _Worker | None = None
@@ -4009,6 +4283,10 @@ class Worker:
         # among live handles).  ``orch.allocate_domain`` adds entries here;
         # ``release()`` removes them and queues a deferred backend free.
         self._live_domains: dict[str, CommDomainHandle] = {}
+        self._live_global_domains: dict[str, GlobalCommDomainHandle] = {}
+        self._failed_global_domain_releases: dict[int, GlobalCommDomainHandle] = {}
+        self._global_node_domains: dict[int, _GlobalNodeDomainState] = {}
+        self._global_cluster_id = uuid.uuid4().hex
         # Monotonic per-Worker counter; mixed into IPC barrier filenames so
         # two concurrent allocations don't share a marker file.  Wraps after
         # 2^64 allocations — far beyond any realistic Worker lifetime.
@@ -4022,12 +4300,18 @@ class Worker:
         # down under an in-flight release.
         self._domain_free_mu = threading.Lock()
         self._domain_free_results: dict[int, BaseException | None] = {}
+        self._global_domain_free_mu = threading.Lock()
+        self._global_domain_free_results: dict[int, BaseException | None] = {}
         self._alloc_id_lock = threading.Lock()
         # Base HCCL/sim communicator is built lazily on the first
         # ``orch.allocate_domain`` call (see ``_ensure_comm_base``).  We
         # keep ``Worker.init()`` cheap — it only forks chip children and
         # starts the C++ scheduler; no comm work happens there.
         self._comm_base_ready: bool = False
+
+        self._endpoint_registry: EndpointRegistry | None = None
+        self._endpoint_registry_epoch: int = 0
+        self._region_access_service: RegionAccessService | None = None
 
         self._live_worker_chip_regions: list[Any] = []
         self._worker_chip_orch_comm_host_buffers: dict[int, int] = {}
@@ -4045,28 +4329,46 @@ class Worker:
         self._child_alloc_prov: dict[tuple[int, int], _ChildProvEntry] = {}
         self._child_prov_lock = threading.Lock()
 
-        # Post-fork zero-copy host buffers (``create_host_buffer``). Keyed by the
-        # born-shared shm's mapped base (== the buffer's data_ptr); each entry maps
-        # a named shm into every local L3 child so memory created after the children
-        # were forked is still reachable by a later run — with no per-run copy.
-        self._host_buf_registry: dict[int, _HostBufEntry] = {}
-        # Immutable read snapshot for the lock-free per-submit lookup
-        # (``_find_host_buf_entry``): a ``(sorted_ptrs_tuple, registry_copy)`` pair
-        # rebuilt under ``_registry_lock`` on every create/free and rebound
-        # atomically. The reader loads it once, so the sorted keys and the dict it
-        # bisects into never mutate mid-lookup — no lock, no torn read, no
-        # IndexError from a concurrent free shrinking the list. Host buffers are
-        # distinct, non-overlapping allocations, so the unique candidate for an
-        # address is the entry with the greatest base <= addr.
-        self._host_buf_snapshot: tuple[tuple[int, ...], dict[int, _HostBufEntry]] = ((), {})
-        self._host_buf_token_counter: int = 0
+        # Owner-side Buffer state (P1-B): a per-incarnation opaque nonce, a monotonic buffer_id
+        # (0 reserved), and the live handles this Worker owns. create_buffer allocates a handle whose
+        # self-describing descriptor rides embedded in every Tensor built over it (no export
+        # handshake); consumers materialize it lazily on receipt.
+        #
+        # The endpoint registry mints `EndpointIdentity.session_instance_id` from this same nonce,
+        # and the sharing is load-bearing rather than incidental: it is the key of the registry's
+        # `owner_instance_id -> owner endpoint` binding, which is the only way a consumer holding a
+        # `BufferDescriptor` can name the endpoint that minted it — the descriptor itself cannot,
+        # since the nonce is opaque, `owner_worker_path_id` is diagnostic by contract, and
+        # `address_space` does not say which card.
+        #
+        # Both identities share this mint point. init() re-mints it (see the
+        # `_lifecycle = _Lifecycle.INITIALIZING` assignment) rather than trusting the value from
+        # here: for a next-level child, init() only ever runs inside the process that forked to
+        # host it, so that later mint is the one that names the real incarnation and is never older
+        # than its fork. The value assigned here exists only so a Worker that never reaches init()
+        # (e.g. a test double that pokes `_lifecycle` directly) still has a well-formed nonce.
+        self._owner_instance_id: bytes = mint_owner_instance_id()
+        self._buffer_id_counter: int = 1
+        self._buffers: dict[int, Buffer] = {}
+        # Re-export table (points 1-4): an upper-level ref received by this worker's orch is re-exported
+        # to a local handle H' under this worker's identity, per-backing (keyed by source identity),
+        # so each level's orch sees only its own handles. No map here — H' relabels the backing;
+        # a compute leaf maps lazily. Lifetime is worker-scoped for now.
+        self._reexport_by_source: dict[CanonicalIdentity, Buffer] = {}
+        # make_tensor_arg memo: a pre-fork host tensor's storage base -> its FORK_SHM handle, so every ref
+        # over the same storage shares one canonical identity (dependencies key on it). Worker-scoped.
+        self._fork_tensor_handles: dict[int, Buffer] = {}
+        # L2 leaf only: the in-process consumer import cache. An L2 Worker materializes its own tensor
+        # args itself (no forked child, no mailbox), resolving each ref's descriptor to a local base
+        # map-once — the chip-child path minus the mailbox hop. Lazily created on first L2 run.
+        self._chip_import_registry: ImportRegistry | None = None
 
     @property
     def _initialized(self) -> bool:
         """True only in READY — the worker's tree is live and dispatchable.
 
         False once CLOSED (the moment close() claims the epoch), so a dispatch /
-        register / create_host_buffer that races an in-progress close() is
+        register / create_buffer that races an in-progress close() is
         rejected rather than entering the teardown window.
         """
         return self._lifecycle is _Lifecycle.READY
@@ -4307,6 +4609,109 @@ class Worker:
             )
         return entries
 
+    @staticmethod
+    def _validate_global_node_config(
+        *,
+        label: str,
+        platform: str,
+        device_ids: tuple[int, ...],
+        comm_profile: str,
+        global_device_ranks: tuple[int, ...],
+    ) -> None:
+        if comm_profile not in GLOBAL_DOMAIN_PROFILE_IDS:
+            raise ValueError(f"{label} comm_profile {comm_profile!r} is not supported")
+        if comm_profile == "a3-fabric-v1" and (not platform.startswith("a2a3") or platform.endswith("sim")):
+            raise ValueError(f"{label} comm_profile 'a3-fabric-v1' requires real A3 devices")
+        if global_device_ranks and len(global_device_ranks) != len(device_ids):
+            raise ValueError(f"{label} global_device_ranks must match device_ids length")
+        if any(rank < 0 for rank in global_device_ranks) or len(set(global_device_ranks)) != len(global_device_ranks):
+            raise ValueError(f"{label} global_device_ranks must be unique and non-negative")
+
+    def _resolved_global_nodes(self) -> dict[int, _GlobalNodeRuntime]:
+        configs: list[tuple[int, tuple[int, ...], str, str, tuple[int, ...], bool]] = []
+        for worker_id, spec in zip(self._remote_worker_ids, self._remote_worker_specs):
+            configs.append(
+                (
+                    int(worker_id),
+                    tuple(spec.device_ids),
+                    spec.platform,
+                    spec.comm_profile,
+                    tuple(spec.global_device_ranks),
+                    True,
+                )
+            )
+        for worker_id, child in zip(self._next_level_worker_ids, self._next_level_workers):
+            if child.level != 3:
+                continue
+            device_ids = tuple(int(device_id) for device_id in child._config.get("device_ids", ()))
+            platform = str(child._config.get("platform", ""))
+            comm_profile = str(child._config.get("comm_profile", "sim"))
+            global_device_ranks = tuple(int(rank) for rank in child._config.get("global_device_ranks", ()))
+            self._validate_global_node_config(
+                label=f"local L3 worker {worker_id}",
+                platform=platform,
+                device_ids=device_ids,
+                comm_profile=comm_profile,
+                global_device_ranks=global_device_ranks,
+            )
+            configs.append(
+                (
+                    int(worker_id),
+                    device_ids,
+                    platform,
+                    comm_profile,
+                    global_device_ranks,
+                    False,
+                )
+            )
+        configs.sort(key=lambda item: item[0])
+
+        explicit_ranks: set[int] = set()
+        for worker_id, _device_ids, _platform, _profile, ranks, _is_remote in configs:
+            overlap = explicit_ranks.intersection(ranks)
+            if overlap:
+                raise ValueError(
+                    f"Global CommDomain worker {worker_id} duplicates global_device_ranks {sorted(overlap)}"
+                )
+            explicit_ranks.update(ranks)
+
+        used = set(explicit_ranks)
+        next_rank = 0
+        resolved: dict[int, _GlobalNodeRuntime] = {}
+        node_count = len(configs)
+        for node_rank, (worker_id, device_ids, platform, profile, ranks, is_remote) in enumerate(configs):
+            self._validate_global_node_config(
+                label=f"{'remote' if is_remote else 'local'} L3 worker {worker_id}",
+                platform=platform,
+                device_ids=device_ids,
+                comm_profile=profile,
+                global_device_ranks=ranks,
+            )
+            if not ranks:
+                assigned: list[int] = []
+                for _device_id in device_ids:
+                    while next_rank in used:
+                        next_rank += 1
+                    assigned.append(next_rank)
+                    used.add(next_rank)
+                    next_rank += 1
+                ranks = tuple(assigned)
+            resolved[worker_id] = _GlobalNodeRuntime(
+                worker_id=worker_id,
+                device_ids=device_ids,
+                platform=platform,
+                comm_profile=profile,
+                global_device_ranks=ranks,
+                node_rank=node_rank,
+                node_count=node_count,
+                cluster_id=self._global_cluster_id,
+                is_remote=is_remote,
+            )
+        return resolved
+
+    def _resolved_global_device_ranks(self) -> dict[int, tuple[int, ...]]:
+        return {worker_id: runtime.global_device_ranks for worker_id, runtime in self._resolved_global_nodes().items()}
+
     def _build_remote_manifest(
         self, *, spec: RemoteWorkerSpec, worker_id: int, session_id: int, startup_remaining_s: float
     ) -> dict[str, Any]:
@@ -4314,6 +4719,15 @@ class Worker:
         listen_host = spec.session_listen_host or ("127.0.0.1" if daemon_host == "localhost" else daemon_host)
         if self._is_wildcard_session_host(listen_host) and not spec.allow_wildcard_session_bind:
             raise ValueError("RemoteWorkerSpec wildcard session bind requires allow_wildcard_session_bind=True")
+        if worker_id in self._remote_worker_ids:
+            runtime = self._resolved_global_nodes()[int(worker_id)]
+            node_rank = runtime.node_rank
+            node_count = runtime.node_count
+            global_device_ranks = runtime.global_device_ranks
+        else:
+            node_rank = 0
+            node_count = 1
+            global_device_ranks = spec.global_device_ranks or tuple(range(len(spec.device_ids)))
         return {
             "session_id": int(session_id),
             "parent_worker_level": int(self.level),
@@ -4325,6 +4739,11 @@ class Worker:
             "num_sub_workers": int(spec.num_sub_workers),
             "heap_ring_size": self._config.get("remote_heap_ring_size", None),
             "transport": spec.transport,
+            "comm_profile": spec.comm_profile,
+            "cluster_id": self._global_cluster_id,
+            "node_rank": node_rank,
+            "node_count": node_count,
+            "global_device_ranks": list(global_device_ranks),
             # session_timeout_s bounds the runtime command socket; startup_remaining_s
             # bounds this session's slice of the single root startup budget. They are
             # distinct: the remote must not spend runtime-command time as startup time.
@@ -5324,6 +5743,117 @@ class Worker:
                     self._lease_depth[tid] = depth
                 self._hierarchical_start_cv.notify_all()
 
+    def _invalidate_endpoint_registry(self) -> None:
+        self._endpoint_registry = None
+        self._region_access_service = None
+        self._endpoint_registry_epoch += 1
+
+    def _require_ready_for_region_planning(self, api: str = "region planning") -> None:
+        """Admit only a Worker that owns a control subtree to declare a region.
+
+        This is a control-tree visibility rule, not a capability decision: level says who may
+        *declare* a region over its own subtree, the same way it says an L4 submits only to its L3
+        children. It never decides whether two endpoints can share memory — that is deployment,
+        interconnect, backing and live attachment, none of which appear here. A level < 3 Worker has
+        no subtree to enumerate, so it has no members to name; it can still be a *member* of a
+        region its parent declares.
+
+        Lifecycle admission is deliberately absent: `_operation_lease` is the single fence for
+        READY, cleanup errors and the close race.
+        """
+        if self.level < 3:
+            raise RuntimeError(f"Worker.{api}: region planning requires a level >= 3 Worker")
+
+    def _endpoint_topology_snapshot(self) -> _EndpointTopologySnapshot:
+        self._require_ready_for_region_planning("_endpoint_topology_snapshot")
+        root_level = int(self.level)
+        root_path = _format_worker_path(root_level)
+        entries: list[_EndpointTopologyEntry] = []
+        self._append_endpoint_topology(entries, self, root_path, "local", include_self=True)
+        entries.sort(key=lambda entry: self._endpoint_topology_sort_key(entry, root_level))
+        return _EndpointTopologySnapshot(
+            root_level=root_level,
+            session_instance_id=self._owner_instance_id,
+            entries=tuple(entries),
+        )
+
+    def _append_endpoint_topology(
+        self,
+        entries: list[_EndpointTopologyEntry],
+        worker: Worker,
+        path: str,
+        node_identity: str,
+        *,
+        include_self: bool,
+    ) -> None:
+        if include_self:
+            # The Worker's own buffer-owner nonce rides along, so the registry can resolve a
+            # BufferDescriptor back to the endpoint that minted it. A remote child's nonce is
+            # minted in its own process and is deliberately left absent below.
+            entries.append(_EndpointTopologyEntry(path, HOST_CPU, node_identity, worker._owner_instance_id))
+        if int(worker.level) == 3:
+            self._append_device_endpoint_topology(entries, path, worker._config.get("device_ids", ()), node_identity)
+        for child_index, child in zip(worker._next_level_worker_ids, worker._next_level_workers):
+            child_path = _format_worker_path(int(child.level), parent_path=path, index=int(child_index))
+            self._append_endpoint_topology(entries, child, child_path, node_identity, include_self=True)
+        for child_index, spec in zip(worker._remote_worker_ids, worker._remote_worker_specs):
+            remote_path = _format_worker_path(3, parent_path=path, index=int(child_index))
+            remote_node_identity = self._node_identity_from_remote_endpoint(spec.endpoint)
+            entries.append(_EndpointTopologyEntry(remote_path, HOST_CPU, remote_node_identity))
+            self._append_device_endpoint_topology(entries, remote_path, spec.device_ids, remote_node_identity)
+
+    def _append_device_endpoint_topology(
+        self,
+        entries: list[_EndpointTopologyEntry],
+        path_to_l3: str,
+        device_ids,
+        node_identity: str,
+    ) -> None:
+        for child_index, _device_id in enumerate(tuple(device_ids)):
+            device_path = _format_worker_path(2, parent_path=path_to_l3, index=child_index)
+            entries.append(_EndpointTopologyEntry(device_path, DEVICE_AICORE, node_identity))
+            entries.append(_EndpointTopologyEntry(device_path, DEVICE_AICPU, node_identity))
+
+    def _node_identity_from_remote_endpoint(self, endpoint: str) -> str:
+        host, _port = self._parse_remote_endpoint(endpoint)
+        return _normalize_node_identity(host)
+
+    def _endpoint_topology_sort_key(self, entry: _EndpointTopologyEntry, root_level: int):
+        deployment_order = {HOST_CPU: 0, DEVICE_AICORE: 1, DEVICE_AICPU: 2}
+        return (parse_endpoint_path(entry.path, root_level=root_level).sort_key, deployment_order[entry.deployment])
+
+    def _get_endpoint_registry(self) -> EndpointRegistry:
+        self._require_ready_for_region_planning("_get_endpoint_registry")
+        registry = self._endpoint_registry
+        if registry is None:
+            registry = EndpointRegistry.from_snapshot(
+                self._endpoint_topology_snapshot(), registry_epoch=self._endpoint_registry_epoch
+            )
+            self._endpoint_registry = registry
+        return registry
+
+    def _get_region_access_service(self) -> RegionAccessService:
+        service = self._region_access_service
+        if service is None:
+            service = DefaultRegionAccessService()
+            self._region_access_service = service
+        return service
+
+    def _resolve_region_spec(self, members, topology: SingleOwner):
+        self._require_ready_for_region_planning("_resolve_region_spec")
+        with self._operation_lease("_resolve_region_spec"):
+            return self._get_endpoint_registry().resolve_region_spec(members, topology)
+
+    def _plan_region(
+        self, members, topology: SingleOwner, layout_summary: RegionLayoutSpec
+    ) -> BackendPlan | UnsupportedRegionPlan:
+        self._require_ready_for_region_planning("_plan_region")
+        with self._operation_lease("_plan_region"):
+            registry = self._get_endpoint_registry()
+            resolved = registry.resolve_region_spec(members, topology)
+            resolver = BackendResolver(registry, self._get_region_access_service())
+            return resolver.plan(resolved, layout_summary)
+
     def _register_into_snapshot_or_wait(self, reg: _CallableRegistration) -> CallableHandle | None:
         """Linearize a level>=3 register against the startup epoch.
 
@@ -6295,7 +6825,7 @@ class Worker:
         raises after a bounded rollback that reaps the children it forked
         best-effort (a child wedged in native code past the deadline may be left
         behind — see the deferred un-reaped-child / nested-shm items).
-        ``run`` / ``create_host_buffer`` / the remote register/memory APIs never
+        ``run`` / ``create_buffer`` / the remote register/memory APIs never
         trigger startup.
 
         Args:
@@ -6347,6 +6877,11 @@ class Worker:
             if _startup_deadline is None:
                 self._assign_shm_namespace()
             self._lifecycle = _Lifecycle.INITIALIZING
+            # Generated after this Worker's own fork: a next-level child's init() runs only inside
+            # the process that forked to host it (see _start_hierarchical), so this nonce is never
+            # older than the incarnation it names. Buffer and endpoint identity share this mint
+            # point (see the Owner-side Buffer state comment in __init__).
+            self._owner_instance_id: bytes = mint_owner_instance_id()
             if self.level >= 3:
                 self._is_startup_root = _startup_deadline is None
                 own_deadline = time.monotonic() + self._startup_timeout_s
@@ -6544,7 +7079,7 @@ class Worker:
                 self._worker.add_remote_l3_socket(
                     session.worker_id,
                     session.session_id,
-                    spec.transport,
+                    spec.comm_profile,
                     session.command_host,
                     session.command_port,
                     session.health_host,
@@ -6576,6 +7111,7 @@ class Worker:
         deadline = self._startup_deadline
         direct_chip_pipeline_depth = PTO_PIPELINE_MAX_DEPTH
         chip_depths: list[int] = []
+        global_nodes = self._resolved_global_nodes() if self.level >= 4 else {}
 
         # Freeze the startup registry snapshot. init() already holds the epoch in
         # the INITIALIZING state, so a concurrent register/unregister is blocked
@@ -6651,6 +7187,7 @@ class Worker:
                                 callable_kind="CHIP_CALLABLE",
                                 target_namespace="LOCAL_CHIP",
                             ),
+                            self._owner_instance_id,
                             log_level=chip_log_level,
                             platform=str(self._config["platform"]),
                             runtime=str(self._config["runtime"]),
@@ -6698,6 +7235,8 @@ class Worker:
         # L3 child → L3's chip/sub grandchildren) and INIT_READY propagates up
         # only after the whole subtree is ready.
         for idx, inner_worker in enumerate(self._next_level_workers):
+            worker_id = self._next_level_worker_ids[idx]
+            global_node = global_nodes.get(worker_id)
             pid = os.fork()
             if pid == 0:
                 buf = self._next_level_shms[idx].buf
@@ -6729,7 +7268,12 @@ class Worker:
                     buf,
                     f"next_level worker {idx}",
                     _setup,
-                    lambda tables, b=buf, inner=inner_worker: _child_worker_loop(b, *tables, inner),
+                    lambda tables, b=buf, inner=inner_worker, node=global_node: _child_worker_loop(
+                        b,
+                        *tables,
+                        inner,
+                        node,
+                    ),
                     make_group_leader=self._is_startup_root,
                 )
             else:
@@ -7053,15 +7597,13 @@ class Worker:
                 poisoned = True
         return poisoned
 
-    def _register_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, ChipTensor):
-            raise TypeError("L3-L2 host buffer registration expects a ChipTensor")
-        if tensor.child_memory:
-            raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
-        if not tensor.is_contiguous:
-            raise ValueError("L3-L2 payload buffer must be contiguous")
-        base = int(tensor.data)
-        nbytes = int(tensor.nbytes())
+    def _register_worker_chip_orch_comm_host_buffer(self, handle) -> None:
+        if not isinstance(handle, Buffer):
+            raise TypeError("L3-L2 host buffer registration expects a Buffer")
+        if handle.address_space != AddressSpace.HOST:
+            raise ValueError("L3-L2 payload buffer must be host storage, not device storage")
+        base = int(handle.base)
+        nbytes = int(handle.nbytes)
         if base <= 0 or nbytes <= 0:
             return
         resources = self._building_run_resources
@@ -7075,15 +7617,13 @@ class Worker:
             nbytes,
         )
 
-    def _validate_worker_chip_orch_comm_host_buffer(self, tensor) -> None:
-        if not isinstance(tensor, ChipTensor):
-            raise ValueError("L3-L2 payload buffer must be a ChipTensor returned by orch.alloc(...)")
-        if tensor.child_memory:
-            raise ValueError("L3-L2 payload buffer must be host storage, not child_memory device storage")
-        if not tensor.is_contiguous:
-            raise ValueError("L3-L2 payload buffer must be contiguous")
-        base = int(tensor.data)
-        nbytes = int(tensor.nbytes())
+    def _validate_worker_chip_orch_comm_host_buffer(self, handle) -> None:
+        if not isinstance(handle, Buffer):
+            raise ValueError("L3-L2 payload buffer must be a Buffer returned by orch.alloc(...)")
+        if handle.address_space != AddressSpace.HOST:
+            raise ValueError("L3-L2 payload buffer must be host storage, not device storage")
+        base = int(handle.base)
+        nbytes = int(handle.nbytes)
         if base <= 0 or nbytes <= 0:
             raise ValueError("L3-L2 payload buffer must have a nonzero address and size")
         resources = self._building_run_resources
@@ -7094,10 +7634,10 @@ class Worker:
         )
         registered_nbytes = buffers.get(base)
         if registered_nbytes is None:
-            raise ValueError("L3-L2 payload ChipTensor is not registered; use a tensor returned by orch.alloc(...)")
+            raise ValueError("L3-L2 payload buffer is not registered; use a handle returned by orch.alloc(...)")
         if nbytes > int(registered_nbytes):
             raise ValueError(
-                f"L3-L2 payload ChipTensor size {nbytes} exceeds registered shared storage {registered_nbytes}"
+                f"L3-L2 payload buffer size {nbytes} exceeds registered shared storage {registered_nbytes}"
             )
 
     def _consume_worker_host_mapped_cleanup_error_locked(self, api: str) -> RuntimeError | None:
@@ -7561,7 +8101,17 @@ class Worker:
                             device_ctx=int(device_ctx),
                             local_window_base=int(local_window_base),
                             actual_window_size=int(window_size),
-                            buffer_ptrs={b.name: ptrs[i] for i, b in enumerate(buffers)},
+                            buffers={
+                                b.name: wrap_vmm_window(
+                                    ptrs[i],
+                                    int(b.nbytes),
+                                    self._owner_instance_id,
+                                    self._next_buffer_id(),
+                                    f"L{self.level}",
+                                    owner_worker_id=int(chip_idx),
+                                )
+                                for i, b in enumerate(buffers)
+                            },
                         )
                     handle.contexts = contexts
                 finally:
@@ -7589,14 +8139,15 @@ class Worker:
             # The backend windows are now live: record each chip's window base
             # and every carved buffer pointer before the lifecycle publishes
             # success back to the interruptible caller.
-            buf_nbytes = {b.name: int(b.nbytes) for b in buffers}
             with self._child_prov_lock:
                 for chip_idx, ctx in contexts.items():
                     self._child_prov_record_domain(
                         chip_idx, int(ctx.local_window_base), allocation_id, int(ctx.actual_window_size)
                     )
-                    for buf_name, buf_ptr in ctx.buffer_ptrs.items():
-                        self._child_prov_record_domain(chip_idx, int(buf_ptr), allocation_id, buf_nbytes[buf_name])
+                    # Each carved buffer's handle carries its own extent, so the copy-range check
+                    # reads it straight off the handle.
+                    for buf in ctx.buffers.values():
+                        self._child_prov_record_domain(chip_idx, int(buf.base), allocation_id, int(buf.nbytes))
 
         published_handle = _run_with_owned_shared_memory(
             len(workers) * 2,
@@ -7613,7 +8164,7 @@ class Worker:
         Called by ``CommDomainHandle.release()``.  We do NOT drive
         ``CTRL_RELEASE_DOMAIN`` here because the orch function is allowed
         to have already submitted DAG tasks that capture the handle's
-        ``device_ctx`` / ``buffer_ptrs``.  Those tasks must see live
+        ``device_ctx`` / ``buffers``.  Those tasks must see live
         memory through execution; the queue is drained by
         ``_execute_pending_domain_releases`` once the owning run's fence fires.
 
@@ -7658,7 +8209,10 @@ class Worker:
         with resources.domain_lock:
             resources.retired = True
             stragglers = list(resources.pending_release_domains)
+            global_stragglers = list(resources.pending_release_global_domains)
+            resources.live_global_domains.clear()
         self._drain_pending_domain_snapshot(resources, stragglers)
+        self._drain_pending_global_domain_snapshot(resources, global_stragglers)
 
     def _drain_pending_domain_snapshot(self, resources: _RunResources, pending: list[CommDomainHandle]) -> None:
         """Free a snapshot while each source-queue claim stays durable."""
@@ -7672,6 +8226,23 @@ class Worker:
                 for index, candidate in enumerate(resources.pending_release_domains):
                     if candidate is handle:
                         del resources.pending_release_domains[index]
+                        break
+
+        _raise_first(_release, pending)
+
+    def _drain_pending_global_domain_snapshot(
+        self,
+        resources: _RunResources,
+        pending: list[GlobalCommDomainHandle],
+    ) -> None:
+        """Free global-domain claims without dropping unfinished cleanup debt."""
+
+        def _release(handle: GlobalCommDomainHandle) -> None:
+            self._free_global_domain_after_fence(handle)
+            with resources.domain_lock:
+                for index, candidate in enumerate(resources.pending_release_global_domains):
+                    if candidate is handle:
+                        del resources.pending_release_global_domains[index]
                         break
 
         _raise_first(_release, pending)
@@ -7854,6 +8425,735 @@ class Worker:
                 f"{len(errors)}/{len(workers)} chips; first error chip={first[0]}: {first[1]}"
             )
 
+    @staticmethod
+    def _global_domain_command_identity(command: GlobalDomainCommand) -> tuple[Any, ...]:
+        return (
+            command.domain_id,
+            command.generation,
+            command.name,
+            command.profile,
+            command.window_size,
+            command.members,
+            command.buffers,
+        )
+
+    @staticmethod
+    def _global_domain_provenance_id(domain_id: int) -> int:
+        # Local CommDomain allocation ids are positive. Keep remote Global
+        # CommDomains in a disjoint namespace while reusing the same exact-pointer
+        # provenance table that protects child-memory task submissions.
+        return -int(domain_id)
+
+    def _global_local_members(
+        self, command: GlobalDomainCommand, node_worker_id: int
+    ) -> tuple[GlobalDomainMember, ...]:
+        members = tuple(member for member in command.members if member.node_worker_id == node_worker_id)
+        if not members:
+            raise ValueError(f"Global CommDomain has no members on node worker {node_worker_id}")
+        local_count = len(self._config.get("device_ids", []))
+        for member in members:
+            if member.local_worker_id < 0 or member.local_worker_id >= local_count:
+                raise ValueError(
+                    f"Global CommDomain local worker {member.local_worker_id} is outside [0, {local_count})"
+                )
+        return members
+
+    def _prepare_global_domain_node(
+        self, command: GlobalDomainCommand, node_worker_id: int
+    ) -> tuple[GlobalDomainDescriptor, ...]:
+        if self.level != 3 or self._worker is None:
+            raise RuntimeError("Global CommDomain node prepare requires a ready L3 Worker")
+        prior = self._global_node_domains.get(command.domain_id)
+        if prior is not None:
+            if self._global_domain_command_identity(prior.command) != self._global_domain_command_identity(command):
+                raise RuntimeError("Global CommDomain prepare conflicts with a live domain")
+            return tuple(prior.descriptors[rank] for rank in sorted(prior.descriptors))
+
+        state = _GlobalNodeDomainState(command=command)
+        self._global_node_domains[command.domain_id] = state
+        local_members = self._global_local_members(command, node_worker_id)
+        capacity = max(LOCAL_PREPARE_REQUEST.size, LOCAL_PREPARE_REPLY.size + GLOBAL_DOMAIN_DESCRIPTOR_BYTES)
+        try:
+            for member in local_members:
+                payload = bytearray(capacity)
+                LOCAL_PREPARE_REQUEST.pack_into(
+                    payload,
+                    0,
+                    LOCAL_DOMAIN_MAGIC,
+                    GLOBAL_DOMAIN_VERSION,
+                    command.domain_id,
+                    command.generation,
+                    member.domain_rank,
+                    len(command.members),
+                    GLOBAL_DOMAIN_PROFILE_IDS[command.profile],
+                    command.window_size,
+                )
+                state.prepared_domain_ranks.add(member.domain_rank)
+                reply = bytes(
+                    self._worker.control_payload(
+                        WorkerType.NEXT_LEVEL,
+                        member.local_worker_id,
+                        CTRL_GLOBAL_DOMAIN_PREPARE,
+                        payload,
+                        self._py_control_timeout_s,
+                    )
+                )
+                fields = LOCAL_PREPARE_REPLY.unpack_from(reply, 0)
+                magic, version, domain_id, generation, local_base, mapping_size = fields
+                _validate_local_global_header(magic, version, domain_id, generation, operation="prepare reply")
+                if domain_id != command.domain_id or generation != command.generation:
+                    raise RuntimeError("Global CommDomain prepare reply identity mismatch")
+                start = LOCAL_PREPARE_REPLY.size
+                descriptor = GlobalDomainDescriptor.decode(reply[start : start + GLOBAL_DOMAIN_DESCRIPTOR_BYTES])
+                if descriptor.domain_rank != member.domain_rank:
+                    raise RuntimeError("Global CommDomain prepare reply rank mismatch")
+                state.descriptors[member.domain_rank] = descriptor
+                state.local_window_bases[member.local_worker_id] = int(local_base)
+                state.mapping_sizes[member.local_worker_id] = int(mapping_size)
+            return tuple(state.descriptors[rank] for rank in sorted(state.descriptors))
+        except BaseException:
+            self._release_global_domain_node(
+                GlobalDomainReleaseCommand(command.domain_id, command.generation),
+                suppress_errors=True,
+            )
+            raise
+
+    def _import_global_domain_node(self, command: GlobalDomainCommand, node_worker_id: int) -> None:
+        if self.level != 3 or self._worker is None:
+            raise RuntimeError("Global CommDomain node import requires a ready L3 Worker")
+        state = self._global_node_domains.get(command.domain_id)
+        if state is None or state.command.generation != command.generation:
+            raise RuntimeError("Global CommDomain import requires a matching prepared domain")
+        if self._global_domain_command_identity(state.command) != self._global_domain_command_identity(command):
+            raise RuntimeError("Global CommDomain import command conflicts with prepare")
+        validate_descriptor_table(
+            command.descriptors,
+            rank_count=len(command.members),
+            profile=command.profile,
+        )
+        local_members = self._global_local_members(command, node_worker_id)
+        descriptor_bytes = b"".join(descriptor.encode() for descriptor in command.descriptors)
+        request_size = LOCAL_IMPORT_REQUEST.size + len(descriptor_bytes)
+        capacity = max(request_size, LOCAL_IMPORT_REPLY.size)
+        try:
+            for member in local_members:
+                payload = bytearray(capacity)
+                LOCAL_IMPORT_REQUEST.pack_into(
+                    payload,
+                    0,
+                    LOCAL_DOMAIN_MAGIC,
+                    GLOBAL_DOMAIN_VERSION,
+                    command.domain_id,
+                    command.generation,
+                    len(command.descriptors),
+                )
+                payload[LOCAL_IMPORT_REQUEST.size : request_size] = descriptor_bytes
+                reply = bytes(
+                    self._worker.control_payload(
+                        WorkerType.NEXT_LEVEL,
+                        member.local_worker_id,
+                        CTRL_GLOBAL_DOMAIN_IMPORT,
+                        payload,
+                        self._py_control_timeout_s,
+                    )
+                )
+                fields = LOCAL_IMPORT_REPLY.unpack_from(reply, 0)
+                magic, version, domain_id, generation, device_ctx, local_base, mapping_size = fields
+                _validate_local_global_header(magic, version, domain_id, generation, operation="import reply")
+                if domain_id != command.domain_id or generation != command.generation:
+                    raise RuntimeError("Global CommDomain import reply identity mismatch")
+                if mapping_size != command.descriptors[member.domain_rank].mapping_size:
+                    raise RuntimeError("Global CommDomain import reply mapping size mismatch")
+                offset = 0
+                buffer_bases: dict[str, int] = {}
+                domain_buffers: dict[str, Buffer] = {}
+                for buffer in command.buffers:
+                    base = int(local_base) + offset
+                    buffer_bases[buffer.name] = base
+                    domain_buffers[buffer.name] = wrap_vmm_window(
+                        base,
+                        int(buffer.nbytes),
+                        self._owner_instance_id,
+                        self._next_buffer_id(),
+                        f"L{self.level}",
+                        owner_worker_id=int(member.local_worker_id),
+                    )
+                    offset += buffer.nbytes
+                state.contexts[member.local_worker_id] = ChipDomainContext(
+                    name=command.name,
+                    domain_rank=member.domain_rank,
+                    domain_size=len(command.members),
+                    device_ctx=int(device_ctx),
+                    local_window_base=int(local_base),
+                    actual_window_size=int(mapping_size),
+                    buffers=domain_buffers,
+                )
+                provenance_id = self._global_domain_provenance_id(command.domain_id)
+                with self._child_prov_lock:
+                    self._child_prov_record_domain(
+                        member.local_worker_id,
+                        int(local_base),
+                        provenance_id,
+                        int(mapping_size),
+                    )
+                    for buffer in command.buffers:
+                        self._child_prov_record_domain(
+                            member.local_worker_id,
+                            buffer_bases[buffer.name],
+                            provenance_id,
+                            buffer.nbytes,
+                        )
+            state.command = command
+            state.phase = GlobalDomainPhase.IMPORT
+            state.view = GlobalCommDomainView(
+                name=command.name,
+                members=command.members,
+                contexts=state.contexts,
+                domain_id=command.domain_id,
+                generation=command.generation,
+                mapping_size=command.descriptors[0].mapping_size,
+            )
+        except BaseException:
+            # A node may have imported one local rank before a later local rank
+            # fails. Roll that partial node back here; the L4 ABORT fanout is an
+            # idempotent second safety net, not the only cleanup owner.
+            self._release_global_domain_node(
+                GlobalDomainReleaseCommand(command.domain_id, command.generation),
+                suppress_errors=True,
+            )
+            raise
+
+    def _commit_global_domain_node(self, command: GlobalDomainCommand) -> None:
+        state = self._global_node_domains.get(command.domain_id)
+        if state is None or state.command.generation != command.generation:
+            raise RuntimeError("Global CommDomain commit requires a matching imported domain")
+        if state.phase is not GlobalDomainPhase.IMPORT or state.view is None:
+            raise RuntimeError("Global CommDomain commit requires IMPORT completion")
+        if (
+            self._global_domain_command_identity(state.command) != self._global_domain_command_identity(command)
+            or state.command.descriptors != command.descriptors
+        ):
+            raise RuntimeError("Global CommDomain commit command conflicts with IMPORT")
+        state.phase = GlobalDomainPhase.COMMIT
+        state.view._committed = True  # noqa: SLF001 -- session owns the transaction
+
+    def _release_global_domain_node(
+        self, command: GlobalDomainReleaseCommand, *, suppress_errors: bool = False
+    ) -> None:
+        state = self._global_node_domains.get(command.domain_id)
+        if state is None:
+            return
+        if state.command.generation != command.generation:
+            raise RuntimeError("Global CommDomain release generation mismatch")
+        # Invalidate the public view before the first destructive child call.
+        # If fanout later fails, callers can no longer retrieve or use pointers
+        # into windows that may already have been released on some local ranks.
+        state.phase = GlobalDomainPhase.ABORT
+        if state.view is not None:
+            state.view._committed = False  # noqa: SLF001 -- node session owns the transaction
+        with self._child_prov_lock:
+            self._child_prov_drop_domain(self._global_domain_provenance_id(command.domain_id))
+        if self._worker is None:
+            return
+        errors: list[BaseException] = []
+        local_members = tuple(
+            member for member in state.command.members if member.domain_rank in state.prepared_domain_ranks
+        )
+        for member in local_members:
+            payload = bytearray(LOCAL_RELEASE_REQUEST.size)
+            LOCAL_RELEASE_REQUEST.pack_into(
+                payload,
+                0,
+                LOCAL_DOMAIN_MAGIC,
+                GLOBAL_DOMAIN_VERSION,
+                command.domain_id,
+                command.generation,
+            )
+            try:
+                self._worker.control_payload(
+                    WorkerType.NEXT_LEVEL,
+                    member.local_worker_id,
+                    CTRL_GLOBAL_DOMAIN_RELEASE,
+                    payload,
+                    self._py_control_timeout_s,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if not errors:
+            self._global_node_domains.pop(command.domain_id, None)
+        if errors and not suppress_errors:
+            raise RuntimeError(f"Global CommDomain node release failed: {errors[0]}") from errors[0]
+
+    def _release_all_global_domain_nodes(self) -> None:
+        for state in list(self._global_node_domains.values())[::-1]:
+            try:
+                self._release_global_domain_node(
+                    GlobalDomainReleaseCommand(state.command.domain_id, state.command.generation)
+                )
+            except Exception as exc:  # noqa: BLE001
+                # A node release that fails during teardown leaves device state
+                # nothing else tracks; the same boundary as the ABORT fan-out
+                # applies.
+                self._record_unreclaimable(
+                    f"Global CommDomain node release failed for domain_id={state.command.domain_id}; "
+                    "backend windows may remain mapped",
+                    exc,
+                )
+
+    def _get_global_domain(self, domain_id: int) -> GlobalCommDomainView:
+        state = self._global_node_domains.get(int(domain_id))
+        if state is None or state.phase is not GlobalDomainPhase.COMMIT or state.view is None:
+            raise KeyError(f"Global CommDomain {domain_id} is not committed on this L3 node")
+        return state.view
+
+    def _copy_global_domain_node(self, command: GlobalDomainCopyCommand, *, copy_to_device: bool) -> bytes:
+        state = self._global_node_domains.get(command.domain_id)
+        if (
+            state is None
+            or state.command.generation != command.generation
+            or state.phase is not GlobalDomainPhase.COMMIT
+        ):
+            raise RuntimeError("Global CommDomain copy requires a committed live domain")
+        if command.domain_rank >= len(state.command.members):
+            raise ValueError("Global CommDomain copy rank is out of range")
+        member = state.command.members[command.domain_rank]
+        if member.local_worker_id not in state.contexts:
+            raise RuntimeError("Global CommDomain copy rank is not local to this L3 node")
+        request_size = LOCAL_COPY_REQUEST.size + (command.nbytes if copy_to_device else 0)
+        reply_size = LOCAL_COPY_REPLY.size + (command.nbytes if not copy_to_device else 0)
+        payload = bytearray(max(request_size, reply_size))
+        LOCAL_COPY_REQUEST.pack_into(
+            payload,
+            0,
+            LOCAL_DOMAIN_MAGIC,
+            GLOBAL_DOMAIN_VERSION,
+            command.domain_id,
+            command.generation,
+            command.offset,
+            command.nbytes,
+        )
+        if copy_to_device:
+            payload[LOCAL_COPY_REQUEST.size : request_size] = command.data
+        assert self._worker is not None
+        reply = bytes(
+            self._worker.control_payload(
+                WorkerType.NEXT_LEVEL,
+                member.local_worker_id,
+                CTRL_GLOBAL_DOMAIN_COPY_TO if copy_to_device else CTRL_GLOBAL_DOMAIN_COPY_FROM,
+                payload,
+                self._py_control_timeout_s,
+            )
+        )
+        magic, version, domain_id, generation, nbytes = LOCAL_COPY_REPLY.unpack_from(reply, 0)
+        _validate_local_global_header(magic, version, domain_id, generation, operation="copy reply")
+        if domain_id != command.domain_id or generation != command.generation or nbytes != command.nbytes:
+            raise RuntimeError("Global CommDomain copy reply mismatch")
+        if copy_to_device:
+            return b""
+        return reply[LOCAL_COPY_REPLY.size : LOCAL_COPY_REPLY.size + command.nbytes]
+
+    @staticmethod
+    def _local_global_domain_response_capacity(control_name: int, payload: bytes) -> int:
+        from .remote_l3_protocol import ControlName  # noqa: PLC0415
+
+        control = ControlName(control_name)
+        if control is ControlName.COMM_INIT:
+            return struct.calcsize("<III") + 4 + GLOBAL_DOMAIN_MAX_STRING_BYTES
+        if control is ControlName.ALLOC_DOMAIN:
+            command = decode_domain_command(payload)
+            if command.phase is GlobalDomainPhase.PREPARE_EXPORT:
+                return 4 + GLOBAL_DOMAIN_MAX_RANKS * GLOBAL_DOMAIN_DESCRIPTOR_BYTES
+            return 0
+        if control is ControlName.COPY_FROM_DOMAIN:
+            command = decode_copy_command(payload, include_data=False)
+            return 4 + command.nbytes
+        return 0
+
+    def _local_global_domain_control(self, worker_id: int, control_name: int, payload: bytes) -> bytes:
+        if self._worker is None:
+            raise RuntimeError("Global CommDomain control requires a ready hierarchical Worker")
+        if worker_id not in self._next_level_worker_ids:
+            raise ValueError(f"Global CommDomain worker {worker_id} is not a local L3 worker")
+        response_capacity = self._local_global_domain_response_capacity(control_name, payload)
+        capacity = max(len(payload), response_capacity)
+        staged = bytearray(_LOCAL_GLOBAL_CONTROL_HEADER.size + capacity)
+        _LOCAL_GLOBAL_CONTROL_HEADER.pack_into(staged, 0, int(control_name), len(payload), 0)
+        start = _LOCAL_GLOBAL_CONTROL_HEADER.size
+        staged[start : start + len(payload)] = payload
+        reply = bytes(
+            self._worker.control_payload(
+                WorkerType.NEXT_LEVEL,
+                int(worker_id),
+                _CTRL_GLOBAL_DOMAIN_NODE,
+                staged,
+                self._py_control_timeout_s,
+            )
+        )
+        reply_control, reply_request_size, response_size = _LOCAL_GLOBAL_CONTROL_HEADER.unpack_from(reply, 0)
+        if reply_control != int(control_name) or reply_request_size != len(payload) or response_size > capacity:
+            raise RuntimeError("local Global CommDomain control reply is invalid")
+        return reply[start : start + response_size]
+
+    def _global_domain_control(self, worker_id: int, control_name: int, payload: bytes) -> bytes:
+        if self._worker is None:
+            raise RuntimeError("Global CommDomain control requires a ready hierarchical Worker")
+        if worker_id in self._remote_worker_ids:
+            return bytes(self._worker.remote_domain_control(int(worker_id), int(control_name), bytes(payload)))
+        if worker_id in self._next_level_worker_ids:
+            return self._local_global_domain_control(worker_id, control_name, payload)
+        raise ValueError(f"Global CommDomain worker {worker_id} is not a registered L3 worker")
+
+    def _allocate_global_domain(  # noqa: PLR0912 -- transaction validation and prepare/import/commit rollback stay ordered
+        self,
+        *,
+        name: str,
+        members: tuple[tuple[int, int], ...],
+        window_size: int,
+        buffers: list[CommBufferSpec],
+        retain_after_run: bool,
+    ) -> GlobalCommDomainHandle:
+        from .remote_l3_protocol import ControlName  # noqa: PLC0415
+
+        if self.level < 4 or self._worker is None:
+            raise RuntimeError("allocate_global_domain requires a ready L4+ Worker")
+        resources = self._building_run_resources
+        if resources is None:
+            raise RuntimeError("allocate_global_domain is only valid while a run's graph is being built")
+        if not name:
+            raise ValueError("allocate_global_domain: name must be non-empty")
+        if name in self._live_global_domains:
+            raise ValueError(f"allocate_global_domain: domain {name!r} is already live")
+        if not members or len(members) > GLOBAL_DOMAIN_MAX_RANKS:
+            raise ValueError("allocate_global_domain: members must contain between 1 and 64 devices")
+        if len(set(members)) != len(members):
+            raise ValueError("allocate_global_domain: members contain duplicate node/local devices")
+        if window_size <= 0:
+            raise ValueError("allocate_global_domain: window_size must be positive")
+        if len({buffer.name for buffer in buffers}) != len(buffers):
+            raise ValueError("allocate_global_domain: buffer names must be unique")
+        if any(not buffer.name or int(buffer.nbytes) <= 0 for buffer in buffers):
+            raise ValueError("allocate_global_domain: buffers require a name and positive nbytes")
+        if sum(int(buffer.nbytes) for buffer in buffers) > window_size:
+            raise ValueError("allocate_global_domain: buffers exceed window_size")
+
+        nodes = self._resolved_global_nodes()
+        profiles: set[str] = set()
+        domain_members: list[GlobalDomainMember] = []
+        for domain_rank, (node_worker_id, local_worker_id) in enumerate(members):
+            node = nodes.get(int(node_worker_id))
+            if node is None:
+                raise ValueError(f"allocate_global_domain: worker {node_worker_id} is not a registered L3")
+            if local_worker_id < 0 or local_worker_id >= len(node.device_ids):
+                raise ValueError(
+                    f"allocate_global_domain: local worker {local_worker_id} is outside "
+                    f"worker {node_worker_id}'s device list"
+                )
+            profiles.add(node.comm_profile)
+            domain_members.append(
+                GlobalDomainMember(
+                    node_worker_id=int(node_worker_id),
+                    local_worker_id=int(local_worker_id),
+                    global_device_rank=node.global_device_ranks[int(local_worker_id)],
+                    domain_rank=domain_rank,
+                )
+            )
+        if len(profiles) != 1:
+            raise ValueError("allocate_global_domain: all participating nodes must use the same comm_profile")
+        profile = next(iter(profiles))
+        global_buffers = tuple(GlobalDomainBuffer(buffer.name, int(buffer.nbytes)) for buffer in buffers)
+        domain_members_tuple = tuple(domain_members)
+        involved_nodes = tuple(dict.fromkeys(member.node_worker_id for member in domain_members_tuple))
+        for node_worker_id in involved_nodes:
+            node = nodes[node_worker_id]
+            resolve_global_comm_capability(
+                platform=node.platform,
+                profile=node.comm_profile,
+                local_device_count=len(node.device_ids),
+            )
+        topology_bytes = repr(
+            (
+                self._global_cluster_id,
+                profile,
+                tuple(
+                    (
+                        member.node_worker_id,
+                        member.local_worker_id,
+                        member.global_device_rank,
+                        member.domain_rank,
+                    )
+                    for member in domain_members_tuple
+                ),
+            )
+        ).encode()
+        topology_hash = hashlib.sha256(topology_bytes).hexdigest()
+        with self._alloc_id_lock:
+            self._next_alloc_id += 1
+            domain_id = self._next_alloc_id
+        generation = 1
+        base_command = GlobalDomainCommand(
+            phase=GlobalDomainPhase.PREPARE_EXPORT,
+            domain_id=domain_id,
+            generation=generation,
+            name=name,
+            profile=profile,
+            window_size=int(window_size),
+            members=domain_members_tuple,
+            buffers=global_buffers,
+        )
+
+        prepared_nodes: list[int] = []
+        try:
+            for node_worker_id in involved_nodes:
+                node = nodes[node_worker_id]
+                init = GlobalCommInitCommand(
+                    cluster_id=self._global_cluster_id,
+                    topology_hash=topology_hash,
+                    profile=profile,
+                    node_rank=node.node_rank,
+                    node_count=node.node_count,
+                    members=domain_members_tuple,
+                )
+                result = decode_comm_init_result(
+                    self._global_domain_control(node_worker_id, ControlName.COMM_INIT, encode_comm_init(init))
+                )
+                if (
+                    result.profile != profile
+                    or result.max_ranks < len(domain_members_tuple)
+                    or result.descriptor_bytes != GLOBAL_DOMAIN_DESCRIPTOR_BYTES
+                    or result.local_device_count != len(node.device_ids)
+                ):
+                    raise RuntimeError(f"Global CommDomain COMM_INIT capability mismatch on node {node_worker_id}")
+
+            descriptor_by_rank: dict[int, GlobalDomainDescriptor] = {}
+            for node_worker_id in involved_nodes:
+                prepared_nodes.append(node_worker_id)
+                reply = self._global_domain_control(
+                    node_worker_id,
+                    ControlName.ALLOC_DOMAIN,
+                    encode_domain_command(base_command),
+                )
+                for descriptor in decode_descriptor_table(reply):
+                    if descriptor.domain_rank in descriptor_by_rank:
+                        raise RuntimeError("Global CommDomain prepare returned a duplicate rank")
+                    descriptor_by_rank[descriptor.domain_rank] = descriptor
+            descriptors = tuple(descriptor_by_rank[rank] for rank in range(len(domain_members_tuple)))
+            validate_descriptor_table(descriptors, rank_count=len(domain_members_tuple), profile=profile)
+            if descriptors[0].mapping_size < window_size:
+                raise RuntimeError("Global CommDomain backend mapped less than the requested window size")
+
+            import_command = GlobalDomainCommand(
+                phase=GlobalDomainPhase.IMPORT,
+                domain_id=domain_id,
+                generation=generation,
+                name=name,
+                profile=profile,
+                window_size=int(window_size),
+                members=domain_members_tuple,
+                buffers=global_buffers,
+                descriptors=descriptors,
+            )
+            for node_worker_id in involved_nodes:
+                self._global_domain_control(
+                    node_worker_id,
+                    ControlName.ALLOC_DOMAIN,
+                    encode_domain_command(import_command),
+                )
+            commit_command = GlobalDomainCommand(
+                phase=GlobalDomainPhase.COMMIT,
+                domain_id=domain_id,
+                generation=generation,
+                name=name,
+                profile=profile,
+                window_size=int(window_size),
+                members=domain_members_tuple,
+                buffers=global_buffers,
+                descriptors=descriptors,
+            )
+            for node_worker_id in involved_nodes:
+                self._global_domain_control(
+                    node_worker_id,
+                    ControlName.ALLOC_DOMAIN,
+                    encode_domain_command(commit_command),
+                )
+        except BaseException:
+            abort_command = GlobalDomainCommand(
+                phase=GlobalDomainPhase.ABORT,
+                domain_id=domain_id,
+                generation=generation,
+                name=name,
+                profile=profile,
+                window_size=int(window_size),
+                members=domain_members_tuple,
+                buffers=global_buffers,
+            )
+            for node_worker_id in prepared_nodes:
+                try:
+                    self._global_domain_control(
+                        node_worker_id,
+                        ControlName.ALLOC_DOMAIN,
+                        encode_domain_command(abort_command),
+                    )
+                except BaseException as abort_error:  # noqa: BLE001
+                    # The domain is not registered on this path, so no run fence
+                    # and no close() sweep can reach whatever the failed ABORT
+                    # leaves mapped. Refusing further work is the only boundary
+                    # that keeps a later run from being admitted as if the
+                    # teardown had succeeded.
+                    self._record_unreclaimable(
+                        f"Global CommDomain {name!r} ABORT cleanup failed for node worker "
+                        f"{node_worker_id}; backend windows may remain mapped",
+                        abort_error,
+                    )
+            raise
+
+        handle = GlobalCommDomainHandle(
+            name=name,
+            members=domain_members_tuple,
+            buffers=global_buffers,
+            domain_id=domain_id,
+            generation=generation,
+            mapping_size=descriptors[0].mapping_size,
+            retain_after_run=retain_after_run,
+            _release_fn=lambda released, owner=resources: self._release_global_domain_handle(released, owner),
+        )
+        self._live_global_domains[name] = handle
+        resources.live_global_domains[name] = handle
+        resources.requires_ordered_cleanup = True
+        return handle
+
+    def _release_global_domain_handle(
+        self,
+        handle: GlobalCommDomainHandle,
+        resources: _RunResources,
+    ) -> None:
+        if self._worker is None:
+            return
+        with resources.domain_lock:
+            if resources.live_global_domains.get(handle.name) is handle:
+                resources.live_global_domains.pop(handle.name)
+            if self._live_global_domains.get(handle.name) is handle:
+                self._live_global_domains.pop(handle.name)
+            if not resources.retired:
+                resources.pending_release_global_domains.append(handle)
+                resources.requires_ordered_cleanup = True
+                return
+        # A retained handle may be released while a later run is being built.
+        # Its allocation run is already retired then, so bind the release to the
+        # current run's fence without losing the original-run capture that
+        # protects release calls made after submit returns.
+        current_resources = self._building_run_resources
+        if current_resources is not None and current_resources is not resources:
+            with current_resources.domain_lock:
+                if not current_resources.retired:
+                    current_resources.pending_release_global_domains.append(handle)
+                    current_resources.requires_ordered_cleanup = True
+                    return
+        self._free_global_domain_after_fence(handle)
+
+    def _free_global_domain_after_fence(self, handle: GlobalCommDomainHandle) -> None:
+        if handle.freed:
+            return
+        try:
+            self._release_global_domain_now(handle)
+            handle._freed = True  # noqa: SLF001 -- runtime owns this transition
+            self._failed_global_domain_releases.pop(handle.domain_id, None)
+        except Exception:
+            self._failed_global_domain_releases[handle.domain_id] = handle
+            raise
+
+    def _release_global_domain_now(self, handle: GlobalCommDomainHandle) -> None:
+        with self._global_domain_free_mu:
+            if handle.domain_id in self._global_domain_free_results:
+                failure = self._global_domain_free_results[handle.domain_id]
+                if failure is not None:
+                    raise failure
+                return
+            try:
+                self._release_global_domain_claimed(handle)
+            except BaseException as exc:
+                self._global_domain_free_results[handle.domain_id] = exc
+                raise
+            self._global_domain_free_results[handle.domain_id] = None
+
+    def _release_global_domain_claimed(self, handle: GlobalCommDomainHandle) -> None:
+        from .remote_l3_protocol import ControlName  # noqa: PLC0415
+
+        command = encode_release_command(GlobalDomainReleaseCommand(handle.domain_id, handle.generation))
+        errors: list[BaseException] = []
+        for node_worker_id in dict.fromkeys(member.node_worker_id for member in handle.members):
+            try:
+                self._global_domain_control(node_worker_id, ControlName.RELEASE_DOMAIN, command)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            raise RuntimeError(f"Global CommDomain release failed: {errors[0]}") from errors[0]
+        if self._live_global_domains.get(handle.name) is handle:
+            self._live_global_domains.pop(handle.name)
+
+    def _execute_pending_global_domain_releases(self, resources: _RunResources) -> None:
+        with resources.domain_lock:
+            pending = list(resources.pending_release_global_domains)
+        self._drain_pending_global_domain_snapshot(resources, pending)
+
+    def _release_all_live_global_domains(
+        self,
+        resources: _RunResources | None = None,
+        *,
+        include_retained: bool = True,
+    ) -> None:
+        live_domains = self._live_global_domains if resources is None else resources.live_global_domains
+
+        def _release(handle: GlobalCommDomainHandle) -> None:
+            if handle.retain_after_run and not include_retained:
+                return
+            handle._released = True  # noqa: SLF001 -- runtime owns this transition
+            self._free_global_domain_after_fence(handle)
+            if live_domains.get(handle.name) is handle:
+                live_domains.pop(handle.name)
+
+        _raise_first(_release, list(live_domains.values())[::-1])
+
+    def _copy_to_global_domain(
+        self, handle: GlobalCommDomainHandle, domain_rank: int, data: bytes, offset: int
+    ) -> None:
+        from .remote_l3_protocol import ControlName  # noqa: PLC0415
+
+        payload = bytes(data)
+        member = handle.member(domain_rank)
+        command = GlobalDomainCopyCommand(
+            domain_id=handle.domain_id,
+            generation=handle.generation,
+            domain_rank=int(domain_rank),
+            offset=int(offset),
+            nbytes=len(payload),
+            data=payload,
+        )
+        self._global_domain_control(
+            member.node_worker_id,
+            ControlName.COPY_TO_DOMAIN,
+            encode_copy_command(command, include_data=True),
+        )
+
+    def _copy_from_global_domain(
+        self, handle: GlobalCommDomainHandle, domain_rank: int, nbytes: int, offset: int
+    ) -> bytes:
+        from .remote_l3_protocol import ControlName  # noqa: PLC0415
+
+        member = handle.member(domain_rank)
+        command = GlobalDomainCopyCommand(
+            domain_id=handle.domain_id,
+            generation=handle.generation,
+            domain_rank=int(domain_rank),
+            offset=int(offset),
+            nbytes=int(nbytes),
+        )
+        reply = self._global_domain_control(
+            member.node_worker_id,
+            ControlName.COPY_FROM_DOMAIN,
+            encode_copy_command(command, include_data=False),
+        )
+        return decode_copy_result(reply)
+
     def _release_all_live_domains(self, resources: _RunResources | None = None) -> None:
         """Best-effort release of every still-live domain handle (LIFO).
 
@@ -7993,13 +9293,36 @@ class Worker:
 
     @staticmethod
     def _child_ptrs_in_args(args: Any) -> list[tuple[int, int]]:
-        """Extract ``(device_ptr, arg_index)`` for every child_memory tensor in ``args``."""
+        """``(device_ptr, arg_index)`` for every device arg — used for kind4 device-pointer provenance.
+
+        A DEVICE_MALLOC (worker device malloc) or VMM_WINDOW (domain-carved) ref carries the device
+        pointer in its backend body (u64 LE); that pointer is the provenance key the guard validates
+        against ``_child_alloc_prov``. Host-backed refs (POSIX/fork shm) contribute nothing.
+        """
         out: list[tuple[int, int]] = []
         for i in range(args.tensor_count()):
-            tensor = args.tensor(i)
-            if tensor.child_memory:
-                out.append((int(tensor.data), i))
+            desc = args.tensor(i).buffer
+            if desc.backend_kind in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+                out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
+
+    @staticmethod
+    def _identities_in_args(args: Any) -> set[CanonicalIdentity]:
+        """Every tensor arg's identity in ``args``."""
+        return {args.tensor(i).buffer.identity for i in range(args.tensor_count())}
+
+    def _record_touched_identities(self, args: Any) -> None:
+        """Add every tensor arg's identity in ``args`` to the current run's touched set.
+
+        A no-op when no run is being built (``_building_run_resources is None``) — tracking is
+        opportunistic, only meaningful inside ``submit_next_level``/``submit_next_level_group``'s
+        run context, per the ``current_resources = self._building_run_resources; if ... is not
+        None`` idiom used elsewhere for the same "attach to the open run, if any" shape.
+        """
+        resources = self._building_run_resources
+        if resources is None:
+            return
+        resources.touched_identities.update(self._identities_in_args(args))
 
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
         """Validate every child_memory pointer against its exact target worker."""
@@ -8047,37 +9370,80 @@ class Worker:
         if worker_id < 0 or worker_id >= len(self._chip_shms):
             raise IndexError(f"worker_id {worker_id} out of range (have {len(self._chip_shms)} chips)")
 
-    def malloc(self, size: int, worker_id: int = 0) -> int:
-        """Allocate memory on next-level chip worker *worker_id*. Returns a pointer."""
-        with self._operation_lease("malloc"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                # L2 is a single chip; worker_id is meaningless there, so the
-                # provenance is keyed on the canonical worker 0.
-                with self._child_prov_lock:
-                    ptr = self._chip_worker.malloc(size)
-                    self._child_prov_record_malloc(0, int(ptr), int(size))
-                    return ptr
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            return self._orch.malloc(worker_id, size)
+    def malloc(self, size: int) -> Buffer:
+        """Allocate device memory on this L2 worker's own chip; returns a DEVICE_MALLOC ``Buffer``.
 
-    def free(self, ptr: int, worker_id: int = 0) -> None:
-        """Free memory allocated by ``malloc()``."""
-        with self._operation_lease("free"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                # Safety-first commit barrier (mirrors Orchestrator.free): revoke
-                # provenance BEFORE the native free so an async unwind after a
-                # successful free can never leave a freed address live.
-                with self._child_prov_lock:
-                    self._child_prov_require_malloc_base(0, int(ptr), api="free")
-                    self._child_prov_clear_malloc(0, int(ptr))
+        Name a task arg with ``handle.tensor(shapes, dtype)`` and release with ``worker.free(handle)``. L3+
+        allocates child device memory with ``alloc_child_tensor(worker_id, ...)`` instead — a Worker is
+        the only allocator, the Orchestrator never allocates.
+        """
+        if self.level != 2:
+            raise TypeError("worker.malloc is L2-only; at L3+ use worker.alloc_child_tensor(worker_id, ...)")
+        with self._operation_lease("malloc"):
+            assert self._chip_worker is not None
+            # L2 is a single chip; worker_id is meaningless there, so the provenance is keyed
+            # on the canonical worker 0.
+            with self._child_prov_lock:
+                ptr = int(self._chip_worker.malloc(int(size)))
+                self._child_prov_record_malloc(0, ptr, int(size))
+        return wrap_device_malloc(
+            ptr, int(size), self._owner_instance_id, self._next_buffer_id(), f"L{self.level}", owner_worker_id=0
+        )
+
+    def alloc_child_tensor(self, worker_id: int, shapes: tuple[int, ...], dtype) -> Buffer:
+        """Allocate device memory on next-level ``worker_id`` sized for ``shapes`` × ``dtype``; returns a
+        DEVICE_MALLOC ``Buffer`` (successor of ``orch.malloc`` + ``child_memory``).
+
+        Called from within an orchestration fn (capture the Worker in the closure). The pointer is
+        private to ``worker_id``; name the arg with ``handle.tensor(shapes, dtype)``, dispatch it only to
+        that worker, and load host data with ``copy_to``. Not auto-freed at end-of-task.
+        """
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        self._check_chip_worker_id(int(worker_id))
+        assert self._worker is not None
+        # The lease is re-entrant, so calling this inside the orch fn (the run already holds it) nests
+        # safely, and calling it outside a run acquires it fresh.
+        with (
+            self._operation_lease("alloc_child_tensor"),
+            self._device_control_admission("alloc_child_tensor"),
+            self._child_prov_lock,
+        ):
+            ptr = int(self._worker.malloc(int(worker_id), int(nbytes)))
+            self._child_prov_record_malloc(int(worker_id), ptr, int(nbytes))
+        return wrap_device_malloc(
+            ptr,
+            int(nbytes),
+            self._owner_instance_id,
+            self._next_buffer_id(),
+            f"L{self.level}",
+            owner_worker_id=int(worker_id),
+        )
+
+    def free(self, handle: Buffer) -> None:
+        """Free a device ``Buffer`` allocated by ``malloc`` / ``alloc_child_tensor``.
+
+        The operation lease is re-entrant, so an in-run ``orch.free`` that delegates here nests safely.
+        """
+        wid, ptr = int(handle.owner_worker_id), int(handle.base)
+        # Reject a non-chip target (L4+, or a bad id) before the lease and the fence: a device op is
+        # only meaningful on a next-level chip, and an invalid id must fail now rather than after a
+        # wait for the FIFO head.
+        if self.level != 2:
+            self._check_chip_worker_id(wid)
+        with self._operation_lease("free"), self._device_control_admission("free"):
+            with self._child_prov_lock:
+                # Safety-first commit barrier: revoke provenance BEFORE the native free so an async unwind
+                # after a successful free can never leave a freed address live.
+                self._child_prov_require_malloc_base(wid, ptr, api="free")
+                self._child_prov_clear_malloc(wid, ptr)
+                if self.level == 2:
+                    assert self._chip_worker is not None
                     self._chip_worker.free(ptr)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.free(worker_id, ptr)
+                else:
+                    assert self._worker is not None
+                    self._worker.free(wid, ptr)
 
     def committed_device_memory(self, worker_id: int = 0) -> int:
         """Total device HBM (bytes) committed by chip worker *worker_id*'s
@@ -8099,232 +9465,229 @@ class Worker:
             assert self._orch is not None
             return int(self._orch.committed_device_memory(worker_id))
 
-    def copy_to(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
-        """Copy *size* bytes from host *src* to chip worker *dst*."""
-        with self._operation_lease("copy_to"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                with self._child_prov_lock:
-                    self._child_prov_require_live_range(0, int(dst), int(size), api="copy_to")
-                    self._chip_worker.copy_to(dst, src, size)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.copy_to(worker_id, dst, src, size)
+    @staticmethod
+    def _check_copy_handle(handle: Buffer, nbytes: int, *, writing: bool, api: str) -> None:
+        """Require ``handle`` to be a device backing this copy may legally touch for ``nbytes``.
 
-    def copy_from(self, dst: int, src: int, size: int, worker_id: int = 0) -> None:
-        """Copy *size* bytes from chip worker *src* to host *dst*."""
-        with self._operation_lease("copy_from"):
-            if self.level == 2:
-                assert self._chip_worker is not None
-                with self._child_prov_lock:
-                    self._child_prov_require_live_range(0, int(src), int(size), api="copy_from")
-                    self._chip_worker.copy_from(dst, src, size)
-                return
-            self._check_chip_worker_id(worker_id)
-            assert self._orch is not None
-            self._orch.copy_from(worker_id, dst, src, size)
+        The transfer length comes from the *host* object, so without this check a host buffer larger
+        than the device backing writes past it, and a READ-only backing accepts a write.
+        """
+        if handle.address_space != AddressSpace.DEVICE:
+            raise ValueError(
+                f"Worker.{api}: expected a DEVICE handle, got {handle.address_space.name} "
+                f"({handle.backend_kind.name}); host-to-host copies do not go through this API"
+            )
+        if handle.backend_kind not in (BackendKind.DEVICE_MALLOC, BackendKind.VMM_WINDOW):
+            raise ValueError(f"Worker.{api}: backend {handle.backend_kind.name} is not reachable from this process")
+        needed = AccessMode.WRITE if writing else AccessMode.READ
+        if handle.access not in (needed, AccessMode.READWRITE):
+            raise ValueError(
+                f"Worker.{api}: backing grants {handle.access.name} but this direction needs {needed.name}"
+            )
+        if nbytes > handle.nbytes:
+            raise ValueError(f"Worker.{api}: {nbytes} bytes exceeds the {handle.nbytes}-byte backing")
+
+    @staticmethod
+    def _host_side_of_copy(obj, *, writing: bool, api: str) -> tuple[Buffer | None, int, int]:
+        """``(buffer_or_None, address, nbytes)`` for the host end of a control-plane copy.
+
+        A ``Buffer`` carries a self-describing descriptor a consumer resolves for itself, so the
+        handle is what travels; a raw host object has only an address, which is meaningful in this
+        process alone. The decision is by TYPE, never by matching an address against a range of known
+        backings — an address range says nothing reliable about who owns memory.
+        """
+        if not isinstance(obj, Buffer):
+            addr, nbytes = host_ptr_nbytes(obj)
+            return None, addr, nbytes
+        if obj.address_space != AddressSpace.HOST:
+            raise ValueError(f"Worker.{api}: the host side must be a HOST handle, got {obj.address_space.name}")
+        needed = AccessMode.WRITE if writing else AccessMode.READ
+        if obj.access not in (needed, AccessMode.READWRITE):
+            raise ValueError(
+                f"Worker.{api}: host backing grants {obj.access.name} but this direction needs {needed.name}"
+            )
+        return obj, int(obj.base), int(obj.nbytes)
+
+    def _require_buffer_host_side(self, host: Buffer | None, api: str) -> Buffer:
+        """The host ``Buffer`` a child resolves for an L3+ control-plane copy.
+
+        A forked child reaches host memory only through a backing its ``ImportRegistry`` can
+        materialize, so at L3+ the host end of a copy is a handle, never bare memory.
+        """
+        if host is None:
+            raise TypeError(
+                f"Worker.{api}: an L{self.level} host side must be a Buffer from create_buffer "
+                "(write the payload into buffer.shm.buf); raw host memory is L2-only"
+            )
+        return host
+
+    def copy_to(self, dst: Buffer, src) -> None:
+        """H2D: copy host ``src`` into device handle ``dst``.
+
+        ``src`` is a host ``Buffer``; the chip child resolves both handles through its
+        ``ImportRegistry`` and reads the host backing directly. At L2 the chip worker shares this
+        process, so a torch tensor or any writable buffer works too.
+        """
+        host, src_addr, nbytes = self._host_side_of_copy(src, writing=False, api="copy_to")
+        self._check_copy_handle(dst, nbytes, writing=True, api="copy_to")
+        wid, dptr = int(dst.owner_worker_id), int(dst.base)
+        if self.level != 2:
+            self._check_chip_worker_id(wid)
+            host = self._require_buffer_host_side(host, "copy_to")
+        with self._operation_lease("copy_to"), self._device_control_admission("copy_to"):
+            with self._child_prov_lock:
+                self._child_prov_require_live_range(wid, dptr, nbytes, api="copy_to")
+                if self.level == 2:
+                    # No fork: the chip worker runs in this process, so the host address is valid.
+                    assert self._chip_worker is not None
+                    self._chip_worker.copy_to(dptr, src_addr, nbytes)
+                else:
+                    assert self._worker is not None
+                    assert host is not None
+                    self._worker.copy_to(wid, dst.to_descriptor(), host.to_descriptor(), nbytes)
+
+    def copy_from(self, dst, src: Buffer) -> None:
+        """D2H: copy device handle ``src`` into host ``dst``.
+
+        ``dst`` is a host ``Buffer``; the chip child resolves both handles through its
+        ``ImportRegistry`` and writes the host backing directly. At L2 the chip worker shares this
+        process, so a torch tensor or any writable buffer works too.
+        """
+        host, dst_addr, nbytes = self._host_side_of_copy(dst, writing=True, api="copy_from")
+        self._check_copy_handle(src, nbytes, writing=False, api="copy_from")
+        wid, sptr = int(src.owner_worker_id), int(src.base)
+        if self.level != 2:
+            self._check_chip_worker_id(wid)
+            host = self._require_buffer_host_side(host, "copy_from")
+        with self._operation_lease("copy_from"), self._device_control_admission("copy_from"):
+            with self._child_prov_lock:
+                self._child_prov_require_live_range(wid, sptr, nbytes, api="copy_from")
+                if self.level == 2:
+                    # No fork: the chip worker runs in this process, so the host address is valid.
+                    assert self._chip_worker is not None
+                    self._chip_worker.copy_from(dst_addr, sptr, nbytes)
+                else:
+                    assert self._worker is not None
+                    assert host is not None
+                    self._worker.copy_from(wid, host.to_descriptor(), src.to_descriptor(), nbytes)
 
     # ------------------------------------------------------------------
     # Post-fork zero-copy host buffers
     # ------------------------------------------------------------------
 
-    def create_host_buffer(self, nbytes: int) -> HostBuffer:
-        """Allocate a born-shared host buffer, attached into every local L3 child,
-        that a later ``run()`` reads/writes with **no per-run copy**.
-
-        Local L3 children are forked during ``init()``; host memory allocated
-        afterwards is not in their address space. This hands you memory that is
-        *born* in a shm already attached into every child, so there is nothing to
-        copy: the child reads and writes the same physical pages the parent sees.
-
-        Returns a :class:`HostBuffer` whose ``buffer`` is a ``memoryview`` over
-        that shm. Build a tensor over it with the buffer protocol, framework of
-        your choice, and pass it to ``run()`` as usual::
-
-            buf = worker.create_host_buffer(n * 4)
-            t = torch.frombuffer(buf.buffer, dtype=torch.float32, count=n)
-            t.uniform_(0, 1)                       # in place → lands in the shm
-            worker.run(orch(chip, t, out), args=None, config=CallConfig())
-            worker.free_host_buffer(buf)           # drop the tensor first
-
-        simpler stays framework-free: torch/numpy appear only on the user's side
-        (``frombuffer``). Blocks until every local L3 child has attached the buffer;
-        not thread-safe against a concurrent ``run`` / ``create`` / ``free`` on
-        the same Worker — drive them from one thread, as the L3 worker is
-        otherwise.
-        """
-        if self.level < 3:
-            raise TypeError("create_host_buffer requires a level >= 3 Worker")
-        with self._operation_lease("create_host_buffer"):
-            return self._create_host_buffer_locked(int(nbytes))
-
-    def _create_host_buffer_locked(self, nbytes: int) -> HostBuffer:
-        # A born-shared buffer is mapped into every direct process child (chip
-        # and sub alike, via _broadcast_host_control). Only a truly childless L3
-        # has nowhere to attach it.
-        if not self._chip_shms and not self._sub_shms:
-            raise _NoHostBufferChildrenError(
-                "create_host_buffer requires at least one forked chip or sub child (this Worker has none)"
-            )
-        assert self._worker is not None
-
-        if nbytes <= 0:
-            raise ValueError("create_host_buffer: nbytes must be positive")
-
-        # Create the shm up front, then guard everything after it — mapping the
-        # address (``_shm_base_addr``), reserving the registry slot, and the
-        # broadcast — under one ``try`` so any failure closes and unlinks the shm
-        # instead of leaking a /dev/shm segment. The registry mutation stays under
-        # ``_registry_lock`` (mirrors Worker.register's discipline); the slow
-        # broadcast runs *outside* the lock — wire-level concurrency is serialized
-        # at the C++ mailbox, not here. The born-shared shm's own mapped base is
-        # the buffer's data_ptr, so a tensor built over buffer.buffer resolves to
-        # this registered range.
-        shm = SharedMemory(create=True, size=nbytes)
-        token: int | None = None
-        data_ptr: int | None = None
-        try:
-            data_ptr = _shm_base_addr(shm)
-            with self._registry_lock:
-                token = self._host_buf_token_counter
-                self._host_buf_token_counter += 1
-                entry = _HostBufEntry(
-                    token=token,
-                    data_ptr=data_ptr,
-                    nbytes=nbytes,
-                    shm=shm,
-                    shm_name=shm.name,
-                    shm_base=data_ptr,
-                )
-                self._host_buf_registry[data_ptr] = entry
-                self._rebuild_host_buf_snapshot()
-
-            payload = _HOST_BUF_MAP_HEADER.pack(token, data_ptr, nbytes) + shm.name.encode("utf-8")
-            errors = self._broadcast_host_control(_CTRL_MAP_HOST, payload)
-            if errors:
-                raise RuntimeError(
-                    f"create_host_buffer: MAP_HOST failed on {len(errors)} local L3 children; first error: {errors[0]}"
-                )
-        except BaseException:
-            # Roll back on any failure — a staging error before the map, a partial
-            # map, or an exception from the broadcast itself (any of which would
-            # otherwise leak the shm): unmap any child that took it, drop the
-            # reservation, free the shm. No user view exists yet, so close() cannot
-            # be blocked by an exported buffer.
-            try:
-                if token is not None:
-                    self._broadcast_host_unmap(token)
-            except Exception as unmap_exc:  # noqa: BLE001 -- must not mask the original failure below
-                sys.stderr.write(
-                    f"[worker pid={os.getpid()}] WARN: create_host_buffer rollback UNMAP_HOST "
-                    f"failed (continuing best-effort): {unmap_exc}\n"
-                )
-                sys.stderr.flush()
-            finally:
-                with self._registry_lock:
-                    if data_ptr is not None and self._host_buf_registry.pop(data_ptr, None) is not None:
-                        self._rebuild_host_buf_snapshot()
-                shm.close()
-                try:
-                    shm.unlink()
-                except FileNotFoundError:
-                    pass
-            raise
-
-        buf_view = shm.buf
-        assert buf_view is not None
-        return HostBuffer(token=token, data_ptr=data_ptr, nbytes=nbytes, buffer=buf_view)
-
-    def free_host_buffer(self, handle: HostBuffer) -> None:
-        """Release a born-shared buffer created by ``create_host_buffer``.
-
-        Unmaps it from every local L3 child and frees the parent shm. Drop every
-        tensor / ``memoryview`` you built over ``handle.buffer`` *first*: a live
-        view keeps the shm's pages exported, so ``close()`` cannot release them
-        and the buffer only warns (and is reclaimed once the last view is gone).
-
-        Best-effort and idempotent: a stale handle whose token no longer matches
-        (e.g. freed twice) is a silent no-op.
-        """
-        if not isinstance(handle, HostBuffer):
-            raise TypeError("free_host_buffer expects a HostBuffer from create_host_buffer")
-        with self._operation_lease("free_host_buffer"):
-            self._free_host_buffer_locked(handle)
-
-    def _free_host_buffer_locked(self, handle: HostBuffer) -> None:
-        with self._registry_lock:
-            entry = self._host_buf_registry.get(handle.data_ptr)
-            if entry is None or entry.token != handle.token:
-                return
-            self._host_buf_registry.pop(handle.data_ptr, None)
-            self._rebuild_host_buf_snapshot()
-        errors: list[str] = []
-        try:
-            # Gate on resource presence, not lifecycle: the child mailboxes are
-            # driveable whenever the C++ _worker is up — including during close()
-            # teardown (CLOSED), when the children are still alive to unmap.
-            if self._worker is not None:
-                errors = self._broadcast_host_unmap(entry.token)
-        except Exception as exc:  # noqa: BLE001
-            errors = [str(exc)]
-        finally:
-            close_warn = self._close_host_shm(entry)
-            if close_warn:
-                errors.append(close_warn)
-        if errors:
-            sys.stderr.write(
-                f"[worker pid={os.getpid()}] WARN: free_host_buffer token={entry.token} "
-                f"failed on {len(errors)} local L3 children; first error: {errors[0]}\n"
-            )
-            sys.stderr.flush()
-
-    @staticmethod
-    def _close_host_shm(entry: _HostBufEntry) -> str | None:
-        """Close + unlink a host-buffer's parent shm.
-
-        Returns a warning string (else ``None``) when a still-live view over a
-        zero-copy buffer blocks ``close()``: ``memoryview.release()`` raises
-        ``BufferError`` while a tensor built via ``frombuffer`` still holds the
-        pages exported. The name is unlinked regardless, so the OS reclaims the
-        segment once the user drops that last view.
-        """
-        warn: str | None = None
-        try:
-            entry.shm.close()
-        except BufferError:
-            warn = (
-                f"host buffer token={entry.token} still has a live view (a tensor/memoryview over "
-                f"buffer.buffer); drop it before free_host_buffer/close() to release the shm promptly"
-            )
-        try:
-            entry.shm.unlink()
-        except FileNotFoundError:
-            pass
-        return warn
-
-    # ------------------------------------------------------------------
-    # Owner-side Buffer allocation
-    # ------------------------------------------------------------------
-
     def create_buffer(self, nbytes: int) -> Buffer:
-        """Allocate a shared ``Buffer`` owned by this Worker.
+        """Allocate a shared ``Buffer`` owned by this Worker (P1-B).
 
         The backing is a POSIX shm; the Buffer carries a typed canonical identity and a
-        self-describing descriptor, so a consumer can resolve it with no prior handshake. Build a
-        tensor over ``buffer.shm.buf`` with the buffer protocol. Not thread-safe against a concurrent
-        run/create/free on the same Worker.
+        self-describing descriptor, so a consumer can resolve it with no prior handshake: the
+        descriptor travels embedded in every ``Tensor`` built over this Buffer and the consumer
+        materializes it lazily on first receipt (map-once, keyed by canonical identity). At L3+ that
+        consumer is a forked child; at L2 (a leaf, no children) the Worker itself materializes the
+        tensor in-process on ``run``. Build a tensor over ``buffer.shm.buf`` with the buffer protocol.
+        Not thread-safe against a concurrent run/create/free on the same Worker.
         """
         if self.level < 2:
             raise TypeError("create_buffer requires a level >= 2 Worker")
         with self._operation_lease("create_buffer"):
             return self._create_buffer_locked(int(nbytes))
 
+    def alloc_shared_tensor(self, shapes: tuple[int, ...], dtype) -> Buffer:
+        """Allocate a runtime-managed intermediate buffer (the ``Tensor`` form of ``orch.alloc``).
+
+        Called inside an orchestration fn. The backing comes from the orchestrator's HeapRing
+        (MAP_SHARED, visible to forked children) and is **auto-reclaimed** once every downstream consumer
+        has completed and the scope ends — no manual free. Returns a ``FORK_SHM`` ``Buffer`` whose
+        canonical identity is registered in the tensormap so a view of it (``handle.tensor(shapes, dtype)``)
+        dependency-wires to this producer slot. Chip-A→chip-B intermediates: name it as an OUTPUT of the
+        producing task and an INPUT of the consumer.
+        """
+        assert self._orch is not None, "alloc_shared_tensor requires an L3+ orchestration context"
+        nbytes = get_element_size(dtype)
+        for s in shapes:
+            nbytes *= int(s)
+        oid, buffer_id, path = self._owner_instance_id, self._next_buffer_id(), f"L{self.level}"
+        identity = CanonicalIdentity(oid, buffer_id)
+        va = int(self._orch._o.alloc(list(int(s) for s in shapes), dtype, identity))
+        # Wrap the ring VA under the SAME identity: the child materializes to that VA (fork-inherited,
+        # MAP_SHARED read-write) and infer_deps keys the ref to the slot registered above.
+        return wrap_fork_inherited(
+            va,
+            int(nbytes),
+            oid,
+            buffer_id,
+            path,
+            access=AccessMode.READWRITE,
+            backend_kind=BackendKind.FORK_SHM,
+        )
+
+    def make_tensor_arg(self, tensor, shapes: tuple[int, ...], dtype: int, *, strides: tuple[int, ...] | None = None):
+        """Name a **pre-fork** host tensor as a ``Tensor`` over a memoized ``FORK_SHM`` handle.
+
+        The torch (or buffer-protocol) tensor MUST be allocated before ``init()`` so its VA is
+        fork-inherited by the children (the mainline "fork-inherited" contract). A ``share_memory_()``
+        tensor is MAP_SHARED — read-write across the fork, so usable as an OUTPUT the parent reads back;
+        a plain tensor is COW read-only (input only). The handle is memoized by the tensor's storage
+        base, so every ref over the same storage shares one canonical identity and dependencies key on
+        it. At L2 (no fork) any host tensor works. ``dtype`` is the ``DataType`` int value.
+        """
+        untyped_storage = getattr(tensor, "untyped_storage", None)
+        if callable(untyped_storage):
+            st = untyped_storage()
+            base, nbytes = int(st.data_ptr()), int(st.nbytes())
+            byte_offset = int(tensor.data_ptr()) - base  # the view's start within its storage
+        else:
+            base, nbytes = host_ptr_nbytes(tensor)
+            byte_offset = 0
+        # Memoized per storage base so every view of one storage shares an identity and their
+        # dependencies key together. The allocator reuses addresses, though, so a hit whose size no
+        # longer matches is a *different* storage that happens to sit where the last one did: it must
+        # get a fresh identity, or the two would fuse into one node in the dependency graph.
+        handle = self._fork_tensor_handles.get(base)
+        if handle is not None and handle.nbytes != nbytes:
+            handle = None
+        if handle is None:
+            # Copy-on-write only bites when a fork stands between the writer and this process. An
+            # L2 leaf consumes its own args in-process, so any host tensor is writable there; at L3+
+            # the consumer is a forked child, and only a MAP_SHARED allocation carries its writes
+            # back. Measuring this rather than assuming it is what stops a plain tensor from being
+            # accepted as an OUTPUT and then silently losing every write in the child.
+            shared = self.level == 2 or bool(getattr(tensor, "is_shared", lambda: False)())
+            # The backend tag records whether a consumer's writes reach this process, which is what
+            # the FORK_COW rejection protects. At L2 the consumer IS this process, so they reach it
+            # trivially and FORK_COW's contract — a write splitting into a private copy the owner
+            # never sees — is the one that would be false; the tag therefore follows `shared`.
+            handle = wrap_fork_inherited(
+                base,
+                nbytes,
+                self._owner_instance_id,
+                self._next_buffer_id(),
+                f"L{self.level}",
+                access=AccessMode.READWRITE if shared else AccessMode.READ,
+                backend_kind=BackendKind.FORK_SHM if shared else BackendKind.FORK_COW,
+            )
+            self._fork_tensor_handles[base] = handle
+        return handle.tensor(shapes=tuple(shapes), dtype=dtype, strides=strides, byte_offset=byte_offset)
+
     def _next_buffer_id(self) -> int:
         with self._registry_lock:
             bid = self._buffer_id_counter
             self._buffer_id_counter += 1
         return bid
+
+    def _reexport(self, source: BufferDescriptor) -> Buffer:
+        """Re-export a received backing for forwarding (per-backing, memoized, no map).
+
+        An upper-level ref reaching this worker's orch is forwarded as a handle H' that keeps the
+        source's canonical identity unchanged (invariant across every edge, frozen model §5/§8) — H'
+        is never mapped here (a downstream compute leaf maps it lazily), and is built once per source
+        backing (keyed by identity). Worker-scoped lifetime for now.
+        """
+        key = source.identity
+        handle = self._reexport_by_source.get(key)
+        if handle is None:
+            handle = re_export(source)
+            self._reexport_by_source[key] = handle
+        return handle
 
     def _create_buffer_locked(self, nbytes: int) -> Buffer:
         # An L3+ buffer is consumed by a forked child that lazily maps it, so a childless L3+ buffer
@@ -8333,7 +9696,7 @@ class Worker:
         # are local L3 Workers can consume one. An L2 leaf has no children and materializes
         # in-process, so it needs none.
         if self.level >= 3 and not self._chip_shms and not self._sub_shms and not self._next_level_shms:
-            raise RuntimeError(
+            raise _NoBufferConsumerError(
                 "create_buffer requires at least one forked chip, sub, or next-level child (this Worker has none)"
             )
         if nbytes <= 0:
@@ -8343,19 +9706,63 @@ class Worker:
             nbytes,
             owner_instance_id=self._owner_instance_id,
             buffer_id=buffer_id,
-            owner_worker_path=f"L{self.level}",
+            owner_worker_path=_format_worker_path(int(self.level)),
             generation=1,
         )
         with self._registry_lock:
             self._buffers[buffer_id] = buffer
         return buffer
 
+    def _close_chip_import_registry(self) -> None:
+        """Close the L2 in-process consumer import cache (drops its mapped shm imports)."""
+        if self._chip_import_registry is not None:
+            self._chip_import_registry.close()
+            self._chip_import_registry = None
+
+    def release_buffer(self, buffer: Buffer) -> None:
+        """Close + unlink one owner Buffer and drop its registry entry.
+
+        Rejects outright if any currently in-flight L3+ run (not yet past ``_cleanup_published``)
+        sent this identity as a NEXT_LEVEL Tensor arg, or any in-flight L2 direct-chip run sent it —
+        a Buffer never goes away while a dispatched task still names it. The L3+ check takes
+        ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles`` before its
+        orchestration callback (where ``touched_identities`` gets populated) has run, and that
+        callback is what ``_submit_mu`` already serializes graph construction against, so taking it
+        here means the check only ever runs between callbacks, never mid-callback with a
+        not-yet-complete touched set. The L2 check is independent (a separate run-id namespace with
+        no callback to serialize against — ``_chip_run_touched_identities`` is written atomically
+        alongside ``_chip_runs`` under ``_registry_lock`` instead, see ``_submit_l2_locked``), so the
+        two checks run sequentially rather than under one shared lock. Neither is checked once
+        ``buffer`` is already closed, matching ``Buffer.close()``'s own idempotency. The entry
+        survives a failed close, so ``_release_all_buffers`` still reports the leak at close() rather
+        than losing it here. The slot is dropped only when it still holds *this* buffer: a buffer_id
+        minted elsewhere can collide with a registry key, and evicting the live entry it names would
+        strand that backing."""
+        if not buffer.closed:
+            with self._submit_mu, self._hierarchical_start_cv:
+                for handle in self._accepted_run_handles:
+                    if not handle._cleanup_published and buffer.identity in handle._resources.touched_identities:
+                        raise RuntimeError(f"release_buffer: {buffer.identity} is still referenced by an in-flight run")
+            with self._registry_lock:
+                for touched in self._chip_run_touched_identities.values():
+                    if buffer.identity in touched:
+                        raise RuntimeError(
+                            f"release_buffer: {buffer.identity} is still referenced by an in-flight L2 run"
+                        )
+        buffer.close()
+        with self._registry_lock:
+            buffer_id = int(buffer.identity.buffer_id)
+            if self._buffers.get(buffer_id) is buffer:
+                del self._buffers[buffer_id]
+
     def _release_all_buffers(self) -> None:
         """Close + unlink every owner Buffer (called from close()).
 
-        Per-buffer best-effort: one buffer's failure never strands the rest, and the first error is
-        raised after all are attempted so close() reports the leak rather than swallowing it. A
-        buffer whose close fails keeps its registry entry so the cleanup journal can retry it."""
+        Children drop their own lazily-mapped imports when their loops exit; the owner unlinks the
+        backing shm here. Per-buffer best-effort: one buffer's failure never strands the rest, and the
+        first error is raised after all are attempted so close() reports the leak rather than
+        swallowing it. A buffer whose close fails keeps its registry entry so the cleanup journal can
+        retry it."""
         with self._registry_lock:
             entries = list(self._buffers.items())
         errors: list[BaseException] = []
@@ -8370,129 +9777,6 @@ class Worker:
         if errors:
             raise errors[0]
 
-    def _release_all_host_buffers(self) -> None:
-        """Unmap + free every still-registered host buffer (called from close()).
-
-        Per-buffer best-effort: one buffer's failure never strands the rest, and
-        the first error is raised after all are attempted so close() reports the
-        leak rather than swallowing it to stderr. A buffer whose unmap broadcast
-        fails keeps its registry entry so the cleanup journal can retry it."""
-        with self._registry_lock:
-            entries = list(self._host_buf_registry.items())
-        errors: list[BaseException] = []
-        for data_ptr, entry in entries:
-            try:
-                if self._worker is not None:  # resource presence, not lifecycle (see _close_host_shm)
-                    child_errors = self._broadcast_host_unmap(entry.token)
-                    if child_errors:
-                        raise RuntimeError(f"host buffer token={entry.token} unmap failed: {child_errors[0]}")
-                # Tolerates a still-live view over a zero-copy buffer at close():
-                # unlinks the name regardless so the OS reclaims it once dropped.
-                self._close_host_shm(entry)
-                with self._registry_lock:
-                    if self._host_buf_registry.get(data_ptr) is entry:
-                        self._host_buf_registry.pop(data_ptr)
-                        self._rebuild_host_buf_snapshot()
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-        if errors:
-            raise errors[0]
-
-    def _broadcast_host_unmap(self, token: int) -> list[str]:
-        """Broadcast _CTRL_UNMAP_HOST for ``token`` to every local L3 child."""
-        return self._broadcast_host_control(_CTRL_UNMAP_HOST, _HOST_BUF_UNMAP.pack(token))
-
-    def _broadcast_host_control(self, sub_cmd: int, payload: bytes) -> list[str]:
-        if self._worker is None:
-            return []
-        results = []
-        for worker_type in (WorkerType.NEXT_LEVEL, WorkerType.SUB):
-            results.extend(
-                self._worker.broadcast_control_all(
-                    worker_type,
-                    int(sub_cmd),
-                    payload,
-                    None,
-                    timeout_s=self._py_control_timeout_s,
-                )
-            )
-        return self._control_errors(results)
-
-    def _stage_host_buffers_for_chip_submit(self, args: Any) -> None:
-        """Validate the host tensors of one chip submit before dispatch.
-
-        Called from ``Orchestrator.submit_next_level`` on the LOCAL_CHIP path —
-        only there does the forked child dereference raw host pointers. Each host
-        tensor is either:
-
-        * inside a buffer from ``create_host_buffer`` → born-shared, so its bytes
-          already live in the child-visible shm and the child writes results back
-          into the same physical pages: nothing to copy. ``_find_host_buf_entry``
-          still validates the view fits inside the buffer (else the child would
-          read past its shm mapping);
-        * unregistered → forwarded unvalidated. A fork-inherited ``share_memory_``
-          tensor is the legitimate case; an unregistered post-fork tensor reads
-          stale/unmapped memory in the child — allocate it with
-          ``create_host_buffer`` instead.
-
-        The child rewrites in-range host pointers to its own mapping; see
-        _rewrite_blob_host_addrs.
-        """
-        for i in range(args.tensor_count()):
-            tensor = args.tensor(i)
-            if tensor.child_memory:
-                continue
-            addr = int(tensor.data)
-            if addr == 0:
-                continue
-            # Raises if an in-range view overruns its buffer; otherwise there is
-            # nothing to do — the born-shared bytes are already child-visible.
-            self._find_host_buf_entry(addr, int(tensor.nbytes()))
-
-    def _rebuild_host_buf_snapshot(self) -> None:
-        """Rebuild the lock-free read snapshot from the registry.
-
-        Caller must hold ``_registry_lock``. Rebinds ``_host_buf_snapshot`` to a
-        fresh ``(sorted_ptrs_tuple, registry_copy)`` pair so an in-flight
-        ``_find_host_buf_entry`` keeps reading the prior immutable snapshot until
-        the single atomic rebind swaps it — see ``_find_host_buf_entry``.
-        """
-        registry = dict(self._host_buf_registry)
-        self._host_buf_snapshot = (tuple(sorted(registry)), registry)
-
-    def _find_host_buf_entry(self, addr: int, nbytes: int) -> _HostBufEntry | None:
-        """Host buffer whose ``[data_ptr, data_ptr+nbytes)`` contains the whole
-        ``[addr, addr+nbytes)`` view, or None. Raises if a view starts inside a
-        buffer but runs past its end (would read past the shm in the child).
-
-        Host buffers are distinct, non-overlapping allocations, so the only
-        candidate for ``addr`` is the entry with the greatest base ``<= addr`` —
-        found by bisecting the snapshot's sorted keys so this stays log-time on
-        the per-submit hot path rather than scanning every buffer.
-
-        Sub-view matching assumes the blob's ``ChipTensor.buffer.addr`` is the
-        contiguous base of the host buffer (``make_tensor_arg`` builds tensors with
-        ``start_offset == 0``); a non-zero ``start_offset`` would shift ``addr``
-        and is not modelled here.
-        """
-        # Load the immutable snapshot once: sorted keys and the dict they index
-        # into are captured together, so a concurrent create/free (which rebinds a
-        # fresh snapshot) cannot mutate what we bisect and index here — no lock, no
-        # IndexError from a shrinking list, no torn key/dict pairing.
-        sorted_ptrs, registry = self._host_buf_snapshot
-        idx = bisect.bisect_right(sorted_ptrs, addr) - 1
-        if idx < 0:
-            return None
-        entry = registry.get(sorted_ptrs[idx])
-        if entry is None or addr >= entry.data_ptr + entry.nbytes:
-            return None
-        if addr + nbytes > entry.data_ptr + entry.nbytes:
-            raise RuntimeError(
-                f"Host tensor 0x{addr:x} (+{nbytes} B) overruns its host buffer "
-                f"0x{entry.data_ptr:x} (+{entry.nbytes} B); create a buffer at least as large."
-            )
-        return entry
-
     # ------------------------------------------------------------------
     # run — uniform entry point
     # ------------------------------------------------------------------
@@ -8503,8 +9787,7 @@ class Worker:
         Dispatch:
           - L2: ``callable`` is a ``CallableHandle`` returned by
             ``Worker.register(chip_callable)``. Routes to the private slot
-            carried by the handle. The current L2 backend remains blocking, so
-            the returned handle is already complete.
+            carried by the handle and returns a live completion handle.
           - L3+: ``callable`` is a Python orch fn invoked with the
             ``Orchestrator`` handle. Graph construction completes synchronously;
             device completion is reported by the returned handle.
@@ -8545,8 +9828,7 @@ class Worker:
         if self.level == 2:
             assert self._chip_worker is not None
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
-            self._chip_worker._run_slot(state.slot_id, args, cfg)
-            return RunHandle._completed(self)
+            return self._submit_l2_locked(state.slot_id, args, cfg)
 
         with self._submit_mu:
             # Graph callbacks stay serialized, so a predecessor's callback has
@@ -8673,6 +9955,16 @@ class Worker:
         native = self._orch._o if self._orch is not None else None
         return direct_control(self, native, f"Worker.{api}")
 
+    def _device_control_admission(self, api: str):
+        """Ordering for one device-memory command that reaches a child outside any TaskSlot.
+
+        L2 owns its chip in-process and has no orchestrator to be ordered against,
+        so only L3+ takes the whole-run fence.
+        """
+        if self.level == 2:
+            return contextlib.nullcontext()
+        return self._control_admission(api)
+
     @contextlib.contextmanager
     def _control_reservation(self, api: str):
         """Reserve this worker for one command that belongs to no run.
@@ -8729,6 +10021,41 @@ class Worker:
                 if handle._resources.requires_ordered_cleanup and not handle._cleanup_published:
                     return handle
         return None
+
+    def _submit_l2_locked(self, callable_id: int, args, cfg: CallConfig) -> RunHandle:
+        """Admit one direct-chip run and return a handle to it while it runs.
+
+        The lane is the sole admission authority. Its runtime contract permits
+        one active plus one prepared compatible run; otherwise submission drains
+        the predecessor and retains depth-one behavior. The caller owns the
+        completion fence through :meth:`RunHandle.wait`.
+        """
+        assert self._chip_worker is not None
+        touched = self._identities_in_args(args) if args is not None else set()
+        chip_args = self._materialize_l2_args(args)
+        # Publish touched_identities BEFORE dispatch, not after: release_buffer() reads this
+        # dict to decide whether a Buffer is still in flight, so if it were only written after
+        # _submit_chip_run_direct() returns, a release racing the window between dispatch and
+        # publication would see no entry for a run that is already running on the chip.
+        with self._registry_lock:
+            self._chip_run_seq += 1
+            run_id = self._chip_run_seq
+            self._chip_run_touched_identities[run_id] = touched
+        try:
+            chip_run = self._chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, cfg)
+        except BaseException:
+            with self._registry_lock:
+                self._chip_run_touched_identities.pop(run_id, None)
+            raise
+        with self._registry_lock:
+            self._chip_runs[run_id] = chip_run
+        # chip_args is kept alive by the handle: the lane copies the args into
+        # its own storage, but the keepalive also pins the buffers the resolved
+        # descriptors point at for as long as the run can still read them.
+        return RunHandle(self, run_id, (callable_id, args, cfg, chip_args))
+
+    def _chip_run_for(self, run_id: int) -> Any | None:
+        return self._chip_runs.get(run_id)
 
     def _submit_l3_locked(self, callable, args, cfg: CallConfig) -> RunHandle:
         assert self._orch is not None
@@ -8787,10 +10114,18 @@ class Worker:
         return handle
 
     def _run_handle_done(self, run_id: int) -> bool:
+        chip_run = self._chip_run_for(run_id)
+        if chip_run is not None:
+            return chip_run.done()
         assert self._orch is not None
         return self._orch._run_done(run_id)
 
     def _wait_run_handle(self, run_id: int, timeout: float | None) -> bool:
+        chip_run = self._chip_run_for(run_id)
+        if chip_run is not None:
+            # Negative means "no deadline" to the binding, which then blocks on
+            # the device instead of polling.
+            return chip_run.wait(-1.0 if timeout is None else max(0.0, timeout))
         assert self._orch is not None
         if timeout is None:
             self._orch._wait_run(run_id)
@@ -8801,7 +10136,7 @@ class Worker:
         assert self._orch is not None
         self._orch._wait_run_accepted(run_id)
 
-    def _finalize_run_handle(
+    def _finalize_run_handle(  # noqa: PLR0912 -- one extra branch for the L2 pop-under-lock guard
         self,
         handle: RunHandle,
         run_id: int,
@@ -8810,6 +10145,21 @@ class Worker:
         _after_step: Any | None = None,
     ) -> BaseException | None:
         """Run fence-owned cleanup exactly once and return the cached result."""
+        # A direct-chip run owns no orchestration state: the lane finalized the
+        # native run as part of reaching terminal, and this worker built no
+        # domains, remote slots or chip regions for it. Retiring the lane entry
+        # is the whole of its cleanup, so it never enters the cursor below —
+        # driving those steps here would report a cleanup failure for state that
+        # was never created. The membership check and both removals share one lock
+        # acquisition (pop(..., None), not del) so a concurrent Worker.close() clearing
+        # these same dicts can never make this raise KeyError or read a half-updated pair.
+        with self._registry_lock:
+            was_l2_run = self._chip_runs.pop(run_id, None) is not None
+            if was_l2_run:
+                self._chip_run_touched_identities.pop(run_id, None)
+        if was_l2_run:
+            return native_error
+
         # Two different failures, deliberately not merged. A task that failed is
         # this run's business and says nothing about the worker; a cleanup that
         # failed leaves collective device state nobody can describe, and poisons
@@ -8837,6 +10187,17 @@ class Worker:
                     ("remote_frees", self._flush_pending_remote_frees),
                     ("worker_chip_regions", lambda: self._cleanup_worker_chip_regions(resources)),
                     ("worker_chip_host_buffers", resources.worker_chip_orch_comm_host_buffers.clear),
+                    (
+                        "pending_global_domains",
+                        lambda: self._execute_pending_global_domain_releases(resources),
+                    ),
+                    (
+                        "live_global_domains",
+                        lambda: self._release_all_live_global_domains(
+                            resources,
+                            include_retained=False,
+                        ),
+                    ),
                     ("pending_domains", lambda: self._execute_pending_domain_releases(resources)),
                     ("live_domains", lambda: self._release_all_live_domains(resources)),
                     ("retire_domains", lambda: self._retire_run_domains(resources)),
@@ -8900,6 +10261,35 @@ class Worker:
         # the reason the worker is now shut.
         return handle._finalization_error
 
+    def _materialize_l2_args(self, args) -> Any:
+        """Resolve an L2 leaf's tensor args to a chip-POD blob in this process.
+
+        The user builds args as ``TaskArgs`` (``Tensor``) at every level; an L2 leaf is the consumer of
+        its own args, so it does exactly what a chip child does — resolve each ref's embedded descriptor
+        to a local base (map-once, cached in ``_chip_import_registry``) and build the chip blob the
+        runtime reads — only without a mailbox, since the args are already in this process.
+
+        ``args`` is a ``TaskArgs`` or ``None`` (no args). The chip-only POD
+        ``ChipStorageTaskArgs`` is not accepted here — submit it through ``ChipWorker._run_slot``.
+        """
+        registry = self._chip_import_registry
+        if registry is None:
+            # This worker runs its own chip in-process (no fork, no mailbox): it is its own device
+            # endpoint, so DEVICE backings it materializes must be its own.
+            context = ImportContext(is_host_endpoint=False, owning_chip_instance_id=self._owner_instance_id)
+            registry = ImportRegistry(context)
+            self._chip_import_registry = registry
+        if args is None:
+            args = TaskArgs()
+        resolved = registry.materialize_args(args)
+        return materialize_task_args(args, resolved)
+
+    def _run_l2_materialized(self, callable_id: int, args, cfg) -> None:
+        """Materialize an L2 leaf's tensor args and run the kernel to completion."""
+        chip_args = self._materialize_l2_args(args)
+        assert self._chip_worker is not None
+        self._chip_worker._impl.run_materialized(callable_id, chip_args, cfg)
+
     @property
     def aicpu_dlopen_count(self) -> int:
         """L2 only: number of distinct callable identities the AICPU has dlopened for.
@@ -8954,7 +10344,8 @@ class Worker:
             or bool(self._sub_shms or self._chip_shms or self._next_level_shms)
             or bool(self._live_worker_chip_regions)
             or bool(self._live_domains)
-            or bool(self._host_buf_registry)
+            or bool(self._live_global_domains or self._failed_global_domain_releases)
+            or bool(self._global_node_domains)
             or bool(self._remote_sessions)
             or bool(self._pending_remote_buffer_frees or self._pending_remote_import_releases)
             or not self._cleanup_journal.empty
@@ -8976,8 +10367,12 @@ class Worker:
             parts.append(f"{len(self._live_worker_chip_regions)} L3-L2 region(s)")
         if self._live_domains:
             parts.append(f"{len(self._live_domains)} comm domain(s)")
-        if self._host_buf_registry:
-            parts.append(f"{len(self._host_buf_registry)} host buffer(s)")
+        if self._live_global_domains or self._failed_global_domain_releases:
+            live_global_ids = {handle.domain_id for handle in self._live_global_domains.values()}
+            live_global_ids.update(self._failed_global_domain_releases)
+            parts.append(f"{len(live_global_ids)} global comm domain(s)")
+        if self._global_node_domains:
+            parts.append(f"{len(self._global_node_domains)} imported global comm domain(s)")
         if self._remote_sessions:
             parts.append(f"{len(self._remote_sessions)} remote session(s)")
         n_remote = len(self._pending_remote_buffer_frees) + len(self._pending_remote_import_releases)
@@ -9048,7 +10443,7 @@ class Worker:
             with self._hierarchical_start_cv:
                 if threading.get_ident() in self._lease_depth:
                     raise RuntimeError(
-                        "Worker.close(): cannot be called from within a run() / submit() / create_host_buffer() / "
+                        "Worker.close(): cannot be called from within a run() / submit() / create_buffer() / "
                         "register() / unregister() or other leased Worker operation on this thread"
                     )
                 if self._lifecycle is _Lifecycle.INITIALIZING:
@@ -9111,6 +10506,7 @@ class Worker:
                 # Claim: publish CLOSED (permanent admission fence) and install a
                 # fresh teardown attempt.
                 self._lifecycle = _Lifecycle.CLOSED
+                self._invalidate_endpoint_registry()
                 attempt = _CloseAttempt()
                 self._close_completion = attempt
                 self._hierarchical_start_cv.notify_all()
@@ -9450,12 +10846,15 @@ class Worker:
         pre_transport_keys: set[tuple[str, str]] = set()
         for kind, identity, cleanup in (
             ("region", "all Worker-Chip regions", self._cleanup_worker_chip_regions),
+            ("domain", "all Global CommDomains", self._release_all_live_global_domains),
+            ("domain", "Global CommDomain nodes", self._release_all_global_domain_nodes),
             ("domain", "all CommDomains", self._release_all_live_domains),
             ("provenance", "child allocation provenance", self._clear_child_prov),
             ("remote", "active remote slot references", self._release_active_remote_slot_refs),
             ("remote", "pending remote frees", self._flush_pending_remote_frees),
             ("buffer", "all owner Buffers", self._release_all_buffers),
-            ("host-buffer", "all host buffers", self._release_all_host_buffers),
+            ("buffer", "fork-inherited tensor buffers", self._fork_tensor_handles.clear),
+            ("buffer", "chip import registry", self._close_chip_import_registry),
         ):
             self._cleanup_journal.add_once(kind, identity, cleanup)
             pre_transport_keys.add((kind, identity))
@@ -9478,6 +10877,29 @@ class Worker:
 
             def _finalize_chip() -> None:
                 if self._chip_worker:
+                    # Close the lane before finalizing the worker: a handle the
+                    # caller never waited on still owns device work, and the
+                    # lane drains it here while the device is still up.
+                    #
+                    # The lane rethrows its poison on close. Whether that is
+                    # news depends on who has already seen it: waiting on a
+                    # handle delivers the run's error and retires its entry, so
+                    # a remaining entry is a run whose failure nobody has been
+                    # told about, and only then is close the first report. With
+                    # every run waited, the poison is the error those waits
+                    # already raised, and re-raising it here would turn a
+                    # handled run failure into an unhandled close failure.
+                    impl = getattr(self._chip_worker, "_impl", None)
+                    if impl is not None:
+                        undelivered = bool(self._chip_runs)
+                        try:
+                            impl._close_chip_run_lane()
+                        except Exception:
+                            if undelivered:
+                                raise
+                    with self._registry_lock:
+                        self._chip_runs.clear()
+                        self._chip_run_touched_identities.clear()
                     self._chip_worker.finalize()
                     self._chip_worker = None
 

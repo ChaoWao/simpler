@@ -17,7 +17,7 @@ when ring 1 is limited to 1.5 MiB.
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 SENTINEL = 42.0
 INIT_VAL = -1.0
@@ -72,8 +72,8 @@ class TestHeapEmptyRingRebase(SceneTestCase):
         y1 = torch.full((16,), INIT_VAL, dtype=torch.float32)
         y2 = torch.full((16,), INIT_VAL, dtype=torch.float32)
         return TaskArgsBuilder(
-            Tensor("y1", y1),
-            Tensor("y2", y2),
+            TensorArg("y1", y1),
+            TensorArg("y2", y2),
         )
 
     def compute_golden(self, args, params):

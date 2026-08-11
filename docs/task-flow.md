@@ -538,14 +538,17 @@ Local mailbox path:
 ```text
 slot.callable.digest ─┐
 slot.config          ─┼─► memcpy into shm mailbox ─► child resolves digest
-slot.pipeline_lease  ─┤    (dispatch_process)         and runs local slot
+slot.pipeline_lease  ─┤    (submit_progress)         and runs local slot
 slot.task_args       ─┘
 ```
 
 For SUB children the same mailbox layout is reused; the Python child
 runs `_sub_worker_loop`, which decodes the args blob via
-`_read_args_from_mailbox` into a `TaskArgs` object and calls
-`fn(args)` directly — no C++ leaf involved.
+`ImportRegistry.mapped_args_from_blob` into a `MappedArgs` object — every
+tensor mapped into this process, the scalars alongside — and calls
+`fn(args)` directly — no C++ leaf involved. A nested next-level child
+runs `_child_worker_loop` instead, which re-exports rather than maps
+(`_reexport_args_from_mailbox`) and hands its orch function a `TaskArgs`.
 
 The mailbox layout, fork ordering, and child loop are in
 [worker-manager.md](worker-manager.md).
@@ -587,11 +590,11 @@ reclaim independently of outer-scope tasks. See
 
 ## 8. Data flow on completion
 
-When the child finishes the kernel, it writes `TASK_DONE` to the mailbox;
-`LocalMailboxEndpoint::run` exits its spin-poll, reads the mailbox error
-fields, and returns a `WorkerCompletion`. `MAILBOX_OFF_ERROR == 0` maps to
-success; a non-zero child error maps to task failure. The parent
-`WorkerThread` pushes that completion onto `Scheduler::completion_queue_`.
+When the child finishes the kernel, it writes `TASK_DONE` to the mailbox. The
+Scheduler calls `LocalMailboxEndpoint::poll_progress`, which reads the mailbox
+error fields and returns a `WorkerCompletion`. `MAILBOX_OFF_ERROR == 0` maps to
+success; a non-zero child error maps to task failure. The endpoint lane reports
+that completion through `Scheduler::worker_done`.
 
 At this point:
 

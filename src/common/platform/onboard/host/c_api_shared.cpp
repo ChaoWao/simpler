@@ -65,6 +65,12 @@ extern "C" {
 int register_callable_impl(const ChipCallable *callable, const HostApi *api, CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
 __attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
+__attribute__((weak)) int prepared_run_config_compatible_impl(
+    const HostApi * /*api*/, const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/,
+    const uint64_t * /*ring_dep_pool*/
+) {
+    return 1;
+}
 
 /* ===========================================================================
  * Context-bound HostApi functions passed to runtime implementations.
@@ -714,6 +720,39 @@ int simpler_prepare_run(
         int rc = runner->attach_current_thread(runner->device_id());
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
 
+        if (overlaps_active_run) {
+            int compatibility_rc = 0;
+            {
+                STRACE("simpler_run.bind.compatibility");
+                compatibility_rc = prepared_run_config_compatible_impl(
+                    &state->host_api, config->runtime_env.ring_task_window, config->runtime_env.ring_heap,
+                    config->runtime_env.ring_dep_pool
+                );
+            }
+            if (compatibility_rc <= 0) {
+                // A miss is normal — the successor keeps its lease and prepares
+                // after the predecessor's fence — so it is reported at INFO and
+                // kept distinct from a probe that failed to answer at all.
+                // Without this the two are indistinguishable from outside: a
+                // pipeline that silently never overlaps looks the same whether
+                // the runtime_env disagrees or the feature is broken.
+                if (compatibility_rc == 0) {
+                    LOG_INFO(
+                        "simpler_prepare_run: shared-arena layout differs from the active run; preparing at depth one "
+                        "after its fence (%s)",
+                        state->trace_attrs
+                    );
+                    compatibility_rc = PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE;
+                } else {
+                    LOG_ERROR(
+                        "simpler_prepare_run: prepared-run compatibility probe failed: %d (%s)", compatibility_rc,
+                        state->trace_attrs
+                    );
+                }
+                return cleanup_failed_prepare(state, compatibility_rc, true);
+            }
+        }
+
         state->runner_resources_owned = true;
         rc = runner->provision_native_run_resources(state->descriptor.pipeline_slot);
         if (rc != 0) return cleanup_failed_prepare(state, rc, true);
@@ -853,6 +892,12 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
 
     int execution_rc = state->completion_rc;
+    // The launch transaction hands back an ActiveExecution only once it has
+    // reached the device (LaunchProgress::Partial or Complete); a NotStarted
+    // launch returns its PreparedExecution instead and leaves this null. So
+    // `launched` means "this run owns device work" — it is what separates a run
+    // that must be drained, whose rc is the run's result, and whose runtime
+    // holds a live GM/SM pointer, from one that never touched a stream.
     const bool launched = state->active_execution != nullptr;
     // Both drain_execution() and validate_runtime_impl() touch the device, so
     // the attach covers each of them. rtSetDevice is idempotent on an

@@ -315,7 +315,7 @@ def _serve_until_shutdown(mailbox: SharedMemory, gate: SharedMemory) -> None:
     assert gate_buf is not None
     state_addr = worker_mod._buffer_field_addr(mailbox_buf, worker_mod._OFF_STATE)
 
-    def handle_task():
+    def handle_task(_task_buf):
         return 0, ""
 
     def handle_control(_sub_cmd):
@@ -348,7 +348,7 @@ class TestOneWayShutdown:
         """A shutdown requested while a control command is in flight must still
         end the child, even though the CONTROL_DONE it publishes overwrites the
         SHUTDOWN state word."""
-        mailbox = SharedMemory(create=True, size=worker_mod.MAILBOX_FRAME_SIZE)
+        mailbox = SharedMemory(create=True, size=worker_mod.MAILBOX_SIZE)
         gate = SharedMemory(create=True, size=8)
         mailbox_buf = mailbox.buf
         gate_buf = gate.buf

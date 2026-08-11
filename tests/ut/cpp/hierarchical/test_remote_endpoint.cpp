@@ -23,6 +23,7 @@
 #include <csignal>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -264,17 +265,70 @@ start_delayed_reply_server(std::thread &server_thread, std::atomic<bool> &stop, 
     return port;
 }
 
+uint16_t start_split_header_reply_server(
+    std::thread &server_thread, std::atomic<bool> &stop, std::atomic<bool> &prefix_sent, std::atomic<bool> &send_suffix,
+    uint64_t sequence
+) {
+    uint16_t port = 0;
+    int listener = make_loopback_listener(port);
+    server_thread = std::thread([listener, &stop, &prefix_sent, &send_suffix, sequence]() {
+        int fd = accept_until_stop(listener, stop);
+        if (fd >= 0) {
+            remote_l3::FrameHeader header;
+            header.frame_type = remote_l3::FrameType::COMPLETION;
+            header.session_id = 1;
+            header.worker_id = 0;
+            header.sequence = sequence;
+            std::vector<uint8_t> frame = remote_l3::encode_frame(header, {});
+            const size_t prefix_size = remote_l3::FRAME_HEADER_BYTES / 2;
+            size_t offset = 0;
+            while (offset < prefix_size) {
+                ssize_t n = ::send(fd, frame.data() + offset, prefix_size - offset, MSG_NOSIGNAL);
+                if (n <= 0) break;
+                offset += static_cast<size_t>(n);
+            }
+            if (offset == prefix_size) {
+                prefix_sent.store(true, std::memory_order_release);
+                while (!send_suffix.load(std::memory_order_acquire) && !stop.load(std::memory_order_acquire)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (!stop.load(std::memory_order_acquire)) {
+                    while (offset < frame.size()) {
+                        ssize_t n = ::send(fd, frame.data() + offset, frame.size() - offset, MSG_NOSIGNAL);
+                        if (n <= 0) break;
+                        offset += static_cast<size_t>(n);
+                    }
+                }
+            }
+            ::close(fd);
+        }
+        ::close(listener);
+    });
+    return port;
+}
+
 class FakeRemoteTransport : public RemoteL3Transport {
 public:
     int32_t next_error_code{0};
     std::string next_error_message;
     std::vector<uint8_t> next_control_result_bytes;
     std::vector<uint8_t> last_frame;
+    int progress_polls_before_ready{0};
     remote_l3::ControlName last_control_name{remote_l3::ControlName::PREPARE_CALLABLE};
     remote_l3::RemoteRegistryTarget last_target_registry{remote_l3::RemoteRegistryTarget::REMOTE_TASK_DISPATCHER};
     CallableKind last_callable_kind{CallableKind::PYTHON_IMPORT};
 
     void submit_frame(const std::vector<uint8_t> &frame) override { last_frame = frame; }
+    void submit_progress_frame(const std::vector<uint8_t> &frame) override { submit_frame(frame); }
+
+    bool poll_progress_reply(remote_l3::FrameType frame_type, uint64_t sequence, std::vector<uint8_t> &reply) override {
+        if (progress_polls_before_ready > 0) {
+            --progress_polls_before_ready;
+            return false;
+        }
+        reply = wait_for_reply(frame_type, sequence);
+        return true;
+    }
 
     std::vector<uint8_t> wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) override {
         auto submitted = remote_l3::decode_frame(last_frame);
@@ -350,31 +404,82 @@ TaskArgs scalar_args() {
 
 TaskArgs bare_pointer_args() {
     TaskArgs args;
-    ChipTensor tensor{};
-    tensor.buffer.addr = 0x1234;
-    tensor.ndims = 1;
-    tensor.shapes[0] = 1;
-    tensor.dtype = DataType::UINT8;
-    args.add_tensor(tensor, TensorArgType::INPUT);
+    Tensor ref{};
+    ref.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    ref.buffer.nbytes = 1;  // a local backing without a remote sidecar -> rejected by the remote endpoint
+    ref.buffer.identity.buffer_id = 0x1234;
+    ref.ndims = 1;
+    ref.shapes[0] = 1;
+    ref.strides[0] = 1;
+    ref.dtype = DataType::UINT8;
+    args.add_tensor(ref, TensorArgType::INPUT);
+    return args;
+}
+
+TaskArgs sidecar_free_placeholder_args() {
+    TaskArgs args;
+    Tensor ref{};
+    ref.buffer.magic = BUFFER_DESCRIPTOR_MAGIC;
+    ref.buffer.address_space = static_cast<uint8_t>(AddressSpace::HOST);
+    ref.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    ref.buffer.backend_kind = static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
+    ref.buffer.identity.buffer_id = 0x1234;
+    ref.buffer.identity.generation = 1;
+    ref.buffer.nbytes = 1;
+    ref.ndims = 1;
+    ref.shapes[0] = 1;
+    ref.strides[0] = 1;
+    ref.dtype = DataType::UINT8;
+    args.add_tensor(ref, TensorArgType::INPUT);
     return args;
 }
 
 }  // namespace
 
-TEST(RemoteEndpoint, SuccessCompletionMapsToSuccess) {
+TEST(RemoteEndpoint, TaskDispatchUsesProgressSubmissionAndPolling) {
+    Ring ring;
+    ring.init(1ULL << 20);
+    TaskSlot slot = make_slot(ring, scalar_args());
+
+    auto *transport = new FakeRemoteTransport();
+    transport->progress_polls_before_ready = 1;
+    RemoteL3Endpoint endpoint(3, 99, "fake", std::unique_ptr<RemoteL3Transport>(transport));
+
+    WorkerDispatch dispatch;
+    dispatch.task_slot = slot;
+    dispatch.dispatch_id = 7;
+    endpoint.submit_progress(&ring, dispatch);
+
+    WorkerEndpointProgress progress;
+    EXPECT_FALSE(endpoint.poll_progress(progress));
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
+    EXPECT_EQ(progress.dispatch.dispatch_id, 7u);
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
+    EXPECT_FALSE(transport->last_frame.empty());
+    ring.shutdown();
+}
+
+TEST(RemoteEndpoint, ProgressStopReleasesWaitingControl) {
     Ring ring;
     ring.init(1ULL << 20);
     TaskSlot slot = make_slot(ring, scalar_args());
 
     auto *transport = new FakeRemoteTransport();
     RemoteL3Endpoint endpoint(3, 99, "fake", std::unique_ptr<RemoteL3Transport>(transport));
-
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
-    WorkerCompletion completion = endpoint.run(&ring, dispatch);
+    endpoint.submit_progress(&ring, dispatch);
 
-    EXPECT_EQ(completion.outcome, EndpointOutcome::SUCCESS);
-    EXPECT_FALSE(transport->last_frame.empty());
+    std::array<uint8_t, CALLABLE_HASH_DIGEST_SIZE> digest{};
+    auto control = std::async(std::launch::async, [&] {
+        endpoint.control_prepare(digest.data());
+    });
+    EXPECT_EQ(control.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+
+    endpoint.request_progress_stop();
+    ASSERT_EQ(control.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+    EXPECT_THROW(control.get(), std::runtime_error);
     ring.shutdown();
 }
 
@@ -390,10 +495,12 @@ TEST(RemoteEndpoint, RemoteTaskErrorMapsToTaskFailure) {
 
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
-    WorkerCompletion completion = endpoint.run(&ring, dispatch);
+    endpoint.submit_progress(&ring, dispatch);
 
-    EXPECT_EQ(completion.outcome, EndpointOutcome::TASK_FAILURE);
-    EXPECT_EQ(completion.error_message, "remote orch failed");
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::TASK_FAILURE);
+    EXPECT_EQ(progress.completion.error_message, "remote orch failed");
     ring.shutdown();
 }
 
@@ -589,6 +696,98 @@ TEST(RemoteSocketTransport, RuntimeReadSurvivesElapsedAttachDeadline) {
     server.stop_and_join();
 }
 
+TEST(RemoteSocketTransport, ProgressPollDoesNotWaitForDelayedReply) {
+    ScopedServerThread server;
+    uint16_t port = start_delayed_reply_server(server.thread(), server.stop_flag(), /*delay_ms=*/500, /*sequence=*/1);
+    RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 2.0);
+
+    remote_l3::FrameHeader header;
+    header.frame_type = remote_l3::FrameType::TASK;
+    header.session_id = 1;
+    header.worker_id = 0;
+    header.sequence = 1;
+    transport.submit_progress_frame(remote_l3::encode_frame(header, {}));
+
+    std::vector<uint8_t> reply;
+    auto t0 = std::chrono::steady_clock::now();
+    EXPECT_FALSE(transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply));
+    double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_LT(elapsed, 0.2);
+
+    bool complete = false;
+    for (int i = 0; i < 100 && !complete; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        complete = transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply);
+    }
+    EXPECT_TRUE(complete);
+    EXPECT_FALSE(reply.empty());
+    transport.shutdown();
+    server.stop_and_join();
+}
+
+TEST(RemoteSocketTransport, ProgressPollResumesAfterPartialHeader) {
+    std::atomic<bool> prefix_sent{false};
+    std::atomic<bool> send_suffix{false};
+    ScopedServerThread server;
+    uint16_t port =
+        start_split_header_reply_server(server.thread(), server.stop_flag(), prefix_sent, send_suffix, /*sequence=*/1);
+    RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 2.0);
+
+    remote_l3::FrameHeader header;
+    header.frame_type = remote_l3::FrameType::TASK;
+    header.session_id = 1;
+    header.worker_id = 0;
+    header.sequence = 1;
+    transport.submit_progress_frame(remote_l3::encode_frame(header, {}));
+
+    for (int i = 0; i < 100 && !prefix_sent.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(prefix_sent.load(std::memory_order_acquire));
+    std::vector<uint8_t> reply;
+    EXPECT_FALSE(transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply));
+
+    send_suffix.store(true, std::memory_order_release);
+    bool complete = false;
+    for (int i = 0; i < 100 && !complete; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        complete = transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply);
+    }
+    EXPECT_TRUE(complete);
+    EXPECT_EQ(reply.size(), remote_l3::FRAME_HEADER_BYTES);
+    transport.shutdown();
+    server.stop_and_join();
+}
+
+TEST(RemoteSocketTransport, ProgressErrorClearsActiveCommand) {
+    ScopedServerThread server;
+    uint16_t port = start_closing_server(server.thread(), server.stop_flag());
+    RemoteL3SocketTransport transport("127.0.0.1", port, "127.0.0.1", 1, /*attach*/ 1.0, /*runtime*/ 1.0);
+    server.stop_and_join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    remote_l3::FrameHeader header;
+    header.frame_type = remote_l3::FrameType::TASK;
+    header.session_id = 1;
+    header.worker_id = 0;
+    header.sequence = 1;
+    std::vector<uint8_t> frame = remote_l3::encode_frame(header, {});
+    transport.submit_progress_frame(frame);
+
+    std::vector<uint8_t> reply;
+    bool saw_error = false;
+    for (int i = 0; i < 3 && !saw_error; ++i) {
+        try {
+            (void)transport.poll_progress_reply(remote_l3::FrameType::COMPLETION, 1, reply);
+        } catch (const std::runtime_error &) {
+            saw_error = true;
+        }
+    }
+    ASSERT_TRUE(saw_error);
+    EXPECT_NO_THROW(transport.submit_progress_frame(frame));
+    transport.shutdown();
+}
+
 TEST(RemoteSocketTransport, RuntimeWriteToStalledReaderTimesOut) {
     // The peer accepts but never reads; a large frame overruns the socket buffers
     // so a single blocking send() would hang past the runtime deadline. The fd is
@@ -607,7 +806,7 @@ TEST(RemoteSocketTransport, RuntimeWriteToStalledReaderTimesOut) {
     server.stop_and_join();
 }
 
-TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsEndpointFailure) {
+TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsRejectedAtSubmission) {
     Ring ring;
     ring.init(1ULL << 20);
     TaskSlot slot = make_slot(ring, bare_pointer_args());
@@ -617,10 +816,39 @@ TEST(RemoteEndpoint, BareHostPointerWithoutSidecarIsEndpointFailure) {
 
     WorkerDispatch dispatch;
     dispatch.task_slot = slot;
-    WorkerCompletion completion = endpoint.run(&ring, dispatch);
+    // Encoding happens while publishing, so an unsidecar'd local backing is
+    // rejected at submission rather than reported as a completion. Match the
+    // message: submit_progress has several other runtime_error paths, and a
+    // bare EXPECT_THROW would pass on any of them.
+    try {
+        endpoint.submit_progress(&ring, dispatch);
+        ADD_FAILURE() << "expected the local backing to be rejected";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find("local backing"), std::string::npos) << e.what();
+    }
+    EXPECT_TRUE(transport->last_frame.empty());
+    ring.shutdown();
+}
 
-    EXPECT_EQ(completion.outcome, EndpointOutcome::ENDPOINT_FAILURE);
-    EXPECT_NE(completion.error_message.find("bare host pointer"), std::string::npos);
+TEST(RemoteEndpoint, SidecarFreePlaceholderIsRejectedAtSubmission) {
+    Ring ring;
+    ring.init(1ULL << 20);
+    TaskSlot slot = make_slot(ring, sidecar_free_placeholder_args());
+
+    auto *transport = new FakeRemoteTransport();
+    RemoteL3Endpoint endpoint(3, 99, "fake", std::unique_ptr<RemoteL3Transport>(transport));
+
+    WorkerDispatch dispatch;
+    dispatch.task_slot = slot;
+    // A REMOTE_SIDECAR placeholder names its backing only through its sidecar, so one submitted
+    // without a sidecar names nothing the runner could resolve. Match the message: submit_progress
+    // has several other runtime_error paths.
+    try {
+        endpoint.submit_progress(&ring, dispatch);
+        ADD_FAILURE() << "expected the sidecar-free placeholder to be rejected";
+    } catch (const std::runtime_error &e) {
+        EXPECT_NE(std::string(e.what()).find("without remote sidecar"), std::string::npos) << e.what();
+    }
     EXPECT_TRUE(transport->last_frame.empty());
     ring.shutdown();
 }

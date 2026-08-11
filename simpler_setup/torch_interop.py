@@ -10,13 +10,13 @@
 """Torch integration helpers.
 
 Canonical home for torch-aware helpers that convert ``torch.Tensor`` and
-``torch.dtype`` values into the runtime's ``ChipTensor`` / ``DataType``
+``torch.dtype`` values into the runtime's ``Tensor`` / ``ChipTensor`` / ``DataType``
 types. These helpers live in ``simpler_setup`` (not ``simpler``) so that the
 stable ``simpler`` runtime API can remain torch-free; torch integration is a
 setup-time/test-framework concern.
 
 Callers:
-    from simpler_setup.torch_interop import make_tensor_arg, torch_dtype_to_datatype
+    from simpler_setup.torch_interop import make_chip_tensor_arg, torch_dtype_to_datatype
 
 torch is imported lazily inside ``_ensure_torch_map`` so that importing this
 module does not force torch onto users who only touch ``simpler_setup`` for
@@ -81,8 +81,12 @@ def torch_dtype_to_datatype(dt) -> DataType:
     return _TORCH_DTYPE_MAP[dt]  # pyright: ignore[reportOptionalSubscript]
 
 
-def make_tensor_arg(tensor) -> ChipTensor:
-    """Create a ``ChipTensor`` from a torch.Tensor.
+def make_chip_tensor_arg(tensor) -> ChipTensor:
+    """Create a ``ChipTensor`` — the materialized chip POD — from a torch.Tensor.
+
+    Distinct from ``Worker.make_tensor_arg``, which names a wire ``Tensor`` (identity, no
+    address) for the ordinary dispatch path. This one carries a raw address and is only for
+    the direct ``ChipWorker`` API.
 
     The result is always contiguous (row-major strides, ``start_offset == 0``) —
     the unified ``ChipTensor`` can express strided views, but this construction path
@@ -102,14 +106,34 @@ def make_tensor_arg(tensor) -> ChipTensor:
         raise ValueError(f"Unsupported tensor dtype for ChipTensor: {tensor.dtype}")
     if tensor.device.type != "cpu":
         raise ValueError(
-            f"make_tensor_arg requires a CPU tensor, got device={tensor.device}. "
+            f"make_chip_tensor_arg requires a CPU tensor, got device={tensor.device}. "
             "A device pointer must be wrapped explicitly via "
             "ChipTensor.make(..., child_memory=True)."
         )
     if not tensor.is_contiguous():
         raise ValueError(
-            "make_tensor_arg requires a contiguous tensor (TaskArgs ChipTensors are constructed "
+            "make_chip_tensor_arg requires a contiguous tensor (TaskArgs ChipTensors are constructed "
             "contiguous); call tensor.contiguous() before passing it."
         )
     shapes = tuple(int(s) for s in tensor.shape)
     return ChipTensor.make(tensor.data_ptr(), shapes, dt)
+
+
+def make_tensor_arg(worker, tensor):
+    """A ``Tensor`` task arg over a **pre-fork** host torch tensor.
+
+    Names ``tensor`` as a memoized ``FORK_SHM`` handle on ``worker`` (``worker.make_tensor_arg``), inferring
+    shapes + dtype from the tensor. Use for standalone L3 examples whose host inputs/outputs are
+    ``share_memory_()`` tensors allocated before ``worker.init()`` (fork-inherited). A contiguous CPU
+    tensor is required (as for ``make_chip_tensor_arg``).
+    """
+    _ensure_torch_map()
+    dt = _TORCH_DTYPE_MAP.get(tensor.dtype)  # pyright: ignore[reportOptionalMemberAccess]
+    if dt is None:
+        raise ValueError(f"Unsupported tensor dtype: {tensor.dtype}")
+    if tensor.device.type != "cpu":
+        raise ValueError(f"make_tensor_arg requires a CPU tensor, got device={tensor.device}.")
+    if not tensor.is_contiguous():
+        raise ValueError("make_tensor_arg requires a contiguous tensor; call tensor.contiguous() first.")
+    shapes = tuple(int(s) for s in tensor.shape)
+    return worker.make_tensor_arg(tensor, shapes=shapes, dtype=int(dt.value))

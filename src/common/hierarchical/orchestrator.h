@@ -17,7 +17,7 @@
  *   - submit_next_level_group(CallableIdentity, vector<TaskArgs>, CallConfig, worker_ids)
  *   - submit_sub(CallableIdentity, TaskArgs)
  *   - submit_sub_group(CallableIdentity, vector<TaskArgs>)
- *   - alloc(shape, dtype) — runtime-owned intermediate buffer
+ *   - alloc(shape, dtype, identity) — runtime-owned intermediate buffer (returns its VA)
  *
  * Each TaskArgs carries per-tensor TensorArgType tags. The Orchestrator
  * walks those tags to drive dependency inference and — for OUTPUT tags with
@@ -93,23 +93,21 @@ public:
         std::function<void()> ready_notify_cb = {}
     );
 
-    // Allocate an intermediate buffer from the Worker's HeapRing (MAP_SHARED,
-    // visible to forked child workers). Returns a contiguous ChipTensor whose
-    // `.buffer.addr` points into the ring.
+    // Allocate an intermediate buffer from the Worker's HeapRing (MAP_SHARED, visible to forked child
+    // workers) and return its VA. Registered in the tensormap under the identity's canonical hash
+    // (matching how infer_deps keys a Tensor), so the caller can wrap the VA as a FORK_SHM
+    // Buffer carrying `identity` and a ref over it dependency-wires to this slot. Backs
+    // Worker.alloc_shared_tensor / Orchestrator.alloc (Python).
     //
-    // Lifetime: aligned with a synthetic task slot. The buffer is reclaimed
-    // (FIFO, via last_alive) once every downstream consumer tagging the
-    // pointer has reached CONSUMED and scope_end has released the scope ref.
-    ChipTensor alloc(const std::vector<uint32_t> &shape, DataType dtype);
+    // Lifetime: aligned with a synthetic task slot. The buffer is reclaimed (FIFO, via last_alive) once
+    // every downstream consumer tagging the ref has reached CONSUMED and scope_end has released the
+    // scope ref.
+    uint64_t alloc(const std::vector<uint32_t> &shape, DataType dtype, const CanonicalIdentity &identity);
 
-    // Memory management on a specific next-level worker. Thread-safe:
-    // can be called from the orch thread while the target worker is
-    // running a task (MemoryAllocator is mutex-protected).
-    uint64_t malloc(int worker_id, size_t size);
+    // Bytes currently committed by a specific next-level worker's device
+    // allocator. Thread-safe: can be called from the orch thread while the
+    // target worker is running a task (MemoryAllocator is mutex-protected).
     uint64_t committed_device_memory(int worker_id);
-    void free(int worker_id, uint64_t ptr);
-    void copy_to(int worker_id, uint64_t dst, uint64_t src, size_t size);
-    void copy_from(int worker_id, uint64_t dst, uint64_t src, size_t size);
 
     // Submit a NEXT_LEVEL task. `callable` is the stable identity returned
     // by Worker.register(); the child resolves its digest to a private slot.

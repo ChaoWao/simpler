@@ -121,28 +121,14 @@ void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
 PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena, int32_t dep_pool_capacity) {
     int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH];
-    int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         dep_pool_capacities[r] = dep_pool_capacity;
-        task_window_sizes[r] = PTO2_TASK_WINDOW_SIZE;
     }
-    return reserve_layout(arena, dep_pool_capacities, task_window_sizes);
+    return reserve_layout(arena, dep_pool_capacities);
 }
 
 PTO2SchedulerLayout
 PTO2SchedulerState::reserve_layout(DeviceArena &arena, const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]) {
-    int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_window_sizes[r] = PTO2_TASK_WINDOW_SIZE;
-    }
-    return reserve_layout(arena, dep_pool_capacities, task_window_sizes);
-}
-
-PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(
-    DeviceArena &arena, const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH],
-    const int32_t task_window_sizes[PTO2_MAX_RING_DEPTH]
-) {
-    (void)task_window_sizes;
     PTO2SchedulerLayout layout{};
     layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -552,7 +538,7 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
         task_window_sizes_i32[r] = static_cast<int32_t>(task_window_sizes[r]);
     }
     layout.offsets.orch = PTO2OrchestratorState::reserve_layout(arena, task_window_sizes_i32, dep_pool_capacities);
-    layout.offsets.sched = PTO2SchedulerState::reserve_layout(arena, dep_pool_capacities, task_window_sizes_i32);
+    layout.offsets.sched = PTO2SchedulerState::reserve_layout(arena, dep_pool_capacities);
     layout.offsets.off_runtime = arena.reserve(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE);
     layout.offsets.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
 

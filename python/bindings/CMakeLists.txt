@@ -51,6 +51,7 @@ target_compile_definitions(_task_interface PRIVATE
 
 target_sources(_task_interface PRIVATE
     ${CMAKE_SOURCE_DIR}/src/common/worker/chip_worker.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/worker/chip_run_lane.cpp
     # Host-side assert_impl / get_stacktrace for the unified Tensor's
     # always_assert (Tensor::make -> init_external). The binding does not link
     # the runtime orchestration/common.cpp that provides these for runtime .so.
@@ -61,6 +62,7 @@ target_include_directories(_task_interface PRIVATE
     ${CMAKE_SOURCE_DIR}/src/common/task_interface
     ${CMAKE_SOURCE_DIR}/src/common/worker
     ${CMAKE_SOURCE_DIR}/src/common/hierarchical
+    ${CMAKE_SOURCE_DIR}/src/common/platform/include
     ${CMAKE_SOURCE_DIR}/src/common/platform/include/common
     ${CMAKE_SOURCE_DIR}/src/common/platform/include/host
     ${CMAKE_CURRENT_SOURCE_DIR}

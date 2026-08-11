@@ -43,10 +43,77 @@ allocation: if `sum(b.nbytes) > window_size`, `allocate_domain` raises
 | `device_ctx` | pointer to the device-side `CommContext` (pass as a kernel scalar) |
 | `local_window_base` | base device address of this rank's window |
 | `actual_window_size` | window size actually allocated |
-| `buffer_ptrs` | `{buffer_name: device_ptr}` for each `CommBufferSpec` |
+| `buffers` | `{buffer_name: Buffer}` for each `CommBufferSpec` (device `VMM_WINDOW`, owned by this chip) |
 
 Kernels read peer windows through `device_ctx` (which holds every rank's
-window base, local + imported peer); `buffer_ptrs[name]` is the local slice.
+window base, local + imported peer); `buffers[name]` is the local slice —
+name it in a task arg with `buffers[name].tensor(shapes, dtype)`.
+
+### Global CommDomain across local and remote L3 nodes
+
+An L4 worker can build the same `CommContext` shape across any combination of
+forked local L3 workers (`add_worker`) and TCP-connected L3 workers
+(`add_remote_worker`) without `mpirun`:
+
+```python
+with orch.allocate_global_domain(
+    name="tp",
+    members=[(node0_worker_id, 0), (node1_worker_id, 0)],
+    window_size=4096,
+    buffers=[CommBufferSpec("payload", "uint8", 4096, 4096)],
+) as domain:
+    ...
+```
+
+Each member is `(l3_worker_id, local_l2_worker_id)`. The order defines dense
+domain ranks. A remote node reads `comm_profile` and `global_device_ranks`
+from `RemoteWorkerSpec`; a local L3 reads the same fields from its `Worker`
+configuration. All participating nodes must use the same profile.
+
+Global CommDomain capability follows the backend that the node actually
+loads: a platform ending in `sim` supports the `sim` profile, and a real
+`a2a3` platform supports `a3-fabric-v1`. Real A5 and any other
+platform/profile combination currently reject allocation before `PREPARE`.
+Each local or remote L3 repeats the same check during `COMM_INIT`, so an
+unsupported backend never advertises a usable descriptor capability.
+
+The control flow is:
+
+1. L4 sends `COMM_INIT` with cluster, node, global-device, and domain-rank
+   identities.
+2. Each L3 asks its participating L2 children to create a local window and
+   export a transport descriptor.
+3. L4 validates and assembles one complete rank-ordered descriptor table.
+4. L4 returns that table to every L3, which forwards it to each L2 for import.
+5. L4 commits only after all imports succeed. Any earlier failure sends
+   `ABORT` and releases every prepared local window.
+
+The descriptor reports the backend's actual mapped size. A3 Fabric may align
+the requested size to its VMM granularity; buffer carving and bounds checks
+therefore use the returned mapping size. Handles and device pointers never
+cross the public Python API. Remote orchestration code calls
+`orch.get_global_domain(domain_id)` to obtain only its committed L3-local
+contexts.
+
+`copy_to_global_domain` and `copy_from_global_domain` provide bounded
+control-plane staging and smoke checks. Normal communication still runs in
+L2 kernels through the imported `CommContext`.
+
+By default a live Global CommDomain is swept after the current `Worker.run`
+drains. Set `retain_after_run=True` when a communication kernel writes results
+into the window and a second L4 run must inspect them. The later run should
+call `domain.release()` after copying the results; `Worker.close()` is the
+final safety net.
+
+Repository CI exercises the complete transaction, rollback, and mixed
+local/remote paths with the `sim` backend. It also exercises the real
+`a3-fabric-v1` backend: the two-machine `st-pod-onboard-a2a3` job runs
+`global_tload_mixed_l3` and `compute_then_tload_mixed_l3`, whose default
+profile is `a3-fabric-v1` on real A3 devices. Those two examples are the
+in-repository harness for the Fabric path; a run that needs to know whether
+Fabric was covered should read that job rather than infer it from the
+simulation checks. The job now drives their `test_*.py` wrappers through
+`pod-run-pytest` rather than calling `run_parent.sh` directly.
 
 ---
 
@@ -64,7 +131,7 @@ The handle is a context manager. Its lifecycle has **two distinct states**:
 This split exists because `submit_next_level()` only *enqueues* DAG work;
 `Worker.run()` does not wait for completion until the orch function returns.
 If `release()` freed memory immediately on `with`-exit, a still-queued task that
-captured the domain's `device_ctx` / `buffer_ptrs` would read freed memory. So
+captured the domain's `device_ctx` / `buffers` would read freed memory. So
 **release is deferred**: `release()` flips `released` and queues the backend
 free; the real free runs after the run fence, when every task that could
 reference the window has completed.
@@ -151,14 +218,21 @@ To preload host data (rather than have a kernel write the window), use
 `orch.copy_to`:
 
 ```python
-orch.copy_to(chip_idx, dst=handle[chip_idx].buffer_ptrs["input"], src=tensor.data_ptr(), size=n)
+orch.copy_to(handle[chip_idx].buffers["input"], src_buffer)
 ```
 
-`copy_to` is **synchronous** (control-mailbox round-trip + synchronous
-`rtMemcpy` H2D): when it returns, the bytes are in that rank's window. `src`
-must be device-visible from the forked chip child — e.g. a `torch` tensor moved
-to shared memory with `.share_memory_()` **before** `Worker.init()` forks the
-chips.
+`copy_to(dst_handle, src)` is **synchronous** (control-mailbox round-trip +
+synchronous `rtMemcpy` H2D): when it returns, the bytes are in that rank's
+window. `dst` is the window's `VMM_WINDOW` Buffer; `src` is a host `Buffer`. Both ends cross
+the fork as buffer descriptors, and the chip child resolves each one through the same
+map-once-by-identity path a task argument takes, then DMAs straight out of the
+backing — no intermediate copy, and no host address ever leaves this process:
+
+```python
+src_buffer = worker.create_buffer(nbytes)
+torch.frombuffer(src_buffer.shm.buf, dtype=torch.float32, count=n).copy_(src_tensor)
+orch.copy_to(handle[rank].buffers["input_window"], src_buffer)
+```
 
 **Cross-rank ordering:** when a kernel reads a *peer's* staged window, stage
 **all** ranks' windows before submitting any kernel — `copy_to` is synchronous
@@ -168,7 +242,7 @@ rank's producer run before another rank has finished staging:
 ```python
 with orch.allocate_domain(...) as handle:
     for chip_idx in handle.workers:                       # stage all first
-        orch.copy_to(chip_idx, dst=handle[chip_idx].buffer_ptrs["input"], src=..., size=n)
+        orch.copy_to(handle[chip_idx].buffers["input"], tensor)
     for chip_idx in handle.workers:                       # then submit
         orch.submit_next_level(chip_handle, args, cfg, worker=chip_idx)
 ```
@@ -177,52 +251,46 @@ with orch.allocate_domain(...) as handle:
 
 ## 6. Host tensor visibility for `worker.run`
 
-A host tensor passed to `worker.run(...)` / `orch.submit_next_level(...)` /
-`orch.submit_sub(...)` is ultimately dereferenced from a forked local L3 child,
-not the parent, so its memory must be backed by pages mapped into that child.
-Fork-inherited MAP_SHARED mappings retain their virtual address, while post-fork
-worker-allocated buffers may map at a different address and have their pointers
-rewritten before decoding. Two sources are legal:
+A host tensor named in a task arg is ultimately dereferenced from a forked local
+L3 child, not the parent, so its backing must reach that child. Under the
+Buffer ABI an arg is a `Tensor` carrying a self-describing descriptor; the
+child materializes it lazily on first receipt (map-once, keyed by canonical
+identity) — there is no eager broadcast and no host-pointer rewrite. Two sources
+are legal:
 
 | Source | How | Why it works |
 | ------ | --- | ------------ |
-| **fork-inherited** | `tensor.share_memory_()` **before `Worker.init()`** (before the local L3 children are forked) | the child inherits the MAP_SHARED page at fork |
-| **worker-allocated post-fork** | `worker.create_host_buffer(nbytes)` after the children exist | born-shared memory attached into every local child, **zero-copy** |
+| **fork-inherited** | `tensor.share_memory_()` **before `Worker.init()`**, named with `worker.make_tensor_arg(t, shapes, dtype)` (FORK_SHM) | the child inherits the MAP_SHARED page at the fork; it resolves to that same VA |
+| **worker-allocated post-fork** | `worker.create_buffer(nbytes)` after the children exist, named with `handle.tensor(shapes, dtype)` (POSIX_SHM) | the child maps the shm by identity on first receipt, **zero-copy** |
 
 The local L3 children are forked eagerly in `Worker.init()`. A host tensor
-created after that — the natural dynamic-shape serving pattern — is invisible to
-the children unless it lives in a `create_host_buffer` buffer:
+created after that — the natural dynamic-shape serving pattern — reaches the
+children by naming a `create_buffer` handle as a `Tensor`:
 
 ```python
 worker = Worker(level=3, ...); worker.register(chip); worker.init()   # forks the chips
 
-buf_h = worker.create_host_buffer(tokens * hidden_size * 4)   # born-shared, post-fork
-buf_o = worker.create_host_buffer(batch * vocab * 4)
+buf_h = worker.create_buffer(tokens * hidden_size * 4)   # POSIX shm, post-fork
+buf_o = worker.create_buffer(batch * vocab * 4)
 try:
-    hidden = torch.frombuffer(buf_h.buffer, dtype=torch.float32).view(tokens, hidden_size)
-    out    = torch.frombuffer(buf_o.buffer, dtype=torch.float32).view(batch, vocab)
+    hidden = torch.frombuffer(buf_h.shm.buf, dtype=torch.float32, count=tokens * hidden_size)
+    out    = torch.frombuffer(buf_o.shm.buf, dtype=torch.float32, count=batch * vocab)
     for step in batches:
-        fill(hidden); worker.run(orch, ...)     # no per-run copy — child reads/writes the same pages
+        fill(hidden)
+        # name each buffer as a ref in the task args; the child maps it once
+        worker.run(orch, ...)                   # no per-run copy — child reads/writes the same pages
         use(out)
-    del hidden, out                             # drop views before free
+    del hidden, out                             # drop views before close
 finally:
-    worker.free_host_buffer(buf_h)
-    worker.free_host_buffer(buf_o)
+    buf_h.close()
+    buf_o.close()
 ```
 
-**Create once, reuse many runs.** `create_host_buffer` maps a shm into each
-child and keeps it mapped; the child reads and writes the same physical pages
-the parent sees, so there is **no per-run copy**. Build the tensor over
-`buf.buffer` (buffer protocol — `torch.frombuffer` / `np.frombuffer`) once and
-reuse it; a sub-view (slice) that fits inside the buffer is resolved
-automatically. simpler stays framework-free — torch/numpy appear only on the
-caller's side.
-
-**Unregistered post-fork tensors are forwarded unvalidated.** A tensor that is
-neither fork-inherited nor from `create_host_buffer` is passed through as-is:
-the fork-inherited case is the common legitimate one, so it must keep working.
-An anonymous post-fork tensor forwarded this way reads stale/unmapped memory in
-the child — allocate it with `create_host_buffer` instead.
+**Create once, reuse many runs.** The first ref over a `create_buffer` handle
+maps its shm into the child (map-once, cached by identity); later runs reuse the
+mapping, so there is **no per-run copy**. Build the tensor over `handle.shm.buf`
+(buffer protocol — `torch.frombuffer` / `np.frombuffer`) once and reuse it.
+simpler stays framework-free — torch/numpy appear only on the caller's side.
 
 ### Contract / limits
 
@@ -230,24 +298,16 @@ the child — allocate it with `create_host_buffer` instead.
   child; during a `run` the child is reading/writing them, so the parent must
   not read or write the buffer until `run` returns (same contract as a
   fork-inherited `.share_memory_()` tensor). In-run cross-task ordering (a
-  producer task's output read by a consumer task) is still enforced by the
-  runtime's OverlapMap, keyed on the host address — no host-side copy involved.
-- **Shape varies within `nbytes`.** A tensor built over the buffer may take any
-  shape whose bytes fit; a view that runs past the buffer raises before dispatch
-  (`overruns its host buffer`). To grow beyond `nbytes`, free and re-create a
-  larger buffer. Do not free a buffer while a `run` using it is in flight, and
-  drop every tensor/`memoryview` over `buffer.buffer` before `free_host_buffer`
-  (or `close()`) so the shm can be released promptly.
-- **`orch.copy_to` is the unmanaged low-level path.** `create_host_buffer`
-  covers the `run` / `submit_next_level` host-tensor args. The explicit
-  `orch.copy_to(src=tensor.data_ptr())` staging path (§5) is *not* validated —
-  its `src` must be fork-inherited (`.share_memory_()` before `init()`)
-  or a `create_host_buffer` buffer.
+  producer task's output read by a consumer task) is enforced by the runtime's
+  dependency inference, keyed on the ref's canonical identity — no host-side copy.
+- **`orch.copy_to` is the low-level device path.** It moves host bytes into a
+  domain window (`copy_to(dst_handle, src)`, §5); both ends are `Buffer`s, so the
+  child resolves them exactly as it resolves a task argument.
 - **Fork-inherited anonymous memory is copy-on-write, hence stale.** Even a
   tensor the child legitimately inherited is only useful as a *live* input if it
   is MAP_SHARED: anonymous (non-`share_memory_`) pages are COW, so writes the
   parent makes *after* fork do not reach the child. A live input must be
-  file-backed (`.share_memory_()` before `init()`) or a `create_host_buffer` one.
+  file-backed (`.share_memory_()` before `init()`) or a `create_buffer` one.
 
 ---
 

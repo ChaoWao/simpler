@@ -26,7 +26,7 @@ import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
 
 _VECTOR_KERNELS = "../../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
@@ -85,9 +85,9 @@ class TestPreparedCallable(SceneTestCase):
         size = 128 * 128
         a, b = params["a"], params["b"]
         return TaskArgsBuilder(
-            Tensor("a", torch.full((size,), a, dtype=torch.float32)),
-            Tensor("b", torch.full((size,), b, dtype=torch.float32)),
-            Tensor("f", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("a", torch.full((size,), a, dtype=torch.float32)),
+            TensorArg("b", torch.full((size,), b, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(size, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):

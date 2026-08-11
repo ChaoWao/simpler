@@ -35,6 +35,8 @@ workers/
     child_memory/           # orch.malloc + child_memory=True, weight reuse across tasks
   l4/                       # Multi-machine examples (one L3 here, one over TCP)
     vector_add_mixed_l3/    # Worker(level=4) + add_remote_worker, golden checked on both sides
+    global_tload_mixed_l3/  # Global CommDomain build + cross-machine peer TLOAD on both ranks
+    compute_then_tload_mixed_l3/  # compute round on both L2s, then peer TLOAD through the same domain
 ```
 
 Why no `tensormap_and_ringbuffer/` layer? Because every example here hard-codes
@@ -65,7 +67,8 @@ l4/<your_example>/
   README.md
   kernels/aiv/*.cpp
   kernels/orchestration/*.cpp
-  main.py                   # entry point: argparse + main()
+  main.py                   # entry point: argparse + main() delegating to run()
+  test_<your_example>.py    # @pytest.mark.pod wrapper collected by pod CI
   run_parent.sh             # maps environment variables onto main.py's flags
 ```
 
@@ -86,9 +89,8 @@ it. Three things are load-bearing:
 
 ### The environment-variable contract
 
-`run_parent.sh` exists to turn environment variables into `main.py`'s flags,
-because that is the interface CI drives it through. Pick a prefix and read
-these five; CI sets exactly them:
+`run_parent.sh` exists to turn environment variables into `main.py`'s flags for
+manual two-machine runs. Pick a prefix and read these five:
 
 | Variable | Meaning |
 | -------- | ------- |
@@ -103,11 +105,10 @@ Anything else — platform, runtime — defaults inside `run_parent.sh`.
 ### Running it in CI
 
 The `st-pod-onboard-a2a3` job runs L4 examples across a pair of a2a3 machines.
-Adding yours to it is one block plus one line, and the wiring, the log
-artifact, and the failure semantics are described in
-[`docs/ci.md`](../../docs/ci.md#multi-machine-pod-jobs). Read that before adding the
-block — in particular why a step that reports green there may still have
-failed.
+The job runs one `pytest examples tests/st -m pod` sweep, so adding yours means
+adding a `test_*.py` wrapper carrying `@pytest.mark.pod`. Do not edit
+`_st-pod.yml`. The wiring and the log artifact are described in
+[`docs/ci.md`](../../docs/ci.md#multi-machine-pod-jobs).
 
 ## Prerequisites
 
@@ -147,9 +148,10 @@ require an Ascend NPU box with `ASCEND_HOME_PATH` set.
 
 L2 and L3 examples follow that uniform CLI. **L4 examples do not** — they need
 a peer's address and a device split on each side, so they take `--remote`,
-`--local-devices` and `--remote-devices` instead of `-p`/`-d`, and are normally
-launched through their `run_parent.sh`. See each L4 example's README for the
-two-machine sequence.
+`--local-devices` and `--remote-devices` instead of `-p`/`-d`. Each L4 example
+now also ships a `test_*.py` wrapper for pytest collection; CI uses that wrapper
+and `run_parent.sh` remains the manual entry point. See each L4 example's README
+for the two-machine sequence.
 
 ## Related documentation
 

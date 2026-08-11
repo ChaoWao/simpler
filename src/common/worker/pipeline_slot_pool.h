@@ -113,6 +113,16 @@ private:
  */
 class PipelineSlotGenerationFilter {
 public:
+    // Preview half of the preview/commit pair: reports the same verdict admit()
+    // would give, without advancing the slot. Const because committing nothing
+    // is the whole reason it exists — preparation can fail after this check, and
+    // a generation spent on a run that then falls back is not recoverable.
+    bool is_admissible(const PipelineSlotLease &lease) const {
+        if (lease.slot_id >= newest_.size()) return false;
+        std::lock_guard<std::mutex> lock(mu_);
+        return lease.generation >= newest_[lease.slot_id];
+    }
+
     bool admit(const PipelineSlotLease &lease) {
         if (lease.slot_id >= newest_.size()) return false;
         std::lock_guard<std::mutex> lock(mu_);
@@ -128,7 +138,7 @@ public:
     }
 
 private:
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::array<uint64_t, PTO_PIPELINE_MAX_DEPTH> newest_{};
 };
 

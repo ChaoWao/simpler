@@ -10,18 +10,18 @@
 """Public Python API for task_interface nanobind bindings.
 
 Re-exports the canonical C++ types (DataType, ChipTensor, ChipStorageTaskArgs, TaskArgs,
-TensorArgType) plus ``scalar_to_uint64``. Torch-aware helpers (``make_tensor_arg``,
+TensorArgType) plus ``scalar_to_uint64``, and re-exports the address-free ``Tensor`` — the task
+argument users build — from ``simpler.buffer``. Torch-aware helpers (``make_chip_tensor_arg``,
 ``torch_dtype_to_datatype``) live in ``simpler_setup.torch_interop`` — this module has no torch
 dependency.
 
-The address-free L3+ ``Tensor`` of ``simpler.buffer`` is deliberately **not** re-exported here.
-``TaskArgs.add_tensor`` still takes a ``ChipTensor``, so a ``Tensor`` on this surface would be a
-public type whose advertised operation rejects it. It joins this module in the wire cutover that
-makes ``TaskArgs`` carry it, not before.
+``ChipTensor`` is the chip-only POD the runtime ABI expects, paired with
+``ChipStorageTaskArgs`` on the direct ``ChipWorker`` path; it carries a
+materialized address and never crosses a process boundary.
 
 Usage:
-    from simpler.task_interface import ChipTensor, DataType, TensorArgType
-    from simpler_setup.torch_interop import make_tensor_arg
+    from simpler.task_interface import DataType, TaskArgs, Tensor, TensorArgType
+    from simpler_setup.torch_interop import make_chip_tensor_arg
 """
 
 from __future__ import annotations
@@ -48,7 +48,9 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
+    MAILBOX_PREPARATION_DISPOSITION_VALUES,
     MAILBOX_SIZE,
+    MAILBOX_STATE_VALUES,
     MAX_REGISTERED_CALLABLE_IDS,
     MAX_TENSOR_DIMS,
     ArgDirection,
@@ -70,6 +72,8 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_element_size,
     read_args_from_blob,
 )
+
+from .buffer import Buffer, Tensor
 
 
 def _assert_bindings_match_source_tree() -> None:
@@ -136,11 +140,14 @@ def _assert_bindings_match_source_tree() -> None:
 
 _assert_bindings_match_source_tree()
 
+from .global_comm_domain import GlobalDomainBuffer, GlobalDomainMember  # noqa: E402
+
 __all__ = [
     "DataType",
     "get_element_size",
     "get_dtype_name",
     "MAX_TENSOR_DIMS",
+    "Tensor",
     "ChipTensor",
     "ChipStorageTaskArgs",
     "TensorArgType",
@@ -165,11 +172,15 @@ __all__ = [
     "MAILBOX_FRAME_SIZE",
     "MAILBOX_OFF_ERROR_MSG",
     "MAILBOX_ERROR_MSG_SIZE",
+    "MAILBOX_STATE_VALUES",
+    "MAILBOX_PREPARATION_DISPOSITION_VALUES",
     "read_args_from_blob",
     # Dynamic CommDomain allocation (orch-only API)
     "CommBufferSpec",
     "ChipDomainContext",
     "CommDomainHandle",
+    "GlobalCommDomainHandle",
+    "GlobalCommDomainView",
 ]
 
 COMM_MAX_RANK_NUM = 64
@@ -770,17 +781,32 @@ def _storage_for_remote_task_args(args: TaskArgs) -> _RemoteTaskArgsStorage:
         return storage
 
 
-def _task_args_add_tensor(
-    self: TaskArgs, tensor: ChipTensor | RemoteTensorRef, tag: TensorArgType = TensorArgType.INPUT
-) -> None:
+def _task_args_add_tensor(self: TaskArgs, tensor, tag: TensorArgType = TensorArgType.INPUT) -> None:
+    """Add a task arg. ``tensor`` is a ``simpler.buffer.Tensor`` (packable) or its packed
+    bytes. A RemoteTensorRef (arg destined for a remote worker) is rewritten to a REMOTE_SIDECAR
+    ``Tensor`` (no local backing) with its remote descriptor tracked in the sidecar."""
     if isinstance(tensor, RemoteTensorRef):
+        from .buffer import AddressSpace, remote_sidecar_tensor
+
         storage = _storage_for_remote_task_args(self)
-        metadata = ChipTensor.make(0, tensor.shape, tensor.dtype)
-        _TASK_ARGS_ADD_TENSOR(self, metadata, tag)
+        handle = tensor.handle
+        inline = handle.address_space == RemoteAddressSpace.HOST_INLINE
+        nbytes = tensor.nbytes
+        assert nbytes is not None
+        placeholder = remote_sidecar_tensor(
+            shapes=tuple(int(s) for s in tensor.shape),
+            dtype=int(tensor.dtype.value),
+            nbytes=int(nbytes),
+            owner_worker_id=0 if inline else int(handle.owner_worker_id),
+            buffer_id=0 if inline else int(handle._buffer_id),
+            generation=0 if inline else int(handle._generation),
+            address_space=(
+                AddressSpace.DEVICE if handle.address_space == RemoteAddressSpace.REMOTE_DEVICE else AddressSpace.HOST
+            ),
+        )
+        _TASK_ARGS_ADD_TENSOR(self, placeholder, tag)
         storage.sidecars.append(_sidecar_from_ref(storage, tensor))
         return
-    if not isinstance(tensor, ChipTensor):
-        raise TypeError("TaskArgs.add_tensor expects ChipTensor or RemoteTensorRef")
     _TASK_ARGS_ADD_TENSOR(self, tensor, tag)
     with _REMOTE_TASK_ARGS_STORAGE_LOCK:
         storage = _REMOTE_TASK_ARGS_STORAGE.get(self)
@@ -913,9 +939,8 @@ def scalar_to_uint64(value) -> int:
 class CommBufferSpec:
     """A named slice of the per-rank communicator window.
 
-    Buffers are placed sequentially inside the window in declaration order —
     Buffers are placed sequentially inside the window in declaration order.
-    The ``CommDomainHandle.contexts[chip_idx].buffer_ptrs`` dict returned by
+    The ``CommDomainHandle.contexts[chip_idx].buffers`` dict returned by
     ``Orchestrator.allocate_domain`` is keyed by ``CommBufferSpec.name``.
     """
 
@@ -939,7 +964,9 @@ class ChipDomainContext:
     device_ctx: int
     local_window_base: int
     actual_window_size: int
-    buffer_ptrs: dict[str, int]
+    # Each named window slice as a device ``VMM_WINDOW`` Buffer owned by this chip. Name a task
+    # arg with ``buffers[name].tensor(shapes, dtype)`` and dispatch it only to this chip (``domain_rank``).
+    buffers: dict[str, Buffer]
 
 
 class CommDomainHandle:
@@ -1004,7 +1031,7 @@ class CommDomainHandle:
         if self._released:
             raise RuntimeError(
                 f"CommDomainHandle({self.name!r}) already released; do not pass it to submit_* "
-                "after release(). Submitted tasks that captured device_ctx / buffer_ptrs before "
+                "after release(). Submitted tasks that captured device_ctx / buffers before"
                 "release will still see live memory until Worker.run drains."
             )
         return self.contexts[chip_idx]
@@ -1063,6 +1090,132 @@ class CommDomainHandle:
         else:
             state = "live"
         return f"CommDomainHandle(name={self.name!r}, workers={self.workers}, {state})"
+
+
+class GlobalCommDomainHandle:
+    """L4-owned handle for one CommDomain spanning local and/or remote L3 nodes.
+
+    The handle contains stable topology and buffer offsets only. Device
+    addresses remain in the L3/L2 process that imported the transport handles.
+    """
+
+    __slots__ = (
+        "_freed",
+        "_release_fn",
+        "_released",
+        "buffers",
+        "domain_id",
+        "generation",
+        "mapping_size",
+        "members",
+        "name",
+        "retain_after_run",
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        members: tuple[GlobalDomainMember, ...],
+        buffers: tuple[GlobalDomainBuffer, ...],
+        domain_id: int,
+        generation: int,
+        mapping_size: int,
+        retain_after_run: bool,
+        _release_fn,
+    ) -> None:
+        self.name = str(name)
+        self.members = tuple(members)
+        self.buffers = tuple(buffers)
+        self.domain_id = int(domain_id)
+        self.generation = int(generation)
+        self.mapping_size = int(mapping_size)
+        self.retain_after_run = bool(retain_after_run)
+        self._release_fn = _release_fn
+        self._released = False
+        self._freed = False
+
+    def member(self, domain_rank: int) -> GlobalDomainMember:
+        if self._released:
+            raise RuntimeError(f"GlobalCommDomainHandle({self.name!r}) is already released")
+        rank = int(domain_rank)
+        if rank < 0 or rank >= len(self.members):
+            raise IndexError(f"global domain rank {rank} is out of range")
+        member = self.members[rank]
+        if member.domain_rank != rank:
+            raise RuntimeError("global domain member table is not rank ordered")
+        return member
+
+    def buffer_range(self, name: str) -> tuple[int, int]:
+        if self._released:
+            raise RuntimeError(f"GlobalCommDomainHandle({self.name!r}) is already released")
+        offset = 0
+        for buffer in self.buffers:
+            if buffer.name == name:
+                return offset, buffer.nbytes
+            offset += buffer.nbytes
+        raise KeyError(f"global domain {self.name!r} has no buffer {name!r}")
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    @property
+    def freed(self) -> bool:
+        return self._freed
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._release_fn(self)
+        self._released = True
+
+    def __enter__(self) -> GlobalCommDomainHandle:
+        return self
+
+    def __exit__(self, *_):
+        self.release()
+
+
+class GlobalCommDomainView:
+    """L3-local imported view exposed to remote orchestration callables."""
+
+    __slots__ = (
+        "_committed",
+        "contexts",
+        "domain_id",
+        "generation",
+        "mapping_size",
+        "members",
+        "name",
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        members: tuple[GlobalDomainMember, ...],
+        contexts: dict[int, ChipDomainContext],
+        domain_id: int,
+        generation: int,
+        mapping_size: int,
+    ) -> None:
+        self.name = str(name)
+        self.members = tuple(members)
+        self.contexts = dict(contexts)
+        self.domain_id = int(domain_id)
+        self.generation = int(generation)
+        self.mapping_size = int(mapping_size)
+        self._committed = False
+
+    def __getitem__(self, local_worker_id: int) -> ChipDomainContext:
+        if not self._committed:
+            raise RuntimeError(f"GlobalCommDomainView({self.name!r}) is not committed")
+        return self.contexts[int(local_worker_id)]
+
+    @property
+    def committed(self) -> bool:
+        return self._committed
 
 
 # Process-wide RTLD_GLOBAL preload registry. host_runtime.so resolves its

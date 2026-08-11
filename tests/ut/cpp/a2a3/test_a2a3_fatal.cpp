@@ -34,11 +34,13 @@ extern "C" void framework_bind_runtime(PTO2Runtime *rt) { g_bound_runtime = rt; 
 
 struct FakeRuntime {
     const PTO2RuntimeOps *ops;
+    PTO2ScopeMode pending_scope_mode = PTO2ScopeMode::AUTO;
     bool fatal = false;
     int submit_calls = 0;
     int alloc_calls = 0;
     int scope_begin_calls = 0;
     int scope_end_calls = 0;
+    PTO2ScopeMode last_scope_mode = PTO2ScopeMode::AUTO;
     int get_calls = 0;
     int set_calls = 0;
     int report_fatal_calls = 0;
@@ -48,6 +50,9 @@ struct FakeRuntime {
 };
 
 static_assert(offsetof(FakeRuntime, ops) == 0);  // Guard: reinterpret_cast below assumes ops is first member.
+static_assert(
+    offsetof(FakeRuntime, pending_scope_mode) == offsetof(PTO2Runtime, pending_scope_mode)
+);  // ...and pending_scope_mode follows ops, matching the PTO2Runtime prefix the inline scope wrappers pun through.
 
 FakeRuntime *as_fake(PTO2Runtime *rt) { return reinterpret_cast<FakeRuntime *>(rt); }
 
@@ -56,7 +61,11 @@ TaskOutputTensors fake_submit(PTO2Runtime *rt, const MixedKernels &, const CoreT
     return TaskOutputTensors{};
 }
 
-void fake_scope_begin(PTO2Runtime *rt) { as_fake(rt)->scope_begin_calls++; }
+void fake_scope_begin(PTO2Runtime *rt) {
+    FakeRuntime *fake = as_fake(rt);
+    fake->scope_begin_calls++;
+    fake->last_scope_mode = fake->pending_scope_mode;
+}
 void fake_scope_end(PTO2Runtime *rt) { as_fake(rt)->scope_end_calls++; }
 void fake_orchestration_done(PTO2Runtime *) {}
 bool fake_is_fatal(PTO2Runtime *rt) { return as_fake(rt)->fatal; }
@@ -177,6 +186,32 @@ TEST(A2A3Fatal, ExplicitFatalRoutesThroughOps) {
     CoreTaskArgs args;
     EXPECT_TRUE(rt_submit_task(mixed, args).empty());
     EXPECT_EQ(runtime.submit_calls, 0);
+}
+
+TEST(A2A3Fatal, ScopeGuardForwardsModeUntilLexicalScopeExit) {
+    FakeRuntime runtime{};
+    runtime.ops = &kFakeOps;
+    RuntimeBindingGuard bind(reinterpret_cast<PTO2Runtime *>(&runtime));
+
+    runtime.pending_scope_mode = PTO2ScopeMode::MANUAL;
+
+    {
+        PTO2_SCOPE_GUARD();
+        EXPECT_EQ(runtime.scope_begin_calls, 1);
+        EXPECT_EQ(runtime.scope_end_calls, 0);
+        EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::AUTO);
+    }
+
+    EXPECT_EQ(runtime.scope_end_calls, 1);
+
+    {
+        PTO2_SCOPE_GUARD(PTO2ScopeMode::MANUAL);
+        EXPECT_EQ(runtime.scope_begin_calls, 2);
+        EXPECT_EQ(runtime.scope_end_calls, 1);
+        EXPECT_EQ(runtime.last_scope_mode, PTO2ScopeMode::MANUAL);
+    }
+
+    EXPECT_EQ(runtime.scope_end_calls, 2);
 }
 
 TEST(A2A3Fatal, AllocTensorConvenienceReportsInvalidArgsInsteadOfAsserting) {

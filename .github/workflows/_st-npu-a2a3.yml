@@ -78,10 +78,10 @@ jobs:
           source /usr/local/Ascend/cann/set_env.sh
           source .venv/bin/activate
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st -m "not sdma" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
+            python -m pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
+              --run "python -m pytest examples tests/st -m 'not sdma and not pod' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
           fi
 
       - name: Run pytest scene tests (a2a3 legacy SDMA paths)
@@ -91,10 +91,10 @@ jobs:
           source .venv/bin/activate
           SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            python -m pytest examples tests/st $SDMA_IGNORE -m "not pod" --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run "python -m pytest examples tests/st $SDMA_IGNORE -m 'not pod' --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
       - name: SDMA pytest (a2a3)
@@ -123,82 +123,8 @@ jobs:
               --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
-      - name: dep_gen smoke (a2a3)
+      - name: DFX smokes (a2a3)
         if: inputs.include_dfx_smokes
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
-              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-dep-gen
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
-              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-dep-gen"
-          fi
-
-      - name: dep_gen smoke (a2a3 host_build_graph)
-        if: inputs.include_dfx_smokes
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
-              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-dep-gen
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
-              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-dep-gen"
-          fi
-
-      - name: chip_swimlane smoke (a2a3)
-        if: inputs.include_dfx_smokes
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
-              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-chip-swimlane --enable-dep-gen
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
-              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-chip-swimlane --enable-dep-gen"
-          fi
-
-      - name: PMU smoke (a2a3)
-        if: inputs.include_dfx_smokes
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
-              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-pmu 2
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
-              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --enable-pmu 2"
-          fi
-
-      - name: args_dump smoke (a2a3)
-        if: inputs.include_dfx_smokes
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
-              --platform a2a3 --device ${DEVICE_RANGE} -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --dump-args
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
-              --platform a2a3 --device \$TASK_DEVICE -p no:xdist --pto-session-timeout 600 \
-              --require-pto-isa --dump-args"
-          fi
+        uses: ./.github/actions/run-onboard-dfx-smokes
+        with:
+          platform: a2a3

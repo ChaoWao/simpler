@@ -453,16 +453,16 @@ void RemoteL3SocketTransport::start_health_monitor(uint64_t session_id, int32_t 
         };
 
         try {
-            static constexpr size_t HEADER_BYTES = 40;
             while (!health_stop_.load(std::memory_order_acquire)) {
-                std::vector<uint8_t> frame(HEADER_BYTES);
-                if (!read_exact(frame.data(), HEADER_BYTES)) return;
+                std::vector<uint8_t> frame(remote_l3::FRAME_HEADER_BYTES);
+                if (!read_exact(frame.data(), remote_l3::FRAME_HEADER_BYTES)) return;
                 uint32_t payload_bytes = read_le_u32(frame.data() + 32);
                 if (payload_bytes > remote_l3::MAX_FRAME_PAYLOAD_BYTES) {
                     throw std::runtime_error("HEALTH payload exceeds maximum");
                 }
-                frame.resize(HEADER_BYTES + payload_bytes);
-                if (payload_bytes != 0 && !read_exact(frame.data() + HEADER_BYTES, payload_bytes)) return;
+                frame.resize(remote_l3::FRAME_HEADER_BYTES + payload_bytes);
+                if (payload_bytes != 0 && !read_exact(frame.data() + remote_l3::FRAME_HEADER_BYTES, payload_bytes))
+                    return;
                 auto decoded = remote_l3::decode_frame(frame);
                 if (decoded.header.frame_type != remote_l3::FrameType::HEALTH) {
                     throw std::runtime_error("non-HEALTH frame on health lane");
@@ -536,12 +536,11 @@ void RemoteL3SocketTransport::write_all(
 }
 
 std::vector<uint8_t> RemoteL3SocketTransport::read_frame(std::chrono::steady_clock::time_point deadline) {
-    static constexpr size_t HEADER_BYTES = 40;
-    std::vector<uint8_t> frame(HEADER_BYTES);
+    std::vector<uint8_t> frame(remote_l3::FRAME_HEADER_BYTES);
     size_t off = 0;
-    while (off < HEADER_BYTES) {
+    while (off < remote_l3::FRAME_HEADER_BYTES) {
         wait_readable(deadline);
-        ssize_t n = ::recv(fd_, frame.data() + off, HEADER_BYTES - off, 0);
+        ssize_t n = ::recv(fd_, frame.data() + off, remote_l3::FRAME_HEADER_BYTES - off, 0);
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             throw std::runtime_error(
@@ -555,8 +554,8 @@ std::vector<uint8_t> RemoteL3SocketTransport::read_frame(std::chrono::steady_clo
     if (payload_bytes > remote_l3::MAX_FRAME_PAYLOAD_BYTES) {
         throw std::runtime_error("RemoteL3SocketTransport: frame payload exceeds maximum");
     }
-    frame.resize(HEADER_BYTES + payload_bytes);
-    off = HEADER_BYTES;
+    frame.resize(remote_l3::FRAME_HEADER_BYTES + payload_bytes);
+    off = remote_l3::FRAME_HEADER_BYTES;
     while (off < frame.size()) {
         wait_readable(deadline);
         ssize_t n = ::recv(fd_, frame.data() + off, frame.size() - off, 0);
@@ -596,18 +595,111 @@ void RemoteL3SocketTransport::expect_hello_ready(
 
 void RemoteL3SocketTransport::submit_frame(const std::vector<uint8_t> &frame) {
     if (fd_ < 0) throw std::runtime_error("RemoteL3SocketTransport: socket is closed");
+    if (progress_command_active_) {
+        throw std::logic_error("RemoteL3SocketTransport: progress command is active");
+    }
     // Each runtime command gets a fresh runtime-timeout budget, independent of
     // the (already-spent) attach deadline.
     write_all(frame.data(), frame.size(), deadline_from_now(runtime_timeout_s_));
 }
 
 std::vector<uint8_t> RemoteL3SocketTransport::wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) {
+    if (progress_command_active_) {
+        throw std::logic_error("RemoteL3SocketTransport: progress command is active");
+    }
     auto frame_bytes = read_frame(deadline_from_now(runtime_timeout_s_));
     auto frame = remote_l3::decode_frame(frame_bytes);
     if (frame.header.frame_type != frame_type || frame.header.sequence != sequence) {
         throw std::runtime_error("RemoteL3SocketTransport: reply frame type or sequence mismatch");
     }
     return frame_bytes;
+}
+
+void RemoteL3SocketTransport::submit_progress_frame(const std::vector<uint8_t> &frame) {
+    if (fd_ < 0) throw std::runtime_error("RemoteL3SocketTransport: socket is closed");
+    if (progress_command_active_) {
+        throw std::logic_error("RemoteL3SocketTransport: progress command is already active");
+    }
+    progress_write_ = frame;
+    progress_write_offset_ = 0;
+    progress_read_.assign(remote_l3::FRAME_HEADER_BYTES, 0);
+    progress_read_offset_ = 0;
+    progress_read_size_ = remote_l3::FRAME_HEADER_BYTES;
+    progress_deadline_ = deadline_from_now(runtime_timeout_s_);
+    progress_command_active_ = true;
+}
+
+bool RemoteL3SocketTransport::poll_progress_reply(
+    remote_l3::FrameType frame_type, uint64_t sequence, std::vector<uint8_t> &reply
+) {
+    if (!progress_command_active_) {
+        throw std::logic_error("RemoteL3SocketTransport: no progress command is active");
+    }
+    try {
+        check_health();
+        if (std::chrono::steady_clock::now() >= progress_deadline_) {
+            throw std::runtime_error("RemoteL3SocketTransport: progress command timed out");
+        }
+
+        while (progress_write_offset_ < progress_write_.size()) {
+            ssize_t n = send_no_sigpipe(
+                fd_, progress_write_.data() + progress_write_offset_, progress_write_.size() - progress_write_offset_
+            );
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+                throw std::runtime_error(
+                    std::string("RemoteL3SocketTransport: progress send failed: ") + std::strerror(errno)
+                );
+            }
+            if (n == 0) throw std::runtime_error("RemoteL3SocketTransport: socket closed while writing progress frame");
+            progress_write_offset_ += static_cast<size_t>(n);
+        }
+
+        while (progress_read_offset_ < progress_read_size_) {
+            ssize_t n = ::recv(
+                fd_, progress_read_.data() + progress_read_offset_, progress_read_size_ - progress_read_offset_, 0
+            );
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+                throw std::runtime_error(
+                    std::string("RemoteL3SocketTransport: progress recv failed: ") + std::strerror(errno)
+                );
+            }
+            if (n == 0) throw std::runtime_error("RemoteL3SocketTransport: socket closed while reading progress frame");
+            progress_read_offset_ += static_cast<size_t>(n);
+            if (progress_read_offset_ == remote_l3::FRAME_HEADER_BYTES &&
+                progress_read_size_ == remote_l3::FRAME_HEADER_BYTES) {
+                uint32_t payload_bytes = read_le_u32(progress_read_.data() + 32);
+                if (payload_bytes > remote_l3::MAX_FRAME_PAYLOAD_BYTES) {
+                    throw std::runtime_error("RemoteL3SocketTransport: progress frame payload exceeds maximum");
+                }
+                progress_read_size_ += payload_bytes;
+                progress_read_.resize(progress_read_size_);
+            }
+        }
+
+        auto decoded = remote_l3::decode_frame(progress_read_);
+        if (decoded.header.frame_type != frame_type || decoded.header.sequence != sequence) {
+            throw std::runtime_error("RemoteL3SocketTransport: progress reply frame type or sequence mismatch");
+        }
+        reply = std::move(progress_read_);
+        reset_progress_command();
+        return true;
+    } catch (...) {
+        reset_progress_command();
+        throw;
+    }
+}
+
+void RemoteL3SocketTransport::reset_progress_command() noexcept {
+    progress_write_.clear();
+    progress_write_offset_ = 0;
+    progress_read_.clear();
+    progress_read_offset_ = 0;
+    progress_read_size_ = remote_l3::FRAME_HEADER_BYTES;
+    progress_command_active_ = false;
 }
 
 void RemoteL3SocketTransport::shutdown() { close_socket(); }
@@ -633,91 +725,166 @@ remote_l3::TaskPayloadWire RemoteL3Endpoint::build_task_payload(const TaskSlotSt
     payload.callable_digest = slot.callable.digest;
     payload.config = slot.config;
 
-    TaskArgsView view = slot.args_view(group_index);
+    const TaskArgs &a = slot.args(group_index);
     const RemoteTaskArgsSidecar &sidecar = slot.remote_sidecar_for(group_index);
-    if (!sidecar.tensors.empty() && sidecar.tensors.size() != static_cast<size_t>(view.tensor_count)) {
-        throw std::runtime_error("RemoteL3Endpoint::run: remote sidecar tensor count does not match TaskArgs");
+    if (!sidecar.tensors.empty() && sidecar.tensors.size() != static_cast<size_t>(a.tensor_count())) {
+        throw std::runtime_error(
+            "RemoteL3Endpoint::build_task_payload: remote sidecar tensor count does not match TaskArgs"
+        );
     }
     payload.args.inline_payload = sidecar.inline_payload;
-    payload.args.tensor_metadata.reserve(static_cast<size_t>(view.tensor_count));
-    payload.args.remote_desc.reserve(static_cast<size_t>(view.tensor_count));
+    payload.args.tensors.reserve(static_cast<size_t>(a.tensor_count()));
+    payload.args.remote_desc.reserve(static_cast<size_t>(a.tensor_count()));
 
-    for (int32_t i = 0; i < view.tensor_count; ++i) {
-        ChipTensor tensor = view.tensors(i);
+    for (int32_t i = 0; i < a.tensor_count(); ++i) {
+        const Tensor &ref = a.tensor(i);
         RemoteTensorSidecar tensor_sidecar{};
         if (!sidecar.tensors.empty()) tensor_sidecar = sidecar.tensors[static_cast<size_t>(i)];
-        if (tensor.buffer.addr != 0 && !tensor_sidecar.present) {
-            throw std::runtime_error("RemoteL3Endpoint::run: bare host pointer submitted without remote sidecar");
+        // The sidecar is the sole authority for a remote argument's backing, so the sender's own
+        // backing never crosses: an arg bound for a remote worker is a REMOTE_SIDECAR placeholder
+        // whose identity names the remote buffer. Orchestrator::validate_remote_sidecars rejects a
+        // local backing alongside a sidecar at submit; this is the encoder's own guard.
+        if (ref.buffer.backend_kind != static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR)) {
+            throw std::runtime_error(
+                "RemoteL3Endpoint::build_task_payload: a remote task arg must carry no local backing"
+            );
         }
-        if (tensor.is_child_memory() && !tensor_sidecar.present) {
-            throw std::runtime_error("RemoteL3Endpoint::run: child-memory tensor submitted without remote sidecar");
+        // Every argument's backing is named by its own sidecar, so an absent one leaves the
+        // placeholder naming nothing the runner could resolve.
+        if (!tensor_sidecar.present) {
+            throw std::runtime_error("RemoteL3Endpoint::build_task_payload: tensor submitted without remote sidecar");
         }
-        if (!tensor_sidecar.present && tensor.nbytes() != 0) {
-            throw std::runtime_error("RemoteL3Endpoint::run: tensor payload submitted without remote sidecar");
-        }
-        tensor.buffer.addr = 0;
-        payload.args.tensor_metadata.push_back(tensor);
+        payload.args.tensors.push_back(ref);
         payload.args.remote_desc.push_back(tensor_sidecar);
     }
-    payload.args.scalars.reserve(static_cast<size_t>(view.scalar_count));
-    for (int32_t i = 0; i < view.scalar_count; ++i)
-        payload.args.scalars.push_back(view.scalars[i]);
+    payload.args.scalars.reserve(static_cast<size_t>(a.scalar_count()));
+    for (int32_t i = 0; i < a.scalar_count(); ++i)
+        payload.args.scalars.push_back(a.scalar(i));
     return payload;
 }
 
-WorkerCompletion RemoteL3Endpoint::run(Ring *ring, const WorkerDispatch &dispatch) {
-    if (ring == nullptr) throw std::invalid_argument("RemoteL3Endpoint::run: null ring");
-    TaskSlotState &slot = *ring->slot_state(dispatch.task_slot);
+void RemoteL3Endpoint::finish_progress_command(uint64_t sequence) {
+    if (sequence != 0 && command_lane_.in_flight()) command_lane_.finish_reply(sequence);
+    pending_task_ = {};
+    command_cv_.notify_all();
+}
 
-    WorkerCompletion completion;
-    completion.task_slot = dispatch.task_slot;
-    completion.group_index = dispatch.group_index;
+void RemoteL3Endpoint::submit_progress(Ring *ring, const WorkerDispatch &dispatch) {
+    if (ring == nullptr) throw std::invalid_argument("RemoteL3Endpoint::submit_progress: null ring");
+    TaskSlotState *slot = ring->slot_state(dispatch.task_slot);
+    if (slot == nullptr) throw std::out_of_range("RemoteL3Endpoint::submit_progress: invalid task slot");
+    auto payload = remote_l3::encode_task_payload(build_task_payload(*slot, dispatch.group_index));
 
-    uint64_t sequence = 0;
-    std::unique_lock<std::mutex> command_lk(command_mu_);
+    std::lock_guard<std::mutex> command_lk(command_mu_);
+    if (pending_task_.occupied || command_lane_.in_flight()) {
+        throw std::runtime_error("RemoteL3Endpoint::submit_progress: command lane is occupied");
+    }
+    uint64_t sequence = command_lane_.begin_command();
     try {
-        sequence = command_lane_.begin_command();
-        auto payload = remote_l3::encode_task_payload(build_task_payload(slot, dispatch.group_index));
         remote_l3::FrameHeader header;
         header.frame_type = remote_l3::FrameType::TASK;
         header.session_id = session_id_;
         header.worker_id = caps_.worker_id;
         header.sequence = sequence;
-        transport_->submit_frame(remote_l3::encode_frame(header, payload));
+        transport_->submit_progress_frame(remote_l3::encode_frame(header, payload));
+        pending_task_.occupied = true;
+        pending_task_.dispatch = dispatch;
+        pending_task_.sequence = sequence;
+    } catch (...) {
+        try {
+            command_lane_.finish_reply(sequence);
+        } catch (...) {}
+        throw;
+    }
+}
 
-        auto reply_bytes = transport_->wait_for_reply(remote_l3::FrameType::COMPLETION, sequence);
+bool RemoteL3Endpoint::poll_progress(WorkerEndpointProgress &progress) {
+    std::lock_guard<std::mutex> command_lk(command_mu_);
+    if (!pending_task_.occupied) return false;
+
+    const WorkerDispatch dispatch = pending_task_.dispatch;
+    const uint64_t sequence = pending_task_.sequence;
+    progress.kind = WorkerProgressKind::COMPLETED;
+    progress.dispatch = dispatch;
+    progress.completion.task_slot = dispatch.task_slot;
+    progress.completion.group_index = dispatch.group_index;
+    if (progress_stop_requested_) {
+        progress.completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+        progress.completion.error_message =
+            progress_stop_reason_.empty() ? "RemoteL3Endpoint progress stopped" : progress_stop_reason_;
+        finish_progress_command(sequence);
+        return true;
+    }
+
+    try {
+        std::vector<uint8_t> reply_bytes;
+        if (!transport_->poll_progress_reply(remote_l3::FrameType::COMPLETION, sequence, reply_bytes)) return false;
         auto reply = remote_l3::decode_frame(reply_bytes);
-        if (reply.header.frame_type != remote_l3::FrameType::COMPLETION) {
-            throw std::runtime_error("RemoteL3Endpoint::run: expected COMPLETION reply");
-        }
         if (reply.header.session_id != session_id_ || reply.header.worker_id != caps_.worker_id) {
-            throw std::runtime_error("RemoteL3Endpoint::run: completion session or worker mismatch");
+            throw std::runtime_error("completion session or worker mismatch");
         }
         auto decoded = remote_l3::decode_completion(reply.payload.data(), reply.payload.size(), sequence);
-        command_lane_.finish_reply(sequence);
-
         if (decoded.error_code == 0) {
-            completion.outcome = EndpointOutcome::SUCCESS;
+            progress.completion.outcome = EndpointOutcome::SUCCESS;
         } else {
-            completion.outcome = EndpointOutcome::TASK_FAILURE;
-            completion.error_message = decoded.error_message;
+            progress.completion.outcome = EndpointOutcome::TASK_FAILURE;
+            progress.completion.error_message = decoded.error_message;
         }
     } catch (const std::exception &e) {
-        if (sequence != 0 && command_lane_.in_flight()) {
-            try {
-                command_lane_.finish_reply(sequence);
-            } catch (...) {}
-        }
-        completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
-        completion.error_message =
-            std::string("RemoteL3Endpoint::run(worker_id=") + std::to_string(caps_.worker_id) + "): " + e.what();
+        progress.completion.outcome = EndpointOutcome::ENDPOINT_FAILURE;
+        progress.completion.error_message =
+            std::string("RemoteL3Endpoint progress(worker_id=") + std::to_string(caps_.worker_id) + "): " + e.what();
     }
-    return completion;
+    finish_progress_command(sequence);
+    return true;
+}
+
+void RemoteL3Endpoint::request_progress_stop() noexcept {
+    try {
+        std::lock_guard<std::mutex> command_lk(command_mu_);
+        progress_stop_requested_ = true;
+        progress_stop_reason_ = "RemoteL3Endpoint progress stopped";
+        command_cv_.notify_all();
+        transport_->shutdown();
+    } catch (...) {}
+}
+
+void RemoteL3Endpoint::report_progress_error(const std::string &reason) noexcept {
+    try {
+        std::lock_guard<std::mutex> command_lk(command_mu_);
+        progress_stop_requested_ = true;
+        progress_stop_reason_ = "RemoteL3Endpoint progress driver failed: " + reason;
+        command_cv_.notify_all();
+        transport_->shutdown();
+    } catch (...) {}
+}
+
+bool RemoteL3Endpoint::report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) noexcept {
+    try {
+        std::lock_guard<std::mutex> command_lk(command_mu_);
+        const bool endpoint_owned =
+            pending_task_.occupied && pending_task_.dispatch.dispatch_id == dispatch.dispatch_id;
+        progress_stop_requested_ = true;
+        progress_stop_reason_ = "RemoteL3Endpoint submission failed: " + reason;
+        command_cv_.notify_all();
+        transport_->shutdown();
+        return endpoint_owned;
+    } catch (...) {
+        return false;
+    }
 }
 
 remote_l3::ControlReplyPayload
 RemoteL3Endpoint::run_control(remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes) {
     std::unique_lock<std::mutex> command_lk(command_mu_);
+    command_cv_.wait(command_lk, [this] {
+        return !pending_task_.occupied || progress_stop_requested_;
+    });
+    if (progress_stop_requested_) {
+        throw std::runtime_error(
+            progress_stop_reason_.empty() ? "RemoteL3Endpoint progress stopped" : progress_stop_reason_
+        );
+    }
     uint64_t sequence = 0;
     try {
         sequence = command_lane_.begin_command();
@@ -934,10 +1101,23 @@ void RemoteL3Endpoint::control_remote_release_import(const RemoteBufferHandle &h
     run_control(remote_l3::ControlName::RELEASE_IMPORT, remote_l3::encode_release_import_request(request));
 }
 
+std::vector<uint8_t> RemoteL3Endpoint::control_remote_domain(
+    remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes
+) {
+    return run_control(control_name, command_bytes).result_bytes;
+}
+
 void RemoteL3Endpoint::shutdown_child() {
     if (!transport_) return;
     try {
         std::lock_guard<std::mutex> command_lk(command_mu_);
+        if (pending_task_.occupied) {
+            progress_stop_requested_ = true;
+            progress_stop_reason_ = "RemoteL3Endpoint shut down with a task in flight";
+            command_cv_.notify_all();
+            transport_->shutdown();
+            return;
+        }
         uint64_t sequence = command_lane_.begin_command();
         remote_l3::FrameHeader header;
         header.frame_type = remote_l3::FrameType::SHUTDOWN;

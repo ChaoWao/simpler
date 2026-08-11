@@ -164,9 +164,9 @@ def run(platform: str, device_ids: list[int]) -> int:
             #   OUTPUT_EXISTING = "task writes to this pre-allocated tensor"
             for i in range(len(device_ids)):
                 chip_args = TaskArgs()
-                chip_args.add_tensor(make_tensor_arg(host_a[i]), TensorArgType.INPUT)
-                chip_args.add_tensor(make_tensor_arg(host_b[i]), TensorArgType.INPUT)
-                chip_args.add_tensor(make_tensor_arg(host_out[i]), TensorArgType.OUTPUT_EXISTING)
+                chip_args.add_tensor(make_tensor_arg(worker, host_a[i]), TensorArgType.INPUT)
+                chip_args.add_tensor(make_tensor_arg(worker, host_b[i]), TensorArgType.INPUT)
+                chip_args.add_tensor(make_tensor_arg(worker, host_out[i]), TensorArgType.OUTPUT_EXISTING)
                 orch.submit_next_level(chip_handle, chip_args, cfg, worker=i)
 
             # Sub task that depends on both chip outputs. Tagging the two
@@ -174,7 +174,7 @@ def run(platform: str, device_ids: list[int]) -> int:
             # both chip tasks to finish before running the sub.
             sub_args = TaskArgs()
             for i in range(len(device_ids)):
-                sub_args.add_tensor(make_tensor_arg(host_out[i]), TensorArgType.INPUT)
+                sub_args.add_tensor(make_tensor_arg(worker, host_out[i]), TensorArgType.INPUT)
             orch.submit_sub(sub_handle, sub_args)
 
         # --- 7. Run the DAG. Worker.run() opens a scope, invokes orch_fn,

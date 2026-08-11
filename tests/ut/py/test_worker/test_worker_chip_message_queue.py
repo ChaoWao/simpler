@@ -8,6 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import ctypes
+import itertools
 import math
 import struct
 from dataclasses import dataclass
@@ -17,8 +18,9 @@ from typing import Optional
 import pytest
 from simpler import worker as worker_module
 from simpler import worker_chip_orch_comm
+from simpler.buffer import AccessMode, BackendKind, CanonicalIdentity, mint_owner_instance_id, wrap_fork_inherited
 from simpler.orchestrator import Orchestrator
-from simpler.task_interface import ChipTensor, DataType, get_element_size
+from simpler.task_interface import DataType, get_element_size
 from simpler.worker import _IDLE, _OFF_STATE, Worker, _buffer_field_addr, _mailbox_store_i32
 from simpler.worker_chip_message_queue import (
     WORKER_CHIP_QUEUE_CHIP_ABORT_FLAG_OFFSET,
@@ -38,6 +40,19 @@ from simpler.worker_chip_orch_comm import (
     WorkerChipRegionAccessProfile,
     WorkerHostRegionMapping,
 )
+
+_DESC_BID = itertools.count(1)
+
+
+def _fake_alloc_handle(orch, nbytes):
+    """A FORK_SHM Buffer over a bare _FakeCOrch alloc — mirrors Orchestrator.alloc for the
+    low-level tests that drive WorkerChipQueue with a fake C orch directly."""
+    oid, bid = mint_owner_instance_id(), next(_DESC_BID)
+    identity = CanonicalIdentity(oid, bid)
+    va = int(orch.alloc([nbytes], DataType.UINT8, identity))
+    return wrap_fork_inherited(
+        va, nbytes, oid, bid, "L3", access=AccessMode.READWRITE, backend_kind=BackendKind.FORK_SHM
+    )
 
 
 @dataclass(frozen=True)
@@ -103,15 +118,14 @@ class _FakeCOrch:
         self._buffers = []
         self.fail_next_alloc = False
 
-    def alloc(self, shape, dtype):
+    def alloc(self, shape, dtype, identity):
         if self.fail_next_alloc:
             self.fail_next_alloc = False
             raise RuntimeError("injected allocation failure")
         nbytes = math.prod(int(x) for x in shape) * int(get_element_size(dtype))
-        storage_t = ctypes.c_uint8 * nbytes
-        storage = storage_t()
+        storage = (ctypes.c_uint8 * nbytes)()
         self._buffers.append(storage)
-        return ChipTensor.make(ctypes.addressof(storage), tuple(int(x) for x in shape), dtype)
+        return ctypes.addressof(storage)
 
 
 class _FakeClient:
@@ -426,9 +440,9 @@ def test_create_worker_chip_queue_allocates_region_and_exposes_l2_task_scalars()
 
 def test_create_worker_chip_queue_frees_region_on_post_region_alloc_failure():
     orch, worker, shm, _fake_client = _make_orchestrator()
-    original_alloc = orch._o.alloc
+    original_alloc_ref = orch._o.alloc
 
-    def fail_alloc(_shape, _dtype):
+    def fail_alloc(_shape, _dtype, _identity):
         raise RuntimeError("injected alloc failure")
 
     orch._o.alloc = fail_alloc
@@ -439,7 +453,7 @@ def test_create_worker_chip_queue_frees_region_on_post_region_alloc_failure():
         assert len(worker._live_worker_chip_regions) == 1
         assert worker._live_worker_chip_regions[0]._released is True
     finally:
-        orch._o.alloc = original_alloc
+        orch._o.alloc = original_alloc_ref
         _close(worker, shm)
 
 
@@ -552,9 +566,9 @@ def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monke
         orch,
         region,
         layout,
-        orch.alloc([24], DataType.UINT8),
-        orch.alloc([8], DataType.UINT8),
-        orch.alloc([WORKER_CHIP_QUEUE_DESC_SLOT_BYTES], DataType.UINT8),
+        _fake_alloc_handle(orch, 24),
+        _fake_alloc_handle(orch, 8),
+        _fake_alloc_handle(orch, WORKER_CHIP_QUEUE_DESC_SLOT_BYTES),
     )
     alloc_count = len(orch._buffers)
     payload_writes: list[tuple[int, bytes]] = []
@@ -612,7 +626,7 @@ def test_output_read_into_registered_tensor_uses_fast_path_and_release_notifies_
         queue.output.read_into(handle, output)
         queue.output.release(handle)
 
-        assert ctypes.string_at(int(output.data), 16) == b"abcdefghijklmnop"
+        assert ctypes.string_at(int(output.base), 16) == b"abcdefghijklmnop"
         assert fake_client.counters[queue.layout.output_desc_head_offset] == 1
     finally:
         _close(worker, shm)
@@ -629,7 +643,7 @@ def test_dequeue_into_reads_and_releases_output():
 
         assert message.seq == 1
         assert message.opcode == WorkerChipQueueOpcode.DATA
-        assert ctypes.string_at(int(output.data), 16) == b"abcdefghijklmnop"
+        assert ctypes.string_at(int(output.base), 16) == b"abcdefghijklmnop"
         assert fake_client.counters[queue.layout.output_desc_head_offset] == 1
     finally:
         _close(worker, shm)
@@ -645,7 +659,7 @@ def test_output_error_opcode_is_delivered_without_poison():
         message = queue.output.dequeue_into(output, timeout=0.001)
 
         assert message.opcode == WorkerChipQueueOpcode.ERROR
-        assert ctypes.string_at(int(output.data), 12) == b"error-detail"
+        assert ctypes.string_at(int(output.base), 12) == b"error-detail"
         assert fake_client.counters[queue.layout.output_desc_head_offset] == 1
         assert fake_client.counters.get(WORKER_CHIP_QUEUE_WORKER_ABORT_FLAG_OFFSET, 0) == 0
     finally:

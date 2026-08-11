@@ -4,12 +4,20 @@ Graph Execution is available only in the `host_build_graph` runtime. A Graph is
 a composite incore task: it is submitted and completed once like an AIC, AIV,
 MIX, or SPMD task, but contains a recorded task DAG.
 
-The first invocation executes normally and records the DAG. A later invocation
-places one `GRAPH` task in the host task window. The device Scheduler expands
-the saved topology and dispatches its internal nodes; the Host Orchestrator does
-not submit those nodes again.
+Every invocation places exactly one `GRAPH` task in the host task window. The
+first invocation records the DAG off the ring — its internal submissions build
+host-only node metadata and reserve scratch output buffers instead of consuming
+task-window slots — then emits the outer `GRAPH` task from the freshly built
+Definition. Later invocations reuse the cached Definition and emit the same one
+`GRAPH` task directly. In both cases the device Scheduler expands the saved
+topology and dispatches the internal nodes; the Host Orchestrator never submits
+those nodes as ring tasks.
 
-## Step-1 API
+A recording that hits an unsupported construct is discarded and the body re-runs
+on the ordinary task-submit path so its work is still submitted; the internal
+nodes then occupy the ring only for that one fallback invocation.
+
+## API
 
 A Graph uses `CoreTaskArgs`, the existing incore argument type:
 
@@ -27,7 +35,7 @@ void graph_function(const CoreTaskArgs &args, int variant) {
     CoreTaskArgs matmul_args;
     matmul_args.add_input(input, weight);
     matmul_args.add_output(intermediate);
-    matmul_args.add_scalar(uint32_t{16});  // fixed Definition data
+    matmul_args.copy_scalars_from(args, 0, 1);  // current invocation's value
     TaskOutputTensors matmul = rt_submit_aic_task(
         variant == 0 ? FUNC_MATMUL : FUNC_MATMUL_TRANSPOSED,
         matmul_args
@@ -69,19 +77,39 @@ the same key for different functions can select the wrong recorded topology.
 There are no public `GraphArgs`, `GraphBindings`, `Patch`, or `ScalarRef`
 types. The boundary is represented by `CoreTaskArgs`.
 
+Boundary scalars are pass-through bindings. Forward them directly with
+`node_args.add_scalar(args.scalar(i))` or `copy_scalars_from(args, i, count)`
+so recording can retain their source indices.
+
+Ordinary C++ value transformations do not retain boundary provenance. Both
+`node_args.add_scalar(args.scalar(i) + 1)` and copying `args.scalar(i)` into a
+local arithmetic variable before calling `add_scalar` produce an ordinary
+static node scalar. That value is stored in the Definition, and later cache
+hits reuse the first invocation's value without a warning. The runtime cannot
+distinguish such a derived value from an intentional static literal after the
+C++ expression has produced a plain arithmetic value. Compute the derived value
+before constructing the Graph boundary and pass it as another boundary scalar,
+perform the transformation in a kernel, or use a construction parameter when
+the value changes the Graph structure.
+
+Access through a non-const `scalar()` invalidates inherited boundary provenance
+conservatively, because returning a mutable reference cannot distinguish a read
+from a later write. A Graph containing such an invalidated binding is not
+cached, which prevents replay from silently replacing the transformed value
+with the unmodified boundary value.
+
 ## Supported dynamic and static data
 
-Step 1 deliberately supports a narrow, safe contract:
-
 - Boundary ChipTensor addresses may change for every invocation.
+- Boundary scalar values may change for every invocation. Their count is fixed
+  by the recorded boundary contract. Unused boundary scalars are allowed and do
+  not create internal scalar patches.
 - A Graph boundary contains at least one ChipTensor.
 - Construction parameters are part of Graph identity and may control the
   function's task count, kernel selection, or other structural choices.
 - Boundary ChipTensor shape, stride, dtype, size, direction, contiguity, and alias
   partition must match the first invocation.
-- Scalars inside internal task args are fixed Definition data.
-- Scalars in the boundary `CoreTaskArgs` are not cacheable yet. Such a call uses
-  the ordinary task-submit path.
+- Internal task scalars with no boundary source are fixed Definition data.
 - Boundary storage is caller-owned. `INPUT`, `INOUT`, `OUTPUT_EXISTING`, and
   `NO_DEP` are supported. A boundary `TensorCreateInfo` tagged `OUTPUT` is not.
 - Early-resolve hints apply while recording the first invocation. Replayed
@@ -116,7 +144,7 @@ void qwen_decoder_layer(const CoreTaskArgs &args) {
     CoreTaskArgs attention_args;
     attention_args.add_input(hidden, attention_weight);
     attention_args.add_output(attention_out);
-    attention_args.add_scalar(uint32_t{16});  // fixed model configuration
+    attention_args.copy_scalars_from(args, 0, 1);  // dynamic token position
     TaskOutputTensors attention =
         rt_submit_aic_task(FUNC_ATTENTION, attention_args);
 
@@ -138,7 +166,8 @@ void decode_three_layers(
     const std::array<ChipTensor, 3> &hidden,
     const std::array<ChipTensor, 3> &attention_weight,
     const std::array<ChipTensor, 3> &mlp_weight,
-    const std::array<ChipTensor, 3> &output
+    const std::array<ChipTensor, 3> &output,
+    const std::array<uint32_t, 3> &token_position
 ) {
     for (std::size_t layer = 0; layer < hidden.size(); ++layer) {
         CoreTaskArgs args;
@@ -148,15 +177,17 @@ void decode_three_layers(
             mlp_weight[layer]
         );
         args.add_output(output[layer]);
+        args.add_scalar(token_position[layer]);
         submit_qwen_decoder_layer(args);
     }
 }
 ```
 
-The first layer records ordinary task submissions. Layers two and three submit
-one Graph task each when their ChipTensor metadata matches. A per-layer or
-per-token scalar is not dynamic in step 1; use ordinary submission or a
-different fixed Graph function/key until dynamic scalar support is added.
+All three layers submit one Graph task each: the first records the sub-DAG off
+the ring and emits its Graph task, layers two and three replay the cached
+Definition when their ChipTensor metadata and boundary scalar count match. Each
+invocation patches the current layer's `token_position`; it is a dynamic
+boundary scalar refreshed on every submission and is not part of the Graph key.
 
 ## Definition
 
@@ -179,7 +210,7 @@ Definition. It contains:
 - one packed-heap offset per node;
 - each node's ChipTensor source:
   `BOUNDARY_EXACT`, `BOUNDARY_VIEW`, `INTERNAL`, or `OWN_OUTPUT`;
-- fixed scalar values;
+- fixed scalar values plus boundary-scalar source indices;
 - fixed boundary signatures and alias representatives.
 
 The header also carries a content hash of the complete Definition image. The
@@ -211,8 +242,8 @@ For a cache hit, the Host Orchestrator:
 5. emits one outer `GRAPH` task;
 6. stages the exact-size POD submission image for upload after orchestration;
 7. asks the host runtime for an aligned execution block sized from the recorded
-   node count, tensor-address patch count, and Definition bytes, then writes
-   that device address into the submission wire image.
+   node count, Tensor-address and scalar patch capacities, and Definition
+   bytes, then writes that device address into the submission wire image.
 
 Internal nodes consume no ring task-window slots. Their descriptor, payload,
 and slot state are built in host-owned GM. The runtime retains one grow-only
@@ -226,12 +257,14 @@ The `GraphSubmission` wire POD carries the aligned device address and usable
 byte capacity explicitly. The Scheduler validates both before placement-
 constructing `GraphExecution`; it never allocates execution storage from the
 AICPU process heap. A block whose prior Definition key and content hash match
-retains the local Definition, static node fields, and the address patch table
-generated during its first materialization. That graph-affine replay skips
+retains the local Definition, static node fields, and the Tensor-address and
+scalar patch tables generated during its first materialization. That
+graph-affine replay skips
 topology binding, per-node count/offset validation, tensor-source
-classification, tensor wire validation, static field stores, and scalar
+classification, tensor wire validation, static field stores, and static scalar
 copies. It refreshes only task IDs, packed-buffer bases, boundary/internal
-tensor addresses, scheduling state, dispatch atomics, and wake registrations.
+tensor addresses, boundary scalar bindings, scheduling state, dispatch
+atomics, and wake registrations.
 
 The retained blocks are addressed directly by `(pipeline slot, Graph key,
 occurrence index)`. Occurrence numbering restarts deterministically for every
@@ -274,8 +307,8 @@ Internal dependency readiness borrows the completion-state polling idea, but
 dependency wiring remains an Orchestrator responsibility:
 
 - recording constructs both fanin and fanout CSR in the immutable Definition;
-- first materialization builds static runnable node state plus a compact
-  boundary/internal address patch table; affine replay applies that table and
+- first materialization builds static runnable node state plus compact Tensor
+  address and scalar patch tables; affine replay applies those tables and
   resets only dynamic runnable state;
 - materialization registers each non-root on one producer selected from its
   saved fanin CSR;
@@ -315,7 +348,6 @@ error instead of leaving an already-submitted outer Graph unable to complete.
 These cases assert in debug builds and execute through the ordinary path in a
 release build:
 
-- dynamic boundary scalars;
 - an empty Graph boundary;
 - variable ChipTensor shape or metadata;
 - changed boundary aliasing;
@@ -325,6 +357,7 @@ release build:
 - cross-boundary explicit dependencies that are not represented by a boundary
   ChipTensor's creator;
 - an unclassifiable internal ChipTensor source;
+- a boundary-derived scalar accessed through mutable `scalar()`;
 - more than 16 Definitions, 1024 internal nodes, or 32 boundary Tensors;
 - insufficient task-window or heap capacity detected before outer submission.
 

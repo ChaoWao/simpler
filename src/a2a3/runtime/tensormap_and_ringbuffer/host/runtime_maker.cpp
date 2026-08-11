@@ -80,6 +80,8 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
     return &contract;
 }
 
+extern "C" int concurrent_native_prepare_supported_impl(void) { return 1; }
+
 static_assert(
     RUNTIME_ENV_RING_COUNT == PTO2_MAX_RING_DEPTH, "RuntimeEnv ring count must match PTO2 runtime ring depth"
 );
@@ -341,7 +343,7 @@ public:
         size_t required = 0;
         for (int i = 0; i < orch_args->tensor_count(); i++) {
             ChipTensor t = orch_args->tensor(i);
-            if (t.is_child_memory() || t.nbytes() == 0) {
+            if (t.is_device_memory() || t.nbytes() == 0) {
                 continue;
             }
             required += align_up(static_cast<size_t>(t.nbytes()));
@@ -499,6 +501,33 @@ static PrebuiltRuntimeArenaCacheProbe make_prebuilt_runtime_arena_cache_probe(co
     return probe;
 }
 
+static bool resolve_arena_sizing(
+    const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool, ArenaSizingConfig *out
+);
+
+extern "C" int prepared_run_config_compatible_impl(
+    const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
+) {
+    if (api == nullptr) return -1;
+
+    ArenaSizingConfig sizing;
+    if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) return -1;
+
+    PrebuiltRuntimeArenaCacheProbe probe = make_prebuilt_runtime_arena_cache_probe(sizing);
+    void *gm_heap = nullptr;
+    void *gm_sm = nullptr;
+    void *runtime_arena = nullptr;
+    size_t runtime_offset = 0;
+    const void *image = nullptr;
+    size_t image_size = 0;
+    return api->lookup_prebuilt_runtime_arena_cache(
+               probe.hash, probe.serialized_key.data(), probe.serialized_key.size(), &gm_heap, &gm_sm, &runtime_arena,
+               &runtime_offset, &image, &image_size
+           ) ?
+               1 :
+               0;
+}
+
 // per-(cid,config): resolve the cache-key sizing knobs. Pure host parsing over
 // per-task overrides, PTO2_RING_* env, and compile-time defaults. Derived
 // allocation sizes are computed only on cache miss.
@@ -555,7 +584,7 @@ static bool stage_device_args(
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
-        if (t.is_child_memory()) {
+        if (t.is_device_memory()) {
             LOG_DEBUG("  ChipTensor %d: child memory, pass-through (0x%" PRIx64 ")", i, t.buffer.addr);
             out->add_tensor(t);
             continue;
@@ -603,7 +632,7 @@ static bool stage_device_args(
         }
         // Read-only INPUT tensors are never written by the kernel, so there is
         // no point copying them back D2H at the end. Index the signature
-        // by the orch tensor index `i` (child_memory tensors are skipped above
+        // by the orch tensor index `i` (device-space tensors are skipped above
         // but do not consume a separate signature slot — scalars follow the
         // tensor entries). Anything not provably IN keeps the safe default of
         // copying back.

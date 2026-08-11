@@ -16,17 +16,44 @@ import pytest
 import simpler
 
 
-def test_worker_and_task_interface_are_advertised():
+def test_worker_task_interface_and_comm_endpoints_are_advertised():
     assert "Worker" in simpler.__all__
     assert "task_interface" in simpler.__all__
+    assert "comm_endpoints" in simpler.__all__
     assert "Worker" in dir(simpler)
     assert "task_interface" in dir(simpler)
+    assert "comm_endpoints" in dir(simpler)
 
 
 def test_logging_helpers_remain_exported():
     for name in ("get_logger", "get_current_config", "DEFAULT_THRESHOLD", "NUL"):
         assert name in simpler.__all__
         assert hasattr(simpler, name)
+
+
+def test_comm_endpoints_region_access_surface_is_module_scoped():
+    ce = importlib.import_module("simpler.comm_endpoints")
+    for name in (
+        "RegionAccessQuery",
+        "RegionAccessDecision",
+        "RegionAccessDiagnostics",
+        "RegionAccessReasonCode",
+        "RegionAccessService",
+        "StaticRegionAccessService",
+    ):
+        assert name in ce.__all__
+        assert hasattr(ce, name)
+        assert name not in simpler.__all__
+        assert not hasattr(simpler, name)
+
+    for removed in (
+        "PlatformCapability",
+        "CapabilityResult",
+        "PlatformCapabilityCache",
+        "StaticPlatformCapabilityCache",
+        "_AdapterCandidate",
+    ):
+        assert removed not in ce.__all__
 
 
 def test_unknown_attribute_raises_attribute_error():
@@ -60,6 +87,34 @@ def test_importing_simpler_survives_without_the_extension():
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "True", f"{out.stdout!r} {out.stderr!r}"
+
+
+def test_comm_endpoints_requires_the_extension_and_stays_lazy():
+    """W2 planning takes `BackendKind` from the extension, so it is not part of the
+    no-extension surface.
+
+    An earlier cut of the endpoint model kept its own Python backing enum and was importable
+    without `_task_interface`. Reusing the canonical `BackendKind` is what stops a second backing
+    vocabulary existing, and it costs that property — so the property is pinned here in its new
+    form rather than left unstated: `import simpler` still survives (the submodule is lazy, and
+    `_log` keeps its own fallback), while reaching `simpler.comm_endpoints` needs the extension.
+    """
+    code = (
+        "import sys; sys.modules['_task_interface'] = None; import simpler; "
+        "reached = True\n"
+        "try:\n"
+        "    simpler.comm_endpoints\n"
+        "except ImportError:\n"
+        "    reached = False\n"
+        "print(reached)"
+    )
+    out = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False", f"comm_endpoints imported without the extension: {out.stdout!r}"
+
+    ce = importlib.import_module("simpler.comm_endpoints")
+    assert ce.BackendKind is importlib.import_module("_task_interface").BackendKind
 
 
 def test_worker_resolves_to_the_same_object_as_the_submodule():

@@ -68,7 +68,7 @@
 struct MockMailboxWorker {
     struct Record {
         uint8_t callable_hash0;
-        uint64_t tensor_key;  // first tensor's `data` field (unique per submit in tests)
+        uint64_t tensor_key;  // first tensor's identity buffer_id (unique per submit in tests)
     };
 
     alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
@@ -137,9 +137,11 @@ struct MockMailboxWorker {
 
     // The child publishes acceptance into the sticky word, not the state.
     void write_task_accepted() {
-        auto *ptr = reinterpret_cast<int32_t *>(static_cast<char *>(mailbox_ptr()) + MAILBOX_OFF_ACCEPTED);
         int32_t v = MAILBOX_TASK_ACCEPTED;
-        __atomic_store(ptr, &v, __ATOMIC_RELEASE);
+        auto *base_ptr = reinterpret_cast<int32_t *>(mailbox.data() + MAILBOX_OFF_ACCEPTED);
+        auto *task_ptr = reinterpret_cast<int32_t *>(task_frame() + MAILBOX_OFF_ACCEPTED);
+        __atomic_store(base_ptr, &v, __ATOMIC_RELEASE);
+        __atomic_store(task_ptr, &v, __ATOMIC_RELEASE);
     }
 
     void wait_running(int timeout_ms = 500) {
@@ -170,22 +172,37 @@ private:
         __atomic_store_n(ptr, static_cast<int32_t>(s), __ATOMIC_RELEASE);
     }
 
+    char *task_frame() { return mailbox.data() + MAILBOX_FIRST_TASK_FRAME * MAILBOX_FRAME_SIZE; }
+
+    MailboxState read_task_state() const {
+        const auto *ptr = reinterpret_cast<const volatile int32_t *>(
+            mailbox.data() + MAILBOX_FIRST_TASK_FRAME * MAILBOX_FRAME_SIZE + MAILBOX_OFF_STATE
+        );
+        int32_t v = __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+        return static_cast<MailboxState>(v);
+    }
+
+    void write_task_state(MailboxState state) {
+        auto *ptr = reinterpret_cast<volatile int32_t *>(task_frame() + MAILBOX_OFF_STATE);
+        __atomic_store_n(ptr, static_cast<int32_t>(state), __ATOMIC_RELEASE);
+    }
+
     void loop() {
         while (true) {
             if (stop_flag.load(std::memory_order_acquire)) return;
             MailboxState s = read_state();
-            if (s == MailboxState::TASK_READY) {
-                uint8_t callable_hash0 = static_cast<uint8_t>(mailbox[MAILBOX_OFF_TASK_CALLABLE_HASH]);
-                int32_t t_count = 0;
-                std::memcpy(&t_count, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB, sizeof(int32_t));
+            MailboxState task_state = read_task_state();
+            if (task_state == MailboxState::TASK_READY || s == MailboxState::TASK_READY) {
+                const bool progress_frame = task_state == MailboxState::TASK_READY;
+                char *frame = progress_frame ? task_frame() : mailbox.data();
+                uint8_t callable_hash0 = static_cast<uint8_t>(frame[MAILBOX_OFF_TASK_CALLABLE_HASH]);
+                // The frame carries the wire blob, so decode it the way a real child does.
+                TaskArgsView view = read_blob(
+                    reinterpret_cast<const uint8_t *>(frame) + MAILBOX_OFF_TASK_ARGS_BLOB, MAILBOX_ARGS_CAPACITY
+                );
                 uint64_t tensor_key = 0;
-                if (t_count > 0) {
-                    ChipTensor first{};
-                    std::memcpy(
-                        &first, mailbox.data() + MAILBOX_OFF_TASK_ARGS_BLOB + TASK_ARGS_BLOB_HEADER_SIZE,
-                        sizeof(ChipTensor)
-                    );
-                    tensor_key = first.buffer.addr;
+                if (view.tensor_count > 0) {
+                    tensor_key = view.tensors(0).buffer.identity.buffer_id;
                 }
                 {
                     std::lock_guard<std::mutex> lk(dispatched_mu);
@@ -212,13 +229,17 @@ private:
                 }
                 is_running.store(false, std::memory_order_release);
 
-                std::memcpy(mailbox.data() + MAILBOX_OFF_ERROR, &error_code, sizeof(int32_t));
-                std::memset(mailbox.data() + MAILBOX_OFF_ERROR_MSG, 0, MAILBOX_ERROR_MSG_SIZE);
+                std::memcpy(frame + MAILBOX_OFF_ERROR, &error_code, sizeof(int32_t));
+                std::memset(frame + MAILBOX_OFF_ERROR_MSG, 0, MAILBOX_ERROR_MSG_SIZE);
                 if (!error_msg.empty()) {
                     size_t n = std::min(error_msg.size(), MAILBOX_ERROR_MSG_SIZE - 1);
-                    std::memcpy(mailbox.data() + MAILBOX_OFF_ERROR_MSG, error_msg.data(), n);
+                    std::memcpy(frame + MAILBOX_OFF_ERROR_MSG, error_msg.data(), n);
                 }
-                write_state(MailboxState::TASK_DONE);
+                if (progress_frame) {
+                    write_task_state(MailboxState::TASK_DONE);
+                } else {
+                    write_state(MailboxState::TASK_DONE);
+                }
             } else if (s == MailboxState::CONTROL_REQUEST) {
                 // Acknowledge the control request so a future test using
                 // WorkerThread::control_* doesn't hang on the spin-poll.
@@ -250,14 +271,29 @@ public:
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
 
-    WorkerCompletion run(Ring *ring, const WorkerDispatch &dispatch) override {
-        (void)ring;
-        WorkerCompletion completion;
-        completion.task_slot = dispatch.task_slot;
-        completion.group_index = dispatch.group_index;
-        completion.outcome = EndpointOutcome::SUCCESS;
-        return completion;
+    // Immediate success: submit_progress queues the completion the very next
+    // poll_progress reports, so a dispatch through this endpoint finishes
+    // without any test-side stepping.
+    void submit_progress(Ring *, const WorkerDispatch &dispatch) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        WorkerEndpointProgress progress;
+        progress.kind = WorkerProgressKind::COMPLETED;
+        progress.dispatch = dispatch;
+        progress.completion.task_slot = dispatch.task_slot;
+        progress.completion.group_index = dispatch.group_index;
+        progress.completion.outcome = EndpointOutcome::SUCCESS;
+        events_.push_back(progress);
     }
+
+    bool poll_progress(WorkerEndpointProgress &progress) override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (events_.empty()) return false;
+        progress = events_.front();
+        events_.pop_front();
+        return true;
+    }
+
+    bool activate_progress(RunId) override { return true; }
 
     void control_prepare(const uint8_t *) override {
         if (prepare_count_ != nullptr) prepare_count_->fetch_add(1, std::memory_order_relaxed);
@@ -266,6 +302,8 @@ public:
 private:
     WorkerEndpointCaps caps_;
     std::atomic<int> *prepare_count_{nullptr};
+    std::mutex mu_;
+    std::deque<WorkerEndpointProgress> events_;
 };
 
 class DeterministicProgressEndpoint final : public WorkerEndpoint {
@@ -277,14 +315,20 @@ public:
     }
 
     const WorkerEndpointCaps &caps() const override { return caps_; }
-    bool progressable() const override { return true; }
-
-    WorkerCompletion run(Ring *, const WorkerDispatch &) override {
-        throw std::logic_error("progress endpoint must not use blocking run");
-    }
 
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override {
         ProgressCall call(*this);
+        {
+            std::unique_lock<std::mutex> gate_lk(submit_gate_mu_);
+            if (block_submit_) {
+                submit_entered_ = true;
+                submit_gate_cv_.notify_all();
+                submit_gate_cv_.wait(gate_lk, [this] {
+                    return release_submit_;
+                });
+                block_submit_ = false;
+            }
+        }
         RunId run_id = INVALID_RUN_ID;
         if (ring != nullptr) {
             TaskSlotState *slot = ring->slot_state(dispatch.task_slot);
@@ -294,6 +338,10 @@ public:
         submitted_.push_back(dispatch);
         outstanding_.emplace(dispatch.dispatch_id, Outstanding{dispatch, run_id});
         cv_.notify_all();
+        if (throw_submit_after_publication_) {
+            throw_submit_after_publication_ = false;
+            throw std::runtime_error("injected submit failure after publication");
+        }
     }
 
     bool poll_progress(WorkerEndpointProgress &progress) override {
@@ -343,6 +391,16 @@ public:
         cv_.notify_all();
     }
 
+    bool report_submission_error(const WorkerDispatch &dispatch, const std::string &reason) override {
+        ProgressCall call(*this);
+        std::lock_guard<std::mutex> lk(mu_);
+        const bool endpoint_owned = outstanding_.count(dispatch.dispatch_id) != 0;
+        progress_error_ = reason;
+        terminalize_outstanding_locked();
+        cv_.notify_all();
+        return endpoint_owned;
+    }
+
     bool wait_submitted(size_t count, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
         std::unique_lock<std::mutex> lk(mu_);
         return cv_.wait_for(lk, timeout, [this, count] {
@@ -372,6 +430,31 @@ public:
     void throw_on_next_poll() {
         std::lock_guard<std::mutex> lk(mu_);
         throw_poll_once_ = true;
+    }
+
+    void block_next_submit() {
+        std::lock_guard<std::mutex> lk(submit_gate_mu_);
+        block_submit_ = true;
+        submit_entered_ = false;
+        release_submit_ = false;
+    }
+
+    bool wait_submit_entered(std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+        std::unique_lock<std::mutex> lk(submit_gate_mu_);
+        return submit_gate_cv_.wait_for(lk, timeout, [this] {
+            return submit_entered_;
+        });
+    }
+
+    void release_blocked_submit() {
+        std::lock_guard<std::mutex> lk(submit_gate_mu_);
+        release_submit_ = true;
+        submit_gate_cv_.notify_all();
+    }
+
+    void throw_after_next_submit_publication() {
+        std::lock_guard<std::mutex> lk(mu_);
+        throw_submit_after_publication_ = true;
     }
 
     bool wait_progress_error(std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
@@ -419,6 +502,10 @@ public:
     bool progress_owner_changed() const {
         std::lock_guard<std::mutex> lk(owner_mu_);
         return progress_owner_changed_;
+    }
+    std::thread::id progress_owner() const {
+        std::lock_guard<std::mutex> lk(owner_mu_);
+        return progress_owner_;
     }
 
 private:
@@ -482,7 +569,13 @@ private:
     size_t stop_request_count_{0};
     size_t stop_terminalization_request_{1};
     bool throw_poll_once_{false};
+    bool throw_submit_after_publication_{false};
     std::string progress_error_;
+    std::mutex submit_gate_mu_;
+    std::condition_variable submit_gate_cv_;
+    bool block_submit_{false};
+    bool submit_entered_{false};
+    bool release_submit_{false};
     std::atomic<int> concurrent_calls_{0};
     std::atomic<int> max_concurrent_calls_{0};
     mutable std::mutex owner_mu_;
@@ -552,17 +645,47 @@ static TaskSlot make_progress_slot(Ring &ring, RunId run_id, uint32_t pipeline_s
     return allocation.slot;
 }
 
+// Poll an endpoint until it reports one progress event, or the budget expires.
+static bool poll_until(WorkerEndpoint &endpoint, WorkerEndpointProgress &progress) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (endpoint.poll_progress(progress)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Helper: build a TaskArgs whose only tensor has the given (data, tag).
 // ---------------------------------------------------------------------------
 
-static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
-    TaskArgs a;
-    ChipTensor t{};
-    t.buffer.addr = data_ptr;
+// A valid wire Tensor over a 1-byte POSIX_SHM backing, keyed by `buffer_id`. The dispatch path
+// decodes it with TaskArgsView::tensors, which validates every element, so the descriptor must be
+// well-formed (magic, non-zero generation, strides, an extent that fits the backing).
+static Tensor wire_tensor(uint64_t buffer_id) {
+    Tensor t{};
+    t.buffer.magic = BUFFER_DESCRIPTOR_MAGIC;
+    t.buffer.address_space = static_cast<uint8_t>(AddressSpace::HOST);
+    t.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    t.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    t.buffer.nbytes = 1;
+    t.buffer.identity.buffer_id = buffer_id;
+    t.buffer.identity.generation = 1;
+    // A POSIX_SHM descriptor names its backing; nothing here opens it, but the wire schema requires
+    // the name to be present and printable, and every element a TaskArgsView hands out is validated.
+    const std::string shm_name = "psm_sched_" + std::to_string(buffer_id);
+    t.buffer.body_len = static_cast<uint16_t>(shm_name.size());
+    std::memcpy(t.buffer.body, shm_name.data(), shm_name.size());
     t.ndims = 1;
     t.shapes[0] = 1;
+    t.strides[0] = 1;
     t.dtype = DataType::UINT8;
+    return t;
+}
+
+static TaskArgs single_tensor_args(uint64_t data_ptr, TensorArgType tag) {
+    TaskArgs a;
+    Tensor t = wire_tensor(data_ptr);
     a.add_tensor(t, tag);
     return a;
 }
@@ -769,9 +892,6 @@ struct SchedulerFixture : public ::testing::Test {
             },
             [this](WorkerDispatch dispatch) {
                 orch.mark_task_accepted(dispatch.task_slot);
-            },
-            [this] {
-                sched.notify_ready();
             }
         );
         rq_next_level.reset(manager.next_level_worker_ids());
@@ -856,6 +976,76 @@ TEST(WorkerManagerTest, StartRejectsDuplicateNextLevelWorkerId) {
     EXPECT_TRUE(threw);
 }
 
+TEST(WorkerManagerTest, SchedulerOwnsProgressAcrossWorkerEndpoints) {
+    Ring allocator;
+    ReadyQueue ready_sub;
+    NextLevelReadyQueues ready_next;
+    WorkerManager manager;
+    Scheduler scheduler;
+    allocator.init(/*heap_bytes=*/0);
+
+    auto endpoint0 = std::make_unique<DeterministicProgressEndpoint>(0, 1);
+    auto endpoint1 = std::make_unique<DeterministicProgressEndpoint>(1, 1);
+    DeterministicProgressEndpoint *endpoint0_ptr = endpoint0.get();
+    DeterministicProgressEndpoint *endpoint1_ptr = endpoint1.get();
+    manager.add_next_level_endpoint(std::move(endpoint0));
+    manager.add_next_level_endpoint(std::move(endpoint1));
+    manager.start(
+        &allocator,
+        [&scheduler](WorkerCompletion completion) {
+            scheduler.worker_done(std::move(completion));
+        },
+        [](WorkerDispatch) {}
+    );
+    ready_next.reset(manager.next_level_worker_ids());
+
+    auto enqueue = [&](int32_t worker_id, RunId run_id) {
+        TaskSlot slot = make_progress_slot(allocator, run_id, /*pipeline_slot=*/0, /*generation=*/run_id);
+        TaskSlotState &state = *allocator.slot_state(slot);
+        state.worker_type = WorkerType::NEXT_LEVEL;
+        state.target_worker_ids.push_back(worker_id);
+        state.state.store(TaskState::READY, std::memory_order_release);
+        ready_next.push_single(worker_id, slot);
+        return slot;
+    };
+    TaskSlot slot0 = enqueue(/*worker_id=*/0, /*run_id=*/81);
+    TaskSlot slot1 = enqueue(/*worker_id=*/1, /*run_id=*/82);
+
+    Scheduler::Config config;
+    config.ring = &allocator;
+    config.ready_sub_queue = &ready_sub;
+    config.ready_next_level_queues = &ready_next;
+    config.manager = &manager;
+    config.enqueue_ready_cb = [&](TaskSlot slot) {
+        TaskSlotState &state = *allocator.slot_state(slot);
+        ready_next.push_single(state.target_worker_id(0), slot);
+    };
+    scheduler.start(config);
+
+    ASSERT_TRUE(endpoint0_ptr->wait_submitted(1));
+    ASSERT_TRUE(endpoint1_ptr->wait_submitted(1));
+    WorkerDispatch dispatch0 = endpoint0_ptr->submitted().front();
+    WorkerDispatch dispatch1 = endpoint1_ptr->submitted().front();
+    endpoint0_ptr->emit(WorkerProgressKind::COMPLETED, dispatch0);
+    endpoint1_ptr->emit(WorkerProgressKind::COMPLETED, dispatch1);
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((allocator.slot_state(slot0)->state.load(std::memory_order_acquire) != TaskState::COMPLETED ||
+            allocator.slot_state(slot1)->state.load(std::memory_order_acquire) != TaskState::COMPLETED) &&
+           std::chrono::steady_clock::now() < deadline) {}
+    EXPECT_EQ(allocator.slot_state(slot0)->state.load(std::memory_order_acquire), TaskState::COMPLETED);
+    EXPECT_EQ(allocator.slot_state(slot1)->state.load(std::memory_order_acquire), TaskState::COMPLETED);
+    EXPECT_EQ(endpoint0_ptr->progress_owner(), endpoint1_ptr->progress_owner());
+
+    scheduler.request_stop();
+    scheduler.stop();
+    EXPECT_EQ(endpoint0_ptr->progress_owner(), endpoint1_ptr->progress_owner());
+    EXPECT_FALSE(endpoint0_ptr->progress_owner_changed());
+    EXPECT_FALSE(endpoint1_ptr->progress_owner_changed());
+    manager.stop();
+    allocator.shutdown();
+}
+
 TEST(WorkerManagerTest, SingleFrameSuccessorIsNotReportedAsStageable) {
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
@@ -873,113 +1063,6 @@ TEST(WorkerManagerTest, SingleFrameSuccessorIsNotReportedAsStageable) {
     EXPECT_FALSE(worker->can_stage());
 
     manager.stop();
-    allocator.shutdown();
-}
-
-// The scheduler's wait is edge-triggered, so the wake it consumes for a
-// finished dispatch has to imply the worker can take the next one. A
-// completion cannot carry that: it is published before the lane state, on
-// purpose, so a stopping scheduler never reads a worker as no longer busy
-// while its last completion is still unqueued. These two pin the ordering the
-// idle edge restores — one per endpoint driving mode.
-TEST(WorkerManagerTest, IdleCallbackFollowsTheLanePublicationOnBlockingEndpoints) {
-    Ring allocator;
-    allocator.init(/*heap_bytes=*/0);
-    TaskSlot slot = make_progress_slot(allocator, /*run_id=*/71, /*pipeline_slot=*/0, /*generation=*/1);
-    ASSERT_NE(slot, INVALID_SLOT);
-
-    WorkerManager manager;
-    manager.add_next_level_endpoint(std::make_unique<FakeEndpoint>(0));
-
-    std::mutex mu;
-    std::condition_variable cv;
-    int completions = 0;
-    int idle_calls = 0;
-    bool completion_seen_first = false;
-    bool worker_readable_as_idle = false;
-
-    manager.start(
-        &allocator,
-        [&](WorkerCompletion) {
-            std::lock_guard<std::mutex> lk(mu);
-            ++completions;
-        },
-        [](WorkerDispatch) {},
-        [&] {
-            WorkerThread *worker = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 0);
-            std::lock_guard<std::mutex> lk(mu);
-            ++idle_calls;
-            completion_seen_first = completions == 1;
-            worker_readable_as_idle = worker != nullptr && worker->idle() && !worker->busy();
-            cv.notify_all();
-        }
-    );
-
-    WorkerThread *worker = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 0);
-    ASSERT_NE(worker, nullptr);
-    worker->dispatch(WorkerDispatch{slot, 0});
-
-    {
-        std::unique_lock<std::mutex> lk(mu);
-        ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(3), [&] {
-            return idle_calls == 1;
-        })) << "the worker never signalled that its lane freed up";
-        EXPECT_TRUE(completion_seen_first) << "the idle edge must not precede the completion it belongs to";
-        EXPECT_TRUE(worker_readable_as_idle) << "a dispatch placed on this edge would find the worker occupied";
-    }
-
-    manager.stop();
-    allocator.shutdown();
-}
-
-TEST(WorkerManagerTest, IdleCallbackFollowsTheLanePublicationOnProgressEndpoints) {
-    Ring allocator;
-    allocator.init(/*heap_bytes=*/0);
-    TaskSlot slot = make_progress_slot(allocator, /*run_id=*/72, /*pipeline_slot=*/0, /*generation=*/1);
-    ASSERT_NE(slot, INVALID_SLOT);
-
-    WorkerThread worker;
-    auto endpoint = std::make_unique<DeterministicProgressEndpoint>();
-    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
-
-    std::mutex mu;
-    std::condition_variable cv;
-    int completions = 0;
-    int idle_calls = 0;
-    bool completion_seen_first = false;
-    bool worker_readable_as_idle = false;
-
-    worker.start(
-        &allocator,
-        [&](WorkerCompletion) {
-            std::lock_guard<std::mutex> lk(mu);
-            ++completions;
-        },
-        [](WorkerDispatch) {},
-        [&] {
-            std::lock_guard<std::mutex> lk(mu);
-            ++idle_calls;
-            completion_seen_first = completions == 1;
-            worker_readable_as_idle = worker.idle() && !worker.busy();
-            cv.notify_all();
-        },
-        std::move(endpoint)
-    );
-
-    worker.dispatch(WorkerDispatch{slot, 0});
-    ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
-    endpoint_ptr->force_stop_terminalization();
-
-    {
-        std::unique_lock<std::mutex> lk(mu);
-        ASSERT_TRUE(cv.wait_for(lk, std::chrono::seconds(3), [&] {
-            return idle_calls == 1;
-        })) << "the worker never signalled that its lane freed up";
-        EXPECT_TRUE(completion_seen_first) << "the idle edge must not precede the completion it belongs to";
-        EXPECT_TRUE(worker_readable_as_idle) << "a dispatch placed on this edge would find the worker occupied";
-    }
-
-    worker.stop();
     allocator.shutdown();
 }
 
@@ -1010,7 +1093,7 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
             accepted.push_back(dispatch);
             callback_cv.notify_all();
         },
-        {}, std::move(endpoint)
+        std::move(endpoint)
     );
 
     worker.dispatch(WorkerDispatch{active_slot, 0});
@@ -1026,6 +1109,8 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
 
     endpoint_ptr->emit(WorkerProgressKind::ACCEPTED, submitted[0]);
     endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted[0]);
+    worker.progress();
+    worker.progress();
     {
         std::unique_lock<std::mutex> lk(callback_mu);
         EXPECT_TRUE(callback_cv.wait_for(lk, std::chrono::seconds(3), [&] {
@@ -1035,10 +1120,13 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
     EXPECT_TRUE(worker.idle());
     EXPECT_TRUE(worker.busy());
     EXPECT_TRUE(worker.activate_prepared(/*run_id=*/12));
+    worker.progress();
     EXPECT_TRUE(endpoint_ptr->wait_activated(/*run_id=*/12));
 
     endpoint_ptr->emit(WorkerProgressKind::ACCEPTED, submitted[1]);
     endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted[1]);
+    worker.progress();
+    worker.progress();
     {
         std::unique_lock<std::mutex> lk(callback_mu);
         EXPECT_TRUE(callback_cv.wait_for(lk, std::chrono::seconds(3), [&] {
@@ -1084,7 +1172,7 @@ TEST(WorkerManagerTest, AdmissionRejectionsCompleteClaimedDispatchesWithoutThrow
             accepted.push_back(dispatch);
             callback_cv.notify_all();
         },
-        {}, std::move(endpoint)
+        std::move(endpoint)
     );
 
     worker.dispatch(WorkerDispatch{active_slot, 0});
@@ -1116,6 +1204,8 @@ TEST(WorkerManagerTest, AdmissionRejectionsCompleteClaimedDispatchesWithoutThrow
     WorkerDispatch active = endpoint_ptr->submitted().front();
     endpoint_ptr->emit(WorkerProgressKind::ACCEPTED, active);
     endpoint_ptr->emit(WorkerProgressKind::COMPLETED, active);
+    worker.progress();
+    worker.progress();
     {
         std::unique_lock<std::mutex> lk(callback_mu);
         ASSERT_TRUE(callback_cv.wait_for(lk, std::chrono::seconds(3), [&] {
@@ -1132,6 +1222,130 @@ TEST(WorkerManagerTest, AdmissionRejectionsCompleteClaimedDispatchesWithoutThrow
         EXPECT_EQ(completed.back().outcome, EndpointOutcome::ENDPOINT_FAILURE);
         EXPECT_EQ(completed.back().task_slot, stopping_rejected);
     }
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, StopLinearizesWithEndpointSubmission) {
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot submitted_slot = make_progress_slot(allocator, /*run_id=*/17, /*pipeline_slot=*/0, /*generation=*/1);
+    TaskSlot rejected_slot = make_progress_slot(allocator, /*run_id=*/18, /*pipeline_slot=*/0, /*generation=*/2);
+    ASSERT_NE(submitted_slot, INVALID_SLOT);
+    ASSERT_NE(rejected_slot, INVALID_SLOT);
+
+    WorkerThread worker;
+    auto endpoint = std::make_unique<DeterministicProgressEndpoint>(/*worker_id=*/0, /*max_inflight_tasks=*/1);
+    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
+    endpoint_ptr->block_next_submit();
+    std::mutex completion_mu;
+    std::vector<WorkerCompletion> completed;
+    worker.start(
+        &allocator,
+        [&](WorkerCompletion completion) {
+            std::lock_guard<std::mutex> lk(completion_mu);
+            completed.push_back(std::move(completion));
+        },
+        [](WorkerDispatch) {}, std::move(endpoint)
+    );
+
+    std::thread submitter([&] {
+        worker.dispatch(WorkerDispatch{submitted_slot, 0});
+    });
+    ASSERT_TRUE(endpoint_ptr->wait_submit_entered());
+
+    std::promise<void> stop_returned;
+    std::future<void> stop_future = stop_returned.get_future();
+    std::thread stopper([&] {
+        worker.stop();
+        stop_returned.set_value();
+    });
+    EXPECT_EQ(stop_future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout)
+        << "stop must not linearize while endpoint publication is still in progress";
+
+    endpoint_ptr->release_blocked_submit();
+    submitter.join();
+    ASSERT_EQ(stop_future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    stopper.join();
+    ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
+
+    worker.dispatch(WorkerDispatch{rejected_slot, 0});
+    EXPECT_EQ(endpoint_ptr->submitted().size(), 1u) << "nothing may publish after stop returns";
+
+    worker.progress();
+    worker.progress();
+    {
+        std::lock_guard<std::mutex> lk(completion_mu);
+        EXPECT_EQ(completed.size(), 2u);
+    }
+    EXPECT_FALSE(worker.busy());
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, StopBeforeProgressDoesNotActivatePreparedSuccessor) {
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot active_slot = make_progress_slot(allocator, /*run_id=*/19, /*pipeline_slot=*/0, /*generation=*/1);
+    TaskSlot staged_slot = make_progress_slot(allocator, /*run_id=*/20, /*pipeline_slot=*/1, /*generation=*/1);
+    ASSERT_NE(active_slot, INVALID_SLOT);
+    ASSERT_NE(staged_slot, INVALID_SLOT);
+
+    WorkerThread worker;
+    auto endpoint = std::make_unique<DeterministicProgressEndpoint>();
+    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
+    std::vector<WorkerCompletion> completed;
+    worker.start(
+        &allocator,
+        [&](WorkerCompletion completion) {
+            completed.push_back(std::move(completion));
+        },
+        [](WorkerDispatch) {}, std::move(endpoint)
+    );
+    worker.dispatch(WorkerDispatch{active_slot, 0});
+    worker.dispatch_prepared(WorkerDispatch{staged_slot, 0});
+    ASSERT_TRUE(endpoint_ptr->wait_submitted(2));
+    std::vector<WorkerDispatch> submitted = endpoint_ptr->submitted();
+    endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted[0]);
+    worker.progress();
+    ASSERT_TRUE(worker.activate_prepared(/*run_id=*/20));
+
+    worker.stop();
+    worker.progress();
+    EXPECT_FALSE(endpoint_ptr->wait_activated(/*run_id=*/20, std::chrono::milliseconds(20)))
+        << "stop must fence activation even after the staged lane moved to active";
+    worker.progress();
+    EXPECT_EQ(completed.size(), 2u);
+    EXPECT_FALSE(worker.busy());
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, SubmitExceptionQuiescesEndpointOwnedPublication) {
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot slot = make_progress_slot(allocator, /*run_id=*/21, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(slot, INVALID_SLOT);
+
+    WorkerThread worker;
+    auto endpoint = std::make_unique<DeterministicProgressEndpoint>();
+    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
+    endpoint_ptr->throw_after_next_submit_publication();
+    std::vector<WorkerCompletion> completed;
+    worker.start(
+        &allocator,
+        [&](WorkerCompletion completion) {
+            completed.push_back(std::move(completion));
+        },
+        [](WorkerDispatch) {}, std::move(endpoint)
+    );
+
+    worker.dispatch(WorkerDispatch{slot, 0});
+    EXPECT_TRUE(endpoint_ptr->wait_progress_error());
+    EXPECT_TRUE(completed.empty()) << "endpoint-owned work must terminalize through endpoint progress";
+    EXPECT_TRUE(worker.busy());
+
+    worker.progress();
+    ASSERT_EQ(completed.size(), 1u);
+    EXPECT_EQ(completed[0].outcome, EndpointOutcome::ENDPOINT_FAILURE);
+    EXPECT_FALSE(worker.busy());
     allocator.shutdown();
 }
 
@@ -1162,10 +1376,13 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     WorkerEndpointProgress progress;
     EXPECT_FALSE(endpoint.poll_progress(progress));
 
+    const int32_t native_prepared = static_cast<int32_t>(MailboxPreparationDisposition::NATIVE_PREPARED);
+    std::memcpy(lower_frame + MAILBOX_OFF_PREPARATION_DISPOSITION, &native_prepared, sizeof(native_prepared));
     set_test_frame_state(lower_frame, MailboxState::FRAME_STAGED);
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::FRAME_STAGED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
+    EXPECT_EQ(progress.preparation_disposition, MailboxPreparationDisposition::NATIVE_PREPARED);
     EXPECT_EQ(test_frame_state(lower_frame), MailboxState::ACTIVATE);
 
     set_test_frame_state(lower_frame, MailboxState::TASK_LAUNCHED);
@@ -1174,6 +1391,35 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, CapacityOneMailboxUsesTheProgressTaskFrame) {
+    alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/21, /*pipeline_slot=*/1, /*generation=*/7);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+
+    LocalMailboxEndpoint endpoint(/*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/1);
+    EXPECT_FALSE(endpoint.caps().supports_frame_staging);
+
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/41, /*prepare_only=*/false};
+    endpoint.submit_progress(&allocator, dispatch);
+
+    char *frame = test_task_frame(mailbox, 0);
+    EXPECT_EQ(test_frame_state(frame), MailboxState::TASK_READY);
+    EXPECT_EQ(test_frame_dispatch_id(frame), 41u);
+
+    set_test_frame_accepted(frame);
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
+
+    set_test_frame_state(frame, MailboxState::TASK_DONE);
+    ASSERT_TRUE(endpoint.poll_progress(progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
     allocator.shutdown();
 }
 
@@ -1212,7 +1458,7 @@ TEST(WorkerManagerTest, ThirdDispatchCannotMutateTwoOccupiedFrames) {
             ++completion_count;
             completion_cv.notify_all();
         },
-        [](WorkerDispatch) {}, {},
+        [](WorkerDispatch) {},
         std::make_unique<LocalMailboxEndpoint>(
             /*worker_id=*/0, mailbox.data(), /*child_pid=*/-1, /*task_frame_count=*/2
         )
@@ -1248,6 +1494,10 @@ TEST(WorkerManagerTest, ThirdDispatchCannotMutateTwoOccupiedFrames) {
     set_test_frame_accepted(frame1);
     set_test_frame_state(frame0, MailboxState::TASK_DONE);
     set_test_frame_state(frame1, MailboxState::TASK_DONE);
+    worker.progress();
+    worker.progress();
+    worker.progress();
+    worker.progress();
     {
         std::unique_lock<std::mutex> lk(completion_mu);
         EXPECT_TRUE(completion_cv.wait_for(lk, std::chrono::seconds(3), [&] {
@@ -1449,23 +1699,16 @@ TEST(WorkerManagerTest, StopTerminalizesOutstandingProgress) {
             completed.push_back(std::move(completion));
             completion_cv.notify_all();
         },
-        [](WorkerDispatch) {}, {}, std::move(endpoint)
+        [](WorkerDispatch) {}, std::move(endpoint)
     );
     worker.dispatch(WorkerDispatch{active_slot, 0});
     worker.dispatch_prepared(WorkerDispatch{staged_slot, 0});
     EXPECT_TRUE(endpoint_ptr->wait_submitted(2));
 
-    std::promise<void> stopped;
-    std::future<void> stop_done = stopped.get_future();
-    std::thread stopper([&] {
-        worker.stop();
-        stopped.set_value();
-    });
+    worker.stop();
+    worker.progress();
     EXPECT_TRUE(endpoint_ptr->wait_stop_requested());
-    std::future_status stop_status = stop_done.wait_for(std::chrono::seconds(3));
-    EXPECT_EQ(stop_status, std::future_status::ready);
-    if (stop_status != std::future_status::ready) endpoint_ptr->force_stop_terminalization();
-    stopper.join();
+    worker.progress();
     {
         std::lock_guard<std::mutex> lk(completion_mu);
         ASSERT_EQ(completed.size(), 2u);
@@ -1494,21 +1737,14 @@ TEST(WorkerManagerTest, ProgressStopRepeatsUntilOutstandingWorkTerminalizes) {
             std::lock_guard<std::mutex> lk(completion_mu);
             completed.push_back(std::move(completion));
         },
-        [](WorkerDispatch) {}, {}, std::move(endpoint)
+        [](WorkerDispatch) {}, std::move(endpoint)
     );
     worker.dispatch(WorkerDispatch{slot, 0});
     EXPECT_TRUE(endpoint_ptr->wait_submitted(1));
 
-    std::promise<void> stopped;
-    std::future<void> stop_done = stopped.get_future();
-    std::thread stopper([&] {
-        worker.stop();
-        stopped.set_value();
-    });
-    std::future_status stop_status = stop_done.wait_for(std::chrono::seconds(3));
-    EXPECT_EQ(stop_status, std::future_status::ready);
-    if (stop_status != std::future_status::ready) endpoint_ptr->force_stop_terminalization();
-    stopper.join();
+    worker.stop();
+    worker.progress();
+    worker.progress();
 
     EXPECT_EQ(endpoint_ptr->stop_request_count(), 2u)
         << "the first stop request may be overwritten by an in-flight control completion";
@@ -1541,10 +1777,12 @@ TEST(WorkerManagerTest, PollExceptionTerminalizesOutstandingProgressAndStopsTheD
             completed.push_back(std::move(completion));
             completion_cv.notify_all();
         },
-        [](WorkerDispatch) {}, {}, std::move(endpoint)
+        [](WorkerDispatch) {}, std::move(endpoint)
     );
     worker.dispatch(WorkerDispatch{slot, 0});
     EXPECT_TRUE(endpoint_ptr->wait_submitted(1));
+    worker.progress();
+    worker.progress();
     EXPECT_TRUE(endpoint_ptr->wait_progress_error());
 
     bool completion_ready = false;
@@ -1557,16 +1795,7 @@ TEST(WorkerManagerTest, PollExceptionTerminalizesOutstandingProgressAndStopsTheD
     EXPECT_TRUE(completion_ready);
     if (!completion_ready) endpoint_ptr->force_stop_terminalization();
 
-    std::promise<void> stopped;
-    std::future<void> stop_done = stopped.get_future();
-    std::thread stopper([&] {
-        worker.stop();
-        stopped.set_value();
-    });
-    std::future_status stop_status = stop_done.wait_for(std::chrono::seconds(3));
-    EXPECT_EQ(stop_status, std::future_status::ready);
-    if (stop_status != std::future_status::ready) endpoint_ptr->force_stop_terminalization();
-    stopper.join();
+    worker.stop();
 
     EXPECT_EQ(endpoint_ptr->progress_error(), "poll_progress failed: injected poll failure");
     {
@@ -1601,10 +1830,7 @@ TEST(WorkerManagerTest, StopKeepsWorkerBusyUntilItsLastCompletionIsPublished) {
             allow_completion_future.wait();
             scheduler.worker_done(std::move(completion));
         },
-        [](WorkerDispatch) {},
-        [&scheduler] {
-            scheduler.notify_ready();
-        }
+        [](WorkerDispatch) {}
     );
 
     ReadyQueue ready_sub;
@@ -1677,9 +1903,6 @@ struct ProgressSchedulerFixture : public ::testing::Test {
             },
             [this](WorkerDispatch dispatch) {
                 orchestrator.mark_task_accepted(dispatch.task_slot);
-            },
-            [this] {
-                scheduler.notify_ready();
             }
         );
         ready_next.reset(manager.next_level_worker_ids());
@@ -1988,54 +2211,50 @@ TEST_F(ProgressSchedulerFixture, PreparedSuccessorSingleCannotBypassItsReadyGrou
     if (orchestrator.run_done(second_run)) orchestrator.release_run(second_run);
 }
 
+// The endpoint must report acceptance as its own progress event, ahead of the
+// completion event, so a waiter on wait_run_accepted is released while the task
+// is still running rather than only once it finishes.
 TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
     MockMailboxWorker child;
     child.start();
 
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
-    AllocResult ar = allocator.alloc(/*heap_bytes=*/0, /*depth=*/0);
-    ASSERT_NE(ar.slot, INVALID_SLOT);
-    TaskSlotState *slot = allocator.slot_state(ar.slot);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/31, /*pipeline_slot=*/1, /*generation=*/7);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+    TaskSlotState *slot = allocator.slot_state(task_slot);
     ASSERT_NE(slot, nullptr);
-    slot->reset();
     slot->callable.digest[0] = 0x42;
-    slot->pipeline_lease = PipelineSlotLease{1, 0, 7};
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
-    std::promise<WorkerCompletion> result;
-    auto done = result.get_future();
-    std::atomic<bool> accepted{false};
-    std::thread caller([&] {
-        result.set_value(endpoint.run_with_accept(&allocator, WorkerDispatch{ar.slot, 0}, [&] {
-            accepted.store(true, std::memory_order_release);
-        }));
-    });
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/71, /*prepare_only=*/false};
+    endpoint.submit_progress(&allocator, dispatch);
 
     child.wait_running();
     EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
+    // The lease travels in the task frame the dispatch was published to, not
+    // the control base frame.
+    const char *published_frame =
+        static_cast<const char *>(child.mailbox_ptr()) + MAILBOX_FIRST_TASK_FRAME * MAILBOX_FRAME_SIZE;
     PipelineSlotLease wire_lease{};
-    std::memcpy(
-        &wire_lease, static_cast<char *>(child.mailbox_ptr()) + MAILBOX_OFF_PIPELINE_LEASE, sizeof(PipelineSlotLease)
-    );
+    std::memcpy(&wire_lease, published_frame + MAILBOX_OFF_PIPELINE_LEASE, sizeof(PipelineSlotLease));
     EXPECT_EQ(wire_lease.slot_id, 1u);
     EXPECT_EQ(wire_lease.generation, 7u);
-    child.write_task_accepted();
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (!accepted.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    EXPECT_TRUE(accepted.load(std::memory_order_acquire));
-    EXPECT_EQ(done.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
 
-    // Non-fatal from here on: a fatal assertion would return with `caller`
-    // joinable, and ~std::thread would terminate the whole test binary.
+    child.write_task_accepted();
+    WorkerEndpointProgress progress;
+    ASSERT_TRUE(poll_until(endpoint, progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
+    EXPECT_EQ(progress.dispatch.dispatch_id, dispatch.dispatch_id);
+
+    // Acceptance is a distinct earlier event: the task is not complete yet.
+    WorkerEndpointProgress not_yet;
+    EXPECT_FALSE(endpoint.poll_progress(not_yet));
+
     child.complete();
-    EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    if (done.valid() && done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        EXPECT_EQ(done.get().outcome, EndpointOutcome::SUCCESS);
-    }
-    caller.join();
+    ASSERT_TRUE(poll_until(endpoint, progress));
+    EXPECT_EQ(progress.kind, WorkerProgressKind::COMPLETED);
+    EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
     allocator.shutdown();
 }
 
@@ -2045,8 +2264,8 @@ TEST(WorkerManagerTest, LocalMailboxPublishesAcceptanceBeforeCompletion) {
 // state word observes none at all.
 //
 // This does not force the parent to skip a poll between the two writes: the
-// parent is already spinning by then and nothing here can stop it. What it
-// pins is the property that makes that interleaving harmless — acceptance is
+// parent is already polling by then and nothing here can stop it. What it pins
+// is the property that makes that interleaving harmless — acceptance is
 // readable after TASK_DONE, so losing a poll cannot lose the ACK.
 TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
     MockMailboxWorker child;
@@ -2054,23 +2273,15 @@ TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
 
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
-    AllocResult ar = allocator.alloc(/*heap_bytes=*/0, /*depth=*/0);
-    ASSERT_NE(ar.slot, INVALID_SLOT);
-    TaskSlotState *slot = allocator.slot_state(ar.slot);
+    TaskSlot task_slot = make_progress_slot(allocator, /*run_id=*/33, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(task_slot, INVALID_SLOT);
+    TaskSlotState *slot = allocator.slot_state(task_slot);
     ASSERT_NE(slot, nullptr);
-    slot->reset();
     slot->callable.digest[0] = 0x42;
 
     LocalMailboxEndpoint endpoint(/*worker_id=*/0, child.mailbox_ptr());
-    std::promise<WorkerCompletion> result;
-    auto done = result.get_future();
-    std::atomic<bool> accepted{false};
-
-    std::thread caller([&] {
-        result.set_value(endpoint.run_with_accept(&allocator, WorkerDispatch{ar.slot, 0}, [&] {
-            accepted.store(true, std::memory_order_release);
-        }));
-    });
+    WorkerDispatch dispatch{task_slot, 0, /*dispatch_id=*/73, /*prepare_only=*/false};
+    endpoint.submit_progress(&allocator, dispatch);
 
     child.wait_running();
     EXPECT_TRUE(child.is_running.load(std::memory_order_acquire));
@@ -2078,15 +2289,23 @@ TEST(WorkerManagerTest, AcceptanceIsReadableAfterTaskDone) {
     child.write_task_accepted();
     child.complete();
 
-    // Non-fatal: a fatal assertion would return with `caller` joinable, and
-    // ~std::thread would terminate the whole test binary.
-    EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    if (done.valid() && done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        EXPECT_EQ(done.get().outcome, EndpointOutcome::SUCCESS);
+    bool saw_accepted = false;
+    bool saw_completed = false;
+    WorkerEndpointProgress progress;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!saw_completed && std::chrono::steady_clock::now() < deadline) {
+        if (!endpoint.poll_progress(progress)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        if (progress.kind == WorkerProgressKind::ACCEPTED) saw_accepted = true;
+        if (progress.kind == WorkerProgressKind::COMPLETED) {
+            saw_completed = true;
+            EXPECT_EQ(progress.completion.outcome, EndpointOutcome::SUCCESS);
+        }
     }
-    EXPECT_TRUE(accepted.load(std::memory_order_acquire))
-        << "the endpoint lost the launch ACK to a task that completed first";
-    caller.join();
+    EXPECT_TRUE(saw_completed);
+    EXPECT_TRUE(saw_accepted) << "the endpoint lost the launch ACK to a task that completed first";
     allocator.shutdown();
 }
 
@@ -2236,11 +2455,7 @@ TEST_F(SchedulerFixture, ComposedKernelArgsBlobFitsMailbox) {
 
     TaskArgs args;
     for (int i = 0; i < 76; ++i) {
-        ChipTensor t{};
-        t.buffer.addr = 0x1000u + static_cast<uint64_t>(i) * 0x100u;
-        t.ndims = 1;
-        t.shapes[0] = 1;
-        t.dtype = DataType::UINT8;
+        Tensor t = wire_tensor(0x1000u + static_cast<uint64_t>(i) * 0x100u);
         args.add_tensor(t, TensorArgType::OUTPUT);
     }
     args.add_scalar(1);
@@ -2302,6 +2517,7 @@ struct GroupSchedulerFixture : public ::testing::Test {
     std::chrono::milliseconds reservation_stall_warn_after{std::chrono::seconds(5)};
     Scheduler::ReservationStallSink reservation_stall_sink{nullptr};
     void *reservation_stall_sink_context{nullptr};
+    std::function<void()> after_group_phase_hook;
 
     std::vector<TaskSlot> consumed_slots;
     std::mutex consumed_mu;
@@ -2328,9 +2544,6 @@ struct GroupSchedulerFixture : public ::testing::Test {
             },
             [this](WorkerDispatch dispatch) {
                 orch.mark_task_accepted(dispatch.task_slot);
-            },
-            [this] {
-                sched.notify_ready();
             }
         );
         rq_next_level.reset(manager.next_level_worker_ids());
@@ -2364,6 +2577,9 @@ struct GroupSchedulerFixture : public ::testing::Test {
         c.reservation_stall_warn_after = reservation_stall_warn_after;
         c.reservation_stall_sink = reservation_stall_sink;
         c.reservation_stall_sink_context = reservation_stall_sink_context;
+        c.after_group_phase_cb = [this] {
+            if (after_group_phase_hook) after_group_phase_hook();
+        };
         sched.start(c);
     }
 
@@ -2677,10 +2893,7 @@ TEST(SchedulerDispatchPassTest, ActiveRunSwitchCannotBypassSuccessorGroupReserva
         [&sched](WorkerCompletion completion) {
             sched.worker_done(std::move(completion));
         },
-        [](WorkerDispatch) {},
-        [&sched] {
-            sched.notify_ready();
-        }
+        [](WorkerDispatch) {}
     );
     rq_next_level.reset(manager.next_level_worker_ids());
 
@@ -2689,6 +2902,7 @@ TEST(SchedulerDispatchPassTest, ActiveRunSwitchCannotBypassSuccessorGroupReserva
         TaskSlotState &state = *allocator.slot_state(allocation.slot);
         state.reset();
         state.run_id = run_id;
+        state.pipeline_lease = PipelineSlotLease{/*slot_id=*/0, /*reserved=*/0, /*generation=*/run_id};
         state.worker_type = WorkerType::NEXT_LEVEL;
         state.callable = C(callable_seed);
         state.target_worker_ids.push_back(worker_id);
@@ -2874,9 +3088,6 @@ TEST_F(GroupSchedulerFixture, TearDownDrainsCurrentAndQueuedDispatches) {
     EXPECT_TRUE(sub_worker_b.is_running.load(std::memory_order_acquire));
 }
 
-// The shape that hangs when the idle edge is missing: a second task queued for
-// the only worker that can run it. Its wake is the first task's completion,
-// which a dispatch pass can consume while that worker still reads as occupied.
 TEST_F(GroupSchedulerFixture, QueuedSingleRunsAfterItsWorkerFreesUp) {
     auto first = orch.submit_next_level(C(81), single_tensor_args(0x1A, TensorArgType::OUTPUT), cfg, 0);
     worker_a.wait_running();
@@ -2898,7 +3109,71 @@ TEST_F(GroupSchedulerFixture, QueuedSingleRunsAfterItsWorkerFreesUp) {
     wait_consumed(queued.task_slot);
 }
 
-TEST_F(GroupSchedulerFixture, BlockedGroupSleepsUntilWorkerCompletion) {
+TEST_F(GroupSchedulerFixture, GroupPublishedBetweenGroupAndSinglePhasesStillOwnsItsTargets) {
+    SubmitResult second_group;
+    SubmitResult single_a;
+    SubmitResult single_c;
+    std::atomic<bool> published{false};
+    std::promise<void> publication_done;
+    std::future<void> publication_future = publication_done.get_future();
+    after_group_phase_hook = [&] {
+        if (published.exchange(true, std::memory_order_acq_rel)) return;
+        second_group = orch.submit_next_level_group(
+            C(91), {single_tensor_args(0x202, TensorArgType::OUTPUT), single_tensor_args(0x203, TensorArgType::OUTPUT)},
+            cfg, {1, 2}
+        );
+        single_a = orch.submit_next_level(C(92), single_tensor_args(0x204, TensorArgType::OUTPUT), cfg, 0);
+        single_c = orch.submit_next_level(C(93), single_tensor_args(0x205, TensorArgType::OUTPUT), cfg, 2);
+        publication_done.set_value();
+    };
+
+    SubmitResult first_group = orch.submit_next_level_group(
+        C(90), {single_tensor_args(0x200, TensorArgType::OUTPUT), single_tensor_args(0x201, TensorArgType::OUTPUT)},
+        cfg, {0, 1}
+    );
+    ASSERT_EQ(publication_future.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    worker_a.wait_running();
+    worker_b.wait_running();
+    EXPECT_EQ(worker_c.dispatched_count(), 0)
+        << "the later single must not cross a group that appeared between dispatch phases";
+
+    worker_a.complete();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_a.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_a.dispatched_count(), 2);
+    EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 92u);
+    worker_a.complete();
+
+    worker_b.complete();
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_b.dispatched_count() < 2 || worker_c.dispatched_count() < 1) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_b.dispatched_count(), 2);
+    ASSERT_EQ(worker_c.dispatched_count(), 1);
+    EXPECT_EQ(worker_b.dispatched[1].callable_hash0, 91u);
+    EXPECT_EQ(worker_c.dispatched[0].callable_hash0, 91u);
+    worker_b.complete();
+    worker_c.complete();
+
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (worker_c.dispatched_count() < 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(worker_c.dispatched_count(), 2);
+    EXPECT_EQ(worker_c.dispatched[1].callable_hash0, 93u);
+    worker_c.complete();
+
+    wait_consumed(first_group.task_slot);
+    wait_consumed(second_group.task_slot);
+    wait_consumed(single_a.task_slot);
+    wait_consumed(single_c.task_slot);
+}
+
+TEST_F(GroupSchedulerFixture, BlockedGroupRemainsReadyUntilWorkerCompletion) {
     auto running = orch.submit_next_level(C(78), single_tensor_args(0xFA, TensorArgType::OUTPUT), cfg, 0);
     worker_a.wait_running();
     EXPECT_TRUE(worker_a.is_running.load(std::memory_order_acquire));
@@ -2915,22 +3190,6 @@ TEST_F(GroupSchedulerFixture, BlockedGroupSleepsUntilWorkerCompletion) {
     }
     const uint64_t settled_rounds = sched.dispatch_round_count();
     ASSERT_GT(settled_rounds, rounds_before_blocked_group);
-    // The fix's property: with the group blocked, dispatch rounds stop
-    // advancing once the scheduler parks. Poll for a quiet window instead of
-    // a fixed sleep so a loaded runner cannot fail the check spuriously.
-    uint64_t quiet_rounds = settled_rounds;
-    bool parked = false;
-    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-    while (std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        const uint64_t rounds_now = sched.dispatch_round_count();
-        if (rounds_now == quiet_rounds) {
-            parked = true;
-            break;
-        }
-        quiet_rounds = rounds_now;
-    }
-    EXPECT_TRUE(parked) << "scheduler did not park while the group head was blocked";
     EXPECT_EQ(S(blocked.task_slot).state.load(std::memory_order_acquire), TaskState::READY);
 
     worker_a.complete();
@@ -2968,16 +3227,13 @@ TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {
         single_b = orch.submit_next_level(C(77), single_tensor_args(0xF9, TensorArgType::OUTPUT), cfg, 1);
         worker_a.complete();
         worker_b.complete();
-
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        while (manager.any_busy() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        ASSERT_FALSE(manager.any_busy());
     }
 
-    worker_a.wait_running();
-    worker_b.wait_running();
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     ASSERT_EQ(worker_a.dispatched_count(), 2);
     ASSERT_EQ(worker_b.dispatched_count(), 2);
     EXPECT_EQ(worker_a.dispatched[1].callable_hash0, 75u);
@@ -2987,7 +3243,7 @@ TEST_F(GroupSchedulerFixture, LaunchableGroupPrecedesConflictingSingles) {
     worker_b.complete();
     wait_consumed(group.task_slot);
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     while ((worker_a.dispatched_count() < 3 || worker_b.dispatched_count() < 3) &&
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -3085,23 +3341,8 @@ TEST_F(GroupSchedulerFixture, InvalidGroupIndexFailsAndConsumesGroup) {
     wait_consumed(slot);
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
 
-    {
-        // Wait for the invalid completion's dispatch round to finish, then
-        // make both terminalized group members idle while the scheduler loop
-        // is paused. Their completion callbacks must provide the next wake.
-        std::lock_guard<std::mutex> scheduler_pause(sched.loop_mutex());
-        worker_a.complete();
-        worker_b.complete();
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        WorkerThread *manager_worker_a = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 0);
-        WorkerThread *manager_worker_b = manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 1);
-        while ((!manager_worker_a->idle() || !manager_worker_b->idle()) &&
-               std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        EXPECT_TRUE(manager_worker_a->idle());
-        EXPECT_TRUE(manager_worker_b->idle());
-    }
+    worker_a.complete();
+    worker_b.complete();
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     while ((worker_a.dispatched_count() < 2 || worker_b.dispatched_count() < 2) &&
@@ -3223,11 +3464,7 @@ TEST_F(GroupSchedulerFixture, APoisonThatLandsMidSubmitLeavesThePropagationToSub
 
     TaskArgs consumer_args;
     for (uint64_t key : {0xF100ULL, 0xB200ULL}) {
-        ChipTensor t{};
-        t.buffer.addr = key;
-        t.ndims = 1;
-        t.shapes[0] = 1;
-        t.dtype = DataType::UINT8;
+        Tensor t = wire_tensor(key);
         consumer_args.add_tensor(t, TensorArgType::INPUT);
     }
 
@@ -3305,9 +3542,6 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
         },
         [&orch](WorkerDispatch dispatch) {
             orch.mark_task_accepted(dispatch.task_slot);
-        },
-        [&sched] {
-            sched.notify_ready();
         }
     );
     rq_next_level.reset(manager.next_level_worker_ids());
@@ -3384,11 +3618,7 @@ TEST(SchedulerWorkerTargetTest, NextLevelTargetUsesWorkerIdNotVectorIndex) {
 
 TEST_F(GroupSchedulerFixture, RemoteSidecarRejectsLocalEndpointEligibility) {
     TaskArgs args;
-    ChipTensor tensor{};
-    tensor.buffer.addr = 0;
-    tensor.ndims = 1;
-    tensor.shapes[0] = 1;
-    tensor.dtype = DataType::UINT8;
+    Tensor tensor = wire_tensor(0);
     args.add_tensor(tensor, TensorArgType::OUTPUT);
 
     RemoteTaskArgsSidecar sidecar;
@@ -3442,9 +3672,6 @@ struct MixedTypeSchedulerFixture : public ::testing::Test {
             },
             [this](WorkerDispatch dispatch) {
                 orch.mark_task_accepted(dispatch.task_slot);
-            },
-            [this] {
-                sched.notify_ready();
             }
         );
         rq_next_level.reset(manager.next_level_worker_ids());

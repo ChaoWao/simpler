@@ -36,7 +36,7 @@ import time
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 
 # Path is relative to this file's directory (the SceneTestCase build helper
@@ -112,8 +112,8 @@ class TestDepGenChain(SceneTestCase):
         x = torch.full((16,), self.INIT_VAL, dtype=torch.float32)
         y = torch.full((16,), self.INIT_VAL, dtype=torch.float32)
         return TaskArgsBuilder(
-            Tensor("x", x),
-            Tensor("y", y),
+            TensorArg("x", x),
+            TensorArg("y", y),
             Scalar("n", int(params["n"])),
         )
 

@@ -67,11 +67,18 @@ Implemented:
   imported-handle scheduling eligibility, and deferred owner free.
 - Registry-scope-aware remote callable manifest/control install for dispatcher
   `PYTHON_IMPORT`, inner `PYTHON_IMPORT`, and inner inline `CHIP_CALLABLE`.
+  Pre-init `ChipCallable` registrations on an L4 worker are serialized into
+  each remote session manifest and installed on that L3's L2 children.
+- The repository contains simulation coverage for the no-`mpirun` Global
+  CommDomain transaction and mixed local/remote L3 topology.
+- The two-machine `st-pod-onboard-a2a3` job covers the real `a3-fabric-v1`
+  backend through `global_tload_mixed_l3` (L4-brokered peer `TLOAD`) and
+  `compute_then_tload_mixed_l3` (one L2 compute round followed by
+  cross-machine communication through the same domain).
 
 Still pending:
 
 - A2 RoCE, A3 HCCS, and A5 UB HCOMM profiles.
-- Remote `CommDomain` allocation/import and hardware-gated validation.
 - Negotiated `PYTHON_SERIALIZED` remote callable payloads and staged
   `CHIP_CALLABLE` blob adapters.
 
@@ -130,7 +137,8 @@ Relevant code paths:
   - `_child_worker_loop()` runs a nested `Worker` child via shm mailbox.
   - `_run_chip_main_loop()` handles task and control mailbox states.
 - `src/common/hierarchical/worker_manager.{h,cpp}`
-  - `WorkerThread` owns one local mailbox and blocks until `TASK_DONE`.
+  - `WorkerThread` owns one local mailbox; the Scheduler thread advances it
+    to `TASK_DONE` through non-blocking submit/poll calls.
   - Control commands share the same mailbox and serialize on `mailbox_mu_`.
   - Errors are reported through `MAILBOX_OFF_ERROR` and
     `MAILBOX_OFF_ERROR_MSG`.
@@ -186,8 +194,8 @@ success/failure outcome.
 ## Fork-Safe Remote Process Model
 
 The remote runtime must preserve the repository's fork ordering invariant:
-all chip/sub child processes are forked before any C++ Scheduler,
-`WorkerThread`, transport, or health threads are started.
+all chip/sub child processes are forked before any C++ Scheduler, transport, or
+health threads are started.
 
 Use a two-process remote model:
 
@@ -449,10 +457,9 @@ Session execution rules:
   the current one-`WorkerThread`-per-child local scheduling model and keeps
   ordering, buffer lifetime, and callable visibility simple.
 - State-changing CONTROL frames such as register, unregister, buffer free,
-  copy, export/import, and import release serialize with TASK execution on the
-  ordered command lane. They are not applied concurrently with a running TASK
-  on the same endpoint. Future Remote CommDomain controls follow the same
-  ordering rule when they enter scope.
+  copy, export/import, import release, and Global CommDomain transactions
+  serialize with TASK execution on the ordered command lane. They are not
+  applied concurrently with a running TASK on the same endpoint.
 - Bulk data movement may use a separate data plane, but the state change that
   makes staged bytes, callable payloads, or imported handles visible is ordered
   by the command lane.
@@ -511,8 +518,8 @@ run as if the producer succeeded.
 
 Required parent-side behavior:
 
-- `RemoteL3Endpoint::run()` blocks for the matching completion sequence.
-- `LocalMailboxEndpoint::run()` maps a non-zero mailbox error to
+- `RemoteL3Endpoint::poll_progress()` reports the matching completion sequence.
+- `LocalMailboxEndpoint::poll_progress()` maps a non-zero mailbox error to
   `task_failure` instead of reporting a successful completion.
 - Non-zero task or endpoint errors become candidates for the worker's first
   reported error.

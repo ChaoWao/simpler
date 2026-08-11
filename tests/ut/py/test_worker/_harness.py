@@ -25,11 +25,13 @@ native register raise, and the failure surfaces to the caller of
 
 from __future__ import annotations
 
+import ctypes
 import signal
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from functools import partial
+from typing import Any
 
 import pytest
 import simpler.worker as worker_mod
@@ -100,6 +102,43 @@ def chip_callable(func_name: str = "x", binary: bytes = b"\x00") -> ChipCallable
     return ChipCallable.build(signature=[], func_name=func_name, binary=binary, children=[])
 
 
+class _FakeChipRun:
+    """The live handle a direct submit returns (native ``_ChipRun``).
+
+    A fake chip never executes its payload, so the run is already at its
+    completion fence; what it still has to model is that the handle is the
+    caller's, that waiting on it is idempotent, and that a failed run delivers
+    its error to whoever waits.
+    """
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.wait_count = 0
+        self.error = error
+
+    def done(self) -> bool:
+        return True
+
+    def wait(self, timeout: float = -1.0) -> bool:
+        self.wait_count += 1
+        if self.error is not None:
+            raise self.error
+        return True
+
+    def activate(self) -> None:
+        pass
+
+    def abandon(self) -> None:
+        pass
+
+    @property
+    def launched(self) -> bool:
+        return True
+
+    @property
+    def lane_poisoned(self) -> bool:
+        return False
+
+
 class _FakeChipImpl:
     """The native-handle half of :class:`FakeChipWorker` (``cw._impl``)."""
 
@@ -107,10 +146,33 @@ class _FakeChipImpl:
 
     def __init__(self, register_error: str | None = None) -> None:
         self._register_error = register_error
+        self.submitted: list[tuple[int, Any]] = []
+        self.lane_closed = False
+        self.finalized = False
+        # Assigned by a test to make every subsequently submitted run deliver
+        # this error from wait(), the way a failed native run does.
+        self.run_error: BaseException | None = None
+        # Set when _close_chip_run_lane ran while the device was still up.
+        # Draining after finalize would wait on a device that is already gone.
+        self.lane_closed_before_finalize: bool | None = None
 
     def register_callable_from_blob(self, cid: int, addr: int) -> None:
         if self._register_error is not None:
             raise RuntimeError(self._register_error)
+
+    def run_materialized(self, *_a, **_k) -> None:
+        """An L2 submit reaches the native handle here, with its args already materialized."""
+
+    def _submit_chip_run_direct(self, cid: int, args: Any, cfg: Any) -> _FakeChipRun:
+        """A direct submit admits at capacity one and returns the run while it runs."""
+        run = _FakeChipRun(self.run_error)
+        self.submitted.append((cid, run))
+        return run
+
+    def _close_chip_run_lane(self) -> None:
+        self.lane_closed = True
+        if self.lane_closed_before_finalize is None:
+            self.lane_closed_before_finalize = not self.finalized
 
 
 class FakeChipWorker:
@@ -120,6 +182,10 @@ class FakeChipWorker:
     :data:`CHIP_INIT_FAILURE`, ``"hangs"`` blocks past any test budget.
     ``register_error``, orthogonal to the script, makes the post-READY native
     register raise that message on the chip child.
+
+    Its "device" memory is a child-local host allocation, so the pointers
+    ``malloc`` hands out are meaningful only in the process that made them —
+    the same property a real device pointer has across the fork.
 
     Build one with :func:`fake_chip_worker`; ``ChipWorker`` is constructed with
     no arguments on both the L2 in-process and the forked chip-child paths.
@@ -133,6 +199,22 @@ class FakeChipWorker:
             raise ValueError(f"unknown fake-chip script {script!r}; expected one of {_SCRIPTS}")
         self.script = script
         self._impl = _FakeChipImpl(register_error)
+        self._blocks: dict[int, Any] = {}
+
+    def malloc(self, size: int) -> int:
+        block = (ctypes.c_char * int(size))()
+        ptr = ctypes.addressof(block)
+        self._blocks[ptr] = block
+        return ptr
+
+    def free(self, ptr: int) -> None:
+        self._blocks.pop(int(ptr), None)
+
+    def copy_to(self, dst: int, src: int, size: int) -> None:
+        ctypes.memmove(dst, src, size)
+
+    def copy_from(self, dst: int, src: int, size: int) -> None:
+        ctypes.memmove(dst, src, size)
 
     def init(self, *_a, **_k) -> None:
         if self.script == "raises":
@@ -150,7 +232,7 @@ class FakeChipWorker:
         pass
 
     def finalize(self) -> None:
-        pass
+        self._impl.finalized = True
 
 
 def fake_chip_worker(*, script: str = "ok", register_error: str | None = None):

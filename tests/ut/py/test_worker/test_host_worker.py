@@ -26,7 +26,7 @@ import weakref
 from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
 from typing import Any, Optional, cast
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 import simpler.orchestrator as orch_mod
@@ -170,6 +170,7 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
             {},
             {},
             {},
+            worker_mod.mint_owner_instance_id(),
             platform="a2a3",
             runtime="tensormap_and_ringbuffer",
         )
@@ -255,6 +256,48 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     assert fake_parent.initialized
 
 
+class _FakeChipRun:
+    def __init__(self, lane, submission) -> None:
+        self._lane = lane
+        self.submission = submission
+        self.token = None
+        self.activated = False
+        self._launched = False
+        self.terminal = False
+        self.error: Optional[BaseException] = None
+        self._disposition = worker_mod._VALIDATED_ONLY
+
+    @property
+    def launched(self) -> bool:
+        return self._launched
+
+    @property
+    def lane_poisoned(self) -> bool:
+        return self._lane._lane_poisoned
+
+    @property
+    def preparation_disposition(self):
+        return SimpleNamespace(value=self._disposition)
+
+    def activate(self) -> None:
+        self.activated = True
+        self._lane._launch_front()
+        self._lane._prepare_successor()
+
+    def abandon(self) -> None:
+        if self._launched:
+            raise RuntimeError("cannot abandon a launched fake ChipRun")
+        self._lane._finish(self)
+
+    def done(self) -> bool:
+        return self._lane._progress(self)
+
+    def _raise_if_failed(self) -> None:
+        assert self.terminal
+        if self.error is not None:
+            raise self.error
+
+
 class _FakeNativeRunImpl:
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
         self.supports_concurrent_native_prepare = supports_concurrent_native_prepare
@@ -268,20 +311,22 @@ class _FakeNativeRunImpl:
         self.poll_errors: dict[tuple[int, int], BaseException] = {}
         self.finalize_errors: dict[tuple[int, int], BaseException] = {}
         self.prepare_identities: list[tuple[int, int, int, int]] = []
+        self.poll_states: list[tuple[int, int]] = []
         self.register_calls: list[tuple[int, int]] = []
         self.register_called = threading.Event()
         self._finalized_runs: set[tuple[int, int]] = set()
         self._polled_slots: set[int] = set()
+        self._runs: list[_FakeChipRun] = []
+        self._lane_poisoned = False
 
     def register_callable_from_blob(self, cid: int, blob_addr: int) -> None:
         self.register_calls.append((int(cid), int(blob_addr)))
         self.register_called.set()
 
-    def _prepare_native_run_from_blob(
+    def _prepare_native_run_materialized(
         self,
         _cid,
-        _blob_addr,
-        _capacity,
+        _args,
         _cfg,
         slot_id,
         generation,
@@ -328,6 +373,8 @@ class _FakeNativeRunImpl:
 
     def _poll_native_run(self, token) -> bool:
         slot = int(token.slot_id)
+        state_addr = int(token.accepted_addr) - worker_mod._OFF_ACCEPTED
+        self.poll_states.append((slot, _mailbox_load_i32(state_addr)))
         error = self.poll_errors.get((slot, int(token.generation)))
         if error is not None:
             raise error
@@ -346,6 +393,149 @@ class _FakeNativeRunImpl:
         error = self.finalize_errors.get(run_key)
         if error is not None:
             raise error
+
+    @staticmethod
+    def _has_diagnostics(config) -> bool:
+        return bool(
+            config.enable_chip_swimlane
+            or config.enable_dump_args
+            or config.enable_pmu
+            or config.enable_dep_gen
+            or config.enable_scope_stats
+        )
+
+    def _prepare(self, run: _FakeChipRun) -> None:
+        s = run.submission
+        run.token = self._prepare_native_run_materialized(
+            s.cid,
+            s.args,
+            s.config,
+            s.slot_id,
+            s.generation,
+            s.run_id,
+            s.dispatch_id,
+            s.accepted_addr,
+            s.accepted_value,
+        )
+        run._disposition = worker_mod._NATIVE_PREPARED
+
+    def _finish(self, run: _FakeChipRun) -> None:
+        try:
+            if run.token is not None:
+                self._finalize_native_run(run.token)
+        except BaseException as error:  # noqa: BLE001
+            run.error = run.error or error
+            self._lane_poisoned = True
+        run.terminal = True
+        if run in self._runs:
+            self._runs.remove(run)
+
+    def _launch_front(self) -> None:
+        if not self._runs:
+            return
+        run = self._runs[0]
+        if self._lane_poisoned:
+            run.error = run.error or RuntimeError("fake chip run lane is poisoned")
+            self._finish(run)
+            return
+        if not run.activated or run._launched or run.terminal:
+            return
+        if run.token is None:
+            try:
+                self._prepare(run)
+            except BaseException as error:  # noqa: BLE001
+                run.error = error
+                run.terminal = True
+                self._runs.remove(run)
+                return
+        try:
+            self._launch_native_run(run.token)
+            run._launched = True
+        except BaseException as error:  # noqa: BLE001
+            run.error = error
+            self._finish(run)
+
+    def _prepare_successor(self) -> None:
+        if len(self._runs) != 2:
+            return
+        predecessor, successor = self._runs
+        if (
+            predecessor._launched
+            and successor.token is None
+            and self.supports_concurrent_native_prepare
+            and not self._has_diagnostics(predecessor.submission.config)
+            and not self._has_diagnostics(successor.submission.config)
+        ):
+            try:
+                self._prepare(successor)
+            except BaseException as error:  # noqa: BLE001
+                successor.error = error
+                successor.terminal = True
+                self._runs.remove(successor)
+
+    def _progress(self, target: _FakeChipRun) -> bool:
+        if target.terminal:
+            return True
+        if not self._runs or self._runs[0] is not target:
+            return False
+        self._launch_front()
+        self._prepare_successor()
+        if target.terminal:
+            self._launch_front()
+            return True
+        if not target._launched:
+            return False
+        try:
+            if not self._poll_native_run(target.token):
+                return False
+        except BaseException as error:  # noqa: BLE001
+            target.error = error
+            self._lane_poisoned = True
+        self._finish(target)
+        self._launch_front()
+        self._prepare_successor()
+        return True
+
+    def _submit_chip_run_materialized(  # noqa: PLR0913 -- mirrors the production binding
+        self,
+        cid,
+        args,
+        config,
+        slot_id,
+        generation,
+        run_id,
+        dispatch_id,
+        accepted_addr,
+        accepted_value,
+        activated,
+    ):
+        submission = SimpleNamespace(
+            cid=cid,
+            args=args,
+            config=config,
+            slot_id=int(slot_id),
+            generation=int(generation),
+            run_id=int(run_id),
+            dispatch_id=int(dispatch_id),
+            accepted_addr=int(accepted_addr),
+            accepted_value=int(accepted_value),
+        )
+        run = _FakeChipRun(self, submission)
+        run.activated = bool(activated)
+        self._runs.append(run)
+        self._runs.sort(key=lambda candidate: candidate.submission.dispatch_id)
+        self._launch_front()
+        self._prepare_successor()
+        return run
+
+    def _close_chip_run_lane(self) -> None:
+        while self._runs:
+            run = self._runs[0]
+            if run._launched:
+                self.completed[run.submission.slot_id].set()
+            self._finish(run)
+        if self._lane_poisoned:
+            raise RuntimeError("fake chip run lane is poisoned")
 
 
 class _FakeTwoFrameChipWorker:
@@ -406,6 +596,7 @@ class _TwoFrameLoopHarness:
                 self.registry,
                 self.identity_table,
                 self.identity_refs,
+                worker_mod.mint_owner_instance_id(),
             ),
             kwargs={
                 "chip_platform": "a2a3",
@@ -423,6 +614,11 @@ class _TwoFrameLoopHarness:
 
     def accepted_addr(self, index: int) -> int:
         return self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_ACCEPTED
+
+    def preparation_disposition(self, index: int) -> int:
+        return _mailbox_load_i32(
+            self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_PREPARATION_DISPOSITION
+        )
 
     def publish(
         self,
@@ -513,6 +709,7 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
 
         harness.publish(1, 2)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert harness.preparation_disposition(1) == worker_mod._VALIDATED_ONLY
         assert not harness.cw._impl.prepared[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
@@ -541,6 +738,19 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
         harness.close()
 
 
+def test_two_frame_publishes_launch_before_polling_immediate_completion():
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.cw._impl.completed[0].set()
+        harness.publish(0, 1)
+        harness.start()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+
+        assert harness.cw._impl.poll_states[0] == (0, worker_mod._TASK_LAUNCHED)
+    finally:
+        harness.close()
+
+
 def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
     harness = _TwoFrameLoopHarness(
         supports_concurrent_native_prepare=True,
@@ -553,6 +763,7 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
 
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
+        assert harness.preparation_disposition(1) == worker_mod._NATIVE_PREPARED
         assert harness.cw._impl.prepared[1].is_set()
         assert not harness.cw._impl.finalized[0].is_set()
         assert not harness.cw._impl.launched[1].is_set()
@@ -752,6 +963,7 @@ def test_two_frame_prepare_ready_waits_for_sticky_activation():
         harness.publish(0, 1, state=worker_mod._PREPARE_READY)
         harness.start()
         harness.wait_state(0, worker_mod._FRAME_STAGED)
+        assert harness.preparation_disposition(0) == worker_mod._VALIDATED_ONLY
         assert not harness.cw._impl.prepared[0].is_set()
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
@@ -4525,21 +4737,38 @@ class TestDirectControlOrdering:
 
     @staticmethod
     def _orch(worker):
+        """Wire a worker that can reach a child: a native Worker to drive the call and a
+        native Orchestrator to assert the whole-run fence on.
+
+        `alloc_child_tensor` range-checks `worker_id` against `_chip_shms` and takes an
+        operation lease, so the worker must look like a READY L3 with one chip.
+        """
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         from simpler.orchestrator import Orchestrator  # noqa: PLC0415
 
+        native_worker = MagicMock()
+        native_worker.malloc.return_value = 0x1000
+        worker._worker = cast(Any, native_worker)
+        worker._chip_shms = cast(Any, [object()])
+        worker._lifecycle = worker_mod._Lifecycle.READY
+
         native = MagicMock()
-        native.malloc.return_value = 0x1000
-        return Orchestrator(native, worker), native
+        native.malloc = native_worker.malloc
+        orch = Orchestrator(native, worker)
+        worker._orch = cast(Any, orch)
+        return orch, native
+
+    @staticmethod
+    def _alloc(worker):
+        return worker.alloc_child_tensor(0, (16,), DataType.FLOAT32)
 
     def test_control_inside_a_run_waits_for_that_run_to_hold_the_fifo_head(self):
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
 
         with orch_mod._callback_run(7, worker):
-            orch.malloc(0, 64)
+            self._alloc(worker)
         native.await_run_admission.assert_called_once_with(7)
 
     def test_control_after_a_task_submission_in_the_same_run_is_refused(self):
@@ -4549,32 +4778,29 @@ class TestDirectControlOrdering:
         each hold the mailbox the other is waiting for.
         """
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
 
         with orch_mod._callback_run(7, worker):
-            orch.malloc(0, 64)  # before any submit: fine
+            self._alloc(worker)  # before any submit: fine
             orch_mod._admit_task_submission(worker)
             with pytest.raises(RuntimeError, match="cannot follow a task submission"):
-                orch.malloc(0, 64)
+                self._alloc(worker)
         assert native.malloc.call_count == 1
 
     def test_caught_submit_validation_failure_does_not_forbid_later_control(self):
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
 
         with orch_mod._callback_run(7, worker):
             with pytest.raises(TypeError, match="expects a CallableHandle"):
                 orch.submit_sub(object())
-            orch.malloc(0, 64)
+            self._alloc(worker)
 
         native.submit_sub.assert_not_called()
         native.malloc.assert_called_once()
 
     def test_native_submit_attempt_forbids_later_control_even_when_it_raises(self, monkeypatch):
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
         monkeypatch.setattr(
             orch_mod,
@@ -4587,20 +4813,19 @@ class TestDirectControlOrdering:
             with pytest.raises(RuntimeError, match="native submit failed"):
                 orch.submit_sub(object())
             with pytest.raises(RuntimeError, match="cannot follow a task submission"):
-                orch.malloc(0, 64)
+                self._alloc(worker)
 
         native.submit_sub.assert_called_once()
         native.malloc.assert_not_called()
 
     def test_each_run_starts_with_no_submissions_of_its_own(self):
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, _native = self._orch(worker)
 
         with orch_mod._callback_run(7, worker):
             orch_mod._admit_task_submission(worker)
         with orch_mod._callback_run(8, worker):
-            orch.malloc(0, 64)
+            self._alloc(worker)
 
     def test_a_nested_run_restores_its_callers_marker(self):
         """An L4 callback drives its children's runs on its own thread.
@@ -4609,15 +4834,14 @@ class TestDirectControlOrdering:
         the outer submission nor erase it on the way out.
         """
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, _native = self._orch(worker)
 
         with orch_mod._callback_run(7, worker):
             orch_mod._admit_task_submission(worker)
             with orch_mod._callback_run(8, worker):
-                orch.malloc(0, 64)  # the inner run has submitted nothing
+                self._alloc(worker)  # the inner run has submitted nothing
             with pytest.raises(RuntimeError, match="cannot follow a task submission"):
-                orch.malloc(0, 64)
+                self._alloc(worker)
         assert orch_mod._callback_frames() == []
 
     def test_the_reservation_spans_the_call_not_just_the_check(self):
@@ -4628,7 +4852,6 @@ class TestDirectControlOrdering:
         the check was for. The serializer submission holds is held here too.
         """
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, _native = self._orch(worker)
 
         in_control = threading.Event()
@@ -4640,10 +4863,10 @@ class TestDirectControlOrdering:
             assert release_control.wait(5.0), "test never released the control call"
             return 0x1000
 
-        _native.malloc = _blocking_native_malloc
+        cast(Any, worker._worker).malloc = _blocking_native_malloc
         worker._submit_l3_locked = cast(Any, lambda *a: submit_entered.set())
 
-        control = threading.Thread(target=lambda: orch.malloc(0, 64), daemon=True)
+        control = threading.Thread(target=lambda: self._alloc(worker), daemon=True)
         control.start()
         assert in_control.wait(5.0), "the control call never reached the child"
 
@@ -4690,7 +4913,7 @@ class TestDirectControlOrdering:
 
         with orch_mod._callback_run(1, worker_a):
             with pytest.raises(RuntimeError, match="still in flight"):
-                orch_b.malloc(0, 64)
+                self._alloc(worker_b)
         native_b.await_run_admission.assert_not_called()
 
     def test_a_reservation_on_one_worker_does_not_cover_another(self):
@@ -4705,7 +4928,7 @@ class TestDirectControlOrdering:
 
         with worker_a._control_reservation("Worker.malloc"):
             with pytest.raises(RuntimeError, match="still in flight"):
-                orch_b.malloc(0, 64)
+                self._alloc(worker_b)
 
     def test_a_nested_worker_callback_keeps_its_callers_ordering(self):
         """An L4 callback drives its child's run on its own thread.
@@ -4723,8 +4946,8 @@ class TestDirectControlOrdering:
 
         with orch_mod._callback_run(5, parent):
             with orch_mod._callback_run(9, child):
-                orch_child.malloc(0, 64)
-                orch_parent.malloc(0, 64)
+                self._alloc(child)
+                self._alloc(parent)
         native_child.await_run_admission.assert_called_once_with(9)
         native_parent.await_run_admission.assert_called_once_with(5)
 
@@ -4735,14 +4958,13 @@ class TestDirectControlOrdering:
         reclaimable device state, so the refusal is re-read on every call.
         """
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
 
         with orch_mod._callback_run(7, worker):
-            orch.malloc(0, 64)
+            self._alloc(worker)
             worker._ordered_cleanup_error = RuntimeError("region rollback leaked")
             with pytest.raises(RuntimeError, match="no further work is admitted"):
-                orch.malloc(0, 64)
+                self._alloc(worker)
         assert native.malloc.call_count == 1
 
     def test_task_submission_rechecks_the_sticky_poison(self):
@@ -4761,12 +4983,11 @@ class TestDirectControlOrdering:
 
     def test_owner_less_control_is_refused_after_a_cleanup_failure(self):
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, _native = self._orch(worker)
 
         worker._ordered_cleanup_error = RuntimeError("domain release failed")
         with pytest.raises(RuntimeError, match="no further work is admitted"):
-            orch.malloc(0, 64)
+            self._alloc(worker)
 
     def test_a_mailbox_query_takes_the_same_ordering_as_a_command(self):
         """`committed_device_memory` is a read, but it travels the same mailbox.
@@ -4775,7 +4996,6 @@ class TestDirectControlOrdering:
         describes neither the state before nor the state after.
         """
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
         native.committed_device_memory.return_value = 4096
 
@@ -4790,22 +5010,62 @@ class TestDirectControlOrdering:
 
     def test_owner_less_control_is_refused_while_a_run_is_in_flight(self):
         worker = Worker(level=3, num_sub_workers=0)
-        worker._worker = cast(Any, object())
         orch, native = self._orch(worker)
 
-        orch.malloc(0, 64)  # quiescent: admitted
+        self._alloc(worker)  # quiescent: admitted
         handle = RunHandle(worker, 1, (), worker_mod._RunResources())
         worker._accepted_run_handles.add(handle)
 
         with pytest.raises(RuntimeError, match="still in flight"):
-            orch.malloc(0, 64)
+            self._alloc(worker)
         native.await_run_admission.assert_not_called()
 
         # A run whose cleanup has been published is no longer in flight, even
         # though nothing removed the handle here.
         handle._cleanup_published = True
-        orch.malloc(0, 64)
+        self._alloc(worker)
         assert native.malloc.call_count == 2
+
+    def test_every_worker_device_entry_point_takes_the_fence(self):
+        """The Worker is the single choke point for device control.
+
+        `alloc_child_tensor` / `free` / `copy_to` reach a child outside any TaskSlot,
+        so each one issued inside a run must wait for that run to hold the FIFO head.
+        """
+        from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id  # noqa: PLC0415
+
+        worker = Worker(level=3, num_sub_workers=0)
+        orch, native = self._orch(worker)
+        host = create_host_shared_buffer(16 * 4, mint_owner_instance_id(), buffer_id=1)
+
+        try:
+            with orch_mod._callback_run(7, worker):
+                handle = self._alloc(worker)
+                assert native.await_run_admission.call_count == 1
+
+                worker.copy_to(handle, host)
+                assert native.await_run_admission.call_count == 2
+
+                worker.free(handle)
+                assert native.await_run_admission.call_count == 3
+            assert native.await_run_admission.call_args_list == [call(7), call(7), call(7)]
+        finally:
+            host.close()
+
+    def test_the_thin_orchestrator_forward_does_not_double_gate(self):
+        """`orch.free` delegates to the Worker, which owns the gate.
+
+        Gating both layers would be harmless but would leave two choke points
+        for one command; the fence is taken exactly once.
+        """
+        worker = Worker(level=3, num_sub_workers=0)
+        orch, native = self._orch(worker)
+
+        with orch_mod._callback_run(7, worker):
+            handle = self._alloc(worker)
+            native.await_run_admission.reset_mock()
+            orch.free(handle)
+        native.await_run_admission.assert_called_once_with(7)
 
 
 class TestRemoteControlOrdering:
@@ -6669,7 +6929,7 @@ class TestScope:
             # Mixed with submits.
             with o.scope():
                 inner = o.alloc((32,), DataType.FLOAT32)
-                assert inner.data != 0
+                assert inner.base != 0
 
         hw.run(orch)
         hw.close()
@@ -6708,7 +6968,7 @@ class TestScope:
 
 class TestOrchAlloc:
     def test_alloc_returns_valid_tensor(self):
-        """alloc returns a ChipTensor whose data ptr is non-zero and writeable."""
+        """alloc returns a Tensor whose data ptr is non-zero and writeable."""
         captured = []
 
         hw = Worker(level=3, num_sub_workers=1)
@@ -6717,12 +6977,13 @@ class TestOrchAlloc:
 
         def orch(o, args, cfg):
             inter = o.alloc((64,), DataType.FLOAT32)
-            captured.append((inter.data, inter.ndims, inter.shapes[0]))
+            ref = inter.tensor((64,), DataType.FLOAT32)
+            captured.append((inter.base, ref.ndims, ref.shapes[0]))
 
             # Tag as OUTPUT in some submit so the synthetic alloc slot has a
             # downstream consumer (otherwise scope_end consumes alone — still fine).
             sub_args = TaskArgs()
-            sub_args.add_tensor(inter, TensorArgType.INPUT)
+            sub_args.add_tensor(ref, TensorArgType.INPUT)
             o.submit_sub(handle, sub_args)
 
         hw.run(orch)
@@ -6754,13 +7015,13 @@ class TestOrchAlloc:
                 # do TensorMap.lookup. Plain OUTPUT / OUTPUT_EXISTING are
                 # pure inserts and would leave no dep on the alloc slot.
                 p_args = TaskArgs()
-                p_args.add_tensor(inter, TensorArgType.INOUT)
+                p_args.add_tensor(inter.tensor((128,), DataType.FLOAT32), TensorArgType.INOUT)
                 o.submit_sub(producer_handle, p_args)
 
-                # Consumer tags inter as INPUT — tensormap.lookup finds the
-                # producer slot, dep wired automatically.
+                # Consumer tags inter as INPUT — dep inference keys on the ref's
+                # canonical identity (shared with the producer), dep wired automatically.
                 c_args = TaskArgs()
-                c_args.add_tensor(inter, TensorArgType.INPUT)
+                c_args.add_tensor(inter.tensor((128,), DataType.FLOAT32), TensorArgType.INPUT)
                 o.submit_sub(consumer_handle, c_args)
 
             hw.run(orch)
@@ -6801,7 +7062,7 @@ class TestOrchAlloc:
             def orch(o, args, cfg):
                 inter = o.alloc((64,), DataType.FLOAT32)
                 args = TaskArgs()
-                args.add_tensor(inter, TensorArgType.INPUT)
+                args.add_tensor(inter.tensor((64,), DataType.FLOAT32), TensorArgType.INPUT)
                 o.submit_sub(handle, args)
 
             for _ in range(8):
@@ -6821,30 +7082,30 @@ class TestOrchAlloc:
 
 class TestSubCallableArgs:
     def test_sub_callable_receives_tensor_metadata(self):
-        """Sub callable receives TaskArgs with correct tensor count and shape."""
-        from simpler.task_interface import ChipTensor  # noqa: PLC0415
+        """Sub callable receives MappedArgs with correct tensor count and shape."""
+        from simpler.buffer import mint_owner_instance_id, wrap_fork_inherited  # noqa: PLC0415
 
         result_shm, result_buf = _make_shared_counter()
         try:
             hw = Worker(level=3, num_sub_workers=1)
 
             def check_args(args):
-                # Verify args decoded correctly: 1 tensor, shape (4,), FLOAT32
-                if args.tensor_count() == 1 and args.scalar_count() == 0:
-                    t = args.tensor(0)
-                    if t.ndims == 1 and t.shapes[0] == 4:
+                # Verify args decoded correctly: 1 tensor, shape (4,), and no scalars.
+                if len(args) == 1 and args.scalar_count() == 0:
+                    t = args[0]
+                    if len(t.shapes) == 1 and t.shapes[0] == 4:
                         _increment_counter(result_buf)
 
             handle = hw.register(check_args)
             hw.init()
 
-            # Use a synthetic non-zero pointer — sub callable only checks metadata,
-            # doesn't dereference the pointer.
-            ct = ChipTensor.make(0xCAFE0000, (4,), DataType.FLOAT32)
+            # Use a synthetic non-zero pointer — the sub callable only checks metadata (shapes),
+            # never dereferences the buffer, so a FORK_SHM ref over a fake VA is enough.
+            cref = wrap_fork_inherited(0xCAFE0000, 16, mint_owner_instance_id(), 1, "L3").tensor((4,), DataType.FLOAT32)
 
             def orch(o, args, cfg):
                 sub_args = TaskArgs()
-                sub_args.add_tensor(ct, TensorArgType.INPUT)
+                sub_args.add_tensor(cref, TensorArgType.INPUT)
                 o.submit_sub(handle, sub_args)
 
             hw.run(orch)
@@ -6909,6 +7170,32 @@ class TestSubCallableArgs:
 # ---------------------------------------------------------------------------
 # Test: _CTRL_REGISTER digest-owned child slots
 # ---------------------------------------------------------------------------
+
+
+@requires_sim_binaries
+class TestChipChildCopyHandles:
+    """An L3 copy names both ends by handle; the forked chip child resolves each one itself."""
+
+    def test_round_trip_through_the_forked_chip_child(self, monkeypatch):
+        # The device pointer the child's malloc returns is meaningful only in the child, and the
+        # host backing is mapped at the owner's address only in the parent — so a round trip that
+        # comes back byte-for-byte proves both ends resolved on the side that owns them.
+        payload = bytes(range(64))
+        with fake_chip_l3(monkeypatch) as hw:
+            device = hw.alloc_child_tensor(0, (64,), DataType.UINT8)
+            src = hw.create_buffer(64)
+            dst = hw.create_buffer(64)
+            src_shm, dst_shm = src.shm, dst.shm
+            assert src_shm is not None
+            assert dst_shm is not None
+            src_view, dst_view = src_shm.buf, dst_shm.buf
+            assert src_view is not None
+            assert dst_view is not None
+            src_view[:64] = payload
+            assert bytes(dst_view[:64]) != payload
+            hw.copy_to(device, src)
+            hw.copy_from(dst, device)
+            assert bytes(dst_view[:64]) == payload
 
 
 class TestChipMainLoopDigestRegister:
@@ -7014,6 +7301,7 @@ class TestChipMainLoopDigestRegister:
 
     @staticmethod
     def _spawn_loop(cw, buf, state_addr, registry=None, identity_table=None, identity_refs=None):
+        from simpler.buffer import mint_owner_instance_id  # noqa: PLC0415
         from simpler.worker import _run_chip_main_loop  # noqa: PLC0415
 
         if registry is None:
@@ -7024,7 +7312,7 @@ class TestChipMainLoopDigestRegister:
             identity_refs = {}
         t = threading.Thread(
             target=_run_chip_main_loop,
-            args=(cw, buf, 0, state_addr, 0, registry, identity_table, identity_refs),
+            args=(cw, buf, 0, state_addr, 0, registry, identity_table, identity_refs, mint_owner_instance_id()),
             kwargs={"chip_platform": ""},
             daemon=True,
         )

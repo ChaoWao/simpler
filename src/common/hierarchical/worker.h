@@ -134,6 +134,11 @@ public:
     control_digest_only(WorkerType type, int worker_id, uint64_t sub_cmd, const uint8_t *digest, double timeout_s) {
         return manager_.control_digest_only(type, worker_id, sub_cmd, digest, timeout_s);
     }
+    std::vector<uint8_t> control_payload(
+        WorkerType type, int worker_id, uint64_t sub_cmd, const void *payload, size_t payload_size, double timeout_s
+    ) {
+        return manager_.control_payload(type, worker_id, sub_cmd, payload, payload_size, timeout_s);
+    }
     ControlResult remote_prepare_register(
         int worker_id, remote_l3::RemoteRegistryTarget target_registry, CallableKind callable_kind, const void *payload,
         size_t payload_size, const uint8_t *digest
@@ -181,6 +186,37 @@ public:
         return manager_.control_remote_import(importer_worker_id, export_desc, requested_access_flags);
     }
     void remote_release_import(const RemoteBufferHandle &handle) { manager_.control_remote_release_import(handle); }
+    std::vector<uint8_t> remote_domain_control(
+        int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes
+    ) {
+        return manager_.control_remote_domain(worker_id, control_name, command_bytes);
+    }
+
+    // Device memory on a next-level worker. The Worker is the sole owner of buffer lifecycle; the
+    // Python Orchestrator's malloc/free/copy are thin wrappers that route back here. Each resolves
+    // the target worker thread and forwards to its control-plane op (CTRL_MALLOC / FREE / COPY).
+    uint64_t malloc(int worker_id, size_t size) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::malloc: invalid worker_id");
+        return wt->control_malloc(size);
+    }
+    void free(int worker_id, uint64_t ptr) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::free: invalid worker_id");
+        wt->control_free(ptr);
+    }
+    // Both ends of a copy are handles: the child resolves each descriptor through its
+    // ImportRegistry, so neither side is described by an address the parent minted.
+    void copy_to(int worker_id, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::copy_to: invalid worker_id");
+        wt->control_copy_to(dst, src, nbytes);
+    }
+    void copy_from(int worker_id, const BufferDescriptor &dst, const BufferDescriptor &src, uint64_t nbytes) {
+        auto *wt = manager_.get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
+        if (!wt) throw std::runtime_error("Worker::copy_from: invalid worker_id");
+        wt->control_copy_from(dst, src, nbytes);
+    }
 
     // Broadcast CTRL_REGISTER / CTRL_UNREGISTER for a ChipCallable digest to
     // every NEXT_LEVEL child in parallel. `blob_ptr`/`blob_size` describe

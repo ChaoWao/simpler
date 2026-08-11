@@ -144,7 +144,7 @@ void Worker::add_remote_l3_socket(
 void Worker::init() {
     if (initialized_) throw std::runtime_error("Worker: already initialized");
 
-    // Start WorkerManager first — creates WorkerThreads.
+    // Start WorkerManager first — creates endpoint lanes.
     // The on_complete callback routes through the Scheduler's worker_done().
     manager_.start(
         &allocator_,
@@ -153,9 +153,6 @@ void Worker::init() {
         },
         [this](WorkerDispatch dispatch) {
             orchestrator_.mark_task_accepted(dispatch.task_slot);
-        },
-        [this] {
-            scheduler_.notify_ready();
         }
     );
     ready_next_level_queues_.reset(manager_.next_level_worker_ids());
@@ -196,7 +193,6 @@ void Worker::init() {
 void Worker::close() {
     if (!initialized_) return;
     scheduler_.request_stop();
-    manager_.stop_workers();
     scheduler_.stop();
     manager_.stop();
     allocator_.shutdown();

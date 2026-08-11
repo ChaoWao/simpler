@@ -88,30 +88,17 @@ encodes these fields explicitly and rejects drift through decode-time bounds
 checks. The local fork/shm mailbox continues to memcpy the packed `CallConfig`
 POD because it is same-binary IPC, not the cross-host protocol.
 
-`TensorWire v1` encodes tensor metadata explicitly. In remote TASK
-frames, `data` is not a transferable pointer; it is reserved and must be zero.
+A remote TASK argument is a `TensorWire`, defined with the rest of the TASK
+payload below.
 
-```text
-data: uint64  # reserved in remote TASK frames; must be 0
-shapes: uint32[MAX_TENSOR_DIMS]
-ndims: uint32
-dtype: uint32
-child_memory: uint8
-reserved: uint8[7]
-```
-
-The wire carries only the contiguous-defining fields; it does **not** carry
-`strides` / `start_offset`, and `decode_tensor` rebuilds them as row-major.
-The remote wire is therefore **contiguous-only**: strided views round-trip
-solely over the local fork/shm mailbox blob (full 128 B `ChipTensor` memcpy).
-`encode_tensor` asserts `is_contiguous && start_offset == 0` so a strided
-tensor fails loudly rather than being silently flattened.
-
-The session runner decodes these wire records into local `CallConfig` and
-`ChipTensor` values before calling `inner_worker.run()`. For tensors with
-a remote descriptor, the runner fills the local `ChipTensor.data` from
-its buffer/import registry after validating the descriptor. Local ABI structs
-therefore remain the in-process execution ABI, not the remote transport ABI.
+The session runner decodes these wire records into a local `CallConfig` and a
+wire `TaskArgs` before calling `inner_worker.run()`. Each tensor becomes a
+`Tensor` over a backing the runner holds: the validated descriptor selects the
+entry in its buffer/import registry, and an interior range becomes the view's
+`byte_offset` over that whole backing rather than a second identity. An
+orchestration function therefore receives the same container at a remote L3 as
+at any other level and forwards its args to a child unchanged; the
+`ChipTensor` conversion happens where it does everywhere else, at the L2 leaf.
 
 ## HELLO Payload
 
@@ -149,7 +136,8 @@ args: RemoteTaskArgsWire v1
 
 The TASK payload has exactly these top-level fields: callable digest,
 `CallConfigWire`, and `RemoteTaskArgsWire`. `RemoteTaskArgsWire` then carries
-tensor metadata, remote tensor descriptors, scalars, and optional inline bytes.
+the argument tensors, remote tensor descriptors, scalars, and optional inline
+bytes.
 
 TASK frames carry the raw digest from the submitted parent-facing
 `CallableHandle.hashid`. Parent-side dependency inference has already consumed
@@ -158,11 +146,11 @@ A TASK frame always resolves `callable_hash_digest` in the remote TASK
 dispatcher registry. The dispatcher is not a Worker: it resolves the digest to
 its private orchestration callable slot, materializes the remote arguments, and
 then invokes the embedded `inner_worker = Worker(level=3)`. The endpoint uses
-the sidecar descriptors captured at submit time to materialize local
-`ChipTensor` values on the session runner.
+the sidecar descriptors captured at submit time to name, on the session runner,
+the local backings the wire `TaskArgs` views.
 
 The current `RemoteL3Endpoint` implementation builds this payload from
-`TaskSlotState`, zeros every tensor metadata `data` field, and submits the
+`TaskSlotState`, carrying each argument's `Tensor` verbatim, and submits the
 encoded frame through `RemoteL3Transport`. The simulation session runner
 resolves the digest in its dispatcher registry, materializes the sidecar
 descriptors, and calls `inner_worker.run()`.
@@ -172,22 +160,28 @@ descriptors, and calls `inner_worker.run()`.
 ```text
 tensor_count: uint32
 scalar_count: uint32
-tensor_metadata: TensorWire[tensor_count]
+tensors: TensorWire[tensor_count]
 remote_desc: OptionalRemoteTensorDescWire[tensor_count]
 scalars: uint64[scalar_count]
 inline_payload_bytes_len: uint32
 inline_payload_bytes: uint8[inline_payload_bytes_len]
 ```
 
-For each tensor index, exactly one of these is true:
+`TensorWire` is the wire `Tensor` of `src/common/task_interface/buffer.h`: the
+embedded `BufferDescriptor` (identity nonce, `buffer_id`, `generation`,
+`address_space`, `access`, `backend_kind`, `nbytes`, `owner_worker_path_id`, a
+length-delimited backend body) followed by the view (`byte_offset`, `ndims`,
+`ndims`-many `shapes` and `strides`, `dtype`). Shapes and strides travel as
+`ndims`-many entries, so the slots past `ndims` that `validate_tensor` requires
+zero are never on the wire.
 
-- `remote_desc[i]` is present and names a remote buffer, imported peer buffer,
-  UB mapping, or allowed small `HOST_INLINE` payload.
-- The tensor is metadata-only and has no data pointer and no remote descriptor.
-
-`tensor_metadata[i].data` must be zero in both cases. Bare host pointers are
-rejected for remote endpoints unless an explicit staging API has produced a
-remote handle and sidecar descriptor.
+Every argument's `remote_desc[i]` is present and names a remote buffer,
+imported peer buffer, UB mapping, or allowed small `HOST_INLINE` payload. That
+sidecar is the sole authority for the argument's backing, so `tensors[i]` must
+carry no backing of its own: its `backend_kind` is `REMOTE_SIDECAR` and its
+`byte_offset` is zero, both rejected otherwise on encode and on decode. Bare
+host pointers are rejected for remote endpoints unless an explicit staging API
+has produced a remote handle and sidecar descriptor.
 
 `HOST_INLINE` is for small payloads that should travel inside the TASK frame.
 It still requires a `RemoteTensorDescWire` with `address_space=HOST_INLINE`;
@@ -218,14 +212,13 @@ RemoteTensorDescWire:
 
 Rules:
 
-- `ChipTensor` remains the L2 ABI. The session runner translates
-  descriptors into local `ChipTensor` values immediately before
-  `inner_worker.run()`.
-- When a descriptor is present, the incoming `TensorWire.data` is
-  reserved and must be zero. The session runner derives the executable local
-  address only from the validated descriptor and its live buffer/import
-  registry.
-- Metadata-only tensors also require `TensorWire.data == 0`.
+- `ChipTensor` remains the L2 ABI. The session runner rebuilds each incoming
+  `TensorWire`'s view over the local backing its descriptor names, immediately
+  before `inner_worker.run()`; the L2 leaf under it materializes those into
+  `ChipTensor` as it does on every path.
+- The incoming `TensorWire` carries no address and no local backing. The
+  session runner derives the executable local address only from the validated
+  descriptor and its live buffer/import registry.
 - Parent-side dependency keys use a stable logical start-address key derived at
   submit time:
   `(address_kind, owner_worker_id, buffer_id, generation, offset)`.
@@ -296,15 +289,29 @@ Required remote controls:
 - `IMPORT_BUFFER`
 - `RELEASE_IMPORT`
 
-Reserved future controls for Remote CommDomain:
+Required Global CommDomain controls:
 
 - `COMM_INIT`
 - `ALLOC_DOMAIN`
 - `RELEASE_DOMAIN`
+- `COPY_TO_DOMAIN`
+- `COPY_FROM_DOMAIN`
 
-The first Remote L3 task-dispatch cut rejects the reserved domain controls
-with an unsupported-control reply. They become required only when Remote
-CommDomain enters scope.
+`COMM_INIT` validates the cluster id, node identity, communication profile,
+global device ranks, and dense domain-rank table. `ALLOC_DOMAIN` is a
+transaction with `PREPARE_EXPORT`, `IMPORT`, `COMMIT`, and `ABORT` phases.
+Each L2 exports its local transport descriptor during prepare. L4 assembles
+the complete rank-ordered table and sends it to every L3; each L3 forwards it
+to its L2 children for import. No domain becomes visible to a remote task
+before every node acknowledges `COMMIT`.
+
+`RELEASE_DOMAIN` is idempotent and normally runs after the L4 DAG drain.
+An allocation marked `retain_after_run` may remain live for a later L4 run
+that reads kernel results; explicit release or session shutdown then performs
+the same teardown.
+`COPY_TO_DOMAIN` and `COPY_FROM_DOMAIN` are bounded smoke/control data
+operations for a committed local window. They do not replace kernel data
+movement through `CommContext`.
 
 The register-family controls are registry-scope-aware.
 `PREPARE_REGISTER_CALLABLE` carries:
@@ -752,7 +759,8 @@ The frame codec must reject:
 - descriptor offsets outside the referenced handle;
 - `HOST_INLINE` payload offsets or lengths outside the inline byte arena;
 - non-`HOST_INLINE` descriptors with non-zero inline payload lengths;
-- non-zero `TensorWire.data` in remote TASK frames;
+- a remote TASK argument that carries a local backing (any `backend_kind` other
+  than `REMOTE_SIDECAR`) or a non-zero `TensorWire.byte_offset`;
 - stale generations;
 - unknown control names or control versions;
 - completion sequence mismatch;

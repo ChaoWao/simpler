@@ -27,7 +27,7 @@ import time
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 from ._swimlane_validate import validate_perf_artifact
 
@@ -77,21 +77,23 @@ class TestChipSwimlane(SceneTestCase):
             "name": "default",
             "platforms": ["a5sim", "a5"],
             "params": {},
+            "required_sched_phases": ("release",),
         },
         {
             "name": "aicpu_threads_2",
             "platforms": ["a5sim", "a5"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
+            "required_sched_phases": ("release",),
         },
     ]
 
     def generate_args(self, params):
         SIZE = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
-            Tensor("f", torch.zeros(SIZE, dtype=torch.float32)),
+            TensorArg("a", torch.full((SIZE,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((SIZE,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(SIZE, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):
@@ -107,7 +109,10 @@ class TestChipSwimlane(SceneTestCase):
         for case in self.CASES:
             if st_platform in case["platforms"]:
                 validate_perf_artifact(
-                    f"TestChipSwimlane_{case['name']}", since=run_marker, expected_task_count=_EXPECTED_TASK_COUNT
+                    f"TestChipSwimlane_{case['name']}",
+                    since=run_marker,
+                    expected_task_count=_EXPECTED_TASK_COUNT,
+                    required_sched_phases=case["required_sched_phases"],
                 )
 
 

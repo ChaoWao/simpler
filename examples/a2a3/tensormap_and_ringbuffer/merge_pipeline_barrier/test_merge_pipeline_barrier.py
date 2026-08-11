@@ -26,7 +26,7 @@ output out of the golden comparison.
 import torch
 from simpler.task_interface import ArgDirection as D
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 TILES = 8
 M = 128
@@ -67,10 +67,10 @@ class TestMergePipelineBarrier(SceneTestCase):
 
     def generate_args(self, params):
         return TaskArgsBuilder(
-            Tensor("x", torch.arange(SIZE, dtype=torch.float32) / 7.0),
-            Tensor("sync", torch.zeros(NBLK, dtype=torch.int32)),  # barrier slots / counter (zero-init)
-            Tensor("out", torch.zeros(SIZE, dtype=torch.float32)),
-            Tensor("timing", torch.zeros(NBLK * 32, dtype=torch.int32)),  # per-block gaps (32-int32 stride)
+            TensorArg("x", torch.arange(SIZE, dtype=torch.float32) / 7.0),
+            TensorArg("sync", torch.zeros(NBLK, dtype=torch.int32)),  # barrier slots / counter (zero-init)
+            TensorArg("out", torch.zeros(SIZE, dtype=torch.float32)),
+            TensorArg("timing", torch.zeros(NBLK * 32, dtype=torch.int32)),  # per-block gaps (32-int32 stride)
         )
 
     def compute_golden(self, args, params):

@@ -41,12 +41,13 @@ __all__ = [
     "TIMING",
     "get_current_config",
     "get_logger",
+    "comm_endpoints",
     "task_interface",
 ]
 
 # name -> (module, attribute). Resolved by __getattr__ on first access.
 _LAZY_ATTRS = {"Worker": (f"{__name__}.worker", "Worker")}
-_LAZY_SUBMODULES = ("task_interface",)
+_LAZY_SUBMODULES = ("comm_endpoints", "task_interface")
 
 
 def __getattr__(name: str) -> Any:

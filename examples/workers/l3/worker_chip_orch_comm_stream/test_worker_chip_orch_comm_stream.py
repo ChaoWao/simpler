@@ -74,12 +74,12 @@ def _build_chip_callable(platform: str) -> ChipCallable:
     )
 
 
-def _float_view(tensor):
-    return (ctypes.c_float * _NUMEL).from_address(int(tensor.data))
+def _float_view(handle):
+    return (ctypes.c_float * _NUMEL).from_address(int(handle.base))
 
 
-def _byte_view(tensor):
-    return (ctypes.c_uint8 * int(tensor.nbytes())).from_address(int(tensor.data))
+def _byte_view(handle):
+    return (ctypes.c_uint8 * int(handle.nbytes)).from_address(int(handle.base))
 
 
 def _write_header(header_tensor, seq: int, opcode: int) -> None:

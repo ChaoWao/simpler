@@ -18,6 +18,8 @@ from typing import cast
 
 import pytest
 from simpler import remote_l3_session, remote_l3_worker
+from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
+from simpler.worker import RunHandle, Worker, _RunResources
 
 
 def _manifest(**extra):
@@ -938,3 +940,83 @@ def test_serve_real_socket_survives_truncated_frame_then_serves_next(monkeypatch
 
     assert not server_thread.is_alive()
     assert reply is not None and reply["ok"] is True  # next connection served after EOF
+
+
+def _bare_l3_worker():
+    """An L3 Worker with the state ``_create_buffer_locked`` and ``release_buffer`` read — no
+    fork, no device, no ``init()``."""
+    w = Worker.__new__(Worker)
+    w.level = 3
+    w._chip_shms = [object()]
+    w._sub_shms = []
+    w._next_level_shms = []
+    w._registry_lock = threading.Lock()
+    w._owner_instance_id = mint_owner_instance_id()
+    w._buffer_id_counter = 1
+    w._buffers = {}
+    w._hierarchical_start_mu = threading.Lock()
+    w._hierarchical_start_cv = threading.Condition(w._hierarchical_start_mu)
+    w._accepted_run_handles = set()
+    w._submit_mu = threading.Lock()
+    w._chip_run_touched_identities = {}
+    return w
+
+
+def test_owner_buffer_entry_reads_the_buffer_backing():
+    # An ALLOC_REMOTE_BUFFER entry holds a Worker-owned Buffer: the address the copy and TASK paths
+    # dereference is the Buffer's own mapping, and the name EXPORT_BUFFER hands out is its shm's.
+    w = _bare_l3_worker()
+    buffer = w._create_buffer_locked(64)
+    entry = remote_l3_session._RemoteBufferEntry(
+        buffer, 64, 1, remote_l3_session.RemoteAddressSpace.REMOTE_DEVICE, owner=w
+    )
+    assert entry.addr == buffer.base
+    assert buffer.shm is not None
+    assert entry.shm_name == buffer.shm.name
+
+    entry.close(unlink=True)
+    assert buffer.shm is None  # closed and unlinked by its owner
+    assert not w._buffers  # and the owner's registry entry went with it
+    assert entry.owner is None
+
+
+def test_owner_buffer_entry_retains_owner_across_a_rejected_release():
+    # close() must not clear self.owner before release_buffer() actually succeeds: if it raises
+    # (an in-flight run still references this identity), a retried close() has to go through the
+    # guard again, not fall through to a direct self.data.close() that bypasses it.
+    w = _bare_l3_worker()
+    buffer = w._create_buffer_locked(64)
+    entry = remote_l3_session._RemoteBufferEntry(
+        buffer, 64, 1, remote_l3_session.RemoteAddressSpace.REMOTE_DEVICE, owner=w
+    )
+    resources = _RunResources()
+    resources.touched_identities.add(buffer.identity)
+    handle = RunHandle(w, run_id=1, keepalive=())
+    handle._resources = resources
+    handle._cleanup_published = False
+    w._accepted_run_handles.add(handle)
+
+    with pytest.raises(RuntimeError, match="in-flight run"):
+        entry.close(unlink=True)
+    assert entry.owner is w
+    assert not buffer.closed
+    assert w._buffers  # registry entry survives the rejection too
+
+    handle._cleanup_published = True
+    entry.close(unlink=True)
+    assert buffer.closed
+    assert not w._buffers
+    assert entry.owner is None
+
+
+def test_session_scoped_buffer_entry_closes_its_own_backing():
+    # A runner with no forked child mints the backing itself, so the entry has no owning Worker and
+    # the loop's exit is what releases it.
+    buffer = create_host_shared_buffer(64, mint_owner_instance_id(), buffer_id=7)
+    entry = remote_l3_session._RemoteBufferEntry(buffer, 64, 1, remote_l3_session.RemoteAddressSpace.REMOTE_DEVICE)
+    assert entry.addr == buffer.base
+    assert buffer.shm is not None
+    assert entry.shm_name == buffer.shm.name
+
+    entry.close(unlink=True)
+    assert buffer.shm is None

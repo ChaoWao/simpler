@@ -28,7 +28,6 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipTensor,
     CommBufferSpec,
     CoreCallable,
     DataType,
@@ -114,11 +113,8 @@ def run(
     input_nbytes = N * DTYPE_NBYTES
     window_size = max(input_nbytes, 4 * 1024)
 
-    # `inputs` must live in shared memory: `orch.copy_to` stages each rank's
-    # data into its HCCL window from the forked chip child, which reads `src`
-    # out of its own address space.
-    inputs = [
-        torch.tensor([float(rank * 1000 + (i % 251)) / 10.0 for i in range(N)], dtype=torch.float32).share_memory_()
+    golden = [
+        torch.tensor([float(rank * 1000 + (i % 251)) / 10.0 for i in range(N)], dtype=torch.float32)
         for rank in range(nranks)
     ]
     out = [torch.zeros(N, dtype=torch.float32).share_memory_() for _ in range(nranks)]
@@ -134,8 +130,21 @@ def run(
         enable_sdma=True,
     )
     chip_handle = worker.register(chip_callable)
+    input_views: list = []
     try:
         worker.init()
+
+        def _view(buf):
+            shm = buf.shm
+            assert shm is not None
+            return torch.frombuffer(shm.buf, dtype=torch.float32, count=N)
+
+        # The H2D source of a window is a Buffer this Worker owns: the forked chip child maps that
+        # backing by name and reads it there. The torch views exist only to fill them.
+        input_bufs = [worker.create_buffer(input_nbytes) for _ in range(nranks)]
+        input_views = [_view(buf) for buf in input_bufs]
+        for rank in range(nranks):
+            input_views[rank].copy_(golden[rank])
 
         def orch_fn(orch, _args, cfg):
             with orch.allocate_domain(
@@ -150,26 +159,13 @@ def run(
                 # each producer TGET_ASYNCs the *peer* rank's window, so all
                 # windows must hold real data before execution begins.
                 for rank in range(nranks):
-                    orch.copy_to(
-                        rank,
-                        dst=handle[rank].buffer_ptrs["input_window"],
-                        src=inputs[rank].data_ptr(),
-                        size=input_nbytes,
-                    )
+                    orch.copy_to(handle[rank].buffers["input_window"], input_bufs[rank])
                 for rank in range(nranks):
                     domain = handle[rank]
                     args = TaskArgs()
-                    args.add_tensor(
-                        ChipTensor.make(
-                            data=domain.buffer_ptrs["input_window"],
-                            shapes=(N,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INPUT,
-                    )
-                    args.add_tensor(make_tensor_arg(out[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_tensor(make_tensor_arg(result[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(domain.buffers["input_window"].tensor((N,), DataType.FLOAT32), TensorArgType.INPUT)
+                    args.add_tensor(make_tensor_arg(worker, out[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_tensor(make_tensor_arg(worker, result[rank]), TensorArgType.OUTPUT_EXISTING)
                     args.add_scalar(domain.device_ctx)
                     orch.submit_next_level(chip_handle, args, cfg, worker=rank)
 
@@ -178,7 +174,7 @@ def run(
         ok = True
         for rank in range(nranks):
             peer = 1 - rank
-            expected_out = inputs[peer]
+            expected_out = golden[peer]
             expected_result = expected_out + 1.0
             max_out = float(torch.max(torch.abs(out[rank] - expected_out)))
             max_result = float(torch.max(torch.abs(result[rank] - expected_result)))
@@ -186,6 +182,7 @@ def run(
             ok = ok and max_out <= 1e-3 and max_result <= 1e-3
         return 0 if ok else 1
     finally:
+        input_views = []  # drop views before close unlinks the shm
         worker.close()
 
 

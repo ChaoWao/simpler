@@ -17,7 +17,7 @@ on both simulators:
 
 ```bash
 pytest examples --platform a2a3sim
-pytest examples -m "not sdma" --platform a2a3 --device 0-1        # hardware (SDMA quarantined by marker)
+pytest examples -m "not sdma and not pod" --platform a2a3 --device 0-1        # hardware (SDMA/pod quarantined; pod runs in the two-machine job)
 ```
 
 A single example:

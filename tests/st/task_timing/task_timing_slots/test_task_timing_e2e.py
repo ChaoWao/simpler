@@ -31,10 +31,10 @@ from simpler.task_interface import (
     ArgDirection,
     CallConfig,
     ChipCallable,
-    ChipStorageTaskArgs,
-    ChipTensor,
     CoreCallable,
     DataType,
+    TaskArgs,
+    TensorArgType,
 )
 from simpler.worker import Worker
 
@@ -46,7 +46,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
 _A2A3_VECTOR_ADD = os.path.join(_PROJECT_ROOT, "examples", "workers", "l2", "vector_add")
 # a5's ccec/pto-isa needs the qualified `pto::Stride` spelling; the l2/vector_add
 # kernel above (a2a3-only example) uses unqualified `Stride` and does not compile
-# under the a5 AICore toolchain. Use the a5-native add kernel (same out=a+b ChipTensor*
+# under the a5 AICore toolchain. Use the a5-native add kernel (same out=a+b Tensor*
 # ABI) on a5.
 _A5_VECTOR_ADD = os.path.join(_PROJECT_ROOT, "examples", "a5", "tensormap_and_ringbuffer", "vector_example")
 
@@ -127,16 +127,16 @@ def _drive(
         host_b = torch.full((N_ROWS, N_COLS), 2.0, dtype=torch.float32)
         expected = host_a + b_multiplier * host_b
 
-        dev_a = worker.malloc(NBYTES)
-        dev_b = worker.malloc(NBYTES)
-        dev_out = worker.malloc(NBYTES)
-        worker.copy_to(dev_a, host_a.data_ptr(), NBYTES)
-        worker.copy_to(dev_b, host_b.data_ptr(), NBYTES)
+        a_h = worker.malloc(NBYTES)
+        b_h = worker.malloc(NBYTES)
+        out_h = worker.malloc(NBYTES)
+        worker.copy_to(a_h, host_a)
+        worker.copy_to(b_h, host_b)
 
-        args = ChipStorageTaskArgs()
-        args.add_tensor(ChipTensor.make(dev_a, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(ChipTensor.make(dev_b, (N_ROWS, N_COLS), DataType.FLOAT32))
-        args.add_tensor(ChipTensor.make(dev_out, (N_ROWS, N_COLS), DataType.FLOAT32))
+        args = TaskArgs()
+        args.add_tensor(a_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+        args.add_tensor(b_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.INPUT)
+        args.add_tensor(out_h.tensor(shapes=(N_ROWS, N_COLS), dtype=DataType.FLOAT32), TensorArgType.OUTPUT_EXISTING)
 
         config = CallConfig()
         config.enable_chip_swimlane = False  # slots must work with swimlane OFF
@@ -144,10 +144,10 @@ def _drive(
         assert worker.run(chip_handle, args, config) is None
 
         host_out = torch.zeros(N_ROWS, N_COLS, dtype=torch.float32)
-        worker.copy_from(host_out.data_ptr(), dev_out, NBYTES)
-        worker.free(dev_a)
-        worker.free(dev_b)
-        worker.free(dev_out)
+        worker.copy_from(host_out, out_h)
+        worker.free(a_h)
+        worker.free(b_h)
+        worker.free(out_h)
         assert torch.allclose(host_out, expected, rtol=1e-5, atol=1e-5), (
             f"{func_name} output diverged; max |expected - out| = "
             f"{float(torch.max(torch.abs(host_out - expected))):.3e}"
@@ -320,14 +320,15 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
         nb = _TILE_ELEMS * 4
         bufs = {n: worker.malloc(nb) for n in "ABCDEFGHI"}
         for name, t in {"A": A.flatten(), "B": B.flatten(), "D": D, "E": E, "G": G, "H": H}.items():
-            worker.copy_to(bufs[name], t.contiguous().data_ptr(), nb)
+            worker.copy_to(bufs[name], t.contiguous())
 
-        args = ChipStorageTaskArgs()
-        args.add_tensor(ChipTensor.make(bufs["A"], (_MATMUL_SIZE, _MATMUL_SIZE), DataType.FLOAT32))
-        args.add_tensor(ChipTensor.make(bufs["B"], (_MATMUL_SIZE, _MATMUL_SIZE), DataType.FLOAT32))
-        args.add_tensor(ChipTensor.make(bufs["C"], (_TILE_ELEMS,), DataType.FLOAT32))
-        for n in "DEFGHI":
-            args.add_tensor(ChipTensor.make(bufs[n], (_TILE_ELEMS,), DataType.FLOAT32))
+        # Arg order matches the ChipCallable signature: A,B->C (matmul), D,E->F (add), G,H->I (mul).
+        _shapes = {"A": (_MATMUL_SIZE, _MATMUL_SIZE), "B": (_MATMUL_SIZE, _MATMUL_SIZE)}
+        _outputs = {"C", "F", "I"}
+        args = TaskArgs()
+        for n in "ABCDEFGHI":
+            tag = TensorArgType.OUTPUT_EXISTING if n in _outputs else TensorArgType.INPUT
+            args.add_tensor(bufs[n].tensor(shapes=_shapes.get(n, (_TILE_ELEMS,)), dtype=DataType.FLOAT32), tag)
 
         config = CallConfig()
         config.enable_chip_swimlane = False
@@ -336,9 +337,9 @@ def test_mix_task_aggregates_across_subtasks(st_platform, st_device_ids, capfd):
         out_C = torch.zeros(_TILE_ELEMS, dtype=torch.float32)
         out_F = torch.zeros(_TILE_ELEMS, dtype=torch.float32)
         out_I = torch.zeros(_TILE_ELEMS, dtype=torch.float32)
-        worker.copy_from(out_C.data_ptr(), bufs["C"], nb)
-        worker.copy_from(out_F.data_ptr(), bufs["F"], nb)
-        worker.copy_from(out_I.data_ptr(), bufs["I"], nb)
+        worker.copy_from(out_C, bufs["C"])
+        worker.copy_from(out_F, bufs["F"])
+        worker.copy_from(out_I, bufs["I"])
         for b in bufs.values():
             worker.free(b)
         # The AIV0/AIV1 subtasks are element-wise (layout-agnostic): their correct

@@ -16,6 +16,9 @@ Imports come from `simpler.buffer` because that is where a caller reaches them, 
 registry and the Buffer constructors that are genuinely defined there.
 """
 
+import ctypes
+from unittest.mock import patch
+
 import pytest
 from _task_interface import OWNER_INSTANCE_ID_BYTES, DataType
 from simpler.buffer import (
@@ -24,7 +27,9 @@ from simpler.buffer import (
     BackendKind,
     BufferDescriptor,
     CanonicalIdentity,
+    ImportContext,
     ImportRegistry,
+    MappedArg,
     Tensor,
     create_host_shared_buffer,
     intern_worker_path,
@@ -44,20 +49,18 @@ def test_wire_tensor_and_device_pod_are_distinct_types():
     assert ChipTensor is not Tensor
 
 
-def test_wire_tensor_stays_off_the_public_submit_surface():
-    # `TaskArgs.add_tensor` still takes a ChipTensor, so re-exporting `Tensor` from
-    # simpler.task_interface would advertise a public type that its own submit call rejects. The two
-    # facts move together: the wire cutover that makes add_tensor accept a Tensor is what earns it a
-    # place on that module, and this test fails then to say so.
+def test_task_args_takes_the_wire_tensor():
+    # `TaskArgs.add_tensor` takes the wire `Tensor`, and simpler.task_interface re-exports it: the
+    # public submit surface names the type its own submit call accepts.
     import simpler.task_interface as ti  # noqa: PLC0415
 
-    assert not hasattr(ti, "Tensor")
+    assert ti.Tensor is Tensor
 
     h = create_host_shared_buffer(64, mint_owner_instance_id(), buffer_id=1)
     try:
         args = ti.TaskArgs()
-        with pytest.raises(TypeError):
-            args.add_tensor(h.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+        args.add_tensor(h.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+        assert args.tensor_count() == 1
     finally:
         h.close()
 
@@ -145,6 +148,35 @@ def test_create_export_import_resolve_zero_copy():
         buffer.close()
 
 
+def test_close_unlinks_even_when_shm_close_raises():
+    # A close() failure must not skip owner unlink: the shm's named backing is the actual leak risk,
+    # not the local close() call, so unlink must run regardless of whether close() itself succeeded.
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=mint_owner_instance_id(), buffer_id=1)
+    shm = buffer.shm
+    assert shm is not None
+    with (
+        patch.object(shm, "close", side_effect=OSError("injected close failure")),
+        patch.object(shm, "unlink") as unlink,
+    ):
+        with pytest.raises(OSError, match="injected close failure"):
+            buffer.close()
+        unlink.assert_called_once()
+    assert buffer.closed
+    shm.unlink()  # the mock above swallowed the real unlink; do it for real so the test leaves no /dev/shm litter
+
+
+def test_closed_buffer_refuses_to_derive_a_tensor():
+    # A released Buffer's identity may already be unlinked, so deriving a Tensor from it would embed
+    # a descriptor for memory that no longer exists.
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=mint_owner_instance_id(), buffer_id=1)
+    buffer.close()
+    assert buffer.closed
+    with pytest.raises(ValueError, match="released buffer"):
+        buffer.to_descriptor()
+    with pytest.raises(ValueError, match="released buffer"):
+        buffer.tensor(shapes=(16,), dtype=DataType.FLOAT32)
+
+
 def test_resolve_unregistered_raises():
     reg = ImportRegistry()
     with pytest.raises(KeyError):
@@ -197,11 +229,35 @@ def test_device_malloc_wrap_materialize():
     assert h.backend_kind == BackendKind.DEVICE_MALLOC
     assert h.address_space == AddressSpace.DEVICE
     assert h.shm is None and h.base == 0xDEAD0000
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
     imp = reg.materialize(h.to_descriptor())
     assert imp.base == 0xDEAD0000
     assert imp.address_space == AddressSpace.DEVICE
     assert imp.shm is None
+
+
+def test_materialize_args_scopes_the_returned_map_to_this_calls_tensors():
+    # materialize_args must not hand back an endpoint's entire materialize-once history — only the
+    # identities the tensors in THIS call touched. A dispatch that reuses a registry across many
+    # tasks (the real chip/L2-leaf usage) would otherwise pay O(every identity ever seen) per call.
+    import simpler.task_interface as ti  # noqa: PLC0415
+
+    oid = mint_owner_instance_id()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
+    h1 = wrap_device_malloc(0xDEAD0000, 4096, oid, buffer_id=1)
+    h2 = wrap_device_malloc(0xBEEF0000, 4096, oid, buffer_id=2)
+
+    args1 = ti.TaskArgs()
+    args1.add_tensor(h1.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+    resolved1 = reg.materialize_args(args1)
+    assert set(resolved1) == {h1.identity}
+
+    args2 = ti.TaskArgs()
+    args2.add_tensor(h2.tensor(shapes=(16,), dtype=DataType.FLOAT32))
+    resolved2 = reg.materialize_args(args2)
+    # h1 is still live in the registry's own history (map-once), but this call's args never
+    # referenced it, so it must not appear in this call's returned map.
+    assert set(resolved2) == {h2.identity}
 
 
 def test_materialize_remote_sidecar_rejected():
@@ -229,7 +285,7 @@ def test_materialize_rejects_a_conflicting_descriptor_for_a_live_identity():
     # carrying the same identity and a different nbytes describes something the existing mapping is
     # not, so returning that mapping would hand back a base under a size nothing stands behind.
     oid = mint_owner_instance_id()
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
     first = reg.materialize(_device_descriptor(oid, 1, nbytes=4096))
 
     for conflicting in (
@@ -249,7 +305,7 @@ def test_conflict_error_names_only_the_fields_that_differ():
     # A whole repr of both descriptors would carry a 32-byte body twice for what is usually a
     # one-field disagreement, and leave the reader to diff them by eye.
     oid = mint_owner_instance_id()
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=oid))
     reg.materialize(_device_descriptor(oid, 1, nbytes=4096))
     with pytest.raises(ValueError) as excinfo:
         reg.materialize(_device_descriptor(oid, 1, nbytes=8192))
@@ -430,3 +486,23 @@ def test_fork_backend_is_stated_not_inferred_from_access():
     )
     with pytest.raises(ValueError, match="FORK_COW"):
         bad.to_descriptor()
+
+
+def test_mapped_arg_buffer_is_read_only_for_a_read_access_descriptor():
+    # FORK_COW's whole contract is that a write is invisible to the owner (copy-on-write splits the
+    # page privately), so `MappedArg.buffer` must not hand back a writable view for it. `.cast("B")`
+    # is what makes the write attempt itself meaningful: the raw `<c` format memoryview this property
+    # returns for a ctypes-backed mapping does not support slice assignment at all (readonly or not),
+    # so asserting through the native format would prove nothing about the readonly flag specifically.
+    data = bytearray(16)
+    addr = ctypes.addressof((ctypes.c_char * 16).from_buffer(data))
+    oid = mint_owner_instance_id()
+    buf = wrap_fork_inherited(addr, 16, oid, buffer_id=1)  # default: access=READ, backend=FORK_COW
+    reg = ImportRegistry()
+    imported = reg.materialize(buf.to_descriptor())
+    arg = MappedArg(imported, byte_offset=0, shapes=(16,), strides=(1,), dtype=DataType.UINT8)
+
+    view = arg.buffer
+    assert view.readonly
+    with pytest.raises(TypeError):
+        view.cast("B")[0:4] = b"\x01\x02\x03\x04"

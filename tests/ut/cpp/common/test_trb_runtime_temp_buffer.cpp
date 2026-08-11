@@ -41,6 +41,10 @@ extern "C" int bind_callable_to_runtime_impl(
     const uint64_t *ring_dep_pool
 );
 extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
+extern "C" int concurrent_native_prepare_supported_impl(void);
+extern "C" int prepared_run_config_compatible_impl(
+    const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
+);
 
 namespace {
 
@@ -66,6 +70,11 @@ struct FakeHostApi {
     std::vector<uint8_t> gm_heap;
     std::vector<uint8_t> gm_sm;
     std::vector<uint8_t> runtime_arena;
+    bool compatibility_key_valid = false;
+    uint64_t compatibility_hash = 0;
+    std::vector<uint8_t> compatibility_key;
+    uint64_t observed_hash = 0;
+    std::vector<uint8_t> observed_key;
 
     ~FakeHostApi() { release_all(); }
 
@@ -168,11 +177,24 @@ void *fake_acquire_pooled_runtime_arena(void * /*runner_ctx*/, uint32_t /*arena_
     return g_fake->runtime_arena.empty() ? nullptr : g_fake->runtime_arena.data();
 }
 bool fake_lookup_prebuilt_runtime_arena_cache(
-    void * /*runner_ctx*/, uint32_t /*arena_bank*/, uint64_t /* hash */, const void * /* key_data */,
-    size_t /* key_size */, void ** /* gm_heap_base */, void ** /* sm_base */, void ** /* runtime_arena_base */,
-    size_t * /* runtime_off */, const void ** /* image_data */, size_t * /* image_size */
+    void * /*runner_ctx*/, uint32_t arena_bank, uint64_t hash, const void *key_data, size_t key_size,
+    void **gm_heap_base, void **sm_base, void **runtime_arena_base, size_t *runtime_off, const void **image_data,
+    size_t *image_size
 ) {
-    return false;
+    const auto *key = static_cast<const uint8_t *>(key_data);
+    g_fake->observed_hash = hash;
+    g_fake->observed_key.assign(key, key + key_size);
+    const bool hit = arena_bank == 0 && g_fake->compatibility_key_valid && hash == g_fake->compatibility_hash &&
+                     g_fake->observed_key == g_fake->compatibility_key;
+    if (hit) {
+        *gm_heap_base = reinterpret_cast<void *>(1);
+        *sm_base = reinterpret_cast<void *>(2);
+        *runtime_arena_base = reinterpret_cast<void *>(3);
+        *runtime_off = 4;
+        *image_data = reinterpret_cast<const void *>(5);
+        *image_size = 6;
+    }
+    return hit;
 }
 void fake_mark_prebuilt_runtime_arena_cached(
     void * /*runner_ctx*/, uint32_t /*arena_bank*/, uint64_t /* hash */, const void * /* key_data */,
@@ -207,7 +229,10 @@ HostApi make_host_api() {
 ChipTensor make_tensor(std::vector<uint8_t> &storage, bool child_memory = false) {
     ChipTensor tensor;
     uint32_t shape[1] = {static_cast<uint32_t>(storage.size())};
-    tensor.init_external(storage.data(), storage.size(), shape, 1, DataType::UINT8, 0, false, child_memory ? 1 : 0);
+    tensor.init_external(
+        storage.data(), storage.size(), shape, 1, DataType::UINT8, 0, false,
+        child_memory ? AddressSpace::DEVICE : AddressSpace::HOST
+    );
     return tensor;
 }
 
@@ -439,4 +464,23 @@ TEST_F(TrbRuntimeTempBufferTest, FailedCopyOnTemporaryPathDoesNotFreeRetainedBuf
     EXPECT_EQ(fake_.device_free_count, 0);
     EXPECT_NE(fake_.retained_addr, nullptr);
     EXPECT_TRUE(runtime.tensor_leases_.empty());
+}
+
+TEST_F(TrbRuntimeTempBufferTest, PreparedRuntimeEnvRequiresTheActiveArenaKey) {
+    fake_.reset();
+    HostApi compatibility_api = make_host_api();
+    uint64_t task_window[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
+    uint64_t heap[PTO2_MAX_RING_DEPTH] = {1024, 1024, 1024, 1024};
+    uint64_t dep_pool[PTO2_MAX_RING_DEPTH] = {4, 4, 4, 4};
+
+    EXPECT_EQ(concurrent_native_prepare_supported_impl(), 1);
+    EXPECT_EQ(prepared_run_config_compatible_impl(&compatibility_api, task_window, heap, dep_pool), 0);
+    fake_.compatibility_key_valid = true;
+    fake_.compatibility_hash = fake_.observed_hash;
+    fake_.compatibility_key = fake_.observed_key;
+
+    EXPECT_EQ(prepared_run_config_compatible_impl(&compatibility_api, task_window, heap, dep_pool), 1);
+    heap[2] = 2048;
+    EXPECT_EQ(prepared_run_config_compatible_impl(&compatibility_api, task_window, heap, dep_pool), 0);
+    EXPECT_NE(fake_.observed_key, fake_.compatibility_key);
 }

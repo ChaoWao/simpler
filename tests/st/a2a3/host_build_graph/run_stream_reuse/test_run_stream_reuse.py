@@ -29,8 +29,8 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.worker import Worker
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, Tensor, scene_test
-from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
+from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from simpler_setup.scene_test import _build_chip_task_args, _build_l2_ref_args, _compare_outputs
 
 _VECTOR_KERNELS = "../vector_example/kernels"
 _REPEATED_RUNS = 4
@@ -114,9 +114,9 @@ class TestRunStreamReuseHbg(SceneTestCase):
     def generate_args(self, params):
         size = 128 * 128
         return TaskArgsBuilder(
-            Tensor("a", torch.full((size,), 2.0, dtype=torch.float32)),
-            Tensor("b", torch.full((size,), 3.0, dtype=torch.float32)),
-            Tensor("f", torch.zeros(size, dtype=torch.float32)),
+            TensorArg("a", torch.full((size,), 2.0, dtype=torch.float32)),
+            TensorArg("b", torch.full((size,), 3.0, dtype=torch.float32)),
+            TensorArg("f", torch.zeros(size, dtype=torch.float32)),
         )
 
     def compute_golden(self, args, params):
@@ -142,12 +142,14 @@ class TestRunStreamReuseHbg(SceneTestCase):
     def _run_registered(self, worker, handle, *, subtract):
         params = self.CASES[0]["params"]
         test_args = self.generate_args(params)
-        chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
+        # Worker.run takes TensorArg args and materializes them in-process; the runtime.so-ABI POD is
+        # the direct chip API's shape, used by the lease path below.
+        args, output_names = _build_l2_ref_args(test_args, self.CALLABLE["orchestration"]["signature"], worker)
         golden_args = test_args.clone()
         a, b = golden_args.a, golden_args.b
         base = a - b if subtract else a + b
         golden_args.f[:] = (base + 1) * (base + 2)
-        worker.run(handle, chip_args, config=self._build_config(self.CASES[0]["config"]))
+        worker.run(handle, args, config=self._build_config(self.CASES[0]["config"]))
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
     # The st_worker fixture is shared by every test in this class, and so is the
@@ -285,3 +287,25 @@ class TestRunStreamReuseHbg(SceneTestCase):
             assert st_worker.run_stream_set_create_count == stream_sets
         finally:
             st_worker.unregister(add_handle)
+
+
+@scene_test(level=2, runtime="tensormap_and_ringbuffer")
+class TestRunStreamFreshTmr(SceneTestCase):
+    """TMR preparation keeps the same fresh run-owned AICore stream rule."""
+
+    CALLABLE = TestRunStreamReuseHbg.CALLABLE
+    CASES = TestRunStreamReuseHbg.CASES
+
+    generate_args = TestRunStreamReuseHbg.generate_args
+    compute_golden = TestRunStreamReuseHbg.compute_golden
+
+    def test_every_run_creates_its_own_aicore_stream(self, st_platform, st_worker):
+        if st_platform != "a2a3":
+            pytest.skip("run stream sets are an a2a3 onboard resource")
+
+        callable_obj = self.build_callable(st_platform)
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=1)
+        after_first = st_worker.run_stream_set_create_count
+        rounds = _REPEATED_RUNS - 1
+        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=rounds)
+        assert st_worker.run_stream_set_create_count == after_first + rounds

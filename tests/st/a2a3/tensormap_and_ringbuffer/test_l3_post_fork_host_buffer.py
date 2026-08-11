@@ -12,32 +12,33 @@
 A host tensor created *after* the chip children are forked (lazily on the
 first ``Worker.run()``) is not visible to those children: the orch fn runs in
 the parent and carries a raw parent VA that is unmapped (or stale) in the child.
-``Worker.create_host_buffer`` hands back born-shared memory already attached into
-every chip child, so a tensor built over it with ``torch.frombuffer`` round-trips
+``Worker.create_buffer`` allocates a POSIX-shm backing and hands back a
+``Buffer``; naming it in a task arg with ``handle.tensor(...)`` carries a
+self-describing descriptor that the forked chip child materializes lazily on
+first receipt (map-once), so a tensor built over ``handle.shm.buf`` round-trips
 with **no per-run copy** — the child reads and writes the same physical pages the
 parent sees.
 
 Covers the mechanism end-to-end (allocate a post-fork buffer, fill it in place,
-run, read the result back). The host-side staging (born-shared bytes need no
-copy; an in-range view is validated to fit) is unit-tested in
-``tests/ut/py/test_worker/test_host_buffer_registration.py``.
+run, read the result back).
 
-a5sim: ``create_host_buffer`` is pure host-side (POSIX shm + a control
-broadcast to the forked chip children) with no platform branching, so the sim
-backend exercises the full mechanism without needing a device. The
-vector_example orchestration kernels exist only for a5.
+a2a3sim: ``create_buffer`` is pure host-side (POSIX shm; the descriptor rides in
+the mailbox, no eager broadcast) with no platform branching, so the sim backend
+exercises the full mechanism without needing a device. The vector_example
+orchestration kernels exist only for a2a3.
 """
 
 import torch
 from simpler.task_interface import ArgDirection as D
-from simpler.task_interface import CallConfig, TaskArgs, TensorArgType
+from simpler.task_interface import CallConfig, DataType, TaskArgs, TensorArgType
 
-from simpler_setup import SceneTestCase, make_tensor_arg, scene_test
+from simpler_setup import SceneTestCase, scene_test
 
-KERNELS_BASE = "../../../../examples/a5/tensormap_and_ringbuffer/vector_example/kernels"
+KERNELS_BASE = "../../../../examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels"
 
 SIZE = 128 * 128
 DTYPE = torch.float32
+_F32 = DataType.FLOAT32
 
 
 def _golden(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -45,12 +46,12 @@ def _golden(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return (s + 1) * (s + 2) + s
 
 
-def _one_task_orch(chip_handle, a, b, out):
+def _one_task_orch(chip_handle, ba, bb, bout):
     def orch_fn(orch, _args, cfg):
         ta = TaskArgs()
-        ta.add_tensor(make_tensor_arg(a), TensorArgType.INPUT)
-        ta.add_tensor(make_tensor_arg(b), TensorArgType.INPUT)
-        ta.add_tensor(make_tensor_arg(out), TensorArgType.OUTPUT_EXISTING)
+        ta.add_tensor(ba.tensor((SIZE,), _F32), TensorArgType.INPUT)
+        ta.add_tensor(bb.tensor((SIZE,), _F32), TensorArgType.INPUT)
+        ta.add_tensor(bout.tensor((SIZE,), _F32), TensorArgType.OUTPUT_EXISTING)
         orch.submit_next_level(chip_handle, ta, cfg, worker=0)
 
     return orch_fn
@@ -94,43 +95,43 @@ class TestPostForkHostBufferZeroCopy(SceneTestCase):
     }
 
     CASES = [
-        {"name": "post_fork_zero_copy", "platforms": ["a5sim"]},
+        {"name": "post_fork_zero_copy", "platforms": ["a2a3sim"]},
     ]
 
     def test_run(self, st_worker):
-        """Zero-copy: buffers allocated AFTER the fork via ``create_host_buffer``,
+        """Zero-copy: buffers allocated AFTER the fork via ``create_buffer``,
         filled in place, run, and read back — all without a per-run copy.
 
         ``Worker.init()`` is eager, so the chip child is already forked when the
-        buffers are created; a born-shared ``create_host_buffer`` is the mapped
-        path a post-init host tensor takes to reach that child.
+        buffers are created; a post-init ``create_buffer`` reaches that child by
+        naming the handle as a ``Tensor`` the child materializes lazily.
         """
         worker = st_worker
         chip_handle = type(self)._st_chip_handles["vector"]
 
         nbytes = SIZE * DTYPE.itemsize  # element count × dtype size, not a magic 4
-        ba = worker.create_host_buffer(nbytes)
-        bb = worker.create_host_buffer(nbytes)
-        bout = worker.create_host_buffer(nbytes)
+        ba = worker.create_buffer(nbytes)
+        bb = worker.create_buffer(nbytes)
+        bout = worker.create_buffer(nbytes)
         a = b = out = None
         result = False
         try:
-            a = torch.frombuffer(ba.buffer, dtype=DTYPE, count=SIZE)
-            b = torch.frombuffer(bb.buffer, dtype=DTYPE, count=SIZE)
-            out = torch.frombuffer(bout.buffer, dtype=DTYPE, count=SIZE)
+            a = torch.frombuffer(ba.shm.buf, dtype=DTYPE, count=SIZE)
+            b = torch.frombuffer(bb.shm.buf, dtype=DTYPE, count=SIZE)
+            out = torch.frombuffer(bout.shm.buf, dtype=DTYPE, count=SIZE)
             a.fill_(5.0)  # in place → lands directly in the child-visible shm
             b.fill_(7.0)
             out.zero_()
-            worker.run(_one_task_orch(chip_handle, a, b, out), args=None, config=CallConfig())
+            worker.run(_one_task_orch(chip_handle, ba, bb, bout), args=None, config=CallConfig())
             result = torch.allclose(out, _golden(a, b), rtol=self.RTOL, atol=self.ATOL)
         finally:
             # Drop the views before freeing so the shm releases promptly, and do it
             # in finally so a run()/assert failure above still cleans up all three
             # buffers instead of leaving live views warning on the first free.
             del a, b, out
-            worker.free_host_buffer(ba)
-            worker.free_host_buffer(bb)
-            worker.free_host_buffer(bout)
+            ba.close()
+            bb.close()
+            bout.close()
         assert result
 
 
