@@ -3117,6 +3117,17 @@ TEST_F(GroupSchedulerFixture, GroupPublishedBetweenGroupAndSinglePhasesStillOwns
     std::promise<void> publication_done;
     std::future<void> publication_future = publication_done.get_future();
     after_group_phase_hook = [&] {
+        // The scheduler runs a group phase every dispatch pass, including an
+        // empty one it may reach before this thread's first_group submission is
+        // visible. Publishing then would place second_group while cores 0/1 are
+        // still idle, so it would dispatch to them instead of blocking behind
+        // first_group. Fire only once first_group has claimed its targets — the
+        // scheduler occupies each worker's active lane synchronously during that
+        // dispatch, so idle() here reflects it on this same thread.
+        if (manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 0)->idle() ||
+            manager.get_worker_by_id(WorkerType::NEXT_LEVEL, 1)->idle()) {
+            return;
+        }
         if (published.exchange(true, std::memory_order_acq_rel)) return;
         second_group = orch.submit_next_level_group(
             C(91), {single_tensor_args(0x202, TensorArgType::OUTPUT), single_tensor_args(0x203, TensorArgType::OUTPUT)},
