@@ -251,7 +251,6 @@ private:
     void clear_run_ready_queues(RunId run_id);
     void compact_if_quiescent();
     void decrement_run_tasks(RunId run_id);
-    void increment_run_accepts(RunId run_id, int32_t count);
     void decrement_run_accepts(RunId run_id);
     static void record_run_error(const std::shared_ptr<RunState> &run, std::exception_ptr error);
     void record_run_error(RunId run_id, std::exception_ptr error);

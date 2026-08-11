@@ -95,6 +95,13 @@ class DevicePool:
 _device_pool: DevicePool | None = None
 
 
+class PodPeer(typing.NamedTuple):
+    endpoint: str
+    remote_device_ids: tuple[int, ...]
+    session_timeout_s: float
+    session_listen_host: str
+
+
 def pytest_addoption(parser):
     """Register CLI options."""
     parser.addoption("--platform", action="store", default=None, help="Target platform (e.g., a2a3sim, a2a3)")
@@ -430,12 +437,18 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "platforms(list): supported platforms for standalone ST functions")
     config.addinivalue_line("markers", "requires_hardware: test needs Ascend toolchain and real device")
     config.addinivalue_line("markers", "device_count(n): number of NPU devices needed")
+    config.addinivalue_line("markers", "pod: test needs the pod runner and its peer machine")
     config.addinivalue_line(
         "markers",
-        "sdma: the test provisions the PTO-ISA async-SDMA workspace. "
-        "SceneTestCase fixtures build its Worker with enable_sdma=True; "
-        "standalone tests may use the platform's default SDMA backend. "
-        "Provisioning creates 48 "
+        "pod_remote_device_count(n): number of remote NPU devices needed on the peer machine",
+    )
+    config.addinivalue_line(
+        "markers",
+        "sdma: the test exercises PTO-ISA async SDMA. SceneTestCase pytest "
+        "fixtures and standalone runners build its Worker with enable_sdma=True "
+        "unless worker_workspace=False selects a platform-provisioned "
+        "communication-domain workspace. "
+        "Worker-global provisioning creates 48 "
         "device-only STARS streams that sit in the device fault domain, which "
         "makes a later AICore fault on that device cost minutes instead of "
         "~0.3 s (#1425). Two consequences follow from the one marker: such a "
@@ -1246,6 +1259,62 @@ def st_platform(request):
 
 
 @pytest.fixture(scope="session")
+def st_pod_peer():
+    """Pod endpoint and remote device pool from the pod runner environment."""
+    endpoint = os.environ.get("POD_REMOTE_ENDPOINT")
+    if not endpoint:
+        pytest.skip("POD_REMOTE_ENDPOINT is required for pod tests")
+    remote_devices = os.environ.get("POD_REMOTE_DEVICES")
+    if not remote_devices:
+        pytest.skip("POD_REMOTE_DEVICES is required for pod tests")
+    try:
+        session_timeout_s = float(os.environ.get("POD_L3_SESSION_TIMEOUT_S", "120"))
+    except ValueError as e:
+        pytest.fail(f"POD_L3_SESSION_TIMEOUT_S must be a float: {e}")
+    # The remote peer connects back to the parent session runner.
+    return PodPeer(
+        endpoint=endpoint,
+        remote_device_ids=tuple(_parse_device_range(remote_devices)),
+        session_timeout_s=session_timeout_s,
+        session_listen_host=os.environ.get("POD_L3_SESSION_LISTEN_HOST", "0.0.0.0"),  # noqa: S104
+    )
+
+
+@pytest.fixture()
+def st_pod_remote_device_ids(request, st_pod_peer):
+    """Allocate remote device IDs from the pod peer's default device pool.
+
+    Every pod test gets the same leading slice, so this is collision-free only
+    while the pod job serializes the sweep with ``--max-parallel 1``.
+    """
+    marker = request.node.get_closest_marker("pod_remote_device_count")
+    n = marker.args[0] if marker else 1
+    if n > len(st_pod_peer.remote_device_ids):
+        pytest.fail(
+            f"need {n} remote devices but POD_REMOTE_DEVICES only has {len(st_pod_peer.remote_device_ids)} entries"
+        )
+    return list(st_pod_peer.remote_device_ids[:n])
+
+
+@pytest.fixture()
+def st_pod_logs(request, monkeypatch):
+    """Per-test parent log directory for pod scene tests."""
+    if request.node.get_closest_marker("pod") is None:
+        pytest.fail("st_pod_logs requires @pytest.mark.pod")
+    run_dir = os.environ.get("RUN_DIR")
+    if not run_dir:
+        if not os.environ.get("POD_REMOTE_ENDPOINT") or not os.environ.get("POD_REMOTE_DEVICES"):
+            pytest.skip("pod runner environment is required for pod tests")
+        pytest.fail("RUN_DIR is required for pod tests")
+    machine = os.environ.get("POD_MACHINE", "parent")
+    nodeid = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.nodeid)
+    log_path = os.path.join(run_dir, "pytest", f"parent-{machine}", "ascend", nodeid)
+    os.makedirs(log_path, exist_ok=True)
+    monkeypatch.setenv("ASCEND_PROCESS_LOG_PATH", log_path)
+    return log_path
+
+
+@pytest.fixture(scope="session")
 def _l2_worker_pool(request, st_platform):
     """Session-scoped L2 worker pool keyed by (runtime, device_id).
 
@@ -1381,6 +1450,9 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
 
     level = cls._st_level
     runtime = cls._st_runtime
+    from simpler_setup.scene_test import _class_wants_sdma  # noqa: PLC0415
+
+    wants_sdma = _class_wants_sdma(cls)
 
     if level == 2:
         # A prior test on this runtime poisoned the device and the rebuild below
@@ -1410,8 +1482,6 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
         # nor a plain Worker to one that did. It therefore takes a slot in the
         # pool key and gates reuse. Ordering puts every sdma test after the
         # rest, so the swap happens once, at the end.
-        wants_sdma = request.node.get_closest_marker("sdma") is not None
-
         for (rt, dev_id, pooled_sdma), existing in _l2_worker_pool.items():
             if rt == runtime and pooled_sdma == wants_sdma:
                 _register_l2_pool_recycle(request, _l2_worker_pool, (rt, dev_id, pooled_sdma), _l2_poisoned)
@@ -1485,7 +1555,7 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
             num_sub_workers=max_subs,
             platform=st_platform,
             runtime=runtime,
-            enable_sdma=request.node.get_closest_marker("sdma") is not None,
+            enable_sdma=wants_sdma,
         )
         w._st_device_id = ids[0]  # expose primary device to test_run for profiling snapshots
 

@@ -92,12 +92,19 @@ def clear_compile_cache() -> None:
 # Results are unaffected: the same fixture golden-computed at 320 and at 8
 # threads is bit-identical across `out`, `k_cache` and `v_cache`.
 def _class_wants_sdma(cls) -> bool:
-    """True when the SceneTestCase carries ``@pytest.mark.sdma``.
+    """True when the SceneTestCase requests a Worker-global SDMA workspace.
+
+    ``@pytest.mark.sdma`` owns test selection and ordering. Its optional
+    ``worker_workspace=False`` argument keeps those marker semantics while the
+    test uses a platform-provisioned communication-domain workspace.
 
     Read from ``cls.pytestmark`` rather than a pytest item so the standalone
     ``python test_x.py`` path sees the same declaration the pytest path does.
     """
-    return any(getattr(m, "name", None) == "sdma" for m in getattr(cls, "pytestmark", ()))
+    for marker in getattr(cls, "pytestmark", ()):
+        if getattr(marker, "name", None) == "sdma":
+            return bool(getattr(marker, "kwargs", {}).get("worker_workspace", True))
+    return False
 
 
 _GOLDEN_MAX_THREADS = 8
@@ -515,6 +522,15 @@ def _build_chip_task_args(test_args: TaskArgsBuilder, orch_signature: list):
     return chip_args, output_names
 
 
+def _rehosted_buffer_for(test_args: TaskArgsBuilder, tensor):
+    """The rehosted ``tensor``'s owning Buffer, matched by its backing address."""
+    base = int(tensor.data_ptr())
+    for handle in getattr(test_args, "_rehost_handles", {}).values():
+        if handle.base == base:
+            return handle
+    raise ValueError("tensor is not a rehosted arg (no create_buffer handle with a matching base)")
+
+
 def _rehosted_ref_for(test_args: TaskArgsBuilder, tensor):
     """A ``TensorArg`` over the rehosted ``tensor``'s owning handle, matched by its backing address.
 
@@ -523,11 +539,8 @@ def _rehosted_ref_for(test_args: TaskArgsBuilder, tensor):
     """
     from simpler_setup.torch_interop import torch_dtype_to_datatype  # noqa: PLC0415
 
-    base = int(tensor.data_ptr())
-    for handle in getattr(test_args, "_rehost_handles", {}).values():
-        if handle.base == base:
-            return handle.tensor(shapes=tuple(tensor.shape), dtype=torch_dtype_to_datatype(tensor.dtype).value)
-    raise ValueError("tensor is not a rehosted arg (no create_buffer handle with a matching base)")
+    handle = _rehosted_buffer_for(test_args, tensor)
+    return handle.tensor(shapes=tuple(tensor.shape), dtype=torch_dtype_to_datatype(tensor.dtype).value)
 
 
 def _l3_ref(test_args: TaskArgsBuilder, name: str, worker=None):

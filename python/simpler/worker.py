@@ -75,6 +75,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
@@ -98,12 +99,12 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _worker_host_mapped_region_peek_cleanup_error,
     get_element_size,
     materialize_task_args,
-    materialize_tensor_blob,
     read_args_from_blob,
 )
 
 from . import _log as _simpler_log
 from .buffer import (
+    OWNER_INSTANCE_ID_BYTES,
     AccessMode,
     AddressSpace,
     BackendKind,
@@ -201,7 +202,9 @@ from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
+    MAILBOX_PREPARATION_DISPOSITION_VALUES,
     MAILBOX_SIZE,
+    MAILBOX_STATE_VALUES,
     CallConfig,
     ChipCallable,
     ChipDomainContext,
@@ -287,6 +290,10 @@ _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 _OFF_ACCEPTED = MAILBOX_FRAME_SIZE - MAILBOX_ERROR_MSG_SIZE - 8
 _TASK_ACCEPTED = 1
 _OFF_PREPARATION_DISPOSITION = _OFF_ACCEPTED + 4
+# The parent resets the disposition word to NONE when it claims a frame, so a
+# child never publishes it: staging reports VALIDATED_ONLY or NATIVE_PREPARED
+# and nothing else. Declared so the wire check below covers the whole enum.
+_DISPOSITION_NONE = 0
 _VALIDATED_ONLY = 1
 _NATIVE_PREPARED = 2
 _OFF_FRAME_PROTOCOL = _OFF_ACCEPTED - 40
@@ -329,6 +336,68 @@ _TASK_FAILED = 10
 _ACTIVATE = 11
 _PREPARE_READY = 12
 _TASK_FRAME_COUNT = 2
+
+
+def _assert_mailbox_wire_constants() -> None:
+    """Fail import if these constants disagree with the C++ enums.
+
+    The state word and the disposition word are a cross-process contract: a
+    parent writes them and its forked child reads them, so a value that differs
+    from the C++ side is a protocol mismatch between two live processes. Nothing
+    else catches it — the two declarations are in different languages, so there
+    is no compile error, and a wrong value reads as a legal-but-different state
+    rather than as corruption. The constants stay literals because they are read
+    on the mailbox polling path; this checks them instead of replacing them.
+    """
+    declared = {
+        "IDLE": _IDLE,
+        "TASK_READY": _TASK_READY,
+        "TASK_DONE": _TASK_DONE,
+        "SHUTDOWN": _SHUTDOWN,
+        "CONTROL_REQUEST": _CONTROL_REQUEST,
+        "CONTROL_DONE": _CONTROL_DONE,
+        "INIT_READY": _INIT_READY,
+        "INIT_FAILED": _INIT_FAILED,
+        "FRAME_STAGED": _FRAME_STAGED,
+        "TASK_LAUNCHED": _TASK_LAUNCHED,
+        "TASK_FAILED": _TASK_FAILED,
+        "ACTIVATE": _ACTIVATE,
+        "PREPARE_READY": _PREPARE_READY,
+    }
+    dispositions = {
+        "NONE": _DISPOSITION_NONE,
+        "VALIDATED_ONLY": _VALIDATED_ONLY,
+        "NATIVE_PREPARED": _NATIVE_PREPARED,
+    }
+    for name, table, native in (
+        ("MailboxState", declared, MAILBOX_STATE_VALUES),
+        ("MailboxPreparationDisposition", dispositions, MAILBOX_PREPARATION_DISPOSITION_VALUES),
+    ):
+        # Report every disagreement at once: a renumbering usually moves several
+        # values, and fixing them one import at a time is needless.
+        mismatched = sorted(
+            f"{key}: python={value} c++={native[key]}"
+            for key, value in table.items()
+            if key not in native or native[key] != value
+        )
+        if mismatched:
+            raise RuntimeError(
+                f"{name} constants in simpler.worker disagree with the C++ enum: "
+                + "; ".join(mismatched)
+                + ". These cross a process boundary, so the mismatch would surface as a hung or "
+                "misrouted child rather than an error."
+            )
+        # A value the C++ side has and Python does not is a state a child can
+        # legitimately publish and this module would not recognise.
+        missing = sorted(set(native) - set(table))
+        if missing:
+            raise RuntimeError(
+                f"{name} has enumerators the Python side does not declare: {', '.join(missing)}. "
+                "A child can publish them and this module would not recognise the value."
+            )
+
+
+_assert_mailbox_wire_constants()
 
 
 def _local_task_frame_count(platform: str, _runtime: str, pipeline_depth: int) -> int:
@@ -428,6 +497,13 @@ _CTRL_COMM_INIT = 9
 _CTRL_PY_REGISTER = 10
 _CTRL_PY_UNREGISTER = 11
 _CTRL_PY_IMPORT_REGISTER = 12
+# Best-effort import-cache invalidation: the owner released a Buffer, this tells every consumer
+# (chip or SUB child, or a nested NEXT_LEVEL Worker forwarding it further down its own tree) to
+# drop its own materialized mapping for the identity if it has one. Reached via the generic
+# broadcast_control_all path (Worker._broadcast_py_control), the same mechanism _CTRL_PY_REGISTER
+# et al. already use — the digest slot carries a CanonicalIdentity's three meaningful fields
+# packed by _pack_identity_wire, not a callable hash.
+_CTRL_IMPORT_RELEASE = 13
 # Operation names a child puts in its error message when a control command
 # fails, so the parent's re-raised text names the operation and not just a
 # numeric sub-command. Absent entries fall back to the raw number.
@@ -437,7 +513,9 @@ _CTRL_OP_NAMES = {
     _CTRL_PY_REGISTER: "py_register",
     _CTRL_PY_IMPORT_REGISTER: "py_register",
     _CTRL_PY_UNREGISTER: "py_unregister",
+    _CTRL_IMPORT_RELEASE: "import_release",
 }
+
 
 _CTRL_WORKER_CHIP_REGION_CREATE = 16
 _CTRL_WORKER_CHIP_REGION_RELEASE = 17
@@ -687,6 +765,60 @@ class _ChildProvEntry:
 # it takes is not re-entrant — but the re-entrance is per Worker: a call that
 # reaches a *different* Worker owes that Worker its own reservation.
 _CONTROL_RESERVATION = threading.local()
+
+
+class _SharedExclusiveLock:
+    """Held by many in shared mode, or by one alone in exclusive mode.
+
+    Run admission and device control both need ordering against each other, but
+    not the same amount of it. A control command that belongs to no run needs
+    "no run may be admitted while I run" — a property of the worker. Two such
+    commands on different chips do not need to exclude *each other*, and making
+    them do so serializes every mailbox round-trip in the tree behind one
+    mutex. Admission takes this exclusively, control takes it shared.
+
+    Writer-preferring: once a submit is waiting, new shared holders queue behind
+    it, so a stream of control commands cannot starve admission.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._shared = 0
+        self._exclusive = False
+        self._waiting_exclusive = 0
+
+    @contextlib.contextmanager
+    def shared(self) -> Iterator[None]:
+        """Admit alongside other shared holders; excludes exclusive holders."""
+        with self._cv:
+            while self._exclusive or self._waiting_exclusive:
+                self._cv.wait()
+            self._shared += 1
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._shared -= 1
+                if self._shared == 0:
+                    self._cv.notify_all()
+
+    @contextlib.contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Admit alone: waits out every shared holder and excludes new ones."""
+        with self._cv:
+            self._waiting_exclusive += 1
+            try:
+                while self._exclusive or self._shared:
+                    self._cv.wait()
+            finally:
+                self._waiting_exclusive -= 1
+            self._exclusive = True
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._exclusive = False
+                self._cv.notify_all()
 
 
 def _held_control_reservations() -> set[int]:
@@ -1584,6 +1716,26 @@ def _read_control_digest(buf) -> bytes:
     return bytes(buf[_OFF_CONTROL_CALLABLE_HASH : _OFF_CONTROL_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES])
 
 
+_IDENTITY_WIRE = struct.Struct(f"<{OWNER_INSTANCE_ID_BYTES}sQI")
+assert _IDENTITY_WIRE.size <= CALLABLE_HASH_DIGEST_BYTES
+
+
+def _pack_identity_wire(identity: CanonicalIdentity) -> bytes:
+    """CanonicalIdentity's three meaningful fields, packed to fit the digest-sized control slot
+    _CTRL_IMPORT_RELEASE reuses. Deliberately not the identity's own bytes — see
+    ``CanonicalIdentity``'s binding docstring on why it exposes no ``pack()``: this reconstructs
+    the wire form field-by-field, the same way ``remote_l3_protocol.py`` encodes one for the
+    cross-machine wire, rather than dumping the object's raw memory.
+    """
+    body = _IDENTITY_WIRE.pack(identity.owner_instance_id, identity.buffer_id, identity.generation)
+    return body.ljust(CALLABLE_HASH_DIGEST_BYTES, b"\x00")
+
+
+def _unpack_identity_wire(buf: bytes) -> CanonicalIdentity:
+    owner_instance_id, buffer_id, generation = _IDENTITY_WIRE.unpack_from(buf, 0)
+    return CanonicalIdentity(owner_instance_id, buffer_id, generation)
+
+
 def _read_task_digest(buf) -> bytes:
     return bytes(buf[_OFF_TASK_CALLABLE_HASH : _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES])
 
@@ -1855,14 +2007,17 @@ def _sub_worker_loop(
 
     def handle_control(sub_cmd: int) -> tuple[int, str]:
         try:
-            _handle_py_callable_control(
-                buf,
-                registry,
-                identity_table,
-                identity_refs,
-                sub_cmd,
-                context="sub_worker",
-            )
+            if sub_cmd == _CTRL_IMPORT_RELEASE:
+                import_registry.unregister(_unpack_identity_wire(_read_control_digest(buf)))
+            else:
+                _handle_py_callable_control(
+                    buf,
+                    registry,
+                    identity_table,
+                    identity_refs,
+                    sub_cmd,
+                    context="sub_worker",
+                )
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker control", e)
         return 0, ""
@@ -2501,13 +2656,14 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             )
             if pipeline_reserved != 0:
                 raise RuntimeError(f"chip_process dev={device_id}: invalid pipeline lease reserved field")
-            # Materialize the tensor args into a chip-POD blob the runtime reads: resolve
-            # each ref's embedded handle to a local base (map-once, cached by canonical
-            # identity), then build the chip blob at those bases. Replaces the former
-            # parent-VA range rewrite — identities resolve exactly, not by numeric range.
+            # The mailbox bytes decode once, into the wire TaskArgs; the mapping pass and the
+            # chip-POD build both read that object. Each tensor's embedded handle resolves to a
+            # local base by canonical identity (map-once, cached), and the POD is built at those
+            # bases — an exact resolution, not the parent-VA numeric-range rewrite it replaced.
             args_ptr = task_addr + _OFF_TASK_ARGS_BLOB
-            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
-            chip_args = materialize_tensor_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            resolved = import_registry.materialize_args(args)
+            chip_args = materialize_task_args(args, resolved)
             # The acceptance flag lives in the mailbox, not in the materialized args, so
             # the fence still publishes through the address the parent polls.
             cw._impl.run_materialized(
@@ -2637,6 +2793,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_worker_chip_region_release(buf, worker_chip_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
+            elif sub_cmd == _CTRL_IMPORT_RELEASE:
+                import_registry.unregister(_unpack_identity_wire(_read_control_digest(buf)))
             elif sub_cmd == CTRL_GLOBAL_DOMAIN_PREPARE:
                 _handle_ctrl_global_domain_prepare(cw, buf, global_domain_store)
             elif sub_cmd == CTRL_GLOBAL_DOMAIN_IMPORT:
@@ -2759,13 +2917,15 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
 
         def submit_frame(frame: _StagedFrame) -> None:
             _protocol, run_id, slot_id, generation, dispatch_id = frame.identity
-            # The frame carries the wire blob; the runtime reads the chip POD. Resolve each
-            # tensor's descriptor to a local base (map-once, cached by canonical identity) and
-            # rebuild at those bases, as the non-pipelined task path does. The lane copies the
-            # args into its own storage, so this POD need not outlive the call.
+            # The frame carries the wire blob; the runtime reads the chip POD. The bytes decode
+            # once into the wire TaskArgs, whose tensors resolve to local bases (map-once, cached
+            # by canonical identity) and rebuild at those bases, as the non-pipelined task path
+            # does. The lane copies the args into its own storage, so this POD need not outlive
+            # the call.
             args_ptr = frame.frame_addr + _OFF_TASK_ARGS_BLOB
-            resolved = import_registry.materialize_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
-            chip_args = materialize_tensor_blob(args_ptr, _MAILBOX_ARGS_CAPACITY, resolved)
+            args = read_args_from_blob(args_ptr, _MAILBOX_ARGS_CAPACITY)
+            resolved = import_registry.materialize_args(args)
+            chip_args = materialize_task_args(args, resolved)
             frame.chip_run = cw._impl._submit_chip_run_materialized(
                 frame.cid,
                 chip_args,
@@ -3193,6 +3353,8 @@ def _child_worker_loop(
                 digest = _read_control_digest(buf)
                 inner_worker._unregister_child_digest(digest=digest)
                 _remove_local_identity(registry, identity_table, identity_refs, digest)
+            elif sub_cmd == _CTRL_IMPORT_RELEASE:
+                inner_worker._release_import_recursive(_unpack_identity_wire(_read_control_digest(buf)))
             elif sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER, _CTRL_PY_UNREGISTER):
                 _handle_py_callable_control(
                     buf,
@@ -4123,7 +4285,9 @@ class Worker:
         # may be admitted at once is the depth the child backends negotiated.
         # This gate serialises graph construction itself, which stays
         # synchronous on the submitting caller at any depth.
-        self._submit_mu = threading.Lock()
+        # Exclusive for run admission, shared for control that belongs to no run:
+        # such a command must exclude admission, but not other chips' commands.
+        self._submit_mu = _SharedExclusiveLock()
         # Guarded by _hierarchical_start_cv. Handles are installed before their
         # orchestration callback can enqueue work and retired after fence-owned
         # cleanup, so close() can drain the exact accepted set.
@@ -4175,6 +4339,10 @@ class Worker:
         # handle back to its run so waiting and finalization can find it.
         self._chip_runs: dict[int, Any] = {}
         self._chip_run_seq: int = 0
+        # Mirrors _chip_runs' own lifecycle (added/removed at the same two points) so
+        # release_buffer() can see an L2 run in flight: L2 dispatch never touches
+        # _accepted_run_handles/_submit_mu, so it is otherwise invisible to that check.
+        self._chip_run_touched_identities: dict[int, set[CanonicalIdentity]] = {}
 
         # Level-3+ internals
         self._worker: _Worker | None = None
@@ -4254,6 +4422,11 @@ class Worker:
         # interrupted op never leaves a freed address live. Cleared on close().
         self._child_alloc_prov: dict[tuple[int, int], _ChildProvEntry] = {}
         self._child_prov_lock = threading.Lock()
+        # Per-worker locks for the *native* half of a provenance-guarded device op.
+        # ``_child_prov_lock`` stays the bookkeeping lock (short, process-wide); the
+        # long native call (malloc / free / copy) is serialized per worker instead, so
+        # ops on different chips overlap while same-worker ordering is unchanged.
+        self._child_prov_worker_locks: dict[int, threading.Lock] = {}
 
         # Owner-side Buffer state (P1-B): a per-incarnation opaque nonce, a monotonic buffer_id
         # (0 reserved), and the live handles this Worker owns. create_buffer allocates a handle whose
@@ -6619,6 +6792,48 @@ class Worker:
                 f"(continuing best-effort). First error: {errors[0]}\n"
             )
             sys.stderr.flush()
+
+    def _broadcast_import_release(self, identity: CanonicalIdentity) -> None:
+        """Broadcast _CTRL_IMPORT_RELEASE to every NEXT_LEVEL child (chip or nested Worker) and
+        every SUB child, via the generic control channel _CTRL_PY_REGISTER et al. already use.
+
+        A no-op before ``init()`` (``self._worker`` unset) — a Worker that never started has no
+        forked children to reach regardless of what ``_python_worker_types()`` would report.
+        Otherwise unconditional on both target lists: a Worker with no children of one kind sends
+        to an empty list, which the underlying broadcast already no-ops on — no need to duplicate
+        ``_python_worker_types()``'s gating here (that helper only counts nested-Worker NEXT_LEVEL
+        children, not chip children, so it would wrongly skip the chip-only case).
+
+        Best-effort, mirroring ``_broadcast_unregister``: a child that never materialized
+        ``identity`` has nothing to drop, and a slow or dead child must not block or fail
+        ``release_buffer()`` — the Buffer is already closed on the owner side by the time this
+        runs, so this call is pure cleanup, not a correctness gate.
+        """
+        if self._worker is None:
+            return
+        errors = self._broadcast_py_control(
+            [WorkerType.NEXT_LEVEL, WorkerType.SUB],
+            _CTRL_IMPORT_RELEASE,
+            digest=_pack_identity_wire(identity),
+            strict=False,
+        )
+        if errors:
+            sys.stderr.write(
+                f"Worker.release_buffer(identity={identity}): {len(errors)} children reported errors "
+                f"(continuing best-effort). First error: {errors[0]}\n"
+            )
+            sys.stderr.flush()
+
+    def _release_import_recursive(self, identity: CanonicalIdentity) -> None:
+        """Drop ``identity`` from this Worker's own same-process import cache, then forward one
+        more hop down this Worker's own children — same shape as ``_unregister_child_digest``'s
+        recursive forward for callable cleanup, since a NEXT_LEVEL child may itself have
+        materialized ``identity`` further down its own tree (chip/SUB leaves, or its own
+        NEXT_LEVEL children in turn).
+        """
+        if self._chip_import_registry is not None:
+            self._chip_import_registry.unregister(identity)
+        self._broadcast_import_release(identity)
 
     def add_worker(self, worker: Worker) -> int:
         """Add a lower-level Worker as a NEXT_LEVEL child. Must be called before init().
@@ -9122,6 +9337,19 @@ class Worker:
     # successful native alloc; revoke before the native free.
     # ------------------------------------------------------------------
 
+    def _child_prov_worker_lock(self, worker_id: int) -> threading.Lock:
+        """Return the lock serializing native device ops on *worker_id* alone.
+
+        Acquired *before* ``_child_prov_lock`` wherever both are needed; never the
+        other way round, so the two can never deadlock.
+        """
+        with self._child_prov_lock:
+            lock = self._child_prov_worker_locks.get(int(worker_id))
+            if lock is None:
+                lock = threading.Lock()
+                self._child_prov_worker_locks[int(worker_id)] = lock
+            return lock
+
     def _child_prov_record_malloc(self, worker_id: int, ptr: int, size: int) -> None:
         """Mark ``(worker_id, ptr)`` as a live malloc base spanning ``size`` bytes
         (after a successful malloc)."""
@@ -9232,6 +9460,11 @@ class Worker:
                 out.append((int.from_bytes(desc.body[:8], "little"), i))
         return out
 
+    @staticmethod
+    def _identities_in_args(args: Any) -> set[CanonicalIdentity]:
+        """Every tensor arg's identity in ``args``."""
+        return {args.tensor(i).buffer.identity for i in range(args.tensor_count())}
+
     def _record_touched_identities(self, args: Any) -> None:
         """Add every tensor arg's identity in ``args`` to the current run's touched set.
 
@@ -9243,8 +9476,7 @@ class Worker:
         resources = self._building_run_resources
         if resources is None:
             return
-        for i in range(args.tensor_count()):
-            resources.touched_identities.add(args.tensor(i).buffer.identity)
+        resources.touched_identities.update(self._identities_in_args(args))
 
     def _child_prov_check_dispatch(self, child_ptrs: list[tuple[int, int]], target_worker_id: int, *, api: str) -> None:
         """Validate every child_memory pointer against its exact target worker."""
@@ -9330,10 +9562,11 @@ class Worker:
         with (
             self._operation_lease("alloc_child_tensor"),
             self._device_control_admission("alloc_child_tensor"),
-            self._child_prov_lock,
+            self._child_prov_worker_lock(int(worker_id)),
         ):
             ptr = int(self._worker.malloc(int(worker_id), int(nbytes)))
-            self._child_prov_record_malloc(int(worker_id), ptr, int(nbytes))
+            with self._child_prov_lock:
+                self._child_prov_record_malloc(int(worker_id), ptr, int(nbytes))
         return wrap_device_malloc(
             ptr,
             int(nbytes),
@@ -9355,11 +9588,14 @@ class Worker:
         if self.level != 2:
             self._check_chip_worker_id(wid)
         with self._operation_lease("free"), self._device_control_admission("free"):
-            with self._child_prov_lock:
+            with self._child_prov_worker_lock(wid):
                 # Safety-first commit barrier: revoke provenance BEFORE the native free so an async unwind
-                # after a successful free can never leave a freed address live.
-                self._child_prov_require_malloc_base(wid, ptr, api="free")
-                self._child_prov_clear_malloc(wid, ptr)
+                # after a successful free can never leave a freed address live. The revoke commits under
+                # ``_child_prov_lock``; the native call runs under this worker's lock only, so a free on
+                # one chip no longer blocks provenance or device ops on another.
+                with self._child_prov_lock:
+                    self._child_prov_require_malloc_base(wid, ptr, api="free")
+                    self._child_prov_clear_malloc(wid, ptr)
                 if self.level == 2:
                     assert self._chip_worker is not None
                     self._chip_worker.free(ptr)
@@ -9457,8 +9693,9 @@ class Worker:
             self._check_chip_worker_id(wid)
             host = self._require_buffer_host_side(host, "copy_to")
         with self._operation_lease("copy_to"), self._device_control_admission("copy_to"):
-            with self._child_prov_lock:
-                self._child_prov_require_live_range(wid, dptr, nbytes, api="copy_to")
+            with self._child_prov_worker_lock(wid):
+                with self._child_prov_lock:
+                    self._child_prov_require_live_range(wid, dptr, nbytes, api="copy_to")
                 if self.level == 2:
                     # No fork: the chip worker runs in this process, so the host address is valid.
                     assert self._chip_worker is not None
@@ -9482,8 +9719,9 @@ class Worker:
             self._check_chip_worker_id(wid)
             host = self._require_buffer_host_side(host, "copy_from")
         with self._operation_lease("copy_from"), self._device_control_admission("copy_from"):
-            with self._child_prov_lock:
-                self._child_prov_require_live_range(wid, sptr, nbytes, api="copy_from")
+            with self._child_prov_worker_lock(wid):
+                with self._child_prov_lock:
+                    self._child_prov_require_live_range(wid, sptr, nbytes, api="copy_from")
                 if self.level == 2:
                     # No fork: the chip worker runs in this process, so the host address is valid.
                     assert self._chip_worker is not None
@@ -9642,26 +9880,44 @@ class Worker:
             self._chip_import_registry = None
 
     def release_buffer(self, buffer: Buffer) -> None:
-        """Close + unlink one owner Buffer and drop its registry entry.
+        """Close + unlink one owner Buffer, drop its registry entry, and tell every descendant to
+        drop its own cached import for the identity.
 
-        Rejects outright if any currently in-flight run (not yet past ``_cleanup_published``) sent
-        this identity as a NEXT_LEVEL Tensor arg — a Buffer never goes away while a dispatched task
-        still names it. Takes ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles``
-        before its orchestration callback (where ``touched_identities`` gets populated) has run, and
-        that callback is what ``_submit_mu`` already serializes graph construction against, so taking
-        it here means the check only ever runs between callbacks, never mid-callback with a
-        not-yet-complete touched set. Not checked once ``buffer`` is already closed, matching
-        ``Buffer.close()``'s own idempotency. The entry survives a failed close, so
-        ``_release_all_buffers`` still reports the leak at close() rather than losing it here. The
-        slot is dropped only when it still holds *this* buffer: a buffer_id minted elsewhere can
-        collide with a registry key, and evicting the live entry it names would strand that
-        backing."""
+        Rejects outright if any currently in-flight L3+ run (not yet past ``_cleanup_published``)
+        sent this identity as a NEXT_LEVEL Tensor arg, or any in-flight L2 direct-chip run sent it —
+        a Buffer never goes away while a dispatched task still names it. The L3+ check takes
+        ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles`` before its
+        orchestration callback (where ``touched_identities`` gets populated) has run, and that
+        callback is what ``_submit_mu`` already serializes graph construction against, so taking it
+        here means the check only ever runs between callbacks, never mid-callback with a
+        not-yet-complete touched set. The L2 check is independent (a separate run-id namespace with
+        no callback to serialize against — ``_chip_run_touched_identities`` is written atomically
+        alongside ``_chip_runs`` under ``_registry_lock`` instead, see ``_submit_l2_locked``), so the
+        two checks run sequentially rather than under one shared lock. Neither is checked once
+        ``buffer`` is already closed, matching ``Buffer.close()``'s own idempotency. The entry
+        survives a failed close, so ``_release_all_buffers`` still reports the leak at close() rather
+        than losing it here — the import-cache broadcast only fires once close() has actually
+        succeeded, so a failed release never tells a descendant to drop a mapping the owner still
+        considers live. The slot is dropped only when it still holds *this* buffer: a buffer_id
+        minted elsewhere can collide with a registry key, and evicting the live entry it names would
+        strand that backing."""
         if not buffer.closed:
-            with self._submit_mu, self._hierarchical_start_cv:
+            # Exclusive, not shared: `shared()` would already exclude admission and so
+            # satisfy the "never mid-callback" argument above, but this keeps the
+            # ordering identical to the plain lock this used to be, and buffer release
+            # is not on a hot path, so there is nothing to win by weakening it.
+            with self._submit_mu.exclusive(), self._hierarchical_start_cv:
                 for handle in self._accepted_run_handles:
                     if not handle._cleanup_published and buffer.identity in handle._resources.touched_identities:
                         raise RuntimeError(f"release_buffer: {buffer.identity} is still referenced by an in-flight run")
+            with self._registry_lock:
+                for touched in self._chip_run_touched_identities.values():
+                    if buffer.identity in touched:
+                        raise RuntimeError(
+                            f"release_buffer: {buffer.identity} is still referenced by an in-flight L2 run"
+                        )
         buffer.close()
+        self._release_import_recursive(buffer.identity)
         with self._registry_lock:
             buffer_id = int(buffer.identity.buffer_id)
             if self._buffers.get(buffer_id) is buffer:
@@ -9742,7 +9998,7 @@ class Worker:
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
             return self._submit_l2_locked(state.slot_id, args, cfg)
 
-        with self._submit_mu:
+        with self._submit_mu.exclusive():
             # Graph callbacks stay serialized, so a predecessor's callback has
             # always returned by the time we get here — which is what makes the
             # decision below a fact about that run rather than a guess about
@@ -9890,7 +10146,9 @@ class Worker:
         sampled check leaves the caller free to send its mailbox command after a
         submit admitted a run behind its back, so this takes the serializer
         submission itself holds — no run can be admitted between the check and
-        the command. Re-entrant per thread: one control call may be built out of
+        the command. It takes it *shared*: what the command needs is that no run
+        is admitted while it runs, which two commands on different chips can
+        guarantee at the same time. Re-entrant per thread: one control call may be built out of
         others (a queue out of a region), and the second must join the
         reservation rather than deadlock on it.
         """
@@ -9898,7 +10156,7 @@ class Worker:
         if id(self) in held:
             yield
             return
-        with self._submit_mu:
+        with self._submit_mu.shared():
             with self._hierarchical_start_cv:
                 if self._ordered_cleanup_error is not None:
                     raise RuntimeError(
@@ -9943,11 +10201,25 @@ class Worker:
         completion fence through :meth:`RunHandle.wait`.
         """
         assert self._chip_worker is not None
-        chip_args = self._materialize_l2_args(args)
-        chip_run = self._chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, cfg)
-        self._chip_run_seq += 1
-        run_id = self._chip_run_seq
-        self._chip_runs[run_id] = chip_run
+        touched = self._identities_in_args(args) if args is not None else set()
+        # Publish touched_identities BEFORE materializing, not after: release_buffer() reads this
+        # dict to decide whether a Buffer is still in flight, so if it were only written after
+        # _materialize_l2_args() (which populates self._chip_import_registry, the very cache
+        # release_buffer() pops), a release racing that window would see no entry for a run that
+        # has already cached the mapping it is about to pop out from under it.
+        with self._registry_lock:
+            self._chip_run_seq += 1
+            run_id = self._chip_run_seq
+            self._chip_run_touched_identities[run_id] = touched
+        try:
+            chip_args = self._materialize_l2_args(args)
+            chip_run = self._chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, cfg)
+        except BaseException:
+            with self._registry_lock:
+                self._chip_run_touched_identities.pop(run_id, None)
+            raise
+        with self._registry_lock:
+            self._chip_runs[run_id] = chip_run
         # chip_args is kept alive by the handle: the lane copies the args into
         # its own storage, but the keepalive also pins the buffers the resolved
         # descriptors point at for as long as the run can still read them.
@@ -10035,7 +10307,7 @@ class Worker:
         assert self._orch is not None
         self._orch._wait_run_accepted(run_id)
 
-    def _finalize_run_handle(
+    def _finalize_run_handle(  # noqa: PLR0912 -- one extra branch for the L2 pop-under-lock guard
         self,
         handle: RunHandle,
         run_id: int,
@@ -10049,9 +10321,14 @@ class Worker:
         # domains, remote slots or chip regions for it. Retiring the lane entry
         # is the whole of its cleanup, so it never enters the cursor below —
         # driving those steps here would report a cleanup failure for state that
-        # was never created.
-        if run_id in self._chip_runs:
-            del self._chip_runs[run_id]
+        # was never created. The membership check and both removals share one lock
+        # acquisition (pop(..., None), not del) so a concurrent Worker.close() clearing
+        # these same dicts can never make this raise KeyError or read a half-updated pair.
+        with self._registry_lock:
+            was_l2_run = self._chip_runs.pop(run_id, None) is not None
+            if was_l2_run:
+                self._chip_run_touched_identities.pop(run_id, None)
+        if was_l2_run:
             return native_error
 
         # Two different failures, deliberately not merged. A task that failed is
@@ -10791,7 +11068,9 @@ class Worker:
                         except Exception:
                             if undelivered:
                                 raise
-                    self._chip_runs.clear()
+                    with self._registry_lock:
+                        self._chip_runs.clear()
+                        self._chip_run_touched_identities.clear()
                     self._chip_worker.finalize()
                     self._chip_worker = None
 

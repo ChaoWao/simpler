@@ -446,15 +446,31 @@ children never do. Putting the slot in shm would force cross-process atomics
 and shm-safe containers for no benefit. See
 [task-flow.md](task-flow.md) §11 for full rationale.
 
-### 5.3 Why one WorkerThread per child?
+### 5.3 Why one progress owner for every child?
 
-Alternative: N children share one dispatch queue. Rejected because:
+Alternative: one thread per child, each driving its own endpoint. Rejected
+because `submit_progress` / `poll_progress` never wait for child completion, so
+a dedicated thread has no completion to block on — it spins for as long as its
+child is busy, and N children cost N spinning cores. The Scheduler already wakes
+on completions and already owns the dispatch decision, so folding progress into
+it costs one poll round per iteration and removes both the threads and the queue
+that fed them.
 
-- `WorkerThread` is the natural execution unit. Directed NEXT_LEVEL work waits
-  in child `i`'s ready FIFO if that child is busy; SUB work may use another
-  idle SUB child
-- Simpler mental model: one child = one thread that drives it
-- Zero contention on queue access (only one producer, one consumer per queue)
+Not waiting for completion is not the same as never blocking: `submit_progress`
+still takes `mailbox_mu_`, and the second bullet below is what that costs.
+
+What that trades away:
+
+- One endpoint's progress latency is now bounded by the whole round, since a
+  single thread visits every lane in turn rather than each lane having its own
+- A blocking call reached from the progress path stalls every lane, not just
+  its own. `submit_progress` waits on `mailbox_mu_`, which `run_control_command`
+  holds while it blocks on the child; see the comment at that acquisition in
+  `worker_manager.cpp`
+
+What is unchanged: per-child work still queues per child. Directed NEXT_LEVEL
+work waits in child `i`'s ready FIFO if that child is busy, while SUB work may
+use another idle SUB child.
 
 ---
 

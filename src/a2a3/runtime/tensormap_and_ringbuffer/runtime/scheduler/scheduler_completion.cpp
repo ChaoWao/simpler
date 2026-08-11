@@ -140,7 +140,9 @@ void SchedulerContext::complete_slot_task(
             const PTO2TaskId token = slot_state.task->task_id;
             for (uint32_t i = 0; i < cond_count; ++i) {
                 volatile DeferredCompletionEntry *e = &deferred_slab->entries[i];
-                while (!mailbox->try_push_condition(token, e->addr, e->expected_value, e->engine, e->completion_type)) {
+                while (!mailbox->try_push_condition(
+                    token, e->addr, e->backend_cookie, e->expected_value, e->engine, e->completion_type
+                )) {
                     sched_->async_wait_list.mpsc_skipped_count.fetch_add(1, std::memory_order_relaxed);
                     SPIN_WAIT_HINT();
                 }
@@ -674,10 +676,13 @@ SchedulerContext::SyncStartStageResult SchedulerContext::stage_sync_start_cores(
 //      (running_slot_count) for a gated drain, and reopens the gate
 //      (a release-store the followers acquire, so the seed is visible before any
 //      completion promotes a pending block). Followers spin until the gate reopens.
-void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] uint64_t *out_stage_wall_cycles) {
+void SchedulerContext::handle_drain_mode(
+    int32_t thread_idx, [[maybe_unused]] uint64_t *out_stage_wall_cycles, [[maybe_unused]] int32_t *out_staged_blocks
+) {
 #if SIMPLER_DFX
     bool drain_prof = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES && out_stage_wall_cycles != nullptr);
     uint64_t drain_acked_ts = 0;  // set immediately before staging; used to measure the stage wall
+    if (out_staged_blocks != nullptr) *out_staged_blocks = 0;
 #endif
     // Every spin in this function honors is_completed(): once the run latches
     // completed_ (all tasks done, or a fatal error raised elsewhere), peers leave
@@ -763,6 +768,7 @@ void SchedulerContext::handle_drain_mode(int32_t thread_idx, [[maybe_unused]] ui
     // out param carries the PURE stage_sync_start_cores wall (build_payload + MMIO publish of
     // this thread's cores), isolating it from availability + stage_go handshake.
     if (drain_prof && drain_acked_ts != 0) *out_stage_wall_cycles = get_sys_cnt_aicpu() - drain_acked_ts;
+    if (out_staged_blocks != nullptr) *out_staged_blocks = staged.staged_blocks;
 #endif
     drain_state_.drain_running_staged.fetch_add(staged.running_cores, std::memory_order_acq_rel);
     drain_state_.drain_stage_done_mask.fetch_or(1u << thread_idx, std::memory_order_release);

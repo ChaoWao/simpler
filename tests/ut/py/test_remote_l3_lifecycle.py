@@ -19,7 +19,7 @@ from typing import cast
 import pytest
 from simpler import remote_l3_session, remote_l3_worker
 from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
-from simpler.worker import RunHandle, Worker, _RunResources
+from simpler.worker import RunHandle, Worker, _RunResources, _SharedExclusiveLock
 
 
 def _manifest(**extra):
@@ -957,7 +957,12 @@ def _bare_l3_worker():
     w._hierarchical_start_mu = threading.Lock()
     w._hierarchical_start_cv = threading.Condition(w._hierarchical_start_mu)
     w._accepted_run_handles = set()
-    w._submit_mu = threading.Lock()
+    # Run admission is shared/exclusive now, not a plain Lock: production code calls
+    # `.exclusive()` / `.shared()` on it, so the stand-in has to be the real type.
+    w._submit_mu = _SharedExclusiveLock()
+    w._chip_run_touched_identities = {}
+    w._chip_import_registry = None
+    w._worker = None
     return w
 
 

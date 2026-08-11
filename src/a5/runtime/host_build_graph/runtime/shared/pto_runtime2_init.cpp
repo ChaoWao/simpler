@@ -92,9 +92,9 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     last_task_alive = 0;
     advance_lock.store(0, std::memory_order_relaxed);
 
-    // Per-slot SM-side initialization (reset_for_reuse + fanin_count/active_mask
-    // zero) lives in PTO2SharedMemoryHandle::init_header_per_ring so the AICPU
-    // performs it during SM reset; host prebuilt-arena init skips SM access here.
+    // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
+    // the completion flag) happens init-on-write in orch::prepare_task as each slot
+    // is claimed; host prebuilt-arena init skips SM access here.
 
     return true;
 }
@@ -112,6 +112,8 @@ PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
         layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
     layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     }
@@ -154,6 +156,14 @@ bool PTO2SchedulerState::init_data_from_layout(
         )) {
         return false;
     }
+    if (!ready_queue_init_data_from_layout(
+            &sched->graph_ready_queue, arena, layout.off_graph_ready_queue_slots, layout.ready_queue_capacity
+        ) ||
+        !ready_queue_init_data_from_layout(
+            &sched->graph_prepare_queue, arena, layout.off_graph_prepare_queue_slots, layout.ready_queue_capacity
+        )) {
+        return false;
+    }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         if (!ready_queue_init_data_from_layout(
                 &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i],
@@ -182,6 +192,8 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
         ready_queue_wire_arena_pointers(&sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i]);
     }
     ready_queue_wire_arena_pointers(&sched->dummy_ready_queue, arena, layout.off_dummy_ready_queue_slots);
+    ready_queue_wire_arena_pointers(&sched->graph_ready_queue, arena, layout.off_graph_ready_queue_slots);
+    ready_queue_wire_arena_pointers(&sched->graph_prepare_queue, arena, layout.off_graph_prepare_queue_slots);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(
             &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i]
@@ -200,6 +212,8 @@ void PTO2SchedulerState::destroy() {
         ready_queue_destroy(&sched->ready_sync_queues[i]);
     }
     ready_queue_destroy(&sched->dummy_ready_queue);
+    ready_queue_destroy(&sched->graph_ready_queue);
+    ready_queue_destroy(&sched->graph_prepare_queue);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->early_dispatch_queues[i]);
     }
@@ -344,6 +358,19 @@ PTO2Runtime *runtime_init_data_from_layout(
     return runtime_init_data_from_layout(arena, layout, mode, sm_dev_base, 0, gm_heap_dev_base, heap_sizes);
 }
 
+/**
+ * Populate the prebuilt runtime-arena image in place (host build path).
+ *
+ * Zeroes the PTO2Runtime header at layout.off_runtime, records the GM heap,
+ * and initializes the scheduler (ready / sync / dummy / graph queues) against
+ * the device SM. The orchestrator is deliberately left zeroed: the host-orch
+ * path (run_host_orchestration) initializes it against the host SM once that
+ * buffer exists, then relocates it for the device. Initializing it here would
+ * be dead work — overwritten by that re-init, and the orchestrator arena block
+ * is never uploaded to the device. Caller must follow up with
+ * runtime_wire_arena_pointers. Returns the arena-resident PTO2Runtime*, or
+ * nullptr on failure.
+ */
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base,
     uint64_t /*sm_size*/, void *gm_heap_dev_base, const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
@@ -364,12 +391,15 @@ PTO2Runtime *runtime_init_data_from_layout(
     rt->gm_heap_size = total_heap_size;
     rt->gm_heap_owned = false;
     rt->total_cycles = 0;
+    rt->active_callable_hash = 0;
 
-    if (!rt->orchestrator.init_data_from_layout(
-            layout.orch, arena, sm_dev_base, gm_heap_dev_base, heap_sizes[0], layout.task_window_sizes[0]
-        )) {
-        return nullptr;
-    }
+    // The orchestrator is initialized by the host-orch path
+    // (run_host_orchestration) against the host SM once it is allocated, then
+    // relocated for the device. Initializing it here would be dead work: its
+    // arena content (tensormap + seen_epoch memset) is immediately overwritten by
+    // that re-init, and the orchestrator arena block is not uploaded to the device
+    // (the scheduler boots without it). So only the scheduler is initialized here;
+    // rt->orchestrator stays zeroed (from the memset above) until run_host_orchestration.
     if (!rt->scheduler.init_data_from_layout(layout.sched, arena, sm_dev_base)) {
         return nullptr;
     }

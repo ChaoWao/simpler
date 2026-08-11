@@ -112,7 +112,8 @@ local/remote paths with the `sim` backend. It also exercises the real
 profile is `a3-fabric-v1` on real A3 devices. Those two examples are the
 in-repository harness for the Fabric path; a run that needs to know whether
 Fabric was covered should read that job rather than infer it from the
-simulation checks.
+simulation checks. The job now drives their `test_*.py` wrappers through
+`pod-run-pytest` rather than calling `run_parent.sh` directly.
 
 ---
 

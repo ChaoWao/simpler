@@ -34,6 +34,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cinttypes>
 #include <cstddef>
@@ -43,13 +44,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "../common/pto_runtime_status.h"
 #include "../runtime/common.h"
 #include "../runtime/dep_gen_host_graph.h"
+#include "../runtime/graph_execution.h"
+#include "../runtime/graph_host_state.h"
 #include "../runtime/host_tensor_access.h"
 #include "../runtime/pto_orchestrator.h"
 #include "../runtime/pto_runtime2.h"
@@ -446,6 +452,70 @@ static bool relocate_host_orch_image(
     return ok;
 }
 
+bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostState &graph_state) {
+    std::unordered_map<uint64_t, uint32_t> occurrences;
+    const size_t count = graph_host_upload_count(graph_state);
+    for (size_t index = 0; index < count; ++index) {
+        std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
+        if (!upload.has_value() || upload->outer_slot->task_kind != TaskKind::GRAPH ||
+            upload->outer_slot->task == nullptr) {
+            LOG_ERROR("host-orch: invalid pending Graph POD image");
+            return false;
+        }
+        auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
+        const GraphDefinition *definition = graph_submission_definition(*submission);
+        size_t execution_bytes = 0;
+        if (definition == nullptr || definition->full_key != submission->graph_key || definition->task_count == 0 ||
+            definition->task_count > GRAPH_MAX_NODES ||
+            !graph_execution_storage_bytes(
+                static_cast<int32_t>(definition->task_count), definition->tensor_arg_count,
+                definition->scalar_arg_count, definition->total_bytes, &execution_bytes
+            )) {
+            LOG_ERROR("host-orch: invalid Graph execution storage request");
+            return false;
+        }
+        const uint32_t occurrence = occurrences[submission->graph_key]++;
+        void *execution_storage = api->acquire_graph_execution_buffer(
+            submission->graph_key, occurrence, execution_bytes, alignof(GraphNodeStorage)
+        );
+        if (execution_storage == nullptr) {
+            LOG_ERROR(
+                "host-orch: failed to retain %zu bytes for Graph execution key=%#llx occurrence=%u", execution_bytes,
+                static_cast<unsigned long long>(submission->graph_key), occurrence
+            );
+            return false;
+        }
+        submission->execution_storage = reinterpret_cast<uint64_t>(execution_storage);
+        submission->execution_storage_bytes = execution_bytes;
+        submission->local_execution = 0;
+        submission->activation_gate = 0;
+
+        void *device_submission = api->device_malloc(upload->bytes);
+        if (device_submission == nullptr) {
+            LOG_ERROR("host-orch: failed to allocate %zu bytes for Graph submission", upload->bytes);
+            return false;
+        }
+        if (api->copy_to_device(device_submission, upload->data, upload->bytes) != 0) {
+            LOG_ERROR("host-orch: failed to upload Graph submission POD image");
+            api->device_free(device_submission);
+            return false;
+        }
+        upload->outer_slot->graph_context = device_submission;
+        runtime->tensor_pairs_.push_back({nullptr, device_submission, upload->bytes, false});
+    }
+    return true;
+}
+
+struct GraphHostStateBinding {
+    explicit GraphHostStateBinding(PTO2OrchestratorState &orchestrator, GraphHostState *state) :
+        orchestrator(orchestrator) {
+        orchestrator.graph_host_state = state;
+    }
+    ~GraphHostStateBinding() { orchestrator.graph_host_state = nullptr; }
+
+    PTO2OrchestratorState &orchestrator;
+};
+
 int32_t run_host_orchestration(
     Runtime *runtime, const HostApi *api, HostTensorAccessor &tensor_access, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
@@ -455,8 +525,15 @@ int32_t run_host_orchestration(
     // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
 
-    std::vector<uint8_t> host_sm_buf(sm_size, 0);
-    void *host_sm = host_sm_buf.data();
+    // Init-on-write: descriptors, payloads, slot_states and completion_flags are
+    // each written per task at submit and read only for [0, total_tasks). Zero
+    // only the fixed-size header here; the per-slot segments are initialized in
+    // orch::prepare_task and shipped bounded to total_tasks below.
+    const pto2_sm_layout::PTO2RingSegmentOffsets sm_segs =
+        pto2_sm_layout::ring_segment_offsets(eff_task_window_sizes[0]);
+    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size]);
+    void *host_sm = host_sm_buf.get();
+    std::memset(host_sm, 0, sm_segs.descriptors);
 
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
     // init_data_from_layout resets the orchestrator state, so this is safe.
@@ -474,6 +551,13 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: host SM init_per_ring failed");
         return -1;
     }
+
+    GraphHostStatePtr graph_state = make_graph_host_state();
+    if (!graph_state) {
+        LOG_ERROR("host-orch: failed to allocate Graph recording state");
+        return -1;
+    }
+    GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
 
     // Install the ops table (host s_runtime_ops) and latch this run's cluster
     // counts. worker_count is published by DeviceRunner::prepare_launch_shape
@@ -495,6 +579,7 @@ int32_t run_host_orchestration(
     // into the host address space.
 
     const HostOrchEntryPoints *eps = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
+    rt->active_callable_hash = reinterpret_cast<uint64_t>(eps->entry);
     if (eps->bind != nullptr) {
         rt->tensor_access = &tensor_access;
         // Binds the orchestration .so's own framework_current_runtime, which its
@@ -514,6 +599,14 @@ int32_t run_host_orchestration(
     rt_orchestration_done(rt);
 
     int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
+
+    // total_tasks sizes the bounded per-segment H2D copies below; a value outside
+    // [0, task_window] would make those copies read/write out of bounds.
+    if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > eff_task_window_sizes[0]) {
+        LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, eff_task_window_sizes[0]);
+        return -1;
+    }
 
     // Relocate the host-DDR cross-task pointers to their final DEVICE addresses
     // on the host, before the SM and arena leave for the device. Pointers into
@@ -532,7 +625,23 @@ int32_t run_host_orchestration(
         return -1;
     }
 
-    if (api->copy_to_device(device_sm, host_sm, sm_size) != 0) {
+    // Ship only the live prefix of each segment: the device reads no slot past
+    // total_tasks, so upload header + descriptors[0,N), payloads[0,N),
+    // slot_states[0,N) and completion_flags[0,N) — never the ring-sized tails.
+    // header + descriptors[0,N) are contiguous, so that is a single copy.
+    const uint64_t nt = static_cast<uint64_t>(total_tasks);
+    const uint64_t hdr_desc_bytes = sm_segs.descriptors + nt * sizeof(PTO2TaskDescriptor);
+    char *host_base = static_cast<char *>(host_sm);
+    char *dev_base = static_cast<char *>(device_sm);
+    if (api->copy_to_device(dev_base, host_base, hdr_desc_bytes) != 0 ||
+        api->copy_to_device(dev_base + sm_segs.payloads, host_base + sm_segs.payloads, nt * sizeof(PTO2TaskPayload)) !=
+            0 ||
+        api->copy_to_device(
+            dev_base + sm_segs.slot_states, host_base + sm_segs.slot_states, nt * sizeof(PTO2TaskSlotState)
+        ) != 0 ||
+        api->copy_to_device(
+            dev_base + sm_segs.completion_flags, host_base + sm_segs.completion_flags, nt * sizeof(std::atomic<uint8_t>)
+        ) != 0) {
         LOG_ERROR("host-orch: H2D of populated SM failed");
         return -1;
     }
@@ -874,7 +983,24 @@ extern "C" int bind_callable_to_runtime_impl(
     // *before* it can dereference the image.
     rt->prebuilt_layout = layout;
 
-    int rc_upload = api->copy_to_device(runtime_arena_dev, host_arena.base(), layout.arena_size);
+    // Skip uploading the orchestrator block (fanin_seen_epoch / scope / tensormap,
+    // ~8.5 MB): it is host-only dep-computation scratch that the AICPU scheduler
+    // never reads. Ship [0, orch_start) (sm_handle) and [orch_end, arena_size)
+    // (ready queues + runtime header + mailbox) whole; the orch block between them
+    // is not sent. orch_start/orch_end are the first orch and first scheduler
+    // reservations (runtime_reserve_layout order: sm_handle -> orch -> sched); the
+    // ready queues ship in full because graph execution expands a GRAPH task into
+    // on-device nodes that push past the host task count.
+    const auto &sq = layout.sched;
+    const size_t orch_start = layout.orch.off_fanin_seen_epoch;
+    const size_t orch_end = sq.off_ready_queue_slots[0];
+    always_assert(orch_start <= orch_end);
+    char *arena_host = static_cast<char *>(host_arena.base());
+    char *arena_dev = static_cast<char *>(runtime_arena_dev);
+    int rc_upload = api->copy_to_device(arena_dev, arena_host, orch_start);
+    if (rc_upload == 0) {
+        rc_upload = api->copy_to_device(arena_dev + orch_end, arena_host + orch_end, layout.arena_size - orch_end);
+    }
     if (rc_upload != 0) {
         LOG_ERROR("Failed to rtMemcpy prebuilt runtime arena to device (rc=%d)", rc_upload);
         return -1;

@@ -206,7 +206,10 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
  * Returns the PTO2Runtime* that sits at layout.off_runtime within the arena.
  * Caller must follow up with runtime_wire_arena_pointers; rt->ops and the
  * AICore-side count fields are left untouched and must be filled by the
- * AICPU at boot.
+ * AICPU at boot. Initializes the scheduler only: the orchestrator is left
+ * zeroed for the host-orch path (run_host_orchestration) to initialize
+ * against the host SM, since initializing it here would be overwritten and
+ * is never uploaded to the device.
  */
 PTO2Runtime *runtime_init_data_from_layout(
     DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2RuntimeMode mode, void *sm_dev_base, uint64_t sm_size,

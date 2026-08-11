@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * BGEMM Orchestration Function (tensormap_and_ringbuffer Runtime)
+ * BGEMM Orchestration Function
  *
  * Builds the task graph for tiled matrix multiplication: C = A @ B
  *

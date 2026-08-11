@@ -649,6 +649,15 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     // control mutex is released immediately after the task state release-store;
     // controls may still execute while the native run is active, subject to
     // the child-side registry lifetime gate.
+    //
+    // Acquiring it is not always cheap, and the cost is shared. This runs on
+    // the Scheduler thread, which holds loop_mu_ and is the sole progress owner
+    // for every endpoint; run_control_command holds this same mutex while it
+    // blocks on the child, with no deadline by default. So while a control
+    // command is outstanding on any one endpoint, no endpoint makes progress
+    // and loop_mu_ stays held — and Orchestrator shares loop_mu_ with allocator
+    // compaction. Blocking here is bounded only by the child's control latency,
+    // not by anything this function does.
     std::lock_guard<std::mutex> mailbox_lk(mailbox_mu_);
     std::lock_guard<std::mutex> lk(progress_mu_);
     if (endpoint_poisoned_) {

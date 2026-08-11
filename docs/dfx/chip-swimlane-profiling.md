@@ -45,11 +45,12 @@ available.
   `chip_swimlane_records.json` with `deps.json` from
   [`dep_gen`](dep-gen.md) at post-process time; see
   [§3.5](#35-dependency-arrows-from-dep_gen).
-- **AICPU scheduler phases** — per-iteration breakdown into six
+- **AICPU scheduler phases** — per-iteration breakdown into seven
   mutually time-exclusive **outer** phases (`complete` / `async_poll`
-  / `dispatch` / `release` / `dummy` / `early_dispatch`), one logical
-  **inner** phase (`resolve`, parent = Complete or Dummy) rendered on a
-  sibling scheduler sub-lane with the same `Sched_N` label and adjacent tid,
+  / `dispatch` / `release` / `dummy` / `early_dispatch` / `drain`), plus
+  `resolve`, `drain_prepare`, and `drain_publish` **inner** phases. `resolve`
+  is rendered on a sibling scheduler sub-lane with the same `Sched_N` label,
+  while the drain sub-phases are nested within their `drain` bar,
   and two **separate-lane**
   phases (`dummy_task` and `predicated_skip`, sampled immediately before
   `on_task_complete()` begins dependency resolution and rendered as synthetic
@@ -261,7 +262,10 @@ field but render differently in Perfetto:
 | `release` | outer | sched | deferred-release slots drained this iter |
 | `dummy` | outer | sched | `dummy_ready_queue` entries handled this iter (explicit dummies and false-predicate tasks) |
 | `early_dispatch` | outer | sched | blocks staged by speculative early-dispatch this pass |
+| `drain` | outer | sched | blocks staged by this thread's global sync-start drain pass |
 | `resolve` | inner | sched sub-lane, same `Sched_N` label as its outer lane | consumers visited in `on_task_complete` |
+| `drain_prepare` | inner | sched, nested in `drain` | subtasks prepared for global sync-start publication |
+| `drain_publish` | inner | sched, nested in `drain` | subtasks published during global sync-start staging |
 | `dummy_task` | separate-lane | Worker View AICPU_N (pid=4) | one dummy entering `on_task_complete()`; full identity is in `task_id` |
 | `predicated_skip` | separate-lane | Worker View AICPU_N (pid=4) | one real task retired inline after its dispatch predicate evaluated false; full identity is in `task_id` |
 
@@ -270,12 +274,11 @@ orchestrator submit path, so it has no swimlane lane. Read its cost
 from `g_orch_fanin_cycle` in the device-log orch breakdown (the
 `fanin` line) instead.
 
-Outer phases are mutually time-exclusive within an iter — each
-emit advances the per-thread phase anchor (`_t0_phase`). Inner
-phases (`resolve`) don't advance the anchor; the converter renders
-them on a sibling `Sched_N` tid so flow arrows attach to the outer
-`complete`/`dummy` lane instead of being visually captured by the inner
-slice. Separate-lane phases are routed to a different lane by the converter
+Outer phases are mutually time-exclusive within an iter. The converter renders
+`resolve` on a sibling `Sched_N` tid so flow arrows attach to the outer
+`complete`/`dummy` lane; `drain_prepare` and `drain_publish` remain on the
+scheduler lane and are time-contained by `drain`. Separate-lane phases are
+routed to a different lane by the converter
 (Worker View AICPU_N), so they never overlap visually with the sched lane
 bars even when their timestamps fall inside an outer span.
 
@@ -319,11 +322,10 @@ in. The trace contains:
 - **Orchestrator** (pid=1) — per-submit `orch_submit` envelope
   blocks (level >= 4).
 - **AICPU Scheduler** (pid=2) — per-iteration scheduler phase
-  blocks coloured by `phase` (level >= 3). The five outer phases
-  (`complete` / `dispatch` / `release` / `dummy` /
-  `early_dispatch`) appear as sibling bars on each scheduler
-  thread's first `Sched_N` lane; the `resolve` inner phase appears on an
-  adjacent `Sched_N` sub-lane.
+  blocks coloured by `phase` (level >= 3). Outer phases appear as sibling bars
+  on each scheduler thread's first `Sched_N` lane. `resolve` appears on an
+  adjacent `Sched_N` sub-lane, while `drain_prepare` and `drain_publish` nest
+  within `drain`.
 - **Scheduler View** (pid=3) — task-execution overlay using AICPU
   dispatch/finish timestamps (level >= 2), with the same labels
   as Worker View.
@@ -591,8 +593,8 @@ What the swimlane shows:
   dependency arrows independently use each view's earliest visible slice per
   `(func_id, task_id)` group as the anchor.
 - **Scheduler-loop time decomposition.** Per-iteration AICPU
-  phase records show how long the scheduler spent in each of
-  its two work phases (complete / dispatch); idle is recovered
+  phase records show how long the scheduler spent in recorded work phases;
+  idle is recovered
   from the gap between records.
 - **Orchestrator overhead breakdown.** Per-submit envelope
   records (`orch_submit`) pin "which submit is slow"; cumulative

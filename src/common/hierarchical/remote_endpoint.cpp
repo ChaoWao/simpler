@@ -733,32 +733,28 @@ remote_l3::TaskPayloadWire RemoteL3Endpoint::build_task_payload(const TaskSlotSt
         );
     }
     payload.args.inline_payload = sidecar.inline_payload;
-    payload.args.tensor_metadata.reserve(static_cast<size_t>(a.tensor_count()));
+    payload.args.tensors.reserve(static_cast<size_t>(a.tensor_count()));
     payload.args.remote_desc.reserve(static_cast<size_t>(a.tensor_count()));
 
     for (int32_t i = 0; i < a.tensor_count(); ++i) {
         const Tensor &ref = a.tensor(i);
         RemoteTensorSidecar tensor_sidecar{};
         if (!sidecar.tensors.empty()) tensor_sidecar = sidecar.tensors[static_cast<size_t>(i)];
-        bool has_local_backing =
-            ref.buffer.nbytes != 0 && ref.buffer.backend_kind != static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR);
-        if (has_local_backing && !tensor_sidecar.present) {
+        // The sidecar is the sole authority for a remote argument's backing, so the sender's own
+        // backing never crosses: an arg bound for a remote worker is a REMOTE_SIDECAR placeholder
+        // whose identity names the remote buffer. Orchestrator::validate_remote_sidecars rejects a
+        // local backing alongside a sidecar at submit; this is the encoder's own guard.
+        if (ref.buffer.backend_kind != static_cast<uint8_t>(BackendKind::REMOTE_SIDECAR)) {
             throw std::runtime_error(
-                "RemoteL3Endpoint::build_task_payload: local backing submitted without remote sidecar"
+                "RemoteL3Endpoint::build_task_payload: a remote task arg must carry no local backing"
             );
         }
-        if (ref.buffer.address_space == static_cast<uint8_t>(AddressSpace::DEVICE) && !tensor_sidecar.present) {
-            throw std::runtime_error(
-                "RemoteL3Endpoint::build_task_payload: device-memory tensor submitted without remote sidecar"
-            );
+        // Every argument's backing is named by its own sidecar, so an absent one leaves the
+        // placeholder naming nothing the runner could resolve.
+        if (!tensor_sidecar.present) {
+            throw std::runtime_error("RemoteL3Endpoint::build_task_payload: tensor submitted without remote sidecar");
         }
-        // Metadata is the ref's view geometry with a null address (the remote side re-materializes
-        // from remote_desc); shape/dtype travel, the backing does not.
-        ChipTensor meta = make_tensor_external(
-            nullptr, ref.shapes, ref.ndims, ref.dtype, /*manual_dep=*/false, /*version=*/0,
-            static_cast<AddressSpace>(ref.buffer.address_space)
-        );
-        payload.args.tensor_metadata.push_back(meta);
+        payload.args.tensors.push_back(ref);
         payload.args.remote_desc.push_back(tensor_sidecar);
     }
     payload.args.scalars.reserve(static_cast<size_t>(a.scalar_count()));
