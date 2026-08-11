@@ -57,10 +57,10 @@ jobs:
         run: |
           source .venv/bin/activate
           python -m simpler_setup.tools.scene_test_compile examples tests/st \
-            --platform a5 --require-pto-isa --compile-workers 8 -q
+            --platform a5 --exclude-level 4 --require-pto-isa --compile-workers 8 -q
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" \
-            --run "python -m pytest examples tests/st --platform a5 --device ${DEVICE_RANGE} -v --require-pto-isa -m 'not pod' --pto-session-timeout 1200"
+            --run "python -m pytest examples tests/st --platform a5 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200"
 
       - name: DFX smokes (a5)
         if: inputs.include_dfx_smokes

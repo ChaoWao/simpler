@@ -29,6 +29,7 @@ import os
 import platform as host_platform
 import sys
 from contextlib import contextmanager
+from enum import IntEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -139,6 +140,31 @@ def _golden_thread_cap():
 # ---------------------------------------------------------------------------
 # Spec types
 # ---------------------------------------------------------------------------
+
+
+class SceneTestLevel(IntEnum):
+    CHIP = 2
+    HOST = 3
+    POD = 4
+
+
+def _normalize_scene_level(level: int | SceneTestLevel) -> SceneTestLevel:
+    try:
+        return SceneTestLevel(level)
+    except ValueError as e:
+        supported = ", ".join(str(int(member)) for member in SceneTestLevel)
+        raise ValueError(f"Unsupported scene test level {level!r}; expected one of: {supported}") from e
+
+
+def scene_level(level: int | SceneTestLevel):
+    """Decorator attaching scene-test level metadata to a class or function."""
+    normalized = _normalize_scene_level(level)
+
+    def decorator(obj):
+        obj._st_level = normalized
+        return obj
+
+    return decorator
 
 
 class TensorArg(NamedTuple):
@@ -1203,14 +1229,15 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
 # ---------------------------------------------------------------------------
 
 
-def scene_test(level: int, runtime: str):
+def scene_test(level: int | SceneTestLevel, runtime: str):
     """Decorator marking a SceneTestCase with level and runtime.
 
     Platforms are declared per-case in CASES, not here.
     """
+    level_decorator = scene_level(level)
 
     def decorator(cls):
-        cls._st_level = level
+        level_decorator(cls)
         cls._st_runtime = runtime
         cls_dir = Path(inspect.getfile(cls)).parent
         if hasattr(cls, "CALLABLE"):

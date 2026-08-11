@@ -46,12 +46,12 @@ ctest --test-dir tests/ut/cpp/build -L "^requires_hardware(_a2a3)?$" --output-on
 # Scene tests (pytest, @scene_test classes)
 pytest examples tests/st                          # all sim platforms (auto-parametrized)
 pytest examples tests/st --platform a2a3sim       # specific sim
-pytest examples tests/st -m "not sdma and not pod" --platform a2a3          # hardware
-pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device 4-7  # hardware with device pool
+pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4          # hardware
+pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device 4-7  # hardware with device pool
 
 # Compile the selected hardware batch without creating a Worker or using an NPU
 python -m simpler_setup.tools.scene_test_compile examples tests/st \
-    -m "not sdma and not pod" --platform a2a3 --require-pto-isa --compile-workers 8
+    -m "not sdma" --platform a2a3 --exclude-level 4 --require-pto-isa --compile-workers 8
 
 # SDMA cases run separately, as they do in CI: they are quarantined by
 # @pytest.mark.sdma so no fault-injection case shares a device with a
@@ -59,7 +59,7 @@ python -m simpler_setup.tools.scene_test_compile examples tests/st \
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 
 # A5 runs the non-pod corpus, including SDMA tests, on both host architectures
-pytest examples tests/st -m "not pod" --platform a5 --device 0-7
+pytest examples tests/st --platform a5 --exclude-level 4 --device 0-7
 
 # Single scene test (standalone)
 python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
@@ -111,8 +111,9 @@ A class that fails to compile is reported and skipped rather than aborting the
 pass, so the run that follows still recompiles it and reports the error against
 the case that owns it.
 
-Pass the same paths, `-m`, `--platform`, `--runtime`, and `--level` selections
-to warm-up and execution. A normal pytest or standalone run loads matching
+Pass the same paths, `-m`, `--platform`, `--runtime`, `--level`, and
+`--exclude-level` selections to warm-up and execution. A normal pytest or
+standalone run loads matching
 artifacts from the persistent cache; changed orchestration, incore, or included
 source content, compiler identity, fixed compilation flags, compilation logic,
 or compilation schema produces a new cache entry automatically. Entries unused
@@ -153,7 +154,8 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 | `--device IDS` | `-d` | `0` | Single id (`0`), range (`0-7`), or list (`0,2,5`). Sets the device-id pool for L3 cases and the available slots for L2 fanout. |
 | `--max-parallel N` | | `auto` | Max in-flight subprocesses (make-style). `auto` = `min(nproc, len(--device))` on sim, `len(--device)` on hardware. Decouples device-id pool size from parallelism; use to throttle sim on a CPU-constrained runner. |
 | `--runtime NAME` | | (all) | Restrict to one runtime (also used internally as the child-mode marker) |
-| `--level {2,3}` | | (all) | Restrict to one SceneTestCase level (also the child-mode marker) |
+| `--level {2,3,4}` | | (all) | Restrict to one scene-test level. Level 4 selects pod wrappers. |
+| `--exclude-level {2,3,4}` | | (none) | Exclude tests explicitly carrying that scene-test level. Ordinary onboard lanes use `--exclude-level 4`. |
 | `--case SEL` | | (all) | Case selector, repeatable: `Foo`, `ClassA::Foo`, `ClassA::` |
 | `--manual` | | `exclude` | `exclude`/`include`/`only` for manual cases |
 | `--skip-golden` | | false | Skip golden comparison (for benchmarking) |
@@ -664,7 +666,7 @@ pytest examples tests/st --platform a2a3sim
 python test_my_kernel.py -p a2a3sim
 
 # On hardware (SDMA cases quarantined by marker; run them with -m sdma)
-pytest examples tests/st -m "not sdma and not pod" --platform a2a3
+pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4
 ```
 
 Key fields:

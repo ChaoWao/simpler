@@ -58,10 +58,10 @@ PullRequest
 | `st-sim-a2a3` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a2a3sim` |
 | `st-sim-a5` | `ubuntu-latest`, `macos-latest` | `pytest examples tests/st --platform a5sim` |
 | `ut-a2a3` | a2a3 self-hosted | `pytest tests/ut --platform a2a3` + `ctest -L "^requires_hardware(_a2a3)?$" --resource-spec-file ...` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (host + cross-compiled device SO, link smoke only) |
-| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
+| `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + `ctest -L "^requires_hardware(_a5)?$"` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
-| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st -m "not pod" --platform a5 --device ...`, including SDMA tests, then adaptive-parallel DFX feature smokes |
-| `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st -m pod --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
+| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --exclude-level 4 --device ...`, including SDMA tests, then adaptive-parallel DFX feature smokes |
+| `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st --level 4 --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
 
 ### Multi-machine pod jobs
 
@@ -78,13 +78,15 @@ Its body splits by what is per-run and what is per-pytest session:
 | Action | Called | What it does |
 | ------ | ------ | ------------ |
 | `pod-stage` | once | rsync this run's tree onto the peer and build it there |
-| `pod-run-pytest` | once | start the peer's L3 daemon, set the pod pytest environment, run `pytest examples tests/st -m pod`, stop the daemon and pull its logs |
+| `pod-run-pytest` | once | start the peer's L3 daemon, set the pod pytest environment, run `pytest examples tests/st --level 4`, stop the daemon and pull its logs |
 | `pod-teardown` | once, `if: always()` | remove the run's tree from the peer |
 
 Staging and the peer-side build are the job's whole cost, and every pod test
 runs against that same tree and venv, so they happen once. The pytest command
-owns selection: adding an L4 pod example means adding a `test_*.py` wrapper with
-`@pytest.mark.pod`, not editing `_st-pod.yml`.
+owns selection through the scene-test level axis: adding an L4 pod example
+means adding a `test_*.py` wrapper with `@scene_level(SceneTestLevel.POD)`, not
+editing `_st-pod.yml`. `pod_remote_device_count` stays as the peer-resource
+declaration; `pod` is the runner topology, not a pytest selection marker.
 
 Pod logs go to `output/pod-ci-<run>-<attempt>/pytest/` and the whole directory
 is uploaded as one artifact. Parent-side `ASCEND_PROCESS_LOG_PATH` is split per
@@ -132,11 +134,11 @@ benefit — device bin-packing for L3, xdist fanout for L2, and a shared
 ```bash
 # Recommended CI invocation — a2a3 deselects SDMA and pod tests, as the job does,
 # and runs SDMA as a second pass afterwards
-pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device 4-7 -x
+pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device 4-7 -x
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5 -x
 
 # A5 runners run the non-pod corpus, including SDMA tests
-pytest examples tests/st -m "not pod" --platform a5 --device 0-7 -x
+pytest examples tests/st --platform a5 --exclude-level 4 --device 0-7 -x
 ```
 
 `-x` (`--exitfirst`) is appropriate for CI, where aborting on first
@@ -188,7 +190,7 @@ not need `--max-parallel` manually.
 
   The arch flags subtract `NON_CODE` before deciding, so a non-code-only change already makes both `false`. An arch-gated job therefore needs no separate non-code check. See [`.claude/rules/ci-change-detection.md`](../.claude/rules/ci-change-detection.md) for the invariants these gates must keep.
 
-- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them with `-m "not sdma and not pod"` and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection is by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Pod tests are selected by `-m pod` in `st-pod-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
+- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them with `-m "not sdma"` and `--exclude-level 4`, and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection for SDMA remains by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Pod tests are selected by `--level 4` in `st-pod-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
 
 ### CPU emergency lane (`ci-self-cpu.yml`) and the `/run-cpu` button
 

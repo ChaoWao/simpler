@@ -68,7 +68,7 @@ l4/<your_example>/
   kernels/aiv/*.cpp
   kernels/orchestration/*.cpp
   main.py                   # entry point: argparse + main() delegating to run()
-  test_<your_example>.py    # @pytest.mark.pod wrapper collected by pod CI
+  test_<your_example>.py    # @scene_level(SceneTestLevel.POD) wrapper collected by pod CI
   run_parent.sh             # maps environment variables onto main.py's flags
 ```
 
@@ -105,9 +105,11 @@ Anything else — platform, runtime — defaults inside `run_parent.sh`.
 ### Running it in CI
 
 The `st-pod-onboard-a2a3` job runs L4 examples across a pair of a2a3 machines.
-The job runs one `pytest examples tests/st -m pod` sweep, so adding yours means
-adding a `test_*.py` wrapper carrying `@pytest.mark.pod`. Do not edit
-`_st-pod.yml`. The wiring and the log artifact are described in
+The job runs one `pytest examples tests/st --level 4` sweep, so adding yours
+means adding a `test_*.py` wrapper carrying
+`@scene_level(SceneTestLevel.POD)`. Keep `pod_remote_device_count` when the peer
+side needs more than one remote device; it declares remote resource demand,
+not selection. Do not edit `_st-pod.yml`. The wiring and the log artifact are described in
 [`docs/ci.md`](../../docs/ci.md#multi-machine-pod-jobs).
 
 ## Prerequisites

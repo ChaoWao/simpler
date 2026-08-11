@@ -15,13 +15,14 @@ proves both `examples/` and `tests/st/` pod tests are collected by marker.
 import pytest
 
 from examples.workers.l4.global_tload_mixed_l3.main import run
+from simpler_setup import SceneTestLevel, scene_level
 
 
 def _device_spec(device_ids) -> str:
     return ",".join(str(device_id) for device_id in device_ids)
 
 
-@pytest.mark.pod
+@scene_level(SceneTestLevel.POD)
 @pytest.mark.platforms(["a2a3"])
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(1)

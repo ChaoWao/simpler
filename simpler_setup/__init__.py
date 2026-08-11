@@ -13,7 +13,16 @@ from .kernel_compiler import KernelCompiler
 from .platform_info import parse_platform
 from .pto_isa import ensure_pto_isa_root
 from .runtime_builder import RuntimeBuilder
-from .scene_test import CallableNamespace, Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from .scene_test import (
+    CallableNamespace,
+    Scalar,
+    SceneTestCase,
+    SceneTestLevel,
+    TaskArgsBuilder,
+    TensorArg,
+    scene_level,
+    scene_test,
+)
 from .torch_interop import make_chip_tensor_arg, torch_dtype_to_datatype
 
 __all__ = [
@@ -22,12 +31,14 @@ __all__ = [
     "RuntimeBuilder",
     "Scalar",
     "SceneTestCase",
+    "SceneTestLevel",
     "TensorArg",
     "TaskArgsBuilder",
     "ensure_pto_isa_root",
     "extract_text_section",
     "make_chip_tensor_arg",
     "parse_platform",
+    "scene_level",
     "scene_test",
     "torch_dtype_to_datatype",
 ]

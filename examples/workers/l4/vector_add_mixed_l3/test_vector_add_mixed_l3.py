@@ -10,6 +10,8 @@
 
 import pytest
 
+from simpler_setup import SceneTestLevel, scene_level
+
 from .main import run
 
 
@@ -17,7 +19,7 @@ def _device_spec(device_ids) -> str:
     return ",".join(str(device_id) for device_id in device_ids)
 
 
-@pytest.mark.pod
+@scene_level(SceneTestLevel.POD)
 @pytest.mark.platforms(["a2a3"])
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(2)
