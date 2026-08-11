@@ -84,6 +84,8 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
     return &contract;
 }
 
+extern "C" int concurrent_native_prepare_supported_impl(void) { return 1; }
+
 // Helper: return current time in milliseconds
 static int64_t _now_ms() {
     struct timeval tv;
@@ -497,6 +499,33 @@ static PrebuiltRuntimeArenaCacheProbe make_prebuilt_runtime_arena_cache_probe(co
     }
     probe.hash = hash;
     return probe;
+}
+
+static bool resolve_arena_sizing(
+    const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool, ArenaSizingConfig *out
+);
+
+extern "C" int prepared_run_config_compatible_impl(
+    const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
+) {
+    if (api == nullptr) return -1;
+
+    ArenaSizingConfig sizing;
+    if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) return -1;
+
+    PrebuiltRuntimeArenaCacheProbe probe = make_prebuilt_runtime_arena_cache_probe(sizing);
+    void *gm_heap = nullptr;
+    void *gm_sm = nullptr;
+    void *runtime_arena = nullptr;
+    size_t runtime_offset = 0;
+    const void *image = nullptr;
+    size_t image_size = 0;
+    return api->lookup_prebuilt_runtime_arena_cache(
+               probe.hash, probe.serialized_key.data(), probe.serialized_key.size(), &gm_heap, &gm_sm, &runtime_arena,
+               &runtime_offset, &image, &image_size
+           ) ?
+               1 :
+               0;
 }
 
 // per-(cid,config): resolve the cache-key sizing knobs. Pure host parsing over
