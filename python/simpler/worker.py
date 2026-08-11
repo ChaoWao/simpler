@@ -195,7 +195,7 @@ from .global_comm_domain import (
     resolve_global_comm_capability,
     validate_descriptor_table,
 )
-from .orchestrator import Orchestrator, _callback_run, direct_control
+from .orchestrator import Orchestrator, _callback_frame_for, _callback_run, direct_control
 from .remote_l3_protocol import HOST_TCP_TRANSPORT_PROFILE
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
@@ -5791,7 +5791,10 @@ class Worker:
         self, members, topology: SingleOwner, layout_summary: RegionLayoutSpec
     ) -> RegionInstance:
         self._require_ready_for_region_planning("_materialize_region_instance")
-        with self._operation_lease("_materialize_region_instance"):
+        with (
+            self._operation_lease("_materialize_region_instance"),
+            self._control_admission("materialize_region_instance"),
+        ):
             registry = self._get_endpoint_registry()
             resolved = registry.resolve_region_spec(members, topology)
             resolver = BackendResolver(registry, self._get_region_access_service())
@@ -7799,8 +7802,15 @@ class Worker:
                 except (BufferError, FileNotFoundError, OSError):
                     pass
 
-    def _close_worker_chip_region(self, region, resources: _RunResources | None = None) -> None:
+    def _close_worker_chip_region(
+        self,
+        region,
+        resources: _RunResources | None = None,
+        *,
+        poison_on_error: bool = False,
+    ) -> None:
         region_errors: list[BaseException] = []
+        release_error: BaseException | None = None
         try:
             region._close_worker_host_mapping()
         except BaseException as exc:  # noqa: BLE001
@@ -7809,11 +7819,19 @@ class Worker:
             if self._worker is not None:
                 self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
         except BaseException as exc:  # noqa: BLE001
+            release_error = exc
             region_errors.append(exc)
         # End-of-run cleanup is poisoned and terminal for that run, so it still
         # expires both sides after attempting both debts. Whole-tree close
         # instead retains the region for journal replay.
-        if region_errors and resources is None:
+        if region_errors and resources is None and not poison_on_error:
+            raise region_errors[0]
+        if poison_on_error and region_errors and release_error is not None:
+            self._record_unreclaimable(
+                f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
+                "fully reclaimed; no further work is admitted",
+                region_errors[0],
+            )
             raise region_errors[0]
         try:
             region._expire()
@@ -7824,6 +7842,12 @@ class Worker:
         except BaseException as exc:  # noqa: BLE001
             region_errors.append(exc)
         if region_errors:
+            if poison_on_error:
+                self._record_unreclaimable(
+                    f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
+                    "fully reclaimed; no further work is admitted",
+                    region_errors[0],
+                )
             raise region_errors[0]
 
     def _retire_worker_chip_region_tracking(self, region, resources: _RunResources | None = None) -> None:
@@ -9904,6 +9928,20 @@ class Worker:
                     f"Worker.{api}: a prior run's ordered cleanup failed, so this worker's device state is "
                     "unreclaimed and no further work is admitted; close() it"
                 ) from self._ordered_cleanup_error
+
+    def _require_region_control_context(self, api: str) -> None:
+        frame = _callback_frame_for(self)
+        if frame is not None:
+            if frame.has_submitted_task:
+                raise RuntimeError(
+                    f"Worker.{api}: RegionInstance access cannot follow a task submission in the same run"
+                )
+            self._require_no_ordered_cleanup_failure(api)
+            return
+        if id(self) in _held_control_reservations():
+            self._require_no_ordered_cleanup_failure(api)
+            return
+        raise RuntimeError(f"Worker.{api}: RegionInstance access requires an active orchestration/control context")
 
     def _control_admission(self, api: str):
         """The direct-control ordering policy for a Worker-level command.

@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Private W3.5 region materialization helpers."""
+"""Private region materialization helpers."""
 
 from __future__ import annotations
 
@@ -102,6 +102,7 @@ class RegionInstance:
         self._worker = ctx.worker
         self._region = None
         self._state = RegionInstanceState.PLANNED
+        self._cleanup_error: BaseException | None = None
 
     @property
     def state(self) -> RegionInstanceState:
@@ -116,29 +117,42 @@ class RegionInstance:
 
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
-        self._region.payload_write(offset, host_buffer, nbytes)
+        self._worker._require_region_control_context("region_instance.payload_write")
+        region = self._region
+        assert region is not None
+        region.payload_write(offset, host_buffer, nbytes)
 
     def payload_read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
-        self._region.payload_read(offset, host_buffer, nbytes)
+        self._worker._require_region_control_context("region_instance.payload_read")
+        region = self._region
+        assert region is not None
+        region.payload_read(offset, host_buffer, nbytes)
 
     def counter(self, offset: int):
         self._ensure_live()
-        return self._region.counter(offset)
+        self._worker._require_region_control_context("region_instance.counter")
+        region = self._region
+        assert region is not None
+        return region.counter(offset)
 
     def close(self) -> None:
         if self._state is RegionInstanceState.CLOSED:
             return
+        if self._state is RegionInstanceState.CLOSE_FAILED and self._cleanup_error is not None:
+            raise self._cleanup_error
         if self._state in (RegionInstanceState.PLANNED, RegionInstanceState.ROLLED_BACK):
             self._state = RegionInstanceState.CLOSED
             return
         if self._region is None:
             self._state = RegionInstanceState.CLOSED
             return
+        self._worker._require_region_control_context("region_instance.close")
         self._state = RegionInstanceState.CLOSING
         try:
-            self._worker._close_worker_chip_region(self._region)
-        except BaseException:
+            self._worker._close_worker_chip_region(self._region, poison_on_error=True)
+        except BaseException as exc:
+            self._cleanup_error = exc
             self._state = RegionInstanceState.CLOSE_FAILED
             raise
         self._state = RegionInstanceState.CLOSED
@@ -146,13 +160,17 @@ class RegionInstance:
     def rollback(self) -> None:
         if self._state in (RegionInstanceState.CLOSED, RegionInstanceState.ROLLED_BACK):
             return
+        if self._state is RegionInstanceState.ROLLBACK_FAILED and self._cleanup_error is not None:
+            raise self._cleanup_error
         if self._region is None:
             self._state = RegionInstanceState.ROLLED_BACK
             return
+        self._worker._require_region_control_context("region_instance.rollback")
         self._state = RegionInstanceState.ROLLING_BACK
         try:
-            self._worker._close_worker_chip_region(self._region)
-        except BaseException:
+            self._worker._close_worker_chip_region(self._region, poison_on_error=True)
+        except BaseException as exc:
+            self._cleanup_error = exc
             self._state = RegionInstanceState.ROLLBACK_FAILED
             raise
         self._state = RegionInstanceState.ROLLED_BACK
@@ -168,6 +186,7 @@ class RegionInstance:
 
 
 def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwnerRegionShape:  # noqa: PLR0912
+    _validate_registry_matches_worker(ctx)
     plan = ctx.plan
     if isinstance(plan, UnsupportedRegionPlan):
         raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, plan.message)
@@ -176,17 +195,17 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
     if int(getattr(ctx.worker, "level", -1)) != 3:
         raise MaterializationRefusal(
             RefusalReason.NEEDS_DELEGATION,
-            "W3.5 can materialize only an L3-local worker-chip region; higher roots need W5 delegation",
+            "Only L3-local worker-chip regions can be materialized directly; higher-level roots require delegation",
         )
     if not isinstance(plan.topology_plan, SingleOwnerPlan):
-        raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "W3.5 supports SingleOwner plans only")
+        raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "Only SingleOwner region plans are supported")
     provider = _record_for(ctx, plan.topology_plan.provider_endpoint)
     if not provider.path.startswith("L3/"):
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider path requires delegated materialization")
     if provider.deployment is not DEVICE_AICPU:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT,
-            "W3.5 supports only DEVICE_AICPU providers for worker-chip regions",
+            "Only DEVICE_AICPU providers are supported for worker-chip regions",
         )
     match = _LOCAL_L2_PATH_RE.match(provider.path)
     if match is None:
@@ -202,19 +221,19 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
     if len(member_records) != 2:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "W3.5 supports exactly one host consumer and one device provider",
+            "Only one host consumer and one device provider are supported",
         )
     host_consumers = [member for member in member_records if member.deployment is HOST_CPU]
     if len(host_consumers) != 1 or host_consumers[0].path != "L3":
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "W3.5 requires the current L3 HOST_CPU endpoint as the only consumer",
+            "The current L3 HOST_CPU endpoint must be the only consumer",
         )
     consumer = host_consumers[0]
     if provider.identity not in plan.ordered_members or consumer.identity not in plan.ordered_members:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
-            "W3.5 ordered members must contain the provider and consumer endpoints",
+            "Ordered members must contain the provider and consumer endpoints",
         )
     _validate_part(plan.payload, provider, consumer)
     _validate_part(plan.counter, provider, consumer)
@@ -246,17 +265,27 @@ def _record_for(ctx: MaterializationContext, endpoint: Any) -> EndpointRecord:
         raise MaterializationRefusal(RefusalReason.REGISTRY_MISMATCH, str(exc)) from exc
 
 
+def _validate_registry_matches_worker(ctx: MaterializationContext) -> None:
+    worker_instance_id = getattr(ctx.worker, "_owner_instance_id", None)
+    worker_epoch = getattr(ctx.worker, "_endpoint_registry_epoch", None)
+    if worker_instance_id != ctx.registry.session_instance_id or worker_epoch != ctx.registry.registry_epoch:
+        raise MaterializationRefusal(
+            RefusalReason.REGISTRY_MISMATCH,
+            "Region materialization requires a registry from the current worker endpoint epoch",
+        )
+
+
 def _validate_part(part: RegionPartPlan, provider: EndpointRecord, consumer: EndpointRecord) -> None:
     if part.backend_kind is not BackendKind.VMM_WINDOW:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_BACKEND_KIND,
-            "W3.5 supports only VMM_WINDOW-backed worker-chip region parts",
+            "Only VMM_WINDOW-backed worker-chip region parts are supported",
         )
     attachments = {attachment.member: attachment for attachment in part.attachments}
     if set(attachments) != {provider.identity, consumer.identity}:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_ATTACHMENT,
-            "W3.5 part attachments must match exactly the provider and host consumer",
+            "Part attachments must match exactly the provider and host consumer",
         )
     _validate_provider_attachment(attachments[provider.identity])
     _validate_consumer_attachment(attachments[consumer.identity])
@@ -270,7 +299,7 @@ def _validate_provider_attachment(attachment: MemberAttachmentPlan) -> None:
     ):
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_ATTACHMENT,
-            "W3.5 provider attachment must be a bare PROVIDER attachment",
+            "Provider attachment must be a bare PROVIDER attachment",
         )
 
 
@@ -282,5 +311,5 @@ def _validate_consumer_attachment(attachment: MemberAttachmentPlan) -> None:
     ):
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_ATTACHMENT,
-            "W3.5 host consumer attachment must use OWNER_DELEGATED_COPY/HOST_VMM_COPY",
+            "Host consumer attachment must use OWNER_DELEGATED_COPY/HOST_VMM_COPY",
         )

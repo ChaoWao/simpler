@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Endpoint selectors, registry resolution, and W2 backend planning."""
+"""Endpoint selectors, registry resolution, and backend planning."""
 
 from __future__ import annotations
 
@@ -324,7 +324,7 @@ class EndpointRegistry:
     def resolve_region_spec(self, members: Sequence[EndpointSelector], topology: SingleOwner) -> ResolvedRegionSpec:
         resolved_members = self.resolve_members(members)
         if not isinstance(topology, SingleOwner):
-            raise TypeError("W2 region planning supports SingleOwner topology only")
+            raise TypeError("Region planning supports SingleOwner topology only")
         provider_endpoint = None
         if topology.provider is not None:
             provider_records = self._resolve_provider(topology.provider)

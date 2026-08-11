@@ -6,9 +6,10 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Unit tests for the private W3.5 region materializer."""
+"""Unit tests for the private region materializer."""
 
 import dataclasses
+from typing import Any, Optional, Union
 
 import pytest
 from simpler import comm_endpoints as ce
@@ -54,7 +55,7 @@ def _context(worker: Worker, members, topology, layout=None) -> MaterializationC
     )
 
 
-def _accepted_context(worker: Worker | None = None) -> MaterializationContext:
+def _accepted_context(worker: Optional[Worker] = None) -> MaterializationContext:
     worker = worker or _l3(device_ids=[8, 9])
     return _context(
         worker,
@@ -138,26 +139,28 @@ def test_shape_validation_rejects_direct_map_and_extra_consumers():
     )
 
     worker = _l3(device_ids=[0])
-    worker._region_access_service = ce.StaticRegionAccessService(
-        {
+    decisions: dict[
+        tuple[Any, ce.RegionPartKind, ce.AdapterKind, ce.AdapterProfile],
+        Union[ce.RegionAccessDecision, bool],
+    ] = {}
+    for part in (ce.RegionPartKind.PAYLOAD, ce.RegionPartKind.COUNTER):
+        decisions[
             (
                 ce.BackendKind.VMM_WINDOW,
                 part,
                 ce.AdapterKind.OWNER_DELEGATED_COPY,
                 ce.AdapterProfile.HOST_VMM_COPY,
-            ): True
-            for part in (ce.RegionPartKind.PAYLOAD, ce.RegionPartKind.COUNTER)
-        }
-        | {
+            )
+        ] = True
+        decisions[
             (
                 ce.BackendKind.VMM_WINDOW,
                 part,
                 ce.AdapterKind.DEVICE_PEER,
                 ce.AdapterProfile.DEVICE_VMM_PEER_IMPORT,
-            ): True
-            for part in (ce.RegionPartKind.PAYLOAD, ce.RegionPartKind.COUNTER)
-        }
-    )
+            )
+        ] = True
+    worker._region_access_service = ce.StaticRegionAccessService(decisions)
     extra = _context(
         worker,
         [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[0]", ce.DEVICE_AICPU), ce.at("L3/L2[0]", ce.DEVICE_AICORE)],
@@ -179,7 +182,6 @@ class _FakeCounter:
 
     def wait(self, cmp_value: int, cmp: WaitCmp, timeout: int):
         self._calls.append(("wait", cmp_value, cmp, timeout))
-        return None
 
 
 class _FakeRegion:
@@ -237,18 +239,25 @@ def test_worker_materializes_region_instance_and_closes_single_region(monkeypatc
 
     assert instance.state is RegionInstanceState.LIVE
     assert instance.worker_id == 1
-    instance.payload_write(4, "src", nbytes=8)
-    instance.payload_read(12, "dst")
-    assert instance.counter(16).test(7, WaitCmp.EQ) is True
+    with worker._control_reservation("test_region_instance"):
+        instance.payload_write(4, "src", nbytes=8)
+        instance.payload_read(12, "dst")
+        instance.counter(0).notify(3)
+        instance.counter(8).wait(3, WaitCmp.GE, timeout=10)
+        assert instance.counter(16).test(7, WaitCmp.EQ) is True
 
-    instance.close()
-    instance.close()
+        instance.close()
+        instance.close()
     assert instance.state is RegionInstanceState.CLOSED
     assert worker._live_worker_chip_regions == []
     assert calls == [
         ("create", 1, 64, 128),
         ("payload_write", 4, "src", 8),
         ("payload_read", 12, "dst", None),
+        ("counter", 0),
+        ("notify", 3, NotifyOp.Set),
+        ("counter", 8),
+        ("wait", 3, WaitCmp.GE, 10),
         ("counter", 16),
         ("test", 7, WaitCmp.EQ),
         ("mapping_close",),
@@ -275,8 +284,9 @@ def test_live_region_instance_rollback_reuses_single_region_cleanup(monkeypatch)
         ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
     )
 
-    instance.rollback()
-    instance.rollback()
+    with worker._control_reservation("test_region_instance"):
+        instance.rollback()
+        instance.rollback()
 
     assert instance.state is RegionInstanceState.ROLLED_BACK
     assert worker._live_worker_chip_regions == []
@@ -290,7 +300,7 @@ def test_live_region_instance_rollback_reuses_single_region_cleanup(monkeypatch)
         instance.payload_write(0, "src")
 
 
-def test_region_instance_close_failure_marks_failed_and_keeps_tracking(monkeypatch):
+def test_region_instance_close_failure_marks_failed_and_poisons_worker(monkeypatch):
     worker = _l3(device_ids=[8, 9])
     calls: list[tuple] = []
     fake_region = _FakeRegion(calls, fail_mapping_close=True)
@@ -308,15 +318,23 @@ def test_region_instance_close_failure_marks_failed_and_keeps_tracking(monkeypat
         ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
     )
 
-    with pytest.raises(RuntimeError, match="mapping close failed"):
-        instance.close()
+    with worker._control_reservation("test_region_instance"):
+        with pytest.raises(RuntimeError, match="mapping close failed"):
+            instance.close()
 
     assert instance.state is RegionInstanceState.CLOSE_FAILED
-    assert worker._live_worker_chip_regions == [fake_region]
+    assert worker._live_worker_chip_regions == []
+    with pytest.raises(RuntimeError, match="no further work is admitted"):
+        worker._require_no_ordered_cleanup_failure("test")
+    with pytest.raises(RuntimeError, match="not live"):
+        instance.payload_write(0, "src")
+    with pytest.raises(RuntimeError, match="mapping close failed"):
+        instance.close()
     assert calls == [
         ("create", 1, 64, 128),
         ("mapping_close",),
         ("release", 1, 42),
+        ("expire",),
     ]
 
 
@@ -339,3 +357,59 @@ def test_materialize_create_failure_propagates_without_live_tracking(monkeypatch
 
     assert worker._live_worker_chip_regions == []
     assert calls == [("create", 1, 64, 128)]
+
+
+def test_live_region_instance_access_requires_control_context(monkeypatch):
+    worker = _l3(device_ids=[8, 9])
+    calls: list[tuple] = []
+    fake_region = _FakeRegion(calls)
+    worker._worker = _FakeNativeWorker(calls)
+
+    def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
+        calls.append(("create", worker_id, payload_bytes, counter_bytes))
+        worker._live_worker_chip_regions.append(fake_region)
+        return fake_region
+
+    monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
+    instance = worker._materialize_region_instance(
+        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[1]", ce.DEVICE_AICPU)],
+        ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
+        ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
+    )
+
+    with pytest.raises(RuntimeError, match="active orchestration/control context"):
+        instance.payload_write(0, "src")
+    with pytest.raises(RuntimeError, match="active orchestration/control context"):
+        instance.counter(0)
+    with pytest.raises(RuntimeError, match="active orchestration/control context"):
+        instance.close()
+
+    with worker._control_reservation("test_region_instance"):
+        instance.close()
+
+    assert calls == [
+        ("create", 1, 64, 128),
+        ("mapping_close",),
+        ("release", 1, 42),
+        ("expire",),
+    ]
+
+
+def test_shape_validation_rejects_foreign_registry_context():
+    owner = _accepted_context(_l3(device_ids=[0, 1]))
+    foreign_worker = _l3(device_ids=[0, 1])
+
+    with pytest.raises(MaterializationRefusal) as excinfo:
+        validate_single_owner_region_shape(dataclasses.replace(owner, worker=foreign_worker))
+
+    assert excinfo.value.reason is RefusalReason.REGISTRY_MISMATCH
+
+
+def test_shape_validation_rejects_stale_registry_epoch():
+    ctx = _accepted_context(_l3(device_ids=[0, 1]))
+    ctx.worker._invalidate_endpoint_registry()
+
+    with pytest.raises(MaterializationRefusal) as excinfo:
+        validate_single_owner_region_shape(ctx)
+
+    assert excinfo.value.reason is RefusalReason.REGISTRY_MISMATCH
