@@ -1,0 +1,187 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from _pytest.outcomes import Failed
+
+from simpler_setup import SceneTestLevel, scene_level, scene_test
+
+_ROOT = Path(__file__).resolve().parents[3]
+_SPEC = importlib.util.spec_from_file_location("_root_conftest_for_scene_level_tests", _ROOT / "conftest.py")
+assert _SPEC is not None and _SPEC.loader is not None
+root_conftest = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(root_conftest)
+
+
+class _FakeMarker:
+    def __init__(self, name, *args):
+        self.name = name
+        self.args = args
+
+
+class _FakeItem:
+    def __init__(self, nodeid, *, cls=None, function=None, markers=()):
+        self.nodeid = nodeid
+        self.cls = cls
+        self.function = function
+        self._markers = list(markers)
+
+    def iter_markers(self, name=None):
+        return (marker for marker in self._markers if name is None or marker.name == name)
+
+    def get_closest_marker(self, name):
+        for marker in self._markers:
+            if marker.name == name:
+                return marker
+        return None
+
+    def add_marker(self, marker):
+        self._markers.append(marker)
+
+
+class _FakeHook:
+    def __init__(self):
+        self.deselected = []
+
+    def pytest_deselected(self, items):
+        self.deselected.extend(items)
+
+
+class _FakeConfig:
+    def __init__(self, **options):
+        self.options = options
+        self.hook = _FakeHook()
+
+    def getoption(self, name, default=None):
+        return self.options.get(name, self.options.get(name.lstrip("-"), default))
+
+
+def test_scene_level_normalizes_int_and_enum():
+    @scene_level(4)
+    def pod_fn():
+        return None
+
+    @scene_level(SceneTestLevel.CHIP)
+    def chip_fn():
+        return None
+
+    assert pod_fn._st_level is SceneTestLevel.POD
+    assert chip_fn._st_level is SceneTestLevel.CHIP
+
+
+def test_scene_test_accepts_int_levels():
+    @scene_test(level=2, runtime="tensormap_and_ringbuffer")
+    class L2:
+        CALLABLE = {}
+        CASES = []
+
+    assert L2._st_level is SceneTestLevel.CHIP
+    assert L2._st_runtime == "tensormap_and_ringbuffer"
+
+
+def test_invalid_scene_level_rejected():
+    with pytest.raises(ValueError):
+        scene_level(5)
+
+    with pytest.raises(ValueError):
+        scene_test(level=5, runtime="tensormap_and_ringbuffer")
+
+
+def test_level4_filter_keeps_only_explicit_level4_functions():
+    def plain_fn():
+        return None
+
+    @scene_level(SceneTestLevel.POD)
+    def pod_fn():
+        return None
+
+    items = [
+        _FakeItem("tests::plain", function=plain_fn),
+        _FakeItem("tests::pod", function=pod_fn),
+    ]
+    config = _FakeConfig(
+        platform="a2a3",
+        level=4,
+        **{"exclude-level": None, "runtime": None, "enable-chip-swimlane": 0},
+    )
+
+    root_conftest.pytest_collection_modifyitems(None, config, items)
+
+    assert [item.nodeid for item in items] == ["tests::pod"]
+
+
+def test_exclude_level4_keeps_unlevelled_functions():
+    def plain_fn():
+        return None
+
+    @scene_level(SceneTestLevel.POD)
+    def pod_fn():
+        return None
+
+    items = [
+        _FakeItem("tests::plain", function=plain_fn),
+        _FakeItem("tests::pod", function=pod_fn),
+    ]
+    config = _FakeConfig(
+        platform="a2a3",
+        **{"level": None, "exclude-level": 4, "runtime": None, "enable-chip-swimlane": 0},
+    )
+
+    root_conftest.pytest_collection_modifyitems(None, config, items)
+
+    assert [item.nodeid for item in items] == ["tests::plain"]
+
+
+def test_sorting_uses_function_level_metadata():
+    @scene_level(SceneTestLevel.HOST)
+    def host_fn():
+        return None
+
+    class L2:
+        _st_level = SceneTestLevel.CHIP
+        _st_runtime = "tensormap_and_ringbuffer"
+        CASES = [{"platforms": ["a2a3"]}]
+
+    items = [
+        _FakeItem("tests::l2", cls=L2),
+        _FakeItem("tests::host", function=host_fn),
+    ]
+    config = _FakeConfig(
+        platform="a2a3",
+        level=None,
+        **{"exclude-level": None, "runtime": None, "enable-chip-swimlane": 0},
+    )
+
+    root_conftest.pytest_collection_modifyitems(None, config, items)
+
+    assert [item.nodeid for item in items] == ["tests::host", "tests::l2"]
+
+
+def test_level_filters_are_mutually_exclusive():
+    config = _FakeConfig(level=4, **{"exclude-level": 4})
+
+    with pytest.raises(pytest.UsageError, match="cannot be used together"):
+        root_conftest._validate_level_filters(config)
+
+
+def test_pod_logs_requires_pod_level(monkeypatch):
+    @scene_level(SceneTestLevel.CHIP)
+    def chip_fn():
+        return None
+
+    request = SimpleNamespace(node=_FakeItem("tests::chip", function=chip_fn))
+
+    with pytest.raises(Failed, match="SceneTestLevel\\.POD"):
+        root_conftest.st_pod_logs.__wrapped__(request, monkeypatch)

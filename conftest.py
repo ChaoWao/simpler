@@ -53,12 +53,13 @@ import pytest  # noqa: E402
 from simpler_setup import parallel_scheduler as _ps  # noqa: E402
 from simpler_setup.log_config import DEFAULT_LOG_LEVEL, configure_logging  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.scene_test import clear_compile_cache  # noqa: E402
+from simpler_setup.scene_test import SceneTestLevel, clear_compile_cache  # noqa: E402
 
 # Exit code used when the session watchdog fires. Matches the GNU `timeout`
 # convention so shell wrappers (e.g. CI) can distinguish timeout from other
 # failures.
 TIMEOUT_EXIT_CODE = 124
+_SCENE_LEVEL_CHOICES = [int(level) for level in SceneTestLevel]
 
 
 def _parse_device_range(s: str) -> list[int]:
@@ -69,6 +70,25 @@ def _parse_device_range(s: str) -> list[int]:
     ``0-7``, ``0,2,5``, and mixed ``0,2-4,7``).
     """
     return _ps.device_range_to_list(s)
+
+
+def _normalize_cli_scene_level(level: int | None) -> SceneTestLevel | None:
+    if level is None:
+        return None
+    return SceneTestLevel(level)
+
+
+def _item_scene_level(item) -> SceneTestLevel | None:
+    cls = getattr(item, "cls", None)
+    if cls is not None:
+        level = getattr(cls, "_st_level", None)
+        if level is not None:
+            return SceneTestLevel(level)
+    function = getattr(item, "function", None)
+    level = getattr(function, "_st_level", None)
+    if level is not None:
+        return SceneTestLevel(level)
+    return None
 
 
 class DevicePool:
@@ -125,8 +145,16 @@ def pytest_addoption(parser):
         action="store",
         type=int,
         default=None,
-        choices=[2, 3],
-        help="Only run tests for this SceneTestCase level (2 or 3); default: all levels",
+        choices=_SCENE_LEVEL_CHOICES,
+        help="Only run tests for this scene-test level (2, 3, or 4); default: all levels",
+    )
+    parser.addoption(
+        "--exclude-level",
+        action="store",
+        type=int,
+        default=None,
+        choices=_SCENE_LEVEL_CHOICES,
+        help="Exclude tests carrying this scene-test level (2, 3, or 4)",
     )
     parser.addoption(
         "--max-parallel",
@@ -432,12 +460,18 @@ def _configure_sanitizer(config):
         )
 
 
+def _validate_level_filters(config) -> None:
+    if config.getoption("--level", default=None) is not None and (
+        config.getoption("--exclude-level", default=None) is not None
+    ):
+        raise pytest.UsageError("--level and --exclude-level cannot be used together")
+
+
 def pytest_configure(config):
     """Register custom markers and apply global config."""
     config.addinivalue_line("markers", "platforms(list): supported platforms for standalone ST functions")
     config.addinivalue_line("markers", "requires_hardware: test needs Ascend toolchain and real device")
     config.addinivalue_line("markers", "device_count(n): number of NPU devices needed")
-    config.addinivalue_line("markers", "pod: test needs the pod runner and its peer machine")
     config.addinivalue_line(
         "markers",
         "pod_remote_device_count(n): number of remote NPU devices needed on the peer machine",
@@ -463,6 +497,7 @@ def pytest_configure(config):
         "filtering so non-@scene_test tests only run under their matching runtime",
     )
 
+    _validate_level_filters(config)
     _configure_sanitizer(config)
 
     # Configure logging unconditionally (not only when --log-level is passed) so
@@ -527,7 +562,7 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
-    """Filter ST tests by --platform / --runtime / --level; order L3 before L2.
+    """Filter ST tests by --platform / --runtime / level axes; order L3 before L2.
 
     Static filter mismatches (wrong level, wrong runtime, wrong platform)
     are **deselected** rather than marked ``pytest.skip`` so they don't
@@ -543,7 +578,8 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     """
     platform = config.getoption("--platform")
     runtime_filter = config.getoption("--runtime")
-    level_filter = config.getoption("--level")
+    level_filter = _normalize_cli_scene_level(config.getoption("--level"))
+    exclude_level_filter = _normalize_cli_scene_level(config.getoption("--exclude-level"))
 
     keep: list = []
     deselected: list = []
@@ -557,13 +593,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
 
         cls = getattr(item, "cls", None)
 
-        # Under --level, non-SceneTestCase items don't participate in
-        # level-based dispatch at all. Resource phase collects them
-        # separately in the parent; in a level-filtered child they're
-        # simply not this phase's concern.
-        if level_filter is not None and cls is None:
-            deselected.append(item)
-            continue
+        item_level = _item_scene_level(item)
 
         if cls is not None and hasattr(cls, "CASES") and isinstance(cls.CASES, list):
             # SceneTestCase class item.
@@ -578,7 +608,10 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
             if runtime_filter and getattr(cls, "_st_runtime", None) != runtime_filter:
                 deselected.append(item)
                 continue
-            if level_filter is not None and getattr(cls, "_st_level", None) != level_filter:
+            if level_filter is not None and item_level != level_filter:
+                deselected.append(item)
+                continue
+            if exclude_level_filter is not None and item_level == exclude_level_filter:
                 deselected.append(item)
                 continue
             keep.append(item)
@@ -605,6 +638,13 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
             deselected.append(item)
             continue
 
+        if level_filter is not None and item_level != level_filter:
+            deselected.append(item)
+            continue
+        if exclude_level_filter is not None and item_level == exclude_level_filter:
+            deselected.append(item)
+            continue
+
         keep.append(item)
 
     if deselected:
@@ -614,8 +654,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     # Sort: L3 tests first (they fork child processes that inherit main process CANN state,
     # so they must run before L2 tests pollute the CANN context).
     def sort_key(item):
-        cls = getattr(item, "cls", None)
-        level = getattr(cls, "_st_level", 0) if cls else 0
+        level = _item_scene_level(item) or 0
         # SDMA last, for the same class of reason L3 goes first: provisioning
         # the workspace leaves 48 STARS streams in the device's fault domain,
         # so every fault-injection case must have already run on a device that
@@ -634,8 +673,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
         l3_items = [
             i
             for i in items
-            if getattr(getattr(i, "cls", None), "_st_level", None) == 3
-            and not any(m.name == "skip" for m in i.iter_markers())
+            if _item_scene_level(i) == SceneTestLevel.HOST and not any(m.name == "skip" for m in i.iter_markers())
         ]
         if l3_items:
             sample = ", ".join(sorted({i.nodeid for i in l3_items})[:3])
@@ -760,10 +798,28 @@ def _collect_resource_jobs(items, platform):
     return jobs
 
 
-def _base_pytest_argv(session):
+def _strip_value_options(args, options):
+    stripped = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        text = str(arg)
+        if text in options:
+            skip_next = True
+            continue
+        if any(text.startswith(f"{option}=") for option in options):
+            continue
+        stripped.append(text)
+    return stripped
+
+
+def _base_pytest_argv(session, *, strip_options=()):
     """Inherit the user's original pytest invocation args."""
     base = [sys.executable, "-m", "pytest"]
-    for arg in session.config.invocation_params.args:
+    args = _strip_value_options(session.config.invocation_params.args, set(strip_options))
+    for arg in args:
         base.append(str(arg))
     return base
 
@@ -849,7 +905,7 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
     platform = cfg.getoption("--platform")
     max_parallel = _resolve_max_parallel(cfg, platform or "", device_ids)
 
-    base_args = _base_pytest_argv(session)
+    base_args = _base_pytest_argv(session, strip_options=("--exclude-level",))
     cwd = session.config.invocation_params.dir
 
     # ----- Phase 1: Resource (L3 classes + standalone resource functions) -----
@@ -1025,16 +1081,19 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
 def pytest_runtestloop(session):
     """Dispatch Resource + L2 phases unless caller is already in child mode.
 
-    Child mode (both --runtime and --level set, or --collect-only) skips the
-    dispatcher and falls through to pytest's default runtestloop.
+    Child mode (runtime-filtered runs, L2/L3 level-filtered runs, or
+    --collect-only) skips the dispatcher and falls through to pytest's
+    default runtestloop. Level 4 pod selection is not child mode; it still
+    uses the Resource dispatcher.
     """
     runtime_filter = session.config.getoption("--runtime")
     level_filter = session.config.getoption("--level")
 
-    # Child mode: if the caller filters by runtime or level, it wants direct
-    # control — don't re-enter the multi-phase dispatcher (which would cause
-    # nested dispatch, device pool exhaustion, and timeout).
-    if runtime_filter is not None or level_filter is not None:
+    # Child mode: if the caller filters by runtime, or by the SceneTestCase
+    # levels the dispatcher itself uses for children, it wants direct control.
+    if runtime_filter is not None:
+        return
+    if _normalize_cli_scene_level(level_filter) in (SceneTestLevel.CHIP, SceneTestLevel.HOST):
         return
 
     # User explicitly asked for collect-only / scoped-run — don't orchestrate.
@@ -1299,8 +1358,8 @@ def st_pod_remote_device_ids(request, st_pod_peer):
 @pytest.fixture()
 def st_pod_logs(request, monkeypatch):
     """Per-test parent log directory for pod scene tests."""
-    if request.node.get_closest_marker("pod") is None:
-        pytest.fail("st_pod_logs requires @pytest.mark.pod")
+    if _item_scene_level(request.node) != SceneTestLevel.POD:
+        pytest.fail("st_pod_logs requires SceneTestLevel.POD")
     run_dir = os.environ.get("RUN_DIR")
     if not run_dir:
         if not os.environ.get("POD_REMOTE_ENDPOINT") or not os.environ.get("POD_REMOTE_DEVICES"):

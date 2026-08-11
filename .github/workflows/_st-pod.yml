@@ -181,7 +181,7 @@ jobs:
         with:
           pytest-args: >-
             examples tests/st
-            -m pod
+            --level 4
             --platform ${{ inputs.platform }}
             --device ${{ env.POD_LOCAL_DEVICES }}
             --max-parallel 1
