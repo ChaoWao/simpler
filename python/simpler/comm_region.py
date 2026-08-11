@@ -50,6 +50,14 @@ class RegionInstanceState(str, Enum):
     CLOSE_FAILED = "CLOSE_FAILED"
 
 
+_TERMINAL_FAILURE_STATES = frozenset(
+    (
+        RegionInstanceState.ROLLBACK_FAILED,
+        RegionInstanceState.CLOSE_FAILED,
+    )
+)
+
+
 class RefusalReason(str, Enum):
     UNSUPPORTED_PLAN = "UNSUPPORTED_PLAN"
     NEEDS_DELEGATION = "NEEDS_DELEGATION"
@@ -139,7 +147,7 @@ class RegionInstance:
     def close(self) -> None:
         if self._state is RegionInstanceState.CLOSED:
             return
-        if self._state is RegionInstanceState.CLOSE_FAILED and self._cleanup_error is not None:
+        if self._state in _TERMINAL_FAILURE_STATES and self._cleanup_error is not None:
             raise self._cleanup_error
         if self._state in (RegionInstanceState.PLANNED, RegionInstanceState.ROLLED_BACK):
             self._state = RegionInstanceState.CLOSED
@@ -160,7 +168,7 @@ class RegionInstance:
     def rollback(self) -> None:
         if self._state in (RegionInstanceState.CLOSED, RegionInstanceState.ROLLED_BACK):
             return
-        if self._state is RegionInstanceState.ROLLBACK_FAILED and self._cleanup_error is not None:
+        if self._state in _TERMINAL_FAILURE_STATES and self._cleanup_error is not None:
             raise self._cleanup_error
         if self._region is None:
             self._state = RegionInstanceState.ROLLED_BACK
@@ -235,6 +243,11 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
             RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
             "Ordered members must contain the provider and consumer endpoints",
         )
+    if not ctx.registry.same_node(provider, consumer):
+        raise MaterializationRefusal(
+            RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+            "Worker-chip region materialization only supports local endpoints",
+        )
     _validate_part(plan.payload, provider, consumer)
     _validate_part(plan.counter, provider, consumer)
     return SingleOwnerRegionShape(provider=provider, consumer=consumer, worker_id=worker_id)
@@ -282,7 +295,7 @@ def _validate_part(part: RegionPartPlan, provider: EndpointRecord, consumer: End
             "Only VMM_WINDOW-backed worker-chip region parts are supported",
         )
     attachments = {attachment.member: attachment for attachment in part.attachments}
-    if set(attachments) != {provider.identity, consumer.identity}:
+    if len(attachments) != len(part.attachments) or set(attachments) != {provider.identity, consumer.identity}:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_ATTACHMENT,
             "Part attachments must match exactly the provider and host consumer",

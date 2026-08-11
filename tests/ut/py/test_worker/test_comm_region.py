@@ -41,17 +41,15 @@ def _l4_with_local_l3(device_ids=(0,)) -> Worker:
 
 
 def _context(worker: Worker, members, topology, layout=None) -> MaterializationContext:
+    layout = layout or ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128)
     registry = worker._get_endpoint_registry()
     resolved = registry.resolve_region_spec(members, topology)
-    plan = ce.BackendResolver(registry, worker._get_region_access_service()).plan(
-        resolved,
-        layout or ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
-    )
+    plan = ce.BackendResolver(registry, worker._get_region_access_service()).plan(resolved, layout)
     return MaterializationContext(
         worker=worker,
         registry=registry,
         plan=plan,
-        layout=layout or ce.RegionLayoutSpec(64, 128),
+        layout=layout,
     )
 
 
@@ -72,6 +70,57 @@ def _assert_refusal(ctx: MaterializationContext, reason: RefusalReason) -> None:
 
 def _attachments(part: ce.RegionPartPlan) -> dict[ce.EndpointIdentity, ce.MemberAttachmentPlan]:
     return {attachment.member: attachment for attachment in part.attachments}
+
+
+def _materialize_default_region(worker: Worker):
+    return worker._materialize_region_instance(
+        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[1]", ce.DEVICE_AICPU)],
+        ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
+        ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
+    )
+
+
+def _manual_two_member_context(
+    worker: Worker,
+    provider: ce.EndpointRecord,
+    consumer: ce.EndpointRecord,
+    layout: Optional[ce.RegionLayoutSpec] = None,
+) -> MaterializationContext:
+    layout = layout or ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128)
+    registry = ce.EndpointRegistry(
+        root_level=3,
+        session_instance_id=worker._owner_instance_id,
+        registry_epoch=worker._endpoint_registry_epoch,
+        records=(consumer, provider),
+    )
+    provider_attachment = ce.MemberAttachmentPlan(
+        member=provider.identity,
+        role=ce.AttachmentRole.PROVIDER,
+        adapter_kind=None,
+        adapter_profile=None,
+    )
+    consumer_attachment = ce.MemberAttachmentPlan(
+        member=consumer.identity,
+        role=ce.AttachmentRole.CONSUMER,
+        adapter_kind=ce.AdapterKind.OWNER_DELEGATED_COPY,
+        adapter_profile=ce.AdapterProfile.HOST_VMM_COPY,
+    )
+    part_attachments = (provider_attachment, consumer_attachment)
+    plan = ce.BackendPlan(
+        ordered_members=(consumer.identity, provider.identity),
+        payload=ce.RegionPartPlan(
+            part=ce.RegionPartKind.PAYLOAD,
+            backend_kind=ce.BackendKind.VMM_WINDOW,
+            attachments=part_attachments,
+        ),
+        counter=ce.RegionPartPlan(
+            part=ce.RegionPartKind.COUNTER,
+            backend_kind=ce.BackendKind.VMM_WINDOW,
+            attachments=part_attachments,
+        ),
+        topology_plan=ce.SingleOwnerPlan(provider_endpoint=provider.identity),
+    )
+    return MaterializationContext(worker=worker, registry=registry, plan=plan, layout=layout)
 
 
 def test_shape_validation_accepts_l3_host_to_local_l2_aicpu_copy_plan():
@@ -169,6 +218,59 @@ def test_shape_validation_rejects_direct_map_and_extra_consumers():
     _assert_refusal(extra, RefusalReason.UNSUPPORTED_MEMBER_SHAPE)
 
 
+def test_shape_validation_rejects_remote_endpoint_member():
+    worker = _l3(device_ids=[0])
+    session_id = worker._owner_instance_id
+    registry_epoch = worker._endpoint_registry_epoch
+    consumer = ce.EndpointRecord(
+        identity=ce.EndpointIdentity(session_id, registry_epoch, 0),
+        path="L3",
+        deployment=ce.HOST_CPU,
+        node_scope_id=0,
+    )
+    remote_provider = ce.EndpointRecord(
+        identity=ce.EndpointIdentity(session_id, registry_epoch, 1),
+        path="L3/L2[0]",
+        deployment=ce.DEVICE_AICPU,
+        node_scope_id=1,
+    )
+
+    _assert_refusal(
+        _manual_two_member_context(worker, remote_provider, consumer),
+        RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
+    )
+
+
+def test_shape_validation_rejects_device_peer_consumer_attachment():
+    ctx = _accepted_context()
+    host = validate_single_owner_region_shape(ctx).consumer.identity
+    payload_by_member = _attachments(ctx.plan.payload)
+    payload_by_member[host] = dataclasses.replace(
+        payload_by_member[host],
+        adapter_kind=ce.AdapterKind.DEVICE_PEER,
+        adapter_profile=ce.AdapterProfile.DEVICE_VMM_PEER_IMPORT,
+    )
+    device_peer_payload = dataclasses.replace(ctx.plan.payload, attachments=tuple(payload_by_member.values()))
+
+    _assert_refusal(
+        dataclasses.replace(ctx, plan=dataclasses.replace(ctx.plan, payload=device_peer_payload)),
+        RefusalReason.UNSUPPORTED_ATTACHMENT,
+    )
+
+
+def test_shape_validation_rejects_duplicate_attachment_members():
+    ctx = _accepted_context()
+    duplicate_payload = dataclasses.replace(
+        ctx.plan.payload,
+        attachments=ctx.plan.payload.attachments + (ctx.plan.payload.attachments[-1],),
+    )
+
+    _assert_refusal(
+        dataclasses.replace(ctx, plan=dataclasses.replace(ctx.plan, payload=duplicate_payload)),
+        RefusalReason.UNSUPPORTED_ATTACHMENT,
+    )
+
+
 class _FakeCounter:
     def __init__(self, calls: list[tuple]) -> None:
         self._calls = calls
@@ -211,31 +313,38 @@ class _FakeRegion:
 
 
 class _FakeNativeWorker:
-    def __init__(self, calls: list[tuple]) -> None:
+    def __init__(self, calls: list[tuple], *, fail_release: bool = False) -> None:
         self._calls = calls
+        self._fail_release = fail_release
 
     def control_worker_chip_region_release(self, worker_id: int, region_id: int) -> None:
         self._calls.append(("release", worker_id, region_id))
+        if self._fail_release:
+            raise RuntimeError("release failed")
 
 
-def test_worker_materializes_region_instance_and_closes_single_region(monkeypatch):
-    worker = _l3(device_ids=[8, 9])
-    calls: list[tuple] = []
-    fake_region = _FakeRegion(calls)
-    worker._worker = _FakeNativeWorker(calls)
+@pytest.fixture
+def region_worker(monkeypatch):
+    def build(*, fail_mapping_close: bool = False, fail_release: bool = False, device_ids=(8, 9)):
+        worker = _l3(device_ids=device_ids)
+        calls: list[tuple] = []
+        fake_region = _FakeRegion(calls, fail_mapping_close=fail_mapping_close)
+        worker._worker = _FakeNativeWorker(calls, fail_release=fail_release)
 
-    def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
-        calls.append(("create", worker_id, payload_bytes, counter_bytes))
-        worker._live_worker_chip_regions.append(fake_region)
-        return fake_region
+        def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
+            calls.append(("create", worker_id, payload_bytes, counter_bytes))
+            worker._live_worker_chip_regions.append(fake_region)
+            return fake_region
 
-    monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
+        monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
+        return worker, calls, fake_region
 
-    instance = worker._materialize_region_instance(
-        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[1]", ce.DEVICE_AICPU)],
-        ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
-        ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
-    )
+    return build
+
+
+def test_worker_materializes_region_instance_and_closes_single_region(region_worker):
+    worker, calls, _fake_region = region_worker()
+    instance = _materialize_default_region(worker)
 
     assert instance.state is RegionInstanceState.LIVE
     assert instance.worker_id == 1
@@ -266,23 +375,9 @@ def test_worker_materializes_region_instance_and_closes_single_region(monkeypatc
     ]
 
 
-def test_live_region_instance_rollback_reuses_single_region_cleanup(monkeypatch):
-    worker = _l3(device_ids=[8, 9])
-    calls: list[tuple] = []
-    fake_region = _FakeRegion(calls)
-    worker._worker = _FakeNativeWorker(calls)
-
-    def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
-        calls.append(("create", worker_id, payload_bytes, counter_bytes))
-        worker._live_worker_chip_regions.append(fake_region)
-        return fake_region
-
-    monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
-    instance = worker._materialize_region_instance(
-        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[1]", ce.DEVICE_AICPU)],
-        ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
-        ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
-    )
+def test_live_region_instance_rollback_reuses_single_region_cleanup(region_worker):
+    worker, calls, _fake_region = region_worker()
+    instance = _materialize_default_region(worker)
 
     with worker._control_reservation("test_region_instance"):
         instance.rollback()
@@ -300,23 +395,9 @@ def test_live_region_instance_rollback_reuses_single_region_cleanup(monkeypatch)
         instance.payload_write(0, "src")
 
 
-def test_region_instance_close_failure_marks_failed_and_poisons_worker(monkeypatch):
-    worker = _l3(device_ids=[8, 9])
-    calls: list[tuple] = []
-    fake_region = _FakeRegion(calls, fail_mapping_close=True)
-    worker._worker = _FakeNativeWorker(calls)
-
-    def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
-        calls.append(("create", worker_id, payload_bytes, counter_bytes))
-        worker._live_worker_chip_regions.append(fake_region)
-        return fake_region
-
-    monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
-    instance = worker._materialize_region_instance(
-        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[1]", ce.DEVICE_AICPU)],
-        ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
-        ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
-    )
+def test_region_instance_close_failure_marks_failed_and_poisons_worker(region_worker):
+    worker, calls, _fake_region = region_worker(fail_mapping_close=True)
+    instance = _materialize_default_region(worker)
 
     with worker._control_reservation("test_region_instance"):
         with pytest.raises(RuntimeError, match="mapping close failed"):
@@ -336,6 +417,60 @@ def test_region_instance_close_failure_marks_failed_and_poisons_worker(monkeypat
         ("release", 1, 42),
         ("expire",),
     ]
+
+
+def test_region_instance_rollback_failure_replays_cached_error_for_close(region_worker):
+    worker, calls, _fake_region = region_worker(fail_mapping_close=True)
+    instance = _materialize_default_region(worker)
+
+    with worker._control_reservation("test_region_instance"):
+        with pytest.raises(RuntimeError, match="mapping close failed") as first_excinfo:
+            instance.rollback()
+        with pytest.raises(RuntimeError, match="mapping close failed") as second_excinfo:
+            instance.rollback()
+        with pytest.raises(RuntimeError, match="mapping close failed") as close_excinfo:
+            instance.close()
+
+    assert instance.state is RegionInstanceState.ROLLBACK_FAILED
+    assert second_excinfo.value is first_excinfo.value
+    assert close_excinfo.value is first_excinfo.value
+    assert calls == [
+        ("create", 1, 64, 128),
+        ("mapping_close",),
+        ("release", 1, 42),
+        ("expire",),
+    ]
+
+
+def test_close_worker_chip_region_preserves_release_error_cause(region_worker):
+    worker, _calls, fake_region = region_worker(fail_mapping_close=True, fail_release=True)
+
+    with pytest.raises(RuntimeError, match="mapping close failed") as excinfo:
+        worker._close_worker_chip_region(fake_region, poison_on_error=True)
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "release failed"
+
+
+def test_retire_worker_chip_region_tracking_does_not_retry_base_exception():
+    class FailingTrackingList(list):
+        def __init__(self, values):
+            super().__init__(values)
+            self.assignments = 0
+
+        def __setitem__(self, key, value):
+            self.assignments += 1
+            raise KeyboardInterrupt("tracking interrupted")
+
+    worker = _l3(device_ids=[8, 9])
+    region = object()
+    tracking = FailingTrackingList([region])
+    worker._live_worker_chip_regions = tracking
+
+    with pytest.raises(KeyboardInterrupt, match="tracking interrupted"):
+        worker._retire_worker_chip_region_tracking(region)
+
+    assert tracking.assignments == 1
 
 
 def test_materialize_create_failure_propagates_without_live_tracking(monkeypatch):
@@ -359,23 +494,9 @@ def test_materialize_create_failure_propagates_without_live_tracking(monkeypatch
     assert calls == [("create", 1, 64, 128)]
 
 
-def test_live_region_instance_access_requires_control_context(monkeypatch):
-    worker = _l3(device_ids=[8, 9])
-    calls: list[tuple] = []
-    fake_region = _FakeRegion(calls)
-    worker._worker = _FakeNativeWorker(calls)
-
-    def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
-        calls.append(("create", worker_id, payload_bytes, counter_bytes))
-        worker._live_worker_chip_regions.append(fake_region)
-        return fake_region
-
-    monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
-    instance = worker._materialize_region_instance(
-        [ce.at("L3", ce.HOST_CPU), ce.at("L3/L2[1]", ce.DEVICE_AICPU)],
-        ce.SingleOwner(provider=ce.at("L3/L2[1]", ce.DEVICE_AICPU)),
-        ce.RegionLayoutSpec(payload_bytes=64, counter_bytes=128),
-    )
+def test_live_region_instance_access_requires_control_context(region_worker):
+    worker, calls, _fake_region = region_worker()
+    instance = _materialize_default_region(worker)
 
     with pytest.raises(RuntimeError, match="active orchestration/control context"):
         instance.payload_write(0, "src")

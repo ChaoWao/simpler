@@ -7811,6 +7811,19 @@ class Worker:
     ) -> None:
         region_errors: list[BaseException] = []
         release_error: BaseException | None = None
+
+        def primary_region_error() -> BaseException:
+            primary = region_errors[0]
+            tail = primary
+            seen = {id(tail)}
+            while tail.__cause__ is not None and id(tail.__cause__) not in seen:
+                tail = tail.__cause__
+                seen.add(id(tail))
+            for extra in region_errors[1:]:
+                tail.__cause__ = extra
+                tail = extra
+            return primary
+
         try:
             region._close_worker_host_mapping()
         except BaseException as exc:  # noqa: BLE001
@@ -7825,14 +7838,15 @@ class Worker:
         # expires both sides after attempting both debts. Whole-tree close
         # instead retains the region for journal replay.
         if region_errors and resources is None and not poison_on_error:
-            raise region_errors[0]
+            raise primary_region_error()
         if poison_on_error and region_errors and release_error is not None:
+            primary = primary_region_error()
             self._record_unreclaimable(
                 f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
                 "fully reclaimed; no further work is admitted",
-                region_errors[0],
+                primary,
             )
-            raise region_errors[0]
+            raise primary
         try:
             region._expire()
         except BaseException as exc:  # noqa: BLE001
@@ -7842,37 +7856,26 @@ class Worker:
         except BaseException as exc:  # noqa: BLE001
             region_errors.append(exc)
         if region_errors:
+            primary = primary_region_error()
             if poison_on_error:
                 self._record_unreclaimable(
                     f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
                     "fully reclaimed; no further work is admitted",
-                    region_errors[0],
+                    primary,
                 )
-            raise region_errors[0]
+            raise primary
 
     def _retire_worker_chip_region_tracking(self, region, resources: _RunResources | None = None) -> None:
         tracking_lists = [self._live_worker_chip_regions]
         if resources is not None and resources.worker_chip_regions is not self._live_worker_chip_regions:
             tracking_lists.insert(0, resources.worker_chip_regions)
         errors: list[BaseException] = []
-        next_tracking_list = 0
 
-        def retire_tracking() -> None:
-            nonlocal next_tracking_list
+        for owned_regions in tracking_lists:
             try:
-                while next_tracking_list < len(tracking_lists):
-                    owned_regions = tracking_lists[next_tracking_list]
-                    owned_regions[:] = [owned for owned in owned_regions if owned is not region]
-                    next_tracking_list += 1
-            except Exception as exc:  # noqa: BLE001
-                errors.append(exc)
-                next_tracking_list += 1
-                retire_tracking()
+                owned_regions[:] = [owned for owned in owned_regions if owned is not region]
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
-                retire_tracking()
-
-        retire_tracking()
         if errors:
             raise errors[0]
 
