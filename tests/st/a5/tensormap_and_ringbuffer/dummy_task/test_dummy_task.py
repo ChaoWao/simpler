@@ -81,6 +81,7 @@ class TestDummyTask(SceneTestCase):
         {
             "name": "LongDummyChain",
             "platforms": ["a5sim", "a5"],
+            "manual": True,
             "config": {"aicpu_thread_num": 2},
             "params": {"case": 2},
         },

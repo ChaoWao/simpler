@@ -102,6 +102,7 @@ def _drive_one_run(platform: str, device_id: int, *, enable_chip_swimlane: bool 
 @pytest.mark.platforms(["a2a3sim", "a2a3"])
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(1)
+@pytest.mark.manual(["a2a3sim"])
 def test_simpler_run_emits_strace_markers(st_platform, st_device_ids, capfd):
     _drive_one_run(st_platform, int(st_device_ids[0]))
     err = capfd.readouterr().err
@@ -127,6 +128,7 @@ def test_simpler_run_emits_strace_markers(st_platform, st_device_ids, capfd):
 @pytest.mark.platforms(["a2a3sim", "a5sim"])
 @pytest.mark.runtime("tensormap_and_ringbuffer")
 @pytest.mark.device_count(1)
+@pytest.mark.manual(["a2a3sim", "a5sim"])
 def test_sim_forwards_info_level_to_aicpu(st_platform, st_device_ids, capfd):
     previous_level = get_current_config()
     configure_logging("info")

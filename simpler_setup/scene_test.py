@@ -824,6 +824,20 @@ def _match_selectors(cls_name: str, case_name: str, selectors: list[tuple]) -> b
     return False
 
 
+def is_manual_for_platform(manual, platform: str | None) -> bool:
+    """Whether a case's manual value applies to the selected platform.
+
+    ``True`` keeps the original all-platform behavior. A platform name or a
+    collection of platform names moves only those executions to the manual
+    sweep while leaving the same case in Per-PR coverage elsewhere.
+    """
+    if isinstance(manual, str):
+        return manual == platform
+    if isinstance(manual, (list, tuple, set, frozenset)):
+        return platform in manual
+    return bool(manual)
+
+
 def _select_cases(test_classes, platform: str, selectors: list[tuple], manual_mode: str):
     """Resolve (class, case) pairs to run. Validates selectors strictly.
 
@@ -850,7 +864,7 @@ def _select_cases(test_classes, platform: str, selectors: list[tuple], manual_mo
                 continue
             if not _match_selectors(cls.__name__, case["name"], selectors):
                 continue
-            is_manual = bool(case.get("manual"))
+            is_manual = is_manual_for_platform(case.get("manual"), platform)
             if manual_mode == "exclude" and is_manual:
                 continue
             if manual_mode == "only" and not is_manual:
@@ -1686,7 +1700,7 @@ class SceneTestCase:
                 continue
             if not _match_selectors(cls_name, case["name"], selectors):
                 continue
-            is_manual = bool(case.get("manual"))
+            is_manual = is_manual_for_platform(case.get("manual"), st_platform)
             if manual_mode == "exclude" and is_manual:
                 continue
             if manual_mode == "only" and not is_manual:

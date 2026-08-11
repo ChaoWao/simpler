@@ -69,7 +69,7 @@ path calls `run()` directly, so it is not limited by `main()`'s `--platform`
 choices):
 
 ```bash
-pytest examples/workers/l3/dual_domain_overlap --platform a2a3sim
+pytest examples/workers/l3/dual_domain_overlap --platform a2a3sim --manual include
 ```
 
 Exactly three devices are required.

@@ -23,6 +23,11 @@ on:
         required: false
         default: false
         type: boolean
+      manual_mode:
+        description: exclude for Per-PR, include for the Daily full sweep.
+        required: false
+        default: exclude
+        type: string
       python_version:
         required: false
         default: "3.10"
@@ -34,6 +39,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 30
     env:
+      MANUAL_MODE: ${{ inputs.manual_mode }}
       SIMPLER_SCHEDULER_TIMEOUT_MS: "5000"
     steps:
       - name: Checkout target
@@ -42,6 +48,16 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
+
+      - name: Validate manual mode
+        run: |
+          case "$MANUAL_MODE" in
+            exclude|include|only) ;;
+            *)
+              echo "::error::manual_mode must be exclude, include, or only"
+              exit 2
+              ;;
+          esac
 
       - name: Set up C++ compiler
         if: inputs.setup_variant == 'github'
@@ -89,7 +105,8 @@ jobs:
       - name: Run pytest scene tests
         run: |
           .venv/bin/python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
-            --pto-session-timeout 600 --require-pto-isa
+            --pto-session-timeout 600 --require-pto-isa \
+            --manual "$MANUAL_MODE"
 
       - name: dep_gen smoke (a2a3)
         if: inputs.include_dfx_smokes

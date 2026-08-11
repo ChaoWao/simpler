@@ -117,6 +117,7 @@ class TestAllreduceTwophaseP2(SceneTestCase):
         {
             "name": "twophase",
             "platforms": ["a2a3sim", "a2a3", "a5sim", "a5"],
+            "manual": ["a2a3sim", "a5sim"],
             "config": {"device_count": 2},
             "params": {"nranks": 2, "mode_id": 1},
         }
@@ -163,6 +164,7 @@ class TestAllreduceBidirectionalRingP2(SceneTestCase):
         {
             "name": "bidirectional_ring",
             "platforms": ["a2a3sim", "a2a3", "a5sim", "a5"],
+            "manual": ["a2a3sim", "a5sim"],
             "config": {"device_count": 2},
             "params": {"nranks": 2, "mode_id": 3},
         }
@@ -186,6 +188,7 @@ class TestAllreduceIbingP2(SceneTestCase):
         {
             "name": "ibing",
             "platforms": ["a2a3sim", "a2a3", "a5sim", "a5"],
+            "manual": ["a2a3sim", "a5sim"],
             "config": {"device_count": 2},
             "params": {"nranks": 2, "mode_id": 4},
         }
@@ -209,6 +212,7 @@ class TestAllreduceOnephaseP4(SceneTestCase):
         {
             "name": "onephase",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": True,
             "config": {"device_count": 4},
             "params": {"nranks": 4, "mode_id": 0},
         }
@@ -232,6 +236,7 @@ class TestAllreduceTwophaseP4(SceneTestCase):
         {
             "name": "twophase",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": True,
             "config": {"device_count": 4},
             "params": {"nranks": 4, "mode_id": 1},
         }
@@ -255,6 +260,7 @@ class TestAllreduceRingP4(SceneTestCase):
         {
             "name": "ring",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": True,
             "config": {"device_count": 4},
             "params": {"nranks": 4, "mode_id": 2},
         }
@@ -278,6 +284,7 @@ class TestAllreduceBidirectionalRingP4(SceneTestCase):
         {
             "name": "bidirectional_ring",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": True,
             "config": {"device_count": 4},
             "params": {"nranks": 4, "mode_id": 3},
         }
@@ -301,6 +308,7 @@ class TestAllreduceIbingNranksError(SceneTestCase):
         {
             "name": "ibing_nranks_4",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": True,
             "config": {"device_count": 4},
             "params": {"nranks": 4, "mode_id": 4},
         }

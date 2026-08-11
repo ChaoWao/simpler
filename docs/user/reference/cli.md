@@ -20,11 +20,16 @@ python examples/my_example/test_my_example.py -p a2a3sim   # standalone, no pyte
 | `--level` | Restrict to one level, e.g. `--level 2`; pod wrappers use `--level 4` |
 | `--exclude-level` | Exclude tests explicitly carrying one level, e.g. ordinary onboard lanes use `--exclude-level 4` |
 | `--case` | Case selector, repeatable: `Foo`, `ClassA::Foo`, or `ClassA::` for a whole class |
-| `--manual` | Manual-case handling: `exclude` (default), `include`, `only` |
+| `--manual` | Manual-test handling for scene cases and standalone pytest tests: `exclude` (default), `include`, `only` |
 | `--rounds` | Run each case N times. Default `1`; use this so first-run effects do not dominate a measurement |
 | `--skip-golden` | Skip golden comparison — benchmark mode |
 | `--require-pto-isa` | Fail the session immediately if PTO-ISA cannot be resolved, instead of deferring to the per-test lazy path |
 | `--sanitizer` | Run against a sanitizer build; see [Compiler Sanitizers](../../sanitizers.md) |
+
+Standalone tests may use `@pytest.mark.manual` for every platform, or limit the
+marker with `@pytest.mark.manual(platforms=["a2a3sim", "a5sim"])`. Scene-test
+cases use `"manual": True` or a platform list such as
+`"manual": ["a2a3sim", "a5sim"]`.
 
 ### Diagnostics
 

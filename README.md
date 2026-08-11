@@ -39,7 +39,7 @@ cd simpler
 pip install --no-build-isolation -e '.[test]'
 
 # Run the vector example (simulation, no hardware required)
-python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
+python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim --manual include
 ```
 
 PTO ISA headers are automatically cloned on first run. See [Getting Started](docs/getting-started.md) for manual setup and troubleshooting.

@@ -24,6 +24,11 @@ on:
         required: false
         default: marker
         type: string
+      manual_mode:
+        description: exclude for Per-PR, include for the Daily full sweep.
+        required: false
+        default: exclude
+        type: string
 
 jobs:
   run:
@@ -31,6 +36,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 60
     env:
+      MANUAL_MODE: ${{ inputs.manual_mode }}
       SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
       SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
       SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
@@ -41,6 +47,16 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
+
+      - name: Validate manual mode
+        run: |
+          case "$MANUAL_MODE" in
+            exclude|include|only) ;;
+            *)
+              echo "::error::manual_mode must be exclude, include, or only"
+              exit 2
+              ;;
+          esac
 
       - name: Restore scene-test kernel cache (a2a3)
         uses: actions/cache@v5
@@ -70,21 +86,22 @@ jobs:
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           .venv/bin/python -m simpler_setup.tools.scene_test_compile examples tests/st \
-            --platform a2a3 --exclude-level 4 --require-pto-isa --compile-workers 8 -q
+            --platform a2a3 --exclude-level 4 --require-pto-isa --compile-workers 8 -q \
+            --manual "$MANUAL_MODE"
 
       - name: Run pytest scene tests (a2a3)
         if: inputs.a2a3_sdma_mode == 'marker'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           if [ "$(uname -m)" = "x86_64" ]; then
-            .venv/bin/python -m pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
+            .venv/bin/python -m pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200 --manual "$MANUAL_MODE"
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run ".venv/bin/python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
+              --run ".venv/bin/python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200 --manual '$MANUAL_MODE'"
           fi
 
       - name: Run pytest scene tests (a2a3 legacy SDMA paths)
-        if: inputs.a2a3_sdma_mode == 'legacy-paths'
+        if: inputs.a2a3_sdma_mode == 'legacy-paths' && inputs.manual_mode != 'only'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
@@ -96,7 +113,7 @@ jobs:
           fi
 
       - name: SDMA pytest (a2a3)
-        if: inputs.a2a3_sdma_mode == 'marker'
+        if: inputs.a2a3_sdma_mode == 'marker' && inputs.manual_mode != 'only'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           SDMA_TESTS="examples tests/st -m sdma"
@@ -108,7 +125,7 @@ jobs:
           fi
 
       - name: SDMA pytest (a2a3 legacy paths)
-        if: inputs.a2a3_sdma_mode == 'legacy-paths'
+        if: inputs.a2a3_sdma_mode == 'legacy-paths' && inputs.manual_mode != 'only'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           SDMA_TESTS="examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"

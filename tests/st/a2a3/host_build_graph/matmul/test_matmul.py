@@ -58,6 +58,7 @@ class TestMatmulHostBuildGraph(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": True,
             "params": {},
         },
     ]
