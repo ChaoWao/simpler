@@ -572,6 +572,34 @@ target_link_libraries(test_trb_runtime_temp_buffer PRIVATE
 add_test(NAME test_trb_runtime_temp_buffer COMMAND test_trb_runtime_temp_buffer)
 set_tests_properties(test_trb_runtime_temp_buffer PROPERTIES LABELS "no_hardware")
 
+add_executable(test_a5_trb_runtime_temp_buffer
+    common/test_trb_runtime_temp_buffer.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/tensormap_and_ringbuffer/host/runtime_maker.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/platform_compile_info.cpp
+)
+target_compile_definitions(test_a5_trb_runtime_temp_buffer PRIVATE SIMPLER_PLATFORM_NAME="a5sim")
+target_include_directories(test_a5_trb_runtime_temp_buffer PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/tensormap_and_ringbuffer/host
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/tensormap_and_ringbuffer/orchestration
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/tensormap_and_ringbuffer/runtime
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/tensormap_and_ringbuffer/common
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+)
+target_link_libraries(test_a5_trb_runtime_temp_buffer PRIVATE
+    a5_rt_objs
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_a5_trb_runtime_temp_buffer COMMAND test_a5_trb_runtime_temp_buffer)
+set_tests_properties(test_a5_trb_runtime_temp_buffer PROPERTIES LABELS "no_hardware")
+
 add_executable(test_worker_chip_message_queue
     common/test_worker_chip_message_queue.cpp
     stubs/test_stubs.cpp
