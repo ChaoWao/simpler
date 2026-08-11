@@ -405,7 +405,9 @@ struct PTO2TensorMap {
         return sm_last_task_alive;
     }
 
-    // new_entry only allocates memory, does not assign attributes
+    // new_entry allocates a slot and initializes only its linkage (bucket_index
+    // and the four link pointers) to the clean unlinked state; insert() assigns
+    // the tensor attributes and producer_task_id.
     PTO2TensorMapEntry *new_entry() {
         if (free_num > 0) {
             PTO2TensorMapEntry *res = free_entry_list[--free_num];
@@ -414,7 +416,16 @@ struct PTO2TensorMap {
         }
         always_assert(next_entry_idx < pool_size);
         PTO2TensorMapEntry *res = &entry_pool[next_entry_idx++];
-        debug_assert(res->bucket_index == -1);
+        // Init-on-write: the pool is not pre-zeroed (init_data_from_layout skips
+        // the O(pool_size) memset), so put this fresh slot into the same clean
+        // unlinked state free_entry() leaves recycled slots in. The insert path
+        // overwrites the remaining fields exactly as it does for a recycled slot,
+        // so a fresh slot is indistinguishable from a reused one.
+        res->bucket_index = -1;
+        res->next_in_bucket = nullptr;
+        res->prev_in_bucket = nullptr;
+        res->next_in_task = nullptr;
+        res->prev_in_task = nullptr;
         return res;
     }
 
