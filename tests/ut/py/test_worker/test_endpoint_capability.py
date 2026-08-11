@@ -14,6 +14,7 @@ the argument; the materialization check behind it covers any future submit path 
 """
 
 import ctypes
+import re
 
 import pytest
 from simpler.buffer import (
@@ -24,6 +25,7 @@ from simpler.buffer import (
     mint_owner_instance_id,
     wrap_device_malloc,
 )
+from simpler.comm_endpoints import RegionAccessReasonCode
 from simpler.task_interface import DataType, TaskArgs, TensorArgType
 from simpler.worker import Worker
 
@@ -116,3 +118,20 @@ def test_chip_materialization_refuses_a_foreign_chips_device_tensor():
     reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=foreign_chip_owner))
     with pytest.raises(ValueError, match="different chip's owner"):
         reg.materialize(dev.to_descriptor())
+
+
+def test_device_backing_rejections_carry_the_endpoint_relation_reason_code():
+    # Both materialize() rejections above are instances of the same capability-judgment question
+    # the domain-scoped EndpointRegistry/RegionAccessService engine answers with
+    # RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION -- pinned here so the two mechanisms'
+    # rejection vocabulary stays in sync rather than drifting back into two freeform strings.
+    dev = _device_handle()
+
+    host_reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    with pytest.raises(ValueError, match=re.escape(RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value)):
+        host_reg.materialize(dev.to_descriptor())
+
+    foreign_chip_owner = mint_owner_instance_id()
+    chip_reg = ImportRegistry(ImportContext(is_host_endpoint=False, owning_chip_instance_id=foreign_chip_owner))
+    with pytest.raises(ValueError, match=re.escape(RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value)):
+        chip_reg.materialize(dev.to_descriptor())
