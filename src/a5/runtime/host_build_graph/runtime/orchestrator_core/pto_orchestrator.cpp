@@ -248,13 +248,13 @@ orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char 
         return;
     }
 
-    char message[1024];
-    vsnprintf(message, sizeof(message), fmt, args);
+    std::array<char, 1024> message{};
+    vsnprintf(message.data(), message.size(), fmt, args);
     if (latched_code != PTO2_ERROR_NONE && latched_code != error_code) {
-        unified_log_error(func, "FATAL(code=%d, latched=%d): %s", error_code, latched_code, message);
+        unified_log_error(func, "FATAL(code=%d, latched=%d): %s", error_code, latched_code, message.data());
         return;
     }
-    unified_log_error(func, "FATAL(code=%d): %s", error_code, message);
+    unified_log_error(func, "FATAL(code=%d): %s", error_code, message.data());
 }
 
 void PTO2OrchestratorState::report_fatal(int32_t error_code, const char *func, const char *fmt, ...) {
@@ -838,6 +838,14 @@ static bool prepare_task(
     out->task = &orch->sm_header->ring.task_descriptors[out->alloc_result.slot];
     out->payload = &orch->sm_header->ring.task_payloads[out->alloc_result.slot];
 
+    // Init-on-write: this slot's dynamic scheduling fields and completion flag are
+    // initialized here, as the orchestrator claims the slot. whole-graph-resident
+    // hbg claims slots [0, total_tasks) exactly once and the device reads no slot
+    // past total_tasks, so this claim-time write is the only per-slot SM reset and
+    // the unclaimed tail is neither initialized nor read.
+    out->slot_state->reset_for_reuse();
+    orch->sm_header->ring.completion_flags[out->alloc_result.slot].store(0, std::memory_order_relaxed);
+
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
     // Re-bind payload/task pointers each submit. Value is per-slot constant
@@ -854,7 +862,7 @@ static bool prepare_task(
     // early-dispatch fields) is initialized in PTO2TaskPayload::init, the
     // single payload-init point, which runs before Orch-side wiring publish.
 
-    // Fields already zeroed by reset_for_reuse() at slot init:
+    // Fields already zeroed by the reset_for_reuse() above:
     //   wake_list_head=nullptr, next_in_wake_list=nullptr,
     //   any_subtask_deferred=false, completed_subtasks=0, next_block_idx=0
     // Fields immutable after RingSchedState::init():
@@ -870,8 +878,8 @@ static bool prepare_task(
     out->slot_state->task_kind = active_mask ? TaskKind::KERNEL : TaskKind::DUMMY;
     // Reclaim gate: seed last_consumer to self, so a producer with no consumers
     // is retirable once completed_watermark >= its own id. Each fanin edge bumps
-    // it in append_fanin_or_fail. completion_flags for this slot are already 0
-    // (zeroed once at init; whole-graph-resident hbg never reuses a slot).
+    // it in append_fanin_or_fail. completion_flags for this slot were cleared
+    // above (whole-graph-resident hbg never reuses a slot).
     out->slot_state->last_consumer_local_id = static_cast<int32_t>(out->task_id.local());
     // payload.fanin_count is set in submit_task_common's STEP 6.
     scope_tasks_push(orch, out->slot_state);
@@ -1125,9 +1133,13 @@ static TaskOutputTensors submit_task_common(
     // fanout now that the swimlane hot path no longer records it.
     const bool capture_dep_graph = dep_gen_host_graph_enabled();
     if (capture_dep_graph) {
-        const int32_t kernel_ids_capture[3] = {aic_kernel_id, aiv0_kernel_id, aiv1_kernel_id};
+        const std::array<int32_t, PTO2_SUBTASK_SLOT_COUNT> kernel_ids_capture{
+            aic_kernel_id,
+            aiv0_kernel_id,
+            aiv1_kernel_id,
+        };
         dep_gen_host_graph_begin_task(
-            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), kernel_ids_capture,
+            task_id.raw, orch->in_manual_scope(), args.allow_early_resolve(), kernel_ids_capture.data(),
             args.launch_spec.block_num(), args.tensor_count(), args.tensor_data(), args.tag_data()
         );
     }
