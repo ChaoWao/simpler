@@ -31,6 +31,8 @@ from simpler.orchestrator import Orchestrator
 from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import RunHandle, Worker, _RunResources
 
+from ._harness import fake_chip_l3
+
 _F32 = 0  # DataType.FLOAT32 value
 _OID = mint_owner_instance_id()
 
@@ -272,6 +274,37 @@ class TestL2TouchedIdentityTracking:
             submit_thread.join(timeout=5)
         assert not buf.closed
 
+    def test_publishes_touched_identities_before_materializing_not_after(self, monkeypatch):
+        # _submit_l2_locked must publish _chip_run_touched_identities BEFORE calling
+        # _materialize_l2_args, not just before dispatch -- _materialize_l2_args is what
+        # populates self._chip_import_registry, the very cache release_buffer()'s broadcast
+        # pops. A release racing the window between materialize and publication would see no
+        # entry, pass its check, and pop a mapping a dispatch already in progress just cached.
+        # Block materialize mid-call and confirm release_buffer already rejects at that point.
+        w, buf = _l2_with_registered_buffer()
+        entered_materialize = threading.Event()
+        proceed = threading.Event()
+        real_materialize = Worker._materialize_l2_args
+
+        def _blocking_materialize(self, args):
+            entered_materialize.set()
+            proceed.wait(timeout=5)
+            return real_materialize(self, args)
+
+        monkeypatch.setattr(Worker, "_materialize_l2_args", _blocking_materialize)
+
+        submit_thread = threading.Thread(target=lambda: w._submit_l2_locked(3, _buffer_args(buf), CallConfig()))
+        submit_thread.start()
+        assert entered_materialize.wait(timeout=5)
+
+        try:
+            with pytest.raises(RuntimeError, match="in-flight L2 run"):
+                w.release_buffer(buf)
+        finally:
+            proceed.set()
+            submit_thread.join(timeout=5)
+        assert not buf.closed
+
 
 class TestReleaseBufferL2InFlight:
     def test_rejects_while_an_l2_run_is_in_flight(self):
@@ -290,3 +323,16 @@ class TestReleaseBufferL2InFlight:
         w.release_buffer(buf)
         assert buf.closed
         assert int(buf.identity.buffer_id) not in w._buffers
+
+
+class TestReleaseBufferImportBroadcast:
+    def test_broadcasts_to_a_real_forked_chip_child_without_error(self, monkeypatch, capsys):
+        # Exercises the real wire round-trip against a live forked chip child (device-free via the
+        # fake-chip-L3 harness, but _run_chip_main_loop and its ImportRegistry are production code,
+        # not faked): the new _CTRL_IMPORT_RELEASE sub_cmd must reach the child's handle_control and
+        # return cleanly, proving the sub_cmd numbering and CanonicalIdentity wire packing agree on
+        # both ends rather than just in the mocked unit tests above.
+        with fake_chip_l3(monkeypatch, device_ids=(0,)) as w:
+            buf = w.create_buffer(64)
+            w.release_buffer(buf)
+        assert "reported errors" not in capsys.readouterr().err

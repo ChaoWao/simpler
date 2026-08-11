@@ -959,6 +959,8 @@ def _bare_l3_worker():
     w._accepted_run_handles = set()
     w._submit_mu = threading.Lock()
     w._chip_run_touched_identities = {}
+    w._chip_import_registry = None
+    w._worker = None
     return w
 
 

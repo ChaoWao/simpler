@@ -103,6 +103,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
 
 from . import _log as _simpler_log
 from .buffer import (
+    OWNER_INSTANCE_ID_BYTES,
     AccessMode,
     AddressSpace,
     BackendKind,
@@ -495,6 +496,13 @@ _CTRL_COMM_INIT = 9
 _CTRL_PY_REGISTER = 10
 _CTRL_PY_UNREGISTER = 11
 _CTRL_PY_IMPORT_REGISTER = 12
+# Best-effort import-cache invalidation: the owner released a Buffer, this tells every consumer
+# (chip or SUB child, or a nested NEXT_LEVEL Worker forwarding it further down its own tree) to
+# drop its own materialized mapping for the identity if it has one. Reached via the generic
+# broadcast_control_all path (Worker._broadcast_py_control), the same mechanism _CTRL_PY_REGISTER
+# et al. already use — the digest slot carries a CanonicalIdentity's three meaningful fields
+# packed by _pack_identity_wire, not a callable hash.
+_CTRL_IMPORT_RELEASE = 13
 # Operation names a child puts in its error message when a control command
 # fails, so the parent's re-raised text names the operation and not just a
 # numeric sub-command. Absent entries fall back to the raw number.
@@ -504,7 +512,9 @@ _CTRL_OP_NAMES = {
     _CTRL_PY_REGISTER: "py_register",
     _CTRL_PY_IMPORT_REGISTER: "py_register",
     _CTRL_PY_UNREGISTER: "py_unregister",
+    _CTRL_IMPORT_RELEASE: "import_release",
 }
+
 
 _CTRL_WORKER_CHIP_REGION_CREATE = 16
 _CTRL_WORKER_CHIP_REGION_RELEASE = 17
@@ -1651,6 +1661,26 @@ def _read_control_digest(buf) -> bytes:
     return bytes(buf[_OFF_CONTROL_CALLABLE_HASH : _OFF_CONTROL_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES])
 
 
+_IDENTITY_WIRE = struct.Struct(f"<{OWNER_INSTANCE_ID_BYTES}sQI")
+assert _IDENTITY_WIRE.size <= CALLABLE_HASH_DIGEST_BYTES
+
+
+def _pack_identity_wire(identity: CanonicalIdentity) -> bytes:
+    """CanonicalIdentity's three meaningful fields, packed to fit the digest-sized control slot
+    _CTRL_IMPORT_RELEASE reuses. Deliberately not the identity's own bytes — see
+    ``CanonicalIdentity``'s binding docstring on why it exposes no ``pack()``: this reconstructs
+    the wire form field-by-field, the same way ``remote_l3_protocol.py`` encodes one for the
+    cross-machine wire, rather than dumping the object's raw memory.
+    """
+    body = _IDENTITY_WIRE.pack(identity.owner_instance_id, identity.buffer_id, identity.generation)
+    return body.ljust(CALLABLE_HASH_DIGEST_BYTES, b"\x00")
+
+
+def _unpack_identity_wire(buf: bytes) -> CanonicalIdentity:
+    owner_instance_id, buffer_id, generation = _IDENTITY_WIRE.unpack_from(buf, 0)
+    return CanonicalIdentity(owner_instance_id, buffer_id, generation)
+
+
 def _read_task_digest(buf) -> bytes:
     return bytes(buf[_OFF_TASK_CALLABLE_HASH : _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES])
 
@@ -1922,14 +1952,17 @@ def _sub_worker_loop(
 
     def handle_control(sub_cmd: int) -> tuple[int, str]:
         try:
-            _handle_py_callable_control(
-                buf,
-                registry,
-                identity_table,
-                identity_refs,
-                sub_cmd,
-                context="sub_worker",
-            )
+            if sub_cmd == _CTRL_IMPORT_RELEASE:
+                import_registry.unregister(_unpack_identity_wire(_read_control_digest(buf)))
+            else:
+                _handle_py_callable_control(
+                    buf,
+                    registry,
+                    identity_table,
+                    identity_refs,
+                    sub_cmd,
+                    context="sub_worker",
+                )
         except Exception as e:  # noqa: BLE001
             return 1, _format_exc("sub_worker control", e)
         return 0, ""
@@ -2705,6 +2738,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 _handle_ctrl_worker_chip_region_release(buf, worker_chip_region_store)
             elif sub_cmd == _CTRL_COMMITTED_DEVICE_MEMORY:
                 struct.pack_into("Q", buf, _CTRL_OFF_RESULT, cw.committed_device_memory)
+            elif sub_cmd == _CTRL_IMPORT_RELEASE:
+                import_registry.unregister(_unpack_identity_wire(_read_control_digest(buf)))
             elif sub_cmd == CTRL_GLOBAL_DOMAIN_PREPARE:
                 _handle_ctrl_global_domain_prepare(cw, buf, global_domain_store)
             elif sub_cmd == CTRL_GLOBAL_DOMAIN_IMPORT:
@@ -3263,6 +3298,8 @@ def _child_worker_loop(
                 digest = _read_control_digest(buf)
                 inner_worker._unregister_child_digest(digest=digest)
                 _remove_local_identity(registry, identity_table, identity_refs, digest)
+            elif sub_cmd == _CTRL_IMPORT_RELEASE:
+                inner_worker._release_import_recursive(_unpack_identity_wire(_read_control_digest(buf)))
             elif sub_cmd in (_CTRL_PY_REGISTER, _CTRL_PY_IMPORT_REGISTER, _CTRL_PY_UNREGISTER):
                 _handle_py_callable_control(
                     buf,
@@ -6694,6 +6731,48 @@ class Worker:
             )
             sys.stderr.flush()
 
+    def _broadcast_import_release(self, identity: CanonicalIdentity) -> None:
+        """Broadcast _CTRL_IMPORT_RELEASE to every NEXT_LEVEL child (chip or nested Worker) and
+        every SUB child, via the generic control channel _CTRL_PY_REGISTER et al. already use.
+
+        A no-op before ``init()`` (``self._worker`` unset) — a Worker that never started has no
+        forked children to reach regardless of what ``_python_worker_types()`` would report.
+        Otherwise unconditional on both target lists: a Worker with no children of one kind sends
+        to an empty list, which the underlying broadcast already no-ops on — no need to duplicate
+        ``_python_worker_types()``'s gating here (that helper only counts nested-Worker NEXT_LEVEL
+        children, not chip children, so it would wrongly skip the chip-only case).
+
+        Best-effort, mirroring ``_broadcast_unregister``: a child that never materialized
+        ``identity`` has nothing to drop, and a slow or dead child must not block or fail
+        ``release_buffer()`` — the Buffer is already closed on the owner side by the time this
+        runs, so this call is pure cleanup, not a correctness gate.
+        """
+        if self._worker is None:
+            return
+        errors = self._broadcast_py_control(
+            [WorkerType.NEXT_LEVEL, WorkerType.SUB],
+            _CTRL_IMPORT_RELEASE,
+            digest=_pack_identity_wire(identity),
+            strict=False,
+        )
+        if errors:
+            sys.stderr.write(
+                f"Worker.release_buffer(identity={identity}): {len(errors)} children reported errors "
+                f"(continuing best-effort). First error: {errors[0]}\n"
+            )
+            sys.stderr.flush()
+
+    def _release_import_recursive(self, identity: CanonicalIdentity) -> None:
+        """Drop ``identity`` from this Worker's own same-process import cache, then forward one
+        more hop down this Worker's own children — same shape as ``_unregister_child_digest``'s
+        recursive forward for callable cleanup, since a NEXT_LEVEL child may itself have
+        materialized ``identity`` further down its own tree (chip/SUB leaves, or its own
+        NEXT_LEVEL children in turn).
+        """
+        if self._chip_import_registry is not None:
+            self._chip_import_registry.unregister(identity)
+        self._broadcast_import_release(identity)
+
     def add_worker(self, worker: Worker) -> int:
         """Add a lower-level Worker as a NEXT_LEVEL child. Must be called before init().
 
@@ -9720,7 +9799,8 @@ class Worker:
             self._chip_import_registry = None
 
     def release_buffer(self, buffer: Buffer) -> None:
-        """Close + unlink one owner Buffer and drop its registry entry.
+        """Close + unlink one owner Buffer, drop its registry entry, and tell every descendant to
+        drop its own cached import for the identity.
 
         Rejects outright if any currently in-flight L3+ run (not yet past ``_cleanup_published``)
         sent this identity as a NEXT_LEVEL Tensor arg, or any in-flight L2 direct-chip run sent it —
@@ -9735,7 +9815,9 @@ class Worker:
         two checks run sequentially rather than under one shared lock. Neither is checked once
         ``buffer`` is already closed, matching ``Buffer.close()``'s own idempotency. The entry
         survives a failed close, so ``_release_all_buffers`` still reports the leak at close() rather
-        than losing it here. The slot is dropped only when it still holds *this* buffer: a buffer_id
+        than losing it here — the import-cache broadcast only fires once close() has actually
+        succeeded, so a failed release never tells a descendant to drop a mapping the owner still
+        considers live. The slot is dropped only when it still holds *this* buffer: a buffer_id
         minted elsewhere can collide with a registry key, and evicting the live entry it names would
         strand that backing."""
         if not buffer.closed:
@@ -9750,6 +9832,7 @@ class Worker:
                             f"release_buffer: {buffer.identity} is still referenced by an in-flight L2 run"
                         )
         buffer.close()
+        self._release_import_recursive(buffer.identity)
         with self._registry_lock:
             buffer_id = int(buffer.identity.buffer_id)
             if self._buffers.get(buffer_id) is buffer:
@@ -10032,16 +10115,17 @@ class Worker:
         """
         assert self._chip_worker is not None
         touched = self._identities_in_args(args) if args is not None else set()
-        chip_args = self._materialize_l2_args(args)
-        # Publish touched_identities BEFORE dispatch, not after: release_buffer() reads this
+        # Publish touched_identities BEFORE materializing, not after: release_buffer() reads this
         # dict to decide whether a Buffer is still in flight, so if it were only written after
-        # _submit_chip_run_direct() returns, a release racing the window between dispatch and
-        # publication would see no entry for a run that is already running on the chip.
+        # _materialize_l2_args() (which populates self._chip_import_registry, the very cache
+        # release_buffer() pops), a release racing that window would see no entry for a run that
+        # has already cached the mapping it is about to pop out from under it.
         with self._registry_lock:
             self._chip_run_seq += 1
             run_id = self._chip_run_seq
             self._chip_run_touched_identities[run_id] = touched
         try:
+            chip_args = self._materialize_l2_args(args)
             chip_run = self._chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, cfg)
         except BaseException:
             with self._registry_lock:
