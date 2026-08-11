@@ -565,6 +565,10 @@ GraphMaterializeResult graph_execution_materialize_slice(
             }
         } else {
             for (int32_t j = 0; j < payload.tensor_count; ++j) {
+                if (execution.materialized_tensor_patches >= execution.materialized_tensor_patch_count) {
+                    execution.materialize_busy.store(0, std::memory_order_release);
+                    return GraphMaterializeResult::INVALID;
+                }
                 const GraphTensorAddressPatch &patch =
                     execution.tensor_patches[execution.materialized_tensor_patches++];
                 if (patch.source == static_cast<uint8_t>(GraphTensorAddressSource::BOUNDARY)) {

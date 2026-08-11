@@ -8,8 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#ifndef SCHEDULER_CONTEXT_H
-#define SCHEDULER_CONTEXT_H
+#pragma once
 
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/platform_regs.h"
@@ -271,6 +270,8 @@ private:
     // Emergency shutdown: broadcast exit signal to every handshake'd core and
     // deinit their AICore register blocks. Idempotent.
     void emergency_shutdown(Runtime *runtime);
+
+    __attribute__((noinline, cold)) void fail_scheduler(Runtime *runtime, int32_t thread_idx, int32_t error_code);
 
     // =========================================================================
     // Dispatch (scheduler_dispatch.cpp)
@@ -575,5 +576,3 @@ private:
         return func_id_to_addr_[func_id];
     }
 };
-
-#endif  // SCHEDULER_CONTEXT_H

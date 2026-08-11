@@ -488,6 +488,25 @@ struct PTO2SchedulerState {
     // dummy_ready_queue and are retired inline; a ready sync_start cohort goes to
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
+    void latch_ready_queue_overflow(int32_t thread_idx = -1) {
+        int32_t expected = PTO2_ERROR_NONE;
+        const bool latched = sm_header->sched_error_code.compare_exchange_strong(
+            expected, PTO2_ERROR_READY_QUEUE_OVERFLOW, std::memory_order_acq_rel, std::memory_order_acquire
+        );
+        if (latched && thread_idx >= 0) {
+            sm_header->sched_error_thread.store(thread_idx, std::memory_order_release);
+        }
+        if (thread_idx >= 0 && thread_idx < 32) {
+            sm_header->sched_error_bitmap.fetch_or(1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel);
+        }
+    }
+
+    bool push_graph_prepare(PTO2TaskSlotState *slot_state, uint64_t task_id, int32_t thread_idx) {
+        if (graph_prepare_queue.push_tagged(slot_state, task_id)) return true;
+        latch_ready_queue_overflow(thread_idx);
+        return false;
+    }
+
     void push_ready_routed(PTO2TaskSlotState *slot_state) {
         bool pushed;
         if (slot_state->task_kind == TaskKind::GRAPH) {
@@ -511,10 +530,7 @@ struct PTO2SchedulerState {
         // forward-progress timeout). The graph_ready push is checked identically
         // so a graph task cannot be dropped either.
         if (!pushed) {
-            int32_t expected = PTO2_ERROR_NONE;
-            sm_header->sched_error_code.compare_exchange_strong(
-                expected, PTO2_ERROR_READY_QUEUE_OVERFLOW, std::memory_order_acq_rel, std::memory_order_acquire
-            );
+            latch_ready_queue_overflow();
         }
     }
 
@@ -959,6 +975,7 @@ struct PTO2SchedulerState {
     struct TaskCompletionOutcome {
         uint32_t fanout_edges{0};
         int32_t stream_tasks_completed{0};
+        int32_t error_code{PTO2_ERROR_NONE};
     };
 
     TaskCompletionOutcome complete_task(
@@ -981,11 +998,21 @@ struct PTO2SchedulerState {
         }
 
         GraphExecution *execution = graph_execution_from_slot(slot_state);
-        if (execution == nullptr || execution->definition == nullptr || execution->nodes == nullptr) return outcome;
+        if (execution == nullptr || execution->definition == nullptr || execution->nodes == nullptr ||
+            execution->state.load(std::memory_order_acquire) != GraphExecutionState::ACTIVE) {
+            outcome.error_code = PTO2_ERROR_INVALID_ARGS;
+            return outcome;
+        }
         const int32_t saved_node_index = slot_state.graph_node_index;
-        if (saved_node_index < 0) return outcome;
+        if (saved_node_index < 0) {
+            outcome.error_code = PTO2_ERROR_INVALID_ARGS;
+            return outcome;
+        }
         const uint32_t node_index = static_cast<uint32_t>(saved_node_index);
-        if (node_index >= static_cast<uint32_t>(execution->node_count)) return outcome;
+        if (node_index >= static_cast<uint32_t>(execution->node_count)) {
+            outcome.error_code = PTO2_ERROR_INVALID_ARGS;
+            return outcome;
+        }
 
         // Publish completion before closing the wake list. A consumer that
         // loses registration to the sentinel acquires this state when it
@@ -1113,7 +1140,12 @@ AsyncWaitList::try_inline_complete_locked(AsyncWaitList::DrainCompletionSink &si
 #else
     PTO2SchedulerState::TaskCompletionOutcome outcome = sink.sched->complete_task(slot_state);
 #endif
+    if (outcome.error_code != PTO2_ERROR_NONE) {
+        sink.error_code = outcome.error_code;
+        return false;
+    }
     sink.inline_completed += outcome.stream_tasks_completed;
+    sink.inline_resolved++;
     return true;
 }
 
@@ -1142,6 +1174,7 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
         return result;
     }
     result.completed += sink.inline_completed;
+    result.resolved += sink.inline_resolved;
 
     for (int32_t i = count - 1; i >= 0; --i) {
         AsyncWaitEntry &entry = entries[i];
@@ -1178,8 +1211,15 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
 #else
             PTO2SchedulerState::TaskCompletionOutcome outcome = sched->complete_task(*entry.slot_state);
 #endif
+            if (outcome.error_code != PTO2_ERROR_NONE) {
+                result.error_code = outcome.error_code;
+                result.failed_slot_state = entry.slot_state;
+                unlock();
+                return result;
+            }
             // Polling: completion is fully published inline; no deferred release.
             result.completed += outcome.stream_tasks_completed;
+            result.resolved++;
 
             int32_t last = count - 1;
             if (i != last) entries[i] = entries[last];

@@ -908,7 +908,7 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 
         int32_t resolved_this_pass = 0;
         bool resolved_any = false;
-        for (int32_t s = 0; s < active_sched_threads_; s++) {
+        for (int32_t s = 0; s < active_sched_threads_ && !completed_.load(std::memory_order_acquire); s++) {
             PTO2TaskSlotState *slot;
             while ((slot = sp_queues_[s].pop()) != nullptr) {
 #if SIMPLER_SCHED_PROFILING
@@ -916,10 +916,15 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #else
                 PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*slot);
 #endif
+                if (outcome.error_code != PTO2_ERROR_NONE) {
+                    fail_scheduler(runtime, thread_idx, outcome.error_code);
+                    break;
+                }
                 resolved_this_pass += outcome.stream_tasks_completed;
                 resolved_any = true;
             }
         }
+        if (completed_.load(std::memory_order_acquire)) break;
 
         // Async deferred completions, moved off the scheduler threads. Every
         // condition that fires resolves via on_task_complete inside
@@ -935,17 +940,11 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #endif
             );
             if (poll_result.error_code != PTO2_ERROR_NONE) {
-                int32_t expected = PTO2_ERROR_NONE;
-                header->sched_error_code.compare_exchange_strong(
-                    expected, poll_result.error_code, std::memory_order_acq_rel, std::memory_order_acquire
-                );
-                if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-                    emergency_shutdown(runtime);
-                }
+                fail_scheduler(runtime, thread_idx, poll_result.error_code);
                 break;
             }
             resolved_this_pass += poll_result.completed;
-            resolved_any = resolved_any || poll_result.completed > 0;
+            resolved_any = resolved_any || poll_result.resolved > 0;
         }
 
         // Dependency-only tasks (empty active_mask, or a predicate that failed)
@@ -964,11 +963,17 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #else
                     PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*dummy_batch[di]);
 #endif
+                    if (outcome.error_code != PTO2_ERROR_NONE) {
+                        fail_scheduler(runtime, thread_idx, outcome.error_code);
+                        break;
+                    }
                     resolved_this_pass += outcome.stream_tasks_completed;
                     resolved_any = true;
                 }
+                if (completed_.load(std::memory_order_acquire)) break;
             }
         }
+        if (completed_.load(std::memory_order_acquire)) break;
 
         if (resolved_any) {
             int32_t new_total = completed_tasks_.load(std::memory_order_relaxed);
@@ -1300,16 +1305,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                     (void)sched_->activate_graph_task(*graph_slot);
                     made_progress = true;
                 } else {
-                    int32_t expected = PTO2_ERROR_NONE;
-                    if (header->sched_error_code.compare_exchange_strong(
-                            expected, PTO2_ERROR_INVALID_ARGS, std::memory_order_acq_rel, std::memory_order_acquire
-                        )) {
-                        header->sched_error_thread.store(thread_idx, std::memory_order_release);
-                    }
-                    header->sched_error_bitmap.fetch_or(
-                        1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel
-                    );
-                    completed_.store(true, std::memory_order_release);
+                    fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
                     break;
                 }
             }
@@ -1320,16 +1316,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 const bool valid_slot = prepare_slot->task != nullptr && prepare_slot->task_kind == TaskKind::GRAPH &&
                                         prepare_slot->task->task_id.raw == prepare_task_id;
                 if (!valid_slot) {
-                    int32_t expected = PTO2_ERROR_NONE;
-                    if (header->sched_error_code.compare_exchange_strong(
-                            expected, PTO2_ERROR_INVALID_ARGS, std::memory_order_acq_rel, std::memory_order_acquire
-                        )) {
-                        header->sched_error_thread.store(thread_idx, std::memory_order_release);
-                    }
-                    header->sched_error_bitmap.fetch_or(
-                        1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel
-                    );
-                    completed_.store(true, std::memory_order_release);
+                    fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
                     break;
                 }
 #if SIMPLER_DFX
@@ -1340,20 +1327,12 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
                 GraphMaterializeResult result =
                     sched_->prepare_graph_task(*prepare_slot, GRAPH_MATERIALIZE_SLICE_NODES, &nodes_materialized);
                 if (result == GraphMaterializeResult::PENDING || result == GraphMaterializeResult::BUSY) {
-                    while (!sched_->graph_prepare_queue.push_tagged(prepare_slot, prepare_task_id)) {
-                        SPIN_WAIT_HINT();
+                    if (!sched_->push_graph_prepare(prepare_slot, prepare_task_id, thread_idx)) {
+                        fail_scheduler(runtime, thread_idx, PTO2_ERROR_READY_QUEUE_OVERFLOW);
+                        break;
                     }
                 } else if (result == GraphMaterializeResult::INVALID) {
-                    int32_t expected = PTO2_ERROR_NONE;
-                    if (header->sched_error_code.compare_exchange_strong(
-                            expected, PTO2_ERROR_INVALID_ARGS, std::memory_order_acq_rel, std::memory_order_acquire
-                        )) {
-                        header->sched_error_thread.store(thread_idx, std::memory_order_release);
-                    }
-                    header->sched_error_bitmap.fetch_or(
-                        1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel
-                    );
-                    completed_.store(true, std::memory_order_release);
+                    fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
                     break;
                 }
                 if (nodes_materialized > 0 || result == GraphMaterializeResult::PREPARED) {

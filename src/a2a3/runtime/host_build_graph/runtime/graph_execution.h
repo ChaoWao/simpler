@@ -243,9 +243,18 @@ inline const GraphDefinition *graph_submission_definition(const GraphSubmission 
         sizeof(GraphDefinition) > submission.total_bytes - submission.definition_offset) {
         return nullptr;
     }
-    return reinterpret_cast<const GraphDefinition *>(
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(
         reinterpret_cast<const uint8_t *>(&submission) + submission.definition_offset
     );
+    if (definition->total_bytes < sizeof(GraphDefinition) ||
+        definition->total_bytes > submission.total_bytes - submission.definition_offset) {
+        return nullptr;
+    }
+    return definition;
+}
+
+inline bool graph_submission_wire_size_valid(const GraphSubmission &submission, size_t available_bytes) {
+    return available_bytes >= sizeof(GraphSubmission) && submission.total_bytes == available_bytes;
 }
 
 inline const GraphTensor *graph_submission_tensors(const GraphSubmission &submission) {
@@ -366,6 +375,8 @@ struct GraphExecution {
     uint32_t boundary_scalar_count{0};
 };
 
+static_assert(offsetof(GraphExecution, storage_magic) == 0);
+static_assert(sizeof(GraphExecution::storage_magic) == sizeof(uint64_t));
 static_assert(std::is_trivially_destructible_v<GraphNodeStorage>);
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
 
@@ -442,7 +453,7 @@ inline void graph_execution_retire_node(GraphExecution &execution) {
 inline bool graph_submission_signal(GraphSubmission &submission, uint32_t bit) {
     constexpr uint32_t BOTH = 0x3;
     uint32_t observed = __atomic_fetch_or(&submission.activation_gate, bit, __ATOMIC_ACQ_REL);
-    return (observed | bit) == BOTH;
+    return observed != BOTH && (observed | bit) == BOTH;
 }
 
 inline GraphExecution *graph_submission_local_execution(GraphSubmission &submission) {

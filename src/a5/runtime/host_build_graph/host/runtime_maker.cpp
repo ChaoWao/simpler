@@ -456,12 +456,17 @@ bool upload_graph_submissions(Runtime *runtime, const HostApi *api, GraphHostSta
     const size_t count = graph_host_upload_count(graph_state);
     for (size_t index = 0; index < count; ++index) {
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
-        if (!upload.has_value() || upload->outer_slot->task_kind != TaskKind::GRAPH ||
+        if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
+            upload->bytes < sizeof(GraphSubmission) || upload->outer_slot->task_kind != TaskKind::GRAPH ||
             upload->outer_slot->task == nullptr) {
             LOG_ERROR("host-orch: invalid pending Graph POD image");
             return false;
         }
         auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
+        if (!graph_submission_wire_size_valid(*submission, upload->bytes)) {
+            LOG_ERROR("host-orch: Graph submission size does not match its POD image");
+            return false;
+        }
         const GraphDefinition *definition = graph_submission_definition(*submission);
         size_t execution_bytes = 0;
         if (definition == nullptr || definition->full_key != submission->graph_key || definition->task_count == 0 ||

@@ -45,6 +45,13 @@ static void latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread
     }
 }
 
+void SchedulerContext::fail_scheduler(Runtime *runtime, int32_t thread_idx, int32_t error_code) {
+    latch_scheduler_error(sched_ == nullptr ? nullptr : sched_->sm_header, thread_idx, error_code);
+    if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+        emergency_shutdown(runtime);
+    }
+}
+
 LoopAction SchedulerContext::handle_orchestrator_exit(
     int32_t thread_idx, PTO2SharedMemoryHeader *header, Runtime *runtime, int32_t &task_count
 ) {
@@ -1140,9 +1147,7 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
         }
         PTO2TaskSlotState &slot = ring.get_slot_state_by_task_id(id);
         if (slot.task_kind == TaskKind::GRAPH) {
-            while (!sched_->graph_prepare_queue.push_tagged(&slot, slot.task->task_id.raw)) {
-                SPIN_WAIT_HINT();
-            }
+            if (!sched_->push_graph_prepare(&slot, slot.task->task_id.raw, thread_idx)) return;
         }
         int32_t state = sched_->classify_fanin_state(&slot);
         if (state < 0) {
