@@ -7,85 +7,80 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""SDMA deferred-completion smoke test for onboard a2a3.
+"""Cross-architecture notification-counter deferred-completion test."""
 
-Each rank stages its input inside the HCCL window. The deferred producer fetches
-the peer rank's input into local ``out`` and registers its async event. The
-consumer depends on that output and writes ``result = out + 1``.
-"""
-
-import pytest
 import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
-from simpler_setup.scene_test import _rehosted_buffer_for, _rehosted_ref_for
+from simpler_setup.scene_test import _rehosted_ref_for
 
 N = 128 * 128
 NRANKS = 2
-DTYPE_NBYTES = 4
 
 
-def sdma_async_completion_orch_fn(orch, callables, task_args, config):
-    input_nbytes = N * DTYPE_NBYTES
+def async_notify_orch_fn(orch, callables, task_args, config):
     with orch.allocate_domain(
         name="default",
         workers=list(range(NRANKS)),
-        window_size=max(input_nbytes, 4 * 1024),
-        buffers=[CommBufferSpec(name="input_window", dtype="float32", count=N, nbytes=input_nbytes)],
+        window_size=4 * 1024,
+        buffers=[CommBufferSpec(name="notify_counter", dtype="int32", count=1, nbytes=4)],
     ) as handle:
-        for rank in range(NRANKS):
-            source = getattr(task_args, f"in_{rank}")
-            orch.copy_to(handle[rank].buffers["input_window"], _rehosted_buffer_for(task_args, source))
         for rank in range(NRANKS):
             domain = handle[rank]
             args = TaskArgs()
-            args.add_tensor(domain.buffers["input_window"].tensor((N,), DataType.FLOAT32), TensorArgType.INPUT)
+            args.add_tensor(_rehosted_ref_for(task_args, getattr(task_args, f"in_{rank}")), TensorArgType.INPUT)
             args.add_tensor(
                 _rehosted_ref_for(task_args, getattr(task_args, f"out_{rank}")), TensorArgType.OUTPUT_EXISTING
             )
             args.add_tensor(
                 _rehosted_ref_for(task_args, getattr(task_args, f"result_{rank}")), TensorArgType.OUTPUT_EXISTING
             )
+            args.add_tensor(domain.buffers["notify_counter"].tensor((1,), DataType.INT32), TensorArgType.INPUT)
             args.add_scalar(domain.device_ctx)
-            orch.submit_next_level(callables.sdma_async_completion, args, config, worker=rank)
+            orch.submit_next_level(callables.async_notify, args, config, worker=rank)
 
 
-@pytest.mark.sdma
 @scene_test(level=3, runtime="tensormap_and_ringbuffer")
-class TestSdmaAsyncCompletionDemo(SceneTestCase):
+class TestAsyncNotifyDemo(SceneTestCase):
     CALLABLE = {
-        "orchestration": sdma_async_completion_orch_fn,
+        "orchestration": async_notify_orch_fn,
         "callables": [
             {
-                "name": "sdma_async_completion",
+                "name": "async_notify",
                 "orchestration": {
-                    "source": "kernels/orchestration/sdma_async_completion_orch.cpp",
-                    "function_name": "sdma_async_completion_orchestration",
+                    "source": "kernels/orchestration/async_notify_orchestration.cpp",
+                    "function_name": "async_notify_orchestration",
                     "signature": [D.IN, D.OUT, D.OUT, D.IN],
                 },
                 "incores": [
                     {
-                        "func_id": func_id,
-                        "source": source,
+                        "func_id": 0,
+                        "source": "kernels/aiv/kernel_producer_notify.cpp",
                         "core_type": "aiv",
-                        "signature": [D.IN, D.OUT, D.OUT, D.IN],
-                    }
-                    for func_id, source in enumerate(
-                        [
-                            "kernels/aiv/kernel_sdma_tget_async.cpp",
-                            "kernels/aiv/kernel_consumer.cpp",
-                        ]
-                    )
+                        "signature": [D.IN, D.OUT, D.SCALAR, D.SCALAR],
+                    },
+                    {
+                        "func_id": 1,
+                        "source": "kernels/aiv/kernel_consumer.cpp",
+                        "core_type": "aiv",
+                        "signature": [D.IN, D.IN, D.OUT, D.SCALAR],
+                    },
+                    {
+                        "func_id": 2,
+                        "source": "kernels/aiv/kernel_notify_wait.cpp",
+                        "core_type": "aiv",
+                        "signature": [D.OUT, D.SCALAR, D.SCALAR],
+                    },
                 ],
             }
         ],
     }
     CASES = [
         {
-            "name": "peer_fetch",
-            "platforms": ["a2a3"],
+            "name": "notification_counter",
+            "platforms": ["a2a3", "a5"],
             "config": {"device_count": NRANKS, "num_sub_workers": 0},
             "params": {},
         }
@@ -96,7 +91,7 @@ class TestSdmaAsyncCompletionDemo(SceneTestCase):
     def generate_args(self, params):
         specs = []
         for rank in range(NRANKS):
-            inp = torch.tensor([float(rank * 1000 + (i % 251)) / 10.0 for i in range(N)], dtype=torch.float32)
+            inp = torch.tensor([float(i % 251) / 10.0 for i in range(N)], dtype=torch.float32)
             specs.extend(
                 [
                     TensorArg(f"in_{rank}", inp),
@@ -108,7 +103,7 @@ class TestSdmaAsyncCompletionDemo(SceneTestCase):
 
     def compute_golden(self, args, params):
         for rank in range(NRANKS):
-            expected_out = getattr(args, f"in_{1 - rank}")
+            expected_out = getattr(args, f"in_{rank}") * 2.0
             getattr(args, f"out_{rank}").copy_(expected_out)
             getattr(args, f"result_{rank}").copy_(expected_out + 1.0)
 

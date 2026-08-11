@@ -444,10 +444,11 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "sdma: the test provisions the PTO-ISA async-SDMA workspace. "
-        "SceneTestCase fixtures build its Worker with enable_sdma=True; "
-        "standalone tests may use the platform's default SDMA backend. "
-        "Provisioning creates 48 "
+        "sdma: the test exercises PTO-ISA async SDMA. SceneTestCase pytest "
+        "fixtures and standalone runners build its Worker with enable_sdma=True "
+        "unless worker_workspace=False selects a platform-provisioned "
+        "communication-domain workspace. "
+        "Worker-global provisioning creates 48 "
         "device-only STARS streams that sit in the device fault domain, which "
         "makes a later AICore fault on that device cost minutes instead of "
         "~0.3 s (#1425). Two consequences follow from the one marker: such a "
@@ -1449,6 +1450,9 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
 
     level = cls._st_level
     runtime = cls._st_runtime
+    from simpler_setup.scene_test import _class_wants_sdma  # noqa: PLC0415
+
+    wants_sdma = _class_wants_sdma(cls)
 
     if level == 2:
         # A prior test on this runtime poisoned the device and the rebuild below
@@ -1478,8 +1482,6 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
         # nor a plain Worker to one that did. It therefore takes a slot in the
         # pool key and gates reuse. Ordering puts every sdma test after the
         # rest, so the swap happens once, at the end.
-        wants_sdma = request.node.get_closest_marker("sdma") is not None
-
         for (rt, dev_id, pooled_sdma), existing in _l2_worker_pool.items():
             if rt == runtime and pooled_sdma == wants_sdma:
                 _register_l2_pool_recycle(request, _l2_worker_pool, (rt, dev_id, pooled_sdma), _l2_poisoned)
@@ -1553,7 +1555,7 @@ def st_worker(request, st_platform, device_pool, _l2_worker_pool, _l2_poisoned):
             num_sub_workers=max_subs,
             platform=st_platform,
             runtime=runtime,
-            enable_sdma=request.node.get_closest_marker("sdma") is not None,
+            enable_sdma=wants_sdma,
         )
         w._st_device_id = ids[0]  # expose primary device to test_run for profiling snapshots
 
