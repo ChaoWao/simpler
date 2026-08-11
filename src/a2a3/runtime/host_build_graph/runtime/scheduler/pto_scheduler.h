@@ -489,26 +489,27 @@ struct PTO2SchedulerState {
     // the per-shape ready_sync_queues[] (drained as Tier-0); everything else to
     // ready_queues[].
     void push_ready_routed(PTO2TaskSlotState *slot_state) {
-        if (slot_state->task_kind == TaskKind::GRAPH) {
-            graph_ready_queue.push(slot_state);
-            return;
-        }
-        PTO2ResourceShape shape = slot_state->active_mask.to_shape();
         bool pushed;
-        if (shape == PTO2ResourceShape::DUMMY ||
-            (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
-            pushed = dummy_ready_queue.push(slot_state);
-        } else if (slot_state->task_attrs.requires_sync_start()) {
-            pushed = ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
+        if (slot_state->task_kind == TaskKind::GRAPH) {
+            pushed = graph_ready_queue.push(slot_state);
         } else {
-            pushed = ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+            PTO2ResourceShape shape = slot_state->active_mask.to_shape();
+            if (shape == PTO2ResourceShape::DUMMY ||
+                (slot_state->task_attrs.has_predicate() && !slot_state->payload->predicate.pass())) {
+                pushed = dummy_ready_queue.push(slot_state);
+            } else if (slot_state->task_attrs.requires_sync_start()) {
+                pushed = ready_sync_queues[static_cast<int32_t>(shape)].push(slot_state);
+            } else {
+                pushed = ready_queues[static_cast<int32_t>(shape)].push(slot_state);
+            }
         }
-        // A queue is sized for the whole task window and each task is routed to one
-        // queue exactly once, so push cannot legitimately fail. A false return means
-        // the target slot fell outside the shipped prefix, or the window genuinely
-        // exceeds queue capacity — either way the task is dropped and the run would
-        // otherwise stall. Latch a named error so it surfaces as READY_QUEUE_OVERFLOW
-        // rather than an anonymous forward-progress timeout.
+        // Every ready / sync / dummy / graph task routes to exactly one queue. A
+        // false push means that queue's peak concurrent occupancy exceeded
+        // PTO2_READY_QUEUE_SIZE — a capacity mis-sizing, not a normal condition.
+        // Silently dropping the task would stall the run, so latch a named error
+        // (surfaces as READY_QUEUE_OVERFLOW rather than an anonymous
+        // forward-progress timeout). The graph_ready push is checked identically
+        // so a graph task cannot be dropped either.
         if (!pushed) {
             int32_t expected = PTO2_ERROR_NONE;
             sm_header->sched_error_code.compare_exchange_strong(
