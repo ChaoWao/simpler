@@ -75,6 +75,15 @@ PTO2TensorMapLayout PTO2TensorMap::reserve_layout_default(DeviceArena &arena, in
     return reserve_layout(arena, PTO2_TENSORMAP_NUM_BUCKETS, PTO2_TENSORMAP_POOL_SIZE, new_task_window_size);
 }
 
+/**
+ * Reset the map to empty for a fresh orchestration pass. Addresses the arena
+ * regions directly through arena.region_ptr, so it runs before
+ * wire_arena_pointers binds the struct's pointer fields (and before any
+ * insert/lookup). Clears the bucket heads and the per-task entry heads and
+ * resets the pool cursors (next_entry_idx / free_num); the entry pool itself is
+ * left untouched and initialized on write by new_entry(), so this is
+ * O(num_buckets + task_window_size), not O(pool_size).
+ */
 bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, DeviceArena &arena) {
     num_buckets = layout.num_buckets;
     pool_size = layout.pool_size;
@@ -82,30 +91,20 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
     // Address arena regions for data writes; do not store these in struct
     // fields (wire_arena_pointers does that).
     auto *buckets_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_buckets));
-    auto *entry_pool_arena = static_cast<PTO2TensorMapEntry *>(arena.region_ptr(layout.off_entry_pool));
-    auto *free_list_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_free_entry_list));
 
     // buckets[]: empty == nullptr.
     for (int32_t i = 0; i < num_buckets; i++) {
         buckets_arena[i] = nullptr;
     }
 
-    // entry_pool: zero-init equivalent to the previous calloc(entry_pool, ...).
-    // The pool's persistent invariant after init is "bucket_index == -1 means
-    // not linked", set explicitly below.
-    memset(entry_pool_arena, 0, static_cast<size_t>(pool_size) * sizeof(PTO2TensorMapEntry));
-    for (int32_t i = 0; i < pool_size; i++) {
-        entry_pool_arena[i].bucket_index = -1;
-        entry_pool_arena[i].next_in_bucket = nullptr;
-        entry_pool_arena[i].prev_in_bucket = nullptr;
-        entry_pool_arena[i].next_in_task = nullptr;
-        entry_pool_arena[i].prev_in_task = nullptr;
-        entry_pool_arena[i].producer_task_id = PTO2TaskId{};
-    }
-
-    // free_entry_list: zeroed (was calloc'd before); contents become meaningful
-    // only after entries are freed back, so the body of the array stays as 0.
-    memset(free_list_arena, 0, static_cast<size_t>(pool_size) * sizeof(PTO2TensorMapEntry *));
+    // Init-on-write: the entry pool is not pre-zeroed. new_entry() puts each
+    // bump-allocated slot into the clean "unlinked" state (bucket_index == -1,
+    // link pointers null) -- the same state free_entry() leaves a recycled slot
+    // in -- so only current_used() live entries are ever touched. buckets[] start
+    // empty and unallocated slots are never reached via a bucket chain, so
+    // nothing reads an uninitialized slot; the two debug scans (print_stats /
+    // valid_count) are bounded to next_entry_idx. free_entry_list is a stack
+    // sized by free_num, meaningful only after frees, so it needs no init.
 
     next_entry_idx = 0;
     free_num = 0;
@@ -151,7 +150,9 @@ void PTO2TensorMap::print_stats() {
     int32_t non_empty_buckets = 0;
 
     // Count entries
-    for (int32_t i = 0; i < pool_size; i++) {
+    // Init-on-write: only [0, next_entry_idx) slots have ever been allocated and
+    // thus initialized; slots beyond that are untouched and must not be read.
+    for (int32_t i = 0; i < next_entry_idx; i++) {
         if (entry_pool[i].bucket_index != -1) {
             if (entry_valid(entry_pool[i])) {
                 valid++;
@@ -199,7 +200,9 @@ void PTO2TensorMap::print_stats() {
 int32_t PTO2TensorMap::valid_count() {
     int32_t count = 0;
 
-    for (int32_t i = 0; i < pool_size; i++) {
+    // Init-on-write: only [0, next_entry_idx) slots have ever been allocated and
+    // thus initialized; slots beyond that are untouched and must not be read.
+    for (int32_t i = 0; i < next_entry_idx; i++) {
         if (entry_pool[i].bucket_index != -1 && entry_valid(entry_pool[i])) {
             count++;
         }
