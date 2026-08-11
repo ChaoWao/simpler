@@ -48,7 +48,9 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
+    MAILBOX_PREPARATION_DISPOSITION_VALUES,
     MAILBOX_SIZE,
+    MAILBOX_STATE_VALUES,
     MAX_REGISTERED_CALLABLE_IDS,
     MAX_TENSOR_DIMS,
     ArgDirection,
@@ -170,6 +172,8 @@ __all__ = [
     "MAILBOX_FRAME_SIZE",
     "MAILBOX_OFF_ERROR_MSG",
     "MAILBOX_ERROR_MSG_SIZE",
+    "MAILBOX_STATE_VALUES",
+    "MAILBOX_PREPARATION_DISPOSITION_VALUES",
     "read_args_from_blob",
     # Dynamic CommDomain allocation (orch-only API)
     "CommBufferSpec",

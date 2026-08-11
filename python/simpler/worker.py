@@ -200,7 +200,9 @@ from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
+    MAILBOX_PREPARATION_DISPOSITION_VALUES,
     MAILBOX_SIZE,
+    MAILBOX_STATE_VALUES,
     CallConfig,
     ChipCallable,
     ChipDomainContext,
@@ -286,6 +288,10 @@ _OFF_TASK_ARGS_BLOB = _OFF_TASK_CALLABLE_HASH + CALLABLE_HASH_DIGEST_BYTES
 _OFF_ACCEPTED = MAILBOX_FRAME_SIZE - MAILBOX_ERROR_MSG_SIZE - 8
 _TASK_ACCEPTED = 1
 _OFF_PREPARATION_DISPOSITION = _OFF_ACCEPTED + 4
+# The parent resets the disposition word to NONE when it claims a frame, so a
+# child never publishes it: staging reports VALIDATED_ONLY or NATIVE_PREPARED
+# and nothing else. Declared so the wire check below covers the whole enum.
+_DISPOSITION_NONE = 0
 _VALIDATED_ONLY = 1
 _NATIVE_PREPARED = 2
 _OFF_FRAME_PROTOCOL = _OFF_ACCEPTED - 40
@@ -328,6 +334,68 @@ _TASK_FAILED = 10
 _ACTIVATE = 11
 _PREPARE_READY = 12
 _TASK_FRAME_COUNT = 2
+
+
+def _assert_mailbox_wire_constants() -> None:
+    """Fail import if these constants disagree with the C++ enums.
+
+    The state word and the disposition word are a cross-process contract: a
+    parent writes them and its forked child reads them, so a value that differs
+    from the C++ side is a protocol mismatch between two live processes. Nothing
+    else catches it — the two declarations are in different languages, so there
+    is no compile error, and a wrong value reads as a legal-but-different state
+    rather than as corruption. The constants stay literals because they are read
+    on the mailbox polling path; this checks them instead of replacing them.
+    """
+    declared = {
+        "IDLE": _IDLE,
+        "TASK_READY": _TASK_READY,
+        "TASK_DONE": _TASK_DONE,
+        "SHUTDOWN": _SHUTDOWN,
+        "CONTROL_REQUEST": _CONTROL_REQUEST,
+        "CONTROL_DONE": _CONTROL_DONE,
+        "INIT_READY": _INIT_READY,
+        "INIT_FAILED": _INIT_FAILED,
+        "FRAME_STAGED": _FRAME_STAGED,
+        "TASK_LAUNCHED": _TASK_LAUNCHED,
+        "TASK_FAILED": _TASK_FAILED,
+        "ACTIVATE": _ACTIVATE,
+        "PREPARE_READY": _PREPARE_READY,
+    }
+    dispositions = {
+        "NONE": _DISPOSITION_NONE,
+        "VALIDATED_ONLY": _VALIDATED_ONLY,
+        "NATIVE_PREPARED": _NATIVE_PREPARED,
+    }
+    for name, table, native in (
+        ("MailboxState", declared, MAILBOX_STATE_VALUES),
+        ("MailboxPreparationDisposition", dispositions, MAILBOX_PREPARATION_DISPOSITION_VALUES),
+    ):
+        # Report every disagreement at once: a renumbering usually moves several
+        # values, and fixing them one import at a time is needless.
+        mismatched = sorted(
+            f"{key}: python={value} c++={native[key]}"
+            for key, value in table.items()
+            if key not in native or native[key] != value
+        )
+        if mismatched:
+            raise RuntimeError(
+                f"{name} constants in simpler.worker disagree with the C++ enum: "
+                + "; ".join(mismatched)
+                + ". These cross a process boundary, so the mismatch would surface as a hung or "
+                "misrouted child rather than an error."
+            )
+        # A value the C++ side has and Python does not is a state a child can
+        # legitimately publish and this module would not recognise.
+        missing = sorted(set(native) - set(table))
+        if missing:
+            raise RuntimeError(
+                f"{name} has enumerators the Python side does not declare: {', '.join(missing)}. "
+                "A child can publish them and this module would not recognise the value."
+            )
+
+
+_assert_mailbox_wire_constants()
 
 
 def _local_task_frame_count(platform: str, _runtime: str, pipeline_depth: int) -> int:
