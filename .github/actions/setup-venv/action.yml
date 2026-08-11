@@ -2,6 +2,10 @@ name: Set up venv
 description: Create .venv and install Python dependencies.
 
 inputs:
+  build-packages:
+    description: Packages installed before the main pip invocation, such as scikit-build-core and nanobind.
+    required: false
+    default: ""
   packages:
     description: Arguments passed to pip install after torch, for example ".[test]" or "-e .[test]".
     required: false
@@ -48,6 +52,7 @@ runs:
     - name: Create venv and install dependencies
       shell: bash
       env:
+        BUILD_PACKAGES: ${{ inputs.build-packages }}
         PACKAGES: ${{ inputs.packages }}
         CANN_ENV: ${{ inputs.cann-env }}
         IN_HTTP_PROXY: ${{ inputs.http-proxy }}
@@ -77,6 +82,9 @@ runs:
         pip install --upgrade pip
         if [ "${{ inputs.install-torch }}" = "true" ]; then
           pip install torch --index-url https://download.pytorch.org/whl/cpu
+        fi
+        if [ -n "$BUILD_PACKAGES" ]; then
+          pip install $BUILD_PACKAGES
         fi
         if [ -n "$PACKAGES" ]; then
           pip install $PACKAGES

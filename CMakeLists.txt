@@ -36,13 +36,32 @@ set(SIMPLER_SANITIZER "none" CACHE STRING
     "Sanitizer for host targets during install (none/asan/ubsan/tsan)")
 
 # Pre-build runtime binaries (persistent build dirs for incremental compilation)
+set(_SIMPLER_BUILD_RUNTIMES_COMMAND
+    ${Python_EXECUTABLE}
+    ${CMAKE_SOURCE_DIR}/simpler_setup/build_runtimes.py
+    --lib-dir ${CMAKE_SOURCE_DIR}/build/lib
+    --cache-dir ${CMAKE_SOURCE_DIR}/build/cache
+    --sanitizer ${SIMPLER_SANITIZER}
+)
 add_custom_target(build_runtimes ALL
-    COMMAND ${Python_EXECUTABLE}
-        ${CMAKE_SOURCE_DIR}/simpler_setup/build_runtimes.py
-        --lib-dir ${CMAKE_SOURCE_DIR}/build/lib
-        --cache-dir ${CMAKE_SOURCE_DIR}/build/cache
-        --sanitizer ${SIMPLER_SANITIZER}
+    COMMAND ${_SIMPLER_BUILD_RUNTIMES_COMMAND}
     COMMENT "Building runtime binaries (incremental)..."
+)
+foreach(_platform IN ITEMS a2a3sim a5sim a2a3 a5)
+    add_custom_target(build_runtimes_${_platform}
+        COMMAND ${_SIMPLER_BUILD_RUNTIMES_COMMAND} --platforms ${_platform}
+        COMMENT "Building ${_platform} runtime binaries (incremental)..."
+    )
+    add_custom_target(build_package_${_platform}
+        DEPENDS _task_interface build_runtimes_${_platform}
+    )
+endforeach()
+add_custom_target(build_runtimes_sim
+    COMMAND ${_SIMPLER_BUILD_RUNTIMES_COMMAND} --platforms a2a3sim a5sim
+    COMMENT "Building sim runtime binaries (incremental)..."
+)
+add_custom_target(build_package_sim
+    DEPENDS _task_interface build_runtimes_sim
 )
 
 if(SKBUILD_MODE)

@@ -40,7 +40,8 @@ jobs:
       - name: Set up environment
         uses: ./.github/actions/setup-venv
         with:
-          packages: ".[test]"
+          build-packages: "scikit-build-core nanobind cmake>=3.15"
+          packages: "--no-build-isolation --config-settings=build.targets=build_package_a5 .[test]"
           install-torch: "false"
           system-site-packages: "true"
           source-cann: "false"

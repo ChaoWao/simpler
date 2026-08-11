@@ -161,7 +161,7 @@ jobs:
       - name: Set up environment
         uses: ./.github/actions/setup-venv
         with:
-          packages: ".[test]"
+          packages: "--config-settings=build.targets=build_package_${{ inputs.platform }} .[test]"
           install-torch: "false"
           system-site-packages: "true"
           source-cann: "true"
@@ -175,6 +175,8 @@ jobs:
       # repeat the whole cost of the job.
       - name: Stage the checkout on the peer
         uses: ./.github/actions/pod-stage
+        with:
+          platform: ${{ inputs.platform }}
 
       - name: Run pod pytest
         uses: ./.github/actions/pod-run-pytest
