@@ -13,13 +13,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <new>
+#include <thread>
 #include <vector>
 
 #include "graph_cache.h"
 #include "graph_execution.h"
+#include "runtime_status/error_names.h"
+#include "scheduler/pto_scheduler.h"
 
 namespace {
 
@@ -320,4 +324,154 @@ TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
     );
     EXPECT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
+
+    graph_execution_mark_completed(*execution);
+    execution->retired_nodes.store(2, std::memory_order_release);
+    submission.local_execution = 0;
+    execution = graph_execution_localize(outer_slot);
+    ASSERT_NE(execution, nullptr);
+    ASSERT_TRUE(execution->definition_affine_reuse);
+    execution->materialized_tensor_patch_count = 1;
+
+    EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::INVALID);
+    EXPECT_EQ(execution->materialized_tensor_patches, 1U);
+}
+
+TEST(GraphSubmissionWire, RejectsDefinitionBeyondSubmission) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x3456;
+    std::vector<std::byte> image = make_test_submission(GRAPH_KEY_VALUE, 0x1000, 17, 0x2000, 4096);
+    auto &submission = *reinterpret_cast<GraphSubmission *>(image.data());
+    auto *definition = reinterpret_cast<GraphDefinition *>(image.data() + submission.definition_offset);
+    definition->total_bytes = submission.total_bytes - submission.definition_offset + 1;
+
+    EXPECT_EQ(graph_submission_definition(submission), nullptr);
+}
+
+TEST(GraphSubmissionWire, RequiresExactAvailableSize) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x4567;
+    std::vector<std::byte> image = make_test_submission(GRAPH_KEY_VALUE, 0x1000, 17, 0x2000, 4096);
+    const auto &submission = *reinterpret_cast<const GraphSubmission *>(image.data());
+
+    EXPECT_TRUE(graph_submission_wire_size_valid(submission, image.size()));
+    EXPECT_FALSE(graph_submission_wire_size_valid(submission, image.size() - 1));
+    EXPECT_FALSE(graph_submission_wire_size_valid(submission, image.size() + 1));
+}
+
+TEST(GraphSubmissionActivationGate, ActivatesExactlyOnceUnderContention) {
+    constexpr int ITERATIONS = 1000;
+    for (int iteration = 0; iteration < ITERATIONS; ++iteration) {
+        GraphSubmission submission{};
+        std::atomic<int32_t> activations{0};
+        std::thread prepared([&] {
+            if (graph_submission_signal(submission, 0x1)) activations.fetch_add(1, std::memory_order_relaxed);
+        });
+        std::thread ready([&] {
+            if (graph_submission_signal(submission, 0x2)) activations.fetch_add(1, std::memory_order_relaxed);
+        });
+        prepared.join();
+        ready.join();
+        EXPECT_EQ(submission.activation_gate, 0x3U);
+        EXPECT_EQ(activations.load(std::memory_order_relaxed), 1);
+    }
+}
+
+TEST(GraphSubmissionActivationGate, RetriesDoNotReactivate) {
+    GraphSubmission submission{};
+
+    EXPECT_FALSE(graph_submission_signal(submission, 0x1));
+    EXPECT_TRUE(graph_submission_signal(submission, 0x2));
+    EXPECT_FALSE(graph_submission_signal(submission, 0x1));
+    EXPECT_FALSE(graph_submission_signal(submission, 0x2));
+}
+
+TEST(GraphExecutionErrors, ReadyQueueOverflowHasTriageText) {
+    EXPECT_STREQ(error_name(PTO2_ERROR_READY_QUEUE_OVERFLOW), "READY_QUEUE_OVERFLOW");
+    EXPECT_STRNE(error_desc(PTO2_ERROR_READY_QUEUE_OVERFLOW), "");
+    EXPECT_STRNE(error_hint(PTO2_ERROR_READY_QUEUE_OVERFLOW), "");
+}
+
+TEST(GraphExecutionErrors, GraphReadyQueueOverflowIsReported) {
+    PTO2SharedMemoryHeader header{};
+    PTO2SchedulerState scheduler{};
+    scheduler.sm_header = &header;
+    PTO2ReadyQueueSlot queue_slots[2]{};
+    queue_slots[0].sequence.store(0, std::memory_order_relaxed);
+    queue_slots[1].sequence.store(1, std::memory_order_relaxed);
+    scheduler.graph_ready_queue.slots = queue_slots;
+    scheduler.graph_ready_queue.capacity = 2;
+    scheduler.graph_ready_queue.mask = 1;
+    scheduler.graph_ready_queue.enqueue_pos.store(0, std::memory_order_relaxed);
+    scheduler.graph_ready_queue.dequeue_pos.store(0, std::memory_order_relaxed);
+    PTO2TaskSlotState graph_slots[3]{};
+    for (PTO2TaskSlotState &slot : graph_slots) {
+        slot.task_kind = TaskKind::GRAPH;
+    }
+
+    scheduler.push_ready_routed(&graph_slots[0]);
+    scheduler.push_ready_routed(&graph_slots[1]);
+    scheduler.push_ready_routed(&graph_slots[2]);
+
+    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), PTO2_ERROR_READY_QUEUE_OVERFLOW);
+}
+
+TEST(GraphExecutionErrors, GraphPrepareQueueOverflowIsReported) {
+    PTO2SharedMemoryHeader header{};
+    PTO2SchedulerState scheduler{};
+    scheduler.sm_header = &header;
+    PTO2ReadyQueueSlot queue_slots[2]{};
+    queue_slots[0].sequence.store(0, std::memory_order_relaxed);
+    queue_slots[1].sequence.store(1, std::memory_order_relaxed);
+    scheduler.graph_prepare_queue.slots = queue_slots;
+    scheduler.graph_prepare_queue.capacity = 2;
+    scheduler.graph_prepare_queue.mask = 1;
+    scheduler.graph_prepare_queue.enqueue_pos.store(0, std::memory_order_relaxed);
+    scheduler.graph_prepare_queue.dequeue_pos.store(0, std::memory_order_relaxed);
+    PTO2TaskSlotState graph_slots[3]{};
+
+    EXPECT_TRUE(scheduler.push_graph_prepare(&graph_slots[0], 10, 3));
+    EXPECT_TRUE(scheduler.push_graph_prepare(&graph_slots[1], 11, 3));
+    EXPECT_FALSE(scheduler.push_graph_prepare(&graph_slots[2], 12, 3));
+
+    EXPECT_EQ(header.sched_error_code.load(std::memory_order_acquire), PTO2_ERROR_READY_QUEUE_OVERFLOW);
+    EXPECT_EQ(header.sched_error_thread.load(std::memory_order_acquire), 3);
+    EXPECT_EQ(header.sched_error_bitmap.load(std::memory_order_acquire), 1U << 3);
+}
+
+TEST(GraphExecutionErrors, InvalidNodeCompletionIsReported) {
+    PTO2SchedulerState scheduler{};
+    PTO2TaskSlotState slot{};
+    slot.task_kind = TaskKind::GRAPH_NODE;
+
+    const PTO2SchedulerState::TaskCompletionOutcome outcome = scheduler.complete_task(slot);
+
+    EXPECT_EQ(outcome.error_code, PTO2_ERROR_INVALID_ARGS);
+    EXPECT_EQ(outcome.stream_tasks_completed, 0);
+}
+
+TEST(GraphExecutionProgress, InternalNodeResolutionIsNotAHostCompletion) {
+    PTO2SchedulerState scheduler{};
+    GraphDefinition definition{};
+    GraphNodeStorage node{};
+    GraphExecution execution{};
+    execution.definition = &definition;
+    execution.nodes = &node;
+    execution.node_storage = &node;
+    execution.node_count = 1;
+    execution.remaining_nodes.store(1, std::memory_order_relaxed);
+    execution.state.store(GraphExecutionState::ACTIVE, std::memory_order_relaxed);
+    node.slot.task_kind = TaskKind::GRAPH_NODE;
+    node.slot.graph_context = &execution;
+    node.slot.graph_node_index = 0;
+
+    AsyncWaitList wait_list{};
+    wait_list.entries[0].slot_state = &node.slot;
+    wait_list.entries[0].task_token = PTO2TaskId::make(0, 1);
+    wait_list.entries[0].normal_done = true;
+    wait_list.count = 1;
+
+    const AsyncPollResult result = wait_list.poll_and_complete<false>(nullptr, &scheduler);
+
+    EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
+    EXPECT_EQ(result.resolved, 1);
+    EXPECT_EQ(result.completed, 0);
 }

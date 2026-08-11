@@ -29,7 +29,9 @@ grep -E "orch_error_code=|sched_error_code=|sub_class=|error detail:" <run log>
 
 ## How an error reaches you
 
-The `tensormap_and_ringbuffer` runtime runs orchestration and scheduling on the
+The `host_build_graph` runtime runs orchestration on the host, transfers the
+prepared image to the AICPU, and runs scheduling there. The
+`tensormap_and_ringbuffer` runtime runs both orchestration and scheduling on the
 AICPU. On a fatal condition the runtime **latches** a code into the shared-memory
 header; the host reads it back in `validate_runtime_impl` and prints the lines
 above.
@@ -77,6 +79,7 @@ layer to go looking in, which is what these columns are for.
 | 101 | ASYNC_COMPLETION_INVALID | kernel (async) |
 | 102 | ASYNC_WAIT_OVERFLOW | kernel (async) |
 | 103 | ASYNC_REGISTRATION_FAILED | runtime-internal |
+| 104 | READY_QUEUE_OVERFLOW | runtime-internal / config |
 
 ### SCHEDULER_TIMEOUT sub-classes
 
@@ -139,9 +142,9 @@ always *fallout* — scroll up for the first failure on that device. For classif
 
 ## Minimal reproductions
 
-Each code has a live, minimal trigger in `tests/st/runtime_fatal_codes/`. These are
-the fastest way to see what a code looks like, and the shape to copy when you
-suspect one:
+Each publicly triggerable code listed below has a live, minimal trigger in
+`tests/st/runtime_fatal_codes/`. These are the fastest way to see what a code
+looks like, and the shape to copy when you suspect one:
 
 | Code | How the ST provokes it | Fixture |
 | ---- | ---------------------- | ------- |
@@ -166,7 +169,7 @@ enforces coverage. Edit those and the log carries the new code correctly:
 | ---- | ----- |
 | runtime code names / descriptions / hints | `src/common/runtime_status/error_names.h` |
 | host-side CANN names / descriptions / hints | `src/common/platform/include/host/acl_error_names.h` |
-| `SCHEDULER_TIMEOUT` sub-class labels | `src/{arch}/runtime/tensormap_and_ringbuffer/common/pto_runtime_status.h` |
+| `SCHEDULER_TIMEOUT` sub-class labels | `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/pto_runtime_status.h` |
 | completeness test | `tests/ut/cpp/common/test_error_code_names.cpp` |
 
 **This page does not need updating for a new code** — deliberately. The tables
@@ -176,7 +179,7 @@ time, so there is nothing to drift out of sync.
 
 ## References
 
-- Code definitions: `src/{arch}/runtime/tensormap_and_ringbuffer/common/pto_runtime_status.h`
+- Code definitions: `src/{arch}/runtime/{host_build_graph,tensormap_and_ringbuffer}/common/pto_runtime_status.h`
 - Host print site: `.../host/runtime_maker.cpp` (`validate_runtime_impl`)
 - Sub-class logic: `.../runtime/scheduler/scheduler_cold_path.cpp` (`classify_stall_reason`)
 - End-to-end negative tests: `tests/st/runtime_fatal_codes/`

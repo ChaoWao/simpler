@@ -70,6 +70,10 @@ static inline const char *error_name(int32_t code) {
         return "ASYNC_WAIT_OVERFLOW";
     case PTO2_ERROR_ASYNC_REGISTRATION_FAILED:
         return "ASYNC_REGISTRATION_FAILED";
+#ifdef PTO2_ERROR_READY_QUEUE_OVERFLOW
+    case PTO2_ERROR_READY_QUEUE_OVERFLOW:
+        return "READY_QUEUE_OVERFLOW";
+#endif
     default:
         return "unknown";
     }
@@ -124,6 +128,10 @@ static inline const char *error_desc(int32_t code) {
     case PTO2_ERROR_ASYNC_REGISTRATION_FAILED:
         return "the scheduler received an async completion message of an illegal kind (runtime-internal; "
                "ASYNC_WAIT_OVERFLOW normally intercepts this first)";
+#ifdef PTO2_ERROR_READY_QUEUE_OVERFLOW
+    case PTO2_ERROR_READY_QUEUE_OVERFLOW:
+        return "a scheduler ready queue rejected a task because it had no free slot";
+#endif
     default:
         return "";
     }
@@ -176,6 +184,11 @@ static inline const char *error_hint(int32_t code) {
     case PTO2_ERROR_ASYNC_WAIT_OVERFLOW:
         return "cut the number of in-flight async completions per task, and confirm the consumer side "
                "actually polls and retires them";
+#ifdef PTO2_ERROR_READY_QUEUE_OVERFLOW
+    case PTO2_ERROR_READY_QUEUE_OVERFLOW:
+        return "ensure PTO2_RING_TASK_WINDOW does not exceed the ready-queue capacity; otherwise keep the device "
+               "log and report the scheduler queue-accounting bug";
+#endif
     default:
         return "";
     }
