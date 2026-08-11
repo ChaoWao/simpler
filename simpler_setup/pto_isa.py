@@ -16,7 +16,8 @@
    as-is — it already *is* the pinned ISA, so no checkout and no network.
 3. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh: clone
    over HTTPS (``--no-checkout`` so the default branch is never materialized)
-   and force-check-out the pin.
+   and force-check-out the pin. GitHub is attempted three times; if it cannot
+   provide the complete pinned checkout, fall back to the GitCode mirror.
 4. Verify HEAD exactly matches the pin before returning.
 
 Two deliberate choices:
@@ -51,14 +52,15 @@ from typing import Optional
 from .environment import PROJECT_ROOT
 
 # A fresh clone is only needed when no usable local checkout exists; when it is,
-# guard the single network hop against transient failures (e.g. GitHub
-# SSL_ERROR_SYSCALL) with a few backed-off retries before giving up.
+# guard the complete GitHub acquisition (clone plus landing on the pin) against
+# transient failures before falling back to the GitCode mirror.
 _CLONE_ATTEMPTS = 3
 _CLONE_RETRY_BACKOFF_S = 2
 
 logger = logging.getLogger(__name__)
 
-_PTO_ISA_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
+_PTO_ISA_GITHUB_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
+_PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/luohuan40/pto-isa.git"
 _PTO_ISA_PIN_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PTO_ISA_PIN_FILE = "pto_isa.pin"
 PTO_ISA_BUILD_METADATA = "pto_isa_build.json"
@@ -293,25 +295,12 @@ def _run_git_resilient(
     return result
 
 
-def _discard_incomplete_clone(target: Path, verbose: bool) -> None:
-    """Remove `target` if it exists but is not a usable clone."""
-    if not (target.exists() or target.is_symlink()) or _is_cloned(target):
-        return
-    if verbose:
-        logger.warning(f"Removing incomplete pto-isa clone at {target}")
-    if target.is_dir() and not target.is_symlink():
-        shutil.rmtree(target, ignore_errors=True)
-    else:
-        target.unlink(missing_ok=True)
-
-
 def _remove_clone(target: Path, verbose: bool) -> None:
-    """Unconditionally remove `target` so a fresh clone can replace it.
+    """Unconditionally remove `target` so a fresh pinned clone can replace it.
 
-    Unlike ``_discard_incomplete_clone``, this removes even a *valid* clone —
-    used when the managed checkout is at the wrong (or a dirty) revision and we
-    re-clone at the pinned commit instead of checking out over local changes.
-    Handles a directory, a plain file, or a (possibly broken) symlink.
+    This removes even a *valid* clone when it is at the wrong (or a dirty)
+    revision, and also clears partial clones between source attempts. Handles a
+    directory, a plain file, or a (possibly broken) symlink.
     """
     if not (target.exists() or target.is_symlink()):
         return
@@ -334,6 +323,9 @@ def _land_on_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
     would be overwritten." Forcing discards that pseudo-dirt and lands exactly on
     the pin. A full clone already carries every branch's history, but keep a
     fetch fallback in case the pin is not reachable from the default fetch.
+    Fetch the exact pin first so a stale remote-ref advertisement cannot make a
+    newly-pushed commit invisible; fall back to the advertised refs for servers
+    that do not allow fetching a reachable object by SHA.
     """
     try:
         result = _run_git_resilient(
@@ -341,8 +333,17 @@ def _land_on_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
         )
         if result.returncode != 0:
             if verbose:
-                logger.info(f"pto-isa commit {commit} missing locally, fetching origin...")
-            _run_git_resilient(["fetch", "origin"], cwd=clone_path, timeout=120, check=True, verbose=verbose)
+                logger.info(f"pto-isa commit {commit} missing locally, fetching the exact pin from origin...")
+            fetch_result = _run_git_resilient(
+                ["fetch", "--no-tags", "origin", commit],
+                cwd=clone_path,
+                timeout=120,
+                verbose=verbose,
+            )
+            if fetch_result.returncode != 0:
+                if verbose:
+                    logger.info("Exact PTO-ISA pin fetch failed; falling back to advertised origin refs...")
+                _run_git_resilient(["fetch", "origin"], cwd=clone_path, timeout=120, check=True, verbose=verbose)
             _run_git_resilient(
                 ["checkout", "--detach", "--force", commit], cwd=clone_path, timeout=30, check=True, verbose=verbose
             )
@@ -382,12 +383,53 @@ def _is_pristine_at_commit(clone_path: Path, commit: str, verbose: bool) -> bool
     return result.returncode == 0 and not result.stdout.strip()
 
 
+def _clone_from_remote(target: Path, commit: str, remote: str, attempts: int, verbose: bool) -> bool:
+    """Try complete clone-and-pin acquisitions from one remote."""
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            time.sleep(_CLONE_RETRY_BACKOFF_S * (attempt - 1))
+        _remove_clone(target, verbose)
+        logger.info(
+            f"Cloning pto-isa from {remote} to {target} at {commit} "
+            f"(attempt {attempt}/{attempts}, may take up to a minute)..."
+        )
+
+        failure = ""
+        try:
+            # --no-checkout: never materialize the default branch. Its working
+            # tree carries case-colliding docs/isa/TADDDEQRELU* paths; only lay
+            # down the pinned commit's tree in _land_on_commit.
+            result = _run_git(["clone", "--no-checkout", remote, str(target)], timeout=300)
+            if result.returncode != 0:
+                failure = result.stderr.strip() or f"git clone exited with status {result.returncode}"
+            elif _land_on_commit(target, commit, verbose=verbose):
+                if verbose:
+                    logger.info(f"pto-isa cloned from {remote} at {commit}: {target}")
+                return True
+            else:
+                failure = f"clone succeeded but commit {commit} could not be checked out"
+        except subprocess.TimeoutExpired:
+            failure = "clone operation timed out"
+        except Exception as e:  # noqa: BLE001
+            failure = str(e)
+
+        if verbose:
+            logger.warning(f"pto-isa acquisition from {remote} attempt {attempt}/{attempts} failed:\n{failure}")
+        # A successful clone that could not land on the pin is still unusable;
+        # remove it just like a partial clone before retrying or changing source.
+        _remove_clone(target, verbose)
+
+    return False
+
+
 def _clone(target: Path, commit: str, verbose: bool) -> bool:
     """Fresh-clone PTO-ISA to `target` over HTTPS and land it on `commit`.
 
     Any existing checkout at `target` is removed first, so this always yields a
     clean tree at exactly `commit` — the sync can never be blocked by local
-    modifications in a preexisting (cached/preset) managed checkout.
+    modifications in a preexisting (cached/preset) managed checkout. GitHub is
+    tried three times for the complete clone-and-pin operation before GitCode is
+    used as a fallback source.
     """
     if not _is_git_available():
         if verbose:
@@ -401,46 +443,25 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
             logger.warning(f"Failed to create clone parent dir: {e}")
         return False
 
-    _remove_clone(target, verbose)
-    logger.info(f"Cloning pto-isa to {target} over HTTPS at {commit} (may take up to a minute)...")
-
     try:
-        # --no-checkout: never materialize the default branch. Its working tree
-        # is what carries the case-colliding docs/isa/TADDDEQRELU* paths; we only
-        # ever want the pinned commit's tree, laid down by _land_on_commit.
-        result = _run_git(["clone", "--no-checkout", _PTO_ISA_HTTPS, str(target)], timeout=300)
-        for attempt in range(2, _CLONE_ATTEMPTS + 1):
-            if result.returncode == 0:
-                break
-            if verbose:
-                logger.warning(f"pto-isa clone attempt {attempt - 1}/{_CLONE_ATTEMPTS} failed:\n{result.stderr}")
-            _remove_clone(target, verbose)  # clear the partial clone before retrying
-            time.sleep(_CLONE_RETRY_BACKOFF_S * (attempt - 1))
-            result = _run_git(["clone", "--no-checkout", _PTO_ISA_HTTPS, str(target)], timeout=300)
-        if result.returncode != 0:
-            if verbose:
-                logger.warning(f"Failed to clone pto-isa after {_CLONE_ATTEMPTS} attempts:\n{result.stderr}")
-            _discard_incomplete_clone(target, verbose)
-            return False
-        if not _land_on_commit(target, commit, verbose=verbose):
-            # The clone succeeded but sits at the wrong commit (default HEAD),
-            # so it looks like a valid clone and `_discard_incomplete_clone`
-            # would leave it. Remove it outright so no wrong-revision checkout
-            # is stranded on disk for a later run to mistake for the pin.
-            _remove_clone(target, verbose)
-            return False
-        if verbose:
-            logger.info(f"pto-isa cloned at {commit}: {target}")
-        return True
-    except subprocess.TimeoutExpired:
-        if verbose:
-            logger.warning("Clone operation timed out")
-        _discard_incomplete_clone(target, verbose)
-        return False
+        if _clone_from_remote(
+            target,
+            commit,
+            _PTO_ISA_GITHUB_HTTPS,
+            attempts=_CLONE_ATTEMPTS,
+            verbose=verbose,
+        ):
+            return True
+
+        logger.warning(
+            f"GitHub could not provide PTO-ISA commit {commit} after {_CLONE_ATTEMPTS} attempts; "
+            f"falling back to {_PTO_ISA_GITCODE_HTTPS}"
+        )
+        return _clone_from_remote(target, commit, _PTO_ISA_GITCODE_HTTPS, attempts=1, verbose=verbose)
     except Exception as e:  # noqa: BLE001
         if verbose:
             logger.warning(f"Failed to clone pto-isa: {e}")
-        _discard_incomplete_clone(target, verbose)
+        _remove_clone(target, verbose)
         return False
 
 
@@ -460,7 +481,9 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
             f"PTO-ISA not available.\n"
             f"  The managed checkout must live at {clone_path} and match {PROJECT_ROOT / PTO_ISA_PIN_FILE}.\n"
             f"  If auto-clone failed, manually run:\n"
-            f"    git clone {_PTO_ISA_HTTPS} {clone_path}"
+            f"    git clone {_PTO_ISA_GITHUB_HTTPS} {clone_path}\n"
+            f"  Or use the fallback mirror:\n"
+            f"    git clone {_PTO_ISA_GITCODE_HTTPS} {clone_path}"
         )
     return resolved
 

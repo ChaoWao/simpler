@@ -69,6 +69,59 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     ]
 
 
+def test_clone_falls_back_to_gitcode_after_three_github_pin_failures(tmp_path, monkeypatch):
+    target = tmp_path / "build" / "pto-isa"
+    clone_remotes = []
+    land_results = iter([False, False, False, True])
+    sleeps = []
+
+    monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
+    monkeypatch.setattr(pto_isa.time, "sleep", sleeps.append)
+
+    def fake_run_git(args, cwd=None, timeout=30, check=False):
+        assert args[:2] == ["clone", "--no-checkout"]
+        clone_remotes.append(args[2])
+        return subprocess.CompletedProcess(["git", *args], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
+    monkeypatch.setattr(pto_isa, "_land_on_commit", lambda *args, **kwargs: next(land_results))
+
+    assert pto_isa._clone(target, PIN_A, verbose=False)
+    assert clone_remotes == [
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://gitcode.com/luohuan40/pto-isa.git",
+    ]
+    assert sleeps == [2, 4]
+
+
+def test_clone_falls_back_to_gitcode_after_three_github_clone_failures(tmp_path, monkeypatch):
+    target = tmp_path / "build" / "pto-isa"
+    clone_remotes = []
+
+    monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
+    monkeypatch.setattr(pto_isa.time, "sleep", lambda _seconds: None)
+
+    def fake_run_git(args, cwd=None, timeout=30, check=False):
+        assert args[:2] == ["clone", "--no-checkout"]
+        remote = args[2]
+        clone_remotes.append(remote)
+        returncode = 1 if remote == "https://github.com/hw-native-sys/pto-isa.git" else 0
+        return subprocess.CompletedProcess(["git", *args], returncode=returncode, stdout="", stderr="unavailable")
+
+    monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
+    monkeypatch.setattr(pto_isa, "_land_on_commit", lambda *args, **kwargs: True)
+
+    assert pto_isa._clone(target, PIN_A, verbose=False)
+    assert clone_remotes == [
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://gitcode.com/luohuan40/pto-isa.git",
+    ]
+
+
 def test_ensure_pto_isa_root_reuses_pristine_checkout(tmp_path, monkeypatch):
     clone_path = tmp_path / "build" / "pto-isa"
     (clone_path / "include").mkdir(parents=True)
@@ -194,6 +247,29 @@ def test_land_on_commit_fetches_when_commit_is_missing(tmp_path, monkeypatch):
     assert pto_isa._land_on_commit(tmp_path, PIN_A, verbose=False)
     assert calls == [
         (["checkout", "--detach", "--force", PIN_A], tmp_path, False),
+        (["fetch", "--no-tags", "origin", PIN_A], tmp_path, False),
+        (["checkout", "--detach", "--force", PIN_A], tmp_path, False),
+    ]
+
+
+def test_land_on_commit_falls_back_when_exact_fetch_is_unsupported(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_git(args, cwd=None, timeout=30, check=False):
+        calls.append((args, cwd, check))
+        if args == ["checkout", "--detach", "--force", PIN_A] and len([c for c in calls if c[0] == args]) == 1:
+            return subprocess.CompletedProcess(["git", *args], returncode=1, stdout="", stderr="missing")
+        if args == ["fetch", "--no-tags", "origin", PIN_A]:
+            return subprocess.CompletedProcess(["git", *args], returncode=1, stdout="", stderr="not our ref")
+        return subprocess.CompletedProcess(["git", *args], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
+    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_A)
+
+    assert pto_isa._land_on_commit(tmp_path, PIN_A, verbose=False)
+    assert calls == [
+        (["checkout", "--detach", "--force", PIN_A], tmp_path, False),
+        (["fetch", "--no-tags", "origin", PIN_A], tmp_path, False),
         (["fetch", "origin"], tmp_path, False),
         (["checkout", "--detach", "--force", PIN_A], tmp_path, False),
     ]
