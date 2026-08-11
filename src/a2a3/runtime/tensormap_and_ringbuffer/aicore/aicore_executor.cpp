@@ -106,13 +106,9 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     bool dump_args_enabled = SIMPLER_GET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     bool pmu_enabled = SIMPLER_GET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
 
-    // Per-core ChipSwimlaneActiveHead channel. AICPU completes
-    // `chip_swimlane_aicpu_init` (in pre_handshake_init) before any thread writes
-    // `aicpu_ready = 1` in `handshake_partition`, and Phase 1 above has already observed
-    // `aicpu_ready == 1`, so the rotation-table slot is populated and the
-    // first deref is safe here — off the dispatch→start critical path.
-    __gm__ ChipSwimlaneActiveHead *chip_swimlane_head =
-        chip_swimlane_enabled ? get_chip_swimlane_aicore_head() : nullptr;
+    // The per-core rotation channel is resolved on first dispatch. AICPU
+    // initializes the channel before publishing the first task.
+    __gm__ ChipSwimlaneActiveHead *chip_swimlane_head = nullptr;
     // cached_buf_seq must start != AICPU's initial head.current_buf_seq (0)
     // so the first reservation observes a mismatch and loads the buffer ptr.
     ChipSwimlaneAicoreLocalState chip_swimlane_local = {nullptr, UINT32_MAX, 0};
@@ -154,6 +150,10 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             uint64_t receive_time = chip_swimlane_enabled ? get_sys_cnt_aicore() : 0;
 
             uint32_t task_id = reg_val;  // Decode: register holds task_id directly
+
+            if (chip_swimlane_enabled && chip_swimlane_head == nullptr) {
+                chip_swimlane_head = get_chip_swimlane_aicore_head();
+            }
 
             // Select dual-buffer slot: same bit as AICPU used when writing payload
             __gm__ PTO2DispatchPayload *exec_payload = payload + (task_id & 1u);
