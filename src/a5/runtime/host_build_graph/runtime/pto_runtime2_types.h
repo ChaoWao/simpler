@@ -93,8 +93,13 @@
 // buffer (which would be UB on the arena's malloc'd backing).
 #define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * PTO2_MAX_RING_DEPTH)
 
-// Ready queue
-#define PTO2_READY_QUEUE_SIZE 65536  // Per-shape queue size
+// Per-shape ready-queue capacity (power of two). This is a ring buffer that
+// bounds peak CONCURRENT occupancy (enqueue_pos - dequeue_pos), not total task
+// count: slots recycle, so capacity need only exceed the most tasks ever
+// simultaneously ready in any one queue. Overflow on the ready/sync/dummy queues
+// latches PTO2_ERROR_READY_QUEUE_OVERFLOW (safe-fail), so it must exceed the
+// worst-case ready burst with margin.
+#define PTO2_READY_QUEUE_SIZE 8192
 
 // Cross-thread early-dispatch work queue (power of two)
 #define PTO2_EARLY_DISPATCH_QUEUE_SIZE 64
