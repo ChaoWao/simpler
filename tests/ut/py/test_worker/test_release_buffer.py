@@ -150,7 +150,8 @@ class TestReleaseBuffer:
     def test_serializes_with_a_racing_orchestration_callback(self):
         # _submit_l3_locked adds a run's handle to _accepted_run_handles (worker.py:9910) BEFORE
         # its orchestration callback runs -- the callback is what eventually records
-        # touched_identities via submit_next_level. Without taking _submit_mu (the same lock that
+        # touched_identities via submit_next_level. Without taking _submit_mu exclusively (the same
+        # serializer graph construction takes,
         # already serializes graph construction, worker.py:9741), release_buffer could observe the
         # handle with an empty touched_identities mid-callback and release a Buffer the callback is
         # about to dispatch a Tensor over. This drives that exact window directly.
@@ -165,7 +166,7 @@ class TestReleaseBuffer:
         release_returned = threading.Event()
 
         def fake_orchestration_callback():
-            with w._submit_mu:
+            with w._submit_mu.exclusive():
                 with w._hierarchical_start_cv:
                     w._accepted_run_handles.add(handle)
                 entered_callback.set()
