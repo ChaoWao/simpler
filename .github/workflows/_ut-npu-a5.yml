@@ -49,22 +49,7 @@ jobs:
         run: |
           source .venv/bin/activate
           DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "python -m pytest tests -m requires_hardware --platform a5 --device ${DEVICE_RANGE} -v"
-
-      - name: Build and run C++ hardware unit tests (a5)
-        run: |
-          source .venv/bin/activate
-          cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
-          cmake --build tests/ut/cpp/build
-          python3 -c "
-          import json, os
-          p = os.environ['DEVICE_RANGE'].split('-'); s, e = p[0], p[-1]
-          npus = [{'id': str(i), 'slots': 1} for i in range(int(s), int(e)+1)]
-          json.dump({'version': {'major': 1, 'minor': 0}, 'local': [{'npus': npus}]},
-                    open('tests/ut/cpp/build/resources.json', 'w'))
-          "
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a5)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure"
+          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "python -m pytest tests/ut -m requires_hardware --platform a5 --device ${DEVICE_RANGE} -v"
 
       - name: Build cann-examples/query
         if: inputs.include_cann_examples
