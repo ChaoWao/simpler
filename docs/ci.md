@@ -60,7 +60,7 @@ PullRequest
 | `ut-a2a3` | a2a3 self-hosted | `pytest tests/ut --platform a2a3` + `ctest -L "^requires_hardware(_a2a3)?$" --resource-spec-file ...` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (host + cross-compiled device SO, link smoke only) |
 | `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + `ctest -L "^requires_hardware(_a5)?$"` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
-| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st -m "not pod" --platform a5 --device ...`, then adaptive-parallel DFX feature smokes; x86_64 runners use `-m "not sdma and not pod"` |
+| `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st -m "not pod" --platform a5 --device ...`, including SDMA tests, then adaptive-parallel DFX feature smokes |
 | `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st -m pod --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
 
 ### Multi-machine pod jobs
@@ -135,11 +135,8 @@ benefit — device bin-packing for L3, xdist fanout for L2, and a shared
 pytest examples tests/st -m "not sdma and not pod" --platform a2a3 --device 4-7 -x
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5 -x
 
-# A5 ARM64 runners run the non-pod corpus
+# A5 runners run the non-pod corpus, including SDMA tests
 pytest examples tests/st -m "not pod" --platform a5 --device 0-7 -x
-
-# A5 x86_64 runners deselect SDMA and pod tests
-pytest examples tests/st -m "not sdma and not pod" --platform a5 --device 0-7 -x
 ```
 
 `-x` (`--exitfirst`) is appropriate for CI, where aborting on first
@@ -240,9 +237,9 @@ runner pools, branched at run time on the host arch (`uname -m`):
   the runner — so the step runs `pytest`/`ctest` directly with
   `--device ${DEVICE_RANGE}`.
 
-a5 runners always use `task-submit`. The x86_64 A5 scene-test sweep deselects
-the `sdma` marker; ARM64 runs the full non-pod corpus, including SDMA tests. Steps that
-only build (cmake, `RuntimeBuilder`, the
+a5 runners always use `task-submit` and run the full non-pod scene-test corpus,
+including SDMA tests, on both x86_64 and ARM64. Steps that only build (cmake,
+`RuntimeBuilder`, the
 `cann-examples` smokes) take no lock on either arch. The same device-lock rule
 applies to local onboard work — see
 [.claude/rules/running-onboard.md](../.claude/rules/running-onboard.md).
