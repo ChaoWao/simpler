@@ -42,6 +42,8 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     read_args_from_blob,
 )
 
+from .comm_endpoints import RegionAccessReasonCode
+
 __all__ = [
     "AccessMode",
     "AddressSpace",
@@ -545,6 +547,17 @@ class ImportContext:
     the endpoint x address_space matrix is enforced at submit time by the
     ``(target_worker_id, ptr)`` check in ``orchestrator.py``; this is a backstop for a path that
     reaches ``materialize`` without going through it, not a replacement for that check.
+
+    ``materialize()``'s DEVICE-backing rejections are tagged with
+    ``RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION`` (``comm_endpoints.py``) — the same
+    reason code the domain-scoped ``EndpointRegistry``/``RegionAccessService`` capability engine
+    reports for the same question at region-planning time. The two mechanisms share only this
+    rejection vocabulary, not a live registry object: this context is built inside forked child
+    processes (and at L2's same-process lazy-materialize point), both of which run before
+    ``EndpointRegistry.from_snapshot()``'s ``_require_ready_for_region_planning()`` precondition
+    can be assumed to hold. ``EndpointRegistry``'s topology snapshot also carries no per-chip
+    identity (only per-Worker), so it could not close this class's own Worker-grained-not-chip-
+    grained limit even where it is reachable.
     """
 
     is_host_endpoint: bool
@@ -605,11 +618,13 @@ class ImportRegistry:
         if desc.address_space == AddressSpace.DEVICE:
             if self._context is None or self._context.is_host_endpoint:
                 raise ValueError(
-                    f"ImportRegistry: refusing to materialize a DEVICE backing ({desc.identity}) on a host endpoint"
+                    f"ImportRegistry: [{RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value}] "
+                    f"refusing to materialize a DEVICE backing ({desc.identity}) on a host endpoint"
                 )
             if bytes(desc.identity.owner_instance_id) != self._context.owning_chip_instance_id:
                 raise ValueError(
-                    f"ImportRegistry: refusing to materialize a DEVICE backing ({desc.identity}) "
+                    f"ImportRegistry: [{RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value}] "
+                    f"refusing to materialize a DEVICE backing ({desc.identity}) "
                     f"minted for a different chip's owner"
                 )
         if desc.backend_kind in (
