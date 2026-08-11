@@ -673,8 +673,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
         l3_items = [
             i
             for i in items
-            if _item_scene_level(i) == SceneTestLevel.HOST
-            and not any(m.name == "skip" for m in i.iter_markers())
+            if _item_scene_level(i) == SceneTestLevel.HOST and not any(m.name == "skip" for m in i.iter_markers())
         ]
         if l3_items:
             sample = ", ".join(sorted({i.nodeid for i in l3_items})[:3])
