@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * Alternating Matmul-Add Orchestration Function (tensormap_and_ringbuffer Runtime)
+ * Alternating Matmul-Add Orchestration Function
  *
  * Submits independent matmul and add tasks per batch.
  *
