@@ -183,6 +183,28 @@ def test_resolve_unregistered_raises():
         reg.resolve(_identity())
 
 
+def test_unregister_drops_a_materialized_mapping():
+    oid = mint_owner_instance_id()
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=oid, buffer_id=1)
+    reg = ImportRegistry()
+    try:
+        reg.materialize(buffer.to_descriptor())
+        reg.unregister(buffer.identity)
+        with pytest.raises(KeyError):
+            reg.resolve(buffer.identity)
+        # Re-materializing after unregister must re-open the shm fresh, not fail or hit a stale
+        # cache entry — the same identity mapped, closed, and mapped again.
+        reg.materialize(buffer.to_descriptor())
+    finally:
+        reg.close()
+        buffer.close()
+
+
+def test_unregister_is_a_no_op_for_an_identity_never_materialized():
+    reg = ImportRegistry()
+    reg.unregister(_identity())  # must not raise
+
+
 def test_tensor_full_view_is_contiguous():
     oid = mint_owner_instance_id()
     h = create_host_shared_buffer(nbytes=1024, owner_instance_id=oid, buffer_id=1)

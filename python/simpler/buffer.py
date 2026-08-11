@@ -685,6 +685,19 @@ class ImportRegistry:
             raise KeyError(f"ImportRegistry: no buffer registered for {identity}")
         return imported
 
+    def unregister(self, identity: CanonicalIdentity) -> None:
+        """Drop ``identity``'s mapping if this endpoint made one; a no-op otherwise.
+
+        Consumer-side only — unlinking belongs to the owning Worker, so this never destroys a
+        backing, only this endpoint's own view of it. The owner broadcasts this on
+        ``release_buffer()`` so a long-lived endpoint does not keep every backing it ever saw
+        mapped for its entire lifetime; best-effort by design, since an endpoint that never
+        materialized ``identity`` has nothing to drop.
+        """
+        imported = self._by_identity.pop(identity, None)
+        if imported is not None and imported.shm is not None:
+            imported.shm.close()
+
     def close(self) -> None:
         """Close every mapping this endpoint made. Consumer-side only — unlinking belongs to the
         owning Worker, so this never destroys a backing."""
