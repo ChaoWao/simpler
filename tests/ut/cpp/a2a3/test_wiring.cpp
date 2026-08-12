@@ -406,6 +406,23 @@ TEST_F(WiringTest, EarlyDispatchWaitsForAllProducerBlocksPublished) {
     EXPECT_EQ(payload.dispatch_fanin.load(), payload.fanin_actual_count);
 }
 
+TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
+    alignas(64) PTO2TaskSlotState filler, consumer;
+    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    init_slot(consumer, PTO2_TASK_PENDING, 0, 1);
+
+    auto shape = static_cast<int32_t>(consumer.active_mask.to_shape());
+    auto &queue = sched.early_dispatch_queues[shape];
+    for (uint64_t i = 0; i < queue.capacity; i++) {
+        ASSERT_TRUE(queue.push_tagged(&filler, i));
+    }
+
+    sched.try_enqueue_early_dispatch_candidate(consumer);
+
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    EXPECT_EQ(queue.size(), queue.capacity);
+}
+
 TEST_F(WiringTest, LateWiredFullyPublishedProducerStillSeedsEarlyDispatch) {
     alignas(64) PTO2TaskSlotState producer, consumer;
     alignas(64) PTO2TaskPayload consumer_payload;

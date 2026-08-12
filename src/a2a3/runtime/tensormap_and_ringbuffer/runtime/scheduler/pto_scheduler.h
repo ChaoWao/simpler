@@ -741,8 +741,10 @@ struct PTO2SchedulerState {
     // onto ITS OWN cores (range-claim via next_block_idx), and re-pushes if blocks
     // remain — exactly mirroring how a partially-dispatched SPMD task is re-pushed to
     // the ready queue (scheduler_dispatch: pop -> claim -> re-push). A stale/released
-    // entry fails the STAGING check on pop and is dropped; a push that overflows is
-    // logged and the consumer's blocks fall back to normal dispatch.
+    // entry fails the STAGING check on pop and is dropped. An initial push that
+    // overflows rolls STAGING back to NONE so readiness takes the normal path; a
+    // re-push overflow after a partial claim leaves STAGING in place and the
+    // unclaimed blocks fall back to normal dispatch when the producer releases.
     PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
 
     // sync_start early-dispatch candidates park here instead of early_dispatch_queues[]:
@@ -926,10 +928,18 @@ struct PTO2SchedulerState {
         uint64_t task_id = static_cast<uint64_t>(consumer.task->task_id.raw);
         // A sync-start cohort uses one shape-agnostic queue so one owner can
         // choose an all-or-nothing local stage or the global-drain fallback.
-        if (consumer.task_attrs.requires_sync_start()) {
-            early_sync_start_queue.push_tagged(&consumer, task_id);
-        } else {
-            early_dispatch_queues[static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        bool queued = consumer.task_attrs.requires_sync_start() ?
+                          early_sync_start_queue.push_tagged(&consumer, task_id) :
+                          early_dispatch_queues[static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        if (!queued) {
+            // The candidate was never published to an early-dispatch drain. Undo
+            // the speculative claim so readiness follows the ordinary queue path.
+            // A concurrent producer release may already have changed STAGING to
+            // DISPATCHED; in that case its release path owns the transition.
+            expected = PTO2_EARLY_DISPATCH_STAGING;
+            consumer.payload->early_dispatch_state.compare_exchange_strong(
+                expected, PTO2_EARLY_DISPATCH_NONE, std::memory_order_seq_cst, std::memory_order_seq_cst
+            );
         }
     }
 
