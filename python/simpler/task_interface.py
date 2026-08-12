@@ -40,8 +40,9 @@ from typing import TYPE_CHECKING, Any
 # host_runtime.so resolves its undefined HostLogger / unified_log_* (and, on sim,
 # sim_context_*) symbols against those globals, so each must be loaded — exactly
 # once — before any host_runtime.so dlopen. The registry lives in _log_preload so
-# the import-time logger preload and ChipWorker.init share one entry per path.
+# the import-time logger preload and _initialize_simpler_log share one entry per path.
 from ._log_preload import host_span_sink_address as _host_span_sink_address
+from ._log_preload import preload as _preload_simpler_log
 from ._log_preload import preload_global as _preload_global
 
 if TYPE_CHECKING:
@@ -1233,16 +1234,29 @@ class GlobalCommDomainView:
 # dlopen of an already-registered path is skipped rather than repeated.
 
 
-def _initialize_simpler_log(bins: Any, log_level: int | None = None) -> ctypes.CDLL:
-    """Load and seed the process-global logger before runtime use or fork."""
+def _initialize_simpler_log(bins: Any | None, log_level: int | None = None) -> ctypes.CDLL | None:
+    """Seed this process's logger threshold, before any runtime use or fork.
+
+    ``bins`` names the copy a chip child must load, which is the one its
+    host_runtime.so resolves against. A Worker process that owns no chips has no
+    ``bins`` and passes None: the library the package already preloaded at import
+    is seeded instead, and a process where that preload found nothing keeps a
+    null host-span sink and emits nothing.
+    """
     if log_level is None:
         from . import _log  # noqa: PLC0415
 
         log_level = _log.get_current_config()
-    if not bins.simpler_log_path:
-        raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
 
-    log_handle = _preload_global(str(bins.simpler_log_path))
+    if bins is None:
+        log_handle = _preload_simpler_log()
+        if log_handle is None:
+            return None
+    else:
+        if not bins.simpler_log_path:
+            raise ValueError("simpler log init: bins.simpler_log_path is required")
+        log_handle = _preload_global(str(bins.simpler_log_path))
+
     bind_host_span_sink = getattr(_ti_module, "_bind_host_span_sink", None)
     if bind_host_span_sink is not None:
         bind_host_span_sink(_host_span_sink_address(log_handle))

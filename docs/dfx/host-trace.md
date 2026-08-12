@@ -43,6 +43,8 @@ One line per span, emitted on scope exit
 Span names and attributes percent-encode control bytes and record delimiters.
 They are length-capped (with `~` marking truncation) so each marker remains a
 single atomic pipe write even when forked workers share captured stderr.
+`strace_timing.py` decodes both on the way back in, so a consumer reading its
+output sees the original text; a consumer reading the raw log does not.
 
 ## Span tree
 
@@ -88,8 +90,9 @@ including time the caller spends polling or doing other host work; blocking
 
 ## L3/L4 host scheduler spans
 
-A hierarchical worker with direct local chip children also emits these spans
-through the same process-global `libsimpler_log.so` sink:
+Every hierarchical worker that drives next-level children emits these spans
+through the same process-global `libsimpler_log.so` sink — an L3 with chips and
+an L4 pod alike, since the orchestrator and scheduler code they run is the same:
 
 | Span | Host decision point |
 | ---- | ------------------- |
@@ -102,6 +105,17 @@ through the same process-global `libsimpler_log.so` sink:
 
 Their attributes carry the available `run_id`, `task_slot`, `group_index`,
 `worker_id`, `dispatch_id`, and endpoint kind.
+
+Because the names do not encode which level emitted them, a pod run puts the L4
+process and each of its L3 processes on lanes that differ only by pid. The
+per-level vocabulary that resolves this is tracked in
+[#1793](https://github.com/hw-native-sys/simpler/issues/1793).
+
+One process contributes at most two host lanes, because the scheduler runs on
+one thread: the facade thread emits `l3.graph_build` and `l3.submit`, and the
+scheduler thread emits the other four. `role=worker` on `l3.frame_submit`,
+`l3.activate` and `l3.complete` names the worker a dispatch targets, not the
+thread that ran it.
 
 The spans reach the logger over a fixed POD C ABI, `SimplerHostSpan` in
 `common/host_span.h`. `_task_interface` cannot link `libsimpler_log.so` — that

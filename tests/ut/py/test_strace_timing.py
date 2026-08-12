@@ -143,6 +143,79 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
     assert thread_names == {(41, 410): "orchestrator / facade", (41, 411): "scheduler"}
 
 
+def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
+    """The scheduler thread emits `role=worker` spans before its first `role=scheduler` one.
+
+    `scheduler.cpp`'s loop is the only caller of both `dispatch_ready()` and
+    `manager->progress()`, and inside `submit_dispatch` the `l3.frame_submit`
+    scope closes within `submit_progress` — before the `l3.dispatch` record
+    emitted after the admission lock is released. Naming the lane from the
+    first span it emitted therefore labels the scheduler `worker 3`.
+    """
+    lines = [
+        _span_record(
+            pid=41,
+            tid=411,
+            inv=7,
+            name="l3.frame_submit",
+            ts=1_410,
+            dur=40,
+            attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=worker",
+        ),
+        _span_record(
+            pid=41,
+            tid=411,
+            inv=7,
+            name="l3.dispatch",
+            ts=1_400,
+            dur=80,
+            attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=scheduler",
+        ),
+        _span_record(
+            pid=41,
+            tid=411,
+            inv=7,
+            name="l3.complete",
+            ts=2_000,
+            dur=30,
+            attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=worker",
+        ),
+    ]
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+    thread_names = {
+        (event["pid"], event["tid"]): event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+
+    assert thread_names == {(41, 411): "scheduler"}
+
+
+def test_parse_spans_decodes_percent_escaped_name_and_attribute_values():
+    """`encode_host_span_field` escapes whatever would otherwise be record grammar."""
+    lines = [
+        _span_record(
+            pid=41,
+            tid=410,
+            inv=7,
+            name="l3.odd%20name",
+            ts=100,
+            dur=10,
+            attrs="run_id=7 reason=submit%20failed%3A%20%5Bfatal%5D role=facade",
+        )
+    ]
+
+    span = next(iter(parse_spans(lines)))
+    assert span.name == "l3.odd name"
+
+    trace = to_host_swimlane([span])
+    args = next(event["args"] for event in trace["traceEvents"] if event["ph"] == "X")
+    assert args["reason"] == "submit failed: [fatal]"
+    # The raw field stays verbatim: it is the record as written.
+    assert "%5Bfatal%5D" in args["attrs"]
+
+
 def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
     lines = [
         _span_record(

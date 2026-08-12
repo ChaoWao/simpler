@@ -271,6 +271,76 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     assert startup_events[1:] == [("fork",), ("fork",)]
 
 
+def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monkeypatch):
+    """A chipless hierarchical process still runs a scheduler that emits host spans.
+
+    `init()` rejects `device_ids` above L3, so gating the seeding on them would
+    leave exactly the pod processes unseeded — and their `HostLogger` would keep
+    its constructor default however the `simpler` logger is configured.
+    """
+
+    class FakeParentWorker:
+        def __init__(self) -> None:
+            self.initialized = False
+            self.sub_workers: list[int] = []
+
+        def configure_pipeline_depth(self, depth: int) -> None:
+            pass
+
+        def add_sub_worker(self, _mailbox_addr: int, pid: int) -> None:
+            self.sub_workers.append(pid)
+
+        def init(self) -> None:
+            self.initialized = True
+
+        def get_orchestrator(self):
+            return object()
+
+    worker = Worker(
+        level=3,
+        device_ids=[],
+        num_sub_workers=1,
+        platform="a2a3",
+        runtime="host_build_graph",
+    )
+    worker._sub_shms = [SharedMemory(create=True, size=MAILBOX_SIZE)]
+    worker._worker = cast(Any, FakeParentWorker())
+    worker._startup_deadline = time.monotonic() + 5.0
+    startup_events: list[tuple] = []
+
+    def fake_fork() -> int:
+        startup_events.append(("fork",))
+        return 13001
+
+    monkeypatch.setattr(worker_mod.os, "fork", fake_fork)
+    monkeypatch.setattr(worker_mod._simpler_log, "get_current_config", lambda: 60)
+    monkeypatch.setattr(
+        worker_mod,
+        "_initialize_simpler_log",
+        lambda bins, level: startup_events.append(("log", bins, level)),
+        raising=False,
+    )
+    monkeypatch.setattr(worker, "_await_children_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(worker_mod, "Orchestrator", lambda native, owner: (native, owner))
+    try:
+        worker._start_hierarchical()
+    finally:
+        for shm in worker._sub_shms:
+            shm.close()
+            shm.unlink()
+
+    # bins is None: this process loads no chip binaries, so the copy the package
+    # already preloaded is the one to seed.
+    assert startup_events[0] == ("log", None, 60)
+    assert startup_events[1:] == [("fork",)]
+
+
+def test_a_worker_above_l3_can_never_carry_device_ids():
+    """The premise behind seeding unconditionally in `_start_hierarchical`."""
+    with pytest.raises(RuntimeError, match="device_ids are only supported on L3 Workers"):
+        Worker(level=4, device_ids=[0], num_sub_workers=0, platform="a2a3", runtime="host_build_graph").init()
+
+
 class _FakeChipRun:
     def __init__(self, lane, submission) -> None:
         self._lane = lane

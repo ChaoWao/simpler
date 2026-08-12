@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -52,12 +53,14 @@ namespace {
 
 std::mutex captured_host_spans_mu;
 std::vector<std::string> captured_host_span_names;
+std::vector<std::string> captured_host_span_attributes;
 
 class ScopedHostSpanCapture {
 public:
     ScopedHostSpanCapture() {
         std::lock_guard<std::mutex> lk(captured_host_spans_mu);
         captured_host_span_names.clear();
+        captured_host_span_attributes.clear();
         simpler::host_trace::bind_sink(&simpler_log_emit_host_span);
     }
 
@@ -73,12 +76,22 @@ bool captured_host_span(const std::string &name) {
            captured_host_span_names.end();
 }
 
+// The attributes of the first span emitted under `name`, or "" if none was.
+std::string captured_host_span_attrs(const std::string &name) {
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    for (size_t i = 0; i < captured_host_span_names.size(); ++i) {
+        if (captured_host_span_names[i] == name) return captured_host_span_attributes[i];
+    }
+    return "";
+}
+
 }  // namespace
 
 extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
     if (span == nullptr || span->name == nullptr) return;
     std::lock_guard<std::mutex> lk(captured_host_spans_mu);
     captured_host_span_names.emplace_back(span->name);
+    captured_host_span_attributes.emplace_back(span->attributes == nullptr ? "" : span->attributes);
 }
 
 // ---------------------------------------------------------------------------
@@ -2020,6 +2033,22 @@ struct CapacityOneProgressSchedulerFixture : public ProgressSchedulerFixture {
     uint32_t endpoint0_capacity() const override { return 1; }
 };
 
+TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleIndex) {
+    ScopedHostSpanCapture host_span_capture;
+
+    RunId run = orchestrator.begin_run();
+    SubmitResult group = orchestrator.submit_next_level_group(
+        C(9), {single_tensor_args(0x9000, TensorArgType::OUTPUT), single_tensor_args(0xA000, TensorArgType::OUTPUT)},
+        config, {0, 1}
+    );
+    orchestrator.close_run_submission(run);
+
+    ASSERT_TRUE(captured_host_span("l3.submit"));
+    std::ostringstream expected;
+    expected << "run_id=" << run << " task_slot=" << group.task_slot << " group_index=-1 group_size=2 role=facade";
+    EXPECT_EQ(captured_host_span_attrs("l3.submit"), expected.str());
+}
+
 TEST_F(ProgressSchedulerFixture, SuccessorStagesButActivatesOnlyAfterFifoPromotion) {
     RunId first_run = orchestrator.begin_run();
     SubmitResult first =
@@ -2476,6 +2505,26 @@ TEST_F(SchedulerFixture, ACancellationThatWinsTheClaimStopsTheDispatch) {
         std::lock_guard<std::mutex> lk(mock_worker.dispatched_mu);
         EXPECT_TRUE(mock_worker.dispatched.empty()) << "a cancelled task was still handed to a worker";
     }
+}
+
+// `l3.submit` is what a dispatch arrow is drawn back to, so the swimlane can
+// only pair the two if these attributes carry the same run/slot the dispatch
+// reports. A SUB submission is deliberately silent: it has no NEXT_LEVEL worker
+// to hand off to.
+TEST_F(SchedulerFixture, NextLevelSubmitEmitsAPairableHostSpan) {
+    ScopedHostSpanCapture host_span_capture;
+
+    auto submitted = orch.submit_next_level(C(0x42), single_tensor_args(0xCAFE, TensorArgType::OUTPUT), cfg, 0);
+
+    ASSERT_TRUE(captured_host_span("l3.submit"));
+    std::ostringstream expected;
+    expected << "run_id=" << run_id << " task_slot=" << submitted.task_slot
+             << " group_index=0 group_size=1 worker_id=0 role=facade";
+    EXPECT_EQ(captured_host_span_attrs("l3.submit"), expected.str());
+
+    mock_worker.wait_running();
+    mock_worker.complete();
+    wait_consumed(submitted.task_slot);
 }
 
 TEST_F(SchedulerFixture, IndependentTaskDispatchedAndConsumed) {

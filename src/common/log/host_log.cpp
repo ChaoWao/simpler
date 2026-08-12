@@ -55,6 +55,7 @@ std::string encode_host_span_field(const char *value, size_t capacity, bool attr
     std::string encoded;
     encoded.reserve(capacity);
     bool truncated = false;
+    size_t last_unit_size = 0;
     for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p != '\0'; ++p) {
         const unsigned char c = *p;
         const bool printable = c >= 0x20 && c <= 0x7E;
@@ -73,13 +74,14 @@ std::string encode_host_span_field(const char *value, size_t capacity, bool attr
             encoded.push_back(kHex[c >> 4]);
             encoded.push_back(kHex[c & 0x0F]);
         }
+        last_unit_size = required;
     }
+    // A `%XX` escape is one indivisible unit, so a marker written over the tail
+    // of a full field drops that whole unit rather than its last byte — which
+    // would leave `%0A` as the undecodable `%0~`.
     if (truncated && capacity != 0) {
-        if (encoded.size() == capacity) {
-            encoded.back() = '~';
-        } else {
-            encoded.push_back('~');
-        }
+        if (encoded.size() == capacity) encoded.resize(encoded.size() - last_unit_size);
+        encoded.push_back('~');
     }
     return encoded;
 }

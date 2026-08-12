@@ -237,6 +237,37 @@ TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
     EXPECT_EQ(captured.err[captured.err.size() - 2], '~');
 }
 
+// A `%XX` escape is three bytes that only mean anything together, so a field
+// that fills its budget exactly on one must lose the whole escape to the
+// truncation marker. Overwriting just the last byte would leave `%0A` as `%0~`,
+// which no decoder can read back.
+TEST(HostLogTest, HostSpanTruncationDropsAWholeEscapeRatherThanItsLastByte) {
+    // 3 (leading escape) + 186 + 3 (trailing escape) is exactly the 192-byte
+    // attribute budget, so the next byte truncates on an escape boundary.
+    const std::string attributes = "\n" + std::string(186, 'x') + "\ny";
+    const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
+                               sizeof(SimplerHostSpan),
+                               7,
+                               0x1234,
+                               0,
+                               0,
+                               100,
+                               25,
+                               "l3.dispatch",
+                               attributes.c_str()};
+
+    auto captured = run_with_config(LogLevel::TIMING, [&] {
+        simpler_log_emit_host_span(&span);
+    });
+
+    EXPECT_EQ(captured.err.find("%0~"), std::string::npos) << "truncation marker landed inside an escape";
+    // The leading escape survives whole; the trailing one is gone entirely.
+    EXPECT_NE(captured.err.find("dur=25 %0Axxx"), std::string::npos);
+    EXPECT_EQ(std::count(captured.err.begin(), captured.err.end(), '%'), 1);
+    ASSERT_GE(captured.err.size(), 2u);
+    EXPECT_EQ(captured.err[captured.err.size() - 2], '~');
+}
+
 TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
     int log_pipe[2];
     int start_pipe[2];

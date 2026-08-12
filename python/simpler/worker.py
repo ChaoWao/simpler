@@ -7272,13 +7272,14 @@ class Worker:
                 for digest, state in self._identity_registry.items()
             ]
 
-        # Seed the parent's process-global logger before the first fork so host
-        # spans obey the Python logger level in the facade as well as in every
-        # child. Logger-free topologies have no direct chip binaries and keep
-        # the nullable extension-local sink behavior.
+        # Seed this process's logger before the first fork: the spans its own
+        # scheduler emits obey the Python logger level, and every child inherits
+        # the mapping. Every level needs this — `init()` rejects device_ids above
+        # L3, so a pod process owns no chips yet still drives next-level Workers
+        # and emits their spans. A chip-owning Worker names the copy its children
+        # load; any other process seeds the copy the package already preloaded.
         chip_log_level = _simpler_log.get_current_config()
-        if device_ids:
-            _initialize_simpler_log(self._l3_bins, chip_log_level)
+        _initialize_simpler_log(self._l3_bins if device_ids else None, chip_log_level)
 
         self._startup_reaped_pids = set()
         self._startup_ready_pids = set()

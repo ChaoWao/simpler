@@ -70,6 +70,18 @@ _STRACE_RE = re.compile(
 # A record start, matched independently of whether the rest of that record
 # survived the write that emitted it.
 _STRACE_HEAD_RE = re.compile(r"\[STRACE\]\s+v=\d+")
+# The emitter percent-encodes any byte that would otherwise be record grammar —
+# see `encode_host_span_field` in src/common/log/host_log.cpp.
+_PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def decode_field(text):
+    """Reverse the emitter's percent-encoding of a name or attribute value.
+
+    A field the emitter truncated ends in ``~``, which is left in place: it is a
+    marker that the value is incomplete, not an encoded byte.
+    """
+    return _PERCENT_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
 @dataclass
@@ -134,7 +146,7 @@ def parse_spans(lines):
                 inv=int(m["inv"]),
                 hid=m["hid"].lower(),
                 depth=int(m["depth"]),
-                name=m["name"],
+                name=decode_field(m["name"]),
                 ts=int(m["ts"]),
                 dur=int(m["dur"]),
                 attrs=m["attrs"].strip(),
@@ -421,22 +433,49 @@ def _parsed_attrs(span):
         if re.fullmatch(r"-?\d+", value):
             attrs[key] = int(value)
         else:
-            attrs[key] = value
+            attrs[key] = decode_field(value)
     return attrs
 
 
-def _host_thread_name(span, attrs):
-    role = attrs.get("role")
-    if role == "facade" or span.name in {"l3.graph_build", "l3.submit"}:
-        return "orchestrator / facade"
-    if role == "scheduler":
-        return "scheduler"
-    if role == "worker" or span.name.startswith("l3."):
-        worker_id = attrs.get("worker_id")
+# Highest-precedence match wins. One OS thread emits spans of several roles: the
+# scheduler loop is the sole caller of both `dispatch_ready` and
+# `manager->progress`, so it emits `l3.dispatch` (role=scheduler) alongside
+# `l3.frame_submit` / `l3.activate` / `l3.complete`, whose `role=worker` names
+# the worker a dispatch targets rather than the thread doing the work.
+_HOST_THREAD_ROLES = ("facade", "scheduler", "worker")
+
+
+def _host_thread_name(entries):
+    """Name one OS thread's lane from every span it emitted.
+
+    `entries` are that thread's (span, parsed attributes) pairs.
+    """
+    roles = set()
+    worker_ids = set()
+    for span, attrs in entries:
+        role = attrs.get("role")
+        if role == "facade" or span.name in {"l3.graph_build", "l3.submit"}:
+            roles.add("facade")
+        elif role in ("scheduler", "worker"):
+            roles.add(role)
+        elif span.name.startswith("l3."):
+            roles.add("worker")
+        if role == "worker":
+            worker_ids.add(attrs.get("worker_id"))
+
+    for role in _HOST_THREAD_ROLES:
+        if role not in roles:
+            continue
+        if role == "facade":
+            return "orchestrator / facade"
+        if role == "scheduler":
+            return "scheduler"
+        worker_id = worker_ids.pop() if len(worker_ids) == 1 else None
         return f"worker {worker_id}" if worker_id is not None else "worker"
-    if span.name == "simpler_run" or span.name.startswith("simpler_run."):
+
+    if any(span.name == "simpler_run" or span.name.startswith("simpler_run.") for span, _ in entries):
         return "chip child"
-    return f"tid {span.tid}"
+    return f"tid {entries[0][0].tid}"
 
 
 def _flow_key(span, attrs):
@@ -456,17 +495,19 @@ def to_host_swimlane(spans):
     empty interval. Keep those raw events in ``unalignedDeviceSpans`` for
     inspection, but do not add them to Perfetto's visible ``traceEvents``.
     """
-    spans = list(spans)
+    # (span, parsed attributes) pairs, so the attributes travel with their span
+    # through every partition below. `Span` is an unhashable dataclass, so a
+    # side table would have to be keyed on identity.
+    entries = [(span, _parsed_attrs(span)) for span in spans]
     events = []
-    attrs_by_id = {id(span): _parsed_attrs(span) for span in spans}
 
-    host_spans = [span for span in spans if not span.is_device]
-    device_spans = [span for span in spans if span.is_device]
-    host_pids = sorted({span.pid for span in host_spans})
-    host_threads = sorted({(span.pid, span.tid) for span in host_spans})
+    host_entries = [entry for entry in entries if not entry[0].is_device]
+    device_entries = [entry for entry in entries if entry[0].is_device]
+    host_pids = sorted({span.pid for span, _ in host_entries})
+    host_threads = sorted({(span.pid, span.tid) for span, _ in host_entries})
 
     for pid in host_pids:
-        process_spans = [span for span in host_spans if span.pid == pid]
+        process_spans = [span for span, _ in host_entries if span.pid == pid]
         role = "host" if any(span.name.startswith("l3.") for span in process_spans) else "chip child"
         events.append(
             {
@@ -478,18 +519,17 @@ def to_host_swimlane(spans):
             }
         )
     for pid, tid in host_threads:
-        representative = next(span for span in host_spans if span.pid == pid and span.tid == tid)
+        on_thread = [entry for entry in host_entries if entry[0].pid == pid and entry[0].tid == tid]
         events.append(
             {
                 "ph": "M",
                 "name": "thread_name",
                 "pid": pid,
                 "tid": tid,
-                "args": {"name": _host_thread_name(representative, attrs_by_id[id(representative)])},
+                "args": {"name": _host_thread_name(on_thread)},
             }
         )
-    for span in sorted(host_spans, key=lambda item: (item.ts, item.pid, item.tid, item.name)):
-        parsed = attrs_by_id[id(span)]
+    for span, parsed in sorted(host_entries, key=lambda item: (item[0].ts, item[0].pid, item[0].tid, item[0].name)):
         event_args = {"inv": span.inv, "hid": span.hid, "depth": span.depth, "attrs": span.attrs, **parsed}
         events.append(
             {
@@ -504,10 +544,9 @@ def to_host_swimlane(spans):
         )
 
     submits = defaultdict(list)
-    for span in host_spans:
+    for span, attrs in host_entries:
         if span.name != "l3.submit":
             continue
-        attrs = attrs_by_id[id(span)]
         key = _flow_key(span, attrs)
         if key is not None:
             submits[key].append(span)
@@ -515,10 +554,9 @@ def to_host_swimlane(spans):
         candidates.sort(key=lambda item: item.ts)
 
     dispatches = []
-    for span in host_spans:
+    for span, attrs in host_entries:
         if span.name != "l3.dispatch":
             continue
-        attrs = attrs_by_id[id(span)]
         key = _flow_key(span, attrs)
         source = None
         if key is not None:
@@ -562,7 +600,9 @@ def to_host_swimlane(spans):
         )
 
     unaligned_device_spans = []
-    for span in sorted(device_spans, key=lambda item: (item.pid, item.inv, item.ts, item.tid, item.name)):
+    for span, attrs in sorted(
+        device_entries, key=lambda item: (item[0].pid, item[0].inv, item[0].ts, item[0].tid, item[0].name)
+    ):
         unaligned_device_spans.append(
             {
                 "name": span.name,
@@ -573,7 +613,7 @@ def to_host_swimlane(spans):
                 "inv": span.inv,
                 "hid": span.hid,
                 "depth": span.depth,
-                "attrs": {"raw": span.attrs, **attrs_by_id[id(span)]},
+                "attrs": {"raw": span.attrs, **attrs},
             }
         )
 
