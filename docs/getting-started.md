@@ -107,7 +107,7 @@ All workflows assume an activated project-local venv (see [`.claude/rules/venv-i
 ```bash
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-pip install --no-build-isolation scikit-build-core nanobind cmake pytest torch
+pip install --no-build-isolation scikit-build-core nanobind 'cmake>=3.15' pytest torch
 pip install --no-build-isolation -e .
 ```
 

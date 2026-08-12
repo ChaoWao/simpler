@@ -80,57 +80,48 @@ jobs:
       - name: Cache pip packages
         uses: ./.github/actions/cache-pip
 
-      - name: Install dependencies
-        if: inputs.setup_variant == 'github'
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install '.[test]'
-
-      - name: venv + deps
-        if: inputs.setup_variant == 'self-cpu'
+      - name: Set up environment
         uses: ./.github/actions/setup-venv
         with:
-          packages: ".[test]"
+          build-packages: "scikit-build-core nanobind cmake>=3.15"
+          packages: "--no-build-isolation --config-settings=build.targets=build_package_a2a3sim .[test]"
 
       - name: Run pytest scene tests
         run: |
-          if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
-            source .venv/bin/activate
-          fi
-          python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
+          .venv/bin/python -m pytest examples tests/st --platform a2a3sim --device 0-15 -v \
             --pto-session-timeout 600 --require-pto-isa
 
       - name: dep_gen smoke (a2a3)
         if: inputs.include_dfx_smokes
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+          .venv/bin/python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: dep_gen smoke (a2a3 host_build_graph)
         if: inputs.include_dfx_smokes
         run: |
-          pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
+          .venv/bin/python -m pytest tests/st/a2a3/host_build_graph/dfx/dep_gen/test_dep_gen.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-dep-gen
 
       - name: chip_swimlane smoke (a2a3)
         if: inputs.include_dfx_smokes
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
+          .venv/bin/python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-chip-swimlane --enable-dep-gen
 
       - name: PMU smoke (a2a3)
         if: inputs.include_dfx_smokes
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
+          .venv/bin/python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --enable-pmu 2
 
       - name: args_dump smoke (a2a3)
         if: inputs.include_dfx_smokes
         run: |
-          pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
+          .venv/bin/python -m pytest tests/st/a2a3/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a2a3sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
             --require-pto-isa --dump-args

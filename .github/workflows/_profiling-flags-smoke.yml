@@ -51,24 +51,14 @@ jobs:
       - name: Cache pip packages
         uses: ./.github/actions/cache-pip
 
-      - name: Install dependencies
-        if: inputs.setup_variant == 'github'
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e '.[test]'
-
-      - name: venv + editable install
-        if: inputs.setup_variant == 'self-cpu'
+      - name: Set up environment
         uses: ./.github/actions/setup-venv
         with:
-          packages: "-e .[test]"
+          build-packages: "scikit-build-core nanobind cmake>=3.15"
+          packages: "--no-build-isolation --config-settings=build.targets=_task_interface -e .[test]"
 
       - name: Run all profiling flag combos x 2 arches
         run: |
-          if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
-            source .venv/bin/activate
-          fi
-
           COMBO_NAMES=(dfx-off orch orch-tensormap sched orch-sched all-on)
           COMBO_DEFS=(
             "-DSIMPLER_DFX=0"
@@ -87,13 +77,13 @@ jobs:
               NAME=${COMBO_NAMES[$i]}
               DEFS=${COMBO_DEFS[$i]}
               echo "::group::$ARCH / $NAME - CXX defines: $DEFS"
-              if ! CXX="g++ $DEFS" python simpler_setup/build_runtimes.py --platforms "$ARCH"; then
+              if ! CXX="g++ $DEFS" .venv/bin/python simpler_setup/build_runtimes.py --platforms "$ARCH"; then
                 echo "::error::Build failed: $ARCH / $NAME"
                 FAIL+=("$ARCH/$NAME (build)")
                 echo "::endgroup::"
                 continue
               fi
-              if ! python -m pytest \
+              if ! .venv/bin/python -m pytest \
                    "examples/${ARCH_DIR}/tensormap_and_ringbuffer/vector_example/test_vector_example.py" \
                    --platform "$ARCH" --device 0-1 -p no:xdist \
                    --pto-session-timeout 600; then

@@ -60,7 +60,8 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           # --no-cache-dir so pip rebuilds rather than reusing a non-sanitizer wheel.
           pip install --no-cache-dir \
-            --config-settings=cmake.define.SIMPLER_SANITIZER=${{ matrix.sanitizer }} '.[test]'
+            --config-settings=cmake.define.SIMPLER_SANITIZER=${{ matrix.sanitizer }} \
+            --config-settings=build.targets=build_package_${{ matrix.platform }} '.[test]'
 
       - name: Run sanitized scene tests (${{ matrix.sanitizer }}, ${{ matrix.platform }})
         run: |

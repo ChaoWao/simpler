@@ -83,7 +83,7 @@ print('incore helpers OK:', inc_dirs)
 # ---------------------------------------------------------------------------
 python -c "import scikit_build_core, nanobind, cmake, torch, pytest" 2>/dev/null || {
     echo "ERROR: venv missing required deps. Install with:" >&2
-    echo "  pip install scikit-build-core nanobind cmake pytest torch" >&2
+    echo "  pip install scikit-build-core nanobind 'cmake>=3.15' pytest torch" >&2
     exit 1
 }
 
@@ -96,12 +96,19 @@ pip install .
 smoke "pip install ."
 
 # ---------------------------------------------------------------------------
-# Mode 2: pip install --no-build-isolation .
+# Mode 2: targeted install followed by a default --no-build-isolation install.
+# The second install deliberately reuses the CMake build directory: targeted
+# platform selection must not leak into an ordinary package install.
 # ---------------------------------------------------------------------------
-echo "===== Mode 2: pip install --no-build-isolation . ====="
+echo "===== Mode 2: targeted install -> default install ====="
 wipe_state
+pip install --no-build-isolation \
+    --config-settings=build.targets=build_package_a2a3sim .
+test -f build/lib/a2a3/sim/host_build_graph/libhost_runtime.so
+test ! -e build/lib/a5/sim
 pip install --no-build-isolation .
-smoke "pip install --no-build-isolation ."
+test -f build/lib/a5/sim/host_build_graph/libhost_runtime.so
+smoke "targeted -> default --no-build-isolation install"
 
 # ---------------------------------------------------------------------------
 # Mode 3: pip install -e .

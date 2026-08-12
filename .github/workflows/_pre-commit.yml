@@ -91,29 +91,13 @@ jobs:
 
       - name: Install package (for pyright C extension symbol resolution)
         if: inputs.setup_variant == 'github'
-        run: pip install .
+        run: pip install --config-settings=build.targets=build_package_sim .
 
       - name: venv + deps
         if: inputs.setup_variant == 'self-cpu'
         uses: ./.github/actions/setup-venv
         with:
-          packages: "."
-
-      - name: Cache cmake build directories
-        if: inputs.setup_variant == 'github'
-        uses: actions/cache@v5
-        with:
-          path: build/cache
-          key: cmake-sim-${{ runner.os }}-${{ hashFiles('src/**/CMakeLists.txt', 'src/**/build_config.py', 'simpler_setup/runtime_compiler.py', 'simpler_setup/kernel_compiler.py', 'simpler_setup/toolchain.py') }}
-          restore-keys: |
-            cmake-sim-${{ runner.os }}-
-
-      - name: Build sim runtimes
-        run: |
-          if [ "${{ inputs.setup_variant }}" = "self-cpu" ]; then
-            source .venv/bin/activate
-          fi
-          python simpler_setup/build_runtimes.py --platforms a2a3sim a5sim
+          packages: "--config-settings=build.targets=build_package_sim ."
 
       - name: Resolve base SHA
         id: base

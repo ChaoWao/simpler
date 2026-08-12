@@ -152,6 +152,21 @@ same in both pytest and standalone on purpose; see
 for the full hierarchy, fail-fast semantics, and the
 profiling-vs-parallelism trade-off.
 
+### Targeted runtime builds
+
+The sim, onboard, and pod jobs select one explicit
+`build_package_<platform>` CMake target during package install. That aggregate
+target depends on both the `_task_interface` binding and the selected platform's
+runtime target, so scikit-build-core makes one `cmake --build` call and CMake can
+build both dependencies in parallel while omitting unused platforms. The
+selection is not a cached CMake variable, so a later ordinary package install
+in the same worktree still uses the default `ALL` target and auto-detects every
+available platform. The pod stage passes the same target to its peer.
+Pre-commit selects the combined `build_package_sim` target, while each
+sanitizer matrix cell selects its own platform. The profiling-flags smoke
+installs only the `_task_interface` binding because its matrix builds every
+runtime configuration itself.
+
 ### Sim jobs on CPU-constrained runners
 
 Sim jobs (`st-sim-a2a3`, `st-sim-a5`) run on `ubuntu-latest`, whose standard
@@ -289,8 +304,13 @@ Entries are content-addressed and therefore never overwritten, so a run prunes
 entries whose last use is more than 14 days old before it exits. Without that,
 the directory grows by one entry per kernel change forever and the saved
 `actions/cache` archive — one new entry per push, restored by prefix — would
-crowd the repository's 10 GB cache budget and evict the pip and cmake caches
+crowd the repository's 10 GB cache budget and evict the pip and other caches
 the other jobs depend on.
+
+The pip download cache is keyed by runner OS, runner architecture, and
+`pyproject.toml`. Source-only changes therefore reuse the same dependency cache
+instead of creating another roughly 200 MB archive; pip still resolves and
+validates requested versions on every install.
 
 ## Test Sources
 

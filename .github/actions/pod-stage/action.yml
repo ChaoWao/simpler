@@ -4,13 +4,24 @@ description: >-
   the tree and the venv it produces are what every pod example then runs
   against, so re-staging per example would repeat the job's whole cost.
 
+inputs:
+  platform:
+    description: Onboard platform to build on the peer, either a2a3 or a5.
+    required: true
+
 runs:
   using: composite
   steps:
     - shell: bash
       working-directory: ${{ github.workspace }}
+      env:
+        POD_PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
+        case "$POD_PLATFORM" in
+          a2a3|a5) ;;
+          *) echo "::error::unsupported pod platform: $POD_PLATFORM"; exit 2 ;;
+        esac
         if ! command -v rsync >/dev/null 2>&1; then
           echo "::error::rsync is required on the pod runner for remote checkout sync"
           exit 1
@@ -111,5 +122,5 @@ runs:
           python3 -m venv --system-site-packages .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install '.[test]'
+          pip install --config-settings=build.targets=build_package_$POD_PLATFORM '.[test]'
         REMOTE_STAGE
