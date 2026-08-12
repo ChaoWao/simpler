@@ -923,6 +923,59 @@ struct PTO2SchedulerState {
         return consumers_rescanned;
     }
 
+    // Push every materialized-and-published root that has not been routed yet,
+    // once the outer Graph task's external dependency gate (0x2) has opened.
+    // route_cursor makes this idempotent, so it composes across the per-slice
+    // calls during materialization and the final call at the activation meet;
+    // each root reaches the ready queue exactly once. Non-roots are never pushed
+    // here — they reach the ready queue through their producers' wake list.
+    int32_t graph_route_ready_roots(GraphExecution &execution) {
+        if (execution.outer_slot == nullptr) return 0;
+        GraphSubmission *submission = graph_submission_from_slot(*execution.outer_slot);
+        if (submission == nullptr || (__atomic_load_n(&submission->activation_gate, __ATOMIC_ACQUIRE) & 0x2u) == 0) {
+            return 0;
+        }
+        const int32_t published = execution.published_nodes.load(std::memory_order_acquire);
+        int32_t routed = 0;
+        while (true) {
+            int32_t i = execution.route_cursor.load(std::memory_order_relaxed);
+            if (i >= published) break;
+            if (!execution.route_cursor.compare_exchange_weak(
+                    i, i + 1, std::memory_order_acq_rel, std::memory_order_relaxed
+                )) {
+                continue;
+            }
+            if (execution.fanin_offsets[i] == execution.fanin_offsets[i + 1]) {
+                push_ready_routed(&execution.node_storage[i].slot);
+                routed++;
+            }
+        }
+        return routed;
+    }
+
+    // Register each newly materialized node [first, last) on its first unmet
+    // producer (or route it immediately when every producer already completed),
+    // publish the range for routing, and route any roots the external gate now
+    // admits. Runs single-owner per graph via the prepare-queue slot, so the
+    // range never overlaps another thread's. register_graph_wake and
+    // graph_first_unmet_producer are safe against a producer completing
+    // concurrently, which is what lets a node dispatch before the whole graph is
+    // materialized.
+    void graph_incremental_publish(GraphExecution &execution, int32_t first, int32_t last) {
+        for (int32_t i = first; i < last; ++i) {
+            if (execution.fanin_offsets[i] == execution.fanin_offsets[i + 1]) continue;  // root
+            PTO2TaskSlotState &node = execution.node_storage[i].slot;
+            const int32_t unmet = graph_first_unmet_producer(execution, node);
+            if (unmet < 0) {
+                push_ready_routed(&node);
+            } else {
+                register_graph_wake(execution, &execution.nodes[unmet].slot, &node);
+            }
+        }
+        execution.published_nodes.store(last, std::memory_order_release);
+        graph_route_ready_roots(execution);
+    }
+
     int32_t activate_prepared_graph(GraphExecution &execution) {
         GraphExecutionState expected = GraphExecutionState::PREPARED;
         if (!execution.state.compare_exchange_strong(
@@ -930,20 +983,7 @@ struct PTO2SchedulerState {
             )) {
             return 0;
         }
-        const GraphDefinition &definition = *execution.definition;
-        const uint16_t *roots =
-            graph_definition_array<uint16_t>(definition, definition.off_root_indices, definition.root_count);
-        if (roots == nullptr) return 0;
-        int32_t routed = 0;
-        for (uint32_t i = 0; i < definition.root_count; ++i) {
-            const uint16_t node_index = roots[i];
-            if (node_index >= static_cast<uint32_t>(execution.node_count)) continue;
-            // Roots have zero internal fanin and are routed only here. Every
-            // non-root is registered on one saved producer at a time.
-            push_ready_routed(&execution.nodes[node_index].slot);
-            routed++;
-        }
-        return routed;
+        return graph_route_ready_roots(execution);
     }
 
     GraphMaterializeResult prepare_graph_task(
@@ -957,8 +997,12 @@ struct PTO2SchedulerState {
             return graph_submission_execution_initializing(*submission) ? GraphMaterializeResult::BUSY :
                                                                           GraphMaterializeResult::INVALID;
         }
+        const int32_t before = execution->materialized_nodes;
         const GraphMaterializeResult result =
             graph_execution_materialize_slice(outer_slot, *execution, max_nodes, nodes_materialized);
+        if (result == GraphMaterializeResult::PENDING || result == GraphMaterializeResult::PREPARED) {
+            graph_incremental_publish(*execution, before, execution->materialized_nodes);
+        }
         if (result == GraphMaterializeResult::PREPARED && graph_submission_signal(*submission, 0x1)) {
             activate_prepared_graph(*execution);
         }
@@ -998,8 +1042,16 @@ struct PTO2SchedulerState {
         }
 
         GraphExecution *execution = graph_execution_from_slot(slot_state);
-        if (execution == nullptr || execution->definition == nullptr || execution->nodes == nullptr ||
-            execution->state.load(std::memory_order_acquire) != GraphExecutionState::ACTIVE) {
+        if (execution == nullptr || execution->definition == nullptr || execution->nodes == nullptr) {
+            outcome.error_code = PTO2_ERROR_INVALID_ARGS;
+            return outcome;
+        }
+        // Incremental activation routes a node before the graph reaches ACTIVE, so a
+        // node can legitimately complete while the graph is still MATERIALIZING or
+        // PREPARED. Only SUBMITTED (execution not yet localized) and COMPLETED
+        // (execution already retired) are invalid states for a node completion.
+        const GraphExecutionState graph_state = execution->state.load(std::memory_order_acquire);
+        if (graph_state < GraphExecutionState::MATERIALIZING || graph_state > GraphExecutionState::ACTIVE) {
             outcome.error_code = PTO2_ERROR_INVALID_ARGS;
             return outcome;
         }
