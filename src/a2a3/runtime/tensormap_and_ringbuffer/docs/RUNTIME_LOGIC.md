@@ -436,8 +436,8 @@ Key members:
 | 2 | Initialize task descriptor + slot state, copy parameters |
 | 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers; collect producer pointers in `PTO2FaninBuilder` |
 | 4 | **Insert**: register OUTPUT/INOUT args in TensorMap |
-| 5 | **Record fanin metadata**: store producer pointers in `payload->fanin_inline_slot_states[]` (+ spill pool if >64); claim each live producer by incrementing `fanout_count` under that producer's `fanout_lock`. This step runs **before** `payload.init()`. |
-| 6 | **Orch-side wiring / ready publish**: the orchestrator wires live fanout edges into the per-ring dep_pool; zero-fanin and already-completed fanin tasks publish directly to ready queues |
+| 5 | **Record fanin metadata**: store producer edges (slot pointer + `DepFlags` packed in the low bits) in `payload->fanin_inline_edges[]` (+ spill pool if >64); claim each live producer by incrementing `fanout_count` under that producer's `fanout_lock`. Creator edges are `DEP_WAIT\|DEP_RETAIN`, tensormap-modifier edges `DEP_WAIT`. This step runs **before** `payload.init()`. |
+| 6 | **Orch-side wiring / ready publish**: the orchestrator wires live fanout edges into the per-ring dep_pool; zero-fanin and already-completed fanin tasks publish directly to ready queues. Only `DEP_WAIT` edges gate readiness — they count toward `fanin_count` and are linked onto the producer's `fanout_head` for completion notification. A `DEP_WAIT`-only edge releases its submit→wire retention pin **at wiring** (and on the already-completed fast path), so its producer can be CONSUMED without waiting for this consumer; a `DEP_RETAIN` edge keeps the pin until this consumer's `on_task_release`. A hypothetical `RETAIN`-only edge (none exist yet) would neither gate readiness nor link a fanout node — it only holds the lifetime pin. |
 
 > **Note**: Fanout wiring is now completed before publish in the orchestrator submit path.
 > Scheduler threads consume ready queues directly.

@@ -304,7 +304,7 @@ namespace {
 // host_build_graph is host-orchestration-first: the HOST dlopens the
 // orchestration .so and runs it to completion. The shared memory + arena carry
 // host-DDR cross-task pointers (slot_state.task/payload,
-// payload.fanin_inline_slot_states[], dep_pool/ready queues); the host relocates them to
+// payload.fanin_local_ids[], dep_pool/ready queues); the host relocates them to
 // their final device addresses (relocate_host_orch_image, below) BEFORE the H2D
 // copy, so the device receives a fully device-addressed image and schedules
 // only — no on-device pointer fixup.
@@ -375,7 +375,7 @@ struct HostOrchEntryPoints {
 // and boots scheduler-only with no on-device pointer fixup.
 //
 // Relocated pointers span TWO regions with DIFFERENT deltas: the SM block
-// (slot_state.task/.payload, fanin_inline_slot_states[], dep-entry.slot_state,
+// (slot_state.task/.payload, fanin_local_ids[], dep-entry.slot_state,
 // ready-queue slot.slot_state) and the arena block (slot_state.fanout_head,
 // dep-entry.next point into the SM but live in the arena).
 // Rather than track which delta each field needs, relocate() classifies every

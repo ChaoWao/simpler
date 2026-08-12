@@ -160,8 +160,8 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
     // Consumer task with 2 fanins
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
-    payload.fanin_inline_slot_states[0] = &producer_slots[0];
-    payload.fanin_inline_slot_states[1] = &producer_slots[1];
+    payload.fanin_inline_edges[0].set(&producer_slots[0], DEP_WAIT | DEP_RETAIN);
+    payload.fanin_inline_edges[1].set(&producer_slots[1], DEP_WAIT | DEP_RETAIN);
 
     task_slot.payload = &payload;
     task_slot.task = &desc;
@@ -197,8 +197,8 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
 
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
-    payload.fanin_inline_slot_states[0] = &producer_slots[0];
-    payload.fanin_inline_slot_states[1] = &producer_slots[1];
+    payload.fanin_inline_edges[0].set(&producer_slots[0], DEP_WAIT | DEP_RETAIN);
+    payload.fanin_inline_edges[1].set(&producer_slots[1], DEP_WAIT | DEP_RETAIN);
     task_slot.payload = &payload;
     task_slot.task = &desc;
 
@@ -240,7 +240,7 @@ TEST_F(WiringTest, WireTaskMixedProducerStates) {
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 3;
     for (int i = 0; i < 3; i++) {
-        payload.fanin_inline_slot_states[i] = &producers[i];
+        payload.fanin_inline_edges[i].set(&producers[i], DEP_WAIT | DEP_RETAIN);
     }
     task_slot.payload = &payload;
     task_slot.task = &desc;
@@ -450,8 +450,8 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
 
     init_slot(task_slot, PTO2_TASK_COMPLETED, 3, 1);
     payload.fanin_actual_count = 2;
-    payload.fanin_inline_slot_states[0] = &producers[0];
-    payload.fanin_inline_slot_states[1] = &producers[1];
+    payload.fanin_inline_edges[0].set(&producers[0], DEP_WAIT | DEP_RETAIN);
+    payload.fanin_inline_edges[1].set(&producers[1], DEP_WAIT | DEP_RETAIN);
     // Need a valid fanin_spill_pool even though we don't spill
     PTO2FaninPool dummy_pool{};
     PTO2FaninSpillEntry dummy_entries[4];
@@ -471,6 +471,93 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
     // Producers with fanout_refcount == fanout_count AND COMPLETED -> CONSUMED
     EXPECT_EQ(producers[0].task_state.load(), PTO2_TASK_CONSUMED);
     EXPECT_EQ(producers[1].task_state.load(), PTO2_TASK_CONSUMED);
+}
+
+// =============================================================================
+// WAIT/RETAIN split (issue #1375): an ordering-only (DEP_WAIT) producer drops
+// its submit->wire pin at wiring; a retention (DEP_WAIT|DEP_RETAIN) producer
+// keeps it until on_task_release. Both are linked for completion notification.
+// =============================================================================
+
+TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
+    alignas(64) PTO2TaskSlotState task_slot;
+    alignas(64) PTO2TaskSlotState wait_producer;    // DEP_WAIT only (modifier)
+    alignas(64) PTO2TaskSlotState retain_producer;  // DEP_WAIT|DEP_RETAIN (creator)
+    alignas(64) PTO2TaskPayload payload;
+    memset(&payload, 0, sizeof(payload));
+    PTO2TaskDescriptor desc{};
+
+    // Both live (PENDING) with a single submit pin (fanout_count = 1).
+    init_slot(wait_producer, PTO2_TASK_PENDING, 1, 1);
+    init_slot(retain_producer, PTO2_TASK_PENDING, 1, 1);
+
+    init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
+    payload.fanin_actual_count = 2;
+    payload.fanin_inline_edges[0].set(&wait_producer, DEP_WAIT);
+    payload.fanin_inline_edges[1].set(&retain_producer, DEP_WAIT | DEP_RETAIN);
+    PTO2FaninPool dummy_pool{};
+    PTO2FaninSpillEntry dummy_entries[4];
+    std::atomic<int32_t> dummy_error{PTO2_ERROR_NONE};
+    dummy_pool.init(dummy_entries, 4, &dummy_error);
+    payload.fanin_spill_pool = &dummy_pool;
+    task_slot.payload = &payload;
+    task_slot.task = &desc;
+
+    // Both WAIT edges gate readiness (wfanin = 2) and both link onto fanout_head.
+    wire_fanin(task_slot, 2);
+    EXPECT_NE(wait_producer.fanout_head, nullptr);
+    EXPECT_NE(retain_producer.fanout_head, nullptr);
+
+    // Ordering-only pin released at wiring; retention pin still held.
+    EXPECT_EQ(wait_producer.fanout_refcount.load(), 1);
+    EXPECT_EQ(retain_producer.fanout_refcount.load(), 0);
+
+    // Release: only the retention edge releases here; the ordering edge is not
+    // released a second time.
+    sched.on_task_release(task_slot);
+    EXPECT_EQ(wait_producer.fanout_refcount.load(), 1);
+    EXPECT_EQ(retain_producer.fanout_refcount.load(), 1);
+}
+
+// on_task_release must honor per-edge flags in the spill region too: a spilled
+// DEP_RETAIN edge is released; inline ordering-only edges are skipped.
+TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
+    alignas(64) PTO2TaskSlotState filler;        // 64 inline DEP_WAIT-only edges
+    alignas(64) PTO2TaskSlotState spill_retain;  // 1 spilled DEP_RETAIN edge
+    alignas(64) PTO2TaskSlotState task_slot;
+    alignas(64) PTO2TaskPayload payload;
+    memset(&payload, 0, sizeof(payload));
+    PTO2TaskDescriptor desc{};
+
+    // filler carries a large fanout_count so releasing it can never consume it.
+    init_slot(filler, PTO2_TASK_COMPLETED, 1, 100);
+    init_slot(spill_retain, PTO2_TASK_COMPLETED, 1, 1);
+    init_slot(task_slot, PTO2_TASK_COMPLETED, 0, 1);
+
+    for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
+        payload.fanin_inline_edges[i].set(&filler, DEP_WAIT);
+    }
+    PTO2FaninPool spill_pool{};
+    PTO2FaninSpillEntry spill_entries[4];
+    std::atomic<int32_t> err{PTO2_ERROR_NONE};
+    spill_pool.init(spill_entries, 4, &err);
+    auto *e = spill_pool.alloc();
+    int32_t spill_start = spill_pool.top - 1;
+    e->set(&spill_retain, DEP_WAIT | DEP_RETAIN);
+
+    payload.fanin_actual_count = PTO2_FANIN_INLINE_CAP + 1;
+    payload.fanin_spill_start = spill_start;
+    payload.fanin_spill_pool = &spill_pool;
+    task_slot.payload = &payload;
+    task_slot.task = &desc;
+
+    sched.on_task_release(task_slot);
+
+    // Ordering-only inline edges are skipped; filler is untouched.
+    EXPECT_EQ(filler.fanout_refcount.load(), 0);
+    // The spilled retention edge is released (and consumed: rc == fc, COMPLETED).
+    EXPECT_EQ(spill_retain.fanout_refcount.load(), 1);
+    EXPECT_EQ(spill_retain.task_state.load(), PTO2_TASK_CONSUMED);
 }
 
 // =============================================================================

@@ -41,7 +41,7 @@ protected:
     PTO2FaninPool pool{};
 
     void SetUp() override {
-        entries.assign(POOL_CAP, PTO2FaninSpillEntry{nullptr});
+        entries.assign(POOL_CAP, PTO2FaninSpillEntry{});
         error_code.store(PTO2_ERROR_NONE);
         pool.init(entries.data(), POOL_CAP, &error_code);
     }
@@ -165,7 +165,7 @@ protected:
     alignas(64) PTO2TaskSlotState slots[64];
 
     void SetUp() override {
-        spill_entries.assign(POOL_CAP, PTO2FaninSpillEntry{nullptr});
+        spill_entries.assign(POOL_CAP, PTO2FaninSpillEntry{});
         error_code.store(PTO2_ERROR_NONE);
         spill_pool.init(spill_entries.data(), POOL_CAP, &error_code);
         memset(slots, 0, sizeof(slots));
@@ -173,13 +173,13 @@ protected:
 };
 
 TEST_F(ForEachFaninTest, InlineOnlyVoid) {
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < 5; i++) {
-        inline_slots[i] = &slots[i];
+        inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
     std::vector<PTO2TaskSlotState *> visited;
-    for_each_fanin_storage(inline_slots, 5, 0, spill_pool, [&](PTO2TaskSlotState *s) {
+    for_each_fanin_storage(inline_slots, 5, 0, spill_pool, [&](PTO2TaskSlotState *s, DepFlags) {
         visited.push_back(s);
     });
 
@@ -190,13 +190,13 @@ TEST_F(ForEachFaninTest, InlineOnlyVoid) {
 }
 
 TEST_F(ForEachFaninTest, InlineOnlyBoolEarlyReturn) {
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < 5; i++) {
-        inline_slots[i] = &slots[i];
+        inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
     int count = 0;
-    bool result = for_each_fanin_storage(inline_slots, 5, 0, spill_pool, [&](PTO2TaskSlotState *) -> bool {
+    bool result = for_each_fanin_storage(inline_slots, 5, 0, spill_pool, [&](PTO2TaskSlotState *, DepFlags) -> bool {
         count++;
         return count < 3;  // stop after 3rd
     });
@@ -206,12 +206,12 @@ TEST_F(ForEachFaninTest, InlineOnlyBoolEarlyReturn) {
 }
 
 TEST_F(ForEachFaninTest, InlineOnlyBoolAllTrue) {
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < 3; i++) {
-        inline_slots[i] = &slots[i];
+        inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
-    bool result = for_each_fanin_storage(inline_slots, 3, 0, spill_pool, [](PTO2TaskSlotState *) -> bool {
+    bool result = for_each_fanin_storage(inline_slots, 3, 0, spill_pool, [](PTO2TaskSlotState *, DepFlags) -> bool {
         return true;
     });
 
@@ -219,9 +219,9 @@ TEST_F(ForEachFaninTest, InlineOnlyBoolAllTrue) {
 }
 
 TEST_F(ForEachFaninTest, ZeroFanin) {
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     int count = 0;
-    for_each_fanin_storage(inline_slots, 0, 0, spill_pool, [&](PTO2TaskSlotState *) {
+    for_each_fanin_storage(inline_slots, 0, 0, spill_pool, [&](PTO2TaskSlotState *, DepFlags) {
         count++;
     });
     EXPECT_EQ(count, 0);
@@ -233,20 +233,20 @@ TEST_F(ForEachFaninTest, ZeroFanin) {
 
 TEST_F(ForEachFaninTest, SpillNoWrap) {
     // 18 fanins = 16 inline + 2 spill
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
-        inline_slots[i] = &slots[i];
+        inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
     // Allocate 2 spill entries
     auto *s0 = spill_pool.alloc();
     int32_t spill_start = spill_pool.top - 1;
-    s0->slot_state = &slots[16];
+    s0->set(&slots[16], DEP_WAIT | DEP_RETAIN);
     auto *s1 = spill_pool.alloc();
-    s1->slot_state = &slots[17];
+    s1->set(&slots[17], DEP_WAIT | DEP_RETAIN);
 
     std::vector<PTO2TaskSlotState *> visited;
-    for_each_fanin_storage(inline_slots, 18, spill_start, spill_pool, [&](PTO2TaskSlotState *s) {
+    for_each_fanin_storage(inline_slots, 18, spill_start, spill_pool, [&](PTO2TaskSlotState *s, DepFlags) {
         visited.push_back(s);
     });
 
@@ -268,9 +268,9 @@ TEST_F(ForEachFaninTest, SpillWithWrap) {
     spill_pool.top = POOL_CAP - 2;
     spill_pool.tail = POOL_CAP - 2;
 
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
-        inline_slots[i] = &slots[i];
+        inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
     // 4 spill entries: indices 30, 31, 0, 1 (wraps around)
@@ -278,11 +278,11 @@ TEST_F(ForEachFaninTest, SpillWithWrap) {
     for (int i = 0; i < 4; i++) {
         auto *e = spill_pool.alloc();
         ASSERT_NE(e, nullptr);
-        e->slot_state = &slots[16 + i];
+        e->set(&slots[16 + i], DEP_WAIT | DEP_RETAIN);
     }
 
     std::vector<PTO2TaskSlotState *> visited;
-    for_each_fanin_storage(inline_slots, 20, spill_start, spill_pool, [&](PTO2TaskSlotState *s) {
+    for_each_fanin_storage(inline_slots, 20, spill_start, spill_pool, [&](PTO2TaskSlotState *s, DepFlags) {
         visited.push_back(s);
     });
 
@@ -302,23 +302,61 @@ TEST_F(ForEachFaninTest, SpillWithWrap) {
 // =============================================================================
 
 TEST_F(ForEachFaninTest, SpillBoolEarlyReturnInSpillRegion) {
-    PTO2TaskSlotState *inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
     for (int i = 0; i < PTO2_FANIN_INLINE_CAP; i++) {
-        inline_slots[i] = &slots[i];
+        inline_slots[i].set(&slots[i], DEP_WAIT);
     }
 
     int32_t spill_start = spill_pool.top;
     for (int i = 0; i < 4; i++) {
         auto *e = spill_pool.alloc();
-        e->slot_state = &slots[16 + i];
+        e->set(&slots[16 + i], DEP_WAIT);
     }
 
     int count = 0;
-    bool result = for_each_fanin_storage(inline_slots, 20, spill_start, spill_pool, [&](PTO2TaskSlotState *) -> bool {
-        count++;
-        return count < 17;  // stop on 17th (first spill entry)
-    });
+    bool result =
+        for_each_fanin_storage(inline_slots, 20, spill_start, spill_pool, [&](PTO2TaskSlotState *, DepFlags) -> bool {
+            count++;
+            return count < 17;  // stop on 17th (first spill entry)
+        });
 
     EXPECT_FALSE(result);
     EXPECT_EQ(count, 17);
+}
+
+// =============================================================================
+// PTO2FaninSpillEntry: DepFlags packing round-trips across inline and spill
+// =============================================================================
+
+TEST_F(ForEachFaninTest, DepFlagsRoundTripInlineAndSpill) {
+    // Fill all 64 inline edges; slots 0..2 carry distinct flag combinations.
+    PTO2FaninSpillEntry inline_slots[PTO2_FANIN_INLINE_CAP] = {};
+    inline_slots[0].set(&slots[0], DEP_WAIT);
+    inline_slots[1].set(&slots[1], DEP_RETAIN);
+    inline_slots[2].set(&slots[2], DEP_WAIT | DEP_RETAIN);
+    for (int i = 3; i < PTO2_FANIN_INLINE_CAP; i++) {
+        inline_slots[i].set(&slots[i], DEP_WAIT);
+    }
+
+    // Two edges beyond the inline cap spill; they carry RETAIN-only and WAIT|RETAIN.
+    auto *s0 = spill_pool.alloc();
+    int32_t spill_start = spill_pool.top - 1;
+    s0->set(&slots[0], DEP_RETAIN);
+    auto *s1 = spill_pool.alloc();
+    s1->set(&slots[1], DEP_WAIT | DEP_RETAIN);
+
+    const int32_t total = PTO2_FANIN_INLINE_CAP + 2;  // 64 inline + 2 spill
+    std::vector<DepFlags> flags;
+    for_each_fanin_storage(inline_slots, total, spill_start, spill_pool, [&](PTO2TaskSlotState *, DepFlags f) {
+        flags.push_back(f);
+    });
+
+    ASSERT_EQ(flags.size(), static_cast<size_t>(total));
+    // Inline flags survive.
+    EXPECT_EQ(flags[0], DEP_WAIT);
+    EXPECT_EQ(flags[1], DEP_RETAIN);
+    EXPECT_EQ(flags[2], DEP_WAIT | DEP_RETAIN);
+    // Spill flags survive.
+    EXPECT_EQ(flags[PTO2_FANIN_INLINE_CAP + 0], DEP_RETAIN);
+    EXPECT_EQ(flags[PTO2_FANIN_INLINE_CAP + 1], DEP_WAIT | DEP_RETAIN);
 }

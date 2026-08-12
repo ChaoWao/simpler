@@ -162,8 +162,28 @@ struct PTO2OutputLayout {
  */
 struct PTO2TaskSlotState;  // Forward declaration
 struct PTO2FaninPool;      // Forward declaration
+
+// One fanin edge: a producer slot pointer with the per-edge DepFlags packed into
+// bits 0..1 of the pointer. PTO2TaskSlotState is alignas(64), so bits 0..5 are
+// always zero in a real pointer. Used for both the inline fanin array and the
+// spill pool, keeping sizeof == sizeof(uintptr_t) so neither footprint grows.
 struct PTO2FaninSpillEntry {
-    PTO2TaskSlotState *slot_state;
+    static constexpr uintptr_t FLAG_MASK = 0x3;
+    // No in-class initializer: the type stays trivially default-constructible so
+    // the payload's fanin_inline_edges[64] and the orchestrator's per-submit
+    // builder array are default-initialized at zero cost (only entries [0, count)
+    // are written via set()). Value-init (`PTO2FaninSpillEntry{}`) still zeroes it.
+    uintptr_t packed;
+
+    PTO2TaskSlotState *slot_state() const { return reinterpret_cast<PTO2TaskSlotState *>(packed & ~FLAG_MASK); }
+    DepFlags flags() const { return static_cast<DepFlags>(packed & FLAG_MASK); }
+    // Only bits within FLAG_MASK are stored; any bit outside it (a malformed
+    // DepFlags value) is masked off so it can never corrupt the slot pointer.
+    void set(PTO2TaskSlotState *s, DepFlags f) {
+        packed = reinterpret_cast<uintptr_t>(s) | (static_cast<uintptr_t>(f) & FLAG_MASK);
+    }
+    void add_flags(DepFlags f) { packed |= (static_cast<uintptr_t>(f) & FLAG_MASK); }
+    void clear() { packed = 0; }
 };
 static_assert(sizeof(PTO2FaninSpillEntry) == sizeof(uintptr_t));
 
@@ -255,7 +275,10 @@ struct PTO2TaskPayload {
     int32_t fanin_actual_count{0};  // Actual fanin count (without the +1 redundance)
     int32_t fanin_spill_start{0};   // Linear start index in fanin spill pool (0 = no spill)
     PTO2FaninPool *fanin_spill_pool{nullptr};
-    PTO2TaskSlotState *fanin_inline_slot_states[PTO2_FANIN_INLINE_CAP];
+    // Inline fanin edges (producer slot + packed DepFlags). Spill beyond
+    // PTO2_FANIN_INLINE_CAP goes to fanin_spill_pool. Same packed layout as the
+    // spill entries, so the array footprint is unchanged.
+    PTO2FaninSpillEntry fanin_inline_edges[PTO2_FANIN_INLINE_CAP];
     // Early-dispatch metadata (AICPU-side only). Ordered by descending
     // alignment so the block packs without internal padding. Cache line 8
     // contains the rarely-touched fanin tail rather than the hot tensor/scalar
@@ -378,9 +401,7 @@ struct PTO2TaskPayload {
 
 // PTO2TaskPayload layout verification (offsetof requires complete type).
 static_assert(offsetof(PTO2TaskPayload, fanin_spill_pool) == 16, "spill pool pointer layout drift");
-static_assert(
-    offsetof(PTO2TaskPayload, fanin_inline_slot_states) == 24, "inline fanin array must follow spill metadata"
-);
+static_assert(offsetof(PTO2TaskPayload, fanin_inline_edges) == 24, "inline fanin array must follow spill metadata");
 static_assert(
     offsetof(PTO2TaskPayload, predicate) == 576,
     "dispatch predicate occupies cache line 9 at fixed byte 576 (before tensors, never moves)"
@@ -631,3 +652,9 @@ struct alignas(64) PTO2TaskSlotState {
 };
 
 static_assert(sizeof(PTO2TaskSlotState) == 64);
+// PTO2FaninSpillEntry packs DepFlags into the low bits of a PTO2TaskSlotState*.
+// That is only lossless while the type is aligned past those tag bits.
+static_assert(
+    alignof(PTO2TaskSlotState) > PTO2FaninSpillEntry::FLAG_MASK,
+    "PTO2TaskSlotState alignment must exceed PTO2FaninSpillEntry::FLAG_MASK so the packed DepFlags bits are free"
+);
