@@ -40,6 +40,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -85,6 +86,10 @@ public:
         int32_t worker_id, uint64_t session_id, const std::string &transport_name, const std::string &host,
         uint16_t port, const std::string &health_host, uint16_t health_port, double attach_timeout_s,
         double runtime_timeout_s
+    );
+    void add_mpi_group_mailbox(
+        const std::vector<int32_t> &worker_ids, const std::vector<uint64_t> &session_ids, void *mailbox,
+        size_t mailbox_bytes, int mpirun_pid, double runtime_timeout_s
     );
 
     // Start the scheduler thread. Must be called AFTER the parent has forked
@@ -187,9 +192,10 @@ public:
     }
     void remote_release_import(const RemoteBufferHandle &handle) { manager_.control_remote_release_import(handle); }
     std::vector<uint8_t> remote_domain_control(
-        int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes
+        int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes,
+        bool group_target = false
     ) {
-        return manager_.control_remote_domain(worker_id, control_name, command_bytes);
+        return manager_.control_remote_domain(worker_id, control_name, command_bytes, group_target);
     }
 
     // Device memory on a next-level worker. The Worker is the sole owner of buffer lifecycle; the

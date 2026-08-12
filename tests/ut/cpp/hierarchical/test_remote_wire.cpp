@@ -82,8 +82,12 @@ TEST(RemoteWire, FrameRejectsBadVersionFlagsAndUnknownType) {
     EXPECT_THROW((void)remote_l3::decode_frame(bad_type), std::runtime_error);
 
     auto bad_flags = encoded;
-    bad_flags[36] = 1;
+    bad_flags[36] = static_cast<uint8_t>(remote_l3::FRAME_FLAGS_KNOWN + 1);
     EXPECT_THROW((void)remote_l3::decode_frame(bad_flags), std::runtime_error);
+
+    auto group_flag = encoded;
+    group_flag[36] = remote_l3::FRAME_FLAG_GROUP_TARGET;
+    EXPECT_EQ(remote_l3::decode_frame(group_flag).header.flags, remote_l3::FRAME_FLAG_GROUP_TARGET);
 }
 
 TEST(RemoteWire, TaskPayloadRoundTripsTheArgTensorVerbatim) {

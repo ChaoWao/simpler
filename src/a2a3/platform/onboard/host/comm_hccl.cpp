@@ -94,6 +94,7 @@ static_assert(
     sizeof(aclrtMemFabricHandle) <= COMM_GLOBAL_DOMAIN_HANDLE_BYTES, "Fabric handle exceeds global descriptor"
 );
 static std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> global_domain_allocations;
+static std::mutex global_domain_allocations_mutex;
 
 struct CommHandle_ {
     int rank;
@@ -1531,7 +1532,11 @@ extern "C" int comm_global_domain_prepare(
 ) try {
     if (domain_id == 0 || rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count ||
         window_size == 0 || profile != COMM_GLOBAL_DOMAIN_PROFILE_A3_FABRIC || descriptor_out == nullptr ||
-        local_window_base_out == nullptr || global_domain_allocations.count(domain_id) != 0) {
+        local_window_base_out == nullptr) {
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(global_domain_allocations_mutex);
+    if (global_domain_allocations.count(domain_id) != 0) {
         return -1;
     }
 
@@ -1587,6 +1592,7 @@ extern "C" int comm_global_domain_prepare(
 extern "C" int comm_global_domain_import(
     uint64_t domain_id, const CommGlobalDomainDescriptor *descriptors, size_t descriptor_count, uint64_t *device_ctx_out
 ) try {
+    std::lock_guard<std::mutex> lock(global_domain_allocations_mutex);
     auto it = global_domain_allocations.find(domain_id);
     if (it == global_domain_allocations.end() || descriptors == nullptr || device_ctx_out == nullptr) {
         return -1;
@@ -1668,6 +1674,7 @@ extern "C" int comm_global_domain_import(
 }
 
 extern "C" int comm_global_domain_release(uint64_t domain_id) try {
+    std::lock_guard<std::mutex> lock(global_domain_allocations_mutex);
     auto it = global_domain_allocations.find(domain_id);
     if (it == global_domain_allocations.end()) {
         return 0;

@@ -45,6 +45,7 @@
 #include <fcntl.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -221,6 +222,7 @@ struct GlobalDomainAllocation {
 
 static_assert(sizeof(CommGlobalDomainDescriptor) == 288, "global domain descriptor ABI changed");
 static std::unordered_map<uint64_t, std::unique_ptr<GlobalDomainAllocation>> global_domain_allocations;
+static std::mutex global_domain_allocations_mutex;
 
 struct CommHandle_ {
     int rank;
@@ -751,6 +753,7 @@ extern "C" int comm_global_domain_prepare(
         local_window_base_out == nullptr) {
         return -1;
     }
+    std::lock_guard<std::mutex> lock(global_domain_allocations_mutex);
     if (global_domain_allocations.count(domain_id) != 0) {
         return -1;
     }
@@ -810,6 +813,7 @@ extern "C" int comm_global_domain_prepare(
 extern "C" int comm_global_domain_import(
     uint64_t domain_id, const CommGlobalDomainDescriptor *descriptors, size_t descriptor_count, uint64_t *device_ctx_out
 ) try {
+    std::lock_guard<std::mutex> lock(global_domain_allocations_mutex);
     auto it = global_domain_allocations.find(domain_id);
     if (it == global_domain_allocations.end() || descriptors == nullptr || device_ctx_out == nullptr) {
         return -1;
@@ -876,6 +880,7 @@ extern "C" int comm_global_domain_import(
 }
 
 extern "C" int comm_global_domain_release(uint64_t domain_id) try {
+    std::lock_guard<std::mutex> lock(global_domain_allocations_mutex);
     auto it = global_domain_allocations.find(domain_id);
     if (it == global_domain_allocations.end()) {
         return 0;

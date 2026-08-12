@@ -45,7 +45,7 @@ def _require_mpirun_pod_env() -> tuple[str, str, str]:
         pytest.skip("mpi4py is not installed (required inside the mpirun rank processes)")
     local_ip = os.environ.get("POD_LOCAL_IP", "")
     if not local_ip:
-        pytest.skip("POD_LOCAL_IP is required: mpirun rank 0 and the READY listener bind this machine's address")
+        pytest.skip("POD_LOCAL_IP is required: mpirun places rank 0 on this machine's address")
     mpi_python = os.environ.get("POD_MPI_PYTHON", "")
     if not mpi_python:
         pytest.skip("POD_MPI_PYTHON is required: per-machine rank launcher at one shared absolute path")

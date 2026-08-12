@@ -80,6 +80,13 @@ enum class RemoteRegistryTarget : uint32_t {
     INNER_L3_WORKER = 2,
 };
 
+// FrameHeader::flags bit: the caller addresses every member of the target's
+// worker group, not just the worker named in the header. Only group-capable
+// transports (the MPI mailbox) act on it; point-to-point transports ignore it.
+inline constexpr uint32_t FRAME_FLAG_GROUP_TARGET = 0x1;
+// Every defined flag bit; a frame carrying any other bit is rejected.
+inline constexpr uint32_t FRAME_FLAGS_KNOWN = FRAME_FLAG_GROUP_TARGET;
+
 struct FrameHeader {
     FrameType frame_type{FrameType::HELLO};
     uint64_t session_id{0};

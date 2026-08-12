@@ -49,6 +49,13 @@ REMOTE_BUFFER_ACCESS_WRITE = 1 << 1
 REMOTE_BUFFER_ACCESS_READ_WRITE = REMOTE_BUFFER_ACCESS_READ | REMOTE_BUFFER_ACCESS_WRITE
 CALLABLE_HASH_DIGEST_BYTES = 32
 FRAME_HEADER_BYTES = 40
+
+# FrameHeader.flags bit: the caller addresses every member of the target's
+# worker group, not just the worker named in the header. Only group-capable
+# transports (the MPI mailbox) act on it; point-to-point transports ignore it.
+FRAME_FLAG_GROUP_TARGET = 0x1
+# Every defined flag bit; a frame carrying any other bit is rejected.
+FRAME_FLAGS_KNOWN = FRAME_FLAG_GROUP_TARGET
 MAGIC = b"SLR3"
 
 
@@ -359,8 +366,8 @@ def _validate_import_result_identity(result: ImportBufferResult) -> None:
 def encode_frame(header: FrameHeader, payload: bytes) -> bytes:
     if len(payload) > MAX_FRAME_PAYLOAD_BYTES:
         raise ValueError("remote_wire: frame payload exceeds maximum")
-    if header.flags != 0:
-        raise ValueError("remote_wire: frame flags are reserved in v1")
+    if header.flags & ~FRAME_FLAGS_KNOWN:
+        raise ValueError("remote_wire: unknown frame flags")
     return (
         MAGIC
         + struct.pack(
@@ -389,8 +396,8 @@ def decode_frame(data: bytes) -> Frame:
         frame_type = FrameType(raw_type)
     except ValueError as exc:
         raise ValueError("remote_wire: unknown frame type") from exc
-    if flags != 0:
-        raise ValueError("remote_wire: frame flags are reserved in v1")
+    if flags & ~FRAME_FLAGS_KNOWN:
+        raise ValueError("remote_wire: unknown frame flags")
     if payload_bytes > MAX_FRAME_PAYLOAD_BYTES:
         raise ValueError("remote_wire: frame payload exceeds maximum")
     if len(data) - FRAME_HEADER_BYTES != payload_bytes:

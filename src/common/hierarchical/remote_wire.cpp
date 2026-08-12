@@ -236,7 +236,7 @@ void validate_desc_against_inline_payload(const RemoteTensorDesc &desc, size_t i
 
 std::vector<uint8_t> encode_frame(const FrameHeader &header, const std::vector<uint8_t> &payload) {
     ensure(payload.size() <= MAX_FRAME_PAYLOAD_BYTES, "remote_wire: frame payload exceeds maximum");
-    ensure(header.flags == 0, "remote_wire: frame flags are reserved in v1");
+    ensure((header.flags & ~FRAME_FLAGS_KNOWN) == 0, "remote_wire: unknown frame flags");
     std::vector<uint8_t> out;
     out.reserve(FRAME_HEADER_BYTES + payload.size());
     put_bytes(out, MAGIC, sizeof(MAGIC));
@@ -266,7 +266,7 @@ DecodedFrame decode_frame(const uint8_t *data, size_t size) {
     frame.header.sequence = get_u64(data, size, offset);
     frame.header.payload_bytes = get_u32(data, size, offset);
     frame.header.flags = get_u32(data, size, offset);
-    ensure(frame.header.flags == 0, "remote_wire: frame flags are reserved in v1");
+    ensure((frame.header.flags & ~FRAME_FLAGS_KNOWN) == 0, "remote_wire: unknown frame flags");
     ensure(frame.header.payload_bytes <= MAX_FRAME_PAYLOAD_BYTES, "remote_wire: frame payload exceeds maximum");
     ensure(size - offset == frame.header.payload_bytes, "remote_wire: frame payload length mismatch");
     frame.payload.assign(data + offset, data + size);

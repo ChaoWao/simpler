@@ -474,6 +474,20 @@ inline void bind_worker(nb::module_ &m) {
             nb::arg("health_host"), nb::arg("health_port"), nb::arg("attach_timeout_s") = 30.0,
             nb::arg("runtime_timeout_s") = 30.0, "Register a REMOTE_L3 endpoint after the session reports HELLO READY."
         )
+        .def(
+            "add_mpi_group_mailbox",
+            [](Worker &self, const std::vector<int32_t> &worker_ids, const std::vector<uint64_t> &session_ids,
+               uint64_t mailbox_ptr, size_t mailbox_bytes, int mpirun_pid, double runtime_timeout_s) {
+                nb::gil_scoped_release release;
+                self.add_mpi_group_mailbox(
+                    worker_ids, session_ids, reinterpret_cast<void *>(mailbox_ptr), mailbox_bytes, mpirun_pid,
+                    runtime_timeout_s
+                );
+            },
+            nb::arg("worker_ids"), nb::arg("session_ids"), nb::arg("mailbox_ptr"), nb::arg("mailbox_bytes"),
+            nb::arg("mpirun_pid"), nb::arg("runtime_timeout_s") = 30.0,
+            "Register one shared-memory MPI group endpoint for each worker id."
+        )
 
         // Release the GIL while starting the Scheduler thread so another Python
         // thread can run during it — e.g. a concurrent close() observing
@@ -732,7 +746,7 @@ inline void bind_worker(nb::module_ &m) {
         )
         .def(
             "remote_domain_control",
-            [](Worker &self, int worker_id, uint32_t control_name, nb::bytes command) {
+            [](Worker &self, int worker_id, uint32_t control_name, nb::bytes command, bool group_target) {
                 std::vector<uint8_t> command_bytes(
                     reinterpret_cast<const uint8_t *>(command.c_str()),
                     reinterpret_cast<const uint8_t *>(command.c_str()) + command.size()
@@ -741,13 +755,14 @@ inline void bind_worker(nb::module_ &m) {
                 {
                     nb::gil_scoped_release release;
                     result = self.remote_domain_control(
-                        worker_id, static_cast<remote_l3::ControlName>(control_name), command_bytes
+                        worker_id, static_cast<remote_l3::ControlName>(control_name), command_bytes, group_target
                     );
                 }
                 return nb::bytes(reinterpret_cast<const char *>(result.data()), result.size());
             },
-            nb::arg("worker_id"), nb::arg("control_name"), nb::arg("command"),
-            "Send one Global CommDomain control to a remote L3 endpoint."
+            nb::arg("worker_id"), nb::arg("control_name"), nb::arg("command"), nb::arg("group_target") = false,
+            "Send one Global CommDomain control to a remote L3 endpoint. With group_target, a "
+            "group-capable transport delivers the control to every rank of the worker's group."
         )
         .def(
             "broadcast_unregister_all",

@@ -12,9 +12,9 @@
 One L4 parent (this process) registers a two-rank ``MpiL3GroupSpec`` — rank 0
 on this machine, rank 1 on the peer — and launches both L3 workers through a
 single parent-owned ``mpirun``. Rank 0 must be this machine: only it can read
-the parent-written group manifest, which it then broadcasts over MPI. After
-both ranks publish READY back over TCP (``ready_host`` — file-based READY
-cannot cross machines), the parent attaches them as ordinary remote L3
+the parent-written group manifest, which it then broadcasts over MPI. Rank 0
+marks the group's named shared-memory mailbox READY once every rank reports
+in over MPI, the parent attaches the group as mailbox-backed remote L3
 endpoints and dispatches one TLOAD task per NPU device on each machine. The
 Global CommDomain (``a3-fabric-v1`` on real A3 devices) spans every device of
 both ranks, so it is built over the MPI collective descriptor-exchange path
@@ -81,8 +81,6 @@ def run(  # noqa: PLR0913, PLR0915 -- mirrors the CLI surface; one linear two-ru
     platform: str = "a2a3",
     runtime: str = "tensormap_and_ringbuffer",
     comm_profile: str = "a3-fabric-v1",
-    command_port_base: int = 21173,
-    health_port_base: int = 22173,
     session_timeout: float = 120.0,
     mpirun_path: str = "mpirun",
 ) -> int:
@@ -108,12 +106,9 @@ def run(  # noqa: PLR0913, PLR0915 -- mirrors the CLI surface; one linear two-ru
                 hosts=(local_host, remote_host),
                 platform=platform,
                 runtime=runtime,
-                command_port_base=int(command_port_base),
-                health_port_base=int(health_port_base),
                 device_ids_by_rank=device_ids_by_rank,
                 comm_profile=comm_profile,
                 global_device_ranks_by_rank=global_ranks_by_rank,
-                ready_host=local_host,
                 mpirun_path=mpirun_path,
                 # Hydra and Open MPI both propagate the parent's cwd to every
                 # rank and fail the launch when it is missing on a remote
@@ -159,6 +154,19 @@ def run(  # noqa: PLR0913, PLR0915 -- mirrors the CLI surface; one linear two-ru
                 _add_digest_scalars(task_args, chip_handle.digest)
                 parent_keepalive.append(task_args)
                 orch.submit_next_level(rank_handle, task_args, cfg, worker=node_id)
+            # One full-group batched dispatch: every rank's task travels in a
+            # single PER_RANK mailbox envelope. It re-runs TLOAD on each
+            # rank's first device, rewriting the same summed values, so the
+            # golden check below also proves the batched path executed.
+            group_args = []
+            for node_id in node_ids:
+                task_args = TaskArgs()
+                task_args.add_scalar(domain.domain_id)
+                task_args.add_scalar(0)
+                _add_digest_scalars(task_args, chip_handle.digest)
+                parent_keepalive.append(task_args)
+                group_args.append(task_args)
+            orch.submit_next_level_group(rank_handle, group_args, cfg, workers=list(node_ids))
             domain_handle = domain
 
         worker.run(build_and_run, args=None, config=CallConfig())
@@ -217,8 +225,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--platform", default="a2a3")
     parser.add_argument("--runtime", default="tensormap_and_ringbuffer")
     parser.add_argument("--comm-profile", default="a3-fabric-v1")
-    parser.add_argument("--command-port-base", type=int, default=21173)
-    parser.add_argument("--health-port-base", type=int, default=22173)
     parser.add_argument("--session-timeout", type=float, default=120.0)
     parser.add_argument("--mpirun-path", default="mpirun")
     return parser.parse_args()
@@ -235,8 +241,6 @@ def main() -> int:
         platform=args.platform,
         runtime=args.runtime,
         comm_profile=args.comm_profile,
-        command_port_base=args.command_port_base,
-        health_port_base=args.health_port_base,
         session_timeout=args.session_timeout,
         mpirun_path=args.mpirun_path,
     )
