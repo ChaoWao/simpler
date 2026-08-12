@@ -18,6 +18,7 @@
 #include <cstring>
 #include <new>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "graph_cache.h"

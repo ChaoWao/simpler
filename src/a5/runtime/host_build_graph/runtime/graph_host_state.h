@@ -11,27 +11,4 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <optional>
-
-struct PTO2TaskSlotState;
-struct GraphHostState;
-
-inline constexpr size_t GRAPH_MAX_DEFINITIONS = 16;
-
-struct GraphHostStateDeleter {
-    void operator()(GraphHostState *state) const noexcept;
-};
-
-using GraphHostStatePtr = std::unique_ptr<GraphHostState, GraphHostStateDeleter>;
-
-struct GraphHostUpload {
-    PTO2TaskSlotState *outer_slot;
-    std::byte *data;
-    size_t bytes;
-};
-
-GraphHostStatePtr make_graph_host_state();
-size_t graph_host_upload_count(const GraphHostState &state);
-std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index);
+#include "host_build_graph/graph_host_state.h"
