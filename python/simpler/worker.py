@@ -151,6 +151,7 @@ from .comm_endpoints import (
     _normalize_node_identity,
     parse_endpoint_path,
 )
+from .comm_region import MaterializationContext, RegionInstance, materialize_region_instance
 from .global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
@@ -196,7 +197,7 @@ from .global_comm_domain import (
     resolve_global_comm_capability,
     validate_descriptor_table,
 )
-from .orchestrator import Orchestrator, _callback_run, direct_control
+from .orchestrator import Orchestrator, _callback_frame_for, _callback_run, direct_control
 from .remote_l3_protocol import HOST_TCP_TRANSPORT_PROFILE
 from .task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
@@ -5953,6 +5954,22 @@ class Worker:
             resolver = BackendResolver(registry, self._get_region_access_service())
             return resolver.plan(resolved, layout_summary)
 
+    def _materialize_region_instance(
+        self, members, topology: SingleOwner, layout_summary: RegionLayoutSpec
+    ) -> RegionInstance:
+        self._require_ready_for_region_planning("_materialize_region_instance")
+        with (
+            self._operation_lease("_materialize_region_instance"),
+            self._control_admission("materialize_region_instance"),
+        ):
+            registry = self._get_endpoint_registry()
+            resolved = registry.resolve_region_spec(members, topology)
+            resolver = BackendResolver(registry, self._get_region_access_service())
+            plan = resolver.plan(resolved, layout_summary)
+            return materialize_region_instance(
+                MaterializationContext(worker=self, registry=registry, plan=plan, layout=layout_summary)
+            )
+
     def _register_into_snapshot_or_wait(self, reg: _CallableRegistration) -> CallableHandle | None:
         """Linearize a level>=3 register against the startup epoch.
 
@@ -7994,6 +8011,90 @@ class Worker:
                 except (BufferError, FileNotFoundError, OSError):
                     pass
 
+    def _close_worker_chip_region(
+        self,
+        region,
+        resources: _RunResources | None = None,
+        *,
+        poison_on_error: bool = False,
+    ) -> None:
+        region_errors: list[BaseException] = []
+        release_error: BaseException | None = None
+
+        def primary_region_error() -> BaseException:
+            primary = region_errors[0]
+            tail = primary
+            seen = {id(tail)}
+            while tail.__cause__ is not None and id(tail.__cause__) not in seen:
+                tail = tail.__cause__
+                seen.add(id(tail))
+            for extra in region_errors[1:]:
+                tail.__cause__ = extra
+                tail = extra
+            return primary
+
+        expired = bool(getattr(region, "expired", getattr(region, "_expired", False)))
+        if not expired:
+            try:
+                region._close_worker_host_mapping()
+            except BaseException as exc:  # noqa: BLE001
+                region_errors.append(exc)
+            try:
+                if self._worker is not None:
+                    self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
+                    free = getattr(region, "free", None)
+                    if callable(free):
+                        free()
+            except BaseException as exc:  # noqa: BLE001
+                release_error = exc
+                region_errors.append(exc)
+        # A region remains tracked while chip ownership may still be live, so
+        # whole-tree close can replay it and instance cleanup can poison future
+        # admission. Once the chip release is committed or the native handle is
+        # already expired, cleanup may retire every tracking list that owns it.
+        if region_errors and resources is None and not poison_on_error:
+            raise primary_region_error()
+        if poison_on_error and region_errors and release_error is not None:
+            primary = primary_region_error()
+            self._record_unreclaimable(
+                f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
+                "fully reclaimed; no further work is admitted",
+                primary,
+            )
+            raise primary
+        try:
+            if not expired:
+                region._expire()
+        except BaseException as exc:  # noqa: BLE001
+            region_errors.append(exc)
+        try:
+            self._retire_worker_chip_region_tracking(region, resources)
+        except BaseException as exc:  # noqa: BLE001
+            region_errors.append(exc)
+        if region_errors:
+            primary = primary_region_error()
+            if poison_on_error:
+                self._record_unreclaimable(
+                    f"close_worker_chip_region: region {region.region_id} on worker {region._worker_id} could not be "
+                    "fully reclaimed; no further work is admitted",
+                    primary,
+                )
+            raise primary
+
+    def _retire_worker_chip_region_tracking(self, region, resources: _RunResources | None = None) -> None:
+        tracking_lists = [self._live_worker_chip_regions]
+        if resources is not None and resources.worker_chip_regions is not self._live_worker_chip_regions:
+            tracking_lists.insert(0, resources.worker_chip_regions)
+        errors: list[BaseException] = []
+
+        for owned_regions in tracking_lists:
+            try:
+                owned_regions[:] = [owned for owned in owned_regions if owned is not region]
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+
     def _cleanup_worker_chip_regions(self, resources: _RunResources | None = None) -> None:
         # A region stays tracked until both ownership debts commit. This makes a
         # failed close replayable by the cleanup journal instead of publishing a
@@ -8004,49 +8105,10 @@ class Worker:
         regions = list(tracked)
         errors: list[BaseException] = []
         for region in regions:
-            region_errors: list[BaseException] = []
             try:
-                region._close_worker_host_mapping()
-            except BaseException as exc:  # noqa: BLE001
-                region_errors.append(exc)
-            try:
-                if self._worker is not None:
-                    self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
-            except BaseException as exc:  # noqa: BLE001
-                region_errors.append(exc)
-            # End-of-run cleanup is poisoned and terminal for that run, so it
-            # still expires both sides after attempting both debts. Whole-tree
-            # close instead retains the region for journal replay.
-            if region_errors and resources is None:
-                errors.extend(region_errors)
-                continue
-            try:
-                region._expire()
+                self._close_worker_chip_region(region, resources)
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
-            errors.extend(region_errors)
-
-            tracking_lists = (
-                (tracked,) if tracked is self._live_worker_chip_regions else (tracked, self._live_worker_chip_regions)
-            )
-            next_tracking_list = 0
-
-            def retire_tracking() -> None:
-                nonlocal next_tracking_list
-                try:
-                    while next_tracking_list < len(tracking_lists):
-                        owned_regions = tracking_lists[next_tracking_list]
-                        owned_regions[:] = [owned for owned in owned_regions if owned is not region]
-                        next_tracking_list += 1
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(exc)
-                    next_tracking_list += 1
-                    retire_tracking()
-                except BaseException as exc:  # noqa: BLE001
-                    errors.append(exc)
-                    retire_tracking()
-
-            retire_tracking()
         if errors:
             raise errors[0]
 
@@ -10112,6 +10174,20 @@ class Worker:
                     f"Worker.{api}: a prior run's ordered cleanup failed, so this worker's device state is "
                     "unreclaimed and no further work is admitted; close() it"
                 ) from self._ordered_cleanup_error
+
+    def _require_region_control_context(self, api: str) -> None:
+        frame = _callback_frame_for(self)
+        if frame is not None:
+            if frame.has_submitted_task:
+                raise RuntimeError(
+                    f"Worker.{api}: RegionInstance access cannot follow a task submission in the same run"
+                )
+            self._require_no_ordered_cleanup_failure(api)
+            return
+        if id(self) in _held_control_reservations():
+            self._require_no_ordered_cleanup_failure(api)
+            return
+        raise RuntimeError(f"Worker.{api}: RegionInstance access requires an active orchestration/control context")
 
     def _control_admission(self, api: str):
         """The direct-control ordering policy for a Worker-level command.
