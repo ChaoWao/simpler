@@ -7825,20 +7825,20 @@ class Worker:
             return primary
 
         expired = bool(getattr(region, "expired", getattr(region, "_expired", False)))
-        release_pending = not expired and not bool(getattr(region, "_released", False))
         if not expired:
             try:
                 region._close_worker_host_mapping()
             except BaseException as exc:  # noqa: BLE001
                 region_errors.append(exc)
-            if release_pending:
-                try:
-                    if self._worker is not None:
-                        self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
-                        region.free()
-                except BaseException as exc:  # noqa: BLE001
-                    release_error = exc
-                    region_errors.append(exc)
+            try:
+                if self._worker is not None:
+                    self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
+                    free = getattr(region, "free", None)
+                    if callable(free):
+                        free()
+            except BaseException as exc:  # noqa: BLE001
+                release_error = exc
+                region_errors.append(exc)
         # A region remains tracked while chip ownership may still be live, so
         # whole-tree close can replay it and instance cleanup can poison future
         # admission. Once the chip release is committed or the native handle is
