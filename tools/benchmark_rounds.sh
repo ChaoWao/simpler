@@ -12,15 +12,15 @@
 # by `strace_timing --rounds-table` (no CANN device log is read):
 #   - Host      run_prepared span (host wall, incl. Python)
 #   - Device    run_prepared.runner_run.device_wall span (full on-NPU AICPU wall)
-#   - Effective orch∪sched merged window, from the orch/sched markers'
+#   - Effective orch∪sched merged window, from the TMR orch/sched markers'
 #               device-domain ts+dur (the old device-log "Total", now pure-marker)
-#   - Orch      run_prepared.runner_run.device_wall.orch span
-#   - Sched     run_prepared.runner_run.device_wall.sched span
+#   - Orch      TMR run_prepared.runner_run.device_wall.orch span
+#   - Sched     TMR run_prepared.runner_run.device_wall.sched span
 #
 # Usage:
 #   ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [-r <runtime>] [--serial-orch-sched]
 #
-# Edit the EXAMPLE_CASES map below to control which examples and cases to run.
+# Edit the architecture/runtime EXAMPLE_CASES lists below to control which examples and cases to run.
 
 set -euo pipefail
 
@@ -28,31 +28,52 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---------------------------------------------------------------------------
-# Examples to benchmark and their case lists, per runtime.
-# Key   = directory name under tests/st/<platform>/<runtime>/
-# Value = comma-separated case names to run (empty string = run DEFAULT_CASE)
+# Examples to benchmark and their case lists, per architecture and runtime.
+# Each entry is <directory-name>=<comma-separated-case-names>.
+# An empty case list runs DEFAULT_CASE.
 # ---------------------------------------------------------------------------
 
-# --- tensormap_and_ringbuffer ---
-declare -A TMR_EXAMPLE_CASES=(
-    [alternating_matmul_add]="Case1"
-    [benchmark_bgemm]="Case0"
-    [paged_attention_unroll]="Case1,Case2"
-    [paged_attention_unroll_manual_scope]="Case1,Case2"
-    [batch_paged_attention]="Case1"
+# --- a2a3 + tensormap_and_ringbuffer ---
+A2A3_TMR_EXAMPLE_CASES=(
+    "alternating_matmul_add=Case1"
+    "benchmark_bgemm=Case0"
+    "paged_attention_unroll=Case1,Case2"
+    "paged_attention_unroll_manual_scope=Case1,Case2"
+    "batch_paged_attention=Case1"
     # spmd_paged_attention temporarily disabled: pre-existing onboard stall
     # (507018 S1:running-stalled), reproduces on baseline — see KNOWN_ISSUES.md.
-    # [spmd_paged_attention]="Case1,Case2"
-    [qwen3_14b_decode]="StressBatch16Seq3500"
+    # "spmd_paged_attention=Case1,Case2"
+    "qwen3_14b_decode=StressBatch16Seq3500"
 )
-TMR_EXAMPLE_ORDER=(
-    alternating_matmul_add
-    benchmark_bgemm
-    paged_attention_unroll
-    paged_attention_unroll_manual_scope
-    batch_paged_attention
-    # spmd_paged_attention  # temporarily disabled — see KNOWN_ISSUES.md
-    qwen3_14b_decode
+
+# --- a2a3 + host_build_graph ---
+A2A3_HBG_EXAMPLE_CASES=(
+    "alternating_matmul_add=Case1"
+    "benchmark_bgemm=Case0"
+    "paged_attention_unroll=Case1,Case2"
+    "paged_attention_unroll_manual_scope=Case1,Case2"
+    "batch_paged_attention=Case1"
+    "qwen3_14b_decode=GraphExecutionBatch16Seq3500"
+)
+
+# --- a5 + tensormap_and_ringbuffer ---
+A5_TMR_EXAMPLE_CASES=(
+    "alternating_matmul_add=Case1"
+    "benchmark_bgemm=Case0"
+    "paged_attention_unroll=Case1,Case2"
+    "paged_attention_unroll_manual_scope=Case1,Case2"
+    "batch_paged_attention=Case1"
+    "qwen3_14b_decode=StressBatch16Seq3500"
+)
+
+# --- a5 + host_build_graph ---
+A5_HBG_EXAMPLE_CASES=(
+    "alternating_matmul_add=Case1"
+    "benchmark_bgemm=Case0"
+    "paged_attention_unroll=Case1,Case2"
+    "paged_attention_unroll_manual_scope=Case1,Case2"
+    "batch_paged_attention=Case1"
+    "qwen3_14b_decode=GraphExecutionBatch16Seq3500"
 )
 
 # ---------------------------------------------------------------------------
@@ -65,6 +86,7 @@ RUNTIME=tensormap_and_ringbuffer
 VERBOSE=0
 SERIAL_ORCH_SCHED=0
 EXTRA_ARGS=()
+EXTRA_ARGS_COUNT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -103,27 +125,31 @@ Options:
   -p, --platform Platform to run on (default: a2a3)
   -d, --device   Device ID (default: 0)
   -n, --rounds   Override number of rounds for each example (default: 100)
-  -r, --runtime  Runtime to benchmark: tensormap_and_ringbuffer (default)
+  -r, --runtime  Runtime to benchmark: tensormap_and_ringbuffer (default),
+                 host_build_graph
   -v, --verbose  Save detailed test_*.py output to a timestamped log file
   --serial-orch-sched
-                 Run each case twice: default parallel mode, then serial
+                 Run each TMR case twice: default parallel mode, then serial
                  orch->sched mode with PTO2_SERIAL_ORCH_SCHED=1.
   -h, --help     Show this help
 
 All other options are passed through to the underlying `python test_*.py`
 invocation (e.g. --case).
 
-Edit the EXAMPLE_CASES map at the top of this script to control which
-examples and cases to benchmark.
+Edit the architecture/runtime EXAMPLE_CASES lists at the top of this script
+to control which examples and cases to benchmark.
 
 Output:
   Per-round and average latency (microseconds), all from the [STRACE] markers:
-  Host, Device, Effective, Orch, Sched (parsed by strace_timing --rounds-table).
+  TMR: Host, Device, Effective, Orch, Sched.
+  HBG: Host, Device. Columns without captured markers are omitted.
+  All metrics are parsed by strace_timing --rounds-table.
 USAGE
             exit 0
             ;;
         *)
             EXTRA_ARGS+=("$1")
+            EXTRA_ARGS_COUNT=$((EXTRA_ARGS_COUNT + 1))
             shift
             ;;
     esac
@@ -161,18 +187,34 @@ case "$PLATFORM" in
     *) echo "ERROR: unsupported platform '$PLATFORM'. Use a2a3 or a5."; exit 1 ;;
 esac
 
-# Select example cases and order based on runtime
-case "$RUNTIME" in
-    tensormap_and_ringbuffer)
-        declare -n EXAMPLE_CASES=TMR_EXAMPLE_CASES
-        EXAMPLE_ORDER=("${TMR_EXAMPLE_ORDER[@]}")
+# Select example cases and order based on architecture and runtime.
+case "$ARCH:$RUNTIME" in
+    a2a3:tensormap_and_ringbuffer)
+        EXAMPLE_CASES=("${A2A3_TMR_EXAMPLE_CASES[@]}")
+        DEFAULT_MODE=parallel
+        ;;
+    a2a3:host_build_graph)
+        EXAMPLE_CASES=("${A2A3_HBG_EXAMPLE_CASES[@]}")
+        DEFAULT_MODE=default
+        ;;
+    a5:tensormap_and_ringbuffer)
+        EXAMPLE_CASES=("${A5_TMR_EXAMPLE_CASES[@]}")
+        DEFAULT_MODE=parallel
+        ;;
+    a5:host_build_graph)
+        EXAMPLE_CASES=("${A5_HBG_EXAMPLE_CASES[@]}")
+        DEFAULT_MODE=default
         ;;
     *)
-        echo "ERROR: unknown runtime '$RUNTIME'. Use tensormap_and_ringbuffer."
+        echo "ERROR: unknown runtime '$RUNTIME'. Use tensormap_and_ringbuffer or host_build_graph."
         exit 1
         ;;
 esac
 
+if [[ $SERIAL_ORCH_SCHED -eq 1 && "$RUNTIME" == "host_build_graph" ]]; then
+    echo "ERROR: --serial-orch-sched is only supported by tensormap_and_ringbuffer."
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # parse_timing <fw_stdout_file>
@@ -184,7 +226,7 @@ esac
 #     - Effective (us) orch∪sched merged window, from orch/sched device-domain ts+dur
 #     - Orch (us)      [STRACE] device_wall.orch span
 #     - Sched (us)     [STRACE] device_wall.sched span
-#   Effective/Orch/Sched come from the AICPU phase subdivision (onboard and sim).
+#   Effective/Orch/Sched come from TMR's AICPU phase subdivision.
 #   No CANN device log is read.
 # ---------------------------------------------------------------------------
 parse_timing() {
@@ -194,7 +236,7 @@ parse_timing() {
     out=$(python3 -m simpler_setup.tools.strace_timing "$fw_file" --rounds-table 2>/dev/null || true)
 
     if [[ -z "$out" || "$out" == *"No [STRACE] markers found."* ]]; then
-        echo "  (no benchmark timing data — was SIMPLER_PROFILING enabled?)"
+        echo "  (no benchmark timing data — are SIMPLER_HOST_STRACE markers visible?)"
         return 1
     fi
     echo "$out"
@@ -239,7 +281,10 @@ run_bench() {
         run_cmd+=(--case "$case_name")
         [[ -n "$test_file" ]] && run_cmd+=(--manual include)
     fi
-    run_cmd+=("${EXTRA_ARGS[@]}")
+    # Bash 3.2 with `set -u` rejects expanding an empty indexed array.
+    if [[ $EXTRA_ARGS_COUNT -gt 0 ]]; then
+        run_cmd+=("${EXTRA_ARGS[@]}")
+    fi
 
     # Run example, capturing stdout+stderr — the [STRACE] markers are on stderr.
     vlog "Running: ${run_cmd[*]}"
@@ -316,52 +361,57 @@ SUMMARY_EFFECTIVE=()
 SUMMARY_SCHED=()
 SUMMARY_ORCH=()
 
-echo ""
-echo "Runtime: $RUNTIME"
-
-for example in "${EXAMPLE_ORDER[@]}"; do
-    case_list="${EXAMPLE_CASES[$example]:-}"
-
-    # Search for example: prefer test_*.py (new style), fall back to golden.py (legacy).
-    # tests/st/ is searched before examples/ since benchmarks use production-scale cases.
-    EXAMPLE_DIR=""
+find_example_dir() {
+    local example="$1" candidate dir
     for dir in "${EXAMPLES_DIRS[@]}"; do
         candidate="$dir/$example"
         if [[ -d "$candidate" ]] && ls "$candidate"/test_*.py 1>/dev/null 2>&1; then
-            EXAMPLE_DIR="$candidate"
-            break
+            echo "$candidate"
+            return 0
         fi
     done
-    if [[ -z "$EXAMPLE_DIR" ]]; then
-        for dir in "${EXAMPLES_DIRS[@]}"; do
-            candidate="$dir/$example"
-            if [[ -f "$candidate/golden.py" && -d "$candidate/kernels" ]]; then
-                EXAMPLE_DIR="$candidate"
-                break
-            fi
-        done
+    for dir in "${EXAMPLES_DIRS[@]}"; do
+        candidate="$dir/$example"
+        if [[ -f "$candidate/golden.py" && -d "$candidate/kernels" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+for example_case in "${EXAMPLE_CASES[@]}"; do
+    example="${example_case%%=*}"
+    if ! find_example_dir "$example" >/dev/null; then
+        echo "ERROR: benchmark workload '$example' not found for $ARCH + $RUNTIME."
+        exit 1
     fi
+done
+
+echo ""
+echo "Runtime: $RUNTIME"
+
+for example_case in "${EXAMPLE_CASES[@]}"; do
+    example="${example_case%%=*}"
+    case_list="${example_case#*=}"
+
+    # tests/st/ is searched before examples/ since benchmarks use production-scale cases.
+    EXAMPLE_DIR=$(find_example_dir "$example")
 
     echo ""
     echo "================================================================"
     echo "  $example"
     echo "================================================================"
 
-    if [[ -z "$EXAMPLE_DIR" ]]; then
-        echo "  SKIP: not found in any search directory"
-        ((FAIL++)) || true
-        continue
-    fi
-
     if [[ -z "${case_list:-}" ]]; then
-        run_bench "$example" "$EXAMPLE_DIR" "" "parallel"
+        run_bench "$example" "$EXAMPLE_DIR" "" "$DEFAULT_MODE"
         if [[ $SERIAL_ORCH_SCHED -eq 1 ]]; then
             run_bench "$example" "$EXAMPLE_DIR" "" "serial"
         fi
     else
         IFS=',' read -ra cases <<< "$case_list"
         for c in "${cases[@]}"; do
-            run_bench "$example" "$EXAMPLE_DIR" "$c" "parallel"
+            run_bench "$example" "$EXAMPLE_DIR" "$c" "$DEFAULT_MODE"
             if [[ $SERIAL_ORCH_SCHED -eq 1 ]]; then
                 run_bench "$example" "$EXAMPLE_DIR" "$c" "serial"
             fi

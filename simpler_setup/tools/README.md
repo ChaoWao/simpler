@@ -346,8 +346,10 @@ qwen3 decode, where the pypto-serving profile warmup dispatches a tiny-KV step
 single-invocation tree would report the warmup value.
 
 `--rounds-table` renders one row per invocation of the busiest `hid` —
-**Host** always, plus **Device / Effective / Orch / Sched** when present, in the
-format `tools/benchmark_rounds.sh` parses. `Effective` is the orch∪sched merged
+**Host** always, plus every device column whose marker is present, in the format
+`tools/benchmark_rounds.sh` parses. TMR normally supplies Device / Effective /
+Orch / Sched. HBG supplies Device but no device-side orch/sched windows, so its
+table contains Host / Device only. `Effective` is the TMR orch∪sched merged
 window (`max(orch_end,sched_end) − min(orch_start,sched_start)`, the old
 device-log "Total"), recomputed from the orch/sched markers' `ts`+`dur` — no
 device log needed. The scene test only *emits* the markers to stderr; tee a run

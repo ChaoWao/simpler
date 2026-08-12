@@ -21,5 +21,8 @@ Run on A5 hardware through the shared-device queue:
 task-submit --device auto --device-num 1 --run \
   ".venv/bin/python -m pytest \
   examples/a5/host_build_graph/qwen3_14b_decode \
-  --platform a5 --device \$TASK_DEVICE"
+  --platform a5 --device \$TASK_DEVICE --manual include"
 ```
+
+The case runs in the daily full scene-test sweep and is excluded from per-PR
+CI.

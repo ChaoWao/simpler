@@ -45,8 +45,9 @@ styles**. They measure different things; don't confuse them:
   .claude/skills/onboard-arch-precheck/check.sh a2a3 || exit 1
   task-submit --device auto --device-num 1 --run "\
     python -m pytest examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode \
-      --platform a2a3 --device \$TASK_DEVICE"
-  # standalone: python .../qwen3_14b_decode/test_qwen3_14b_decode.py -p a2a3 -d \$TASK_DEVICE
+      --platform a2a3 --device \$TASK_DEVICE --manual include"
+  # standalone: python .../qwen3_14b_decode/test_qwen3_14b_decode.py \
+  #   -p a2a3 -d \$TASK_DEVICE --manual include
   ```
 
   This is **not** a cross-repo path, so the rest of this skill (§1 setup,

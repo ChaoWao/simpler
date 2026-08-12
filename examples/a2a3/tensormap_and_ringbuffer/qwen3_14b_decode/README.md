@@ -144,17 +144,18 @@ and the golden can verify all 40 layers' KV writes, not just the hidden output.
 ```bash
 # pytest (hardware; wrap in task-submit on shared boxes)
 pytest examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode \
-    --platform a2a3 --device ${DEVICE}
+    --platform a2a3 --device ${DEVICE} --manual include
 
 # standalone
-python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/test_qwen3_14b_decode.py -p a2a3 -d ${DEVICE}
+python examples/a2a3/tensormap_and_ringbuffer/qwen3_14b_decode/test_qwen3_14b_decode.py \
+    -p a2a3 -d ${DEVICE} --manual include
 ```
 
 DFX is opt-in via the existing flags — no kernel changes needed:
 
 ```bash
 pytest .../qwen3_14b_decode --platform a2a3 --device ${DEVICE} \
-    --enable-chip-swimlane 1 --enable-dep-gen
+    --manual include --enable-chip-swimlane 1 --enable-dep-gen
 ```
 
 Note that `--enable-dep-gen` / `--enable-chip-swimlane` on the full 40-layer graph
@@ -169,7 +170,7 @@ reference at `RTOL=5e-2 / ATOL=1e-1`.
 
 ## Cost
 
-It runs in the general `st-onboard-a2a3` scene-test sweep like any other case.
+It runs in the daily full scene-test sweep and is excluded from per-PR CI.
 Measured on this repo's a2a3 box, one device:
 
 | Phase | Wall |

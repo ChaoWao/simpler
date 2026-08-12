@@ -16,6 +16,9 @@ compile-time ``SIMPLER_HOST_STRACE`` macro (on by default) and emitted at
 are emitted by the host after readback as ``clk=dev`` spans nested under
 ``simpler_run.runner_run.device_wall``.
 
+Runtimes emit only the device spans they implement. Both current runtimes emit
+``device_wall``; the finer orch/sched phase subdivision is TMR-specific.
+
 Marker grammar (matched anywhere on the line, so the CANN/host log prefix is
 ignored)::
 
@@ -319,8 +322,8 @@ def print_rounds_table(buckets, stream=sys.stdout):
     inline. The most-invoked hid bucket is treated as the rounds (one row per
     invocation, ordered by ``inv``); each row's metrics come from
     :func:`_round_metrics`. A column is hidden when every row read 0 (e.g.
-    device/orch/sched/effective are 0 on a SIMPLER_HOST_STRACE-off build or on sim,
-    where the device-domain subdivision is not captured).
+    device/orch/sched/effective are 0 when their marker is absent; for example,
+    HBG emits device wall but has no device-side orch/sched windows).
 
     The output format is consumed by ``tools/benchmark_rounds.sh``'s
     framework-table parser (header ``Round  Host (us) …``, ``Avg Host:``

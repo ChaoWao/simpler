@@ -23,3 +23,6 @@ same logic for a single example. Detection / isolation procedures live in
    pattern as `run_bench()` in `tools/benchmark_rounds.sh`: snapshot logs, run
    `python $ARGUMENTS/test_<name>.py -p <platform> -d $TASK_DEVICE --rounds 10 --skip-golden`,
    find the new log, parse timing, report results.
+6. Report only metrics present in the parsed markers. TMR normally supplies
+   Host / Device / Effective / Orch / Sched; HBG supplies Host / Device. A
+   missing HBG phase is not a zero-duration measurement.

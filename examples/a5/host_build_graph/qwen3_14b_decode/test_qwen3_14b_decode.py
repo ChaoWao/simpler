@@ -36,6 +36,7 @@ class TestQwen314BDecodeHostBuildGraph(SceneTestCase):
         {
             "name": "GraphExecutionBatch16Seq3500",
             "platforms": ["a5"],
+            "manual": True,
             "params": {"seed": 1234, "seq_len": 3500},
         },
     ]
