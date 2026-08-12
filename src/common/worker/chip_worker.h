@@ -162,9 +162,9 @@ public:
     size_t host_dlopen_count() const;
 
     /// Number of AICore run streams the bound runner has created. AICPU streams
-    /// belong to slots for the worker's lifetime; each run gets a freshly
-    /// created AICore stream, so this advances once per run. Platforms using
-    /// the persistent bootstrap pair report 0.
+    /// belong to slots for the worker's lifetime. Completed AICore streams are
+    /// reused until a new code upload makes them stale. Platforms using the
+    /// persistent bootstrap pair report 0.
     size_t run_stream_set_create_count() const;
 
     uint64_t malloc(size_t size);

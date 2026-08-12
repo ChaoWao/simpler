@@ -227,9 +227,9 @@ class TestNativeRunLifecycle(SceneTestCase):
                     self.compute_golden(run_golden, case["params"])
                     return run_args, run_chip_args, run_output_names, run_golden
 
-                # The successor owns a distinct bank and fresh stream while A
-                # still owns the execution claim. A failed early launch must
-                # leave B prepared so the same token can launch after A's
+                # The successor owns a distinct bank and slot stream while A
+                # still owns the execution claim. A failed early launch
+                # must leave B prepared so the same token can launch after A's
                 # complete fence and finalization.
                 active_args, active_chip_args, active_outputs, active_golden = build_run_args()
                 successor_args, successor_chip_args, successor_outputs, successor_golden = build_run_args()
@@ -237,12 +237,12 @@ class TestNativeRunLifecycle(SceneTestCase):
                 native_run = chip_worker._prepare_native_run_with_pipeline_lease(
                     _SLOT, active_chip_args, 0, _GENERATION + 1, config=config
                 )
-                assert chip_worker.run_stream_set_create_count == stream_count + 1
+                assert chip_worker.run_stream_set_create_count == stream_count
                 chip_worker._launch_native_run(native_run)
                 successor_run = chip_worker._prepare_native_run_with_pipeline_lease(
                     _SLOT, successor_chip_args, 1, _GENERATION, config=config
                 )
-                assert chip_worker.run_stream_set_create_count == stream_count + 2
+                assert chip_worker.run_stream_set_create_count == stream_count + 1
                 bank0 = chip_worker.arena_bank_gm_heap_base(0)
                 bank1 = chip_worker.arena_bank_gm_heap_base(1)
                 assert bank0 != 0

@@ -2305,9 +2305,9 @@ NB_MODULE(_task_interface, m) {
         .def_prop_ro(
             "run_stream_set_create_count", &ChipWorker::run_stream_set_create_count,
             "Number of AICore run streams the bound runner has created. The AICPU "
-            "stream belongs to a pipeline slot for the worker's lifetime, while each "
-            "run creates and retires its own AICore stream, so this advances once per "
-            "run; platforms whose runs use the persistent bootstrap pair report 0."
+            "stream belongs to a pipeline slot for the worker's lifetime. A completed "
+            "AICore stream is reused until a new code upload makes it stale. Platforms "
+            "using the persistent bootstrap pair report 0."
         )
         .def_prop_ro(
             "committed_device_memory", &ChipWorker::committed_device_memory,

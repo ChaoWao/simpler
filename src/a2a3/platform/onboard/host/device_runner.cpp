@@ -464,10 +464,9 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
         return rc;
     }
 
-    // On a successful device drain, failure to retire this run's AICore stream
-    // is the run's error. Mark the attempt first so cleanup does not immediately
-    // retry a failed destroy; the retained handle keeps the slot unusable and
-    // lets finalize retry it later.
+    // A proven-complete stream is reusable until a code publication marks it
+    // stale. Publish retirement so cleanup does not replace it with an
+    // unproven state after the device result has already been established.
     prepared.aicore_retirement_attempted = true;
     rc = retire_run_aicore_stream(pipeline_slot, RunStreamSlots::CompletionStatus::Complete);
     if (rc != 0) return rc;

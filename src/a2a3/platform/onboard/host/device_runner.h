@@ -105,6 +105,7 @@ public:
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
     int provision_native_run_resources(uint32_t pipeline_slot) override;
     int abandon_native_run_resources(uint32_t pipeline_slot) override;
+    void mark_run_streams_stale() override { run_stream_slots_.mark_all_stale(); }
 
     // Map/unmap a device buffer into host address space via
     // halHostRegister(DEV_SVM_MAP_HOST) / halHostUnregister. The returned host
@@ -225,14 +226,10 @@ private:
     // One slot per in-flight run the pipeline contract can declare.
     static constexpr unsigned kRunStreamSetCount = PTO_PIPELINE_MAX_DEPTH;
 
-    // AICPU streams belong to slots for the worker's lifetime. AICore streams
-    // belong to a single run: the platform offers no instruction-cache
-    // invalidation for code replaced at a reused GM address, and creating the
-    // stream is the only operation known to leave a core free of the previous
-    // image's instructions. Selecting an existing stream is not.
-    // Stream lifetimes live in RunStreamSlots so the slot state machine —
-    // fresh AICore stream per run, handle kept when a destroy fails — is
-    // testable without a device.
+    // AICPU streams belong to slots for the worker's lifetime. A completed
+    // AICore stream remains reusable until a new code upload marks every slot
+    // stale. Stream lifetimes live in RunStreamSlots so publication and
+    // failed-destroy states are testable without a device.
     RunStreamSlots run_stream_slots_{
         [this](void **out) {
             return create_run_stream(out);

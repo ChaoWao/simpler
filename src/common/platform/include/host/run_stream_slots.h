@@ -24,11 +24,9 @@
  * Per-slot ownership of the two streams a run submits on.
  *
  * The AICPU stream carries no instruction-cache state, so it belongs to its
- * slot for the runner's lifetime. The AICore stream belongs to a single run:
- * the platform offers no instruction-cache invalidation for code replaced at a
- * reused GM address, and creating the stream is the only operation known to
- * leave a core free of the previous image's instructions — selecting an
- * existing one is not.
+ * slot for the runner's lifetime. A completed AICore stream remains reusable
+ * until new AICore code is published. Publication marks every slot stale; its
+ * next acquire destroys the old AICore stream before creating a replacement.
  *
  * A destroy that fails keeps its handle. Such a stream may still hold the
  * previous image's instructions, so the slot must refuse the next run rather
@@ -54,11 +52,7 @@ public:
         create_(std::move(create)),
         destroy_(std::move(destroy)) {}
 
-    /**
-     * Ready `slot` for a run: its AICPU stream on first use, and always a fresh
-     * AICore stream. Fails when the slot still holds an AICore stream a prior
-     * run could not retire.
-     */
+    /** Ready `slot` for a run, reusing its AICore stream unless stale. */
     int acquire(unsigned slot) {
         if (slot >= slots_.size()) return -1;
         Slot &s = slots_[slot];
@@ -70,16 +64,35 @@ public:
                 return rc;
             }
         }
-        if (s.aicore != nullptr) return -1;
+        if (s.aicore != nullptr) {
+            if (s.submitted || !s.complete) return -1;
+            if (!s.stale) {
+                s.submitted = false;
+                s.complete = false;
+                return 0;
+            }
+            int rc = destroy_(s.aicore);
+            if (rc != 0) return rc;
+            s.aicore = nullptr;
+        }
         int rc = create_(&s.aicore);
         if (rc != 0) {
             s.aicore = nullptr;
             return rc;
         }
         created_count_.fetch_add(1, std::memory_order_relaxed);
+        s.stale = false;
         s.submitted = false;
         s.complete = false;
         return 0;
+    }
+
+    /** Mark every retained AICore stream stale after code publication. */
+    void mark_all_stale() {
+        for (Slot &s : slots_) {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            s.stale = true;
+        }
     }
 
     /** Make the prepared stream pair visible to non-blocking poll. */
@@ -116,9 +129,7 @@ public:
     }
 
     /**
-     * Retire `slot`'s AICore stream. The handle survives a failed destroy.
-     * Only a successful device query or stream synchronization may pass
-     * Complete; launch rollback and abandoned preparation pass Unproven.
+     * Complete retains the stream for reuse. Unproven destroys it.
      */
     int retire_aicore(unsigned slot, CompletionStatus completion_status) {
         if (slot >= slots_.size()) return -1;
@@ -130,6 +141,7 @@ public:
         // later failing sync, so the sync error remains authoritative.
         s.submitted = false;
         s.complete = completion_status == CompletionStatus::Complete;
+        if (completion_status == CompletionStatus::Complete) return 0;
         if (s.aicore == nullptr) return 0;
         int rc = destroy_(s.aicore);
         if (rc != 0) return rc;
@@ -144,6 +156,7 @@ public:
             std::lock_guard<std::mutex> lock(s.mutex);
             s.submitted = false;
             s.complete = false;
+            s.stale = false;
             for (void **stream : {&s.aicpu, &s.aicore}) {
                 if (*stream == nullptr) continue;
                 int rc = destroy_(*stream);
@@ -162,6 +175,9 @@ public:
         for (Slot &s : slots_) {
             s.aicpu = nullptr;
             s.aicore = nullptr;
+            s.stale = false;
+            s.submitted = false;
+            s.complete = false;
         }
     }
 
@@ -176,6 +192,7 @@ private:
         mutable std::mutex mutex;
         void *aicpu{nullptr};
         void *aicore{nullptr};
+        bool stale{false};
         bool submitted{false};
         bool complete{false};
     };

@@ -290,14 +290,16 @@ that window needs the admission layer to gate dispatch on `pool.owns(lease)`
 before handing work down, which is whole-run admission's job, not this
 layer's.
 
-AICore streams are outside that lease. The instruction cache belongs to the
-cores, every slot publishes its image to the same GM code address, and the
-platform offers no cache invalidation for code replaced there. Creating a
-stream is the only operation known to leave a core free of the previous image's
-instructions; selecting an already-existing one is not. So each run creates its
-own AICore stream and retires it on every exit path, and no record of which
-image a stream last ran is load-bearing. The AICPU stream carries no such state
-and stays with its slot.
+AICore streams are outside that lease. Registered callables keep content-hash
+deduplicated GM allocations: simultaneously resident code images occupy
+different allocations, while unregister frees an allocation that a later
+registration may reuse. A dedup miss is the only path that publishes new
+AICore instruction bytes. After that H2D copy succeeds, every retained slot
+stream is marked stale; its next acquire destroys and recreates the AICore
+stream before launch. Without a new publication, completed slot streams remain
+reusable even when two resident callables alternate. Unproven completion still
+destroys the stream conservatively. The AICPU stream carries no instruction
+cache state and stays with its slot.
 
 #### Whole-run FIFO admission
 

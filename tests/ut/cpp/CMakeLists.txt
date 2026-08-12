@@ -398,8 +398,8 @@ add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
 add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)
 
-# Run-stream slot state machine: fresh AICore stream per run, and the handle a
-# failed destroy must keep. Header-only with injected create/destroy, so it
+# Run-stream slot state machine: publication-aware AICore stream reuse and
+# failed-destroy ownership. Header-only with injected create/destroy, so it
 # needs no runtime objects and no device.
 add_executable(test_run_stream_slots hierarchical/test_run_stream_slots.cpp)
 target_include_directories(test_run_stream_slots PRIVATE

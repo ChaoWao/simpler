@@ -74,9 +74,7 @@ RunStreamSlots make_slots(FakeStreams &fake) {
     );
 }
 
-// The AICPU stream is the slot's for the runner's lifetime; the AICore stream
-// belongs to one run, so the count advances once per acquire.
-TEST(RunStreamSlots, EveryAcquireCreatesAnAicoreStreamAndKeepsTheAicpuOne) {
+TEST(RunStreamSlots, RetiredStreamIsReusedWithoutCodePublication) {
     FakeStreams fake;
     RunStreamSlots slots = make_slots(fake);
 
@@ -87,17 +85,117 @@ TEST(RunStreamSlots, EveryAcquireCreatesAnAicoreStreamAndKeepsTheAicpuOne) {
     ASSERT_NE(first_aicore, nullptr);
     EXPECT_EQ(slots.created_count(), 1u);
 
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
+    EXPECT_EQ(slots.aicore(0), first_aicore);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    EXPECT_EQ(slots.aicpu(0), aicpu) << "the AICPU stream must not be recreated";
+    EXPECT_EQ(slots.aicore(0), first_aicore) << "a retired stream stays warm until code publication";
+    EXPECT_EQ(slots.created_count(), 1u);
+}
+
+TEST(RunStreamSlots, CodePublicationInvalidatesEveryRetiredSlot) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.acquire(1), 0);
+    void *slot0_aicore = slots.aicore(0);
+    void *slot1_aicore = slots.aicore(1);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+    ASSERT_EQ(slots.mark_submitted(1), 0);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
+    ASSERT_EQ(slots.retire_aicore(1, CompletionStatus::Complete), 0);
+
+    slots.mark_all_stale();
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.acquire(1), 0);
+    EXPECT_NE(slots.aicore(0), slot0_aicore);
+    EXPECT_NE(slots.aicore(1), slot1_aicore);
+    EXPECT_EQ(slots.created_count(), 4u);
+}
+
+TEST(RunStreamSlots, CodePublicationDuringARunRebuildsAfterRetirement) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    void *active_aicore = slots.aicore(0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+
+    slots.mark_all_stale();
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
+    ASSERT_EQ(slots.acquire(0), 0);
+    EXPECT_NE(slots.aicore(0), active_aicore);
+    EXPECT_EQ(slots.created_count(), 2u);
+}
+
+TEST(RunStreamSlots, CompleteRetirementWithoutAHandleIsBenign) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    EXPECT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
+}
+
+TEST(RunStreamSlots, PollCompletionDoesNotPermitReuseBeforeRetirement) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    void *aicore = slots.aicore(0);
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+    ASSERT_EQ(
+        slots.poll(
+            0,
+            [](void *, void *) {
+                return SIMPLER_NATIVE_RUN_POLL_COMPLETE;
+            }
+        ),
+        SIMPLER_NATIVE_RUN_POLL_COMPLETE
+    );
+
+    EXPECT_NE(slots.acquire(0), 0);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
+    ASSERT_EQ(slots.acquire(0), 0);
+    EXPECT_EQ(slots.aicore(0), aicore);
+}
+
+TEST(RunStreamSlots, UnprovenRunDestroysTheAicoreStream) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
     ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Unproven), 0);
     EXPECT_EQ(slots.aicore(0), nullptr);
 
     ASSERT_EQ(slots.acquire(0), 0);
-    EXPECT_EQ(slots.aicpu(0), aicpu) << "the AICPU stream must not be recreated";
-    EXPECT_NE(slots.aicore(0), first_aicore) << "the AICore stream must be a new one";
     EXPECT_EQ(slots.created_count(), 2u);
 }
 
-// The three consequences a failed destroy must have.
-TEST(RunStreamSlots, AFailedDestroyReportsKeepsTheHandleAndLocksTheSlot) {
+TEST(RunStreamSlots, PipelineSlotsKeepIndependentWarmStreams) {
+    FakeStreams fake;
+    RunStreamSlots slots = make_slots(fake);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.acquire(1), 0);
+    void *slot0_aicore = slots.aicore(0);
+    void *slot1_aicore = slots.aicore(1);
+    ASSERT_NE(slot0_aicore, slot1_aicore);
+
+    ASSERT_EQ(slots.mark_submitted(0), 0);
+    ASSERT_EQ(slots.mark_submitted(1), 0);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
+    ASSERT_EQ(slots.retire_aicore(1, CompletionStatus::Complete), 0);
+
+    ASSERT_EQ(slots.acquire(0), 0);
+    ASSERT_EQ(slots.acquire(1), 0);
+    EXPECT_EQ(slots.aicore(0), slot0_aicore);
+    EXPECT_EQ(slots.aicore(1), slot1_aicore);
+    EXPECT_EQ(slots.created_count(), 2u);
+}
+
+TEST(RunStreamSlots, AFailedStaleDestroyReportsAndKeepsTheHandle) {
     FakeStreams fake;
     RunStreamSlots slots = make_slots(fake);
 
@@ -105,11 +203,12 @@ TEST(RunStreamSlots, AFailedDestroyReportsKeepsTheHandleAndLocksTheSlot) {
     ASSERT_EQ(slots.mark_submitted(0), 0);
     void *stranded = slots.aicore(0);
 
-    // 1. the error reaches the caller
-    fake.fail_next_destroys(1);
-    EXPECT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), -13);
+    ASSERT_EQ(slots.retire_aicore(0, CompletionStatus::Complete), 0);
 
-    // 2. the handle survives, so teardown still has something to reclaim
+    slots.mark_all_stale();
+    fake.fail_next_destroys(1);
+    EXPECT_EQ(slots.acquire(0), -13);
+
     EXPECT_EQ(slots.aicore(0), stranded);
 
     // Device execution was already drained before retirement. The retained
@@ -124,12 +223,9 @@ TEST(RunStreamSlots, AFailedDestroyReportsKeepsTheHandleAndLocksTheSlot) {
         SIMPLER_NATIVE_RUN_POLL_COMPLETE
     );
 
-    // 3. the next run is refused rather than handed a second live stream
-    EXPECT_NE(slots.acquire(0), 0);
-    EXPECT_EQ(slots.aicore(0), stranded);
-    EXPECT_EQ(slots.created_count(), 1u) << "a refused acquire must not create anything";
-
-    // and teardown retries it
+    ASSERT_EQ(slots.acquire(0), 0);
+    EXPECT_NE(slots.aicore(0), stranded);
+    EXPECT_EQ(slots.created_count(), 2u);
     EXPECT_EQ(slots.destroy_all(), 0);
     EXPECT_EQ(slots.aicore(0), nullptr);
     EXPECT_EQ(fake.live_count(), 0u);
@@ -163,7 +259,7 @@ TEST(RunStreamSlots, SuccessorProvisionAndAbandonDoNotTouchTheActiveSlot) {
     EXPECT_NE(slots.aicore(1), active_aicore);
     EXPECT_EQ(slots.created_count(), 2u);
 
-    // Abandoning the unpublished successor retires only its fresh AICore
+    // Abandoning the unpublished successor retires only its AICore
     // stream. Its slot-persistent AICPU stream remains reusable.
     ASSERT_EQ(slots.retire_aicore(1, CompletionStatus::Unproven), 0);
     EXPECT_TRUE(slots.ready(0));
@@ -325,7 +421,7 @@ TEST(RunStreamSlots, PollDoesNotWaitBehindRetirement) {
     ASSERT_EQ(slots.mark_submitted(0), 0);
 
     auto retire = std::async(std::launch::async, [&]() {
-        return slots.retire_aicore(0, CompletionStatus::Complete);
+        return slots.retire_aicore(0, CompletionStatus::Unproven);
     });
     destroy_entered.get_future().wait();
 
