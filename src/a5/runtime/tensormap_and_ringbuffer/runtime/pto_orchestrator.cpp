@@ -37,6 +37,7 @@
 #include "tensor.h"
 
 #if SIMPLER_DFX
+#include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
 #endif
 
@@ -56,18 +57,15 @@ static_assert(
 // link these no-op stubs so the runtime translation unit is self-contained.
 // Visibility is hidden so the HOST .so doesn't export them into the global
 // dynamic symbol table where they'd shadow the AICPU .so's strong symbols
-// (same pattern as get_sys_cnt_aicpu / l2_perf_aicpu_record_orch_phase below).
+// (same pattern as get_sys_cnt_aicpu / chip_swimlane_aicpu_record_orch_phase below).
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_dep_gen_enabled() { return false; }
 __attribute__((weak, visibility("hidden"))) void dep_gen_aicpu_record_submit(
     uint64_t, bool, bool, int, const void *const *, const uint8_t *, int, const uint64_t *, int, const int32_t[3]
 ) {}
 
-#if SIMPLER_DFX
-#include "aicpu/scope_stats_collector_aicpu.h"
-
 // Scope_stats enable gate, queried via the same predicate idiom as
-// is_dep_gen_enabled. The AICPU collector links the strong definition; host
-// builds fall back to this weak `false`. Gating here still skips the
+// is_dep_gen_enabled above. The AICPU collector links the strong definition;
+// host builds fall back to this weak `false`. Gating here still skips the
 // cross-agent occupancy reads that feed the sample when scope_stats is disabled.
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabled() { return false; }
 
@@ -75,7 +73,6 @@ extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabl
 // wrap. Strong definition lives in the AICPU collector; host builds fall back to
 // this weak no-op so the runtime translation unit stays self-contained.
 extern "C" __attribute__((weak, visibility("hidden"))) void scope_stats_note_heap_wrap(int) {}
-#endif
 
 // =============================================================================
 // Orchestrator Profiling (compile-time toggle)
@@ -181,10 +178,12 @@ static int32_t orch_mark_fatal(PTO2OrchestratorState *orch, int32_t error_code) 
 static void
 orch_report_fatal_v(PTO2OrchestratorState *orch, int32_t error_code, const char *func, const char *fmt, va_list args) {
     int32_t latched_code = orch_mark_fatal(orch, error_code);
+
 #if SIMPLER_DFX
-    // Flush the active scope's peaks before the FATAL line so the diagnostic
-    // context lands adjacent in the log. Latched internally — safe to call
-    // from every cascaded report_fatal.
+    // Flush the current scope's peaks BEFORE the FATAL log line, so the
+    // diagnostic context (which pool/window filled up) appears right next to
+    // the failure reason. on_fatal is latched, so duplicate fatals from
+    // different layers don't print multiple stats lines.
     scope_stats_on_fatal();
 #endif
 

@@ -35,16 +35,14 @@
  *      `set_chip_swimlane_aicore_head_slot()`, and calls `set_aicore_profiling_flag()`,
  *      before invoking `aicore_execute`.
  *   3. `get_chip_swimlane_aicore_head()` dereferences the slot on first use and
- *      caches the result. Callers must defer the first call until AFTER the
- *      Phase 1 handshake (`aicpu_ready == 1`): AICPU's `chip_swimlane_aicpu_init`
- *      runs before it sets `aicpu_ready = 1`, so Phase 1 exit is the
- *      slot-populated guarantee. The executor resolves the head right after
- *      handshake exit so the first-task dispatch→start path carries no
- *      resolve work.
+ *      caches the result. The first call is valid after AICore observes the
+ *      AICPU initialization publication point for the current launch. In the
+ *      current handshake this is Phase 2 exit (`DATA_MAIN_BASE != 0`) after
+ *      AICPU opens the register window. Executors may resolve the head there or
+ *      defer it until the first dispatch.
  */
 
-#ifndef PLATFORM_AICORE_AICORE_PROFILING_STATE_H_
-#define PLATFORM_AICORE_AICORE_PROFILING_STATE_H_
+#pragma once
 
 #include <cstdint>
 
@@ -71,11 +69,12 @@ __aicore__ uint32_t get_aicore_profiling_flag();
  *
  * `get_chip_swimlane_aicore_head()` dereferences the stashed slot on first use,
  * caches the result, and returns the cached pointer on subsequent calls.
- * Callers MUST defer the first call until after AICPU has set
- * `aicpu_ready = 1` (Phase 1 handshake exit), since AICPU's
- * `chip_swimlane_aicpu_init` populates the slot before that signal.
+ * Callers MUST defer the first call until AICore has observed the AICPU
+ * initialization publication point for the current launch. In the current
+ * handshake this is Phase 2 exit (`DATA_MAIN_BASE != 0`) after AICPU opens the
+ * register window. `chip_swimlane_aicpu_init` publishes the slot before any
+ * register window is opened, so resolving at handshake exit and lazy resolution
+ * on first dispatch are both valid.
  */
 __aicore__ void set_chip_swimlane_aicore_head_slot(__gm__ uint64_t *slot_ptr);
 __aicore__ __gm__ ChipSwimlaneActiveHead *get_chip_swimlane_aicore_head();
-
-#endif  // PLATFORM_AICORE_AICORE_PROFILING_STATE_H_

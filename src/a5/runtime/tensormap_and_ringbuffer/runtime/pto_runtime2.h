@@ -96,8 +96,8 @@ struct PTO2RuntimeOps {
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
 
     // Stash the call-site captured by PTO2ScopeGuard into the [ScopeStats]
-    // collector. Always present to keep ops-table layout stable across
-    // SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
+    // collector. Always present in the struct to keep ops-table layout stable
+    // across SIMPLER_DFX settings; set to nullptr at SIMPLER_DFX=0.
     void (*scope_set_site)(const char *file, int line);
 };
 

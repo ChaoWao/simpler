@@ -66,12 +66,13 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * AICPU and AICore during task execution.
  *
  * Protocol State Machine:
- * 1. Initialization: AICPU sets aicpu_ready=1
- * 2. Acknowledgment: AICore sets aicore_done=core_id+1
- * 3. Task Dispatch: AICPU writes DATA_MAIN_BASE after updating the per-core payload
- * 4. Task Execution: AICore reads the cached PTO2DispatchPayload and executes
- * 5. Task Completion: AICore writes FIN to COND; AICPU observes completion
- * 6. Shutdown: AICPU sets control=1, AICore exits
+ * 1. AICore publishes physical_core_id, core_type, and aicore_done on launch
+ * 2. AICPU publishes the task pointer and opens the register window with DATA_MAIN_BASE=IDLE
+ * 3. AICore observes window-open, reports initial idle state, and reads the task pointer
+ * 4. Task Dispatch: AICPU writes DATA_MAIN_BASE after updating the per-core payload
+ * 5. Task Execution: AICore reads the cached PTO2DispatchPayload and executes
+ * 6. Task Completion: AICore writes FIN to COND; AICPU observes completion
+ * 7. Shutdown: AICPU writes the exit signal to DATA_MAIN_BASE; AICore exits
  *
  * Each AICore instance has its own handshake buffer to enable concurrent
  * task execution across multiple cores.
@@ -85,17 +86,17 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * between cores and optimize cache coherency operations.
  *
  * Field Access Patterns:
- * - aicpu_ready: Written by AICPU, read by AICore
+ * - aicpu_ready: Reserved legacy field; the current handshake does not use it
  * - aicore_done: Written by AICore, read by AICPU (final report; physical_core_id
  *   and core_type are published alongside it in the same write)
- * - task: Written by AICPU, read by AICore (0 = not ready, non-zero = PTO2DispatchPayload*)
+ * - task: Written by AICPU before window-open, read by AICore after window-open
  * - core_type: Written by AICore (with aicore_done), read by AICPU (CoreType::AIC or CoreType::AIV)
  * - physical_core_id: Written by AICore (with aicore_done), read by AICPU
  */
 struct Handshake {
-    volatile uint32_t aicpu_ready;  // AICPU ready signal: 0=not ready, 1=ready
+    volatile uint32_t aicpu_ready;  // Legacy layout field; unused by the current handshake
     volatile uint32_t aicore_done;  // AICore ready signal: 0=not ready, core_id+1=ready
-    volatile uint64_t task;         // Init: PTO2DispatchPayload* (set before aicpu_ready); runtime: unused
+    volatile uint64_t task;         // PTO2DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
     volatile uint32_t physical_core_id;  // Physical core ID (reported by AICore with aicore_done)
 } __attribute__((aligned(64)));

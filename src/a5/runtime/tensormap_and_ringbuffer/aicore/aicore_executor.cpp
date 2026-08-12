@@ -48,15 +48,17 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  * AICore main execution loop
  *
  * Implements the AICPU-AICore register-based dispatch protocol:
- * 1. Wait for AICPU ready signal via handshake buffer
- * 2. Report physical core ID and core type, signal AICore ready
- * 3. Cache per-core PTO2DispatchPayload pointer from hank->task
+ * 1. Report physical core ID and core type, signal aicore_done (no AICPU wait)
+ * 2. Wait for the AICPU to open our register window (DATA_MAIN_BASE != 0)
+ * 3. Cache per-core PTO2DispatchPayload pointer from my_hank->task
  * 4. Poll DATA_MAIN_BASE register for task dispatch until exit signal
  *
- * AICPU writes &s_payload_per_core[i] to hank->task before setting
- * aicpu_ready=1. AICore caches this pointer and reads function_bin_addr +
- * args pointer from it on each dispatch. reg_val is a monotonically
- * increasing task ID used only for dispatch signaling and ACK/FIN protocol.
+ * AICore reports on launch; the AICPU writes &s_payload_per_core[i] to
+ * my_hank->task and then opens the register window (DATA_MAIN_BASE = IDLE), which
+ * is itself the acknowledgement. AICore caches this pointer and reads
+ * function_bin_addr + args pointer from it on each dispatch. reg_val is a
+ * monotonically increasing task ID used only for dispatch signaling and
+ * ACK/FIN protocol.
  *
  * @param runtime Pointer to Runtime in global memory
  * @param s_block_idx Block index (core ID)
@@ -98,7 +100,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     dcci(my_hank, SINGLE_CACHE_LINE);
     __gm__ PTO2DispatchPayload *payload = reinterpret_cast<__gm__ PTO2DispatchPayload *>(my_hank->task);
 
-    // Cache profiling state once after Phase 3. The L2 / PMU rings and the
+    // Cache profiling state once after Phase 2. The L2 / PMU rings and the
     // PMU MMIO base are all stable for the entire run (host-resolved at
     // AICore kernel entry from KernelArgs::regs[physical_core_id]), so
     // they are safe to cache here.
@@ -106,10 +108,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     bool chip_swimlane_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE);
     bool dump_args_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     bool pmu_enabled = SIMPLER_GET_DFX_FLAG(profiling_flag, SIMPLER_DFX_FLAG_PMU);
-    // Per-core ChipSwimlaneActiveHead channel — lazy-resolved on first task; the
-    // table slot AICPU populates inside `chip_swimlane_aicpu_init` runs
-    // concurrently with kernel entry, so we cannot deref at startup. The
-    // first dispatch is proof AICPU init is done.
+    // This executor chooses first-dispatch lazy resolution. The rotation
+    // channel has already been safe to resolve since Phase 2 exit above.
     __gm__ ChipSwimlaneActiveHead *chip_swimlane_head = nullptr;
     ChipSwimlaneAicoreLocalState chip_swimlane_local = {nullptr, UINT32_MAX, 0};
     __gm__ PmuAicoreRing *pmu_ring = pmu_enabled ? get_aicore_pmu_ring() : nullptr;

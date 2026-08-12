@@ -558,7 +558,9 @@ Each scheduler thread runs a tight loop with two main phases:
 
 **Phase 2 — Dispatch** (full model in §8.6):
 
-- For each idle core: drain the matching sync_start ready queue first, then the regular shape-based ready queue
+- Service each source (normal ready ▸ speculative early) in occupancy order — `sync_start`
+  Tier-0 ▸ MIX ▸ AIC/AIV, idle ▸ pending — popping from the matching shape-based ready queue
+  (lock-free MPMC Vyukov queue, one per resource shape)
 - Build `PTO2DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
 - Write task pointer to `Handshake.task`, signal AICore via register `DATA_MAIN_BASE` (DMB offset `0xD0` on a5)
 - After normal ready queues are empty, Phase **4b** may stage speculative early-dispatch candidates onto spare slots (`early_dispatch_queues[]` / `early_sync_start_queue`)
@@ -569,13 +571,14 @@ After these phases, the scheduler updates profiling headers and checks for termi
 
 Ready queues use a lock-free bounded MPMC (Vyukov) design:
 
-- Two `PTO2ReadyQueue` lanes per resource shape: sync_start Tier-0 and regular work
-- **Push**: any thread (orchestrator via wiring, or scheduler on completion) pushes newly-ready tasks to the queue matching `task->active_mask.to_shape()`
+- One `PTO2ReadyQueue` per resource shape — 3 shapes (`PTO2_NUM_RESOURCE_SHAPES`): `MIX`
+  (AIC+AIV cluster), `AIC`, `AIV`. Alongside `ready_queues[]` there is a per-shape
+  `ready_sync_queues[]` (sync_start Tier-0) and the speculative `early_dispatch_queues[]` /
+  `early_sync_start_queue` — see §8.6 for the full source × tier model.
+- **Push**: any thread (orchestrator via `init_task`, or scheduler on completion) pushes newly-ready tasks to the queue matching `task->active_mask.to_shape()` (sync_start cohorts to the sync lane)
 - **Pop**: scheduler threads pop from the queue matching the idle core's resource shape
 - Per-slot sequence counters prevent ABA problems
 - `enqueue_pos` and `dequeue_pos` are on separate cache lines to avoid false sharing
-
-Ready `require_sync_start` cohorts use `ready_sync_queues[]` and take cores before regular ready work. Speculative sync_start early candidates use the separate `early_sync_start_queue` (see §8.6).
 
 ### 8.4 Watermark Advancement (last_task_alive)
 
@@ -623,27 +626,27 @@ Private internals are split across three .cpp files by responsibility:
 ### 8.6 Dispatch model — two sources, sync tiers, occupancy order
 
 `resolve_and_dispatch` places ready and speculative work onto AICore cores under one
-occupancy model (ported from a2a3 early-dispatch; a5 specifics called out below). Two
-orthogonal axes decide *what* runs and *where*:
+occupancy model. Two orthogonal axes decide *what* runs and *where*:
 
 - **Source** — `NORMAL` (all producers done; the task sits in a ready queue and launches on
   pickup) vs `EARLY` (a *speculative* pre-stage of a not-yet-released task; its dispatch
-  payload carries a non-zero `src_payload` gate and launches later by a high-32 doorbell on
-  `DATA_MAIN_BASE`). Normal strictly precedes early.
+  payload carries a non-zero `src_payload` gate and launches later by a doorbell). Normal
+  strictly precedes early.
 - **Cohort** — `SYNC_START` (an SPMD cohort that must launch atomically) vs `REGULAR` (each
   block launches independently). "is it ready" (source) and "does it need a rendezvous"
   (cohort) are orthogonal.
 
-Within each source the occupancy order is **`sync_start` ▸ MIX ▸ AIC/AIV`** (shape), and per
+Within each source the occupancy order is **`sync_start` ▸ MIX ▸ AIC/AIV** (shape), and per
 shape **idle ▸ pending** (an idle core takes its running slot; a busy core takes its gated
-pending slot, promoted on completion).`dispatch_ready_tasks` and
-`try_early_dispatch` share `run_staging_order` for this shape/placement order.
+pending slot, promoted on completion). This order lives in one shared skeleton,
+`run_staging_order`; the normal and early sources differ only in the per-shape stage callback
+(pickup vs gated).
 
 #### Queues
 
 | Source | Regular lanes | sync_start lane |
 | ------ | ------------- | --------------- |
-| NORMAL (ready) | `ready_queues[MIX\|AIC\|AIV]` | `ready_sync_queues[MIX\|AIC\|AIV]` |
+| NORMAL (ready) | `ready_queues[MIX\|AIC\|AIV]` | `ready_sync_queues[MIX\|AIC\|AIV]` (per-shape) |
 | EARLY (speculative) | `early_dispatch_queues[MIX\|AIC\|AIV]` | `early_sync_start_queue` (single) |
 
 A task routes to the early sync lane iff `task_attrs.requires_sync_start()`. Early
@@ -713,7 +716,8 @@ edge (#1405).
 
 #### MIX per-core placement
 
-A MIX task spans a cluster (1 AIC + 2 AIV). Gated MIX may place **per core**
+A MIX task spans a cluster (1 AIC + 2 AIV). `classify_mix_cluster` admits a cluster whenever
+every used core has a free slot; `prepare_block_for_dispatch` then places **per core**
 (`to_pending && !is_core_idle`): idle cores → running, busy cores → pending. Cross-core start
 skew within a block is tolerated by AICore incore synchronization.
 

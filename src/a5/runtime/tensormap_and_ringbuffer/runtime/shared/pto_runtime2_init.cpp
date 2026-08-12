@@ -525,6 +525,7 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const int32_t dep_pool_capacities[PTO2_MAX_RING_DEPTH]
 ) {
     PTO2RuntimeArenaLayout layout{};
+
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         layout.sizing.task_window_sizes[r] = task_window_sizes[r];
         layout.sizing.heap_sizes[r] = heap_sizes[r];

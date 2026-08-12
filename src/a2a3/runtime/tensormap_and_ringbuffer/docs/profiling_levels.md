@@ -236,7 +236,7 @@ header just like on onboard.
 | ----- | -------- |
 | 0 | Nothing (disabled) |
 | 1 | AICore timing only (start/end/task_token_raw) — AICPU `complete_task` is bypassed |
-| 2 | + AICPU dispatch_time, finish_time |
+| 2 | + dispatch_time, finish_time |
 | 3 | + Scheduler phases (`SCHED_*`) |
 | 4 | + Orchestrator phases (full) |
 
@@ -271,6 +271,10 @@ Fanout edges are no longer carried on the device hot path — `swimlane_converte
 joins them from the sibling `deps.json` (produced by dep_gen) at post-process time.
 
 Bare `--enable-chip-swimlane` = level 4 (backward compatible).
+
+The Complete phase's `tasks_processed` value is the number of AICore FIN/retire
+events observed by the scheduler poll. For SPMD tasks this includes non-final
+sub-block retires; it is therefore not always the number of logical tasks.
 
 ### Level gating in AICPU code
 
@@ -427,9 +431,9 @@ definitions to runtime headers.
 ### Code Locations
 
 - Macro defaults and validation: `src/common/task_interface/profiling_config.h`
-- Scheduler profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_dispatch.cpp` and `scheduler_cold_path.cpp`
-- Orchestrator profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp`
-- TensorMap profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_tensormap.h`
+- Scheduler profiling: `../runtime/scheduler/scheduler_dispatch.cpp` and `../runtime/scheduler/scheduler_cold_path.cpp`
+- Orchestrator profiling: `../aicpu/aicpu_executor.cpp`
+- TensorMap profiling: `../runtime/pto_tensormap.h`
 
 ---
 

@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-// Host-side fake HostApi tests for a2a3 TRB bind/validate tensor leases.
+// Host-side fake HostApi tests for TRB bind/validate tensor leases.
 //
 // The retained temporary buffer's grow/pack/slice logic lives entirely in
 // runtime_maker.cpp (file-local RetainedTempBump). The platform side is just a

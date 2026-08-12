@@ -552,7 +552,6 @@ static bool prepare_task(
     out->slot_state->bind_ring(ring_id);
     out->slot_state->reset_for_reuse();
     out->slot_state->fanin_count = 0;
-    out->slot_state->dep_pool_mark = 0;
 
     out->payload->prefetch(args.tensor_count(), args.scalar_count());
 
