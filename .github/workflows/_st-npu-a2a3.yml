@@ -69,59 +69,54 @@ jobs:
       - name: Compile scene-test kernels (a2a3)
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
-          python -m simpler_setup.tools.scene_test_compile examples tests/st \
+          .venv/bin/python -m simpler_setup.tools.scene_test_compile examples tests/st \
             --platform a2a3 --exclude-level 4 --require-pto-isa --compile-workers 8 -q
 
       - name: Run pytest scene tests (a2a3)
         if: inputs.a2a3_sdma_mode == 'marker'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
+            .venv/bin/python -m pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
+              --run ".venv/bin/python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200"
           fi
 
       - name: Run pytest scene tests (a2a3 legacy SDMA paths)
         if: inputs.a2a3_sdma_mode == 'legacy-paths'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
           SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            .venv/bin/python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run ".venv/bin/python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
       - name: SDMA pytest (a2a3)
         if: inputs.a2a3_sdma_mode == 'marker'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
           SDMA_TESTS="examples tests/st -m sdma"
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            .venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
-              --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run ".venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
       - name: SDMA pytest (a2a3 legacy paths)
         if: inputs.a2a3_sdma_mode == 'legacy-paths'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
-          source .venv/bin/activate
           SDMA_TESTS="examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
           if [ "$(uname -m)" = "x86_64" ]; then
-            python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
+            .venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
-              --run "python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
+              --run ".venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
           fi
 
       - name: DFX smokes (a2a3)
