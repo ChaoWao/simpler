@@ -42,6 +42,7 @@
 // pto_runtime2_types.h never references PTO2DispatchPayload itself; consumers that
 // need it include it via runtime.h directly.
 #include "aicore_completion_mailbox.h"
+#include "common/args_dump.h"
 #include "pto_submit_types.h"
 #include "pto_task_id.h"
 #include "pto_types.h"
@@ -332,6 +333,7 @@ struct PTO2TaskPayload {
     // / scalars offsets only. Resolved at submit; evaluated by the scheduler at
     // dispatch.
     alignas(64) DispatchPredicate predicate;
+    ArgsDumpTaskMetadata dump_metadata;
     // === Cache lines 10-73 (4096B) — tensors (alignas(64) forces alignment) ===
     ChipTensor tensors[MAX_TENSOR_ARGS];
     // === Cache lines 74-75 (128B) — scalars ===
@@ -396,6 +398,13 @@ struct PTO2TaskPayload {
         // Eliminates branches; extra bytes within the same CL have zero additional cost.
         memcpy(scalars, args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
 
+        dump_metadata = {};
+#if SIMPLER_DFX
+        dump_metadata.dump_arg_mask = args.dump_arg_mask();
+        dump_metadata.dump_arg_flags = args.dump_arg_index_ambiguous_mask();
+        memcpy(dump_metadata.scalar_dtypes, args.scalar_dtypes(), args.scalar_count() * sizeof(uint8_t));
+#endif
+
         // Early-dispatch metadata — the single init point for these
         // fields. reset_for_reuse MUST NOT touch the payload (it runs at slot
         // init and would pull this cold cache line across structures);
@@ -426,6 +435,10 @@ static_assert(offsetof(PTO2TaskPayload, fanin_local_ids) == 12, "inline fanin id
 static_assert(
     offsetof(PTO2TaskPayload, predicate) == 576,
     "dispatch predicate occupies cache line 9 at fixed byte 576 (before tensors, never moves)"
+);
+static_assert(
+    offsetof(PTO2TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 640,
+    "dump metadata must fit in the AICPU-only cache line before tensors"
 );
 static_assert(
     offsetof(PTO2TaskPayload, tensors) == 640, "tensors must start at byte 640 (cache line 10, after predicate)"

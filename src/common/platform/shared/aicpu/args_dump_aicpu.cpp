@@ -680,11 +680,7 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info) {
     bool truncated = false;
     bool is_contiguous = dump_arg_is_contiguous(info);
     bool is_scalar = kind == ArgsDumpKind::SCALAR;
-    ArgsDumpArgMask task_dump_arg_mask = ARGS_DUMP_ARG_MASK_NONE;
-    if (g_dump_args_level == DumpArgsLevel::HYBRID) {
-        get_dump_args_task_masks(info.task_id, &task_dump_arg_mask, nullptr);
-    }
-    bool capture_payload = has_dump_arg_flag(task_dump_arg_mask, static_cast<int32_t>(info.arg_index));
+    bool capture_payload = info.capture_payload != 0;
 
     if (is_scalar || (g_dump_args_level == DumpArgsLevel::HYBRID && !capture_payload)) {
         copy_bytes = 0;

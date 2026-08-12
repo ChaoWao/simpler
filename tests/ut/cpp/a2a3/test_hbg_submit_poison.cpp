@@ -101,7 +101,9 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     CoreTaskArgs root_args;
     create_infos.emplace_back(shape, 1, DataType::FLOAT32);
     root_args.add_output(create_infos.back());
-    root_args.add_scalar(static_cast<uint64_t>(42));
+    float scale = 42.0F;
+    root_args.add_scalar(scale);
+    root_args.dump(create_infos.back(), scale);
     MixedKernels root_mixed{};
     root_mixed.aiv0_kernel_id = 0;
     TaskOutputTensors root = orch.submit_task(root_mixed, root_args);
@@ -169,6 +171,9 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     const PTO2TaskPayload &root_pl = ring.task_payloads[ring.get_slot_by_task_id(root.task_id().local())];
     EXPECT_EQ(root_pl.tensor_count, 1);
     EXPECT_EQ(root_pl.scalar_count, 1);
+    EXPECT_EQ(root_pl.dump_metadata.dump_arg_mask, (uint64_t{1} << 0) | (uint64_t{1} << 1));
+    EXPECT_EQ(root_pl.dump_metadata.dump_arg_flags, ARGS_DUMP_ARG_MASK_NONE);
+    EXPECT_EQ(root_pl.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::FLOAT32));
     EXPECT_NE(root_desc.packed_buffer_base, POISON_PTR);
     EXPECT_NE(root_desc.packed_buffer_base, nullptr);
     EXPECT_EQ(root_desc.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)], 0);

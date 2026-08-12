@@ -49,7 +49,7 @@ class TestDumpArgsExampleA5(SceneTestCase):
     CASES = [
         {
             "name": "default",
-            "platforms": ["a5"],
+            "platforms": ["a5sim", "a5"],
             "params": {},
         },
     ]

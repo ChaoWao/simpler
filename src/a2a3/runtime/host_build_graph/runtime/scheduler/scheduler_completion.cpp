@@ -181,7 +181,8 @@ void SchedulerContext::complete_slot_task(
                 },
                 [this](int32_t func_id) {
                     return get_function_bin_addr(func_id);
-                }
+                },
+                &slot_state.payload->dump_metadata
             );
         }
 #endif

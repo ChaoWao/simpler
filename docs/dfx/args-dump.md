@@ -78,12 +78,13 @@ Scalar values already live inline in the manifest and never need payload copy.
 With no `dump(...)` markers, the AICPU skips all arena payload copies, the
 manifest's `bin_file` is `null`, and every `bin_size` is `0`.
 
-Level 3 deliberately inherits Level 1's existing mask-propagation scope; it
-does not add a second selector path. Both runtime variants on `a2a3` and `a5`
-already propagate the `CoreTaskArgs::dump(...)` mask. Level 3 consumes that same
-mask without changing Level 1 behavior. On `a5`, however, the resulting tensor
-bytes remain untrusted under #1560, so payload restoration stays outside this
-change until that issue is fixed.
+Level 3 deliberately inherits Level 1's selector semantics; it does not add a
+second mask. `tensormap_and_ringbuffer` registers selection metadata in its
+AICPU per-task table. `host_build_graph` embeds the same mask, ambiguity flags,
+and scalar dtypes in each H2D task image, including cached Graph node
+definitions. The device collector consumes either source identically. On `a5`,
+however, the resulting tensor bytes remain untrusted under #1560, so payload
+restoration stays outside this change until that issue is fixed.
 
 ```bash
 # Standalone runner
@@ -110,7 +111,9 @@ via `set_platform_dump_base()`, the enable bit via
 `set_dump_args_enabled(SIMPLER_GET_DFX_FLAG(...))`, and latches the mode
 from the header level before task dispatch (`PARTIAL` → selective,
 `HYBRID` → all metadata, payload copy controlled by the
-same per-task mask as `PARTIAL`). Because the
+same per-task mask as `PARTIAL`). The runtime resolves the mask before each
+record reaches the platform writer, so the writer does not depend on a second
+task-id lookup. Because the
 level is decided host-side **before any task is
 dispatched**, it is latched up front — there is no dependence on task
 submission order. AICore executors read the same `SIMPLER_DFX_FLAG_DUMP_ARGS`
