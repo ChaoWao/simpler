@@ -55,8 +55,8 @@
 #include "../runtime/common.h"
 #include "../runtime/dep_gen_host_graph.h"
 #include "../runtime/graph_execution.h"
-#include "../runtime/graph_host_state.h"
 #include "../runtime/host_tensor_access.h"
+#include "../runtime/graph_host_state.h"
 #include "../runtime/pto_orchestrator.h"
 #include "../runtime/pto_runtime2.h"
 #include "../runtime/pto_shared_memory.h"
@@ -378,7 +378,7 @@ struct HostOrchEntryPoints {
 // (slot_state.task/.payload, fanin_inline_slot_states[], dep-entry.slot_state,
 // ready-queue slot.slot_state) and the arena block (slot_state.fanout_head,
 // dep-entry.next point into the SM but live in the arena).
-// Rather than track which delta each field needs, reloc() classifies every
+// Rather than track which delta each field needs, relocate() classifies every
 // pointer by the region it points INTO and applies that region's delta; foreign
 // and null pointers pass through untouched. The fanout adjacency is wired inline
 // during host submit, so dep_pool/ready are already populated here.
@@ -390,16 +390,12 @@ struct HostOrchEntryPoints {
 // (returns false) rather than shipping un-relocated host pointers to the device.
 // Returns false on any unrelocatable pointer so the caller can fail the prepare.
 static bool relocate_host_orch_image(
-    PTO2SharedMemoryHandle &host_sm_handle, [[maybe_unused]] PTO2Runtime *rt, uint64_t host_sm, uint64_t sm_size,
-    int64_t sm_delta, uint64_t host_arena, uint64_t arena_size, int64_t arena_delta
+    PTO2SharedMemoryHandle &host_sm_handle, uint64_t host_sm, uint64_t sm_size, int64_t sm_delta, uint64_t host_arena,
+    uint64_t arena_size, int64_t arena_delta
 ) {
-    // host_build_graph is single-ring; the loops below iterate the lone ring and
-    // index header->ring (singular). If the ring depth ever grows, those loops
-    // would relocate the same ring N times (applying the delta repeatedly =
-    // corruption), so pin the assumption here.
     static_assert(PTO2_MAX_RING_DEPTH == 1, "relocate_host_orch_image assumes a single ring");
 
-    // SM and arena windows must not overlap — reloc classifies a pointer by
+    // SM and arena windows must not overlap — relocate classifies a pointer by
     // which window it falls in, so an overlap would misclassify and apply the
     // wrong delta. Both are independent malloc-backed host buffers in practice;
     // assert it so a future shared-buffer layout can't silently corrupt.
@@ -412,41 +408,39 @@ static bool relocate_host_orch_image(
     }
 
     bool ok = true;
-    auto reloc = [&](auto *&p) {
-        using Ptr = std::remove_reference_t<decltype(p)>;
-        uint64_t v = reinterpret_cast<uint64_t>(p);
-        if (v == 0) {
-            return;
-        }
-        if (v >= host_sm && v < host_sm + sm_size) {
-            p = reinterpret_cast<Ptr>(static_cast<uintptr_t>(v + sm_delta));
-        } else if (v >= host_arena && v < host_arena + arena_size) {
-            p = reinterpret_cast<Ptr>(static_cast<uintptr_t>(v + arena_delta));
+    auto relocate = [&](auto *&pointer) {
+        using Pointer = std::remove_reference_t<decltype(pointer)>;
+        const uint64_t address = reinterpret_cast<uint64_t>(pointer);
+        if (address == 0) return;
+        if (address >= host_sm && address < host_sm + sm_size) {
+            pointer = reinterpret_cast<Pointer>(static_cast<uintptr_t>(address + sm_delta));
+        } else if (address >= host_arena && address < host_arena + arena_size) {
+            pointer = reinterpret_cast<Pointer>(static_cast<uintptr_t>(address + arena_delta));
         } else {
             // A non-null pointer in neither window is an external/host address
             // the device would dereference verbatim after H2D. No field should
             // legitimately carry one; latch fatal rather than ship a host VA to
             // the device (silent AICPU corruption otherwise).
-            LOG_ERROR("host-orch: pointer %#lx is outside both SM and arena windows; cannot relocate for device", v);
+            LOG_ERROR(
+                "host-orch: pointer %#lx is outside both SM and arena windows; cannot relocate for device", address
+            );
             ok = false;
         }
     };
 
     PTO2SharedMemoryHeader *header = host_sm_handle.header;
     if (header != nullptr) {
-        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-            PTO2SharedMemoryRingHeader &ring = header->ring;
-            int32_t count = ring.fc.current_task_index.load(std::memory_order_acquire);
-            for (int32_t slot = 0; slot < count; slot++) {
-                PTO2TaskSlotState *ss = &ring.slot_states[slot];
-                // Polling: fanin is a flat array of position-independent local-id
-                // integers on the payload, so only the two per-slot arena/SM
-                // pointers need relocating. There is no fanout_head/dep_pool graph
-                // and no host-seeded ready queue (the device boot scan classifies),
-                // so those relocation passes are gone.
-                reloc(ss->task);
-                reloc(ss->payload);
-            }
+        PTO2SharedMemoryRingHeader &ring = header->ring;
+        const int32_t count = ring.fc.current_task_index.load(std::memory_order_acquire);
+        for (int32_t slot = 0; slot < count; ++slot) {
+            PTO2TaskSlotState *state = &ring.slot_states[slot];
+            // Polling: fanin is a flat array of position-independent local-id
+            // integers on the payload, so only the two per-slot arena/SM
+            // pointers need relocating. There is no fanout_head/dep_pool graph
+            // and no host-seeded ready queue (the device boot scan classifies),
+            // so those relocation passes are gone.
+            relocate(state->task);
+            relocate(state->payload);
         }
     }
     return ok;
@@ -559,7 +553,7 @@ int32_t run_host_orchestration(
 
     GraphHostStatePtr graph_state = make_graph_host_state();
     if (!graph_state) {
-        LOG_ERROR("host-orch: failed to allocate Graph recording state");
+        LOG_ERROR("host-orch: failed to allocate Graph host state");
         return -1;
     }
     GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
@@ -583,27 +577,26 @@ int32_t run_host_orchestration(
     // context_lens/block_table) whether or not the platform maps device memory
     // into the host address space.
 
-    const HostOrchEntryPoints *eps = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
-    rt->active_callable_hash = reinterpret_cast<uint64_t>(eps->entry);
-    if (eps->bind != nullptr) {
-        rt->tensor_access = &tensor_access;
-        // Binds the orchestration .so's own framework_current_runtime, which its
-        // inline rt_submit_* read. The host library links a same-named copy from
-        // orchestration/common.cpp, but nothing outside the .so includes
-        // pto_orchestration_api.h, so nothing reads that one — rt_scope_* and
-        // rt_orchestration_done take the runtime as an argument.
-        eps->bind(rt);
-    } else {
+    const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
+    if (entry_points->bind == nullptr) {
         LOG_ERROR("host-orch: orch .so framework_bind_runtime was not resolved");
         return -1;
     }
+    rt->active_callable_hash = reinterpret_cast<uint64_t>(entry_points->entry);
+    rt->tensor_access = &tensor_access;
+    // Binds the orchestration .so's own framework_current_runtime, which its
+    // inline rt_submit_* read. The host library links a same-named copy from
+    // orchestration/common.cpp, but nothing outside the .so includes
+    // pto_orchestration_api.h, so nothing reads that one — rt_scope_* and
+    // rt_orchestration_done take the runtime as an argument.
+    entry_points->bind(rt);
 
     rt_scope_begin(rt);
-    eps->entry(orch_l2);
+    entry_points->entry(orch_l2);
     rt_scope_end(rt);
     rt_orchestration_done(rt);
 
-    int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
+    const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
 
     // total_tasks sizes the bounded per-segment H2D copies below; a value outside
@@ -623,7 +616,7 @@ int32_t run_host_orchestration(
     const int64_t arena_delta = static_cast<int64_t>(reinterpret_cast<uint64_t>(device_arena)) -
                                 static_cast<int64_t>(reinterpret_cast<uint64_t>(host_arena.base()));
     if (!relocate_host_orch_image(
-            host_sm_handle, rt, reinterpret_cast<uint64_t>(host_sm), sm_size, sm_delta,
+            host_sm_handle, reinterpret_cast<uint64_t>(host_sm), sm_size, sm_delta,
             reinterpret_cast<uint64_t>(host_arena.base()), layout.arena_size, arena_delta
         )) {
         LOG_ERROR("host-orch: relocation failed; refusing to H2D an image with unrelocated host pointers");

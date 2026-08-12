@@ -896,15 +896,9 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
     while (true) {
         if (completed_.load(std::memory_order_acquire)) break;
 
-        // Propagate a fatal error latched by the orchestrator (host) or a
-        // scheduler thread; mirror resolve_and_dispatch's exit behavior.
-        if (header->orch_error_code.load(std::memory_order_acquire) != PTO2_ERROR_NONE ||
-            header->sched_error_code.load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
-            if (!completed_.exchange(true, std::memory_order_acq_rel)) {
-                emergency_shutdown(runtime);
-            }
+        int32_t published_task_count = 0;
+        if (handle_orchestrator_exit(thread_idx, header, runtime, published_task_count) == LoopAction::BREAK_LOOP)
             break;
-        }
 
         int32_t resolved_this_pass = 0;
         bool resolved_any = false;
@@ -976,10 +970,8 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
         if (completed_.load(std::memory_order_acquire)) break;
 
         if (resolved_any) {
-            int32_t new_total = completed_tasks_.load(std::memory_order_relaxed);
             if (resolved_this_pass > 0) {
-                new_total =
-                    completed_tasks_.fetch_add(resolved_this_pass, std::memory_order_relaxed) + resolved_this_pass;
+                completed_tasks_.fetch_add(resolved_this_pass, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
                 // P owns the completion accounting, so it owns the profiling mirror too
                 // (the S threads' completed_this_turn no longer feeds it in P mode).
@@ -987,11 +979,6 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 #endif
             }
             last_progress_ts = get_sys_cnt_aicpu();
-            if (total_tasks_ > 0 && new_total >= total_tasks_) {
-                completed_.store(true, std::memory_order_release);
-                LOG_INFO("Thread %d: P resolved all tasks %d/%d", thread_idx, new_total, total_tasks_);
-                break;
-            }
             continue;  // fast re-drain while work keeps arriving
         }
 
@@ -1004,11 +991,12 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
         // task — a genuine forward-progress stall / pre-dispatch deadlock.
         uint64_t now = get_sys_cnt_aicpu();
         if (now - last_progress_ts > scheduler_timeout_cycles) {
-            bool outstanding = total_tasks_ > 0 && completed_tasks_.load(std::memory_order_relaxed) < total_tasks_;
+            const int32_t total = total_tasks_;
+            bool outstanding = total > 0 && completed_tasks_.load(std::memory_order_relaxed) < total;
             if (outstanding && no_thread_owns_running_task()) {
                 LOG_ERROR(
                     "Thread %d: P resolution stall (%d/%d resolved)", thread_idx,
-                    completed_tasks_.load(std::memory_order_relaxed), total_tasks_
+                    completed_tasks_.load(std::memory_order_relaxed), total
                 );
                 int32_t expected = PTO2_ERROR_NONE;
                 header->sched_error_code.compare_exchange_strong(
@@ -1352,8 +1340,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         }
 
         // Phase 3 (dependency-only dummy / predicate-failed retirement) runs on
-        // the resolution thread P, not here — see run_resolution_thread. The
-        // scheduler loop goes straight from completion detection to dispatch.
+        // the resolution thread P, not here — see run_resolution_thread.
 
         // Phase 4: MIX-strict-priority dispatch with phase-split and
         // cross-thread idle gating. See dispatch_ready_tasks for the policy.
