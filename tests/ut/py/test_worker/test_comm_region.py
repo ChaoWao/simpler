@@ -15,12 +15,14 @@ import pytest
 from simpler import comm_endpoints as ce
 from simpler.comm_region import (
     MaterializationContext,
+    MaterializationError,
     MaterializationRefusal,
     RefusalReason,
     RegionInstanceState,
     validate_single_owner_region_shape,
 )
-from simpler.worker import Worker, _Lifecycle
+from simpler.orchestrator import _callback_frame_for, _callback_run
+from simpler.worker import Worker, _Lifecycle, _RunResources
 from simpler.worker_chip_orch_comm import NotifyOp, WaitCmp
 
 
@@ -30,7 +32,9 @@ def _ready(worker: Worker) -> Worker:
 
 
 def _l3(device_ids=(0,)) -> Worker:
-    return _ready(Worker(level=3, device_ids=list(device_ids)))
+    worker = _ready(Worker(level=3, device_ids=list(device_ids)))
+    worker._worker = object()
+    return worker
 
 
 def _l4_with_local_l3(device_ids=(0,)) -> Worker:
@@ -154,6 +158,46 @@ def test_shape_validation_rejects_aicore_provider_until_it_has_a_materializer():
     )
 
     _assert_refusal(ctx, RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT)
+
+
+def test_shape_validation_rejects_non_l2_child_provider_path():
+    worker = _l3(device_ids=[0])
+    session_id = worker._owner_instance_id
+    registry_epoch = worker._endpoint_registry_epoch
+    consumer = ce.EndpointRecord(
+        identity=ce.EndpointIdentity(session_id, registry_epoch, 0),
+        path="L3",
+        deployment=ce.HOST_CPU,
+        node_scope_id=0,
+    )
+    provider = ce.EndpointRecord(
+        identity=ce.EndpointIdentity(session_id, registry_epoch, 1),
+        path="L3/L1[0]",
+        deployment=ce.DEVICE_AICPU,
+        node_scope_id=0,
+    )
+
+    _assert_refusal(_manual_two_member_context(worker, provider, consumer), RefusalReason.NEEDS_DELEGATION)
+
+
+def test_shape_validation_translates_worker_chip_id_value_error():
+    worker = _l3(device_ids=[0])
+    session_id = worker._owner_instance_id
+    registry_epoch = worker._endpoint_registry_epoch
+    consumer = ce.EndpointRecord(
+        identity=ce.EndpointIdentity(session_id, registry_epoch, 0),
+        path="L3",
+        deployment=ce.HOST_CPU,
+        node_scope_id=0,
+    )
+    provider = ce.EndpointRecord(
+        identity=ce.EndpointIdentity(session_id, registry_epoch, 1),
+        path="L3/L2[1]",
+        deployment=ce.DEVICE_AICPU,
+        node_scope_id=0,
+    )
+
+    _assert_refusal(_manual_two_member_context(worker, provider, consumer), RefusalReason.UNSUPPORTED_MEMBER_SHAPE)
 
 
 def test_shape_validation_rejects_unsupported_plan_and_non_vmm_backing():
@@ -292,6 +336,8 @@ class _FakeRegion:
         self._fail_mapping_close = fail_mapping_close
         self._worker_id = 1
         self.region_id = 42
+        self._expired = False
+        self._released = False
 
     def payload_write(self, offset: int, host_buffer, nbytes=None) -> None:
         self._calls.append(("payload_write", offset, host_buffer, nbytes))
@@ -304,12 +350,17 @@ class _FakeRegion:
         return _FakeCounter(self._calls)
 
     def _close_worker_host_mapping(self) -> None:
-        self._calls.append(("mapping_close",))
+        self._calls.append(("mapping_close", self._expired))
         if self._fail_mapping_close:
             raise RuntimeError("mapping close failed")
 
+    def free(self) -> None:
+        self._calls.append(("free",))
+        self._released = True
+
     def _expire(self) -> None:
         self._calls.append(("expire",))
+        self._expired = True
 
 
 class _FakeNativeWorker:
@@ -334,6 +385,10 @@ def region_worker(monkeypatch):
         def create_region(worker_id: int, payload_bytes: int, counter_bytes: int):
             calls.append(("create", worker_id, payload_bytes, counter_bytes))
             worker._live_worker_chip_regions.append(fake_region)
+            resources = worker._building_run_resources
+            if resources is not None:
+                resources.worker_chip_regions.append(fake_region)
+                resources.requires_ordered_cleanup = True
             return fake_region
 
         monkeypatch.setattr(worker, "_create_worker_chip_region", create_region)
@@ -369,8 +424,9 @@ def test_worker_materializes_region_instance_and_closes_single_region(region_wor
         ("wait", 3, WaitCmp.GE, 10),
         ("counter", 16),
         ("test", 7, WaitCmp.EQ),
-        ("mapping_close",),
+        ("mapping_close", False),
         ("release", 1, 42),
+        ("free",),
         ("expire",),
     ]
 
@@ -387,11 +443,15 @@ def test_live_region_instance_rollback_reuses_single_region_cleanup(region_worke
     assert worker._live_worker_chip_regions == []
     assert calls == [
         ("create", 1, 64, 128),
-        ("mapping_close",),
+        ("mapping_close", False),
         ("release", 1, 42),
+        ("free",),
         ("expire",),
     ]
-    with pytest.raises(RuntimeError, match="not live"):
+    with worker._control_reservation("test_region_instance"):
+        instance.close()
+    assert instance.state is RegionInstanceState.ROLLED_BACK
+    with pytest.raises(MaterializationError, match="not live"):
         instance.payload_write(0, "src")
 
 
@@ -413,8 +473,9 @@ def test_region_instance_close_failure_marks_failed_and_poisons_worker(region_wo
         instance.close()
     assert calls == [
         ("create", 1, 64, 128),
-        ("mapping_close",),
+        ("mapping_close", False),
         ("release", 1, 42),
+        ("free",),
         ("expire",),
     ]
 
@@ -436,8 +497,9 @@ def test_region_instance_rollback_failure_replays_cached_error_for_close(region_
     assert close_excinfo.value is first_excinfo.value
     assert calls == [
         ("create", 1, 64, 128),
-        ("mapping_close",),
+        ("mapping_close", False),
         ("release", 1, 42),
+        ("free",),
         ("expire",),
     ]
 
@@ -452,6 +514,65 @@ def test_close_worker_chip_region_preserves_release_error_cause(region_worker):
     assert str(excinfo.value.__cause__) == "release failed"
 
 
+def test_callback_region_close_before_submit_retired_from_run_cleanup(region_worker):
+    worker, calls, _fake_region = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        with _callback_run(17, worker):
+            instance = _materialize_default_region(worker)
+            instance.close()
+    finally:
+        worker._building_run_resources = None
+
+    assert instance.state is RegionInstanceState.CLOSED
+    assert worker._live_worker_chip_regions == []
+    assert resources.worker_chip_regions == []
+
+    worker._cleanup_worker_chip_regions(resources)
+    assert calls == [
+        ("create", 1, 64, 128),
+        ("mapping_close", False),
+        ("release", 1, 42),
+        ("free",),
+        ("expire",),
+    ]
+
+
+def test_callback_region_run_cleanup_then_later_close_is_idempotent(region_worker):
+    worker, calls, _fake_region = region_worker()
+    resources = _RunResources()
+    worker._building_run_resources = resources
+    try:
+        with _callback_run(18, worker):
+            instance = _materialize_default_region(worker)
+            frame = _callback_frame_for(worker)
+            assert frame is not None
+            frame.has_submitted_task = True
+            with pytest.raises(RuntimeError, match="cannot follow a task submission"):
+                instance.close()
+    finally:
+        worker._building_run_resources = None
+
+    worker._cleanup_worker_chip_regions(resources)
+
+    assert instance.state is RegionInstanceState.LIVE
+    assert worker._live_worker_chip_regions == []
+    assert resources.worker_chip_regions == []
+
+    with worker._control_reservation("test_region_instance"):
+        instance.close()
+
+    assert instance.state is RegionInstanceState.CLOSED
+    assert calls == [
+        ("create", 1, 64, 128),
+        ("mapping_close", False),
+        ("release", 1, 42),
+        ("free",),
+        ("expire",),
+    ]
+
+
 def test_retire_worker_chip_region_tracking_does_not_retry_base_exception():
     class FailingTrackingList(list):
         def __init__(self, values):
@@ -464,13 +585,16 @@ def test_retire_worker_chip_region_tracking_does_not_retry_base_exception():
 
     worker = _l3(device_ids=[8, 9])
     region = object()
-    tracking = FailingTrackingList([region])
-    worker._live_worker_chip_regions = tracking
+    failing_tracking = FailingTrackingList([region])
+    succeeding_tracking = [region]
+    resources = _RunResources(worker_chip_regions=failing_tracking)
+    worker._live_worker_chip_regions = succeeding_tracking
 
     with pytest.raises(KeyboardInterrupt, match="tracking interrupted"):
-        worker._retire_worker_chip_region_tracking(region)
+        worker._retire_worker_chip_region_tracking(region, resources)
 
-    assert tracking.assignments == 1
+    assert failing_tracking.assignments == 1
+    assert succeeding_tracking == []
 
 
 def test_materialize_create_failure_propagates_without_live_tracking(monkeypatch):
@@ -510,8 +634,9 @@ def test_live_region_instance_access_requires_control_context(region_worker):
 
     assert calls == [
         ("create", 1, 64, 128),
-        ("mapping_close",),
+        ("mapping_close", False),
         ("release", 1, 42),
+        ("free",),
         ("expire",),
     ]
 
@@ -524,6 +649,14 @@ def test_shape_validation_rejects_foreign_registry_context():
         validate_single_owner_region_shape(dataclasses.replace(owner, worker=foreign_worker))
 
     assert excinfo.value.reason is RefusalReason.REGISTRY_MISMATCH
+
+
+def test_shape_validation_does_not_translate_worker_readiness_errors():
+    ctx = _accepted_context()
+    ctx.worker._worker = None
+
+    with pytest.raises(RuntimeError, match="requires Worker.init"):
+        validate_single_owner_region_shape(ctx)
 
 
 def test_shape_validation_rejects_stale_registry_epoch():

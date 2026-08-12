@@ -7824,19 +7824,25 @@ class Worker:
                 tail = extra
             return primary
 
-        try:
-            region._close_worker_host_mapping()
-        except BaseException as exc:  # noqa: BLE001
-            region_errors.append(exc)
-        try:
-            if self._worker is not None:
-                self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
-        except BaseException as exc:  # noqa: BLE001
-            release_error = exc
-            region_errors.append(exc)
-        # End-of-run cleanup is poisoned and terminal for that run, so it still
-        # expires both sides after attempting both debts. Whole-tree close
-        # instead retains the region for journal replay.
+        expired = bool(getattr(region, "expired", getattr(region, "_expired", False)))
+        release_pending = not expired and not bool(getattr(region, "_released", False))
+        if not expired:
+            try:
+                region._close_worker_host_mapping()
+            except BaseException as exc:  # noqa: BLE001
+                region_errors.append(exc)
+            if release_pending:
+                try:
+                    if self._worker is not None:
+                        self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
+                        region.free()
+                except BaseException as exc:  # noqa: BLE001
+                    release_error = exc
+                    region_errors.append(exc)
+        # A region remains tracked while chip ownership may still be live, so
+        # whole-tree close can replay it and instance cleanup can poison future
+        # admission. Once the chip release is committed or the native handle is
+        # already expired, cleanup may retire every tracking list that owns it.
         if region_errors and resources is None and not poison_on_error:
             raise primary_region_error()
         if poison_on_error and region_errors and release_error is not None:
@@ -7848,7 +7854,8 @@ class Worker:
             )
             raise primary
         try:
-            region._expire()
+            if not expired:
+                region._expire()
         except BaseException as exc:  # noqa: BLE001
             region_errors.append(exc)
         try:

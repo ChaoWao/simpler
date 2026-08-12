@@ -340,6 +340,7 @@ class EndpointRegistry:
         return self._record_for(a).node_scope_id == self._record_for(b).node_scope_id
 
     def record_for(self, endpoint: EndpointRecord | EndpointIdentity | EndpointId) -> EndpointRecord:
+        """Return this registry's canonical record for a record, identity, or endpoint id."""
         return self._record_for(endpoint)
 
     def owner_endpoint(self, owner_instance_id: bytes) -> EndpointRecord:

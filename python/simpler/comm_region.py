@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import itertools
-import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -31,10 +30,10 @@ from .comm_endpoints import (
     RegionPartPlan,
     SingleOwnerPlan,
     UnsupportedRegionPlan,
+    parse_endpoint_path,
 )
 
 _GENERATION_COUNTER = itertools.count(1)
-_LOCAL_L2_PATH_RE = re.compile(r"^L3/L2\[(?P<worker_id>[0-9]+)\]$")
 
 
 class RegionInstanceState(str, Enum):
@@ -108,6 +107,7 @@ class RegionInstance:
             f"payload={int(self.layout.payload_bytes)} counter={int(self.layout.counter_bytes)}"
         )
         self._worker = ctx.worker
+        self._cleanup_resources = getattr(ctx.worker, "_building_run_resources", None)
         self._region = None
         self._state = RegionInstanceState.PLANNED
         self._cleanup_error: BaseException | None = None
@@ -149,7 +149,9 @@ class RegionInstance:
             return
         if self._state in _TERMINAL_FAILURE_STATES and self._cleanup_error is not None:
             raise self._cleanup_error
-        if self._state in (RegionInstanceState.PLANNED, RegionInstanceState.ROLLED_BACK):
+        if self._state is RegionInstanceState.ROLLED_BACK:
+            return
+        if self._state is RegionInstanceState.PLANNED:
             self._state = RegionInstanceState.CLOSED
             return
         if self._region is None:
@@ -158,7 +160,11 @@ class RegionInstance:
         self._worker._require_region_control_context("region_instance.close")
         self._state = RegionInstanceState.CLOSING
         try:
-            self._worker._close_worker_chip_region(self._region, poison_on_error=True)
+            self._worker._close_worker_chip_region(
+                self._region,
+                self._cleanup_resources,
+                poison_on_error=True,
+            )
         except BaseException as exc:
             self._cleanup_error = exc
             self._state = RegionInstanceState.CLOSE_FAILED
@@ -176,7 +182,11 @@ class RegionInstance:
         self._worker._require_region_control_context("region_instance.rollback")
         self._state = RegionInstanceState.ROLLING_BACK
         try:
-            self._worker._close_worker_chip_region(self._region, poison_on_error=True)
+            self._worker._close_worker_chip_region(
+                self._region,
+                self._cleanup_resources,
+                poison_on_error=True,
+            )
         except BaseException as exc:
             self._cleanup_error = exc
             self._state = RegionInstanceState.ROLLBACK_FAILED
@@ -188,9 +198,9 @@ class RegionInstance:
 
     def _ensure_live(self) -> None:
         if self._state is not RegionInstanceState.LIVE:
-            raise RuntimeError(f"region instance is not live: {self._state.value}")
+            raise MaterializationError(f"region instance is not live: {self._state.value}")
         if self._region is None:
-            raise RuntimeError("region instance has no adopted worker-chip region")
+            raise MaterializationError("region instance has no adopted worker-chip region")
 
 
 def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwnerRegionShape:  # noqa: PLR0912
@@ -215,16 +225,23 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
             RefusalReason.UNSUPPORTED_PROVIDER_DEPLOYMENT,
             "Only DEVICE_AICPU providers are supported for worker-chip regions",
         )
-    match = _LOCAL_L2_PATH_RE.match(provider.path)
-    if match is None:
+    try:
+        provider_path = parse_endpoint_path(provider.path, root_level=ctx.registry.root_level)
+    except ValueError as exc:
+        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint") from exc
+    if len(provider_path.segments) != 2:
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    worker_id = int(match.group("worker_id"))
-    device_ids = tuple(getattr(ctx.worker, "_config", {}).get("device_ids", ()))
-    if worker_id < 0 or worker_id >= len(device_ids):
+    root, child = provider_path.segments
+    if root.level != 3 or root.index is not None or child.level != 2 or child.index is None:
+        raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
+    worker_id = int(child.index)
+    try:
+        ctx.worker._validate_worker_chip_id(worker_id)
+    except ValueError as exc:
         raise MaterializationRefusal(
             RefusalReason.UNSUPPORTED_MEMBER_SHAPE,
             f"provider worker_id {worker_id} is outside the current L3 device list",
-        )
+        ) from exc
     member_records = tuple(_record_for(ctx, member) for member in plan.ordered_members)
     if len(member_records) != 2:
         raise MaterializationRefusal(
