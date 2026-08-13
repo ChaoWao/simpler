@@ -33,6 +33,16 @@ namespace pto {
  *     function: `hal_fn(acl_to_hal_device_id(device_id))`.
  *   - ACL/rt entry points (`aclrtSetDevice`, `rtMalloc`, `rtMemcpy`, stream
  *     APIs, ...) take the logical id and MUST NOT.
+ *   - One ACL exception, measured on CANN 9.0.0 / a2a3:
+ *     `aclrtMemAccessDesc::location.id` reaches the driver untranslated and MUST
+ *     translate, even though `aclrtMemSetAccess` is an ACL entry point. Its
+ *     sibling `aclrtPhysicalMemProp::location.id` does NOT — `aclrtMallocPhysical`
+ *     rejects a driver-visible id with 107001. Under isolation, binding logical
+ *     0 of `ASCEND_RT_VISIBLE_DEVICES=1,2`:
+ *       aclrtMallocPhysical  prop.location.id=0 -> 0        prop.location.id=2 -> 107001
+ *       aclrtMemSetAccess    desc.location.id=0 -> 507899   desc.location.id=1 -> 0
+ *     The asymmetry is per-field, not per-API, so neither half generalises to the
+ *     other.
  *
  * `ASCEND_RT_VISIBLE_DEVICES` renumbers the logical space to `0..N-1` while the
  * HAL keeps indexing the driver-visible space; a direct HAL call made with the

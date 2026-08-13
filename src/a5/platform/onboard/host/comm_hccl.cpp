@@ -25,6 +25,7 @@
 #include "platform_comm/comm.h"
 #include "platform_comm/comm_context.h"
 
+#include "common/acl_hal_device.h"
 #include "common/unified_log.h"
 #include "host/file_marker_handshake.h"
 
@@ -488,10 +489,15 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
         aclrtFreePhysical(handle);
         return -1;
     }
+    // aclrtMemAccessDesc::location.id is consumed in the driver-visible space, unlike
+    // aclrtPhysicalMemProp::location.id above, which takes the ACL-logical id. Under
+    // ASCEND_RT_VISIBLE_DEVICES the logical id here names the wrong card and aclrtMemSetAccess
+    // fails with 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR). See common/acl_hal_device.h. The same
+    // descriptor is reused for the peer mappings below, so it carries the translation with it.
     aclrtMemAccessDesc accessDesc{};
     accessDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     accessDesc.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = static_cast<uint32_t>(myDevice);
+    accessDesc.location.id = static_cast<uint32_t>(pto::acl_to_hal_device_id(myDevice));
     aret = aclrtMemSetAccess(localBuf, aligned_size, &accessDesc, 1);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] ipc: MemSetAccess -> %d", rank, static_cast<int>(aret));
@@ -896,10 +902,11 @@ static int domain_alloc_via_ipc(
         aclrtFreePhysical(handle);
         return -1;
     }
+    // Driver-visible id, as in alloc_windows_via_ipc above; the peer mappings reuse this descriptor.
     aclrtMemAccessDesc accessDesc{};
     accessDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     accessDesc.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = static_cast<uint32_t>(myDevice);
+    accessDesc.location.id = static_cast<uint32_t>(pto::acl_to_hal_device_id(myDevice));
     aret = aclrtMemSetAccess(localBuf, aligned_size, &accessDesc, 1);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: MemSetAccess -> %d", h->rank, static_cast<int>(aret));
