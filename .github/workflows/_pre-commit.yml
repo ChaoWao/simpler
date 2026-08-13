@@ -49,55 +49,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install build and lint tools
-        if: inputs.setup_variant == 'github'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ clang-tidy
-
-      - name: Verify provisioned toolchain
-        if: inputs.setup_variant == 'self-cpu'
-        run: |
-          command -v cmake
-          command -v ninja
-          command -v g++
-          command -v clang-tidy
-          if ! command -v g++-15 >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
-          if command -v clang-tidy-18 >/dev/null 2>&1; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -sf "$(command -v clang-tidy-18)" "$RUNNER_TEMP/bin/clang-tidy"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
-          PATH="$RUNNER_TEMP/bin:$PATH" command -v clang-tidy
-          PATH="$RUNNER_TEMP/bin:$PATH" clang-tidy --version
-
       - name: Set up Python 3.10
         if: inputs.setup_variant == 'github'
         uses: actions/setup-python@v6
         with:
           python-version: "3.10"
-
-      - name: Cache pip packages
-        if: inputs.setup_variant == 'self-cpu'
-        uses: ./.github/actions/cache-pip
-
-      - name: Install Python dependencies
-        if: inputs.setup_variant == 'github'
-        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Install package (for pyright C extension symbol resolution)
-        if: inputs.setup_variant == 'github'
-        run: pip install --config-settings=build.targets=build_package_sim .
-
-      - name: venv + deps
-        if: inputs.setup_variant == 'self-cpu'
-        uses: ./.github/actions/setup-venv
-        with:
-          packages: "--config-settings=build.targets=build_package_sim ."
 
       - name: Resolve base SHA
         id: base
@@ -107,6 +63,138 @@ jobs:
         run: |
           git fetch --no-tags "https://github.com/${BASE_REPOSITORY}.git" main
           echo "base_sha=$(git merge-base FETCH_HEAD HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Select lint build target
+        id: lint-build
+        env:
+          BASE_SHA: ${{ inputs.setup_variant == 'self-cpu' && steps.base.outputs.base_sha || inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.setup_variant == 'self-cpu' && (inputs.ref || github.sha) || inputs.head_sha }}
+        run: |
+          needs_package=false
+          needs_cpp=false
+          target=_task_interface
+
+          changed_files=$(mktemp)
+          trap 'rm -f "$changed_files"' EXIT
+          if ! git diff --name-only --no-ext-diff -z "$BASE_SHA"..."$HEAD_SHA" > "$changed_files"; then
+            git diff --name-only --no-ext-diff -z "$BASE_SHA".."$HEAD_SHA" > "$changed_files"
+          fi
+
+          while IFS= read -r -d '' path; do
+            if [[ ! -e "$path" && ! -L "$path" ]]; then
+              continue
+            fi
+
+            case "$path" in
+              .pre-commit-config.yaml)
+                needs_package=true
+                needs_cpp=true
+                target=build_package_sim
+                ;;
+              *)
+                third_party=false
+                if [[ "$path" == 3rdparty/* ]]; then
+                  third_party=true
+                fi
+                shopt -s nocasematch
+                case "$path" in
+                  *.c|*.c++|*.c++m|*.cc|*.ccm|*.cpp|*.cppm|*.cxx|*.cxxm|*.h|*.hh|*.hpp|*.hxx|*.inl|*.ino|*.ipp|*.ixx|*.mm|*.tpp)
+                    if [[ "$third_party" == false ]]; then
+                      needs_package=true
+                      needs_cpp=true
+                      target=build_package_sim
+                    fi
+                    ;;
+                  *.gyp|*.gypi|*.py|*.pyi|*.pyt|*.tac|*.wsgi)
+                    needs_package=true
+                    ;;
+                  *)
+                    if [[ -x "$path" ]]; then
+                      IFS= read -r first_line < "$path" || true
+                      if [[ "$first_line" == '#!'*python* ]]; then
+                        needs_package=true
+                      fi
+                    fi
+                    ;;
+                esac
+                shopt -u nocasematch
+                ;;
+            esac
+          done < "$changed_files"
+
+          echo "needs_package=$needs_package" >> "$GITHUB_OUTPUT"
+          echo "needs_cpp=$needs_cpp" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Install build and lint tools
+        if: inputs.setup_variant == 'github' && steps.lint-build.outputs.needs_package == 'true'
+        env:
+          NEEDS_CPP: ${{ steps.lint-build.outputs.needs_cpp }}
+        run: |
+          missing_packages=()
+          command -v cmake >/dev/null 2>&1 || missing_packages+=(cmake)
+          command -v ninja >/dev/null 2>&1 || missing_packages+=(ninja-build)
+          command -v g++ >/dev/null 2>&1 || missing_packages+=(g++)
+          if [[ "$NEEDS_CPP" == "true" ]] && ! command -v clang-tidy >/dev/null 2>&1; then
+            missing_packages+=(clang-tidy)
+          fi
+          if (( ${#missing_packages[@]} )); then
+            sudo apt-get update
+            sudo apt-get install -y "${missing_packages[@]}"
+          fi
+
+      - name: Verify provisioned toolchain
+        if: inputs.setup_variant == 'self-cpu' && steps.lint-build.outputs.needs_package == 'true'
+        env:
+          NEEDS_CPP: ${{ steps.lint-build.outputs.needs_cpp }}
+        run: |
+          command -v cmake
+          command -v ninja
+          command -v g++
+          if [[ "$NEEDS_CPP" == "true" ]]; then
+            command -v clang-tidy
+            if ! command -v g++-15 >/dev/null 2>&1; then
+              mkdir -p "$RUNNER_TEMP/bin"
+              ln -sf "$(command -v g++)" "$RUNNER_TEMP/bin/g++-15"
+              echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+            fi
+            if command -v clang-tidy-18 >/dev/null 2>&1; then
+              mkdir -p "$RUNNER_TEMP/bin"
+              ln -sf "$(command -v clang-tidy-18)" "$RUNNER_TEMP/bin/clang-tidy"
+              echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+            fi
+            PATH="$RUNNER_TEMP/bin:$PATH" command -v clang-tidy
+            PATH="$RUNNER_TEMP/bin:$PATH" clang-tidy --version
+          fi
+
+      - name: Cache pip packages
+        if: steps.lint-build.outputs.needs_package == 'true'
+        uses: ./.github/actions/cache-pip
+
+      - name: Install Python dependencies
+        if: inputs.setup_variant == 'github' && steps.lint-build.outputs.needs_package == 'true'
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package (for lint extension symbol resolution)
+        if: inputs.setup_variant == 'github' && steps.lint-build.outputs.needs_package == 'true'
+        env:
+          BUILD_TARGET: ${{ steps.lint-build.outputs.target }}
+        run: pip install --config-settings="build.targets=$BUILD_TARGET" .
+
+      - name: venv + deps
+        if: inputs.setup_variant == 'self-cpu' && steps.lint-build.outputs.needs_package == 'true'
+        uses: ./.github/actions/setup-venv
+        with:
+          packages: >-
+            --config-settings=build.targets=${{ steps.lint-build.outputs.target }} .
+
+      - name: Lint-only venv
+        if: inputs.setup_variant == 'self-cpu' && steps.lint-build.outputs.needs_package != 'true'
+        run: python3 -m venv .venv
+
+      - name: Use lint venv
+        if: inputs.setup_variant == 'self-cpu'
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.0

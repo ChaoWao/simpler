@@ -34,7 +34,10 @@ shape. The executable job bodies live in reusable workflows:
 NPU unit-test bodies are split one workflow per architecture so each job
 renders only its own steps. Shared step scaffolding that is safe to run
 after checkout lives in composite actions under `.github/actions/`
-(`cache-pip`, `setup-venv`, and the three `pod-*` actions).
+(`cache-pip`, `setup-gcc-15`, `setup-venv`, and the three `pod-*` actions).
+`setup-gcc-15` accepts a complete, pre-provisioned GCC 15 toolchain on any
+Linux runner; automatic installation of missing Linux tools is Ubuntu-only,
+while macOS installation uses Homebrew.
 
 ```text
 PullRequest
@@ -183,7 +186,15 @@ build both dependencies in parallel while omitting unused platforms. The
 selection is not a cached CMake variable, so a later ordinary package install
 in the same worktree still uses the default `ALL` target and auto-detects every
 available platform. The pod stage passes the same target to its peer.
-Pre-commit selects the combined `build_package_sim` target, while each
+Pre-commit selects its build from the existing files in the merge-base diff,
+the same file set its hooks inspect. Python-only changes build `_task_interface`
+for pyright's extension-symbol resolution; C/C++ changes build the combined
+`build_package_sim` target so clang-tidy has both simulator compile databases.
+Changes to `.pre-commit-config.yaml` also use the combined target because the
+new hook definitions can change those requirements. Diffs with neither skip
+the package build. Self-hosted CPU runs still create a lightweight venv so the
+pre-commit action never installs into the runner's system Python; the
+lint-only path leaves dependency installation to that action. Each
 sanitizer matrix cell selects its own platform. The profiling-flags smoke
 installs only the `_task_interface` binding because its matrix builds every
 runtime configuration itself.
