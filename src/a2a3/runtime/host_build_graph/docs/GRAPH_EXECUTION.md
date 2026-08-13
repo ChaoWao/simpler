@@ -380,6 +380,8 @@ With L2 swimlane level 4:
 
 The scene coverage under `tests/st/a2a3/host_build_graph/graph_execution`
 includes an AIV fanin/fanout DAG, a Qwen-style AIV/AIC decoder-layer DAG, a
-three-slot multi-block MIX/SPMD Graph, and a manual Qwen3-14B three-layer
-decode. Every scene invokes the same fixed Graph three times: one recording
-execution followed by two outer-Graph submissions.
+three-slot multi-block MIX/SPMD Graph. Every scene invokes the same fixed Graph
+three times: one recording execution followed by two outer-Graph submissions.
+The full-model example at `examples/a2a3/host_build_graph/qwen3_14b_decode`
+records one Qwen3-14B decoder layer and replays its Definition for the
+remaining 39 layers.
