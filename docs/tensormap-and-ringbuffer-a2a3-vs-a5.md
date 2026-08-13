@@ -3,20 +3,101 @@
 This document describes the substantive differences in the current code under
 `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/`.
 
-> **Maintenance baseline:** This document uses PR 1795 as its baseline. Update
-> this document whenever the files or constants it describes change.
+> **Maintenance baseline:** This document uses commit
+> `317a19c2ee04bcc3e36d1cb49d2037084455a3ad` as its baseline. Update this
+> document whenever the files or constants it describes change.
 
-## Overview of Current Differences
+## Comparison Boundary and Classification
 
-The current differences fall into two categories:
+The direct comparison covers tracked files under
+`src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/`, matched by relative path.
+There are 53 paths present on both platforms and two additional paths present
+only on A5. Every file in that boundary belongs to exactly one of these three
+categories:
 
-- **Platform divergences that must be retained**: physical topology, cache
-  coherence, the PMU collection protocol, system counter and DMB register
-  layouts, the CANN launch ABI, A5 compiler-reserved symbols, and the optional
-  URMA completion path currently unique to A5.
-- **Software differences that can be converged or require further validation**:
-  include guards, `block_num()`/`core_num()` naming, A2/A3 next-block
-  prefetching, and the different fatal teardown strategies.
+| Category | Count | Definition |
+| -------- | ----: | ---------- |
+| Byte-identical | 28 | The files at the same relative path have identical bytes |
+| Compile-time or non-functional differences | 12 | Text differs, but the generated runtime behavior and data semantics are equivalent |
+| Functional differences | 15 | Thirteen matching paths and two A5-only paths encode or document differences in runtime behavior, capacity, diagnostics, or supported backends |
+
+A file is classified as functional when any part of its diff changes behavior,
+even if the same diff also contains include-order, comment, or formatting
+changes. Files outside the direct boundary, such as platform configuration and
+PMU collector implementations, are cited only as supporting evidence.
+
+## Byte-Identical Files
+
+The following 28 files are byte-identical:
+
+```text
+build_config.py
+docs/{MULTI_RING.md,SCALAR_DATA_ACCESS.md,SUBMIT_BY_CLUSTER.md,device_log_profiling.md,
+      profiling_levels.md}
+host/{dep_gen_replay.cpp,runtime_compile_info.cpp}
+orchestration/{common.cpp,pto_arg_with_deps.h,pto_orchestration_api.h}
+runtime/{common.h,pto_async_kernel_api.h,pto_dep_compute.h,pto_orchestrator.h,
+         pto_ring_buffer.cpp,pto_ring_buffer.h,pto_runtime2.cpp,pto_runtime2.h,
+         pto_shared_memory.h,pto_tensormap.h,tensor_create_info.h}
+runtime/scheduler/{pto_scheduler.cpp,scheduler_types.h}
+runtime/shared/{pto_runtime2_init.cpp,pto_shared_memory.cpp,pto_tensormap.cpp,runtime.cpp}
+```
+
+Byte identity is a textual result only. A shared file may still consume
+platform-specific constants or APIs supplied by files outside this comparison
+boundary.
+
+## Compile-Time or Non-Functional Differences
+
+The following 12 matching paths differ textually without changing runtime
+behavior:
+
+| Files | Difference |
+| ----- | ---------- |
+| `common/pto_runtime_status.h`, `host/dep_gen_replay.h`, `runtime/pto_constants.h` | Path-derived include-guard macro names only |
+| `runtime/backend/sdma/sdma_completion_kernel.h`, `runtime/pto_types.h` | `#pragma once` on A2/A3 versus a path-derived include guard on A5 |
+| `common/intrinsic.h` | A5 uses `s_block_idx` and `s_block_num` because the unprefixed names are compiler-reserved; getter semantics and layout are unchanged |
+| `runtime/pto2_dispatch_payload.h` | Comments follow the platform-specific `LocalContext` field names; payload semantics are unchanged |
+| `runtime/aicore_completion_mailbox.h` | Path-derived include guards and comment wording only |
+| `runtime/pto_completion_token.h` | Path-derived include guards and an A2/A3-only explanatory comment |
+| `runtime/pto_runtime2_types.h` | Comments state the corresponding 72- or 108-worker capacity; the mask remains two 64-bit words on both platforms |
+| `runtime/pto_submit_types.h` | The launch accessor and backing field are named `block_num` on A2/A3 and `core_num` on A5; both represent the logical SPMD block count |
+| `runtime/pto_orchestrator.cpp` | Calls the corresponding launch accessor; the remaining differences are equivalent expression layout and comments |
+
+The first two rows, covering five files, are the strict "compile macro only"
+subset. The `s_block_*` names are also a compile-time constraint rather than a
+different runtime data model. No standalone cleanup is planned; mechanical
+include guards can converge to `#pragma once` when those files are next
+modified.
+
+## Files with Functional Differences
+
+The following 13 matching paths have at least one functional difference:
+
+```text
+aicore/aicore_executor.cpp
+aicpu/aicpu_executor.cpp
+docs/RUNTIME_LOGIC.md
+host/runtime_maker.cpp
+runtime/aicore_completion_mailbox_types.h
+runtime/backend/sdma/sdma_completion_scheduler.h
+runtime/pto_async_wait.h
+runtime/runtime.h
+runtime/scheduler/pto_scheduler.h
+runtime/scheduler/scheduler_cold_path.cpp
+runtime/scheduler/scheduler_completion.cpp
+runtime/scheduler/scheduler_context.h
+runtime/scheduler/scheduler_dispatch.cpp
+```
+
+A5 also has two backend files with no A2/A3 counterpart:
+
+```text
+runtime/backend/urma/urma_completion_kernel.h
+runtime/backend/urma/urma_completion_scheduler.h
+```
+
+The functional differences group into the following themes:
 
 | Difference | Root cause | Must remain platform-specific? | Current decision |
 | ---------- | ---------- | ------------------------------ | ---------------- |
@@ -25,21 +106,10 @@ The current differences fall into two categories:
 | Cache coherence | Hardware coherence model | Yes | Retain the required invalidate/flush operations on A2/A3; do not copy unnecessary maintenance operations to A5 |
 | PMU collection | Hardware PMU and platform collection protocol | Yes | Retain the different counter counts, readers, and FIN submission paths |
 | System counter and DMB | Hardware timing and register layout | Yes | Use the constants for each platform |
-| `s_block_*` fields | Symbols reserved by the A5 CCEC compiler | Yes | Retain the platform-specific internal field names while preserving identical getter semantics |
 | URMA completion | A5-specific implementation and product capability gate | Yes, for now | Retain the A5 path; do not claim that URMA is available in the default build |
-| Include guards | Mechanical difference | No | Converge to `#pragma once` when the corresponding files are next modified |
-| `block_num()`/`core_num()` | Historical interface naming | No | Retain both interfaces for now and do not confuse them with physical core counts |
 | Next-block prefetch | A2/A3-only performance optimization | No | Retain on A2/A3; validate on A5 before considering a port |
 | Fatal teardown | Software reliability strategy | No | Retain the current implementations; decide whether to converge after measuring the worst-case A5 teardown time |
-
-Here, "platform divergences that must be retained" includes not only physical
-hardware differences, but also implementation differences required by the
-platform ABI, toolchain, and currently platform-specific backends. "Software
-differences" means that the hardware and ABI do not require different solutions
-on the two platforms; whether to converge immediately still depends on the
-benefit and validation cost.
-
-## Platform Divergences That Must Be Retained
+| Scheduler trace attribution | Software diagnostic strategy | No | Preserve the current traces; converge only after comparing generated timelines |
 
 ### Compute Topology and AICPU Launch Plan
 
@@ -110,21 +180,6 @@ platform's `platform/include/common/platform_config.h`.
 | `runtime/scheduler/scheduler_completion.cpp` | After FIN, A2/A3 invokes the AICPU MMIO reader for eight counters; A5 commits the ten-counter slot written by the AICore |
 | `platform/shared/aicpu/pmu_collector_aicpu.cpp` | Implements the A2/A3 direct MMIO read and the A5 staging-slot consumption paths |
 
-### Symbols Reserved by the A5 Compiler
-
-The A5 CCEC compiler treats `block_idx` and `block_num` as built-in symbols, so
-using the original field names causes a compilation conflict. A5 therefore
-uses `s_block_idx` and `s_block_num` in `LocalContext` and the dispatch payload,
-while A2/A3 continues to use `block_idx` and `block_num`. The getters and logical
-semantics are identical on both platforms. This is a toolchain symbol
-constraint, not a change to the runtime data model.
-
-| File | Current difference |
-| ---- | ------------------ |
-| `common/intrinsic.h` | `LocalContext` uses the field names permitted by the corresponding platform |
-| `runtime/pto2_dispatch_payload.h` | The dispatch payload follows the platform-specific field layout |
-| `runtime/scheduler/scheduler_dispatch.cpp` | Writes the corresponding platform's payload fields |
-
 ### Optional A5-Specific URMA Backend
 
 A5 contains the source path for issuing URMA completion requests, creating
@@ -151,35 +206,6 @@ backend operations, and CQ polling/retirement path.
 | Deferred entry | `runtime/aicore_completion_mailbox_types.h`, `runtime/pto_async_kernel_api.h` | Both platforms use the same 32-byte entry and propagate `backend_cookie`; A5 additionally defines the URMA completion type |
 | FIN forwarding | `runtime/scheduler/scheduler_completion.cpp`, `runtime/aicore_completion_mailbox.h` | Both platforms carry `backend_cookie` into the same 64-byte mailbox message; A5 can populate it with URMA workspace metadata |
 | CQ polling/retirement | `runtime/backend/urma/urma_completion_scheduler.h`, `runtime/pto_async_wait.h` | A5 registers URMA operations, polls CQE owner/status, advances the CQ/WQ tail, and updates the doorbell; the scheduler header itself is not guarded by the capability macro |
-
-## Software Implementation Differences
-
-### Include Guards
-
-Some equivalent headers use path-based include guards on one platform and
-`#pragma once` on the other. This does not change the ABI, concurrency
-protocol, or runtime behavior, and there is no reason to retain it as a
-long-term platform divergence. No standalone bulk cleanup is planned; each
-file should converge to `#pragma once` when it is next modified, following the
-repository convention.
-
-The affected files are:
-
-- `runtime/backend/sdma/sdma_completion_kernel.h`
-- `runtime/backend/sdma/sdma_completion_scheduler.h`
-- `runtime/pto_types.h`
-
-### `block_num()` and `core_num()`
-
-The A2/A3 launch accessor is named `block_num()`, while the A5 accessor is
-named `core_num()`. Both represent the number of logical SPMD blocks in a task,
-not the number of physical cores. This difference appears in
-`runtime/pto_orchestrator.cpp` and `runtime/pto_submit_types.h`.
-
-This is a historical interface naming difference, not a physical topology
-difference. It is also distinct from the `s_block_num` payload field required
-to avoid the A5 compiler-reserved symbol. Both existing interfaces are retained
-for now.
 
 ### A2/A3 Next-Block Prefetch
 
@@ -220,32 +246,21 @@ then be validated. See
 | `runtime/scheduler/scheduler_cold_path.cpp` | A2/A3 uses a fatal latch, broadcasts EXIT, and uses a shared deadline; A5 uses a `completed_` owner and deinitializes each core sequentially |
 | `runtime/scheduler/scheduler_context.h` | A2/A3 declares fatal-owner election and broadcast/join helpers; A5 retains its existing emergency-shutdown interface |
 
-## Files and Comparison Boundaries
+### Scheduler Trace Attribution
 
-### Byte-Identical Runtime Files
+The scheduler implementations expose the same scheduling protocol, but their
+DFX trace bookkeeping is not byte-equivalent. In
+`runtime/scheduler/scheduler_dispatch.cpp`, A2/A3 advances the scheduler phase
+anchor across idle iterations, while A5 leaves idle gaps for post-processing to
+reconstruct. The two versions also use different local spellings for some
+phase-state references. These differences affect generated diagnostic
+timelines, not task scheduling or completion semantics.
 
-The following files at matching paths are byte-identical in the current code:
+Trace output should be compared before converging this code, because a
+mechanical copy could change how idle time is attributed in Perfetto without
+changing runtime execution.
 
-```text
-build_config.py
-docs/{MULTI_RING.md,SCALAR_DATA_ACCESS.md,SUBMIT_BY_CLUSTER.md,device_log_profiling.md,
-      profiling_levels.md}
-host/{dep_gen_replay.cpp,runtime_compile_info.cpp}
-orchestration/{common.cpp,pto_arg_with_deps.h,pto_orchestration_api.h}
-runtime/{common.h,pto_dep_compute.h,pto_orchestrator.h,pto_ring_buffer.cpp,
-         pto_ring_buffer.h,pto_runtime2.cpp,pto_runtime2.h,pto_shared_memory.h,
-         pto_tensormap.h,tensor_create_info.h}
-runtime/scheduler/{pto_scheduler.cpp,scheduler_types.h}
-runtime/shared/{pto_runtime2_init.cpp,pto_shared_memory.cpp,pto_tensormap.cpp,runtime.cpp}
-```
-
-This list only indicates that the file contents are identical. It does not
-mean that every unlisted file has a substantive platform difference. Textual
-differences not included in the evidence mapping above are primarily
-mechanical, such as helper placement, comment detail, include ordering, and
-blank lines.
-
-### Examples and Tests
+## Excluded Scope: Examples and Tests
 
 `examples/.../tensormap_and_ringbuffer` and
 `tests/st/.../tensormap_and_ringbuffer` are outside the runtime implementation
