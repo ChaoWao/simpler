@@ -37,19 +37,19 @@
  *      `set_chip_swimlane_aicore_head_slot()`, resolves its own PMU MMIO base
  *      from `regs[physical_core_id]`, and calls the PMU setters, before
  *      invoking `aicore_execute`.
- *   3. `get_chip_swimlane_aicore_head()` lazily dereferences the slot the
- *      first time it is called. Callers must defer the call until AFTER
- *      AICPU has dispatched the first task (so AICPU init has had a chance
- *      to populate the table). The executor handles this by calling it
- *      inside the main loop's first-task branch.
+ *   3. `get_chip_swimlane_aicore_head()` dereferences the slot on first use and
+ *      caches the result. The first call is valid after AICore observes the
+ *      AICPU initialization publication point for the current launch. In the
+ *      current handshake this is Phase 2 exit (`DATA_MAIN_BASE != 0`) after
+ *      AICPU opens the register window. Executors may resolve the head there or
+ *      defer it until the first dispatch.
  *
  * a5 specifics: PMU on a5 is AICore-side (AICore reads MMIO + writes the
  * staging slot), so a5 carries an extra `pmu_ring` + `pmu_reg_base` pair
  * that a2a3 does not have.
  */
 
-#ifndef PLATFORM_AICORE_AICORE_PROFILING_STATE_H_
-#define PLATFORM_AICORE_AICORE_PROFILING_STATE_H_
+#pragma once
 
 #include <cstdint>
 
@@ -75,13 +75,14 @@ __aicore__ uint32_t get_aicore_profiling_flag();
  * yet have populated the table (the host launches both kernels and AICPU's
  * init runs concurrently with AICore's entry).
  *
- * `get_chip_swimlane_aicore_head()` lazily dereferences the stashed slot on
- * first use, caches the result, and returns it on subsequent calls. Callers
- * MUST defer the first call until after AICPU has dispatched the first task —
- * by then AICPU's init has completed and the slot holds a valid device
- * address pointing at the AICore pool's `head` (an `ChipSwimlaneActiveHead`).
- * The executor's main loop honours this by reading the head only inside the
- * first-task branch of the dispatch poll.
+ * `get_chip_swimlane_aicore_head()` dereferences the stashed slot on first use,
+ * caches the result, and returns the cached pointer on subsequent calls.
+ * Callers MUST defer the first call until AICore has observed the AICPU
+ * initialization publication point for the current launch. In the current
+ * handshake this is Phase 2 exit (`DATA_MAIN_BASE != 0`) after AICPU opens the
+ * register window. `chip_swimlane_aicpu_init` publishes the slot before any
+ * register window is opened, so resolving at handshake exit and lazy resolution
+ * on first dispatch are both valid.
  */
 __aicore__ void set_chip_swimlane_aicore_head_slot(__gm__ uint64_t *slot_ptr);
 __aicore__ __gm__ ChipSwimlaneActiveHead *get_chip_swimlane_aicore_head();
@@ -102,5 +103,3 @@ __aicore__ __gm__ PmuAicoreRing *get_aicore_pmu_ring();
  */
 __aicore__ void set_aicore_pmu_reg_base(uint64_t reg_base);
 __aicore__ uint64_t get_aicore_pmu_reg_base();
-
-#endif  // PLATFORM_AICORE_AICORE_PROFILING_STATE_H_

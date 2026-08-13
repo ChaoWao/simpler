@@ -144,9 +144,9 @@ extern "C" void aicore_execute_wrapper(
     // Publish per-core profiling state before the executor runs.
     set_aicore_profiling_flag(enable_profiling_flag);
     if ((enable_profiling_flag & SIMPLER_DFX_FLAG_CHIP_SWIMLANE) && chip_swimlane_aicore_rotation_table != 0) {
-        // Stash only the slot pointer; deref happens lazily inside
-        // get_chip_swimlane_aicore_head() once AICPU has populated the table. See
-        // aicore_profiling_state.h.
+        // Stash only the slot pointer; the executor dereferences it via
+        // get_chip_swimlane_aicore_head() after observing Phase 2 window-open.
+        // See aicore_profiling_state.h.
         uint64_t *head_table = reinterpret_cast<uint64_t *>(chip_swimlane_aicore_rotation_table);
         set_chip_swimlane_aicore_head_slot(reinterpret_cast<__gm__ uint64_t *>(&head_table[block_idx]));
     } else {

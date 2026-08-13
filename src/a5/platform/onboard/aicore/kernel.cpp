@@ -63,10 +63,8 @@ __attribute__((weak)) __aicore__ void set_chip_swimlane_aicore_head_slot(__gm__ 
     s_chip_swimlane_aicore_head = nullptr;  // force lazy resolution on next get
 }
 __attribute__((weak)) __aicore__ __gm__ ChipSwimlaneActiveHead *get_chip_swimlane_aicore_head() {
-    // Lazy first-call resolve: AICPU init populates `*s_chip_swimlane_aicore_head_slot`
-    // before dispatching the first task, so by the time the executor reaches
-    // for the head (inside the first-task branch of the dispatch poll) the
-    // slot holds a valid device address.
+    // Lazy first-call resolve. AICPU publishes the slot before opening any
+    // register window, so it is valid after AICore observes Phase 2 exit.
     if (s_chip_swimlane_aicore_head == nullptr && s_chip_swimlane_aicore_head_slot != nullptr) {
         s_chip_swimlane_aicore_head =
             reinterpret_cast<__gm__ ChipSwimlaneActiveHead *>(*s_chip_swimlane_aicore_head_slot);
@@ -86,11 +84,11 @@ extern __aicore__ void aicore_execute(__gm__ Runtime *runtime, int block_idx, Co
  * Kernel entry point with control loop
  *
  * This function implements the AICore-side task execution protocol:
- * 1. Wait for AICPU ready signal (handshake initialization)
- * 2. Signal AICore is ready (aicore_done = core_id + 1)
+ * 1. Signal AICore is ready (aicore_done = block_idx + 1)
+ * 2. Wait for AICPU to open the register window (DATA_MAIN_BASE != 0)
  * 3. Enter polling loop:
- *    - Check control flag (1 = quit, 0 = continue)
- *    - If task pointer is non-zero, execute task and mark as complete
+ *    - Poll DATA_MAIN_BASE for a task or exit command
+ *    - Execute newly dispatched tasks and report completion via COND
  *    - Use DCCI to ensure cache coherency with AICPU
  *
  * Each core (AIC or AIV) gets its own handshake buffer indexed by block_idx.
@@ -128,11 +126,10 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
     if (SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE) &&
         k_args->chip_swimlane_aicore_rotation_table != 0) {
         // Stash only the slot pointer. The slot CONTENTS are written by
-        // AICPU's `chip_swimlane_aicpu_init` which runs concurrently with this
-        // entry; dereferencing here would race with AICPU's write. The
-        // executor defers the deref via `get_chip_swimlane_aicore_head()` until
-        // inside the first-task branch — by then AICPU has dispatched, so
-        // init is done and the slot is populated.
+        // AICPU's `chip_swimlane_aicpu_init`, which races with this entry but
+        // publishes the slot before opening any register window. The executor
+        // dereferences via `get_chip_swimlane_aicore_head()` only after it
+        // observes Phase 2 exit.
         __gm__ uint64_t *head_table = reinterpret_cast<__gm__ uint64_t *>(k_args->chip_swimlane_aicore_rotation_table);
         set_chip_swimlane_aicore_head_slot(&head_table[block_idx]);
     } else {

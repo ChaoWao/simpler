@@ -49,18 +49,18 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  * Implements the AICPU-AICore register-based dispatch protocol:
  * 1. Report physical core ID and core type, signal aicore_done (no AICPU wait)
  * 2. Wait for the AICPU to open our register window (DATA_MAIN_BASE != 0)
- * 3. Cache per-core PTO2DispatchPayload pointer from hank->task
+ * 3. Cache per-core PTO2DispatchPayload pointer from my_hank->task
  * 4. Poll DATA_MAIN_BASE register for task dispatch until exit signal
  *
  * AICore reports on launch; the AICPU writes &s_payload_per_core[i] to
- * hank->task and then opens the register window (DATA_MAIN_BASE = IDLE), which
+ * my_hank->task and then opens the register window (DATA_MAIN_BASE = IDLE), which
  * is itself the acknowledgement. AICore caches this pointer and reads
  * function_bin_addr + args pointer from it on each dispatch. reg_val is a
  * monotonically increasing task ID used only for dispatch signaling and
  * ACK/FIN protocol.
  *
  * Profiling state (enable flag, chip swimlane rotation channel) is published into the platform
- * via set_aicore_profiling_flag / set_aicore_chip_swimlane_ring at kernel entry —
+ * via set_aicore_profiling_flag / set_chip_swimlane_aicore_head_slot at kernel entry —
  * this routine reads it through the matching getters, so neither Handshake
  * nor this signature carry profiling fields.
  *

@@ -584,6 +584,19 @@ struct PTO2SchedulerState {
         return advanced;
     }
 
+    bool try_claim_ready_once(PTO2TaskSlotState &slot_state) {
+        uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
+        for (;;) {
+            if ((flags & PTO2_READY_CLAIMED) != 0) return false;
+            uint8_t desired_flags = flags | PTO2_READY_CLAIMED;
+            if (slot_state.lifecycle_flags.compare_exchange_weak(
+                    flags, desired_flags, std::memory_order_acq_rel, std::memory_order_acquire
+                )) {
+                return true;
+            }
+        }
+    }
+
     void check_and_handle_consumed(PTO2TaskSlotState &slot_state) {
         // Read fanout_refcount/fanout_count and flip COMPLETED->CONSUMED under
         // fanout_lock. The orchestrator claims producers (fanout_count++) under the
@@ -943,19 +956,6 @@ struct PTO2SchedulerState {
         return slot_state.next_block_idx.load(std::memory_order_seq_cst) >= slot_state.logical_block_num;
     }
 
-    bool try_claim_ready_once(PTO2TaskSlotState &slot_state) {
-        uint8_t flags = slot_state.lifecycle_flags.load(std::memory_order_acquire);
-        for (;;) {
-            if ((flags & PTO2_READY_CLAIMED) != 0) return false;
-            uint8_t desired_flags = flags | PTO2_READY_CLAIMED;
-            if (slot_state.lifecycle_flags.compare_exchange_weak(
-                    flags, desired_flags, std::memory_order_acq_rel, std::memory_order_acquire
-                )) {
-                return true;
-            }
-        }
-    }
-
     bool route_ready_once(PTO2TaskSlotState &slot_state, EarlyDispatchReleaseSink *sink = nullptr) {
         if (!try_claim_ready_once(slot_state)) return false;
 
@@ -968,7 +968,16 @@ struct PTO2SchedulerState {
         } else if (early_handled) {
             return true;
         }
-        push_ready_routed(&slot_state);
+
+        PTO2ResourceShape shape = slot_state.active_mask.to_shape();
+        if (shape == PTO2ResourceShape::DUMMY ||
+            (slot_state.task_attrs.has_predicate() && !slot_state.payload->predicate.pass())) {
+            dummy_ready_queue.push(&slot_state);
+        } else if (slot_state.task_attrs.requires_sync_start()) {
+            ready_sync_queues[static_cast<int32_t>(shape)].push(&slot_state);
+        } else {
+            ready_queues[static_cast<int32_t>(shape)].push(&slot_state);
+        }
         return true;
     }
 
@@ -1121,7 +1130,7 @@ struct PTO2SchedulerState {
         slot_state.unlock_fanout();
 
 #if SIMPLER_SCHED_PROFILING
-        lock_atomics += 2;  // state.store + unlock.store
+        lock_atomics += 3;  // task_state.store + lifecycle_flags.fetch_or + unlock.store
         g_sched_lock_atomic_count[thread_idx] += lock_atomics;
         g_sched_lock_wait_cycle[thread_idx] += lock_wait;
         PTO2_SCHED_CYCLE_LAP(g_sched_lock_cycle[thread_idx]);

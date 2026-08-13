@@ -514,15 +514,83 @@ void SchedulerContext::run_staging_order(
     }
 }
 
+void SchedulerContext::dispatch_ready_tasks(
+    int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
+) {
+    // Normal ready dispatch (is_ready): dispatch_shape places each block on pickup and
+    // signals a stop by setting entered_drain when it enters a sync_start drain.
+    bool entered_drain = false;
+
+    // Tier 0: ready sync_start cohorts take cores before any regular ready task
+    // (sync_start > MIX > C/V within the normal source). Same order and machinery,
+    // fed from ready_sync_queues; an oversized cohort arms the stop-the-world drain
+    // (entered_drain), which also short-circuits the regular tier below.
+    run_staging_order(
+        thread_idx, pmu_active,
+        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+            dispatch_shape(
+                thread_idx, sched_->ready_sync_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
+            );
+            return entered_drain;
+        },
+        [&] {
+            return has_residual_sync_mix();
+        }
+    );
+    if (entered_drain) return;
+
+    // Tier 1: regular ready work.
+    run_staging_order(
+        thread_idx, pmu_active,
+        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
+            dispatch_shape(
+                thread_idx, sched_->ready_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
+            );
+            return entered_drain;
+        },
+        [&] {
+            return has_residual_mix();
+        }
+    );
+}
+
+// Stage the ALREADY-CLAIMED range [start, start+count) of consumer `c` onto
+// thread_idx's idle then pending cores. The caller has atomically advanced
+// next_block_idx by `count` AND re-pushed `c` for peers
+// BEFORE calling this — so this, the expensive prepare+publish, runs CONCURRENTLY
+// with peers staging other ranges of the same consumer. This mirrors the normal
+// SPMD dispatch path (claim range -> re-push -> dispatch).
+// `idle`/`pend` are this thread's free-core sets, sized so idle.count+pend.count >=
+// count (the caller clamped the claim to them), so all `count` blocks get a core.
+//
+// Rule 1: idle cores -> gated task in the RUNNING slot. Rule 2: PENDING slot of
+// cores running a real task -> promoted in when that task FINs (gated-pending Case
+// 3.3 in decide_slot_transition completes the running FIN + promotes instead of
+// waiting for an ack the gated task never sends). Each staged core stays
+// pending_occupied while gated, so no second gated block stacks on it.
+//
+// Doorbell ownership: release flips STAGING->DISPATCHED and exchanges the shared
+// mask to claim its bits. A late stager ORs its bits, then fetch-and-clears only
+// those release did not take and rings them from its immutable local handles.
+// The seq_cst order guarantees every gated core has exactly one writer.
 int32_t SchedulerContext::stage_consumer_blocks(
     int32_t thread_idx, PTO2TaskSlotState *c, PTO2ResourceShape shape, int32_t start, int32_t count,
     CoreTracker::BitStates &idle, CoreTracker::BitStates &pend
 ) {
     CoreTracker &tracker = core_trackers_[thread_idx];
+    // Stamp the real pre-stage time (NOT 0) so the swimlane shows these blocks
+    // dispatched during the producer's run, not at trace start.
     uint64_t early_dispatch_ts = get_sys_cnt_aicpu();
-    uint64_t my_cores[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};
+    uint64_t my_cores[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};  // cores gated by this staging pass
     int32_t staged = 0;
     int32_t block = start;
+    // Mirror the normal flush_publish (scheduler_dispatch.cpp wmb()+publish loop):
+    // prepare ALL claimed blocks' payloads (idle bucket -> running slot, pend bucket
+    // -> gated pending), then ONE wmb(), then publish. The wmb guarantees the
+    // src_payload gate + source args are globally visible before any DATA_MAIN_BASE token —
+    // without it a gated core can pick up the token and dcci a stale payload. The
+    // shared `count` budget bounds total blocks <= free clusters/cores, so both
+    // buckets fit one handles[] buffer.
     PublishHandle handles[CoreTracker::MAX_CLUSTERS * 3];
     int n = 0;
     auto prepare_from = [&](CoreTracker::BitStates &avail, bool to_pending) {
@@ -548,11 +616,19 @@ int32_t SchedulerContext::stage_consumer_blocks(
             my_cores[cid >> 6] |= (1ULL << (cid & 63));
         }
     }
+    // Publish all this thread's gated cores into the shared mask in one OR per word
+    // (vs one per subtask) so release sees them; seq_cst keeps the self-ring order.
     for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++)
         if (my_cores[w] != 0) c->payload->staged_core_mask[w].fetch_or(my_cores[w], std::memory_order_seq_cst);
 
+    // Full publication and release are independent events. The seq_cst
+    // state/launch/count operations form a two-sided handshake. A released
+    // block must ring before contributing to the publication count.
     bool released = staged > 0 &&
                     c->payload->early_dispatch_state.load(std::memory_order_seq_cst) == PTO2_EARLY_DISPATCH_DISPATCHED;
+
+    // Claim only bits the release path did not take. Local handles remain valid
+    // even if the shared per-core table is reused before this thread resumes.
     if (released) {
         uint64_t owned[PTO2_EARLY_DISPATCH_CORE_MASK_WORDS] = {0};
         for (int w = 0; w < PTO2_EARLY_DISPATCH_CORE_MASK_WORDS; w++) {
@@ -570,10 +646,19 @@ int32_t SchedulerContext::stage_consumer_blocks(
         wmb();
     }
     sched_->record_published_blocks(*c, staged);
+    // Retry unconditionally after publication. The guards are cheap, and a
+    // pre-ring state read can become stale if release completes before this
+    // count update.
     sched_->propagate_dispatch_fanin(*c);
     return staged;
 }
 
+// Early-dispatch analog of dispatch_shape: drain early_dispatch_queues[shape] and
+// pre-stage claimed block ranges onto this thread's `shape` cores for `phase`. IDLE
+// stages onto idle cores (RUNNING slot, gated); PENDING stages onto a running core's
+// gated pending slot. Producer propagation and late wiring push candidates to the
+// shape's queue when dispatch_fanin becomes complete, so the shape is the queue
+// index (no per-consumer to_shape()). Returns the number of blocks staged.
 int32_t
 SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -581,6 +666,9 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     bool is_mix = (shape == PTO2ResourceShape::MIX);
     bool is_idle = (phase == CoreTracker::DispatchPhase::IDLE);
 
+    // Size the pop exactly as dispatch_shape does: MIX to the cluster count, else the
+    // phase's dispatchable-core count. Skip the queue entirely when no core is free
+    // for this shape+phase (avoids a pointless pop + immediate push-back).
     CoreTracker::BitStates cores =
         is_mix ? tracker.get_cluster_offset_states() : tracker.get_dispatchable_cores(shape, phase);
     if (!cores.has_value()) return 0;
@@ -588,12 +676,29 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     int32_t total_staged = 0;
     PTO2TaskSlotState *batch[CoreTracker::MAX_CLUSTERS * 3];
     uint64_t task_id_snapshots[CoreTracker::MAX_CLUSTERS * 3];
+    // Batch-pop in one queue op (fewer CAS than one pop per consumer); the pop is
+    // bounded by the shape's capacity so the stack buffer always holds it. Then for
+    // each consumer: CLAIM a range sized to THIS thread's free cores by advancing
+    // next_block_idx with a CAS (atomic — next_block_idx is shared with normal
+    // dispatch, which also claims it if release routes the consumer to the ready
+    // queue, so a plain store could double-dispatch), RE-PUSH it for peers, THEN do
+    // the expensive prepare+publish. Re-pushing before staging lets peers claim the
+    // next range and stage CONCURRENTLY — a wide consumer is filled by all idle
+    // threads in parallel. When cores run out mid-batch the unprocessed remainder
+    // is pushed back for peers (mirrors normal's push_batch of the unconsumed tail).
     int got = sched_->early_dispatch_queues[s].pop_batch_tagged(batch, task_id_snapshots, cores.count());
     for (int bi = 0; bi < got; bi++) {
         PTO2TaskSlotState *c = batch[bi];
         if (static_cast<uint64_t>(c->task->task_id.raw) != task_id_snapshots[bi]) continue;
-        if (c->payload->early_dispatch_state.load(std::memory_order_acquire) != PTO2_EARLY_DISPATCH_STAGING) continue;
+        if (c->payload->early_dispatch_state.load(std::memory_order_acquire) != PTO2_EARLY_DISPATCH_STAGING)
+            continue;  // released
 
+        // The single free-core bucket for this phase. For MIX, an active-mask-aware
+        // whole-cluster scan keeps only the clusters whose placement matches the phase
+        // (RUNNING placement for IDLE, PENDING placement for PENDING), matching normal
+        // dispatch's classify_mix_cluster — unused cores in the cluster are ignored, so
+        // a MIX whose unused AIV is busy is not stranded. For AIC/AIV it is just the
+        // phase's dispatchable cores.
         CoreTracker::BitStates bucket;
         if (is_mix) {
             auto wanted = is_idle ? CoreTracker::MixPlacement::RUNNING : CoreTracker::MixPlacement::PENDING;
@@ -609,13 +714,14 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
             bucket = tracker.get_dispatchable_cores(shape, phase);
         }
         int32_t freecores = bucket.has_value() ? bucket.count() : 0;
-        if (freecores == 0) {
+        if (freecores == 0) {  // no cores for this shape+phase — give this + the unprocessed rest back
             sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi);
             break;
         }
         int32_t start = 0;
         int32_t claim = c->claim_block_range(c->logical_block_num, freecores, start);
-        if (claim == 0) continue;
+        if (claim == 0) continue;  // nothing left to claim -> drop (no re-push)
+        // Re-push for concurrent peers BEFORE the expensive staging.
         if (start + claim < c->logical_block_num) {
             if (!sched_->early_dispatch_queues[s].push_tagged(c, task_id_snapshots[bi]))
                 LOG_DEBUG(
@@ -623,6 +729,9 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
                     static_cast<int64_t>(c->task->task_id.raw)
                 );
         }
+        // stage_consumer_blocks fills the idle bucket (RUNNING slot) then the pend
+        // bucket (gated pending); pass this phase's bucket in the matching slot and an
+        // empty other so only the phase's cores are staged.
         CoreTracker::BitStates empty(0ULL);
         total_staged += is_idle ? stage_consumer_blocks(thread_idx, c, shape, start, claim, bucket, empty) :
                                   stage_consumer_blocks(thread_idx, c, shape, start, claim, empty, bucket);
@@ -630,14 +739,25 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
     return total_staged;
 }
 
+// Early-dispatch drain (idle pass) — the EARLY source's analog of dispatch_ready_tasks.
+// Both sources share run_staging_order for the shape order (MIX strict priority, IDLE
+// before PENDING, cross-thread idle gating: MIX-IDLE ▶ c/v-IDLE ▶ MIX-PEND ▶ c/v-PEND).
+// Each handles its sync_start cohort FIRST as Tier 0: an exact local fit stages on
+// one owner, while a capacity-short cohort falls back to the global drain.
+// Returns the number of blocks staged this pass (for the EarlyDispatch swimlane bar).
 int32_t SchedulerContext::try_early_dispatch(
     int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
 ) {
-    // Gate (a2a3 #1288): owned here rather than by the caller.
-    //   - pmu_active: staging gated work perturbs single-issue PMU windows.
-    //   - has_any_free_slot: spare capacity (local read; fully-occupied bails
-    //     before touching shared queues) — not the old fully-idle pass.
-    //   - ready queues empty: normal dispatch strictly precedes early.
+    // Gate, owned here rather than by the caller (mirrors dispatch_ready_tasks
+    // withholding PENDING under PMU internally):
+    //   - pmu_active: staging gated work perturbs the single-issue PMU windows the
+    //     same way dual-issue PENDING dispatch does, so early dispatch is off.
+    //   - has_any_free_slot: this thread has no spare capacity to stage onto (a
+    //     purely local read; a fully-occupied thread bails before touching shared
+    //     queues).
+    //   - ready queues empty: normal dispatch (both the ready sync_start lane and the
+    //     regular ready_queues) strictly precedes early — there is no real ready task
+    //     to delay only when every normal queue is drained.
     if (pmu_active || !tracker.has_any_free_slot()) return 0;
     for (int s = 0; s < PTO2_NUM_RESOURCE_SHAPES; s++) {
         if (sched_->ready_sync_queues[s].size() > 0 || sched_->ready_queues[s].size() > 0) return 0;
@@ -702,46 +822,6 @@ int32_t SchedulerContext::try_early_dispatch(
         try_pushed = true;
     }
     return total_staged;
-}
-
-void SchedulerContext::dispatch_ready_tasks(
-    int32_t thread_idx, CoreTracker &tracker, bool pmu_active, bool &made_progress, bool &try_pushed
-) {
-    // Normal ready dispatch (is_ready): dispatch_shape places each block on pickup and
-    // signals a stop by setting entered_drain when it enters a sync_start drain.
-    bool entered_drain = false;
-
-    // Tier 0: ready sync_start cohorts take cores before any regular ready task
-    // (sync_start > MIX > C/V within the normal source). Same order and machinery,
-    // fed from ready_sync_queues; an oversized cohort arms the stop-the-world drain
-    // (entered_drain), which also short-circuits the regular tier below.
-    run_staging_order(
-        thread_idx, pmu_active,
-        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
-            dispatch_shape(
-                thread_idx, sched_->ready_sync_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
-            );
-            return entered_drain;
-        },
-        [&] {
-            return has_residual_sync_mix();
-        }
-    );
-    if (entered_drain) return;
-
-    // Tier 1: regular ready work.
-    run_staging_order(
-        thread_idx, pmu_active,
-        [&](PTO2ResourceShape shape, CoreTracker::DispatchPhase phase) {
-            dispatch_shape(
-                thread_idx, sched_->ready_queues, shape, phase, tracker, entered_drain, made_progress, try_pushed
-            );
-            return entered_drain;
-        },
-        [&] {
-            return has_residual_mix();
-        }
-    );
 }
 
 // =============================================================================

@@ -1117,7 +1117,7 @@ int32_t SchedulerContext::pre_handshake_init(
     // prior enabled launch's level can't leak into the phase-record gates in
     // scheduler_dispatch. This runs on the leader before it publishes
     // hs_setup_done_, so it happens-before every thread's handshake_partition
-    // (and therefore before any aicpu_ready=1 write).
+    // and therefore before any register window is opened.
     if (is_chip_swimlane_enabled()) {
         chip_swimlane_aicpu_init(runtime->dev.worker_count);
         chip_swimlane_level_ = get_chip_swimlane_level();

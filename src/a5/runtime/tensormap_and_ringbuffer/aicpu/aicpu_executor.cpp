@@ -25,7 +25,6 @@
 #include "aicpu/device_time.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/orch_so_file.h"
-#include "aicpu/platform_aicpu_affinity.h"
 #include "callable_protocol.h"
 #include "common/kernel_args.h"
 #include "pto2_dispatch_payload.h"
@@ -38,15 +37,16 @@
 #include "pto_shared_memory.h"
 
 // Performance profiling headers
-#include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/chip_swimlane_collector_aicpu.h"
 #include "aicpu/scope_stats_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
+#include "aicpu/dep_gen_collector_aicpu.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/unified_log.h"
 
 // Register-based communication
 #include "aicpu/aicpu_device_config.h"
+#include "aicpu/platform_aicpu_affinity.h"
 #include "aicpu/platform_regs.h"
 #include "common/platform_config.h"
 
@@ -674,12 +674,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             if (get_chip_swimlane_level() >= ChipSwimlaneLevel::ORCH_PHASES) {
                 chip_swimlane_aicpu_set_orch_thread_idx(thread_idx);
             }
-            // scope_stats streams scope_end records off the orchestrator thread:
-            // record the per-thread ready_queue index. No-op (writer shared
-            // state null) when scope_stats is disabled; the current buffer is
-            // popped lazily on the first scope_end append.
-            scope_stats_aicpu_set_orch_thread_idx(thread_idx);
+#endif
 
+#if SIMPLER_DFX
             // dep_gen plugs into the orchestrator thread (single-instance subsystem):
             // resolve its buffer state and record the per-thread ready_queue index
             // before any submit_task fires inside orch_func_. The init belongs to
@@ -697,6 +694,12 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 dep_gen_aicpu_init();
                 dep_gen_aicpu_set_orch_thread_idx(thread_idx);
             }
+
+            // scope_stats streams scope_end records off the orchestrator thread:
+            // record the per-thread ready_queue index. No-op (writer shared
+            // state null) when scope_stats is disabled; the current buffer is
+            // popped lazily on the first scope_end append.
+            scope_stats_aicpu_set_orch_thread_idx(thread_idx);
 #endif
 
 #if SIMPLER_DFX

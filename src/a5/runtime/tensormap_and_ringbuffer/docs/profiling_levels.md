@@ -431,9 +431,9 @@ definitions to runtime headers.
 ### Code Locations
 
 - Macro defaults and validation: `src/common/task_interface/profiling_config.h`
-- Scheduler profiling: `src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_dispatch.cpp` and `scheduler_cold_path.cpp`
-- Orchestrator profiling: `src/a5/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp`
-- TensorMap profiling: `src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_tensormap.h`
+- Scheduler profiling: `../runtime/scheduler/scheduler_dispatch.cpp` and `../runtime/scheduler/scheduler_cold_path.cpp`
+- Orchestrator profiling: `../aicpu/aicpu_executor.cpp`
+- TensorMap profiling: `../runtime/pto_tensormap.h`
 
 ---
 
