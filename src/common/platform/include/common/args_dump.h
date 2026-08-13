@@ -41,9 +41,8 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <type_traits>
 
-#include "arg_direction.h"
+#include "common/args_dump_task_metadata.h"
 #include "common/dfx_backpressure_device.h"
 #include "common/platform_config.h"
 
@@ -76,26 +75,6 @@ enum class ArgsDumpKind : uint8_t {
     TENSOR = 0,
     SCALAR = 1,
 };
-
-using ArgsDumpArgMask = uint64_t;
-
-// Bitmask stored in the platform-owned mask pool when orchestration selects
-// specific task tensor/scalar arguments for dump. Bit N corresponds to the
-// payload arg index: tensors first, then scalars.
-// Zero preserves legacy "dump all tasks" behavior unless selective mode is enabled.
-constexpr ArgsDumpArgMask ARGS_DUMP_ARG_MASK_NONE = 0;
-constexpr uint32_t ARGS_DUMP_ARG_MASK_BITS = 64;
-constexpr uint8_t ARGS_DUMP_RECORD_FLAG_ARG_INDEX_AMBIGUOUS = 1u << 0;
-
-struct ArgsDumpTaskMetadata {
-    ArgsDumpArgMask dump_arg_mask{ARGS_DUMP_ARG_MASK_NONE};
-    ArgsDumpArgMask dump_arg_flags{ARGS_DUMP_ARG_MASK_NONE};
-    uint8_t scalar_dtypes[CORE_MAX_SCALAR_ARGS]{};
-};
-
-static_assert(std::is_trivially_copyable_v<ArgsDumpTaskMetadata>);
-static_assert(std::is_standard_layout_v<ArgsDumpTaskMetadata>);
-static_assert(sizeof(ArgsDumpTaskMetadata) == 32);
 
 // Max kernel ids a record carries: one per active subtask of a task (its mix
 // membership). Must equal the runtime's PTO2_SUBTASK_SLOT_COUNT (1C2V => 3);

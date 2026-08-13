@@ -42,7 +42,7 @@
 // pto_runtime2_types.h never references PTO2DispatchPayload itself; consumers that
 // need it include it via runtime.h directly.
 #include "aicore_completion_mailbox.h"
-#include "common/args_dump.h"
+#include "common/args_dump_task_metadata.h"
 #include "pto_submit_types.h"
 #include "pto_task_id.h"
 #include "pto_types.h"
