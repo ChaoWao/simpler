@@ -17,7 +17,7 @@ Python: logging.getLogger("simpler").setLevel(N)
        ChipWorker.init(device_id, bins, level)             ◀── Python wrapper
                   │
        1. ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)  ◀── one HostLogger per process
-       2. simpler_log_init(level)    ──→ HostLogger.set_level
+       2. simpler_log_init(level)    ──→ HostLogger.set_level + clock anchor
                                      (seeds HostLogger BEFORE any host_runtime /
                                       sim_context / aicore SO is dlopen'd, so
                                       any LOG_* macro firing during dlopen-time
@@ -200,11 +200,11 @@ are allowed by default. CMake blocks live in:
 diagnostic on first call. With `--log-level info`:
 
 ```text
-[2026-05-06 ...][T0x...][INFO] pto_cpu_sim_acquire_device: cpu_sim_context.cpp:167] cpu_sim_context: acquired device 0
-[2026-05-06 ...][T0x...][INFO] init_runtime_impl:           runtime_maker.cpp:119] Registering 3 kernel(s) ...
+[mono_ns=...][T0x...][INFO] pto_cpu_sim_acquire_device: cpu_sim_context.cpp:167] cpu_sim_context: acquired device 0
+[mono_ns=...][T0x...][INFO] init_runtime_impl:           runtime_maker.cpp:119] Registering 3 kernel(s) ...
 ```
 
-Both lines carry the same `HostLogger`-formatted prefix (timestamp, thread
+Both lines carry the same `HostLogger`-formatted prefix (monotonic timestamp, thread
 id, level tag), proving that `cpu_sim_context.so` and `host_runtime.so`
 resolve to the same `HostLogger` instance. If singleton sharing were
 broken, `cpu_sim_context.so` would have its own `HostLogger` defaulting to
@@ -215,13 +215,24 @@ TIMING and the INFO diagnostic would be silenced entirely.
 ### Host (`HostLogger::emit`)
 
 ```text
-[YYYY-MM-DD HH:MM:SS.uuuuuu][T0xTID][LEVEL] func: [file.cpp:line] message
+[mono_ns=MONOTONIC_NS][T0xTID][LEVEL] func: [file.cpp:line] message
 ```
 
-Timestamp is local time with microsecond precision; `T0x...` is
-`pthread_self()`. Both prefixes are added before the level/func segments so
-parallel-test stderr from `pytest-xdist` is recoverable via `sort -k1`
-(timestamp) and `grep T0x...` (per-thread).
+The timestamp is `CLOCK_MONOTONIC` (`steady_clock`) in nanoseconds, so it is
+comparable with host `[STRACE]` timestamps and does not jump when wall time is
+corrected. `T0x...` is `pthread_self()`.
+
+The first TIMING-enabled logger initialization in each process emits one
+mapping to wall time:
+
+```text
+[mono_ns=...][T0x...][TIMING] clock_anchor: [CLOCK_ANCHOR] v=1 pid=<pid> mono_ns=<ns> wall_ns=<ns>
+```
+
+For a record at monotonic time `record_ns`, its approximate absolute time is
+`wall_ns + record_ns - mono_ns`. The anchor is a TIMING record so the default
+TIMING threshold keeps it whenever host trace spans are visible. A process
+created by `fork()` emits its own anchor because ownership is keyed by PID.
 
 ### AICPU sim
 

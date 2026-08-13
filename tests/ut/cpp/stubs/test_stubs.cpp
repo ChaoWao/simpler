@@ -34,6 +34,8 @@
 
 extern "C" {
 
+void unified_log_host_span(const struct SimplerHostSpan *) {}
+
 void unified_log_error(const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);

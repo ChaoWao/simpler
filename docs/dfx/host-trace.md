@@ -22,6 +22,25 @@ children share.
 
 ## Marker grammar
 
+Every host log record starts with a `CLOCK_MONOTONIC` nanosecond timestamp:
+
+```text
+[mono_ns=<ns>][T0x<thread>][<level>] <func>: ...
+```
+
+Each process emits one TIMING-level mapping from that clock to wall time when
+its logger starts:
+
+```text
+[CLOCK_ANCHOR] v=1 pid=<pid> mono_ns=<ns> wall_ns=<ns>
+```
+
+For host-clock records, consumers recover an approximate absolute timestamp
+with `wall_ns + record_mono_ns - mono_ns`. Their event ordering and duration
+calculations remain entirely on the monotonic clock and are unaffected by
+wall-clock corrections. Records tagged `clk=dev` use the separate device-clock
+domain described below and do not use this anchor.
+
 One line per span, emitted on scope exit
 (`src/common/log/include/common/strace.h`):
 
@@ -33,7 +52,7 @@ One line per span, emitted on scope exit
 | ----- | ------- |
 | `v` | format version; the parser branches on it. Lets device-side markers align later by reusing the prefix + adding fields. |
 | `pid` `tid` | process / thread id — L3 parent and each L2 child are distinct pids, so they land on separate lanes. |
-| `inv` | process-wide `simpler_run` invocation id (allocated from an atomic, so `(pid, inv)` is unique even across concurrent calls) — **a grouping key only** (gathers one call's spans), NOT a token index. Set once per call. |
+| `inv` | 64-bit process-wide `simpler_run` invocation id (allocated from an atomic, so `(pid, inv)` is unique even across concurrent calls) — **a grouping key only** (gathers one call's spans), NOT a token index. Set once per call. |
 | `hid` | callable content hash (ELF Build-ID 64), stable across slot reuse / processes / runs. The parser buckets by `hid`; the most-frequent bucket is decode (one invocation per token), a once-seen bucket is prefill. |
 | `depth` | thread-local nesting depth (`++` on enter, `--` on exit). The parser rebuilds the call tree from `depth` — **not** from timestamp containment. |
 | `name` | dotted span name (self-locating even without the tree). |

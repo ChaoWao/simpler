@@ -19,9 +19,12 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+
+#include <sys/types.h>
 
 #include "common/log_level.h"
 
@@ -60,7 +63,11 @@ private:
 
     const char *level_name(simpler::log::LogLevel level) const;
     void emit(const char *level_tag, const char *func, const char *fmt, va_list args);
+    void emit_ungated(const char *level_tag, const char *func, const char *fmt, ...);
+    void emit_clock_anchor_if_needed();
 
     simpler::log::LogLevel current_level_;
     std::mutex mutex_;
+    std::atomic<pid_t> clock_anchor_pid_{-1};
+    std::mutex clock_anchor_mutex_;
 };

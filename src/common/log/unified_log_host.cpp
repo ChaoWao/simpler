@@ -22,7 +22,11 @@
 
 #include <cstdarg>
 
+#include "common/host_span.h"
+
 using simpler::log::LogLevel;
+
+void unified_log_host_span(const SimplerHostSpan *span) { simpler_log_emit_host_span(span); }
 
 void unified_log_error(const char *func, const char *fmt, ...) {
     va_list args;

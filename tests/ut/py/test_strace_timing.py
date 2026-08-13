@@ -16,6 +16,7 @@ from simpler_setup.tools.strace_timing import (
     group_invocations,
     legacy_spans,
     main,
+    parse_clock_anchors,
     parse_spans,
     to_chrome_trace,
     to_host_swimlane,
@@ -23,11 +24,14 @@ from simpler_setup.tools.strace_timing import (
 
 
 def _record(pid, inv, name, attrs=""):
-    """One host-log record in the shape `HostLogger::emit` writes it.
+    """One current host-log record in the shape `HostLogger::emit` writes it."""
+    return (
+        f"[mono_ns={1_000_000 + pid}][T0x{pid}][TIMING] emit_host_span: "
+        f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=0 name={name} ts=100 dur=20 {attrs}"
+    )
 
-    `LOG_TIMING` prepends `[<file>:<line>] ` to the caller's format string, so
-    the marker never sits flush against the `<func>: ` separator on stderr.
-    """
+
+def _legacy_record(pid, inv, name, attrs=""):
     return (
         f"[2026-08-04 10:00:00.00000{pid}][T0x{pid}][TIMING] emit_span: [strace.h:132] "
         f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=0 name={name} ts=100 dur=20 {attrs}"
@@ -52,7 +56,7 @@ def test_parse_spans_finds_adjacent_records_on_one_physical_line():
 
 
 def test_parse_spans_keeps_every_record_of_a_multi_line_blob():
-    blob = _record(1, 1, "simpler_run", "rank=0") + "\n" + _record(2, 2, "simpler_run.bind", "rank=1") + "\n"
+    blob = _legacy_record(1, 1, "simpler_run", "rank=0") + "\n" + _record(2, 2, "simpler_run.bind", "rank=1") + "\n"
 
     spans = list(parse_spans([blob]))
 
@@ -62,6 +66,41 @@ def test_parse_spans_keeps_every_record_of_a_multi_line_blob():
     ]
     assert spans[0].attrs == "rank=0"
     assert spans[1].attrs == "rank=1"
+
+
+def test_parse_spans_preserves_64_bit_invocation_id():
+    invocation_id = 2**32 + 7
+
+    spans = list(parse_spans([_record(41, invocation_id, "simpler_run")]))
+
+    assert len(spans) == 1
+    assert spans[0].inv == invocation_id
+
+
+def test_parse_clock_anchor_maps_monotonic_to_wall_time():
+    lines = [
+        "worker-3: [mono_ns=1005][T0x1][TIMING] clock_anchor: "
+        "[CLOCK_ANCHOR] v=1 pid=41 mono_ns=1000 wall_ns=1700000000000000000\n"
+    ]
+
+    anchors = list(parse_clock_anchors(lines))
+
+    assert len(anchors) == 1
+    assert anchors[0].pid == 41
+    assert anchors[0].mono_ns == 1000
+    assert anchors[0].wall_ns == 1_700_000_000_000_000_000
+    assert anchors[0].to_wall_ns(1250) == 1_700_000_000_000_000_250
+
+
+def test_parse_clock_anchor_rejects_payloads_outside_complete_anchor_records():
+    payload = "[CLOCK_ANCHOR] v=1 pid=41 mono_ns=1000 wall_ns=1700000000000000000"
+    lines = [
+        payload + "\n",
+        f"[mono_ns=1005][T0x1][INFO] message: copied {payload}\n",
+        f"[mono_ns=1005][T0x1][TIMING] clock_anchor: {payload} trailing\n",
+    ]
+
+    assert list(parse_clock_anchors(lines)) == []
 
 
 def test_count_record_heads_sees_a_torn_record_that_parse_spans_drops():

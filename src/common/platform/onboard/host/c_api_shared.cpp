@@ -587,7 +587,7 @@ native_run_context(DeviceContextHandle ctx, RuntimeHandle runtime, const char *o
 }
 
 static void
-emit_native_run_host_wall(unsigned trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs) {
+emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
     STRACE_HOST_SPAN_AT_A("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
@@ -608,7 +608,7 @@ int supports_concurrent_native_prepare_ctx(DeviceContextHandle ctx) {
 }
 
 static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_rc, bool clear_gm_sm) {
-    const unsigned trace_inv = state->trace_inv;
+    const uint64_t trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
     char trace_attrs[sizeof(state->trace_attrs)];
@@ -690,7 +690,7 @@ int simpler_prepare_run(
 
     OnboardNativeRunContext *state = nullptr;
     const uint64_t trace_hid = runner->callable_hash(callable_id);
-    const unsigned trace_inv = STRACE_ALLOC_INV();
+    const uint64_t trace_inv = STRACE_ALLOC_INV();
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
         state = new (runtime) OnboardNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
@@ -883,7 +883,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     OnboardNativeRunContext *state = native_run_context(ctx, runtime, "simpler_finalize_run");
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
-    const unsigned trace_inv = state->trace_inv;
+    const uint64_t trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
     char trace_attrs[sizeof(state->trace_attrs)];

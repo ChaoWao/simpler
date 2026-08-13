@@ -17,10 +17,10 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <limits.h>
 #include <pthread.h>
 #include <string>
@@ -33,6 +33,7 @@
 #endif
 
 #include "common/host_span.h"
+#include "common/log_clock.h"
 
 using simpler::log::LogLevel;
 
@@ -91,7 +92,7 @@ std::string encode_host_span_field(const char *value, size_t capacity, bool attr
 // record. A return value of `capacity` or more means `buffer` holds only a
 // truncated prefix and the caller must re-render into that many bytes.
 size_t format_record(
-    char *buffer, size_t capacity, const char *ts, unsigned long tid, const char *level_tag, const char *func,
+    char *buffer, size_t capacity, int64_t monotonic_ns, unsigned long tid, const char *level_tag, const char *func,
     const char *fmt, va_list args, bool append_newline
 ) {
     size_t length = 0;
@@ -102,7 +103,10 @@ size_t format_record(
         return length < capacity ? capacity - length : 0;
     };
 
-    const int prefix = snprintf(tail(), remaining(), "[%s][T0x%lx][%s] %s: ", ts, tid, level_tag, func);
+    const int prefix = snprintf(
+        tail(), remaining(), "[mono_ns=%lld][T0x%lx][%s] %s: ", static_cast<long long>(monotonic_ns), tid, level_tag,
+        func
+    );
     if (prefix < 0) {
         return 0;
     }
@@ -159,8 +163,11 @@ HostLogger::HostLogger() :
     current_level_(LogLevel::TIMING) {}
 
 void HostLogger::set_level(LogLevel level) {
-    std::scoped_lock lock(mutex_);
-    current_level_ = level;
+    {
+        std::scoped_lock lock(mutex_);
+        current_level_ = level;
+    }
+    emit_clock_anchor_if_needed();
 }
 
 int HostLogger::level() const { return static_cast<int>(current_level_); }
@@ -197,16 +204,7 @@ const char *HostLogger::level_name(LogLevel level) const {
 }
 
 void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args) {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto t = system_clock::to_time_t(now);
-    auto us = duration_cast<microseconds>(now.time_since_epoch()) % 1'000'000;
-    struct tm tm_buf;
-    localtime_r(&t, &tm_buf);
-    char ts[40];
-    size_t n = strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
-    snprintf(ts + n, sizeof(ts) - n, ".%06lld", static_cast<long long>(us.count()));
-
+    const int64_t monotonic_ns = simpler::log::monotonic_now_ns();
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
     const bool append_newline = fmt[0] != '\0' && fmt[strlen(fmt) - 1] != '\n';
@@ -217,8 +215,9 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
     // budgeted to the portable _POSIX_PIPE_BUF floor (512 bytes); longer human
     // log records use this same best-effort write path without that promise.
     char stack_buffer[kRecordStackCapacity];
-    const size_t length =
-        format_record(stack_buffer, sizeof(stack_buffer), ts, tid, level_tag, func, fmt, args, append_newline);
+    const size_t length = format_record(
+        stack_buffer, sizeof(stack_buffer), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
+    );
     if (length < sizeof(stack_buffer)) {
         std::scoped_lock lock(mutex_);
         write_stderr(stack_buffer, length);
@@ -226,16 +225,45 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
     }
 
     std::vector<char> heap_buffer(length + 1);
-    const size_t heap_length =
-        format_record(heap_buffer.data(), heap_buffer.size(), ts, tid, level_tag, func, fmt, args, append_newline);
+    const size_t heap_length = format_record(
+        heap_buffer.data(), heap_buffer.size(), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
+    );
     std::scoped_lock lock(mutex_);
     write_stderr(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length);
+}
+
+void HostLogger::emit_ungated(const char *level_tag, const char *func, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    emit(level_tag, func, fmt, args);
+    va_end(args);
+}
+
+void HostLogger::emit_clock_anchor_if_needed() {
+    if (!is_enabled(LogLevel::TIMING)) return;
+
+    const pid_t pid = getpid();
+    if (clock_anchor_pid_.load(std::memory_order_acquire) == pid) return;
+
+    std::scoped_lock lock(clock_anchor_mutex_);
+    if (clock_anchor_pid_.load(std::memory_order_relaxed) == pid) return;
+
+    const int64_t monotonic_ns = simpler::log::monotonic_now_ns();
+    const int64_t wall_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    emit_ungated(
+        level_name(LogLevel::TIMING), "clock_anchor", "[CLOCK_ANCHOR] v=1 pid=%d mono_ns=%lld wall_ns=%lld",
+        static_cast<int>(pid), static_cast<long long>(monotonic_ns), static_cast<long long>(wall_ns)
+    );
+    clock_anchor_pid_.store(pid, std::memory_order_release);
 }
 
 void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list args) {
     if (!is_enabled(level)) {
         return;
     }
+    emit_clock_anchor_if_needed();
     emit(level_name(level), func, fmt, args);
 }
 
@@ -277,9 +305,9 @@ extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
         encode_host_span_field(span->attributes == nullptr ? "" : span->attributes, kHostSpanAttributesCapacity, true);
     HostLogger::get_instance().log(
         LogLevel::TIMING, "emit_host_span",
-        "[STRACE] v=1 pid=%d tid=%ld inv=%llu hid=%llx depth=%d name=%s ts=%lld dur=%lld %s",
-        static_cast<int>(getpid()), host_trace_tid(), static_cast<unsigned long long>(span->invocation_id),
-        static_cast<unsigned long long>(span->callable_hash), span->depth, name.c_str(),
-        static_cast<long long>(span->timestamp_ns), static_cast<long long>(span->duration_ns), attributes.c_str()
+        "[STRACE] v=1 pid=%d tid=%ld inv=%" PRIu64 " hid=%" PRIx64 " depth=%d name=%s ts=%" PRId64 " dur=%" PRId64
+        " %s",
+        static_cast<int>(getpid()), host_trace_tid(), span->invocation_id, span->callable_hash, span->depth,
+        name.c_str(), span->timestamp_ns, span->duration_ns, attributes.c_str()
     );
 }
