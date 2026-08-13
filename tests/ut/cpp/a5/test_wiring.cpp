@@ -145,6 +145,7 @@ TEST_F(WiringTest, NoFaninTaskBecomesReady) {
 
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 0;
+    payload.fanin_wait_count = 0;
     task_slot.payload = &payload;
     task_slot.task = &desc;
 
@@ -180,6 +181,7 @@ TEST_F(WiringTest, WireTaskAllProducersEarlyFinished) {
     // Consumer task with 2 fanins
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
+    payload.fanin_wait_count = 2;
     payload.fanin_inline_edges[0].set(&producer_slots[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producer_slots[1], DEP_WAIT | DEP_RETAIN);
 
@@ -217,6 +219,7 @@ TEST_F(WiringTest, WireTaskProducersPendingTaskNotReady) {
 
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
+    payload.fanin_wait_count = 2;
     payload.fanin_inline_edges[0].set(&producer_slots[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producer_slots[1], DEP_WAIT | DEP_RETAIN);
     task_slot.payload = &payload;
@@ -259,6 +262,7 @@ TEST_F(WiringTest, WireTaskMixedProducerStates) {
 
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 3;
+    payload.fanin_wait_count = 3;
     for (int i = 0; i < 3; i++) {
         payload.fanin_inline_edges[i].set(&producers[i], DEP_WAIT | DEP_RETAIN);
     }
@@ -470,6 +474,7 @@ TEST_F(WiringTest, OnTaskReleaseReleasesProducers) {
 
     init_slot(task_slot, PTO2_TASK_COMPLETED, 3, 1);
     payload.fanin_actual_count = 2;
+    payload.fanin_wait_count = 2;
     payload.fanin_inline_edges[0].set(&producers[0], DEP_WAIT | DEP_RETAIN);
     payload.fanin_inline_edges[1].set(&producers[1], DEP_WAIT | DEP_RETAIN);
     // Need a valid fanin_spill_pool even though we don't spill
@@ -513,6 +518,7 @@ TEST_F(WiringTest, OrderingOnlyReleasedAtWiringRetentionHeldUntilRelease) {
 
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 2;
+    payload.fanin_wait_count = 2;
     payload.fanin_inline_edges[0].set(&wait_producer, DEP_WAIT);
     payload.fanin_inline_edges[1].set(&retain_producer, DEP_WAIT | DEP_RETAIN);
     PTO2FaninPool dummy_pool{};
@@ -566,6 +572,8 @@ TEST_F(WiringTest, ReleaseHonorsRetainFlagInSpillRegion) {
     e->set(&spill_retain, DEP_WAIT | DEP_RETAIN);
 
     payload.fanin_actual_count = PTO2_FANIN_INLINE_CAP + 1;
+
+    payload.fanin_wait_count = PTO2_FANIN_INLINE_CAP + 1;
     payload.fanin_spill_start = spill_start;
     payload.fanin_spill_pool = &spill_pool;
     task_slot.payload = &payload;
@@ -945,6 +953,7 @@ TEST_F(WiringTest, NoEdgePublishRecordsDepPoolMark) {
 
     init_slot(task_slot, PTO2_TASK_PENDING, 0, 1);
     payload.fanin_actual_count = 0;
+    payload.fanin_wait_count = 0;
     task_slot.payload = &payload;
     task_slot.task = &desc;
 
