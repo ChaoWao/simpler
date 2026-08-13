@@ -83,10 +83,13 @@ from typing import Any, cast
 
 import cloudpickle
 from _task_interface import (  # pyright: ignore[reportMissingImports]
+    HOST_STRACE_ENABLED,
     MAX_REGISTERED_CALLABLE_IDS,
     PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
     WorkerType,
+    _emit_host_span,
+    _host_span_sink_available,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
     _mailbox_load_i32,
@@ -218,6 +221,7 @@ from .task_interface import (
     RemoteBufferExport,
     RemoteBufferHandle,
     TaskArgs,
+    _initialize_simpler_log,
     _Worker,
 )
 from .worker_chip_orch_comm import (
@@ -249,6 +253,11 @@ _PY_CONTROL_TIMEOUT_S = 30.0
 # text emitted by the orchestration wrapper; keep this pattern in sync with the
 # wrapper's ``L3-L2 endpoint error ... region=<id>`` format.
 _WORKER_CHIP_ENDPOINT_ERROR_REGION_RE = re.compile(r"\bL3-L2 endpoint error\b[^\n]*\bregion=(\d+)\b")
+
+
+def _host_spans_active() -> bool:
+    """Whether an emitted host span can currently reach the logger sink."""
+    return HOST_STRACE_ENABLED and _host_span_sink_available()
 
 
 # ---------------------------------------------------------------------------
@@ -7280,6 +7289,15 @@ class Worker:
                 for digest, state in self._identity_registry.items()
             ]
 
+        # Seed this process's logger before the first fork: the spans its own
+        # scheduler emits obey the Python logger level, and every child inherits
+        # the mapping. Every level needs this — `init()` rejects device_ids above
+        # L3, so a pod process owns no chips yet still drives next-level Workers
+        # and emits their spans. A chip-owning Worker names the copy its children
+        # load; any other process seeds the copy the package already preloaded.
+        chip_log_level = _simpler_log.get_current_config()
+        _initialize_simpler_log(self._l3_bins if device_ids else None, chip_log_level)
+
         self._startup_reaped_pids = set()
         self._startup_ready_pids = set()
         self._startup_group_leader_pids = set()
@@ -7318,7 +7336,6 @@ class Worker:
         # Fork ChipWorker processes (L3 with device_ids).  Always use the plain
         # task-loop variant; the base communicator is established lazily on first
         # ``orch.allocate_domain`` via CTRL_COMM_INIT.
-        chip_log_level = _simpler_log.get_current_config()
         if device_ids:
             for idx, dev_id in enumerate(device_ids):
                 pid = os.fork()
@@ -10320,7 +10337,23 @@ class Worker:
             self._orch._scope_begin()
             scope_open = True
             with _callback_run(run_id, self):
-                callable(self._orch, args, cfg)
+                if _host_spans_active():
+                    graph_start_ns = time.monotonic_ns()
+                    try:
+                        callable(self._orch, args, cfg)
+                    finally:
+                        graph_end_ns = time.monotonic_ns()
+                        _emit_host_span(
+                            "l3.graph_build",
+                            run_id,
+                            0,
+                            0,
+                            graph_start_ns,
+                            graph_end_ns - graph_start_ns,
+                            f"run_id={run_id} role=facade",
+                        )
+                else:
+                    callable(self._orch, args, cfg)
             scope_open = False
             self._orch._scope_end()
             self._orch._close_run_submission(run_id)

@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -37,6 +38,8 @@
 #include <vector>
 
 #include "call_config.h"
+#include "common/host_span.h"
+#include "common/host_span_scope.h"
 #include "orchestrator.h"
 #include "ring.h"
 #include "scheduler.h"
@@ -45,6 +48,51 @@
 #include "types.h"
 #include "worker_manager.h"
 #include "task_args.h"
+
+namespace {
+
+std::mutex captured_host_spans_mu;
+std::vector<std::string> captured_host_span_names;
+std::vector<std::string> captured_host_span_attributes;
+
+class ScopedHostSpanCapture {
+public:
+    ScopedHostSpanCapture() {
+        std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+        captured_host_span_names.clear();
+        captured_host_span_attributes.clear();
+        simpler::host_trace::bind_sink(&simpler_log_emit_host_span);
+    }
+
+    ~ScopedHostSpanCapture() { simpler::host_trace::bind_sink(nullptr); }
+
+    ScopedHostSpanCapture(const ScopedHostSpanCapture &) = delete;
+    ScopedHostSpanCapture &operator=(const ScopedHostSpanCapture &) = delete;
+};
+
+bool captured_host_span(const std::string &name) {
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    return std::find(captured_host_span_names.begin(), captured_host_span_names.end(), name) !=
+           captured_host_span_names.end();
+}
+
+// The attributes of the first span emitted under `name`, or "" if none was.
+std::string captured_host_span_attrs(const std::string &name) {
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    for (size_t i = 0; i < captured_host_span_names.size(); ++i) {
+        if (captured_host_span_names[i] == name) return captured_host_span_attributes[i];
+    }
+    return "";
+}
+
+}  // namespace
+
+extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
+    if (span == nullptr || span->name == nullptr) return;
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    captured_host_span_names.emplace_back(span->name);
+    captured_host_span_attributes.emplace_back(span->attributes == nullptr ? "" : span->attributes);
+}
 
 // ---------------------------------------------------------------------------
 // MockMailboxWorker: in-process stand-in for the forked Python child loop.
@@ -1141,6 +1189,40 @@ TEST(WorkerManagerTest, WorkerThreadUsesOneProgressOwnerForActiveAndStagedLanes)
     allocator.shutdown();
 }
 
+TEST(WorkerManagerTest, DispatchAndCompletionEmitHostSpans) {
+    ScopedHostSpanCapture host_span_capture;
+
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot slot = make_progress_slot(allocator, /*run_id=*/73, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(slot, INVALID_SLOT);
+
+    WorkerThread worker;
+    auto endpoint = std::make_unique<DeterministicProgressEndpoint>();
+    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
+    std::vector<WorkerCompletion> completed;
+    worker.start(
+        &allocator,
+        [&](WorkerCompletion completion) {
+            completed.push_back(std::move(completion));
+        },
+        [](WorkerDispatch) {}, std::move(endpoint)
+    );
+
+    worker.dispatch(WorkerDispatch{slot, 0});
+    ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
+    EXPECT_TRUE(captured_host_span("l3.dispatch"));
+
+    const WorkerDispatch submitted = endpoint_ptr->submitted().front();
+    endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted);
+    worker.progress();
+    ASSERT_EQ(completed.size(), 1u);
+    EXPECT_TRUE(captured_host_span("l3.complete"));
+
+    worker.stop();
+    allocator.shutdown();
+}
+
 TEST(WorkerManagerTest, AdmissionRejectionsCompleteClaimedDispatchesWithoutThrowing) {
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
@@ -1350,6 +1432,8 @@ TEST(WorkerManagerTest, SubmitExceptionQuiescesEndpointOwnedPublication) {
 }
 
 TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
+    ScopedHostSpanCapture host_span_capture;
+
     alignas(8) std::array<char, MAILBOX_SIZE> mailbox{};
     Ring allocator;
     allocator.init(/*heap_bytes=*/0);
@@ -1391,6 +1475,8 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
+    EXPECT_TRUE(captured_host_span("l3.frame_submit"));
+    EXPECT_TRUE(captured_host_span("l3.activate"));
     allocator.shutdown();
 }
 
@@ -1947,6 +2033,22 @@ struct CapacityOneProgressSchedulerFixture : public ProgressSchedulerFixture {
     uint32_t endpoint0_capacity() const override { return 1; }
 };
 
+TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleIndex) {
+    ScopedHostSpanCapture host_span_capture;
+
+    RunId run = orchestrator.begin_run();
+    SubmitResult group = orchestrator.submit_next_level_group(
+        C(9), {single_tensor_args(0x9000, TensorArgType::OUTPUT), single_tensor_args(0xA000, TensorArgType::OUTPUT)},
+        config, {0, 1}
+    );
+    orchestrator.close_run_submission(run);
+
+    ASSERT_TRUE(captured_host_span("l3.submit"));
+    std::ostringstream expected;
+    expected << "run_id=" << run << " task_slot=" << group.task_slot << " group_index=-1 group_size=2 role=facade";
+    EXPECT_EQ(captured_host_span_attrs("l3.submit"), expected.str());
+}
+
 TEST_F(ProgressSchedulerFixture, SuccessorStagesButActivatesOnlyAfterFifoPromotion) {
     RunId first_run = orchestrator.begin_run();
     SubmitResult first =
@@ -2403,6 +2505,26 @@ TEST_F(SchedulerFixture, ACancellationThatWinsTheClaimStopsTheDispatch) {
         std::lock_guard<std::mutex> lk(mock_worker.dispatched_mu);
         EXPECT_TRUE(mock_worker.dispatched.empty()) << "a cancelled task was still handed to a worker";
     }
+}
+
+// `l3.submit` is what a dispatch arrow is drawn back to, so the swimlane can
+// only pair the two if these attributes carry the same run/slot the dispatch
+// reports. A SUB submission is deliberately silent: it has no NEXT_LEVEL worker
+// to hand off to.
+TEST_F(SchedulerFixture, NextLevelSubmitEmitsAPairableHostSpan) {
+    ScopedHostSpanCapture host_span_capture;
+
+    auto submitted = orch.submit_next_level(C(0x42), single_tensor_args(0xCAFE, TensorArgType::OUTPUT), cfg, 0);
+
+    ASSERT_TRUE(captured_host_span("l3.submit"));
+    std::ostringstream expected;
+    expected << "run_id=" << run_id << " task_slot=" << submitted.task_slot
+             << " group_index=0 group_size=1 worker_id=0 role=facade";
+    EXPECT_EQ(captured_host_span_attrs("l3.submit"), expected.str());
+
+    mock_worker.wait_running();
+    mock_worker.complete();
+    wait_consumed(submitted.task_slot);
 }
 
 TEST_F(SchedulerFixture, IndependentTaskDispatchedAndConsumed) {

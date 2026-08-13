@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <limits.h>
 #include <algorithm>
 #include <cerrno>
 #include <sstream>
@@ -26,6 +27,7 @@
 
 #include <gtest/gtest.h>
 
+#include "common/host_span.h"
 #include "host_log.h"
 
 using simpler::log::LogLevel;
@@ -54,7 +56,8 @@ int capture_cann_log_level(int module_id, int level, int enable_event) {
     return 0;
 }
 
-CapturedStdio run_with_config(LogLevel level, void (*fn)()) {
+template <typename Fn>
+CapturedStdio run_with_config(LogLevel level, Fn &&fn) {
     fflush(stdout);
     fflush(stderr);
     FILE *out_tmp = tmpfile();
@@ -203,6 +206,66 @@ TEST(HostLogTest, AllOutputGoesToStderr) {
     EXPECT_NE(captured.err.find("timing-output-marker"), std::string::npos);
     EXPECT_NE(captured.err.find("info-output-marker"), std::string::npos);
     EXPECT_NE(captured.err.find("debug-output-marker"), std::string::npos);
+}
+
+TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
+    const std::string name = "bad name\n[STRACE]=x";
+    const std::string attributes = "run_id=7 role=worker\n[STRACE] injected=1 " + std::string(4096, 'x');
+    const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
+                               sizeof(SimplerHostSpan),
+                               7,
+                               0x1234,
+                               0,
+                               0,
+                               100,
+                               25,
+                               name.c_str(),
+                               attributes.c_str()};
+
+    auto captured = run_with_config(LogLevel::TIMING, [&] {
+        simpler_log_emit_host_span(&span);
+    });
+
+    const size_t marker = captured.err.find("[STRACE]");
+    ASSERT_NE(marker, std::string::npos);
+    EXPECT_EQ(captured.err.find("[STRACE]", marker + 1), std::string::npos);
+    EXPECT_NE(captured.err.find("name=bad%20name%0A%5BSTRACE%5D%3Dx"), std::string::npos);
+    EXPECT_NE(captured.err.find("run_id=7 role=worker%0A%5BSTRACE%5D injected=1"), std::string::npos);
+    EXPECT_EQ(std::count(captured.err.begin(), captured.err.end(), '\n'), 1);
+    EXPECT_LE(captured.err.size(), static_cast<size_t>(_POSIX_PIPE_BUF));
+    ASSERT_GE(captured.err.size(), 2u);
+    EXPECT_EQ(captured.err[captured.err.size() - 2], '~');
+}
+
+// A `%XX` escape is three bytes that only mean anything together, so a field
+// that fills its budget exactly on one must lose the whole escape to the
+// truncation marker. Overwriting just the last byte would leave `%0A` as `%0~`,
+// which no decoder can read back.
+TEST(HostLogTest, HostSpanTruncationDropsAWholeEscapeRatherThanItsLastByte) {
+    // 3 (leading escape) + 186 + 3 (trailing escape) is exactly the 192-byte
+    // attribute budget, so the next byte truncates on an escape boundary.
+    const std::string attributes = "\n" + std::string(186, 'x') + "\ny";
+    const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
+                               sizeof(SimplerHostSpan),
+                               7,
+                               0x1234,
+                               0,
+                               0,
+                               100,
+                               25,
+                               "l3.dispatch",
+                               attributes.c_str()};
+
+    auto captured = run_with_config(LogLevel::TIMING, [&] {
+        simpler_log_emit_host_span(&span);
+    });
+
+    EXPECT_EQ(captured.err.find("%0~"), std::string::npos) << "truncation marker landed inside an escape";
+    // The leading escape survives whole; the trailing one is gone entirely.
+    EXPECT_NE(captured.err.find("dur=25 %0Axxx"), std::string::npos);
+    EXPECT_EQ(std::count(captured.err.begin(), captured.err.end(), '%'), 1);
+    ASSERT_GE(captured.err.size(), 2u);
+    EXPECT_EQ(captured.err[captured.err.size() - 2], '~');
 }
 
 TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {

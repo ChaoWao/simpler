@@ -56,6 +56,7 @@
 #include "callable_protocol.h"
 #include "chip_run_lane.h"
 #include "chip_worker.h"
+#include "common/host_span_scope.h"
 #include "data_type.h"
 #include "dma_workspace.h"
 #include "worker_chip_orch_comm.h"
@@ -993,6 +994,35 @@ NB_MODULE(_task_interface, m) {
     m.attr("MAX_TENSOR_DIMS") = MAX_TENSOR_DIMS;
     m.attr("MAX_REGISTERED_CALLABLE_IDS") = MAX_REGISTERED_CALLABLE_IDS;
     m.attr("RUNTIME_ENV_RING_COUNT") = RUNTIME_ENV_RING_COUNT;
+#if SIMPLER_HOST_STRACE
+    m.attr("HOST_STRACE_ENABLED") = true;
+#else
+    m.attr("HOST_STRACE_ENABLED") = false;
+#endif
+    m.def(
+        "_bind_host_span_sink",
+        [](uintptr_t address) {
+            simpler::host_trace::bind_sink(reinterpret_cast<SimplerLogEmitHostSpanFn>(address));
+            return simpler::host_trace::sink_available();
+        },
+        nb::arg("address"), "Bind this extension's host-span sink to the process-global logger, or zero to disable it."
+    );
+    m.def(
+        "_host_span_sink_available", &simpler::host_trace::sink_available,
+        "Whether this extension's host-span sink is bound to the process-global logger."
+    );
+    m.def(
+        "_emit_host_span",
+        [](const std::string &name, uint64_t invocation_id, uint64_t callable_hash, int32_t depth, int64_t timestamp_ns,
+           int64_t duration_ns, const std::string &attributes) {
+            simpler::host_trace::emit(
+                name.c_str(), invocation_id, callable_hash, depth, timestamp_ns, duration_ns, attributes.c_str()
+            );
+        },
+        nb::arg("name"), nb::arg("invocation_id"), nb::arg("callable_hash"), nb::arg("depth"), nb::arg("timestamp_ns"),
+        nb::arg("duration_ns"), nb::arg("attributes") = "",
+        "Emit one explicitly timed host span through this extension's bound logger sink."
+    );
     // Byte size of a ChipTensor and the offset of its address_space field within it.
     // A task-args blob stores ChipTensors as a raw memcpy array, so a Python-side
     // blob walker locates tensor i's fields at i * CHIP_TENSOR_STRIDE_BYTES without

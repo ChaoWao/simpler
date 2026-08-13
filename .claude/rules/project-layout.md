@@ -11,8 +11,13 @@ How this repo organizes Python packages, the build system, and example / test di
 | `_task_interface` | `python/bindings/` | nanobind `.so` at wheel root | Internal nanobind module |
 
 `simpler` exposes `Worker` and the `task_interface` submodule lazily (PEP 562
-`__getattr__`), so `from simpler import Worker` works while `import simpler`
-still costs nothing and does not require the `_task_interface` extension.
+`__getattr__`), so `from simpler import Worker` works while `import simpler` does
+not require the `_task_interface` extension. Import time is not quite free: it
+dlopens `build/lib/libsimpler_log.so` into the global symbol scope (~3 ms when
+that library is built, ~25 µs when it is not), which must precede the first
+worker fork. When `_task_interface` is available, `_log` passes the logger's
+host-span entry point into the extension's nullable, extension-local sink slot. The dlopen and
+binding are best-effort and raise nothing — see `python/simpler/_log_preload.py`.
 `simpler.task_interface.ChipTensor` is the GM-address-bearing device descriptor
 a `ChipWorker` consumes; `simpler_setup.TensorArg` is the address-free
 scene-test arg spec `NamedTuple`. They are separate types in separate

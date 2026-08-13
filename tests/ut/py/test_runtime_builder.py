@@ -615,6 +615,71 @@ class TestResolveBuildPtoIsaCommit:
             builder._resolve_build_pto_isa_commit()
 
 
+class TestPlaceBinary:
+    """place_binary must never rewrite the destination in place.
+
+    A build that replaces a .so already dlopened by the running process — which
+    every `pip install -e .` does, and which `get_binaries(build=True)` does to
+    build/lib/libsimpler_log.so mid-test-session — corrupts that mapping if the
+    destination is truncated and rewritten. The fault surfaces far away, as a
+    SIGSEGV inside the dynamic linker on an unrelated dlopen or at interpreter
+    exit, so the invariant is asserted here rather than left to a crash.
+    """
+
+    def _library(self, path: Path) -> Path:
+        """Compile a trivial shared object at `path`."""
+        import subprocess  # noqa: PLC0415
+
+        source = path.with_suffix(".c")
+        source.write_text("int probe(void) { return 7; }\n", encoding="utf-8")
+        # gcc is a fixed test-only toolchain dependency, not user input.
+        subprocess.run(  # noqa: S603
+            ["gcc", "-shared", "-fPIC", "-o", str(path), str(source)],  # noqa: S607
+            check=True,
+        )
+        return path
+
+    def test_replaces_by_rename_not_in_place(self, tmp_path):
+        from simpler_setup.runtime_compiler import place_binary  # noqa: PLC0415
+
+        dest = self._library(tmp_path / "libprobe.so")
+        src = self._library(tmp_path / "libnewer.so")
+        before = dest.stat().st_ino
+
+        place_binary(src, dest)
+
+        assert dest.stat().st_ino != before, "destination was rewritten in place, not renamed over"
+
+    def test_leaves_an_open_mapping_of_the_old_inode_valid(self, tmp_path):
+        import ctypes  # noqa: PLC0415
+
+        from simpler_setup.runtime_compiler import place_binary  # noqa: PLC0415
+
+        dest = self._library(tmp_path / "libprobe.so")
+        handle = ctypes.CDLL(str(dest))
+        assert handle.probe() == 7
+
+        place_binary(self._library(tmp_path / "libnewer.so"), dest)
+
+        # The already-loaded copy keeps its own inode, so calling into it after
+        # the replacement is still defined behaviour.
+        assert handle.probe() == 7
+
+    def test_leaves_no_temporary_behind_when_post_process_fails(self, tmp_path):
+        from simpler_setup.runtime_compiler import place_binary  # noqa: PLC0415
+
+        dest = self._library(tmp_path / "libprobe.so")
+        src = self._library(tmp_path / "libnewer.so")
+
+        def _fail(_staged):
+            raise RuntimeError("strip failed")
+
+        with pytest.raises(RuntimeError, match="strip failed"):
+            place_binary(src, dest, post_process=_fail)
+
+        assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
 # --- Full integration tests (real compilation) ---
 
 

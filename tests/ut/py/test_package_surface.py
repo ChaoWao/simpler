@@ -89,6 +89,21 @@ def test_importing_simpler_survives_without_the_extension():
     assert out.stdout.strip() == "True", f"{out.stdout!r} {out.stderr!r}"
 
 
+def test_importing_simpler_keeps_native_default_when_old_extension_lacks_sink_binder():
+    """A stale extension may expose the threshold before it exposes the optional sink binder."""
+    code = (
+        "import sys, types; "
+        "stub = types.ModuleType('_task_interface'); "
+        "stub.DEFAULT_LOG_THRESHOLD = 30; "
+        "sys.modules['_task_interface'] = stub; "
+        "import simpler; print(simpler.DEFAULT_THRESHOLD)"
+    )
+    out = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "30", f"{out.stdout!r} {out.stderr!r}"
+
+
 def test_comm_endpoints_requires_the_extension_and_stays_lazy():
     """W2 planning takes `BackendKind` from the extension, so it is not part of the
     no-extension surface.
