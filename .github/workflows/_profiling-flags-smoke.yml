@@ -86,7 +86,7 @@ jobs:
               if ! .venv/bin/python -m pytest \
                    "examples/${ARCH_DIR}/tensormap_and_ringbuffer/vector_example/test_vector_example.py" \
                    --platform "$ARCH" --device 0-1 -p no:xdist \
-                   --pto-session-timeout 600; then
+                   --pto-session-timeout 600 --manual include; then
                 echo "::error::Smoke failed: $ARCH / $NAME"
                 FAIL+=("$ARCH/$NAME (pytest)")
               fi

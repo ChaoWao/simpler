@@ -62,7 +62,7 @@ pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 pytest examples tests/st --platform a5 --exclude-level 4 --device 0-7
 
 # Single scene test (standalone)
-python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim
+python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py -p a2a3sim --manual include
 
 # Benchmark mode (100 rounds, skip golden comparison)
 python examples/a2a3/tensormap_and_ringbuffer/vector_example/test_vector_example.py \
@@ -157,7 +157,7 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 | `--level {2,3,4}` | | (all) | Restrict to one scene-test level. Level 4 selects pod wrappers. |
 | `--exclude-level {2,3,4}` | | (none) | Exclude tests explicitly carrying that scene-test level. Ordinary onboard lanes use `--exclude-level 4`. |
 | `--case SEL` | | (all) | Case selector, repeatable: `Foo`, `ClassA::Foo`, `ClassA::` |
-| `--manual` | | `exclude` | `exclude`/`include`/`only` for manual cases |
+| `--manual` | | `exclude` | `exclude`/`include`/`only` for manual scene-test cases and standalone pytest tests |
 | `--skip-golden` | | false | Skip golden comparison (for benchmarking) |
 | `--enable-chip-swimlane [PERF_LEVEL]` | | `0` | Enable chip swimlane collection on first round only. The flag takes an integer perf_level 0–4 (bare = 4); see [docs/dfx/chip-swimlane-profiling.md](dfx/chip-swimlane-profiling.md#31-enable-chip-swimlane) for the level table. Each test case gets its own `outputs/<case>_<ts>/` directory under which `chip_swimlane_records.json` lands; parallel runs never collide. |
 | `--dump-args` | | `0` | Dump tensors plus scalar args into unified runtime artifacts (bare flag = `1`; supports `0/1/2/3`) |
@@ -720,7 +720,27 @@ still gets checked, whereas a skipped case only proves the run didn't crash.
 | `--case ClassA::` | all cases in `ClassA` |
 | `--case A::x --case B::y` | multiple selectors (repeatable) |
 
-`--manual exclude` (default) skips `manual: True` cases; `--manual include` runs them alongside normal cases; `--manual only` runs only manual cases. These compose orthogonally with `--case`: explicit selectors still respect the manual filter — to run a manual case by name, pass `--manual include`.
+`--manual exclude` (default) skips `manual: True` cases and standalone tests
+marked `@pytest.mark.manual`; `--manual include` runs them alongside normal
+tests; `--manual only` runs only manual tests. The `only` filter applies to the
+entire pytest session, so it also deselects ordinary standalone tests without a
+`manual` marker. These compose orthogonally with `--case`: explicit selectors
+still respect the manual filter — to run a manual case by name, pass
+`--manual include`.
+
+The separate `daily.yml` workflow runs the full corpus with `--manual include`
+once per day on A2/A3 and A5, simulation and onboard. Mark a whole standalone
+pytest test with `@pytest.mark.manual`; mark only one case in a `SceneTestCase`
+by setting `"manual": True` on that `CASES` entry. Per-PR excludes those tests,
+while Daily runs them together with the regular corpus. The A2/A3 Pod cases run
+in the same Daily workflow through their existing two-machine job.
+
+To move only selected platforms, pass the platform list to the same marker:
+use `@pytest.mark.manual(["a2a3sim", "a5sim"])` (or the equivalent
+`@pytest.mark.manual(platforms=["a2a3sim", "a5sim"])`) for a standalone test,
+or `"manual": ["a2a3sim", "a5sim"]` for a scene-test case. Do not mix the two
+standalone marker forms. The onboard execution then remains in the default
+Per-PR sweep.
 
 ### Sharing an Example Between examples/ and tests/st/
 

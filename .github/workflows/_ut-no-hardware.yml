@@ -88,5 +88,5 @@ jobs:
             source .venv/bin/activate
           fi
           cmake -B tests/ut/cpp/build -S tests/ut/cpp
-          cmake --build tests/ut/cpp/build
+          cmake --build tests/ut/cpp/build --parallel 4
           ctest --test-dir tests/ut/cpp/build -LE requires_hardware -j4 --output-on-failure

@@ -1,0 +1,59 @@
+name: Daily Full Scene Tests
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "0 16 * * *"  # 00:00 Beijing
+  workflow_dispatch:
+
+concurrency:
+  group: daily-full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  st-sim-a2a3:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    uses: ./.github/workflows/_st-sim-a2a3.yml
+    with:
+      runs_on: ${{ toJSON(matrix.os) }}
+      setup_variant: github
+      include_dfx_smokes: true
+      manual_mode: include
+
+  st-sim-a5:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    uses: ./.github/workflows/_st-sim-a5.yml
+    with:
+      runs_on: ${{ toJSON(matrix.os) }}
+      setup_variant: github
+      include_dfx_smokes: true
+      manual_mode: include
+
+  st-onboard-a2a3:
+    uses: ./.github/workflows/_st-npu-a2a3.yml
+    with:
+      runs_on: '["self-hosted","a2a3"]'
+      include_dfx_smokes: true
+      a2a3_sdma_mode: marker
+      manual_mode: include
+
+  st-onboard-a5:
+    uses: ./.github/workflows/_st-npu-a5.yml
+    with:
+      runs_on: '["self-hosted","a5"]'
+      include_dfx_smokes: true
+      manual_mode: include
+
+  st-pod-onboard-a2a3:
+    uses: ./.github/workflows/_st-pod.yml
+    with:
+      platform: a2a3
+      runs_on: '["self-hosted","Linux","ARM64","a2a3pod"]'

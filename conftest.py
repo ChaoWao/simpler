@@ -53,7 +53,7 @@ import pytest  # noqa: E402
 from simpler_setup import parallel_scheduler as _ps  # noqa: E402
 from simpler_setup.log_config import DEFAULT_LOG_LEVEL, configure_logging  # noqa: E402
 from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: E402
-from simpler_setup.scene_test import SceneTestLevel, clear_compile_cache  # noqa: E402
+from simpler_setup.scene_test import SceneTestLevel, clear_compile_cache, is_manual_for_platform  # noqa: E402
 
 # Exit code used when the session watchdog fires. Matches the GNU `timeout`
 # convention so shell wrappers (e.g. CI) can distinguish timeout from other
@@ -137,7 +137,7 @@ def pytest_addoption(parser):
         action="store",
         choices=["exclude", "include", "only"],
         default="exclude",
-        help="Manual case handling: exclude (default), include, only",
+        help="Manual test handling: exclude (default), include, only",
     )
     parser.addoption("--runtime", action="store", default=None, help="Only run tests for this runtime")
     parser.addoption(
@@ -473,6 +473,9 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_hardware: test needs Ascend toolchain and real device")
     config.addinivalue_line("markers", "device_count(n): number of NPU devices needed")
     config.addinivalue_line(
+        "markers", "manual(platforms=None): test runs only when --manual is include or only on selected platforms"
+    )
+    config.addinivalue_line(
         "markers",
         "pod_remote_device_count(n): number of remote NPU devices needed on the peer machine",
     )
@@ -561,6 +564,34 @@ def pytest_configure(config):
     # filenames or rename dance.
 
 
+def _manual_mode_matches(is_manual: bool, manual_mode: str) -> bool:
+    return manual_mode == "include" or is_manual == (manual_mode == "only")
+
+
+def _manual_marker_applies(marker, platform: str | None) -> bool:
+    if marker is None:
+        return False
+
+    unknown_kwargs = set(marker.kwargs) - {"platforms"}
+    if unknown_kwargs:
+        names = ", ".join(sorted(unknown_kwargs))
+        raise pytest.UsageError(f"@pytest.mark.manual got unsupported keyword argument(s): {names}")
+    if marker.args and "platforms" in marker.kwargs:
+        raise pytest.UsageError(
+            "@pytest.mark.manual platforms must be passed either positionally or by keyword, not both"
+        )
+
+    if "platforms" in marker.kwargs:
+        platforms = marker.kwargs["platforms"]
+    elif marker.args:
+        platforms = marker.args[0] if len(marker.args) == 1 else marker.args
+    else:
+        return True
+    if platforms is None or platform is None:
+        return True
+    return is_manual_for_platform(platforms, platform)
+
+
 def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     """Filter ST tests by --platform / --runtime / level axes; order L3 before L2.
 
@@ -580,6 +611,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
     runtime_filter = config.getoption("--runtime")
     level_filter = _normalize_cli_scene_level(config.getoption("--level"))
     exclude_level_filter = _normalize_cli_scene_level(config.getoption("--exclude-level"))
+    manual_mode = config.getoption("--manual", default="exclude")
 
     keep: list = []
     deselected: list = []
@@ -602,7 +634,11 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
                 item.add_marker(pytest.mark.skip(reason="--platform required"))
                 keep.append(item)
                 continue
-            if not any(platform in c.get("platforms", []) for c in cls.CASES):
+            if not any(
+                platform in case.get("platforms", [])
+                and _manual_mode_matches(is_manual_for_platform(case.get("manual"), platform), manual_mode)
+                for case in cls.CASES
+            ):
                 deselected.append(item)
                 continue
             if runtime_filter and getattr(cls, "_st_runtime", None) != runtime_filter:
@@ -617,7 +653,12 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
             keep.append(item)
             continue
 
-        # Non-class pytest function (standalone resource tests and such).
+        # Standalone pytest test (resource functions and ordinary tests).
+        is_manual = _manual_marker_applies(item.get_closest_marker("manual"), platform)
+        if not _manual_mode_matches(is_manual, manual_mode):
+            deselected.append(item)
+            continue
+
         platforms_marker = item.get_closest_marker("platforms")
         if platforms_marker:
             if not platform:
@@ -724,14 +765,14 @@ def _collect_st_runtimes(items, level=None):
     return sorted(runtimes)
 
 
-def _collect_resource_jobs(items, platform):
+def _collect_resource_jobs(items, platform, manual_mode="exclude"):
     """Collect every item that needs a dedicated device-allocating subprocess.
 
     Two job kinds share one phase:
 
       - ``l3``:         one per L3 ``SceneTestCase`` class.
         ``device_count`` is the max across the class's platform-matching
-        non-manual cases.
+        cases selected by ``manual_mode``.
       - ``standalone``: one per non-class pytest function that declares its
         resource needs via ``@pytest.mark.device_count(n)`` +
         ``@pytest.mark.runtime("...")`` (and optional
@@ -759,7 +800,7 @@ def _collect_resource_jobs(items, platform):
         for case in getattr(cls, "CASES", []):
             if platform and platform not in case.get("platforms", []):
                 continue
-            if case.get("manual"):
+            if not _manual_mode_matches(is_manual_for_platform(case.get("manual"), platform), manual_mode):
                 continue
             saw_case = True
             max_dev = max(max_dev, int(case.get("config", {}).get("device_count", 1)))
@@ -813,6 +854,25 @@ def _strip_value_options(args, options):
             continue
         stripped.append(text)
     return stripped
+
+
+def _resource_child_command(spec, device_ids, platform, manual_mode):
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        spec.nodeid,
+        "--runtime",
+        spec.runtime,
+        "--device",
+        _ps.format_device_range(device_ids),
+    ]
+    if spec.kind == "l3":
+        command.extend(["--level", "3"])
+    if platform:
+        command.extend(["--platform", platform])
+    command.extend(["--manual", manual_mode])
+    return command
 
 
 def _base_pytest_argv(session, *, strip_options=()):
@@ -903,6 +963,7 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
     # pytest registers -x as an alias of --exitfirst; both resolve via this name.
     fail_fast = bool(cfg.getoption("--exitfirst", default=False))
     platform = cfg.getoption("--platform")
+    manual_mode = cfg.getoption("--manual", default="exclude")
     max_parallel = _resolve_max_parallel(cfg, platform or "", device_ids)
 
     base_args = _base_pytest_argv(session, strip_options=("--exclude-level",))
@@ -916,31 +977,14 @@ def _dispatch_test_phases(session, resource_specs):  # noqa: PLR0912
         for spec in resource_specs:
             label = f"{spec.kind} {spec.label} (rt={spec.runtime}, dev={spec.device_count})"
 
-            def _build(ids, _nodeid=spec.nodeid, _rt=spec.runtime, _kind=spec.kind):
+            def _build(ids, _spec=spec):
                 # Narrow the child to the specific nodeid, not the inherited
                 # directory args (examples tests/st). Passing the directories
                 # would re-collect every SceneTestCase and run them alongside
                 # this job in the same subprocess, which has only this job's
                 # allocated devices — e.g. TestL3Group (needs 2) would fail
                 # inside TestL3ChildMemory's 1-device subprocess.
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    _nodeid,
-                    "--runtime",
-                    _rt,
-                    "--device",
-                    _ps.format_device_range(ids),
-                ]
-                if _kind == "l3":
-                    # L3 jobs run inside --level 3 child mode; standalone jobs
-                    # are non-SceneTestCase functions and do not participate
-                    # in level-based dispatch.
-                    cmd.extend(["--level", "3"])
-                if platform:
-                    cmd.extend(["--platform", platform])
-                return cmd
+                return _resource_child_command(_spec, ids, platform, manual_mode)
 
             jobs.append(
                 _ps.Job(
@@ -1112,8 +1156,9 @@ def pytest_runtestloop(session):
     # dispatcher to avoid walking ``session.items`` twice.
     level_filter_explicit = level_filter is not None
     platform = session.config.getoption("--platform")
+    manual_mode = session.config.getoption("--manual", default="exclude")
     runtimes_all = _collect_st_runtimes(session.items)
-    resource_specs = _collect_resource_jobs(session.items, platform)
+    resource_specs = _collect_resource_jobs(session.items, platform, manual_mode)
     if not resource_specs and len(runtimes_all) <= 1 and not level_filter_explicit:
         return
 

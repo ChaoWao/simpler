@@ -21,33 +21,36 @@ so you can move one axis at a time and watch what it costs.
 The cases are laid out as single-axis moves from `Case1`, which is what makes
 them comparable:
 
-| Case | Default run? | `task_num` | `data_size` | `loop` | `grid_k` | Reads as |
-| ---- | ------------ | ---------- | ----------- | ------ | -------- | -------- |
-| `Case1` | no | 64 | 128 | 4 | 2 | the reference point |
-| `Case2` | no | 256 | 128 | 4 | 2 | 4× the tasks |
-| `Case0` | **yes** | 500 | 128 | 4 | 2 | ~8× the tasks |
-| `Case3` | no | 64 | 128 | 16 | 2 | 4× the work per task, same task count |
-| `Case4` | no | 64 | 128 | 4 | 4 | twice the accumulation depth |
-| `Bgemm64` | **yes** | 32 | 64 | 1 | 4 | small tiles, minimal per-task work |
+| Case | Default Sim? | Default Onboard? | `task_num` | `data_size` | `loop` | `grid_k` | Reads as |
+| ---- | ------------ | ---------------- | ---------- | ----------- | ------ | -------- | -------- |
+| `Case1` | no | no | 64 | 128 | 4 | 2 | the reference point |
+| `Case2` | no | no | 256 | 128 | 4 | 2 | 4× the tasks |
+| `Case0` | **yes** | **yes** | 500 | 128 | 4 | 2 | ~8× the tasks |
+| `Case3` | no | no | 64 | 128 | 16 | 2 | 4× the work per task, same task count |
+| `Case4` | no | no | 64 | 128 | 4 | 4 | twice the accumulation depth |
+| `Bgemm64` | no | **yes** | 32 | 64 | 1 | 4 | small tiles, minimal per-task work |
 
 `Case2` against `Case3` is the interesting pair: both quadruple the total
 matmul work relative to `Case1`, one by adding tasks and one by making each
 task bigger.
 
-## Only two cases run by default
+## The default run differs by platform
 
-`Case1`–`Case4` are marked `"manual": True`, and `_select_cases` drops manual
-cases unless you ask for them (`simpler_setup/scene_test.py`). A plain run
-executes `Case0` and `Bgemm64` only:
+`Case1`–`Case4` are manual on both platforms. `Bgemm64` is manual only on
+`a2a3sim`, so the Sim Per-PR run keeps the larger `Case0`, while the Onboard
+Per-PR run continues to execute both `Case0` and `Bgemm64`:
 
 ```bash
-# default — 2 of 6 cases
+# Sim default — Case0 only, 1 of 6 cases
 pytest examples/a2a3/tensormap_and_ringbuffer/benchmark_bgemm --platform a2a3sim
 
-# all six
+# Onboard default — Case0 + Bgemm64, 2 of 6 cases
+pytest examples/a2a3/tensormap_and_ringbuffer/benchmark_bgemm --platform a2a3 --device 0
+
+# all six on either platform
 pytest examples/a2a3/tensormap_and_ringbuffer/benchmark_bgemm --platform a2a3sim --manual include
 
-# only the sweep
+# Sim Daily selection — Case1–Case4 + Bgemm64, 5 of 6 cases
 pytest examples/a2a3/tensormap_and_ringbuffer/benchmark_bgemm --platform a2a3sim --manual only
 ```
 

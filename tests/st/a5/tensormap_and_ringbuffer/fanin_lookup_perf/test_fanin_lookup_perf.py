@@ -49,11 +49,13 @@ class TestFaninLookupPerf(SceneTestCase):
         {
             "name": "LookupOnlyProducers64Consumers64",
             "platforms": ["a5sim", "a5"],
+            "manual": True,
             "params": {"producer_count": 64, "consumer_count": 64, "use_real_kernels": 0},
         },
         {
             "name": "SwimlaneProducers64Consumers64",
             "platforms": ["a5sim", "a5"],
+            "manual": True,
             "params": {"producer_count": 64, "consumer_count": 64, "use_real_kernels": 1},
         },
     ]

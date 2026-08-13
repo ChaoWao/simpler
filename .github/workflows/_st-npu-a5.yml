@@ -19,6 +19,11 @@ on:
         required: false
         default: false
         type: boolean
+      manual_mode:
+        description: exclude for Per-PR, include for the Daily full sweep.
+        required: false
+        default: exclude
+        type: string
 
 jobs:
   run:
@@ -26,6 +31,7 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 60
     env:
+      MANUAL_MODE: ${{ inputs.manual_mode }}
       SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
       SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
       SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
@@ -36,6 +42,16 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
+
+      - name: Validate manual mode
+        run: |
+          case "$MANUAL_MODE" in
+            exclude|include|only) ;;
+            *)
+              echo "::error::manual_mode must be exclude, include, or only"
+              exit 2
+              ;;
+          esac
 
       - name: Restore scene-test kernel cache (a5)
         uses: actions/cache@v5
@@ -57,13 +73,14 @@ jobs:
       - name: Compile scene-test kernels (a5)
         run: |
           .venv/bin/python -m simpler_setup.tools.scene_test_compile examples tests/st \
-            --platform a5 --exclude-level 4 --require-pto-isa --compile-workers 8 -q
+            --platform a5 --exclude-level 4 --require-pto-isa --compile-workers 8 -q \
+            --manual "$MANUAL_MODE"
 
       - name: Run pytest scene tests (a5)
         run: |
           DEVICE_LIST=$(.venv/bin/python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
           task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" \
-            --run ".venv/bin/python -m pytest examples tests/st --platform a5 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200"
+            --run ".venv/bin/python -m pytest examples tests/st --platform a5 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200 --manual '$MANUAL_MODE'"
 
       - name: DFX smokes (a5)
         if: inputs.include_dfx_smokes

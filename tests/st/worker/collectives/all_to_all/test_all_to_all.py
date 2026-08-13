@@ -113,6 +113,7 @@ class TestAllToAllP4(SceneTestCase):
         {
             "name": "p4",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": True,
             "config": {"device_count": 4},
             "params": {"nranks": 4},
         }

@@ -99,6 +99,27 @@ Writing an example — the files, the entry module, the `run(...)` entry point,
 the `test_*.py` pod wrapper, and the manual `run_parent.sh` — is covered in
 [`examples/workers/README.md`](../examples/workers/README.md).
 
+### Daily full scene-test sweep
+
+[`daily.yml`](../.github/workflows/daily.yml) runs the full regular + manual
+scene-test corpus with `--manual include` once per day and supports manual
+re-runs through `workflow_dispatch`. Simulation runs on Ubuntu and macOS for
+both architectures; onboard runs on the A2/A3 and A5 self-hosted pools. The
+same DFX smoke steps used by Per-PR run once in each Daily platform job, and
+the A2/A3 Pod corpus runs through the existing two-machine workflow. Per-PR
+scene-test jobs keep the default `--manual exclude`, so moving a case to Daily
+does not require a second workflow exclusion list.
+
+Use `"manual": True` on an individual `SceneTestCase.CASES` entry and
+`@pytest.mark.manual` on a standalone pytest test. The reusable scene-test
+workflows accept `manual_mode`; Per-PR callers use its `exclude` default and the
+Daily caller passes `include`.
+
+For platform-specific pruning, the same `manual` value accepts a platform list,
+for example `"manual": ["a2a3sim", "a5sim"]`; standalone tests use
+`@pytest.mark.manual(["a2a3sim", "a5sim"])`. This removes only the Sim execution
+from Per-PR while retaining onboard coverage.
+
 ### Nightly sanitizer sweep
 
 A **separate** workflow, [`sanitizers.yml`](../.github/workflows/sanitizers.yml),

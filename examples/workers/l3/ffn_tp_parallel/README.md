@@ -39,7 +39,7 @@ python examples/workers/l3/ffn_tp_parallel/main.py -p a2a3 -d 0-1
 Or as a scene test — `a2a3sim`, `a2a3`, and `a5sim` are marked:
 
 ```bash
-pytest examples/workers/l3/ffn_tp_parallel --platform a2a3sim
+pytest examples/workers/l3/ffn_tp_parallel --platform a2a3sim --manual include
 ```
 
 Exactly two devices are required — `parse_device_range` rejects any other

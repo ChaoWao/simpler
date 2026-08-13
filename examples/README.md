@@ -23,7 +23,7 @@ pytest examples -m "not sdma" --platform a2a3 --exclude-level 4 --device 0-1    
 A single example:
 
 ```bash
-pytest examples/a2a3/tensormap_and_ringbuffer/vector_example --platform a2a3sim
+pytest examples/a2a3/tensormap_and_ringbuffer/vector_example --platform a2a3sim --manual include
 ```
 
 Most `workers/` examples are also plain scripts, which is the quickest way to
