@@ -88,12 +88,12 @@ means adding a `test_*.py` wrapper with `@scene_level(SceneTestLevel.POD)`, not
 editing `_st-pod.yml`. `pod_remote_device_count` stays as the peer-resource
 declaration; `pod` is the runner topology, not a pytest selection marker.
 
-Pod logs go to `output/pod-ci-<run>-<attempt>/pytest/` and the whole directory
-is uploaded as one artifact. Parent-side `ASCEND_PROCESS_LOG_PATH` is split per
-pytest nodeid by `st_pod_logs`; peer-side daemon/device logs are grouped for the
-pytest session. Reach for the artifact first on a device-side failure: the host
-traceback only says the peer's scheduler gave up, and the sub-class saying why
-is printed on the device.
+Pod logs go to `output/pod-ci-<run>-<attempt>/pytest/` while the job is running.
+Parent-side `ASCEND_PROCESS_LOG_PATH` is split per pytest nodeid by
+`st_pod_logs`; peer-side daemon/device logs are grouped for the pytest session.
+The directory is uploaded on a best-effort basis: artifact-service failures are
+ignored so they cannot override the POD test result. Preserve relevant
+diagnostics in the inline job log as well when investigating a failure.
 
 Writing an example — the files, the entry module, the `run(...)` entry point,
 the `test_*.py` pod wrapper, and the manual `run_parent.sh` — is covered in

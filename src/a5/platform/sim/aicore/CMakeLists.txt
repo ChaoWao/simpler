@@ -52,6 +52,8 @@ endif()
 
 # Create shared library (host-compatible for dlopen)
 add_library(aicore_kernel SHARED ${AICORE_SOURCES})
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/profiling_config.cmake")
+simpler_configure_profiling(aicore_kernel)
 
 # Compile options (host g++)
 target_compile_options(aicore_kernel

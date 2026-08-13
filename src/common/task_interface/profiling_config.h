@@ -12,6 +12,12 @@
 #ifndef SRC_COMMON_TASK_INTERFACE_PROFILING_CONFIG_H_
 #define SRC_COMMON_TASK_INTERFACE_PROFILING_CONFIG_H_
 
+#if defined(__has_include)
+#if __has_include(<simpler_profiling_build_config.h>)
+#include <simpler_profiling_build_config.h>
+#endif
+#endif
+
 #ifndef SIMPLER_DFX
 #define SIMPLER_DFX 1
 #endif

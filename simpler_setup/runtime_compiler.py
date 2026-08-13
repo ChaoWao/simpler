@@ -117,7 +117,8 @@ class RuntimeCompiler:
     - "a2a3": ccec for aicore, aarch64 cross-compiler for aicpu, gcc for host
     - "a2a3sim": all use host gcc/g++ (builds host-compatible .so files)
 
-    Use get_instance() to get a cached instance per platform.
+    Use get_instance() to get a cached instance per platform and sanitizer
+    configuration.
     """
 
     _instances = {}
@@ -129,10 +130,11 @@ class RuntimeCompiler:
 
     @classmethod
     def get_instance(cls, platform: str = "a2a3") -> "RuntimeCompiler":
-        """Get or create a RuntimeCompiler instance for the given platform."""
-        if platform not in cls._instances:
-            cls._instances[platform] = cls(platform)
-        return cls._instances[platform]
+        """Get or create an instance for the platform/sanitizer combination."""
+        cache_key = (platform, cls._sanitizers)
+        if cache_key not in cls._instances:
+            cls._instances[cache_key] = cls(platform)
+        return cls._instances[cache_key]
 
     def __init__(self, platform: str = "a2a3"):
         self.platform = platform
@@ -188,9 +190,10 @@ class RuntimeCompiler:
         aarch64 = Aarch64GxxToolchain()
         self.aicpu_target = BuildTarget(aarch64, str(self.platform_dir / "aicpu"), "libaicpu_kernel.so")
 
-        # Host: standard gcc/g++
+        # Under a sanitizer, every host consumer (onboard, sim, and global
+        # helper SOs) must use the same GCC sanitizer runtime.
         self._ensure_host_compilers()
-        host_gxx = GxxToolchain()
+        host_gxx = GxxToolchain(prefer_g15=bool(self._sanitizers))
         self.host_target = BuildTarget(host_gxx, str(self.platform_dir / "host"), "libhost_runtime.so")
 
     def _init_a2a3sim(self):
@@ -225,9 +228,10 @@ class RuntimeCompiler:
         aarch64 = Aarch64GxxToolchain()
         self.aicpu_target = BuildTarget(aarch64, str(self.platform_dir / "aicpu"), "libaicpu_kernel.so")
 
-        # Host: standard gcc/g++
+        # Under a sanitizer, every host consumer (onboard, sim, and global
+        # helper SOs) must use the same GCC sanitizer runtime.
         self._ensure_host_compilers()
-        host_gxx = GxxToolchain()
+        host_gxx = GxxToolchain(prefer_g15=bool(self._sanitizers))
         self.host_target = BuildTarget(host_gxx, str(self.platform_dir / "host"), "libhost_runtime.so")
 
     def _init_a5sim(self):
@@ -480,8 +484,9 @@ class RuntimeCompiler:
             ".",
             "--parallel",
             str(min(multiprocessing.cpu_count(), 32)),
-            "--verbose",
         ]
+        if logger.isEnabledFor(logging.DEBUG):
+            build_cmd.append("--verbose")
         self._run_build_step(build_cmd, build_dir, platform, "Build")
 
         # Return the path to the compiled binary

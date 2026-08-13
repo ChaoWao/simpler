@@ -243,10 +243,11 @@ class Gxx15Toolchain(Toolchain):
 class GxxToolchain(Toolchain):
     """g++ compiler for host compilation.
 
-    ``prefer_g15`` switches the binary to g++-15/gcc-15. Used under a sanitizer
-    on sim: the runtime, helpers, and orchestration must share the SAME host
-    compiler as the sim kernels (which are always g++-15), because mixing g++
-    and g++-15 sanitizer runtimes is an ABI mismatch that fails at `.so` load.
+    ``prefer_g15`` switches the binary to g++-15/gcc-15. Used under a sanitizer:
+    onboard and sim runtimes, helpers, and orchestration must share the SAME
+    host compiler as the sim kernels (which are always g++-15), because mixing
+    g++ and g++-15 sanitizer runtimes is an ABI mismatch that fails at `.so`
+    load.
     """
 
     is_host = True

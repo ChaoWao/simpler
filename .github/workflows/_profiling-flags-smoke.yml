@@ -60,24 +60,26 @@ jobs:
       - name: Run all profiling flag combos x 2 arches
         run: |
           COMBO_NAMES=(dfx-off orch orch-tensormap sched orch-sched all-on)
-          COMBO_DEFS=(
-            "-DSIMPLER_DFX=0"
-            "-DSIMPLER_ORCH_PROFILING=1"
-            "-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_TENSORMAP_PROFILING=1"
-            "-DSIMPLER_SCHED_PROFILING=1"
-            "-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_SCHED_PROFILING=1"
-            "-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_SCHED_PROFILING=1 -DSIMPLER_TENSORMAP_PROFILING=1"
-          )
+          COMBO_DFX=(0 1 1 1 1 1)
+          COMBO_ORCH=(0 1 1 0 1 1)
+          COMBO_SCHED=(0 0 0 1 1 1)
+          COMBO_TENSORMAP=(0 0 1 0 0 1)
           ARCHES=(a2a3sim a5sim)
           FAIL=()
 
-          for ARCH in "${ARCHES[@]}"; do
-            ARCH_DIR=${ARCH%sim}
-            for i in "${!COMBO_NAMES[@]}"; do
-              NAME=${COMBO_NAMES[$i]}
-              DEFS=${COMBO_DEFS[$i]}
-              echo "::group::$ARCH / $NAME - CXX defines: $DEFS"
-              if ! CXX="g++ $DEFS" .venv/bin/python simpler_setup/build_runtimes.py --platforms "$ARCH"; then
+          # Each architecture keeps one persistent CMake tree. Updating the
+          # generated config header rebuilds only objects that include it.
+          for i in "${!COMBO_NAMES[@]}"; do
+            NAME=${COMBO_NAMES[$i]}
+            for ARCH in "${ARCHES[@]}"; do
+              ARCH_DIR=${ARCH%sim}
+              echo "::group::$ARCH / $NAME"
+              if ! .venv/bin/python simpler_setup/build_runtimes.py \
+                   --platforms "$ARCH" \
+                   --profiling-dfx "${COMBO_DFX[$i]}" \
+                   --profiling-orch "${COMBO_ORCH[$i]}" \
+                   --profiling-sched "${COMBO_SCHED[$i]}" \
+                   --profiling-tensormap "${COMBO_TENSORMAP[$i]}"; then
                 echo "::error::Build failed: $ARCH / $NAME"
                 FAIL+=("$ARCH/$NAME (build)")
                 echo "::endgroup::"

@@ -49,11 +49,7 @@ jobs:
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             sudo apt-get update
-            sudo apt-get install -y cmake libgtest-dev
-            cd /usr/src/googletest
-            sudo cmake -B build
-            sudo cmake --build build
-            sudo cmake --install build
+            sudo apt-get install -y libgtest-dev
           else
             brew install googletest
           fi
@@ -65,7 +61,10 @@ jobs:
         if: inputs.setup_variant == 'github'
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install '.[test]'
+          pip install 'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15'
+          # Worker integration tests exercise both a2a3sim and a5sim.
+          pip install --no-build-isolation \
+            --config-settings=build.targets=build_package_sim -e '.[test]'
 
       - name: venv + deps
         if: inputs.setup_variant == 'self-cpu'

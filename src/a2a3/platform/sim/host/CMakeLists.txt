@@ -72,6 +72,8 @@ endif()
 
 # Create shared library
 add_library(host_runtime SHARED ${HOST_RUNTIME_SOURCES})
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/profiling_config.cmake")
+simpler_configure_profiling(host_runtime)
 
 # C++ standard (applied only to C++ files)
 set_target_properties(host_runtime PROPERTIES

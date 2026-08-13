@@ -107,7 +107,8 @@ All workflows assume an activated project-local venv (see [`.claude/rules/venv-i
 ```bash
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-pip install --no-build-isolation scikit-build-core nanobind 'cmake>=3.15' pytest torch
+pip install --no-build-isolation \
+  'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15' 'pytest>=6.0' 'torch>=2.3'
 pip install --no-build-isolation -e .
 ```
 
@@ -115,7 +116,7 @@ Editing Python is instant (editable install). Editing C++ requires re-running `p
 
 **Other supported paths:** `pip install .` (non-editable), `pip install --no-build-isolation .`, `pip install -e .`, and `cmake + PYTHONPATH` (no pip). Full comparison of all 5 paths — what lands where, which entry points work under each, trade-offs — lives in [`docs/python-packaging.md`](python-packaging.md).
 
-**Verifying an install:** the single source of truth is `tools/verify_packaging.sh`, which exercises all 5 install paths × 4 entry points from a fully clean state. CI runs the same script on macOS + Ubuntu (see the `packaging-matrix` job in `.github/workflows/ci.yml`).
+**Verifying an install:** the single source of truth is `tools/verify_packaging.sh`, which exercises all 5 install paths × 2 entry points from a fully clean state. CI runs the same script on macOS + Ubuntu (see the `packaging-matrix` job in `.github/workflows/ci.yml`).
 
 ## Build Process
 
