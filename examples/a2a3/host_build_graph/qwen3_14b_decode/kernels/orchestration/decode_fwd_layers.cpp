@@ -109,8 +109,8 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         const ChipTensor &pa_workspace = alloc_0.get_ref(1);
         const ChipTensor &cur = alloc_0.get_ref(2);
         const ChipTensor &normed = alloc_0.get_ref(3);
-        int64_t pa_num_layers = 3;
-        int64_t pa_num_pages = (KV_CACHE_ROWS_DYN / (pa_num_layers * 1024));
+        constexpr uint32_t num_layers = 40;
+        int64_t pa_num_pages = (KV_CACHE_ROWS_DYN / (num_layers * 1024));
         int64_t pa_max_blocks = (BLOCK_TABLE_FLAT_DYN / 16);
         int32_t pa_num_pages_i32 = static_cast<int32_t>(pa_num_pages);
         int32_t pa_max_blocks_i32 = static_cast<int32_t>(pa_max_blocks);
@@ -183,28 +183,26 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         uint32_t next_normed_ci_shapes[2] = {16, 5120};
         TensorCreateInfo next_normed_ci(next_normed_ci_shapes, 2, DataType::BFLOAT16);
 
-        // Allocate all per-layer boundary and scratch storage before recording.
-        // This keeps replay iterations to one Graph submit each.
+        // The decoder dependency chain serializes Graphs, so every layer shares
+        // scratch storage and ping-pongs between two hidden-state slots.
         TaskOutputTensors layer_storage = alloc_tensors(
-            next_hidden_ci, next_normed_ci, bf16_scratch_ci, fp32_scratch_ci, next_hidden_ci, next_normed_ci,
-            bf16_scratch_ci, fp32_scratch_ci, next_hidden_ci, next_normed_ci, bf16_scratch_ci, fp32_scratch_ci
+            next_hidden_ci, next_normed_ci, next_hidden_ci, next_normed_ci, bf16_scratch_ci, fp32_scratch_ci
         );
-        for (int64_t i = 0; i < 3; i += 1) {
+        for (uint32_t layer = 0; layer < num_layers; layer += 1) {
             PTO2_SCOPE() {
-                const uint32_t layer = static_cast<uint32_t>(i);
-                const uint32_t storage_base = layer * 4;
+                const uint32_t storage_base = (layer % 2) * 2;
                 const ChipTensor &next_hidden = layer_storage.get_ref(storage_base);
                 const ChipTensor &next_normed = layer_storage.get_ref(storage_base + 1);
-                const ChipTensor &bf16_scratch = layer_storage.get_ref(storage_base + 2);
-                const ChipTensor &fp32_scratch = layer_storage.get_ref(storage_base + 3);
+                const ChipTensor &bf16_scratch = layer_storage.get_ref(4);
+                const ChipTensor &fp32_scratch = layer_storage.get_ref(5);
                 auto layer_view = [](const ChipTensor &tensor, uint32_t layer_index, uint32_t rows) {
                     uint32_t offsets[2] = {layer_index * rows, 0};
                     uint32_t shapes[2] = {rows, tensor.shapes[1]};
                     return tensor.view(shapes, offsets);
                 };
-                const uint32_t cache_rows = ext_k_cache.shapes[0] / 3;
+                const uint32_t cache_rows = ext_k_cache.shapes[0] / num_layers;
                 ChipTensor next_input_rms_weight =
-                    layer_view(ext_input_rms_weight, std::min<uint32_t>(layer + 1, 2), 1);
+                    layer_view(ext_input_rms_weight, std::min<uint32_t>(layer + 1, num_layers - 1), 1);
                 ChipTensor wq = layer_view(ext_wq, layer, 5120);
                 ChipTensor wk = layer_view(ext_wk, layer, 5120);
                 ChipTensor wv = layer_view(ext_wv, layer, 5120);
@@ -2066,7 +2064,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                     params_t34.set_dependencies(params_t34_deps, params_t34_deps_count);
                     rt_submit_aiv_task(35, params_t34);
                 };
-                rt_submit_graph(GRAPH_KEY("qwen3_14b_decoder_layer_v1"), +layer_definition, graph_args);
+                rt_submit_graph(+layer_definition, graph_args);
                 ChipTensor cur__ssa_v8 = next_hidden;
                 ChipTensor normed__ssa_v6 = next_normed;
                 cur__rv_v7 = cur__ssa_v8;

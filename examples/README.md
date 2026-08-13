@@ -48,8 +48,10 @@ examples/
 ├── workers/                      # raw Worker API, organized by level
 │   ├── l2/                       #   one chip
 │   └── l3/                       #   one host, several chips (+ SubWorkers)
-├── a2a3/tensormap_and_ringbuffer/   # @scene_test kernels, a2a3
-└── a5/tensormap_and_ringbuffer/     # @scene_test kernels, a5
+├── a2a3/
+│   ├── host_build_graph/            # @scene_test host-built graphs, a2a3
+│   └── tensormap_and_ringbuffer/    # @scene_test device orchestration, a2a3
+└── a5/tensormap_and_ringbuffer/     # @scene_test device orchestration, a5
 ```
 
 An example directory holds its test file, a `kernels/` tree (`aic/`, `aiv/`,
