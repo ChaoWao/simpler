@@ -49,7 +49,7 @@ class TestDumpArgsExample(SceneTestCase):
     CASES = [
         {
             "name": "default",
-            "platforms": ["a2a3"],
+            "platforms": ["a2a3sim", "a2a3"],
             "params": {},
         },
     ]

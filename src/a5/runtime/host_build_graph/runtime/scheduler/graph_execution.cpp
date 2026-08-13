@@ -463,6 +463,7 @@ GraphMaterializeResult graph_execution_materialize_slice(
             slot.graph_context = &execution;
             payload.tensor_count = source.tensor_count;
             payload.scalar_count = source.scalar_count;
+            payload.dump_metadata = source.dump_metadata;
             if (source.tensor_count < 0 || source.tensor_count > MAX_TENSOR_ARGS || source.scalar_count < 0 ||
                 source.scalar_count > MAX_SCALAR_ARGS ||
                 static_cast<uint32_t>(source.tensor_count) > definition.tensor_arg_count ||

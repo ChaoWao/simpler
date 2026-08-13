@@ -96,7 +96,7 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info);
 template <int MaxSubtaskSlots, typename SlotStateT, typename IsSubtaskActiveFn, typename GetFunctionBinAddrFn>
 inline void dump_args_for_task(
     int32_t thread_idx, const SlotStateT &slot_state, ArgsDumpStage stage, IsSubtaskActiveFn is_subtask_active,
-    GetFunctionBinAddrFn get_function_bin_addr
+    GetFunctionBinAddrFn get_function_bin_addr, const ArgsDumpTaskMetadata *task_metadata = nullptr
 ) {
     // The record's func_ids[] must hold every active subtask's id. MaxSubtaskSlots
     // is PTO2_SUBTASK_SLOT_COUNT at every call site, so this ties the record array
@@ -105,7 +105,10 @@ inline void dump_args_for_task(
     const auto &pl = *slot_state.payload;
     ArgsDumpArgMask dump_arg_mask = ARGS_DUMP_ARG_MASK_NONE;
     ArgsDumpArgMask dump_arg_flags = ARGS_DUMP_ARG_MASK_NONE;
-    if (should_load_dump_args_task_masks()) {
+    if (task_metadata != nullptr) {
+        dump_arg_mask = task_metadata->dump_arg_mask;
+        dump_arg_flags = task_metadata->dump_arg_flags;
+    } else if (should_load_dump_args_task_masks()) {
         get_dump_args_task_masks(slot_state.task->task_id.raw, &dump_arg_mask, &dump_arg_flags);
     }
     if (!should_dump_task(dump_arg_mask)) {
@@ -190,6 +193,7 @@ inline void dump_args_for_task(
         info.role = role;
         info.stage = stage;
         info.kind = static_cast<uint8_t>(ArgsDumpKind::TENSOR);
+        info.capture_payload = has_dump_arg_flag(dump_arg_mask, static_cast<int32_t>(slot));
         info.func_count = active_count;
         for (int32_t i = 0; i < active_count; i++) {
             info.func_ids[i] = active_fids[i];
@@ -213,8 +217,15 @@ inline void dump_args_for_task(
     if (stage == ArgsDumpStage::BEFORE_DISPATCH && pl.scalar_count > 0) {
         uint8_t scalar_dtypes[CORE_MAX_SCALAR_ARGS] = {};
         uint32_t dtype_scalar_count = 0;
-        bool has_scalar_dtypes =
-            get_dump_args_task_scalar_dtypes(slot_state.task->task_id.raw, &dtype_scalar_count, scalar_dtypes);
+        bool has_scalar_dtypes = false;
+        if (task_metadata != nullptr) {
+            dtype_scalar_count = static_cast<uint32_t>(pl.scalar_count);
+            memcpy(scalar_dtypes, task_metadata->scalar_dtypes, dtype_scalar_count * sizeof(uint8_t));
+            has_scalar_dtypes = true;
+        } else {
+            has_scalar_dtypes =
+                get_dump_args_task_scalar_dtypes(slot_state.task->task_id.raw, &dtype_scalar_count, scalar_dtypes);
+        }
         for (int32_t scalar_index = 0; scalar_index < pl.scalar_count; scalar_index++) {
             int32_t scalar_arg_index = pl.tensor_count + scalar_index;
             if (!should_dump_arg(dump_arg_mask, scalar_arg_index)) {
@@ -261,10 +272,12 @@ inline void dump_args_for_task(
 //                              emit each running task exactly once.
 //   is_subtask_active / get_function_bin_addr — same callbacks as
 //   dump_args_for_task.
-template <int MaxSubtaskSlots, typename GetRunningSlotFn, typename IsSubtaskActiveFn, typename GetFunctionBinAddrFn>
+template <
+    int MaxSubtaskSlots, typename GetRunningSlotFn, typename IsSubtaskActiveFn, typename GetFunctionBinAddrFn,
+    typename GetTaskMetadataFn>
 inline void dump_running_task_outputs(
     int32_t thread_idx, int32_t cores_total_num, GetRunningSlotFn get_running_slot, IsSubtaskActiveFn is_subtask_active,
-    GetFunctionBinAddrFn get_function_bin_addr
+    GetFunctionBinAddrFn get_function_bin_addr, GetTaskMetadataFn get_task_metadata
 ) {
     for (int32_t cid = 0; cid < cores_total_num; cid++) {
         auto *running = get_running_slot(cid);
@@ -283,9 +296,23 @@ inline void dump_running_task_outputs(
             continue;
         }
         dump_args_for_task<MaxSubtaskSlots>(
-            thread_idx, *running, ArgsDumpStage::AFTER_COMPLETION, is_subtask_active, get_function_bin_addr
+            thread_idx, *running, ArgsDumpStage::AFTER_COMPLETION, is_subtask_active, get_function_bin_addr,
+            get_task_metadata(*running)
         );
     }
+}
+
+template <int MaxSubtaskSlots, typename GetRunningSlotFn, typename IsSubtaskActiveFn, typename GetFunctionBinAddrFn>
+inline void dump_running_task_outputs(
+    int32_t thread_idx, int32_t cores_total_num, GetRunningSlotFn get_running_slot, IsSubtaskActiveFn is_subtask_active,
+    GetFunctionBinAddrFn get_function_bin_addr
+) {
+    dump_running_task_outputs<MaxSubtaskSlots>(
+        thread_idx, cores_total_num, get_running_slot, is_subtask_active, get_function_bin_addr,
+        [](const auto &) -> const ArgsDumpTaskMetadata * {
+            return nullptr;
+        }
+    );
 }
 
 template <typename TensorInfoT>
@@ -338,6 +365,10 @@ inline void dump_args_for_task(
 
     rmb();
 
+    ArgsDumpArgMask dump_arg_mask = ARGS_DUMP_ARG_MASK_NONE;
+    if (should_load_dump_args_task_masks()) {
+        get_dump_args_task_masks(task_id, &dump_arg_mask, nullptr);
+    }
     int32_t tensor_arg_index = 0;
     for (int32_t sig_idx = 0; sig_idx < sig_count; sig_idx++) {
         ArgDirection dir = callable.sig(sig_idx);
@@ -362,6 +393,7 @@ inline void dump_args_for_task(
         info.ndims = t.ndims;
         info.arg_index = static_cast<uint32_t>(sig_idx);
         info.buffer_addr = buffer_addrs[tensor_arg_index];
+        info.capture_payload = has_dump_arg_flag(dump_arg_mask, sig_idx);
         // TensorInfo (host_build_graph) still carries (raw_shapes, offsets)
         // implicitly describing a row-major-aligned sub-region. Translate to
         // (start_offset, strides[]) on the fly:

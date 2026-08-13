@@ -285,13 +285,8 @@ TEST_F(ArgsDumpTest, Level3UsesTaskMaskForTensorPayload) {
     set_platform_dump_base(reinterpret_cast<uint64_t>(dump_mem));
     set_dump_args_enabled(true);
     constexpr uint64_t kTaskId = 0;
-    set_dump_args_task_mask(kTaskId, uint64_t{1} << 6, ARGS_DUMP_ARG_MASK_NONE);
 
     dump_args_init(1);
-
-    ArgsDumpArgMask mask = ARGS_DUMP_ARG_MASK_NONE;
-    get_dump_args_task_masks(kTaskId, &mask, nullptr);
-    EXPECT_EQ(mask, uint64_t{1} << 6);
 
     ArgsDumpInfo info = {};
     info.task_id = kTaskId;
@@ -308,11 +303,13 @@ TEST_F(ArgsDumpTest, Level3UsesTaskMaskForTensorPayload) {
     info.func_ids[0] = 0;
     info.func_ids[1] = 1;
     info.func_ids[2] = 1;
+    info.capture_payload = true;
 
     ASSERT_EQ(dump_arg_record(0, info), 0);
     EXPECT_EQ(meta_buf.records[0].payload_size, sizeof(src_data));
 
     info.arg_index = 7;
+    info.capture_payload = false;
     ASSERT_EQ(dump_arg_record(0, info), 0);
     EXPECT_EQ(meta_buf.records[1].payload_size, 0u);
 

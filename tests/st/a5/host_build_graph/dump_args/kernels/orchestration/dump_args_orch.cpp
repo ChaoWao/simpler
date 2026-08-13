@@ -52,14 +52,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     rt_submit_aiv_task(FUNC_ADD, p0);
 
     // t1: f = f + 1 (in place); INOUT establishes the dependency on t0 via f
-    union {
-        float f32;
-        uint64_t u64;
-    } sconv;
-    sconv.f32 = 1.0f;
+    float scale = 1.0F;
     CoreTaskArgs p1;
     p1.add_inout(f);
-    p1.add_scalar(sconv.u64);
+    p1.add_scalar(scale);
+    p1.dump(f, scale);
     rt_submit_aiv_task(FUNC_ADD_SCALAR_INPLACE, p1);
 
     LOG_INFO("[dump_args_orch] Submitted f = (a + b) + 1");

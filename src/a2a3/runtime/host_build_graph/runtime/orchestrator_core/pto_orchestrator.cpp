@@ -302,6 +302,7 @@ struct GraphRecordedNode {
     std::vector<uint64_t> scalars;
     std::vector<GraphRecordedScalarSourceRef> scalar_sources;
     std::vector<size_t> internal_fanins;
+    ArgsDumpTaskMetadata dump_metadata;
 };
 
 struct GraphRecording {
@@ -560,6 +561,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
         node.total_output_size = static_cast<int32_t>(source.total_output_size);
         node.tensor_offset = static_cast<uint32_t>(tensors.size());
         node.scalar_offset = static_cast<uint32_t>(scalars.size());
+        node.dump_metadata = source.dump_metadata;
         for (const ChipTensor &tensor : source.tensors)
             tensors.push_back(graph_tensor_pack(tensor));
         for (const GraphRecordedTensorSourceRef &tensor_source : source.tensor_sources) {
@@ -1280,22 +1282,6 @@ static TaskOutputTensors submit_task_common(
             payload.predicate.op = PredicateOp::NONE;
         }
     }
-#if SIMPLER_DFX
-    if (is_dump_args_enabled()) {
-        if (args.scalar_count() > 0) {
-            set_dump_args_task_scalar_dtypes(
-                task_id.raw, static_cast<uint32_t>(args.scalar_count()), args.scalar_dtypes()
-            );
-        }
-        // Preserve the existing Level-1 task/arg mask whenever dump is enabled.
-        // Level 1 uses it to select records; hybrid Level 3 reuses the same mask only
-        // to decide which tensors contribute payload alongside full metadata.
-        if (args.dump_arg_mask() != 0) {
-            set_dump_args_task_mask(task_id.raw, args.dump_arg_mask(), args.dump_arg_index_ambiguous_mask());
-        }
-    }
-#endif
-
     CYCLE_COUNT_LAP(g_orch_args_cycle);
 
     // === STEP 6: publish the inline fanin count (device boot classifies) ===
@@ -1607,6 +1593,11 @@ TaskOutputTensors graph_record_submit_node(
         if (args.tag(i) == TensorArgType::OUTPUT) result.materialize_output(node.tensors[static_cast<size_t>(i)]);
     }
     node.scalars.assign(args.scalars(), args.scalars() + args.scalar_count());
+#if SIMPLER_DFX
+    node.dump_metadata.dump_arg_mask = args.dump_arg_mask();
+    node.dump_metadata.dump_arg_flags = args.dump_arg_index_ambiguous_mask();
+    memcpy(node.dump_metadata.scalar_dtypes, args.scalar_dtypes(), args.scalar_count() * sizeof(uint8_t));
+#endif
 
     // Classify each scalar's source: a plain literal is static Definition data,
     // while a value copied from a boundary scalar is refreshed on replay. A

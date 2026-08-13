@@ -69,6 +69,10 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
         node.scalar_count = 1;
         node.total_output_size = 64;
     }
+    nodes[0].dump_metadata.dump_arg_mask = uint64_t{1} << 0;
+    nodes[0].dump_metadata.scalar_dtypes[0] = static_cast<uint8_t>(DataType::FLOAT32);
+    nodes[1].dump_metadata.dump_arg_mask = uint64_t{1} << 1;
+    nodes[1].dump_metadata.scalar_dtypes[0] = static_cast<uint8_t>(DataType::INT32);
     nodes[1].tensor_offset = 1;
     nodes[1].scalar_offset = 1;
     std::vector<GraphTensor> tensors{make_test_tensor(boundary_address), make_test_tensor(boundary_address)};
@@ -283,6 +287,10 @@ TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
     ASSERT_EQ(node.payload.tensor_count, 1);
     EXPECT_EQ(node.payload.scalars[0], 17U);
     EXPECT_EQ(execution->node_storage[1].payload.scalars[0], 18U);
+    EXPECT_EQ(node.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
+    EXPECT_EQ(node.payload.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::FLOAT32));
+    EXPECT_EQ(execution->node_storage[1].payload.dump_metadata.dump_arg_mask, uint64_t{1} << 1);
+    EXPECT_EQ(execution->node_storage[1].payload.dump_metadata.scalar_dtypes[0], static_cast<uint8_t>(DataType::INT32));
 
     graph_execution_mark_completed(*execution);
     execution->retired_nodes.store(2, std::memory_order_release);
@@ -324,6 +332,7 @@ TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
     );
     EXPECT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(node.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
 
     graph_execution_mark_completed(*execution);
     execution->retired_nodes.store(2, std::memory_order_release);

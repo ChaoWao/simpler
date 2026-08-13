@@ -37,12 +37,12 @@
  * specific host/device copy mechanics live outside these shared structures.
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_COMMON_ARGS_DUMP_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_COMMON_ARGS_DUMP_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
 
+#include "common/args_dump_task_metadata.h"
 #include "common/dfx_backpressure_device.h"
 #include "common/platform_config.h"
 
@@ -75,16 +75,6 @@ enum class ArgsDumpKind : uint8_t {
     TENSOR = 0,
     SCALAR = 1,
 };
-
-using ArgsDumpArgMask = uint64_t;
-
-// Bitmask stored in the platform-owned mask pool when orchestration selects
-// specific task tensor/scalar arguments for dump. Bit N corresponds to the
-// payload arg index: tensors first, then scalars.
-// Zero preserves legacy "dump all tasks" behavior unless selective mode is enabled.
-constexpr ArgsDumpArgMask ARGS_DUMP_ARG_MASK_NONE = 0;
-constexpr uint32_t ARGS_DUMP_ARG_MASK_BITS = 64;
-constexpr uint8_t ARGS_DUMP_RECORD_FLAG_ARG_INDEX_AMBIGUOUS = 1u << 0;
 
 // Max kernel ids a record carries: one per active subtask of a task (its mix
 // membership). Must equal the runtime's PTO2_SUBTASK_SLOT_COUNT (1C2V => 3);
@@ -288,7 +278,8 @@ struct ArgsDumpInfo {
     int32_t func_count;
     uint8_t kind;
     uint8_t flags;
-    uint8_t pad[6];
+    uint8_t capture_payload;
+    uint8_t pad[5];
     uint64_t start_offset;                     // 1D ELEMENT offset of the view origin
     uint32_t shapes[PLATFORM_DUMP_MAX_DIMS];   // Current view shape
     uint32_t strides[PLATFORM_DUMP_MAX_DIMS];  // Element stride per dimension (strictly > 0, type-enforced)
@@ -354,5 +345,3 @@ inline DumpBufferState *get_dump_buffer_state(void *base_ptr, int thread_idx) {
 #ifdef __cplusplus
 }
 #endif
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_COMMON_ARGS_DUMP_H_

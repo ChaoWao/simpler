@@ -85,6 +85,7 @@ struct GraphNodeDefinition {
     int32_t total_output_size;
     uint32_t tensor_offset;
     uint32_t scalar_offset;
+    ArgsDumpTaskMetadata dump_metadata;
 };
 
 struct GraphBoundarySignature {

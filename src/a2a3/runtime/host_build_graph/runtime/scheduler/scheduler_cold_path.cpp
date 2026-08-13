@@ -397,6 +397,9 @@ int32_t SchedulerContext::handle_timeout_exit(
                 },
                 [this](int32_t func_id) {
                     return get_function_bin_addr(func_id);
+                },
+                [](const PTO2TaskSlotState &slot_state) {
+                    return &slot_state.payload->dump_metadata;
                 }
             );
         }
