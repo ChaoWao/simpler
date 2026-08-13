@@ -94,13 +94,13 @@ class KernelCompiler:
     Available toolchains:
     - CCEC: ccec compiler for AICore kernels (real hardware)
     - HOST_GXX_15: g++-15 for simulation kernels (host execution)
-    - HOST_GXX: g++ for orchestration .so (host dlopen)
+    - HOST_GXX: g++ (g++-15 under sanitizers) for host orchestration .so
     - AARCH64_GXX: aarch64 cross-compiler for device orchestration
     """
 
     # Comma-separated `-fsanitize` tokens, set once by conftest from the pytest
     # `--sanitizer` option (default "" = off). Only host toolchains (Gxx15 sim
-    # incore, Gxx sim orchestration) honor it; ccec/aarch64 device builds never
+    # incore, Gxx host orchestration) honor it; ccec/aarch64 device builds never
     # do. Must match the runtime's install-time SIMPLER_SANITIZER.
     _sanitizers = ""
 
@@ -132,12 +132,10 @@ class KernelCompiler:
             env_manager.ensure("ASCEND_HOME_PATH")
             self.ccec = CCECToolchain(platform)
             self.aarch64 = Aarch64GxxToolchain()
-            self.host_gxx = GxxToolchain()
+            self.host_gxx = GxxToolchain(prefer_g15=bool(self._sanitizers))
         else:
             self.ccec = None
             self.aarch64 = None
-            # Sim orchestration must match the sim kernels' g++-15 under a
-            # sanitizer (one runtime per process); see GxxToolchain prefer_g15.
             self.host_gxx = GxxToolchain(prefer_g15=bool(self._sanitizers))
 
         self.gxx15 = Gxx15Toolchain()

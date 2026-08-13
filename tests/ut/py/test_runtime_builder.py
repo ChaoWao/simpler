@@ -278,6 +278,55 @@ class TestRuntimeBuilderGetBinaries:
         assert mock_instance.compile.call_count == 3
         targets = sorted(call.args[0] for call in mock_instance.compile.call_args_list)
         assert targets == ["aicore", "aicpu", "host"]
+        expected_defaults = {
+            "SIMPLER_DFX": "1",
+            "SIMPLER_ORCH_PROFILING": "0",
+            "SIMPLER_SCHED_PROFILING": "0",
+            "SIMPLER_TENSORMAP_PROFILING": "0",
+        }
+        for call in mock_instance.compile.call_args_list:
+            assert call.kwargs["cmake_defines"] == expected_defaults
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_reuses_prebuilt_shared_libraries(self, MockCompiler, tmp_path, default_test_platform, test_arch):
+        """A batch build can locate shared libraries without rebuilding them."""
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        self._make_runtime(tmp_path, test_arch)
+
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+
+        builder = RuntimeBuilder(platform=default_test_platform)
+        with (
+            patch.object(builder, "ensure_simpler_log", return_value=tmp_path / "libsimpler_log.so") as log,
+            patch.object(builder, "ensure_sim_context", return_value=tmp_path / "libcpu_sim_context.so") as sim,
+        ):
+            builder.get_binaries("test_rt", build=True, build_shared=False)
+
+        log.assert_called_once_with(build=False)
+        sim.assert_called_once_with(build=False)
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_passes_profiling_config_to_every_target(self, MockCompiler, tmp_path, default_test_platform, test_arch):
+        """All runtime binaries use one complete profiling configuration."""
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        self._make_runtime(tmp_path, test_arch)
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+        config = {
+            "SIMPLER_DFX": "1",
+            "SIMPLER_ORCH_PROFILING": "1",
+            "SIMPLER_SCHED_PROFILING": "0",
+            "SIMPLER_TENSORMAP_PROFILING": "0",
+        }
+
+        RuntimeBuilder(platform=default_test_platform).get_binaries("test_rt", build=True, profiling_config=config)
+
+        assert mock_instance.compile.call_count == 3
+        for call in mock_instance.compile.call_args_list:
+            assert call.kwargs["cmake_defines"] == config
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_resolves_paths_relative_to_config(self, MockCompiler, tmp_path, default_test_platform, test_arch):

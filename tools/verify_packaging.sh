@@ -29,6 +29,9 @@ fi
 # entry points. See docs/macos-libomp-collision.md.
 export KMP_DUPLICATE_LIB_OK=TRUE
 
+PACKAGING_SMOKE_DIR="$(mktemp -d)"
+trap 'rm -rf "${PACKAGING_SMOKE_DIR}"' EXIT
+
 # ---------------------------------------------------------------------------
 # Reset to a fully clean state — what every mode runs into.
 # ---------------------------------------------------------------------------
@@ -38,14 +41,18 @@ wipe_state() {
 }
 
 # ---------------------------------------------------------------------------
-# Smoke check: import surface + each user entry point's argparse.
+# Smoke check: import surface + each user entry point's argparse. Run outside
+# the repository so source files cannot shadow an incomplete wheel install.
 # Tests packaging only, not functionality. Functional tests live in pytest.
 # ---------------------------------------------------------------------------
 smoke() {
     local mode="$1"
     echo "::group::[${mode}] import surface"
-    python -c "
+    (
+        cd "${PACKAGING_SMOKE_DIR}"
+        python -c "
 import os
+
 import simpler, simpler_setup
 from simpler.worker import Worker
 from simpler.task_interface import ChipWorker
@@ -68,22 +75,74 @@ for rel in ('pipe_sync.h', os.path.join('common', 'dma_workspace.h')):
         'incore helper not shipped: ' + rel + '; include dirs: ' + repr(inc_dirs)
 print('incore helpers OK:', inc_dirs)
 "
+    )
     echo "::endgroup::"
     echo "::group::[${mode}] standalone test_*.py --help"
-    python tests/st/a2a3/tensormap_and_ringbuffer/paged_attention_unroll/test_paged_attention_unroll.py --help >/dev/null
+    (
+        cd "${PACKAGING_SMOKE_DIR}"
+        python "${REPO_ROOT}/tests/st/a2a3/tensormap_and_ringbuffer/paged_attention_unroll/test_paged_attention_unroll.py" \
+            --help >/dev/null
+    )
     echo "::endgroup::"
     echo "smoke[${mode}] OK"
 }
 
 # ---------------------------------------------------------------------------
-# Verify required deps are present. Build deps: --no-build-isolation modes
-# need scikit-build-core/nanobind/cmake; cmake-direct mode needs nanobind for
-# find_package(). Runtime deps: smoke imports simpler_setup.goldens.paged_attention
-# which imports torch, and pytest is used by one of the smoke checks.
+# Verify required deps meet the same minimums as pyproject.toml. This catches a
+# persistent self-hosted venv whose unversioned packages would otherwise be
+# accepted by the no-build-isolation and cmake-direct modes.
 # ---------------------------------------------------------------------------
-python -c "import scikit_build_core, nanobind, cmake, torch, pytest" 2>/dev/null || {
-    echo "ERROR: venv missing required deps. Install with:" >&2
-    echo "  pip install scikit-build-core nanobind 'cmake>=3.15' pytest torch" >&2
+python - <<'PY' || {
+import importlib.metadata
+import re
+import shutil
+import subprocess
+
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+import cmake  # noqa: E402,F401
+import nanobind  # noqa: E402,F401
+import pytest  # noqa: E402,F401
+import scikit_build_core  # noqa: E402,F401
+import torch  # noqa: E402,F401
+
+required = (
+    "scikit-build-core>=0.10.0",
+    "nanobind>=2.0.0",
+    "cmake>=3.15",
+    "pytest>=6.0",
+    "torch>=2.3",
+)
+for requirement_text in required:
+    requirement = Requirement(requirement_text)
+    installed = importlib.metadata.version(requirement.name)
+    if not requirement.specifier.contains(installed, prereleases=True):
+        raise RuntimeError(f"{requirement.name} {installed} does not satisfy {requirement.specifier}")
+    print(f"{requirement.name}: {installed}")
+
+cmake_path = shutil.which("cmake")
+if cmake_path is None:
+    raise RuntimeError("cmake executable not found on PATH")
+cmake_version_output = subprocess.run(
+    [cmake_path, "--version"], check=True, capture_output=True, text=True
+).stdout.splitlines()[0]
+match = re.fullmatch(r"cmake version (\S+)", cmake_version_output)
+if match is None or Version(match.group(1)) < Version("3.15"):
+    raise RuntimeError(f"unsupported CMake executable: {cmake_version_output}")
+print(f"cmake executable: {cmake_path} ({cmake_version_output})")
+
+ninja_path = shutil.which("ninja")
+if ninja_path is not None:
+    ninja_version = subprocess.run(
+        [ninja_path, "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    print(f"ninja executable: {ninja_path} ({ninja_version})")
+else:
+    print("ninja executable: not found; CMake will select another generator")
+PY
+    echo "ERROR: venv missing or has unsupported packaging dependencies. Install with:" >&2
+    echo "  pip install 'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15' 'pytest>=6.0' 'torch>=2.3'" >&2
     exit 1
 }
 

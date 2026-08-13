@@ -41,11 +41,22 @@ jobs:
         if: inputs.setup_variant == 'github'
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y cmake ninja-build g++
+            missing_packages=()
+            command -v ninja >/dev/null 2>&1 || missing_packages+=(ninja-build)
+            command -v ccache >/dev/null 2>&1 || missing_packages+=(ccache)
+            if ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+              missing_packages+=(g++)
+            fi
+            if (( ${#missing_packages[@]} )); then
+              sudo apt-get update
+              sudo apt-get install -y "${missing_packages[@]}"
+            fi
           else
-            brew install ninja cmake
-            brew install gcc@15 || brew install gcc
+            command -v ninja >/dev/null 2>&1 || brew install ninja
+            command -v ccache >/dev/null 2>&1 || brew install ccache
+            if ! command -v gcc-15 >/dev/null 2>&1 || ! command -v g++-15 >/dev/null 2>&1; then
+              brew install gcc@15 || brew install gcc
+            fi
           fi
 
       - name: Set up Python ${{ inputs.python_version }}
@@ -61,9 +72,28 @@ jobs:
       - name: Install build + runtime deps in venv
         uses: ./.github/actions/setup-venv
         with:
-          packages: "scikit-build-core nanobind cmake>=3.15 pytest"
+          packages: "scikit-build-core>=0.10.0 nanobind>=2.0.0 cmake>=3.15 pytest>=6.0"
 
       - name: Run packaging matrix
         run: |
           . .venv/bin/activate
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            export MACOSX_DEPLOYMENT_TARGET
+            MACOSX_DEPLOYMENT_TARGET="$(sw_vers -productVersion | cut -d. -f1,2)"
+          fi
+          if command -v ccache >/dev/null 2>&1; then
+            export CCACHE_DIR="$RUNNER_TEMP/simpler-packaging-ccache"
+            # Keep one cold build per job while reusing identical objects
+            # across the remaining clean-install modes.
+            if ccache --clear && ccache --max-size=1G && ccache --zero-stats; then
+              export CMAKE_C_COMPILER_LAUNCHER=ccache
+              export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+              trap 'ccache --show-stats || true' EXIT
+            else
+              unset CCACHE_DIR
+              echo "::warning::ccache initialization failed; running without compiler cache"
+            fi
+          else
+            echo "::notice::ccache not found; running packaging matrix without compiler cache"
+          fi
           bash tools/verify_packaging.sh

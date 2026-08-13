@@ -123,7 +123,7 @@ For developers who don't want to use pip at all:
 
 ```bash
 . .venv/bin/activate
-pip install scikit-build-core nanobind 'cmake>=3.15' pytest torch  # one-time
+pip install 'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15' 'pytest>=6.0' 'torch>=2.3'  # one-time
 cmake -S . -B build/cmake_only -Dnanobind_DIR=$(python -c 'import nanobind; print(nanobind.cmake_dir())')
 cmake --build build/cmake_only
 export PYTHONPATH=$(pwd):$(pwd)/python
@@ -158,11 +158,11 @@ Any change that touches:
 ```bash
 # Locally — same script CI runs.
 source .venv/bin/activate
-pip install scikit-build-core nanobind 'cmake>=3.15' pytest torch  # one-time
+pip install 'scikit-build-core>=0.10.0' 'nanobind>=2.0.0' 'cmake>=3.15' 'pytest>=6.0' 'torch>=2.3'  # one-time
 bash tools/verify_packaging.sh
 ```
 
-The script wipes `build/`, uninstalls `simpler`, and re-runs the install + smoke check from scratch for every mode, so a previous mode's cached binaries cannot mask a regression in the next. Slow (~25–45 min for all 5 modes) but reliable. Both CI and the local invocation use the same script — there's no second source of truth that can drift.
+The script wipes `build/`, uninstalls `simpler`, and re-runs the install + smoke check from scratch for every mode, so a previous mode's cached binaries cannot mask a regression in the next. Smoke checks run from a temporary directory outside the repository, preventing source files from shadowing an incomplete wheel install. Slow (~25–45 min for all 5 modes) but reliable. Both CI and the local invocation use the same script — there's no second source of truth that can drift.
 
 The smoke check itself only verifies imports and each entry point's `--help`. Functional tests (real runtime compilation, scene tests) live in `ut-py`, `ut-cpp`, `st-sim-*`, and the hardware self-hosted jobs.
 

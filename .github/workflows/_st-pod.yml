@@ -195,13 +195,10 @@ jobs:
         if: always()
         uses: ./.github/actions/pod-teardown
 
-      # Both sides' device logs and each daemon's output land under the run
-      # directory and stay on the runner otherwise. A device-side failure — a
-      # scheduler timeout on the peer, say — names its sub-class only there, so
-      # without this the run page shows the host traceback and nothing that
-      # explains it.
+      # Artifact service availability must not override the POD test result.
       - name: Upload pod logs
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pod-ci-${{ github.run_id }}-${{ github.run_attempt }}
