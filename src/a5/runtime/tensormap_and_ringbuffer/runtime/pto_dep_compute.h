@@ -29,7 +29,11 @@
  * the minor structural overlap. Replay handles STEP 1 with a one-line loop of its own.
  *
  * The Emit callback contract:
- *   bool emit(PTO2TaskId producer);
+ *   bool emit(PTO2TaskId producer, DepFlags kind);
+ *     - kind is DEP_WAIT|DEP_RETAIN for a Step-A creator edge (the consumer reads
+ *       the producer's allocated buffer, so the producer is retained) and DEP_WAIT
+ *       for a Step-B modifier edge (ordering only; the buffer was allocated
+ *       elsewhere). Duplicate producers OR-accumulate their flags.
  *     - return true to continue (whether or not the producer was actually recorded —
  *       producer-not-alive / dedup-hit / etc. all return true silently)
  *     - return false to signal fatal (e.g. fanin spill overflow); caller bails
@@ -93,10 +97,11 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
 
         const ChipTensor *tensor = &inputs.tensors[i].ref();
 
-        // Step A: creator retention — all existing tensors extend their creator lifetime.
+        // Step A: creator retention — reading a tensor retains its allocator, so
+        // the creator edge carries both ordering and lifetime.
         PTO2TaskId owner = tensor->owner_task_id;
         if (owner.is_valid()) {
-            if (!emit(owner)) {
+            if (!emit(owner, DEP_WAIT | DEP_RETAIN)) {
                 return false;
             }
         }
@@ -111,7 +116,17 @@ compute_task_fanin(const DepInputs &inputs, PTO2TensorMap &tensor_map, bool in_m
 
         bool fatal = false;
         tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
-            if (!emit(entry.producer_task_id)) {
+            // Ordering-only (DEP_WAIT): a modifier only rewrote a buffer someone
+            // else allocated, so its lifetime rides that allocator's creator edge,
+            // not this modifier edge. Retention-safety invariant that makes this
+            // sound: only TensorArgType::OUTPUT tensors are allocated into the
+            // packed output heap, and a runtime-created OUTPUT always carries a
+            // valid owner_task_id — so its consumer takes a Step-A DEP_RETAIN edge
+            // to the allocator above. INOUT / OUTPUT_EXISTING buffers are never
+            // owned by a modifier. If a future layout put a modifier-owned buffer
+            // into the packed heap, this edge would have to become RETAIN or the
+            // producer could be reclaimed under a live reader (use-after-free).
+            if (!emit(entry.producer_task_id, DEP_WAIT)) {
                 fatal = true;
                 return false;  // stop iteration
             }

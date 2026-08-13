@@ -71,6 +71,42 @@ enum class PTO2ScopeMode : uint8_t {
 };
 
 /**
+ * Orthogonal dependency-edge semantics, stored per fanin edge.
+ *
+ *   DEP_WAIT   — readiness/ordering: the consumer cannot become ready until the
+ *                producer completes. Contributes to the consumer's fanin count
+ *                and to the producer's fanout notification list.
+ *   DEP_RETAIN — lifetime: the producer's slot and packed output buffer must
+ *                stay alive until the consumer releases it. Holds a
+ *                fanout_count reference from submit until on_task_release.
+ *
+ * The two are independent; an edge may carry either, both, or (transiently
+ * during construction) neither. A creator edge is DEP_WAIT|DEP_RETAIN (the
+ * consumer reads the producer's allocated buffer). A tensormap modifier edge is
+ * DEP_WAIT only (the buffer was allocated elsewhere, so only ordering is
+ * needed). When one (producer, consumer) pair is discovered for several
+ * reasons, the flags are OR-accumulated.
+ */
+enum DepFlags : uint8_t {
+    DEP_NONE = 0,
+    DEP_WAIT = 1u << 0,
+    DEP_RETAIN = 1u << 1,
+};
+
+constexpr DepFlags operator|(DepFlags a, DepFlags b) {
+    return static_cast<DepFlags>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+constexpr DepFlags operator&(DepFlags a, DepFlags b) {
+    return static_cast<DepFlags>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+}
+constexpr DepFlags &operator|=(DepFlags &a, DepFlags b) {
+    a = a | b;
+    return a;
+}
+constexpr bool dep_has_wait(DepFlags f) { return (f & DEP_WAIT) != DEP_NONE; }
+constexpr bool dep_has_retain(DepFlags f) { return (f & DEP_RETAIN) != DEP_NONE; }
+
+/**
  * TaskOutputTensors — returned by submit, holds materialized output ChipTensors.
  *
  * Only runtime-created outputs are stored here, indexed in add_output order.
@@ -286,6 +322,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
 #endif
         explicit_deps_ = nullptr;
         explicit_dep_count_ = 0;
+        explicit_dep_kinds_ = nullptr;
         allow_early_resolve_ = false;
         predicate_ = CoreTaskPredicate{};
         task_timing_slot_ = TASK_TIMING_SLOT_NONE;
@@ -396,6 +433,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         if (count == 0) {
             explicit_deps_ = nullptr;
             explicit_dep_count_ = 0;
+            explicit_dep_kinds_ = nullptr;
             return;
         }
         if (deps == nullptr) {
@@ -408,6 +446,35 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         }
         explicit_deps_ = deps;
         explicit_dep_count_ = count;
+        explicit_dep_kinds_ = nullptr;
+    }
+
+    /**
+     * Same as set_dependencies() but attaches a per-dep DepFlags array so the
+     * caller can mark an explicit dep as ordering-only (DEP_WAIT) rather than the
+     * conservative DEP_WAIT|DEP_RETAIN default. The kinds array is caller-owned
+     * and must outlive submit (same lifetime rule as deps). A null kinds array
+     * with count > 0 is rejected; use set_dependencies() for the
+     * conservative DEP_WAIT|DEP_RETAIN default.
+     */
+    void set_dependencies_with_kinds(const PTO2TaskId *deps, const DepFlags *kinds, uint32_t count) {
+        if (count == 0) {
+            explicit_deps_ = nullptr;
+            explicit_dep_count_ = 0;
+            explicit_dep_kinds_ = nullptr;
+            return;
+        }
+        if (deps == nullptr || kinds == nullptr) {
+            set_error("set_dependencies_with_kinds: deps and kinds must not be null when count > 0");
+            return;
+        }
+        if (explicit_deps_ != nullptr) {
+            set_error("set_dependencies_with_kinds: may be called at most once per Arg");
+            return;
+        }
+        explicit_deps_ = deps;
+        explicit_dep_kinds_ = kinds;
+        explicit_dep_count_ = count;
     }
 
     uint32_t explicit_dep_count() const { return explicit_dep_count_; }
@@ -415,6 +482,16 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
     PTO2TaskId explicit_dep(uint32_t index) const {
         always_assert(index < explicit_dep_count_);
         return explicit_deps_[index];
+    }
+
+    /**
+     * Flags of the i-th explicit dep. Returns DEP_WAIT|DEP_RETAIN when no kinds
+     * array is attached (plain set_dependencies), so an explicit dep protecting a
+     * runtime-created output is never silently weakened to ordering-only.
+     */
+    DepFlags explicit_dep_kind(uint32_t index) const {
+        always_assert(index < explicit_dep_count_);
+        return explicit_dep_kinds_ ? explicit_dep_kinds_[index] : (DEP_WAIT | DEP_RETAIN);
     }
 
     const PTO2TaskId *explicit_deps_data() const { return explicit_deps_; }
@@ -516,6 +593,7 @@ private:
     DumpArgSelection dump_arg_selection_;
 #endif
     const PTO2TaskId *explicit_deps_{nullptr};
+    const DepFlags *explicit_dep_kinds_{nullptr};
     uint32_t explicit_dep_count_{0};
 #if SIMPLER_DFX
     template <typename T>

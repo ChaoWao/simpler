@@ -56,8 +56,9 @@ inputs to each submit are captured and the graph is reconstructed afterwards.
   `dep_gen_replay_emit_deps_json` runs every record back through *two*
   parallel host-resident `PTO2TensorMap` instances that evolve in lockstep:
   - **Oracle pass** drives the canonical `compute_task_fanin` template
-      from `pto_dep_compute.h` and collects the producer-id set the
-      runtime would have emitted.
+      from `pto_dep_compute.h` and collects the producer-id → `DepFlags`
+      mapping the runtime would have emitted (flags OR-accumulated per
+      producer).
   - **Annotated pass** runs an inlined mirror of STEP A
       (creator retention) + STEP B (tensormap lookup) against the second
       map, with a wider callback so each edge gets recorded with its
@@ -66,8 +67,9 @@ inputs to each submit are captured and the graph is reconstructed afterwards.
   (explicit deps), STEP 3 (creator retention + tensormap lookup),
   STEP 4 (register outputs). Per-successor dedup matches
   `PTO2FaninBuilder::append_fanin_or_fail`. After both passes finish per
-  record, the replay asserts the two producer-id sets are equal; if they
-  diverge, `deps.json` is not written and the function returns non-zero.
+  record, the replay asserts the two producer-id → `DepFlags` mappings are
+  equal (same producers and same per-producer flags); if they diverge,
+  `deps.json` is not written and the function returns non-zero.
   This is the guarantee against silent shotgun modifications — anyone
   who changes `compute_task_fanin` semantics will trip the gate
   immediately and know to update the annotated mirror.
@@ -151,10 +153,12 @@ The standard SceneTest path
   ],
   "edges": [
     {"pred": "0", "succ": "4294967296", "arg": 0, "source": "creator",
+     "flags": ["wait", "retain"],
      "tensor_id": "13451765318376212391", "consumer_dtype": "FLOAT32",
      "consumer_shape": [16384],
      "consumer_start_offset": "0", "consumer_strides": [1]},
     {"pred": "4294967296", "succ": "4294967298", "arg": 0, "source": "tensormap",
+     "flags": ["wait"],
      "overlap": "covered",
      "tensor_id": "9514117477438350967", "consumer_dtype": "FLOAT32",
      "consumer_shape": [16384],
@@ -210,6 +214,7 @@ Each edge is `{pred, succ}` plus annotation. Fields:
 | `pred`, `succ` | uint64 (string) | always | `PTO2TaskId::raw` of producer and consumer |
 | `arg` | int32 | always | Consumer's arg-slot index; `-1` for `explicit` source |
 | `source` | string | always | `explicit` (from `explicit_deps[]`), `creator` (`owner_task_id` retention), or `tensormap` (overlap lookup hit) |
+| `flags` | string array | always | Subset of `["wait", "retain"]` — the edge's `DepFlags`. `wait` = ordering (readiness); `retain` = producer lifetime held until the consumer releases. `creator` edges are `["wait","retain"]`; `tensormap` edges `["wait"]`. `explicit` edges are **always recorded as `["wait","retain"]`**: the `DepGenRecord` does not carry per-dep kinds, so a replayed explicit dep cannot distinguish the ordering-only `CoreTaskArgsWithDeps::add_dep_wait()` API from the default. The differential gate is unaffected (both passes read the same constant). At runtime an `add_dep_wait()` edge is genuinely `["wait"]`; that distinction is a known replay limitation, not written to `deps.json`. |
 | `overlap` | string | `source=tensormap` | `covered` (producer slice fully contains consumer slice) or `other` |
 | `tensor_id` | uint64 (string) | not `explicit` | Identity of the underlying tensor; cross-references `tensors[]` |
 | `consumer_dtype` | string | not `explicit` | Element type the consumer reads as |

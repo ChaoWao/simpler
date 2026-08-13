@@ -87,11 +87,138 @@ TEST_F(OrchestratorFaninTest, DuplicateExplicitProducerAddsOneFanin) {
 
     ASSERT_NE(consumer_slot.payload, nullptr);
     EXPECT_EQ(consumer_slot.payload->fanin_actual_count, 1);
-    EXPECT_EQ(consumer_slot.payload->fanin_inline_slot_states[0], &producer_slot);
+    EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].slot_state(), &producer_slot);
+    // A plain set_dependencies() dep is conservative RETAIN: DEP_WAIT|DEP_RETAIN.
+    EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
     // fanout_count is bit-packed: bit31 (PTO2_FANOUT_SCOPE_BIT) is the owning-scope
     // ref, low bits the consumer count. The duplicate explicit dep is deduped to a
     // single consumer, so this is scope + 1.
     EXPECT_EQ(producer_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);
+}
+
+// An explicit ordering-only dep (the primitive add_dep_wait() lowers to) yields a
+// DEP_WAIT edge, not the conservative DEP_WAIT|DEP_RETAIN default.
+TEST_F(OrchestratorFaninTest, ExplicitWaitDepProducesWaitOnlyEdge) {
+    orch.begin_scope();
+
+    CoreTaskArgs producer_args;
+    TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+
+    PTO2TaskId deps[] = {producer.task_id()};
+    DepFlags kinds[] = {DEP_WAIT};
+    CoreTaskArgs consumer_args;
+    consumer_args.set_dependencies_with_kinds(deps, kinds, 1);
+    TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);
+    ASSERT_TRUE(consumer.task_id().is_valid());
+
+    auto &consumer_slot =
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local());
+    ASSERT_NE(consumer_slot.payload, nullptr);
+    ASSERT_EQ(consumer_slot.payload->fanin_actual_count, 1);
+    EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT);
+}
+
+// The same producer reached with different kinds OR-accumulates into one edge:
+// WAIT-only first, then WAIT|RETAIN folds RETAIN in, claiming exactly one pin.
+TEST_F(OrchestratorFaninTest, DuplicateProducerOrAccumulatesFlags) {
+    orch.begin_scope();
+
+    CoreTaskArgs producer_args;
+    TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+
+    PTO2TaskId deps[] = {producer.task_id(), producer.task_id()};
+    DepFlags kinds[] = {DEP_WAIT, DEP_WAIT | DEP_RETAIN};
+    CoreTaskArgs consumer_args;
+    consumer_args.set_dependencies_with_kinds(deps, kinds, 2);
+    TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);
+    ASSERT_TRUE(consumer.task_id().is_valid());
+
+    auto &producer_slot =
+        sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local());
+    auto &consumer_slot =
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local());
+    ASSERT_NE(consumer_slot.payload, nullptr);
+    ASSERT_EQ(consumer_slot.payload->fanin_actual_count, 1);
+    EXPECT_EQ(consumer_slot.payload->fanin_inline_edges[0].flags(), DEP_WAIT | DEP_RETAIN);
+    EXPECT_EQ(producer_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);
+}
+
+// The duplicate lands in the spill region (>64 fanin), exercising
+// or_flags_into_existing's spill lookup: the dup folds (65 edges, not 66), claims
+// exactly one pin, and OR-accumulates its flags into the spilled edge.
+TEST_F(OrchestratorFaninTest, DuplicateProducerInSpillRegionDedups) {
+    orch.begin_scope();
+
+    constexpr int kProducers = PTO2_FANIN_INLINE_CAP + 1;  // 65: the last one spills
+    std::vector<TaskOutputTensors> producers;
+    producers.reserve(kProducers);
+    for (int i = 0; i < kProducers; i++) {
+        CoreTaskArgs a;
+        producers.push_back(orch.submit_dummy_task(a));
+        ASSERT_TRUE(producers.back().task_id().is_valid());
+    }
+
+    std::vector<PTO2TaskId> deps;
+    std::vector<DepFlags> kinds;
+    deps.reserve(kProducers + 1);
+    kinds.reserve(kProducers + 1);
+    for (auto &p : producers) {
+        deps.push_back(p.task_id());
+        kinds.push_back(DEP_WAIT);  // the 65th (first spill edge) starts WAIT-only
+    }
+    deps.push_back(producers.back().task_id());  // duplicate the spilled 65th ...
+    kinds.push_back(DEP_WAIT | DEP_RETAIN);      // ... contributing RETAIN via the fold
+
+    CoreTaskArgs consumer_args;
+    consumer_args.set_dependencies_with_kinds(deps.data(), kinds.data(), static_cast<uint32_t>(deps.size()));
+    TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);
+    ASSERT_TRUE(consumer.task_id().is_valid());
+
+    auto &consumer_slot =
+        sm_handle->header->rings[consumer.task_id().ring()].get_slot_state_by_task_id(consumer.task_id().local());
+    ASSERT_NE(consumer_slot.payload, nullptr);
+    PTO2TaskPayload *payload = consumer_slot.payload;
+    EXPECT_EQ(payload->fanin_actual_count, kProducers);  // duplicate folded, not 66
+
+    PTO2TaskId dup = producers.back().task_id();
+    auto &dup_slot = sm_handle->header->rings[dup.ring()].get_slot_state_by_task_id(dup.local());
+    EXPECT_EQ(dup_slot.fanout_count, PTO2_FANOUT_SCOPE_BIT + 1);  // one pin, not two
+
+    // The first spilled edge is the duplicated producer; its flags OR-folded to
+    // WAIT|RETAIN across the two discovery kinds.
+    ASSERT_NE(payload->fanin_spill_pool, nullptr);
+    PTO2FaninPool &spill_pool = *payload->fanin_spill_pool;
+    PTO2FaninSpillEntry &spill_edge = spill_pool.base[payload->fanin_spill_start % spill_pool.capacity];
+    EXPECT_EQ(spill_edge.slot_state(), &dup_slot);
+    EXPECT_EQ(spill_edge.flags(), DEP_WAIT | DEP_RETAIN);
+}
+
+// The all-completed fast path (wire_fanin_task skipped) still drops an
+// ordering-only producer's submit->wire pin.
+TEST_F(OrchestratorFaninTest, AllCompletedFastPathReleasesWaitOnlyPin) {
+    orch.begin_scope();
+
+    CoreTaskArgs producer_args;
+    TaskOutputTensors producer = orch.submit_dummy_task(producer_args);
+    ASSERT_TRUE(producer.task_id().is_valid());
+    auto &producer_slot =
+        sm_handle->header->rings[producer.task_id().ring()].get_slot_state_by_task_id(producer.task_id().local());
+    // COMPLETED but not consumed (the open scope still pins it): the consumer takes
+    // the all-completed fast path.
+    producer_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    int32_t rc_before = producer_slot.fanout_refcount.load();
+
+    PTO2TaskId deps[] = {producer.task_id()};
+    DepFlags kinds[] = {DEP_WAIT};  // ordering-only
+    CoreTaskArgs consumer_args;
+    consumer_args.set_dependencies_with_kinds(deps, kinds, 1);
+    TaskOutputTensors consumer = orch.submit_dummy_task(consumer_args);
+    ASSERT_TRUE(consumer.task_id().is_valid());
+
+    // The fast path released the ordering-only pin.
+    EXPECT_EQ(producer_slot.fanout_refcount.load(), rc_before + 1);
 }
 
 TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapState) {

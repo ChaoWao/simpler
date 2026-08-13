@@ -20,9 +20,9 @@
  *
  *   ORACLE pass (read-only contract):
  *     Drives `compute_task_fanin` (the same template the device orchestrator
- *     uses in pto_orchestrator.cpp:submit_task) against `tm_oracle`. Emits
- *     only PTO2TaskId values — the canonical set of producer IDs the runtime
- *     would have wired. We never widen this template's emit signature: this
+ *     uses in pto_orchestrator.cpp:submit_task) against `tm_oracle`. Its emit
+ *     fires with (PTO2TaskId, DepFlags) — the canonical (producer, WAIT/RETAIN)
+ *     mapping the runtime would have wired, OR-accumulated per producer. This
  *     pass IS the contract, and any future change to `compute_task_fanin`
  *     automatically refreshes the oracle.
  *
@@ -33,12 +33,13 @@
  *     replay can record per-edge tensor metadata (producer/consumer
  *     shape/offset, dtype, version).
  *
- * After both passes finish per record, we compare the producer-ID set the
- * oracle emitted to the producer-ID set the annot pass emitted. They MUST
- * match. If they diverge, deps.json is not written and the function returns
- * non-zero — this is the "no shotgun modifications" guarantee: anyone who
- * changes `compute_task_fanin` will trip this gate immediately and know to
- * mirror the change in the annot pass.
+ * After both passes finish per record, we compare the (producer -> DepFlags)
+ * mapping the oracle emitted to the one the annot pass emitted. They MUST
+ * match on both the producer set and each producer's accumulated flags. If they
+ * diverge, deps.json is not written and the function returns non-zero — this is
+ * the "no shotgun modifications" guarantee: anyone who changes
+ * `compute_task_fanin`'s producers or edge flags trips this gate immediately and
+ * knows to mirror the change in the annot pass.
  *
  * STEP 1 (explicit_deps) is emitted at the call site (per pto_dep_compute.h's
  * "kept at call site" note); both passes run the same explicit-deps loop, so
@@ -130,6 +131,21 @@ const char *edge_source_str(EdgeSource s) {
     return "unknown";
 }
 
+// JSON array of the DepFlags bits set on an edge, e.g. ["wait","retain"].
+void write_dep_flags(std::ostream &out, DepFlags flags) {
+    out << '[';
+    bool first = true;
+    if (dep_has_wait(flags)) {
+        out << "\"wait\"";
+        first = false;
+    }
+    if (dep_has_retain(flags)) {
+        if (!first) out << ',';
+        out << "\"retain\"";
+    }
+    out << ']';
+}
+
 const char *overlap_status_str(OverlapStatus s) {
     switch (s) {
     case OverlapStatus::COVERED:
@@ -154,6 +170,7 @@ struct EdgeAnnot {
     uint64_t succ;
     int32_t consumer_arg_idx;  // -1 for EXPLICIT (not tied to a tensor arg)
     EdgeSource source;
+    DepFlags flags;         // per-edge WAIT/RETAIN semantics carried into deps.json
     OverlapStatus overlap;  // only meaningful for TENSORMAP
     uint64_t tensor_id;     // 0 for EXPLICIT
     // Consumer side (the ChipTensor the submitting task is reading).
@@ -373,6 +390,8 @@ bool write_deps_json(
         out << "{\"pred\":\"" << e.pred << "\",\"succ\":\"" << e.succ << '"';
         out << ",\"arg\":" << e.consumer_arg_idx;
         out << ",\"source\":\"" << edge_source_str(e.source) << '"';
+        out << ",\"flags\":";
+        write_dep_flags(out, e.flags);
         if (e.source == EdgeSource::TENSORMAP) {
             out << ",\"overlap\":\"" << overlap_status_str(e.overlap) << '"';
         }
@@ -516,13 +535,14 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
     TensorRef tref_buf[CORE_MAX_TENSOR_ARGS];
     TensorArgType atype_buf[CORE_MAX_TENSOR_ARGS];
 
-    // Per-record dedup of producer IDs — must match runtime's
+    // Per-record producer ID -> accumulated DepFlags — must match runtime's
     // PTO2FaninBuilder::append_fanin_or_fail semantics, which collapses STEP 1
     // (explicit_deps) + STEP A (creator retention) + STEP B (tensormap lookup)
-    // into a single per-task fanin list. Both oracle and annot use this same
-    // semantics so the divergence check is meaningful.
-    std::unordered_set<uint64_t> oracle_preds;
-    std::unordered_set<uint64_t> annot_preds;
+    // into a single per-task fanin edge and OR-accumulates its flags. Both oracle
+    // and annot use this same semantics so the divergence check compares the
+    // (producer, flags) mapping rather than the producer-ID set alone.
+    std::unordered_map<uint64_t, DepFlags> oracle_preds;
+    std::unordered_map<uint64_t, DepFlags> annot_preds;
 
     // Scratch buffer for assembling full dep lists across overflow chains.
     // Declared outside the loop so it can be reused (clear() keeps capacity).
@@ -683,24 +703,29 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         // gathered base+chain buffer on overflow path).
         for (int32_t i = 0; i < dc; i++) {
             uint64_t pred_raw = deps_data[i];
-            if (oracle_preds.insert(pred_raw).second) {
-                // First time this pred is seen at runtime call site.
-            }
-            if (annot_preds.insert(pred_raw).second) {
+            // Explicit deps are recorded conservatively as DEP_WAIT|DEP_RETAIN;
+            // the DepGenRecord does not carry per-dep kinds, matching Arg's
+            // set_dependencies default.
+            oracle_preds[pred_raw] |= (DEP_WAIT | DEP_RETAIN);
+            bool first = annot_preds.find(pred_raw) == annot_preds.end();
+            annot_preds[pred_raw] |= (DEP_WAIT | DEP_RETAIN);
+            if (first) {
                 EdgeAnnot e{};
                 e.pred = pred_raw;
                 e.succ = rec.task_id;
                 e.consumer_arg_idx = -1;
                 e.source = EdgeSource::EXPLICIT;
+                e.flags = DEP_WAIT | DEP_RETAIN;
                 annot_edges.push_back(e);
             }
         }
 
         // ============ ORACLE pass — drive compute_task_fanin ============
-        bool ok = compute_task_fanin(inputs, tm_oracle, in_manual_scope, [&](PTO2TaskId producer) -> bool {
-            oracle_preds.insert(producer.raw);
-            return true;
-        });
+        bool ok =
+            compute_task_fanin(inputs, tm_oracle, in_manual_scope, [&](PTO2TaskId producer, DepFlags kind) -> bool {
+                oracle_preds[producer.raw] |= kind;
+                return true;
+            });
         if (!ok) {
             LOG_ERROR("dep_gen replay: compute_task_fanin returned fatal at task_id=%" PRIu64, rec.task_id);
             tm_oracle.destroy();
@@ -713,7 +738,9 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
             inputs, tm_annot, in_manual_scope,
             // emit_creator(producer, arg_idx, consumer_tensor)
             [&](PTO2TaskId producer, int32_t arg_idx, const ChipTensor &consumer) {
-                if (!annot_preds.insert(producer.raw).second) {
+                bool first = annot_preds.find(producer.raw) == annot_preds.end();
+                annot_preds[producer.raw] |= (DEP_WAIT | DEP_RETAIN);
+                if (!first) {
                     return;  // already covered by an earlier emit on this record
                 }
                 EdgeAnnot e{};
@@ -721,6 +748,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 e.succ = rec.task_id;
                 e.consumer_arg_idx = arg_idx;
                 e.source = EdgeSource::CREATOR;
+                e.flags = DEP_WAIT | DEP_RETAIN;
                 e.tensor_id = make_tensor_id(consumer.buffer.addr, consumer.version);
                 fill_consumer(e, consumer);
                 annot_edges.push_back(e);
@@ -735,12 +763,13 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 // producers, both yield their own edges. The producer-id-set
                 // comparison below uses annot_preds, which dedups by pred
                 // only, matching runtime PTO2FaninBuilder semantics.
-                annot_preds.insert(producer.raw);
+                annot_preds[producer.raw] |= DEP_WAIT;
                 EdgeAnnot e{};
                 e.pred = producer.raw;
                 e.succ = rec.task_id;
                 e.consumer_arg_idx = arg_idx;
                 e.source = EdgeSource::TENSORMAP;
+                e.flags = DEP_WAIT;
                 e.overlap = status;
                 e.tensor_id = make_tensor_id(entry.buffer_addr, entry.version);
                 fill_consumer(e, consumer);
@@ -755,15 +784,21 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 "dep_gen replay: DIVERGENCE at task_id=%" PRIu64 " (rec_idx=%zu): oracle has %zu preds, annot has %zu",
                 rec.task_id, rec_i, oracle_preds.size(), annot_preds.size()
             );
-            // Log the symmetric difference for debugging.
-            for (uint64_t p : oracle_preds) {
-                if (annot_preds.find(p) == annot_preds.end()) {
-                    LOG_ERROR("  only-in-oracle pred: %" PRIu64, p);
+            // Log the symmetric difference (missing preds and flag mismatches).
+            for (const auto &[p, f] : oracle_preds) {
+                auto it = annot_preds.find(p);
+                if (it == annot_preds.end()) {
+                    LOG_ERROR("  only-in-oracle pred: %" PRIu64 " flags=%u", p, static_cast<unsigned>(f));
+                } else if (it->second != f) {
+                    LOG_ERROR(
+                        "  flags mismatch pred: %" PRIu64 " oracle=%u annot=%u", p, static_cast<unsigned>(f),
+                        static_cast<unsigned>(it->second)
+                    );
                 }
             }
-            for (uint64_t p : annot_preds) {
+            for (const auto &[p, f] : annot_preds) {
                 if (oracle_preds.find(p) == oracle_preds.end()) {
-                    LOG_ERROR("  only-in-annot  pred: %" PRIu64, p);
+                    LOG_ERROR("  only-in-annot  pred: %" PRIu64 " flags=%u", p, static_cast<unsigned>(f));
                 }
             }
             tm_oracle.destroy();

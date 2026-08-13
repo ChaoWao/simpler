@@ -71,26 +71,29 @@ public:
     // the convenience layer reach dependencies only through add_dep() below.
 
     /**
-     * Append one or more dependencies to the bundled buffer. May be called
-     * multiple times; deps accumulate. Variadic accepts any non-zero number
-     * of PTO2TaskId arguments.
+     * Append one or more RETAIN dependencies to the bundled buffer: the producer
+     * is kept alive (its slot/output buffer retained) until this consumer
+     * completes. This is the conservative default — use it when the consumer reads
+     * a tensor whose buffer the producer allocated. May be called multiple times;
+     * deps accumulate. Variadic accepts any non-zero number of PTO2TaskId args.
      *
      * Overflow (more than MAX_DEP_COUNT total) records an error on the
      * underlying Arg; the error surfaces at submit time.
      */
     template <typename... Ids>
     void add_dep(Ids... ids) {
-        static_assert(sizeof...(Ids) >= 1, "add_dep: at least one task id is required");
-        static_assert(
-            (std::is_same_v<std::decay_t<Ids>, PTO2TaskId> && ...), "add_dep: all arguments must be PTO2TaskId"
-        );
-        if (count_ + sizeof...(Ids) > MAX_DEP_COUNT) {
-            CoreTaskArgs::set_error(
-                "CoreTaskArgsWithDeps::add_dep: dep count exceeds MAX_DEP_COUNT (bump the template arg)"
-            );
-            return;
-        }
-        ((deps_[count_++] = ids), ...);
+        add_dep_impl(DEP_WAIT | DEP_RETAIN, ids...);
+    }
+
+    /**
+     * Append one or more ordering-only (DEP_WAIT) dependencies: the producer is
+     * NOT retained and may be reclaimed as soon as it completes and notifies this
+     * consumer. Use this only when the consumer merely orders after the producer
+     * and does not read a buffer the producer allocated.
+     */
+    template <typename... Ids>
+    void add_dep_wait(Ids... ids) {
+        add_dep_impl(DEP_WAIT, ids...);
     }
 
     /**
@@ -113,12 +116,29 @@ public:
      */
     CoreTaskArgs &finalize_for_submit() {
         CoreTaskArgs::set_dependencies(nullptr, 0);
-        CoreTaskArgs::set_dependencies(deps_, count_);
+        CoreTaskArgs::set_dependencies_with_kinds(deps_, kinds_, count_);
         return *this;
     }
 
 private:
+    template <typename... Ids>
+    void add_dep_impl(DepFlags kind, Ids... ids) {
+        static_assert(sizeof...(Ids) >= 1, "add_dep/add_dep_wait: at least one task id is required");
+        static_assert(
+            (std::is_same_v<std::decay_t<Ids>, PTO2TaskId> && ...),
+            "add_dep/add_dep_wait: all arguments must be PTO2TaskId"
+        );
+        if (count_ + sizeof...(Ids) > MAX_DEP_COUNT) {
+            CoreTaskArgs::set_error(
+                "CoreTaskArgsWithDeps::add_dep/add_dep_wait: dep count exceeds MAX_DEP_COUNT (bump the template arg)"
+            );
+            return;
+        }
+        ((kinds_[count_] = kind, deps_[count_] = ids, ++count_), ...);
+    }
+
     PTO2TaskId deps_[MAX_DEP_COUNT];
+    DepFlags kinds_[MAX_DEP_COUNT];
     uint32_t count_ = 0;
 };
 

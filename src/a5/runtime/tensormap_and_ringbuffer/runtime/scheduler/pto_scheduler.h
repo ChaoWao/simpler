@@ -1170,7 +1170,8 @@ struct PTO2SchedulerState {
 
     /**
      * Cold path: release producers (fanin traversal) + check self for CONSUMED.
-     * Returns fanin edge count for profiling.
+     * Returns the number of retained (DEP_RETAIN) producers actually released —
+     * ordering-only edges dropped their pin at wiring and are skipped here.
      */
 
 #if SIMPLER_SCHED_PROFILING
@@ -1185,7 +1186,16 @@ struct PTO2SchedulerState {
     int32_t on_task_release(PTO2TaskSlotState &slot_state) {
 #endif
         PTO2TaskPayload *payload = slot_state.payload;
-        for_each_fanin_slot_state(*payload, [&](PTO2TaskSlotState *producer_slot_state) {
+        int32_t released = 0;
+        // Only DEP_RETAIN edges still hold a fanout pin at completion: an
+        // ordering-only edge released its submit->wire pin at wiring, so releasing
+        // it again here would over-count fanout_refcount against fanout_count and
+        // break the rc == fc consume invariant.
+        for_each_fanin_slot_state(*payload, [&](PTO2TaskSlotState *producer_slot_state, DepFlags flags) {
+            if (!dep_has_retain(flags)) {
+                return;
+            }
+            released++;
 #if SIMPLER_SCHED_PROFILING
             release_producer(*producer_slot_state, fanin_atomics);
 #else
@@ -1207,7 +1217,7 @@ struct PTO2SchedulerState {
 #else
         check_and_handle_consumed(slot_state);
 #endif
-        return payload->fanin_actual_count;
+        return released;
     }
 
     // === Cold-path API (defined in pto_scheduler.cpp) ===

@@ -519,7 +519,7 @@ struct PTO2FaninPool {
         tail = 1;
         high_water = 0;
         reclaim_task_cursor = 0;
-        base[0].slot_state = nullptr;
+        base[0].clear();
         error_code_ptr = in_error_code_ptr;
     }
 
@@ -528,7 +528,7 @@ struct PTO2FaninPool {
         tail = 1;
         high_water = 0;
         reclaim_task_cursor = 0;
-        base[0].slot_state = nullptr;
+        base[0].clear();
         error_code_ptr = in_error_code_ptr;
     }
 
@@ -575,14 +575,16 @@ struct PTO2FaninPool {
 };
 
 template <typename Fn>
-using PTO2FaninCallbackResult = std::invoke_result_t<Fn &, PTO2TaskSlotState *>;
+using PTO2FaninCallbackResult = std::invoke_result_t<Fn &, PTO2TaskSlotState *, DepFlags>;
 
 template <typename Fn>
 using PTO2FaninForEachReturn = std::conditional_t<std::is_same_v<PTO2FaninCallbackResult<Fn>, void>, void, bool>;
 
+// Visit each fanin edge as (producer slot, DepFlags). Inline and spill entries
+// share the packed PTO2FaninSpillEntry layout, so both are unpacked the same way.
 template <typename InlineSlots, typename Fn>
 inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
-    InlineSlots &&inline_slot_states, int32_t fanin_count, int32_t spill_start, PTO2FaninPool &spill_pool, Fn &&fn
+    InlineSlots &&inline_edges, int32_t fanin_count, int32_t spill_start, PTO2FaninPool &spill_pool, Fn &&fn
 ) {
     using FaninCallbackResult = PTO2FaninCallbackResult<Fn>;
     static_assert(
@@ -593,7 +595,7 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
     if constexpr (std::is_void_v<FaninCallbackResult>) {
         int32_t inline_count = std::min(fanin_count, PTO2_FANIN_INLINE_CAP);
         for (int32_t i = 0; i < inline_count; i++) {
-            fn(inline_slot_states[i]);
+            fn(inline_edges[i].slot_state(), inline_edges[i].flags());
         }
 
         int32_t spill_count = fanin_count - inline_count;
@@ -605,18 +607,18 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
         int32_t first_count = std::min(spill_count, spill_pool.capacity - start_idx);
         PTO2FaninSpillEntry *first = spill_pool.base + start_idx;
         for (int32_t i = 0; i < first_count; i++) {
-            fn(first[i].slot_state);
+            fn(first[i].slot_state(), first[i].flags());
         }
 
         int32_t second_count = spill_count - first_count;
         for (int32_t i = 0; i < second_count; i++) {
-            fn(spill_pool.base[i].slot_state);
+            fn(spill_pool.base[i].slot_state(), spill_pool.base[i].flags());
         }
         return;
     } else {
         int32_t inline_count = std::min(fanin_count, PTO2_FANIN_INLINE_CAP);
         for (int32_t i = 0; i < inline_count; i++) {
-            if (!fn(inline_slot_states[i])) {
+            if (!fn(inline_edges[i].slot_state(), inline_edges[i].flags())) {
                 return false;
             }
         }
@@ -630,14 +632,14 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
         int32_t first_count = std::min(spill_count, spill_pool.capacity - start_idx);
         PTO2FaninSpillEntry *first = spill_pool.base + start_idx;
         for (int32_t i = 0; i < first_count; i++) {
-            if (!fn(first[i].slot_state)) {
+            if (!fn(first[i].slot_state(), first[i].flags())) {
                 return false;
             }
         }
 
         int32_t second_count = spill_count - first_count;
         for (int32_t i = 0; i < second_count; i++) {
-            if (!fn(spill_pool.base[i].slot_state)) {
+            if (!fn(spill_pool.base[i].slot_state(), spill_pool.base[i].flags())) {
                 return false;
             }
         }
@@ -648,8 +650,8 @@ inline PTO2FaninForEachReturn<Fn> for_each_fanin_storage(
 template <typename Fn>
 inline PTO2FaninForEachReturn<Fn> for_each_fanin_slot_state(const PTO2TaskPayload &payload, Fn &&fn) {
     return for_each_fanin_storage(
-        payload.fanin_inline_slot_states, payload.fanin_actual_count, payload.fanin_spill_start,
-        *payload.fanin_spill_pool, static_cast<Fn &&>(fn)
+        payload.fanin_inline_edges, payload.fanin_actual_count, payload.fanin_spill_start, *payload.fanin_spill_pool,
+        static_cast<Fn &&>(fn)
     );
 }
 
