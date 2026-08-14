@@ -15,13 +15,16 @@ it exercises that the sibling cannot:
 
 - `add_mpirun_worker_group` / `MpiL3GroupSpec`: rank 0 must land on the parent
   machine (only it can read the parent-written group manifest, which it then
-  broadcasts over MPI), and every rank publishes READY back over TCP
-  (`ready_host`) — file-based READY cannot cross machines.
+  broadcasts over MPI), and rank 0 marks the group's named shared-memory
+  mailbox READY once every rank reports in over MPI — task and control
+  traffic then flows through that mailbox instead of per-rank TCP sessions.
 - The full-group MPI descriptor exchange: the Global CommDomain members cover
   every device of both ranks, so descriptors are exchanged rank-side over an
   MPI collective and the L4 import fanout is skipped.
 - One TLOAD task per NPU device on each machine (the sibling drives one device
   per side), so the domain spans four windows on the pod pair.
+- One `submit_next_level_group` round over the full MPI group, so the batched
+  `PER_RANK` mailbox envelope path runs alongside the directed dispatches.
 
 ## Prerequisites beyond the sibling example
 
@@ -49,7 +52,7 @@ chmod +x /tmp/simpler-mpi-python
 ## Run on the L4 parent
 
 `192.0.2.10` / `192.0.2.20` are documentation placeholders. Hosts must be
-numeric IPs; the local host is where rank 0 and the READY listener bind:
+numeric IPs; the local host is where rank 0 lands:
 
 ```bash
 source .venv/bin/activate

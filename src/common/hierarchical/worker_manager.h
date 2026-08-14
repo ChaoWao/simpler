@@ -303,6 +303,7 @@ struct WorkerEndpointProgress {
 enum class WorkerEndpointKind : int32_t {
     LOCAL_MAILBOX = 0,
     REMOTE_L3 = 1,
+    MPI_GROUP_MAILBOX = 2,
 };
 
 struct WorkerEndpointCaps {
@@ -374,8 +375,9 @@ public:
         int32_t importer_worker_id, const RemoteBufferExport &export_desc, uint32_t requested_access_flags
     );
     virtual void control_remote_release_import(const RemoteBufferHandle &handle);
-    virtual std::vector<uint8_t>
-    control_remote_domain(remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes);
+    virtual std::vector<uint8_t> control_remote_domain(
+        remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes, bool group_target = false
+    );
     virtual void control_generic(
         uint64_t sub_cmd, const char *shm_name, size_t payload_size, double timeout_s, const uint8_t *digest
     );
@@ -600,8 +602,9 @@ public:
         int32_t importer_worker_id, const RemoteBufferExport &export_desc, uint32_t requested_access_flags
     );
     void control_remote_release_import(const RemoteBufferHandle &handle);
-    std::vector<uint8_t>
-    control_remote_domain(remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes);
+    std::vector<uint8_t> control_remote_domain(
+        remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes, bool group_target = false
+    );
     void control_generic(
         uint64_t sub_cmd, const char *shm_name, size_t payload_size, double timeout_s, const uint8_t *digest
     );
@@ -754,7 +757,8 @@ public:
     );
     void control_remote_release_import(const RemoteBufferHandle &handle);
     std::vector<uint8_t> control_remote_domain(
-        int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes
+        int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes,
+        bool group_target = false
     );
 
     // Broadcast CTRL_REGISTER for `digest` to every NEXT_LEVEL worker in

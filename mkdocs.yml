@@ -136,6 +136,7 @@ nav:
       - Remote L3 Worker Design:
           - Overview: remote-l3-worker-design.md
           - Design document index: remote-l3-worker-design/README.md
+      - MPI L3 group mailbox: mpi-l3-mailbox.md
   - Profiling and DFX:
       - Overview: dfx/README.md
       - Profiling Framework: dfx/profiling-framework.md

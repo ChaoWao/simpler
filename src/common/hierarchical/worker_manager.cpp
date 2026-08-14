@@ -170,7 +170,7 @@ RemoteBufferHandle WorkerEndpoint::control_remote_import(int32_t, const RemoteBu
 void WorkerEndpoint::control_remote_release_import(const RemoteBufferHandle &) {
     throw_unsupported_control("control_remote_release_import");
 }
-std::vector<uint8_t> WorkerEndpoint::control_remote_domain(remote_l3::ControlName, const std::vector<uint8_t> &) {
+std::vector<uint8_t> WorkerEndpoint::control_remote_domain(remote_l3::ControlName, const std::vector<uint8_t> &, bool) {
     throw_unsupported_control("control_remote_domain");
 }
 void WorkerEndpoint::control_generic(uint64_t, const char *, size_t, double, const uint8_t *) {
@@ -1514,10 +1514,11 @@ void WorkerThread::control_remote_release_import(const RemoteBufferHandle &handl
     endpoint_->control_remote_release_import(handle);
 }
 
-std::vector<uint8_t>
-WorkerThread::control_remote_domain(remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes) {
+std::vector<uint8_t> WorkerThread::control_remote_domain(
+    remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes, bool group_target
+) {
     if (!endpoint_) throw std::runtime_error("control_remote_domain: null endpoint");
-    return endpoint_->control_remote_domain(control_name, command_bytes);
+    return endpoint_->control_remote_domain(control_name, command_bytes, group_target);
 }
 
 void WorkerThread::control_generic(
@@ -1907,7 +1908,7 @@ void WorkerManager::control_remote_release_import(const RemoteBufferHandle &hand
 }
 
 std::vector<uint8_t> WorkerManager::control_remote_domain(
-    int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes
+    int worker_id, remote_l3::ControlName control_name, const std::vector<uint8_t> &command_bytes, bool group_target
 ) {
     WorkerThread *wt = get_worker_by_id(WorkerType::NEXT_LEVEL, worker_id);
     if (wt == nullptr) {
@@ -1919,7 +1920,7 @@ std::vector<uint8_t> WorkerManager::control_remote_domain(
     case remote_l3::ControlName::RELEASE_DOMAIN:
     case remote_l3::ControlName::COPY_TO_DOMAIN:
     case remote_l3::ControlName::COPY_FROM_DOMAIN:
-        return wt->control_remote_domain(control_name, command_bytes);
+        return wt->control_remote_domain(control_name, command_bytes, group_target);
     default:
         throw std::runtime_error("control_remote_domain: control name is not a domain operation");
     }

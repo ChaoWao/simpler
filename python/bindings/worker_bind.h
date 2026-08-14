@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "ring.h"
+#include "mpi_group_mailbox.h"
 #include "orchestrator.h"
 #include "types.h"
 #include "worker.h"
@@ -200,7 +201,8 @@ inline std::vector<RemoteTaskArgsSidecar> parse_remote_task_args_sidecars(nb::ha
 
 // ---------------------------------------------------------------------------
 // Mailbox acquire/release helpers (exposed to Python as _mailbox_load_i32 /
-// _mailbox_store_i32). Mirror WorkerThread::read_mailbox_state /
+// _mailbox_store_i32, consumed by simpler.worker and
+// simpler.mpi_group_mailbox). Mirror WorkerThread::read_mailbox_state /
 // write_mailbox_state in worker_manager.cpp so the Python side of the mailbox
 // handshake uses the same memory order as the C++ side. Without these, a
 // plain struct.pack_into("i", ...) on the Python child followed by the parent
@@ -474,6 +476,20 @@ inline void bind_worker(nb::module_ &m) {
             nb::arg("health_host"), nb::arg("health_port"), nb::arg("attach_timeout_s") = 30.0,
             nb::arg("runtime_timeout_s") = 30.0, "Register a REMOTE_L3 endpoint after the session reports HELLO READY."
         )
+        .def(
+            "add_mpi_group_mailbox",
+            [](Worker &self, const std::vector<int32_t> &worker_ids, const std::vector<uint64_t> &session_ids,
+               uint64_t mailbox_ptr, size_t mailbox_bytes, int mpirun_pid, double runtime_timeout_s) {
+                nb::gil_scoped_release release;
+                self.add_mpi_group_mailbox(
+                    worker_ids, session_ids, reinterpret_cast<void *>(mailbox_ptr), mailbox_bytes, mpirun_pid,
+                    runtime_timeout_s
+                );
+            },
+            nb::arg("worker_ids"), nb::arg("session_ids"), nb::arg("mailbox_ptr"), nb::arg("mailbox_bytes"),
+            nb::arg("mpirun_pid"), nb::arg("runtime_timeout_s") = 30.0,
+            "Register one shared-memory MPI group endpoint for each worker id."
+        )
 
         // Release the GIL while starting the Scheduler thread so another Python
         // thread can run during it — e.g. a concurrent close() observing
@@ -732,7 +748,7 @@ inline void bind_worker(nb::module_ &m) {
         )
         .def(
             "remote_domain_control",
-            [](Worker &self, int worker_id, uint32_t control_name, nb::bytes command) {
+            [](Worker &self, int worker_id, uint32_t control_name, nb::bytes command, bool group_target) {
                 std::vector<uint8_t> command_bytes(
                     reinterpret_cast<const uint8_t *>(command.c_str()),
                     reinterpret_cast<const uint8_t *>(command.c_str()) + command.size()
@@ -741,13 +757,14 @@ inline void bind_worker(nb::module_ &m) {
                 {
                     nb::gil_scoped_release release;
                     result = self.remote_domain_control(
-                        worker_id, static_cast<remote_l3::ControlName>(control_name), command_bytes
+                        worker_id, static_cast<remote_l3::ControlName>(control_name), command_bytes, group_target
                     );
                 }
                 return nb::bytes(reinterpret_cast<const char *>(result.data()), result.size());
             },
-            nb::arg("worker_id"), nb::arg("control_name"), nb::arg("command"),
-            "Send one Global CommDomain control to a remote L3 endpoint."
+            nb::arg("worker_id"), nb::arg("control_name"), nb::arg("command"), nb::arg("group_target") = false,
+            "Send one Global CommDomain control to a remote L3 endpoint. With group_target, a "
+            "group-capable transport delivers the control to every rank of the worker's group."
         )
         .def(
             "broadcast_unregister_all",
@@ -890,6 +907,70 @@ inline void bind_worker(nb::module_ &m) {
             mailbox_store_i32(addr, value);
         },
         nb::arg("addr"), nb::arg("value"), "Release-store a 32-bit mailbox word at `addr`."
+    );
+    m.def(
+        "_mailbox_wait_i32",
+        [](uint64_t addr, int32_t expected, double timeout_s) {
+            nb::gil_scoped_release release;
+            mpi_group_mailbox::wait_word(reinterpret_cast<int32_t *>(addr), expected, timeout_s);
+        },
+        nb::arg("addr"), nb::arg("expected"), nb::arg("timeout_s"),
+        "Block (GIL released) until the mailbox word at `addr` differs from `expected`, a peer "
+        "wakes the word, or `timeout_s` elapses. May return spuriously; callers re-check the word."
+    );
+    m.def(
+        "_mpi_mailbox_layout",
+        []() {
+            using namespace mpi_group_mailbox;
+            nb::dict layout;
+            layout["MAGIC"] = nb::bytes(reinterpret_cast<const char *>(MAGIC), sizeof(MAGIC));
+            layout["PROTOCOL_VERSION"] = PROTOCOL_VERSION;
+            layout["HEADER_BYTES"] = HEADER_BYTES;
+            layout["PAYLOAD_BYTES"] = PAYLOAD_BYTES;
+            layout["ERROR_BYTES"] = ERROR_BYTES;
+            layout["REQUEST_OFFSET"] = REQUEST_OFFSET;
+            layout["RESPONSE_OFFSET"] = RESPONSE_OFFSET;
+            layout["ERROR_OFFSET"] = ERROR_OFFSET;
+            layout["MAILBOX_BYTES"] = MAILBOX_BYTES;
+            layout["OFF_MAGIC"] = OFF_MAGIC;
+            layout["OFF_PROTOCOL_VERSION"] = OFF_PROTOCOL_VERSION;
+            layout["OFF_HEADER_BYTES"] = OFF_HEADER_BYTES;
+            layout["OFF_MAILBOX_BYTES"] = OFF_MAILBOX_BYTES;
+            layout["OFF_WORLD_SIZE"] = OFF_WORLD_SIZE;
+            layout["OFF_GROUP_STATE"] = OFF_GROUP_STATE;
+            layout["OFF_REQUEST_STATE"] = OFF_REQUEST_STATE;
+            layout["OFF_SEQUENCE_ID"] = OFF_SEQUENCE_ID;
+            layout["OFF_OPCODE"] = OFF_OPCODE;
+            layout["OFF_TARGET"] = OFF_TARGET;
+            layout["OFF_TARGET_RANK"] = OFF_TARGET_RANK;
+            layout["OFF_REQUEST_COUNT"] = OFF_REQUEST_COUNT;
+            layout["OFF_REQUEST_BYTES"] = OFF_REQUEST_BYTES;
+            layout["OFF_RESPONSE_COUNT"] = OFF_RESPONSE_COUNT;
+            layout["OFF_RESPONSE_BYTES"] = OFF_RESPONSE_BYTES;
+            layout["OFF_ERROR_BYTES"] = OFF_ERROR_BYTES;
+            layout["RESERVED_OFFSET"] = RESERVED_OFFSET;
+            layout["GROUP_STATE_INITIALIZING"] = static_cast<int32_t>(GroupState::INITIALIZING);
+            layout["GROUP_STATE_READY"] = static_cast<int32_t>(GroupState::READY);
+            layout["GROUP_STATE_TERMINAL"] = static_cast<int32_t>(GroupState::TERMINAL);
+            layout["GROUP_STATE_CLOSED"] = static_cast<int32_t>(GroupState::CLOSED);
+            layout["REQUEST_STATE_IDLE"] = static_cast<int32_t>(RequestState::IDLE);
+            layout["REQUEST_STATE_REQUEST_READY"] = static_cast<int32_t>(RequestState::REQUEST_READY);
+            layout["REQUEST_STATE_TASK_ACCEPTED"] = static_cast<int32_t>(RequestState::TASK_ACCEPTED);
+            layout["REQUEST_STATE_TASK_DONE"] = static_cast<int32_t>(RequestState::TASK_DONE);
+            layout["REQUEST_STATE_TASK_FAILED"] = static_cast<int32_t>(RequestState::TASK_FAILED);
+            layout["REQUEST_STATE_SHUTDOWN_READY"] = static_cast<int32_t>(RequestState::SHUTDOWN_READY);
+            layout["REQUEST_STATE_SHUTDOWN_DONE"] = static_cast<int32_t>(RequestState::SHUTDOWN_DONE);
+            layout["OPCODE_TASK"] = static_cast<uint32_t>(Opcode::TASK);
+            layout["OPCODE_CONTROL"] = static_cast<uint32_t>(Opcode::CONTROL);
+            layout["OPCODE_PING"] = static_cast<uint32_t>(Opcode::PING);
+            layout["OPCODE_SHUTDOWN"] = static_cast<uint32_t>(Opcode::SHUTDOWN);
+            layout["TARGET_GROUP"] = static_cast<uint32_t>(Target::GROUP);
+            layout["TARGET_RANK"] = static_cast<uint32_t>(Target::RANK);
+            layout["TARGET_PER_RANK"] = static_cast<uint32_t>(Target::PER_RANK);
+            return layout;
+        },
+        "The MPI group mailbox wire layout as declared by mpi_group_mailbox.h, keyed by constant "
+        "name. Backs the Python/C++ layout-agreement test."
     );
     m.def(
         "_read_control_copy_request",

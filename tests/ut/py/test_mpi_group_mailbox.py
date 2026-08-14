@@ -1,0 +1,338 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+from __future__ import annotations
+
+import ctypes
+import time
+
+import pytest
+import simpler.mpi_group_mailbox as mailbox_mod
+from _task_interface import _mpi_mailbox_layout  # pyright: ignore[reportMissingImports]
+from simpler.mpi_group_mailbox import (
+    MAILBOX_REQUEST_OFFSET,
+    MailboxGroupState,
+    MailboxOpcode,
+    MailboxRequestState,
+    MailboxTarget,
+    MpiGroupError,
+    MpiGroupMailbox,
+    MpiRankError,
+    _as_byte_view,
+    open_rank_mailbox,
+)
+
+
+def test_shared_memory_view_is_normalized_to_unsigned_bytes():
+    raw = (ctypes.c_ubyte * 4)()
+    original_view = memoryview(raw)
+    byte_view = _as_byte_view(original_view)
+
+    byte_view[:] = b"test"
+
+    assert byte_view is not original_view
+    assert byte_view.format == "B"
+    assert byte_view.ndim == 1
+    assert bytes(raw) == b"test"
+
+
+def test_named_mailbox_reopens_by_manifest_name_and_only_rank0_opens():
+    owner = MpiGroupMailbox.create(world_size=2)
+    reopened = None
+    try:
+        manifest = owner.manifest()
+        assert open_rank_mailbox(manifest, rank=1) is None
+
+        reopened = open_rank_mailbox(manifest, rank=0)
+        assert reopened is not None
+        assert reopened.name == owner.name
+        assert reopened.world_size == 2
+        assert reopened.group_state is MailboxGroupState.INITIALIZING
+
+        reopened.publish_ready()
+        assert owner.group_state is MailboxGroupState.READY
+    finally:
+        if reopened is not None:
+            reopened.close()
+        owner.close(unlink=True)
+
+
+@pytest.mark.parametrize(
+    ("target", "target_rank", "payloads"),
+    [
+        (MailboxTarget.GROUP, -1, (b"broadcast",)),
+        (MailboxTarget.RANK, 1, (b"rank-1",)),
+        (MailboxTarget.PER_RANK, -1, (b"rank-0", b"rank-1")),
+    ],
+)
+def test_request_envelope_round_trips_all_target_types(target, target_rank, payloads):
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=1,
+            opcode=MailboxOpcode.TASK,
+            target=target,
+            target_rank=target_rank,
+            payloads=payloads,
+        )
+
+        request = mailbox.accept_request(last_sequence_id=0)
+        assert request.sequence_id == 1
+        assert request.opcode is MailboxOpcode.TASK
+        assert request.target is target
+        assert request.target_rank == target_rank
+        assert request.payloads == payloads
+        assert mailbox.request_state is MailboxRequestState.TASK_ACCEPTED
+
+        mailbox.complete_request(sequence_id=1, payloads=(b"ok",))
+        result = mailbox.read_result(sequence_id=1)
+        assert result.payloads == (b"ok",)
+        assert mailbox.request_state is MailboxRequestState.IDLE
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_accept_copies_payload_before_publishing_task_accepted():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=1,
+            opcode=MailboxOpcode.TASK,
+            target=MailboxTarget.RANK,
+            target_rank=0,
+            payloads=(b"immutable-copy",),
+        )
+        request = mailbox.accept_request(last_sequence_id=0)
+        assert mailbox.request_state is MailboxRequestState.TASK_ACCEPTED
+
+        overwrite = b"changed-after-accept"
+        buffer = mailbox._shm.buf  # noqa: SLF001
+        assert buffer is not None
+        buffer[MAILBOX_REQUEST_OFFSET : MAILBOX_REQUEST_OFFSET + len(overwrite)] = overwrite
+        assert request.payloads == (b"immutable-copy",)
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_duplicate_sequence_marks_group_terminal():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=7,
+            opcode=MailboxOpcode.PING,
+            target=MailboxTarget.GROUP,
+            target_rank=-1,
+            payloads=(b"",),
+        )
+        with pytest.raises(MpiGroupError, match="sequence_id 7 is not newer than 7"):
+            mailbox.accept_request(last_sequence_id=7)
+        assert mailbox.group_state is MailboxGroupState.TERMINAL
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_rank_failure_is_reported_with_rank_and_terminal_is_reusable_only_when_requested():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=1,
+            opcode=MailboxOpcode.TASK,
+            target=MailboxTarget.GROUP,
+            target_rank=-1,
+            payloads=(b"task",),
+        )
+        mailbox.accept_request(last_sequence_id=0)
+        mailbox.fail_request(
+            sequence_id=1,
+            errors=(MpiRankError(rank=1, error_type="ValueError", message="rank one failed"),),
+            terminal=False,
+        )
+        with pytest.raises(MpiGroupError, match=r"rank 1.*ValueError.*rank one failed"):
+            mailbox.read_result(sequence_id=1)
+        assert mailbox.group_state is MailboxGroupState.READY
+
+        mailbox.write_request(
+            sequence_id=2,
+            opcode=MailboxOpcode.PING,
+            target=MailboxTarget.GROUP,
+            target_rank=-1,
+            payloads=(b"",),
+        )
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_terminal_group_rejects_new_requests():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.mark_terminal("collective timed out")
+        with pytest.raises(MpiGroupError, match="collective timed out"):
+            mailbox.write_request(
+                sequence_id=1,
+                opcode=MailboxOpcode.PING,
+                target=MailboxTarget.GROUP,
+                target_rank=-1,
+                payloads=(b"",),
+            )
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_rank0_failure_is_reported_and_marks_terminal():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=1,
+            opcode=MailboxOpcode.CONTROL,
+            target=MailboxTarget.GROUP,
+            target_rank=-1,
+            payloads=(b"control",),
+        )
+        mailbox.accept_request(last_sequence_id=0)
+        mailbox.fail_request(
+            sequence_id=1,
+            errors=(MpiRankError(rank=0, error_type="RuntimeError", message="rank zero exited"),),
+            terminal=True,
+        )
+        with pytest.raises(MpiGroupError, match=r"rank 0.*rank zero exited"):
+            mailbox.read_result(sequence_id=1)
+        assert mailbox.group_state is MailboxGroupState.TERMINAL
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_shutdown_has_distinct_ready_and_done_states():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=1,
+            opcode=MailboxOpcode.SHUTDOWN,
+            target=MailboxTarget.GROUP,
+            target_rank=-1,
+            payloads=(b"shutdown-frame",),
+        )
+        assert mailbox.request_state is MailboxRequestState.SHUTDOWN_READY
+        request = mailbox.accept_request(last_sequence_id=0)
+        assert request.opcode is MailboxOpcode.SHUTDOWN
+        assert mailbox.request_state is MailboxRequestState.TASK_ACCEPTED
+        mailbox.complete_shutdown(sequence_id=1)
+        assert mailbox.request_state is MailboxRequestState.SHUTDOWN_DONE
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_python_and_cpp_mailbox_layouts_agree():
+    layout = dict(_mpi_mailbox_layout())
+    assert layout == {
+        "MAGIC": mailbox_mod.MAILBOX_MAGIC,
+        "PROTOCOL_VERSION": mailbox_mod.MAILBOX_PROTOCOL_VERSION,
+        "HEADER_BYTES": mailbox_mod.MAILBOX_HEADER_BYTES,
+        "PAYLOAD_BYTES": mailbox_mod.MAILBOX_PAYLOAD_BYTES,
+        "ERROR_BYTES": mailbox_mod.MAILBOX_ERROR_BYTES,
+        "REQUEST_OFFSET": mailbox_mod.MAILBOX_REQUEST_OFFSET,
+        "RESPONSE_OFFSET": mailbox_mod.MAILBOX_RESPONSE_OFFSET,
+        "ERROR_OFFSET": mailbox_mod.MAILBOX_ERROR_OFFSET,
+        "MAILBOX_BYTES": mailbox_mod.MAILBOX_SIZE,
+        "OFF_MAGIC": mailbox_mod._OFF_MAGIC,  # noqa: SLF001
+        "OFF_PROTOCOL_VERSION": mailbox_mod._OFF_PROTOCOL_VERSION,  # noqa: SLF001
+        "OFF_HEADER_BYTES": mailbox_mod._OFF_HEADER_BYTES,  # noqa: SLF001
+        "OFF_MAILBOX_BYTES": mailbox_mod._OFF_MAILBOX_BYTES,  # noqa: SLF001
+        "OFF_WORLD_SIZE": mailbox_mod._OFF_WORLD_SIZE,  # noqa: SLF001
+        "OFF_GROUP_STATE": mailbox_mod._OFF_GROUP_STATE,  # noqa: SLF001
+        "OFF_REQUEST_STATE": mailbox_mod._OFF_REQUEST_STATE,  # noqa: SLF001
+        "OFF_SEQUENCE_ID": mailbox_mod._OFF_SEQUENCE_ID,  # noqa: SLF001
+        "OFF_OPCODE": mailbox_mod._OFF_OPCODE,  # noqa: SLF001
+        "OFF_TARGET": mailbox_mod._OFF_TARGET,  # noqa: SLF001
+        "OFF_TARGET_RANK": mailbox_mod._OFF_TARGET_RANK,  # noqa: SLF001
+        "OFF_REQUEST_COUNT": mailbox_mod._OFF_REQUEST_COUNT,  # noqa: SLF001
+        "OFF_REQUEST_BYTES": mailbox_mod._OFF_REQUEST_BYTES,  # noqa: SLF001
+        "OFF_RESPONSE_COUNT": mailbox_mod._OFF_RESPONSE_COUNT,  # noqa: SLF001
+        "OFF_RESPONSE_BYTES": mailbox_mod._OFF_RESPONSE_BYTES,  # noqa: SLF001
+        "OFF_ERROR_BYTES": mailbox_mod._OFF_ERROR_BYTES,  # noqa: SLF001
+        "RESERVED_OFFSET": mailbox_mod._OFF_RESERVED,  # noqa: SLF001
+        "GROUP_STATE_INITIALIZING": int(MailboxGroupState.INITIALIZING),
+        "GROUP_STATE_READY": int(MailboxGroupState.READY),
+        "GROUP_STATE_TERMINAL": int(MailboxGroupState.TERMINAL),
+        "GROUP_STATE_CLOSED": int(MailboxGroupState.CLOSED),
+        "REQUEST_STATE_IDLE": int(MailboxRequestState.IDLE),
+        "REQUEST_STATE_REQUEST_READY": int(MailboxRequestState.REQUEST_READY),
+        "REQUEST_STATE_TASK_ACCEPTED": int(MailboxRequestState.TASK_ACCEPTED),
+        "REQUEST_STATE_TASK_DONE": int(MailboxRequestState.TASK_DONE),
+        "REQUEST_STATE_TASK_FAILED": int(MailboxRequestState.TASK_FAILED),
+        "REQUEST_STATE_SHUTDOWN_READY": int(MailboxRequestState.SHUTDOWN_READY),
+        "REQUEST_STATE_SHUTDOWN_DONE": int(MailboxRequestState.SHUTDOWN_DONE),
+        "OPCODE_TASK": int(MailboxOpcode.TASK),
+        "OPCODE_CONTROL": int(MailboxOpcode.CONTROL),
+        "OPCODE_PING": int(MailboxOpcode.PING),
+        "OPCODE_SHUTDOWN": int(MailboxOpcode.SHUTDOWN),
+        "TARGET_GROUP": int(MailboxTarget.GROUP),
+        "TARGET_RANK": int(MailboxTarget.RANK),
+        "TARGET_PER_RANK": int(MailboxTarget.PER_RANK),
+    }
+
+
+def test_attach_rejects_nonzero_reserved_header_bytes():
+    owner = MpiGroupMailbox.create(world_size=1)
+    buffer = owner._shm.buf  # noqa: SLF001
+    assert buffer is not None
+    try:
+        buffer[200] = 1
+        with pytest.raises(MpiGroupError, match="reserved header bytes"):
+            MpiGroupMailbox(owner._shm, owner=False)  # noqa: SLF001
+    finally:
+        buffer[200] = 0
+        del buffer
+        owner.close(unlink=True)
+
+
+def test_rank_error_json_stays_parseable_when_truncated():
+    mailbox = MpiGroupMailbox.create(world_size=2)
+    try:
+        mailbox.publish_ready()
+        mailbox.write_request(
+            sequence_id=1,
+            opcode=MailboxOpcode.TASK,
+            target=MailboxTarget.GROUP,
+            target_rank=-1,
+            payloads=(b"task",),
+        )
+        mailbox.accept_request(last_sequence_id=0)
+        errors = tuple(MpiRankError(rank=index, error_type="RuntimeError", message="x" * 5000) for index in range(64))
+        mailbox.fail_request(sequence_id=1, errors=errors, terminal=False)
+        with pytest.raises(MpiGroupError) as failure:
+            mailbox.read_result(sequence_id=1)
+        message = str(failure.value)
+        assert "rank 0: RuntimeError:" in message
+        assert "[truncated]" in message
+        assert "more rank errors were dropped" in message
+    finally:
+        mailbox.close(unlink=True)
+
+
+def test_wait_request_state_unblocks_on_mismatch_and_bounds_the_park():
+    mailbox = MpiGroupMailbox.create(world_size=1)
+    try:
+        mailbox.publish_ready()
+        start = time.monotonic()
+        mailbox.wait_request_state(MailboxRequestState.TASK_DONE, timeout_s=30.0)
+        assert time.monotonic() - start < 5.0
+
+        start = time.monotonic()
+        mailbox.wait_request_state(MailboxRequestState.IDLE, timeout_s=0.05)
+        elapsed = time.monotonic() - start
+        assert 0.02 <= elapsed < 5.0
+    finally:
+        mailbox.close(unlink=True)
