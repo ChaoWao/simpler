@@ -338,6 +338,11 @@ class _FakeRegion:
         self.region_id = 42
         self._expired = False
         self._released = False
+        self._chip_release_committed = False
+
+    @property
+    def expired(self) -> bool:
+        return self._expired
 
     def payload_write(self, offset: int, host_buffer, nbytes=None) -> None:
         self._calls.append(("payload_write", offset, host_buffer, nbytes))

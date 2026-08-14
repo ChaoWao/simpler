@@ -156,10 +156,8 @@ class WorkerHostRegionMapping:
     def close(self) -> None:
         if self.closed:
             return
-        try:
-            _worker_host_mapped_region_close(int(self.handle))
-        finally:
-            self.closed = True
+        _worker_host_mapped_region_close(int(self.handle))
+        self.closed = True
 
 
 def decode_region_create_reply(buf: memoryview) -> WorkerChipRegionCreateReply:
@@ -311,6 +309,7 @@ class WorkerChipOrchRegion:
         self._descriptor = desc
         self._worker_host_mapping = worker_host_mapping
         self._released = False
+        self._chip_release_committed = False
         self._poisoned = False
         self._expired = False
 
