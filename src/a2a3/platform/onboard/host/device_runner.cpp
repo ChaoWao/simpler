@@ -217,29 +217,16 @@ void DeviceRunner::set_dep_gen_enabled(bool enable) {
     dep_gen_host_graph_set_enabled(enable);
 }
 
-int DeviceRunner::provision_native_run_resources(uint32_t pipeline_slot) {
-    return ensure_run_stream_set(pipeline_slot);
-}
-
-int DeviceRunner::abandon_native_run_resources(uint32_t pipeline_slot) {
-    return retire_run_aicore_stream(pipeline_slot, RunStreamSlots::CompletionStatus::Unproven);
-}
-
 int DeviceRunner::prepare_execution(
     Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
     std::unique_ptr<PreparedExecution> *prepared
 ) {
     if (prepared == nullptr || *prepared != nullptr) return -1;
-    const unsigned selected_pipeline_slot = pipeline_slot;
     auto execution = std::make_unique<PreparedExecution>(identity, runtime, config, pipeline_slot);
     execution->resources_owned = true;
     auto prepare_rollback = RAIIScopeGuard([this, &execution]() {
         cleanup_execution(*execution, /*retire_aicore=*/false);
     });
-    if (!run_stream_slots_.ready(selected_pipeline_slot)) {
-        LOG_ERROR("run stream set %u was not provisioned during native prepare", selected_pipeline_slot);
-        return -1;
-    }
     const int block_dim = runtime.get_worker_count() / cores_per_blockdim_;
     int launch_aicpu_num = config.aicpu_thread_num;
     // A prior AICore launch/sync error poisoned the device context and the
@@ -444,8 +431,7 @@ int DeviceRunner::prepare_execution(
 
 int DeviceRunner::poll_execution(const ActiveExecution &active) {
     if (active.prepared == nullptr) return SIMPLER_NATIVE_RUN_POLL_ERROR;
-    const uint32_t pipeline_slot = active.prepared->pipeline_slot;
-    return run_stream_slots_.poll(pipeline_slot, [](void *aicpu, void *aicore) {
+    return run_streams_.poll([](void *aicpu, void *aicore) {
         return query_stream_pair_nonblocking(static_cast<rtStream_t>(aicpu), static_cast<rtStream_t>(aicore));
     });
 }
@@ -453,12 +439,11 @@ int DeviceRunner::poll_execution(const ActiveExecution &active) {
 int DeviceRunner::drain_execution(ActiveExecution &active) {
     if (active.prepared == nullptr || !active.prepared->resources_owned) return -1;
     PreparedExecution &prepared = *active.prepared;
-    const uint32_t pipeline_slot = prepared.pipeline_slot;
     auto drain_cleanup = RAIIScopeGuard([this, &prepared]() {
         cleanup_execution(prepared, /*retire_aicore=*/true);
     });
 
-    int rc = reap_run(pipeline_slot);
+    int rc = reap_run();
     if (rc != 0) {
         // The device/sync error remains authoritative over teardown errors.
         return rc;
@@ -468,7 +453,7 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
     // stale. Publish retirement so cleanup does not replace it with an
     // unproven state after the device result has already been established.
     prepared.aicore_retirement_attempted = true;
-    rc = retire_run_aicore_stream(pipeline_slot, RunStreamSlots::CompletionStatus::Complete);
+    rc = retire_run_aicore_stream(&prepared, RunStreamPair::CompletionStatus::Complete);
     if (rc != 0) return rc;
 
     // Reads device memory, so it must precede KernelArgs/runtime cleanup.
@@ -507,7 +492,7 @@ void DeviceRunner::cleanup_execution(PreparedExecution &prepared, bool retire_ai
     }
     if (retire_aicore && !abandon && !prepared.aicore_retirement_attempted) {
         prepared.aicore_retirement_attempted = true;
-        (void)retire_run_aicore_stream(prepared.pipeline_slot, RunStreamSlots::CompletionStatus::Unproven);
+        (void)retire_run_aicore_stream(&prepared, RunStreamPair::CompletionStatus::Unproven);
     }
     prepared.resources_owned = false;
 }
@@ -547,30 +532,30 @@ int DeviceRunner::create_run_stream(void **out) {
     return 0;
 }
 
-int DeviceRunner::ensure_run_stream_set(unsigned slot) {
-    int rc = run_stream_slots_.acquire(slot);
+int DeviceRunner::ensure_run_streams() {
+    int rc = run_streams_.ensure();
     if (rc != 0) {
-        LOG_ERROR("ensure_run_stream_set(%u) failed: %d", slot, rc);
+        LOG_ERROR("ensure_run_streams failed: %d", rc);
         ACL_LOG_ERROR_DETAIL(rc);
     }
     return rc;
 }
 
-int DeviceRunner::retire_run_aicore_stream(unsigned slot, RunStreamSlots::CompletionStatus completion_status) {
-    int rc = run_stream_slots_.retire_aicore(slot, completion_status);
+int DeviceRunner::retire_run_aicore_stream(const void *owner, RunStreamPair::CompletionStatus completion_status) {
+    int rc = run_streams_.retire(completion_status, owner);
     if (rc != 0) {
-        LOG_ERROR("rtStreamDestroy (run AICore slot %u) failed: %d, slot is now unusable", slot, rc);
+        LOG_ERROR("rtStreamDestroy (run AICore stream) failed: %d, the handle is retained for teardown", rc);
     }
     return rc;
 }
 
-int DeviceRunner::destroy_run_stream_sets() {
+int DeviceRunner::destroy_run_streams() {
     // No pre-destroy sync, for the reason finalize_common() documents for the
     // bootstrap pair: rtStreamDestroy is the supported teardown for a stream
     // left in the error state by an op-timeout.
-    int rc = run_stream_slots_.destroy_all();
+    int rc = run_streams_.destroy();
     if (rc != 0) {
-        LOG_ERROR("destroy_run_stream_sets: a stream survived teardown: %d", rc);
+        LOG_ERROR("destroy_run_streams: a stream survived teardown: %d", rc);
     }
     return rc;
 }
@@ -597,15 +582,18 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
     Runtime &runtime = *prepared.runtime;
     const int num_aicore = prepared.num_aicore;
     const int launch_aicpu_num = prepared.launch_aicpu_num;
-    const unsigned slot = prepared.pipeline_slot;
     // KernelLaunch is the pipeline boundary: this method clears the handshake
     // consumed by the launch and submits exactly the AICore and AICPU kernels.
     // It intentionally performs no stream synchronization or per-run cleanup.
-    if (!run_stream_slots_.ready(slot)) {
-        LOG_ERROR("launch_run: stream set %u is not ready", slot);
+    //
+    // The pair is readied here rather than at prepare because this is the first
+    // point the caller holds the execution claim: a prepared successor overlaps
+    // its predecessor's execution, so replacing a stale AICore stream during
+    // preparation would destroy a stream the predecessor is still running on.
+    if (ensure_run_streams() != 0) {
         return LaunchTransactionResult{};
     }
-    RunStreamSet streams{run_stream_slots_.aicpu(slot), run_stream_slots_.aicore(slot)};
+    RunStreamSet streams{static_cast<rtStream_t>(run_streams_.aicpu()), static_cast<rtStream_t>(run_streams_.aicore())};
     LaunchTransactionResult result = exact_launch_transaction(
         prepared.identity, std::move(permit),
         [&]() {
@@ -655,9 +643,9 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
 
             // Publishing query/drain ownership is a state change, so it sits past
             // the arming block: everything the block covers is rollback-free.
-            int rc = run_stream_slots_.mark_submitted(slot);
+            int rc = run_streams_.mark_submitted(&prepared);
             if (rc != 0) {
-                LOG_ERROR("launch_run: failed to publish stream set %u: %d", slot, rc);
+                LOG_ERROR("launch_run: failed to publish the run stream pair: %d", rc);
                 return rc;
             }
 
@@ -685,12 +673,12 @@ LaunchTransactionResult DeviceRunner::launch_run(PreparedExecution &prepared, La
     return result;
 }
 
-int DeviceRunner::reap_run(unsigned slot) {
-    if (!run_stream_slots_.ready(slot)) {
-        LOG_ERROR("reap_run: invalid stream set %u", slot);
+int DeviceRunner::reap_run() {
+    if (!run_streams_.ready()) {
+        LOG_ERROR("reap_run: the run stream pair is not ready");
         return -1;
     }
-    int rc = sync_stream_pair(run_stream_slots_.aicpu(slot), run_stream_slots_.aicore(slot));
+    int rc = sync_stream_pair(run_streams_.aicpu(), run_streams_.aicore());
     if (rc != 0) {
         // The pair wait surfaces the AICore op-timeout (STARS-reaped op ->
         // 507000/507018/507046 at AICPU/AICore stream sync). The op-timeout
@@ -1044,7 +1032,7 @@ int DeviceRunner::finalize() {
             );
         }
 
-        run_stream_slots_.abandon_all();
+        run_streams_.abandon();
         int abandon_rc = abandon_common_after_device_failure();
 
         // Only finalize the ACL owner after force reset established a clean
@@ -1082,10 +1070,10 @@ int DeviceRunner::finalize() {
     // for the no-run-since-init case.
     finalize_collectors();
 
-    // The per-run stream sets are this subclass's own RTS-owning member, so
-    // they are released here, while RTS is live and before the device reset
-    // below — the same window finalize_common() uses for the bootstrap pair.
-    int stream_rc = destroy_run_stream_sets();
+    // The run stream pair is this subclass's own RTS-owning member, so it is
+    // released here, while RTS is live and before the device reset below — the
+    // same window finalize_common() uses for the bootstrap pair.
+    int stream_rc = destroy_run_streams();
 
     // Shared cleanup body — streams, kernel_args, callable/orch maps,
     // chip-callable buffer pool, the three arenas, device_wall,

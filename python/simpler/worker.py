@@ -11131,10 +11131,13 @@ class Worker:
     def run_stream_set_create_count(self) -> int:
         """L2 only: number of AICore run streams the runner has created.
 
-        AICPU streams belong to pipeline slots for the worker's lifetime. A
-        completed AICore stream is reused until a new code upload makes it
-        stale. Returns 0 on non-L2 workers and on platforms whose runs use the
-        persistent bootstrap stream pair (simulation, a5).
+        One AICPU + AICore pair serves every run for the runner's lifetime. The
+        AICPU stream persists; the AICore stream is recreated when a new code
+        upload makes it stale, and destroyed when an unproven completion retires
+        it, so this advances per publication or unproven retirement rather than
+        once per run or per pipeline slot. Returns 0 on non-L2 workers and on
+        platforms whose runs use the persistent bootstrap stream pair
+        (simulation, a5).
         """
         if self.level != 2 or self._chip_worker is None:
             return 0

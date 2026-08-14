@@ -399,18 +399,18 @@ add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
 add_hierarchical_test(test_pipeline_contract hierarchical/test_pipeline_contract.cpp)
 
-# Run-stream slot state machine: publication-aware AICore stream reuse and
-# failed-destroy ownership. Header-only with injected create/destroy, so it
-# needs no runtime objects and no device.
-add_executable(test_run_stream_slots hierarchical/test_run_stream_slots.cpp)
-target_include_directories(test_run_stream_slots PRIVATE
+# Run-stream pair state machine: publication-aware AICore stream reuse,
+# submitter-gated retirement, and failed-destroy ownership. Header-only with
+# injected create/destroy, so it needs no runtime objects and no device.
+add_executable(test_run_stream_pair hierarchical/test_run_stream_pair.cpp)
+target_include_directories(test_run_stream_pair PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/worker
 )
-target_link_libraries(test_run_stream_slots PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
-add_test(NAME test_run_stream_slots COMMAND test_run_stream_slots)
-set_tests_properties(test_run_stream_slots PROPERTIES LABELS "no_hardware")
+target_link_libraries(test_run_stream_pair PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_run_stream_pair COMMAND test_run_stream_pair)
+set_tests_properties(test_run_stream_pair PROPERTIES LABELS "no_hardware")
 
 add_executable(test_native_run_execution common/test_native_run_execution.cpp)
 target_include_directories(test_native_run_execution PRIVATE
