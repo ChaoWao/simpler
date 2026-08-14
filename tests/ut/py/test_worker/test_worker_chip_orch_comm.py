@@ -11,6 +11,7 @@ import ctypes
 import gc
 import importlib
 import os
+from pathlib import Path
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +40,21 @@ from simpler.worker_chip_orch_comm import (
 from simpler_setup.runtime_builder import RuntimeBuilder
 
 _task_interface_ext = cast(Any, importlib.import_module("_task_interface"))
+_TASK_INTERFACE_CPP = Path(__file__).resolve().parents[4] / "python" / "bindings" / "task_interface.cpp"
+
+
+def test_worker_host_mapped_backend_types_are_removed_from_native_implementation():
+    source = _TASK_INTERFACE_CPP.read_text(encoding="utf-8")
+
+    for legacy_type in (
+        "WorkerHostMappedRegionCleanupErrors",
+        "WorkerHostMappedRegionEntry",
+        "WorkerHostMappedRegionLease",
+        "WorkerHostMappedRegionRegistry",
+        "WorkerHostMappedRegionHandle",
+        "class WorkerHostMappedRegion",
+    ):
+        assert legacy_type not in source
 
 
 class _FakeDirectCWorker:
