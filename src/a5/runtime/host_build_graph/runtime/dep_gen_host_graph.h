@@ -28,6 +28,7 @@
  *   add_explicit_edge()     — STEP 1, per declared dependency
  *   add_creator_edge()      — STEP 3 Step A, per creator-retention producer
  *   add_tensormap_edge()    — STEP 3 Step B, per tensormap producer
+ *   add_host_write_consumer_edge() — runtime-derived host-write ordering
  *   end_task()              — closes the task, after its last dependency step
  *
  * Control surface, called from the device runner (same host_runtime.so):
@@ -104,7 +105,12 @@ void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx,
 /** STEP 3 Step B: a tensormap producer whose written slice this task reads. */
 void dep_gen_host_graph_add_tensormap_edge(
     uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
-    OverlapStatus overlap
+    OverlapStatus overlap, TensorHazardKind hazard
+);
+
+/** A direct consumer of an overlapping writer that must finish before a host write. */
+void dep_gen_host_graph_add_host_write_consumer_edge(
+    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer
 );
 
 // ---------------------------------------------------------------------------

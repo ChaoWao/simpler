@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Orchestrator Implementation
+ * tensormap_and_ringbuffer - Orchestrator Implementation
  *
  * Implements orchestrator state management, scope handling, and task submission.
  *
@@ -815,7 +815,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
                 return true;
             }
             // Progress is entries actually freed, NOT watermark movement: a ring can
-            // retire zero-output tasks (count_registrable_outputs == 0), advancing
+            // retire zero-access tasks (count_registrable_accesses == 0), advancing
             // last_task_alive without freeing any entry. Gating the backstop on
             // free_entries() keeps a wedged pool from dodging the timeout while some
             // unrelated ring keeps draining.
@@ -897,7 +897,7 @@ static TaskOutputTensors submit_task_common(
     if (is_dep_gen_enabled()) {
         const void *tensor_ptrs[MAX_TENSOR_ARGS];
         // TensorArgType is `enum class : int32_t` (4 bytes); the on-disk record
-        // packs arg_types as uint8_t[16] (5-value enum fits in a byte). Narrow
+        // packs arg_types as uint8_t[16] (the enum fits in a byte). Narrow
         // each tag here rather than letting the AICPU writer reinterpret a
         // 4×-wider array as bytes — that path silently lost two of every three
         // tags on little-endian and synthesized phantom self-edges in replay.
@@ -984,7 +984,23 @@ static TaskOutputTensors submit_task_common(
         );
     };
 
-    if (!compute_task_fanin(dep_inputs, orch->tensor_map, orch->in_manual_scope(), runtime_emit)) {
+    auto runtime_emit_reader = [&](PTO2TaskId producer_task_id, DepFlags kind) -> bool {
+        uint8_t prod_ring = producer_task_id.ring();
+        PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->rings[prod_ring];
+        int32_t prod_slot = producer_ring.get_slot_by_task_id(static_cast<int32_t>(producer_task_id.local()));
+        PTO2TaskSlotState *prod_state = &producer_ring.get_slot_state_by_slot(prod_slot);
+        if (prod_state->task != nullptr && prod_state->task->task_id == producer_task_id &&
+            prod_state->task_state.load(std::memory_order_acquire) >= PTO2_TASK_COMPLETED) {
+            return true;
+        }
+        return append_fanin_or_fail(
+            orch, prod_ring, prod_slot, prod_state, producer_task_id, &fanin_builder, ring_id, kind
+        );
+    };
+
+    if (!compute_task_fanin(
+            dep_inputs, orch->tensor_map, orch->in_manual_scope(), runtime_emit, runtime_emit_reader
+        )) {
         return result;
     }
 
@@ -995,11 +1011,11 @@ static TaskOutputTensors submit_task_common(
     // is shared across rings and reclaimed as last_task_alive advances; an
     // exhausted pool back-pressures here (and detects a wedged watermark) rather
     // than tripping new_entry()'s hard assert mid-registration.
-    int32_t tensormap_needed = count_registrable_outputs(dep_inputs, orch->in_manual_scope());
+    int32_t tensormap_needed = count_registrable_accesses(dep_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) {
         return result;
     }
-    register_task_outputs(dep_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
+    register_task_accesses(dep_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
 
     CYCLE_COUNT_LAP(g_orch_insert_cycle);
 

@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - TensorMap Implementation
+ * tensormap_and_ringbuffer - TensorMap Implementation
  *
  * Implements TensorMap with ring buffer pool, lazy invalidation,
  * and chain truncation optimization.
@@ -56,6 +56,8 @@ PTO2TensorMapLayout PTO2TensorMap::reserve_layout(
 
     PTO2TensorMapLayout layout{};
     layout.num_buckets = new_num_buckets;
+    layout.num_reader_buckets =
+        new_num_buckets < PTO2_TENSORMAP_READER_NUM_BUCKETS ? new_num_buckets : PTO2_TENSORMAP_READER_NUM_BUCKETS;
     layout.pool_size = new_pool_size;
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         layout.task_window_sizes[r] = new_task_window_sizes[r];
@@ -66,6 +68,11 @@ PTO2TensorMapLayout PTO2TensorMap::reserve_layout(
     );
     layout.off_bucket_epochs =
         arena.reserve(static_cast<size_t>(new_num_buckets) * sizeof(uint32_t), alignof(uint32_t));
+    layout.off_reader_buckets = arena.reserve(
+        static_cast<size_t>(layout.num_reader_buckets) * sizeof(PTO2TensorMapEntry *), alignof(PTO2TensorMapEntry *)
+    );
+    layout.off_reader_bucket_epochs =
+        arena.reserve(static_cast<size_t>(layout.num_reader_buckets) * sizeof(uint32_t), alignof(uint32_t));
     layout.off_entry_pool =
         arena.reserve(static_cast<size_t>(new_pool_size) * sizeof(PTO2TensorMapEntry), alignof(PTO2TensorMapEntry));
     layout.off_free_entry_list =
@@ -87,12 +94,15 @@ PTO2TensorMap::reserve_layout_default(DeviceArena &arena, const int32_t new_task
 
 bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, DeviceArena &arena) {
     num_buckets = layout.num_buckets;
+    num_reader_buckets = layout.num_reader_buckets;
     pool_size = layout.pool_size;
 
     // Address arena regions for data writes; do not store these in struct
     // fields (wire_arena_pointers does that).
     auto *buckets_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_buckets));
     auto *bucket_epochs_arena = static_cast<uint32_t *>(arena.region_ptr(layout.off_bucket_epochs));
+    auto *reader_buckets_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_reader_buckets));
+    auto *reader_bucket_epochs_arena = static_cast<uint32_t *>(arena.region_ptr(layout.off_reader_bucket_epochs));
     auto *entry_pool_arena = static_cast<PTO2TensorMapEntry *>(arena.region_ptr(layout.off_entry_pool));
     auto *free_list_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_free_entry_list));
 
@@ -100,6 +110,10 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
     for (int32_t i = 0; i < num_buckets; i++) {
         buckets_arena[i] = nullptr;
         bucket_epochs_arena[i] = 0;
+    }
+    for (int32_t i = 0; i < num_reader_buckets; i++) {
+        reader_buckets_arena[i] = nullptr;
+        reader_bucket_epochs_arena[i] = 0;
     }
 
     // entry_pool: zero-init equivalent to the previous calloc(entry_pool, ...).
@@ -112,7 +126,7 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
         entry_pool_arena[i].prev_in_bucket = nullptr;
         entry_pool_arena[i].next_in_task = nullptr;
         entry_pool_arena[i].prev_in_task = nullptr;
-        entry_pool_arena[i].producer_task_id = PTO2TaskId{};
+        entry_pool_arena[i].access_task_id = PTO2TaskId{};
     }
 
     // free_entry_list: zeroed (was calloc'd before); contents become meaningful
@@ -121,6 +135,8 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
 
     next_entry_idx = 0;
     free_num = 0;
+    reader_used = 0;
+    reader_high_water = 0;
 
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         auto *heads_arena = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_task_entry_heads[r]));
@@ -139,13 +155,17 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
 
 void PTO2TensorMap::reset_for_reuse(const PTO2TensorMapLayout &layout) {
     num_buckets = layout.num_buckets;
+    num_reader_buckets = layout.num_reader_buckets;
     pool_size = layout.pool_size;
     next_entry_idx = 0;
     free_num = 0;
+    reader_used = 0;
+    reader_high_water = 0;
     current_epoch++;
     if (current_epoch == 0) {
         current_epoch = 1;
         memset(bucket_epochs, 0, static_cast<size_t>(layout.num_buckets) * sizeof(uint32_t));
+        memset(reader_bucket_epochs, 0, static_cast<size_t>(layout.num_reader_buckets) * sizeof(uint32_t));
         for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
             memset(task_entry_head_epochs[r], 0, static_cast<size_t>(layout.task_window_sizes[r]) * sizeof(uint32_t));
         }
@@ -161,6 +181,8 @@ void PTO2TensorMap::reset_for_reuse(const PTO2TensorMapLayout &layout) {
 void PTO2TensorMap::wire_arena_pointers(const PTO2TensorMapLayout &layout, DeviceArena &arena) {
     buckets = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_buckets));
     bucket_epochs = static_cast<uint32_t *>(arena.region_ptr(layout.off_bucket_epochs));
+    reader_buckets = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_reader_buckets));
+    reader_bucket_epochs = static_cast<uint32_t *>(arena.region_ptr(layout.off_reader_bucket_epochs));
     entry_pool = static_cast<PTO2TensorMapEntry *>(arena.region_ptr(layout.off_entry_pool));
     free_entry_list = static_cast<PTO2TensorMapEntry **>(arena.region_ptr(layout.off_free_entry_list));
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -175,6 +197,8 @@ void PTO2TensorMap::destroy() {
     // a recycled allocation.
     buckets = nullptr;
     bucket_epochs = nullptr;
+    reader_buckets = nullptr;
+    reader_bucket_epochs = nullptr;
     entry_pool = nullptr;
     free_entry_list = nullptr;
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -190,10 +214,32 @@ void PTO2TensorMap::destroy() {
 void PTO2TensorMap::print_stats() {
     int32_t valid = 0;
     int32_t stale = 0;
-    int32_t empty_buckets = 0;
-    int32_t max_chain = 0;
-    int64_t total_chain = 0;
-    int32_t non_empty_buckets = 0;
+
+    struct BucketStats {
+        int32_t empty{0};
+        int32_t non_empty{0};
+        int32_t max_chain{0};
+        int64_t total_chain{0};
+    };
+    auto collect_bucket_stats = [&](PTO2TensorMapEntry **index, uint32_t *epochs, int32_t bucket_count) {
+        BucketStats stats;
+        for (int32_t b = 0; b < bucket_count; b++) {
+            int32_t chain_len = 0;
+            if (epochs[b] == current_epoch) {
+                for (auto *entry = index[b]; entry != nullptr; entry = entry->next_in_bucket) {
+                    chain_len++;
+                }
+            }
+            if (chain_len == 0) {
+                stats.empty++;
+            } else {
+                stats.non_empty++;
+                stats.total_chain += chain_len;
+                stats.max_chain = std::max(stats.max_chain, chain_len);
+            }
+        }
+        return stats;
+    };
 
     // Count entries
     for (int32_t i = 0; i < pool_size; i++) {
@@ -206,37 +252,26 @@ void PTO2TensorMap::print_stats() {
         }
     }
 
-    // Count bucket stats
-    for (int32_t b = 0; b < num_buckets; b++) {
-        int32_t chain_len = 0;
-        auto cur_entry = buckets[b];
-
-        while (cur_entry != nullptr) {
-            chain_len++;
-            cur_entry = cur_entry->next_in_bucket;
-        }
-
-        if (chain_len == 0) {
-            empty_buckets++;
-        } else {
-            non_empty_buckets++;
-            total_chain += chain_len;
-            if (chain_len > max_chain) {
-                max_chain = chain_len;
-            }
-        }
-    }
+    const BucketStats writer_stats = collect_bucket_stats(buckets, bucket_epochs, num_buckets);
+    const BucketStats reader_stats = collect_bucket_stats(reader_buckets, reader_bucket_epochs, num_reader_buckets);
 
     LOG_DEBUG("=== TensorMap Statistics ===");
     LOG_DEBUG("Pool size:           %d", pool_size);
     LOG_DEBUG("Pool next entry idx: %d", next_entry_idx);
     LOG_DEBUG("Pool free_num:       %d", free_num);
-    LOG_DEBUG("Num buckets:         %d", num_buckets);
+    LOG_DEBUG("Reader entries:      live=%d high_water=%d", reader_used, reader_high_water);
+    LOG_DEBUG("Writer entries:      live=%d", current_writers());
+    LOG_DEBUG("Buckets:             writer=%d reader=%d", num_buckets, num_reader_buckets);
     LOG_DEBUG("Valid entries:       %d", valid);
     LOG_DEBUG("Stale entries:       %d", stale);
-    LOG_DEBUG("Empty buckets:       %d", empty_buckets);
-    LOG_DEBUG("Max chain len:       %d", max_chain);
-    LOG_DEBUG("Avg chain len:       %.2f", non_empty_buckets > 0 ? (float)total_chain / non_empty_buckets : 0);
+    LOG_DEBUG(
+        "Writer buckets:      empty=%d max_chain=%d avg_chain=%.2f", writer_stats.empty, writer_stats.max_chain,
+        writer_stats.non_empty > 0 ? (float)writer_stats.total_chain / writer_stats.non_empty : 0
+    );
+    LOG_DEBUG(
+        "Reader buckets:      empty=%d max_chain=%d avg_chain=%.2f", reader_stats.empty, reader_stats.max_chain,
+        reader_stats.non_empty > 0 ? (float)reader_stats.total_chain / reader_stats.non_empty : 0
+    );
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         LOG_DEBUG("Last task alive[%d]: %d", r, last_task_alives[r]);
     }

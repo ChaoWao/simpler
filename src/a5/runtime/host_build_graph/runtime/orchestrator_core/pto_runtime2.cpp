@@ -154,6 +154,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
     // the second encounter.
     constexpr int kSegmentCap = 64;
     const PTO2TaskSlotState *seg[kSegmentCap];
+    bool seg_wait_consumers[kSegmentCap]{};
     int seg_count = 0;
     bool failed = false;
 
@@ -250,22 +251,26 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         for (int i = 0; i < seg_count; i++) {
             wait_one_producer(*seg[i]);
             if (failed) return;
-            if (!wait_for_consumers) continue;
+            if (!seg_wait_consumers[i]) continue;
             wait_one_consumers(*seg[i]);
             if (failed) return;
         }
         seg_count = 0;
     };
 
-    auto try_push = [&](const PTO2TaskSlotState &s) {
+    auto try_push = [&](const PTO2TaskSlotState &s, bool include_consumers) {
         for (int j = 0; j < seg_count; j++) {
-            if (seg[j] == &s) return;  // per-segment dedup
+            if (seg[j] == &s) {
+                seg_wait_consumers[j] = seg_wait_consumers[j] || include_consumers;
+                return;
+            }
         }
         if (seg_count == kSegmentCap) {
             flush_segment();
             if (failed) return;
         }
-        seg[seg_count++] = &s;
+        seg[seg_count] = &s;
+        seg_wait_consumers[seg_count++] = include_consumers;
     };
 
     auto do_wait = [&]() {
@@ -273,17 +278,27 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         if (owner.is_valid()) {
             const auto *slot = resolve_producer(owner);
             if (slot == nullptr) return;
-            try_push(*slot);
+            try_push(*slot, wait_for_consumers);
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
         orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
-            PTO2TaskId pid = entry.producer_task_id;
+            PTO2TaskId pid = entry.access_task_id;
             const auto *slot = resolve_producer(pid);
             if (slot == nullptr) return false;
-            try_push(*slot);
+            try_push(*slot, wait_for_consumers);
             return !failed;
         });
+        if (wait_for_consumers && !failed) {
+            orch.tensor_map.lookup(
+                tensor, TensorAccessKind::READER, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
+                    const auto *slot = resolve_producer(entry.access_task_id);
+                    if (slot == nullptr) return false;
+                    try_push(*slot, false);
+                    return !failed;
+                }
+            );
+        }
         if (failed) return;
         flush_segment();
     };
@@ -333,22 +348,24 @@ void set_tensor_data(
         return;
     }
 
-    // Wait for producer + all consumers before writing (WAW + WAR safety)
-    if (!wait_for_tensor_ready(rt, tensor, true, __FUNCTION__)) {
-        return;
-    }
-
     uint64_t flat_offset = tensor.compute_flat_offset(indices, ndims);
     uint64_t elem_size = get_element_size(tensor.dtype);
     uint64_t elem_addr = tensor.buffer.addr + flat_offset * elem_size;
-    if (!host_tensor_write(rt->tensor_access, elem_addr, &value, elem_size)) {
-        rt->orchestrator.report_fatal(
-            PTO2_ERROR_INVALID_ARGS, __FUNCTION__,
-            "no writable host view for device address %#llx (%llu bytes): during host orchestration only tensors "
-            "the runtime staged are writable, not runtime-created or child-memory buffers",
-            (unsigned long long)elem_addr, (unsigned long long)elem_size
-        );
+    if (rt->orchestrator.sm_header->ring.fc.current_task_index.load(std::memory_order_acquire) == 0) {
+        if (!host_tensor_write(rt->tensor_access, elem_addr, &value, elem_size)) {
+            rt->orchestrator.report_fatal(
+                PTO2_ERROR_INVALID_ARGS, __FUNCTION__, "no writable host view for device address %#llx (%llu bytes)",
+                (unsigned long long)elem_addr, (unsigned long long)elem_size
+            );
+        }
+        return;
     }
+    // HBG constructs the whole graph before device scheduling starts, so a
+    // synchronous host wait here can never observe a submitted reader finish.
+    // Represent the write as a scheduler-local graph node instead: normal
+    // OUTPUT_EXISTING dependency discovery gives it WAR predecessors and
+    // registers it as the next writer for tasks submitted afterwards.
+    rt->orchestrator.submit_host_write(tensor, elem_addr, value, elem_size);
 }
 
 // Ops-table entry that hands the call-site captured by PTO2ScopeGuard to the

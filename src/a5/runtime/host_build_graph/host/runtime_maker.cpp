@@ -596,6 +596,26 @@ int32_t run_host_orchestration(
     rt_scope_end(rt);
     rt_orchestration_done(rt);
 
+#if SIMPLER_ORCH_PROFILING
+    const PTO2OrchProfilingData profile = orchestrator_get_profiling();
+    const uint64_t profile_total = profile.sync_cycle + profile.alloc_cycle + profile.args_cycle +
+                                   profile.lookup_cycle + profile.insert_cycle + profile.fanin_cycle +
+                                   profile.scope_end_cycle;
+    const double profile_us = static_cast<double>(profile_total) * 1000000.0 / PLATFORM_PROF_SYS_CNT_FREQ;
+    LOG_INFO(
+        "Host Orchestrator Profiling: %" PRId64 " tasks, total=%.3fus, avg/task=%.3fus",
+        static_cast<int64_t>(profile.submit_count), profile_us,
+        profile.submit_count > 0 ? profile_us / profile.submit_count : 0.0
+    );
+#if SIMPLER_TENSORMAP_PROFILING
+    rt->orchestrator.tensor_map.print_stats();
+    LOG_INFO(
+        "Host fanin spill: top=%d used=%d capacity=%d", rt->scheduler.fanin_spill_top, rt->scheduler.fanin_spill_top,
+        rt->scheduler.fanin_spill_capacity
+    );
+#endif
+#endif
+
     const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
 
@@ -991,7 +1011,7 @@ extern "C" int bind_callable_to_runtime_impl(
     // on-device nodes that push past the host task count.
     const auto &sq = layout.sched;
     const size_t orch_start = layout.orch.off_fanin_seen_epoch;
-    const size_t orch_end = sq.off_ready_queue_slots[0];
+    const size_t orch_end = sq.off_fanin_spill_ids;
     always_assert(orch_start <= orch_end);
     char *arena_host = static_cast<char *>(host_arena.base());
     char *arena_dev = static_cast<char *>(runtime_arena_dev);

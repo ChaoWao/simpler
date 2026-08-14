@@ -297,20 +297,9 @@ static inline T get_tensor_data(const ChipTensor &tensor, uint32_t ndims, const 
  *   set_tensor_data(tensor, 1, idx, raw_u64);     // old usage unchanged
  *   set_tensor_data(tensor, 1, idx, 42.0f);       // typed write (T = float)
  *
- * If the tensor has a producer in TensorMap, spin-waits until the producer
- * and all its consumers complete before writing (WAW + WAR safety).
- * External tensors (make_tensor_external) with no TensorMap entry are
- * written immediately without waiting.
- *
- * Limitation: TensorMap only tracks producers (OUTPUT/INOUT), not consumers
- * that used the tensor as INPUT. If a kernel reads this tensor as INPUT
- * (not INOUT) and the tensor has no TensorMap producer entry, set_tensor_data
- * cannot detect the reader and may cause a data race.
- *
- * To ensure WAR safety for all access patterns, use add_inout() instead of
- * add_input() for kernel parameters that may later be written via
- * set_tensor_data. INOUT creates a TensorMap entry that enables automatic
- * consumer tracking via fanout_refcount.
+ * Spin-waits for overlapping writers and explicitly tracked readers before
+ * writing (WAW + WAR safety). A pure reader that may precede this call must
+ * use add_tracked_input(); plain add_input() does not publish a reader entry.
  *
  * The tensor must already have an allocated buffer (addr != 0).
  * For runtime-created outputs, call this only on the ChipTensor returned by

@@ -104,7 +104,7 @@ hierarchy levels.
 ```cpp
 class TaskArgs {
     std::vector<ChipTensor> tensors_;
-    std::vector<TensorArgType>    tags_;     // per-tensor: INPUT/OUTPUT/INOUT/OUTPUT_EXISTING/NO_DEP
+    std::vector<TensorArgType>    tags_;     // per-tensor access/dependency policy
     std::vector<uint64_t>         scalars_;
 public:
     void add_tensor(const ChipTensor&, TensorArgType tag = TensorArgType::INPUT);
@@ -116,8 +116,12 @@ public:
 };
 ```
 
-`TensorArgType` has five values (matches existing `tensor.h:45-51`):
-`INPUT`, `OUTPUT`, `INOUT`, `OUTPUT_EXISTING`, `NO_DEP`.
+The C++ `TensorArgType` has six values: `INPUT`, `OUTPUT`, `INOUT`,
+`OUTPUT_EXISTING`, `NO_DEP`, and `TRACKED_INPUT`. `TRACKED_INPUT` has the same
+read permission as `INPUT`; on A2/A3 and A5, both `host_build_graph` and
+`tensormap_and_ringbuffer` publish it as a reader for a later WAR lookup. The
+opt-in tag is currently a C++ `CoreTaskArgs` API and is not exposed by the
+Python `TensorArgType` binding.
 
 For remote L3 submits, public Python still uses the same `TaskArgs` builder.
 `TaskArgs.add_tensor(RemoteTensorRef(...), tag)` appends a normal

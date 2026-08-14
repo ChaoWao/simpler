@@ -783,6 +783,14 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 static_cast<uint64_t>(tp.overlap_checks), static_cast<uint64_t>(tp.overlap_hits),
                 tp.overlap_checks > 0 ? tp.overlap_hits * 100.0 / tp.overlap_checks : 0.0
             );
+            rt->orchestrator.tensor_map.print_stats();
+            for (int32_t ring_id = 0; ring_id < PTO2_MAX_RING_DEPTH; ++ring_id) {
+                const PTO2FaninPool &pool = rt->orchestrator.rings[ring_id].fanin_pool;
+                LOG_INFO(
+                    "Thread %d: Fanin spill ring=%d used=%d high_water=%d capacity=%d", thread_idx, ring_id,
+                    pool.used(), pool.high_water, pool.capacity
+                );
+            }
 #endif
 #endif  // SIMPLER_ORCH_PROFILING
 

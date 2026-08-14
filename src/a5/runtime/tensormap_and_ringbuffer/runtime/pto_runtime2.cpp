@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Main Implementation
+ * tensormap_and_ringbuffer - Main Implementation
  *
  * Implements the unified runtime API that combines orchestrator and scheduler.
  *
@@ -109,6 +109,7 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
     // the second encounter.
     constexpr int kSegmentCap = 64;
     const PTO2TaskSlotState *seg[kSegmentCap];
+    bool seg_wait_consumers[kSegmentCap]{};
     int seg_count = 0;
     bool failed = false;
 
@@ -169,39 +170,53 @@ wait_for_tensor_ready(PTO2Runtime *rt, const ChipTensor &tensor, bool wait_for_c
         for (int i = 0; i < seg_count; i++) {
             wait_one_producer(*seg[i]);
             if (failed) return;
-            if (!wait_for_consumers) continue;
+            if (!seg_wait_consumers[i]) continue;
             wait_one_consumers(*seg[i]);
             if (failed) return;
         }
         seg_count = 0;
     };
 
-    auto try_push = [&](const PTO2TaskSlotState &s) {
+    auto try_push = [&](const PTO2TaskSlotState &s, bool include_consumers) {
         for (int j = 0; j < seg_count; j++) {
-            if (seg[j] == &s) return;  // per-segment dedup
+            if (seg[j] == &s) {
+                seg_wait_consumers[j] = seg_wait_consumers[j] || include_consumers;
+                return;
+            }
         }
         if (seg_count == kSegmentCap) {
             flush_segment();
             if (failed) return;
         }
-        seg[seg_count++] = &s;
+        seg[seg_count] = &s;
+        seg_wait_consumers[seg_count++] = include_consumers;
     };
 
     auto do_wait = [&]() {
         // Step A: creator retention — read owner directly from tensor metadata
         if (owner.is_valid()) {
             auto &s = orch.sm_header->rings[owner.ring()].get_slot_state_by_task_id(owner.local());
-            try_push(s);
+            try_push(s, wait_for_consumers);
             if (failed) return;
         }
 
         // Step B: modifier writer lookup (OverlapMap), direct callback
         orch.tensor_map.lookup(tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
-            PTO2TaskId pid = entry.producer_task_id;
+            PTO2TaskId pid = entry.access_task_id;
             auto &s = orch.sm_header->rings[pid.ring()].get_slot_state_by_task_id(pid.local());
-            try_push(s);
+            try_push(s, wait_for_consumers);
             return !failed;
         });
+        if (wait_for_consumers && !failed) {
+            orch.tensor_map.lookup(
+                tensor, TensorAccessKind::READER, [&](PTO2TensorMapEntry &entry, OverlapStatus) -> bool {
+                    PTO2TaskId pid = entry.access_task_id;
+                    auto &s = orch.sm_header->rings[pid.ring()].get_slot_state_by_task_id(pid.local());
+                    try_push(s, false);
+                    return !failed;
+                }
+            );
+        }
         if (failed) return;
         flush_segment();
     };

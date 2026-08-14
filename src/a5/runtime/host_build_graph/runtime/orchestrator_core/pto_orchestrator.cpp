@@ -73,8 +73,10 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_explicit
 __attribute__((weak, visibility("hidden"))) void
 dep_gen_host_graph_add_creator_edge(uint64_t, int32_t, const ChipTensor &) {}
 __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensormap_edge(
-    uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus
+    uint64_t, int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus, TensorHazardKind
 ) {}
+__attribute__((weak, visibility("hidden"))) void
+dep_gen_host_graph_add_host_write_consumer_edge(uint64_t, int32_t, const ChipTensor &) {}
 
 // Scope_stats enable gate, queried via the same predicate idiom as
 // dep_gen_host_graph_enabled above. The AICPU collector links the strong definition;
@@ -687,10 +689,9 @@ static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
     return next;
 }
 
-// Polling: fanin is a flat array of position-independent producer local ids on
-// the payload (no dep-pool spill, no producer pointers). The builder writes them
-// directly into payload->fanin_local_ids as producers are appended, deduping by
-// slot and hard-capping at PTO2_MAX_FANIN. self_local is this task's own local id
+// Polling: fanin is a flat sequence of position-independent producer local ids.
+// The builder writes the inline prefix to the payload and the remainder to the
+// scheduler spill pool, deduping by slot. self_local is this task's own local id
 // (the consumer), used to bump each producer's last_consumer_local_id (the
 // reclaim gate the host wait_for_consumers polls via completed_watermark).
 struct PTO2FaninBuilder {
@@ -699,7 +700,10 @@ struct PTO2FaninBuilder {
         orch(orch),
         seen_epoch(seen_epoch),
         self_local(self_local),
-        payload(payload) {}
+        payload(payload) {
+        payload->fanin_spill_start = 0;
+        payload->fanin_spill_count = 0;
+    }
     int32_t count{0};
     PTO2OrchestratorState *orch{nullptr};
     uint32_t seen_epoch{0};
@@ -735,11 +739,22 @@ static bool append_fanin_or_fail(
     if (fanin_builder->mark_seen(prod_ring, prod_slot)) {
         return true;
     }
-    if (fanin_builder->count >= PTO2_MAX_FANIN) {
-        orch_mark_fatal(orch, PTO2_ERROR_DEP_POOL_OVERFLOW);
-        return false;
+    const int32_t producer_local = static_cast<int32_t>(producer_task_id.local());
+    if (fanin_builder->count < PTO2_MAX_FANIN) {
+        fanin_builder->payload->fanin_local_ids[fanin_builder->count] = producer_local;
+    } else {
+        PTO2SchedulerState *sched = orch->scheduler;
+        if (sched == nullptr || sched->fanin_spill_top >= sched->fanin_spill_capacity) {
+            orch_mark_fatal(orch, PTO2_ERROR_DEP_POOL_OVERFLOW);
+            return false;
+        }
+        if (fanin_builder->count == PTO2_MAX_FANIN) {
+            fanin_builder->payload->fanin_spill_start = sched->fanin_spill_top;
+        }
+        sched->fanin_spill_ids[sched->fanin_spill_top++] = producer_local;
+        fanin_builder->payload->fanin_spill_count++;
     }
-    fanin_builder->payload->fanin_local_ids[fanin_builder->count++] = static_cast<int32_t>(producer_task_id.local());
+    fanin_builder->count++;
 
     // Reclaim gate: record this task as a consumer of the producer. The producer
     // slot retires once the per-ring completed_watermark reaches this consumer id.
@@ -1058,7 +1073,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
                 return true;
             }
             // Progress is entries actually freed, NOT watermark movement: a ring can
-            // retire zero-output tasks (count_registrable_outputs == 0), advancing
+            // retire zero-access tasks (count_registrable_accesses == 0), advancing
             // last_task_alive without freeing any entry. Gating the backstop on
             // free_entries() keeps a wedged pool from dodging the timeout while some
             // unrelated ring keeps draining.
@@ -1112,7 +1127,7 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
 // Orch-side wiring/ready publication.
 static TaskOutputTensors submit_task_common(
     PTO2OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
-    int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
+    int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id, TaskKind task_kind = TaskKind::KERNEL
 ) {
     CYCLE_COUNT_START();
     TaskOutputTensors result;
@@ -1127,6 +1142,7 @@ static TaskOutputTensors submit_task_common(
     PTO2TaskDescriptor &task = *prepared.task;
     PTO2TaskPayload &payload = *prepared.payload;
     result.set_task_id(task_id);
+    prepared.slot_state->task_kind = task_kind;
 
     // dep_gen capture point: open this task's graph entry before its dependency
     // steps run, so the edges STEP 1 / STEP 3 discover attach to it. The graph
@@ -1192,6 +1208,74 @@ static TaskOutputTensors submit_task_common(
         }
     }
 
+    // A graph-local host write preserves the synchronous TMR contract: wait for
+    // each overlapping writer and every direct consumer of that writer. The
+    // normal OUTPUT_EXISTING lookup below adds tracked readers. HBG has the
+    // complete task graph resident, so direct consumers are recoverable by
+    // scanning earlier payload fanins without serializing unrelated tasks.
+    if (task_kind == TaskKind::HOST_WRITE) {
+        const int32_t self_local = static_cast<int32_t>(task_id.local());
+        PTO2SharedMemoryRingHeader &producer_ring = orch->sm_header->ring;
+        const ChipTensor &write_tensor = args.tensor(0).ref();
+        auto append_predecessor = [&](PTO2TaskId predecessor) -> bool {
+            const int32_t predecessor_local = static_cast<int32_t>(predecessor.local());
+            const int32_t predecessor_slot = producer_ring.get_slot_by_task_id(predecessor_local);
+            PTO2TaskSlotState *predecessor_state = &producer_ring.get_slot_state_by_slot(predecessor_slot);
+            return append_fanin_or_fail(
+                orch, predecessor.ring(), predecessor_slot, predecessor_state, predecessor, &fanin_builder
+            );
+        };
+        auto append_consumers = [&](PTO2TaskId writer) -> bool {
+            const int32_t writer_local = static_cast<int32_t>(writer.local());
+            for (int32_t consumer_local = 0; consumer_local < self_local; ++consumer_local) {
+                const int32_t consumer_slot = producer_ring.get_slot_by_task_id(consumer_local);
+                PTO2TaskSlotState *consumer_state = &producer_ring.get_slot_state_by_slot(consumer_slot);
+                if (consumer_state->payload == nullptr || consumer_state->task == nullptr ||
+                    consumer_state->task->task_id.local() != static_cast<uint32_t>(consumer_local)) {
+                    continue;
+                }
+                const PTO2TaskPayload &consumer_payload = *consumer_state->payload;
+                bool reads_writer = false;
+                for (int32_t i = 0; i < consumer_payload.fanin_count; ++i) {
+                    if (orch->scheduler->fanin_local_id(consumer_payload, i) == writer_local) {
+                        reads_writer = true;
+                        break;
+                    }
+                }
+                if (!reads_writer) continue;
+                const PTO2TaskId consumer = PTO2TaskId::make(task_id.ring(), static_cast<uint32_t>(consumer_local));
+                if (!append_predecessor(consumer)) return false;
+                if (capture_dep_graph) {
+                    dep_gen_host_graph_add_host_write_consumer_edge(consumer.raw, 0, write_tensor);
+                }
+            }
+            return true;
+        };
+
+        if (write_tensor.owner_task_id.is_valid() && !append_consumers(write_tensor.owner_task_id)) {
+            return result;
+        }
+        bool host_write_fatal = false;
+        orch->tensor_map.lookup(
+            write_tensor, TensorAccessKind::WRITER,
+            [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
+                if (!append_predecessor(entry.access_task_id) || !append_consumers(entry.access_task_id)) {
+                    host_write_fatal = true;
+                    return false;
+                }
+                if (capture_dep_graph) {
+                    dep_gen_host_graph_add_tensormap_edge(
+                        entry.access_task_id.raw, 0, write_tensor, entry, overlap_status, TensorHazardKind::WAW
+                    );
+                }
+                return true;
+            }
+        );
+        if (host_write_fatal) {
+            return result;
+        }
+    }
+
     // === STEP 3: Lookup inputs (creator retention + tensormap modifier lookup) ===
     DepInputs dep_inputs{
         args.tensor_count(),       args.tensor_data(), args.tag_data(), static_cast<int32_t>(args.explicit_dep_count()),
@@ -1214,9 +1298,12 @@ static TaskOutputTensors submit_task_common(
                 dep_gen_host_graph_add_creator_edge(producer.raw, arg_idx, consumer);
             }
             void tensormap(
-                int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap
+                int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry, OverlapStatus overlap,
+                TensorHazardKind hazard
             ) const {
-                dep_gen_host_graph_add_tensormap_edge(entry.producer_task_id.raw, arg_idx, consumer, entry, overlap);
+                dep_gen_host_graph_add_tensormap_edge(
+                    entry.access_task_id.raw, arg_idx, consumer, entry, overlap, hazard
+                );
             }
         };
         const bool ok =
@@ -1240,11 +1327,11 @@ static TaskOutputTensors submit_task_common(
     // is reclaimed as last_task_alive advances; an
     // exhausted pool back-pressures here (and detects a wedged watermark) rather
     // than tripping new_entry()'s hard assert mid-registration.
-    int32_t tensormap_needed = count_registrable_outputs(dep_inputs, orch->in_manual_scope());
+    int32_t tensormap_needed = count_registrable_accesses(dep_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) {
         return result;
     }
-    register_task_outputs(dep_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
+    register_task_accesses(dep_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
 
     CYCLE_COUNT_LAP(g_orch_insert_cycle);
 
@@ -1450,7 +1537,7 @@ bool graph_submit_definition(
     DepInputs boundary_inputs{
         args.tensor_count(), args.tensor_data(), args.tag_data(), 0, nullptr,
     };
-    const int32_t tensormap_needed = count_registrable_outputs(boundary_inputs, orch->in_manual_scope());
+    const int32_t tensormap_needed = count_registrable_accesses(boundary_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) return false;
     if (!check_scope_can_accept_task(orch, allocator, 0)) return false;
 
@@ -1491,7 +1578,7 @@ bool graph_submit_definition(
         return append_fanin_or_fail(orch, producer_id.ring(), producer_slot, producer, producer_id, &fanin_builder);
     };
     if (!compute_task_fanin(boundary_inputs, orch->tensor_map, orch->in_manual_scope(), emit)) return false;
-    register_task_outputs(boundary_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
+    register_task_accesses(boundary_inputs, task_id, orch->tensor_map, orch->in_manual_scope());
     payload.fanin_count = fanin_builder.count;
 
     pending.outer_slot = &slot;
@@ -1529,6 +1616,14 @@ TaskOutputTensors graph_record_submit_node(
 
     if (node_index >= GRAPH_MAX_NODES || args.has_error || args.predicate().op != PredicateOp::NONE) {
         recording.unsupported = true;
+    }
+    for (int32_t i = 0; i < args.tensor_count(); ++i) {
+        if (args.tag(i) == TensorArgType::TRACKED_INPUT) {
+            // The compact Graph format derives only producer-source fanins; it
+            // cannot publish an internal reader for a later WAR lookup.
+            recording.unsupported = true;
+            break;
+        }
     }
 
     const PTO2OutputLayout layout = calculate_output_layout(args);
@@ -1733,7 +1828,6 @@ bool PTO2OrchestratorState::graph_end() {
 
     std::vector<std::byte> definition;
     if (!graph_build_definition(*recording, &definition)) {
-        debug_assert(false && "The recorded Graph contains a construct that Graph Execution does not support");
         LOG_WARN("%s", "[GraphExecution] unsupported construct observed; falling back to the ordinary path");
         return false;
     }
@@ -1890,7 +1984,38 @@ TaskOutputTensors PTO2OrchestratorState::submit_dummy_task(const CoreTaskArgs &a
     }
 
     return submit_task_common(
-        orch, args, ActiveMask{}, task_attrs, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
+        orch, args, ActiveMask{}, task_attrs, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID, TaskKind::DUMMY
+    );
+}
+
+void PTO2OrchestratorState::submit_host_write(
+    const ChipTensor &tensor, uint64_t address, uint64_t value, uint64_t size
+) {
+    if (fatal) return;
+    if (size == 0 || size > sizeof(value)) {
+        report_fatal(
+            PTO2_ERROR_INVALID_ARGS, __FUNCTION__, "host write size=%llu is outside [1,8]", (unsigned long long)size
+        );
+        return;
+    }
+
+    CoreTaskArgs args;
+    args.add_output(tensor);  // OUTPUT_EXISTING: WAR lookup, then writer registration.
+    args.add_scalar(address);
+    args.add_scalar(value);
+    args.add_scalar(size);
+
+    if (GraphHostState *state = graph_state_from(this); state != nullptr && state->recording != nullptr) {
+        // The cached Graph format has no host-write node. Preserve recording
+        // task-id arithmetic, then force graph_end to replay the ordinary path.
+        (void)submit_dummy_task(args);
+        graph_record_mark_unsupported(this);
+        return;
+    }
+
+    (void)submit_task_common(
+        this, args, ActiveMask{}, TaskAttrs{}, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID,
+        TaskKind::HOST_WRITE
     );
 }
 

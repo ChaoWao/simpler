@@ -221,6 +221,87 @@ TEST_F(OrchestratorFaninTest, AllCompletedFastPathReleasesWaitOnlyPin) {
     EXPECT_EQ(producer_slot.fanout_refcount.load(), rc_before + 1);
 }
 
+TEST_F(OrchestratorFaninTest, DuplicateReaderRegistrationAddsOneWarFanin) {
+    orch.begin_scope();
+    uint32_t shape[] = {16};
+    ChipTensor tensor = make_tensor_external(gm_heap.data(), shape, 1, DataType::FLOAT32, false);
+
+    CoreTaskArgs reader_args;
+    reader_args.add_tracked_input(tensor);
+    reader_args.add_tracked_input(tensor);
+    TaskOutputTensors reader = orch.submit_dummy_task(reader_args);
+    ASSERT_TRUE(reader.task_id().is_valid());
+
+    CoreTaskArgs writer_args;
+    writer_args.add_output(tensor);
+    TaskOutputTensors writer = orch.submit_dummy_task(writer_args);
+    ASSERT_TRUE(writer.task_id().is_valid());
+
+    auto &reader_slot =
+        sm_handle->header->rings[reader.task_id().ring()].get_slot_state_by_task_id(reader.task_id().local());
+    auto &writer_slot =
+        sm_handle->header->rings[writer.task_id().ring()].get_slot_state_by_task_id(writer.task_id().local());
+    ASSERT_NE(writer_slot.payload, nullptr);
+    EXPECT_EQ(writer_slot.payload->fanin_actual_count, 1);
+    EXPECT_EQ(writer_slot.payload->fanin_inline_edges[0].slot_state(), &reader_slot);
+}
+
+TEST_F(OrchestratorFaninTest, CompletedReaderDoesNotPinWarFanin) {
+    orch.begin_scope();
+    uint32_t shape[] = {16};
+    ChipTensor tensor = make_tensor_external(gm_heap.data(), shape, 1, DataType::FLOAT32, false);
+
+    CoreTaskArgs reader_args;
+    reader_args.add_tracked_input(tensor);
+    TaskOutputTensors reader = orch.submit_dummy_task(reader_args);
+    ASSERT_TRUE(reader.task_id().is_valid());
+
+    auto &reader_slot =
+        sm_handle->header->rings[reader.task_id().ring()].get_slot_state_by_task_id(reader.task_id().local());
+    reader_slot.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
+    const uint32_t fanout_before = reader_slot.fanout_count;
+
+    CoreTaskArgs writer_args;
+    writer_args.add_output(tensor);
+    TaskOutputTensors writer = orch.submit_dummy_task(writer_args);
+    ASSERT_TRUE(writer.task_id().is_valid());
+
+    auto &writer_slot =
+        sm_handle->header->rings[writer.task_id().ring()].get_slot_state_by_task_id(writer.task_id().local());
+    ASSERT_NE(writer_slot.payload, nullptr);
+    EXPECT_EQ(writer_slot.payload->fanin_actual_count, 0);
+    EXPECT_EQ(reader_slot.fanout_count, fanout_before);
+}
+
+TEST_F(OrchestratorFaninTest, NestedReaderCreatesCrossRingWarToOuterWriter) {
+    orch.begin_scope();
+    uint32_t shape[] = {16};
+    ChipTensor tensor = make_tensor_external(gm_heap.data(), shape, 1, DataType::FLOAT32, false);
+
+    CoreTaskArgs first_writer_args;
+    first_writer_args.add_output(tensor);
+    TaskOutputTensors first_writer = orch.submit_dummy_task(first_writer_args);
+    ASSERT_EQ(first_writer.task_id(), PTO2TaskId::make(0, 0));
+
+    orch.begin_scope();
+    CoreTaskArgs reader_args;
+    reader_args.add_tracked_input(tensor);
+    TaskOutputTensors reader = orch.submit_dummy_task(reader_args);
+    ASSERT_EQ(reader.task_id(), PTO2TaskId::make(1, 0));
+    orch.end_scope();
+
+    CoreTaskArgs next_writer_args;
+    next_writer_args.add_output(tensor);
+    TaskOutputTensors next_writer = orch.submit_dummy_task(next_writer_args);
+    ASSERT_EQ(next_writer.task_id(), PTO2TaskId::make(0, 1));
+
+    auto &reader_slot = sm_handle->header->rings[1].get_slot_state_by_task_id(0);
+    auto &writer_slot = sm_handle->header->rings[0].get_slot_state_by_task_id(1);
+    ASSERT_NE(writer_slot.payload, nullptr);
+    ASSERT_EQ(writer_slot.payload->fanin_actual_count, 1);
+    EXPECT_EQ(writer_slot.payload->fanin_inline_edges[0].slot_state(), &reader_slot);
+}
+
 TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapState) {
     std::vector<TensorCreateInfo> create_infos;
     create_infos.reserve(8);

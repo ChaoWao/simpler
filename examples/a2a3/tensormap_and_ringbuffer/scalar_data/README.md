@@ -10,22 +10,21 @@ using, who waits?**
 
 ## The answer, and the trap
 
-`set_tensor_data` auto-waits — but only for tensors TensorMap knows about.
+`set_tensor_data` waits for overlapping writers, their existing consumers,
+and readers explicitly published with `add_tracked_input`.
 
-| Tensor kind | Added as | Does `set_tensor_data` wait? |
-| ----------- | -------- | ---------------------------- |
-| runtime-created | anything | **Yes.** TensorMap holds a producer entry, so it waits for the producer to complete (WAW) and for `fanout_refcount` to drain (WAR). |
-| external | `add_output` / `add_inout` | **Yes.** These create a TensorMap entry, so the same lookup works. |
-| external | `add_input` | **No — and this is a data race.** `add_input` on an external tensor creates no TensorMap entry. `set_tensor_data` finds no producer, so it writes immediately, while the reader kernel may still be running. |
+| Reader annotation | Published in TensorMap? | Does a later overlapping `set_tensor_data` wait? |
+| ----------------- | ----------------------- | ------------------------------------------------ |
+| `add_tracked_input` | Yes | **Yes.** The host write waits for the reader task to complete. |
+| `add_input` | No | **No.** The host write cannot discover an unfinished pure reader. |
 
-That last row is the whole reason this example exists. There is no error and no
-warning; the value is simply overwritten under a running kernel. **On an
-external tensor, use `add_inout` when a later `set_tensor_data` must not race
-the reader**, even though `add_input` describes the kernel's access accurately.
+The annotation belongs on the reader: a later writer cannot recover an earlier
+plain input that was never published. Keep ordinary `add_input` for reads that
+cannot overlap a later write, and use `add_tracked_input` when they can.
 
-Step 12 in the orchestration demonstrates the safe form: submit `noop` with
-`ext_b` as an output (`noop` reads nothing), then `set_tensor_data(ext_b, 55.0)`
-— which now waits, because the output registered an entry.
+Step 11 submits a real `kernel_add` reader before overwriting its input. Step 12
+uses `noop` to isolate external tracked-reader registration from kernel work;
+plain `add_input` would leave the host write with no reader entry to wait on.
 
 ## The thirteen steps
 
@@ -40,9 +39,9 @@ landing a value in `check[0..8]`:
 | 8 | Plain arithmetic in the orchestration on a value it read back | `check[4]` = 79.0 |
 | 9 | `set_tensor_data` → `get_tensor_data` round-trip | `check[5]` = 42.0 |
 | 10 | Orchestration → AICore RAW: write 10.0, then a kernel reads it | `check[6]` = 12.0 |
-| 11 | WAW + WAR on a runtime-created tensor — `set_tensor_data` waits for both the producer and the consumer | `check[7]` = 88.0 |
-| 12 | External WAR done correctly, via `add_inout` | `check[8]` = 55.0 |
-| 13 | `result = a + b`, external output through `add_inout` | `result` |
+| 11 | Internal tracked reader followed by a host write | `check[7]` = 88.0 |
+| 12 | External tracked-reader registration followed by a host write | `check[8]` = 55.0 |
+| 13 | `result = a + b`, external output through `add_output` | `result` |
 
 `kernel_noop` exists precisely because several steps need a task that
 *registers a dependency* without touching data.
@@ -54,8 +53,8 @@ auto selection.
 
 Note the comment on the `check` tensor in `generate_args`: it is **exactly 9
 slots**, matching `check[0..8]`. Output-tensor slots are not seeded from the
-host, so a tenth slot would read undefined device memory and the golden
-comparison would fail nondeterministically.
+host, so an unwritten slot would contain undefined device memory and make the
+golden comparison nondeterministic.
 
 ## Run
 

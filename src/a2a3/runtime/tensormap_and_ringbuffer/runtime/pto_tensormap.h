@@ -10,10 +10,10 @@
  */
 
 /**
- * PTO Runtime2 - TensorMap Interface
+ * tensormap_and_ringbuffer - TensorMap Interface
  *
- * TensorMap provides producer lookup for dependency discovery:
- * - Maps ChipTensor -> producer task ID
+ * TensorMap provides access lookup for dependency discovery:
+ * - Maps ChipTensor -> reader/writer task IDs
  * - Used by pto_submit_task() to find dependencies
  *
  * Key design features:
@@ -57,6 +57,17 @@ enum class OverlapStatus {
     OTHER,
 };
 
+enum class TensorAccessKind : uint8_t {
+    READER = 0,
+    WRITER = 1,
+};
+
+enum class TensorHazardKind : uint8_t {
+    RAW = 0,
+    WAW = 1,
+    WAR = 2,
+};
+
 struct Segment {
     uint64_t begin;
     uint64_t end;
@@ -75,11 +86,14 @@ struct Segment {
 struct PTO2TensorMapLayout {
     size_t off_buckets;
     size_t off_bucket_epochs;
+    size_t off_reader_buckets;
+    size_t off_reader_bucket_epochs;
     size_t off_entry_pool;
     size_t off_free_entry_list;
     size_t off_task_entry_heads[PTO2_MAX_RING_DEPTH];
     size_t off_task_entry_head_epochs[PTO2_MAX_RING_DEPTH];
     int32_t num_buckets;
+    int32_t num_reader_buckets;
     int32_t pool_size;
     int32_t task_window_sizes[PTO2_MAX_RING_DEPTH];
 };
@@ -108,7 +122,7 @@ extern uint64_t g_insert_count;
  * the hash key, size in [8, 16) is unused by the entry — we repurpose it for
  * `next_in_bucket`).
  *
- *   buffer_addr / next_in_bucket / producer_task_id   — chain traversal + match
+ *   buffer_addr / next_in_bucket / access_task_id     — chain traversal + match
  *   start_offset                                       — overlap byte range begin
  *   version, ndims, dtype, manual_dep, is_contiguous   — overlap fast path
  *   shapes[5]                                          — overlap comparison (line 1)
@@ -128,15 +142,15 @@ struct alignas(64) PTO2TensorMapEntry {
     // === Cache line 1 (64B) — lookup hot path; mirrors ChipTensor line 1 from byte 16 ===
     uint64_t buffer_addr;  // 8B [0, 8):   tensor base address (hash key, mirrors ChipTensor::buffer.addr)
     PTO2TensorMapEntry
-        *next_in_bucket;          // 8B [8, 16):  next entry in hash bucket chain (overlays ChipTensor::buffer.size)
-    PTO2TaskId producer_task_id;  // 8B [16,24):  mirrors ChipTensor::owner_task_id slot
-    uint64_t start_offset;        // 8B [24,32):  mirrors ChipTensor::start_offset (element offset)
-    int32_t version;              // 4B [32,36):  mirrors ChipTensor::version
-    uint32_t ndims;               // 4B [36,40):  mirrors ChipTensor::ndims
-    DataType dtype;               // 1B [40,41):  mirrors ChipTensor::dtype
-    bool manual_dep;              // 1B [41,42):  mirrors ChipTensor::manual_dep
-    bool is_contiguous;           // 1B [42,43):  mirrors ChipTensor::is_contiguous
-    uint8_t __padding1__;         // 1B [43,44):  mirrors ChipTensor padding
+        *next_in_bucket;           // 8B [8, 16):  next entry in hash bucket chain (overlays ChipTensor::buffer.size)
+    PTO2TaskId access_task_id;     // 8B [16,24):  task owning this access
+    uint64_t start_offset;         // 8B [24,32):  mirrors ChipTensor::start_offset (element offset)
+    int32_t version;               // 4B [32,36):  mirrors ChipTensor::version
+    uint32_t ndims;                // 4B [36,40):  mirrors ChipTensor::ndims
+    DataType dtype;                // 1B [40,41):  mirrors ChipTensor::dtype
+    bool manual_dep;               // 1B [41,42):  mirrors ChipTensor::manual_dep
+    bool is_contiguous;            // 1B [42,43):  mirrors ChipTensor::is_contiguous
+    TensorAccessKind access_kind;  // 1B [43,44):  reader or writer index
     uint32_t shapes[MAX_TENSOR_DIMS];  // 20B [44,64): mirrors ChipTensor::shapes
 
     // === Cache line 2 (64B) — chain manipulation + non-contiguous overlap data ===
@@ -153,7 +167,7 @@ struct alignas(64) PTO2TensorMapEntry {
      * Copy overlap-relevant fields from a ChipTensor into this entry.
      *
      * 64B memcpy of ChipTensor cache line 1 populates buffer_addr (byte [0,8)),
-     * producer_task_id, start_offset, version, ndims, dtype, manual_dep,
+     * access_task_id, start_offset, version, ndims, dtype, manual_dep,
      * is_contiguous and shapes[]. Byte [8,16) holds ChipTensor::buffer.size in
      * the source and gets written into next_in_bucket; that's harmless
      * because link_entry() overwrites next_in_bucket immediately after.
@@ -338,7 +352,7 @@ struct alignas(64) PTO2TensorMapEntry {
 
 static_assert(sizeof(PTO2TensorMapEntry) == 128, "TensorMapEntry must be exactly 2 cache lines (128 bytes)");
 static_assert(offsetof(PTO2TensorMapEntry, buffer_addr) == offsetof(ChipTensor, buffer.addr));
-static_assert(offsetof(PTO2TensorMapEntry, producer_task_id) == offsetof(ChipTensor, owner_task_id));
+static_assert(offsetof(PTO2TensorMapEntry, access_task_id) == offsetof(ChipTensor, owner_task_id));
 static_assert(offsetof(PTO2TensorMapEntry, start_offset) == offsetof(ChipTensor, start_offset));
 static_assert(offsetof(PTO2TensorMapEntry, version) == offsetof(ChipTensor, version));
 static_assert(offsetof(PTO2TensorMapEntry, ndims) == offsetof(ChipTensor, ndims));
@@ -385,6 +399,14 @@ struct PTO2TensorMap {
     // Per-ring cleanup progress (for periodic cleanup_retired)
     int32_t last_cleanup[PTO2_MAX_RING_DEPTH]{};
 
+    // Tracked-reader side index. Keep these fields after the original writer
+    // state so the writer-only hot path retains main's field offsets/cache layout.
+    PTO2TensorMapEntry **reader_buckets;
+    uint32_t *reader_bucket_epochs;
+    int32_t num_reader_buckets;
+    int32_t reader_used{0};
+    int32_t reader_high_water{0};
+
     uint32_t get_task_local_id_slot(uint8_t ring_id, uint32_t task_local_id) const {
         return task_local_id & (task_window_sizes[ring_id] - 1);
     }
@@ -394,6 +416,8 @@ struct PTO2TensorMap {
     // setter symbols must export for host dlsym; the probe call sites that use
     // these accessors stay gated by SIMPLER_DFX).
     int32_t current_used() const { return next_entry_idx - free_num; }
+    int32_t current_readers() const { return reader_used; }
+    int32_t current_writers() const { return current_used() - reader_used; }
     int32_t pool_capacity() const { return pool_size; }
     int32_t free_entries() const { return pool_size - current_used(); }
 
@@ -430,29 +454,51 @@ struct PTO2TensorMap {
         return res;
     }
 
-    void free_entry(PTO2TensorMapEntry &entry) {
+    void free_writer_entry(PTO2TensorMapEntry &entry) {
         always_assert(entry.bucket_index != -1);  // must still be in a bucket
 
-        // Update predecessor's next pointer (O(1) via prev_in_bucket)
         if (entry.prev_in_bucket == nullptr) {
-            // Entry is the head of its bucket chain, update bucket head
-            // Must compute hash BEFORE clearing tensor
             buckets[entry.bucket_index] = entry.next_in_bucket;
         } else {
             entry.prev_in_bucket->next_in_bucket = entry.next_in_bucket;
         }
-
-        // Update successor's prev pointer
         if (entry.next_in_bucket != nullptr) {
             entry.next_in_bucket->prev_in_bucket = entry.prev_in_bucket;
         }
-
         free_entry_list[free_num++] = &entry;
         entry.bucket_index = -1;
         entry.next_in_bucket = nullptr;
         entry.prev_in_bucket = nullptr;
         entry.next_in_task = nullptr;
         entry.prev_in_task = nullptr;
+    }
+
+    void free_reader_entry(PTO2TensorMapEntry &entry) {
+        always_assert(entry.bucket_index != -1);
+        if (entry.prev_in_bucket == nullptr) {
+            reader_buckets[entry.bucket_index] = entry.next_in_bucket;
+        } else {
+            entry.prev_in_bucket->next_in_bucket = entry.next_in_bucket;
+        }
+        if (entry.next_in_bucket != nullptr) {
+            entry.next_in_bucket->prev_in_bucket = entry.prev_in_bucket;
+        }
+        always_assert(reader_used > 0);
+        reader_used--;
+        free_entry_list[free_num++] = &entry;
+        entry.bucket_index = -1;
+        entry.next_in_bucket = nullptr;
+        entry.prev_in_bucket = nullptr;
+        entry.next_in_task = nullptr;
+        entry.prev_in_task = nullptr;
+    }
+
+    void free_entry(PTO2TensorMapEntry &entry) {
+        if (entry.access_kind == TensorAccessKind::READER) {
+            free_reader_entry(entry);
+        } else {
+            free_writer_entry(entry);
+        }
     }
 
     // =============================================================================
@@ -521,13 +567,17 @@ struct PTO2TensorMap {
      * @param tensor    ChipTensor to look up
      * @param on_match  Callback invoked for each overlapping entry
      */
-    template <typename Fn>
-    void lookup(const ChipTensor &tensor, Fn &&on_match) {
-        uint32_t bucket_index = hash(tensor.buffer.addr);
-        if (bucket_epochs[bucket_index] != current_epoch) {
+    template <TensorAccessKind access_kind, typename Fn>
+    void lookup_impl(const ChipTensor &tensor, Fn &&on_match) {
+        constexpr bool is_reader = access_kind == TensorAccessKind::READER;
+        int32_t bucket_count = is_reader ? num_reader_buckets : num_buckets;
+        uint32_t bucket_index = hash(tensor.buffer.addr, bucket_count);
+        uint32_t *epochs = is_reader ? reader_bucket_epochs : bucket_epochs;
+        PTO2TensorMapEntry **index = is_reader ? reader_buckets : buckets;
+        if (epochs[bucket_index] != current_epoch) {
             return;
         }
-        PTO2TensorMapEntry *cur_entry = buckets[bucket_index];
+        PTO2TensorMapEntry *cur_entry = index[bucket_index];
 
 #if SIMPLER_TENSORMAP_PROFILING
         g_lookup_count++;
@@ -579,19 +629,41 @@ struct PTO2TensorMap {
 #endif
     }
 
+    template <typename Fn>
+    void lookup(const ChipTensor &tensor, Fn &&on_match) {
+        lookup_impl<TensorAccessKind::WRITER>(tensor, static_cast<Fn &&>(on_match));
+    }
+
+    template <typename Fn>
+    void lookup(const ChipTensor &tensor, TensorAccessKind access_kind, Fn &&on_match) {
+        if (access_kind == TensorAccessKind::READER) {
+            lookup_impl<TensorAccessKind::READER>(tensor, static_cast<Fn &&>(on_match));
+        } else {
+            lookup_impl<TensorAccessKind::WRITER>(tensor, static_cast<Fn &&>(on_match));
+        }
+    }
+
     /**
-     * Insert a new entry (called when task produces output)
+     * Insert a new reader or writer access entry.
      *
      * Allocates from ring buffer pool, may overwrite stale entries.
      * Inserts at head of hash bucket chain (maintains task_id ordering).
      *
-     * @param tensor            ChipTensor produced
-     * @param producer_task_id  Task ID of producer
+     * @param tensor          ChipTensor accessed
+     * @param access_task_id  Task ID owning the access
      */
-    void insert(const ChipTensor &tensor, PTO2TaskId producer_task_id) {
+    void insert(const ChipTensor &tensor, PTO2TaskId access_task_id, TensorAccessKind access_kind) {
+        if (access_kind == TensorAccessKind::READER) {
+            insert_impl<TensorAccessKind::READER>(tensor, access_task_id);
+        } else {
+            insert_impl<TensorAccessKind::WRITER>(tensor, access_task_id);
+        }
+    }
+
+    void insert(const ChipTensor &tensor, PTO2TaskId access_task_id) {
         PTO2TensorMapEntry *entry = new_entry();
         entry->copy_from_tensor(tensor);
-        link_entry(entry, tensor.buffer.addr, producer_task_id);
+        link_entry(entry, tensor.buffer.addr, access_task_id);
     }
 
     /**
@@ -618,7 +690,7 @@ struct PTO2TensorMap {
             PTO2TensorMapEntry *cur_entry = task_entry_heads[ring_id][task_slot];
             while (cur_entry != nullptr) {
                 PTO2TensorMapEntry *next_entry = cur_entry->next_in_task;  // free_entry clears it
-                if (cur_entry->producer_task_id == retired_task) {
+                if (cur_entry->access_task_id == retired_task) {
                     if (cur_entry->prev_in_task != nullptr) {
                         cur_entry->prev_in_task->next_in_task = next_entry;
                     } else {
@@ -646,36 +718,48 @@ struct PTO2TensorMap {
      * addresses (low bits all-zero) still distribute evenly.  We extract
      * the top log2(num_buckets) bits which carry the most entropy.
      */
-    uint32_t hash(uint64_t key) {
+    uint32_t hash(uint64_t key, int32_t bucket_count) {
         key *= 0x9E3779B97F4A7C15ULL;
-        return static_cast<uint32_t>(key >> (64 - __builtin_ctz(num_buckets)));
+        return static_cast<uint32_t>(key >> (64 - __builtin_ctz(bucket_count)));
     }
+
+    uint32_t hash(uint64_t key) { return hash(key, num_buckets); }
 
     /**
      * Link an initialized entry into bucket and task chains.
      */
-    void link_entry(PTO2TensorMapEntry *entry, uint64_t addr, PTO2TaskId producer_task_id) {
+    template <TensorAccessKind access_kind>
+    void link_entry_impl(PTO2TensorMapEntry *entry, uint64_t addr, PTO2TaskId access_task_id) {
 #if SIMPLER_TENSORMAP_PROFILING
         g_insert_count++;
 #endif
-        uint32_t bucket_index = hash(addr);
-        auto ring_id = producer_task_id.ring();
-        auto local_id = producer_task_id.local();
+        constexpr bool is_reader = access_kind == TensorAccessKind::READER;
+        int32_t bucket_count = is_reader ? num_reader_buckets : num_buckets;
+        uint32_t bucket_index = hash(addr, bucket_count);
+        auto ring_id = access_task_id.ring();
+        auto local_id = access_task_id.local();
         int32_t task_slot = local_id & (task_window_sizes[ring_id] - 1);
 
-        entry->producer_task_id = producer_task_id;
+        entry->access_task_id = access_task_id;
+        entry->access_kind = access_kind;
+        if constexpr (is_reader) {
+            reader_used++;
+            if (reader_used > reader_high_water) reader_high_water = reader_used;
+        }
 
         // Insert at head of hash bucket
-        if (bucket_epochs[bucket_index] != current_epoch) {
-            buckets[bucket_index] = nullptr;
-            bucket_epochs[bucket_index] = current_epoch;
+        PTO2TensorMapEntry **index = is_reader ? reader_buckets : buckets;
+        uint32_t *epochs = is_reader ? reader_bucket_epochs : bucket_epochs;
+        if (epochs[bucket_index] != current_epoch) {
+            index[bucket_index] = nullptr;
+            epochs[bucket_index] = current_epoch;
         }
         entry->bucket_index = bucket_index;
-        entry->next_in_bucket = buckets[bucket_index];
+        entry->next_in_bucket = index[bucket_index];
         if (entry->next_in_bucket != nullptr) {
             entry->next_in_bucket->prev_in_bucket = entry;
         }
-        buckets[bucket_index] = entry;
+        index[bucket_index] = entry;
         entry->prev_in_bucket = nullptr;
 
         // Link to task's entry list
@@ -691,16 +775,78 @@ struct PTO2TensorMap {
         task_entry_heads[ring_id][task_slot] = entry;
     }
 
+    template <TensorAccessKind access_kind>
+    void insert_impl(const ChipTensor &tensor, PTO2TaskId access_task_id) {
+        PTO2TensorMapEntry *entry = new_entry();
+        entry->copy_from_tensor(tensor);
+        link_entry_impl<access_kind>(entry, tensor.buffer.addr, access_task_id);
+    }
+
+    void link_entry(PTO2TensorMapEntry *entry, uint64_t addr, PTO2TaskId access_task_id) {
+#if SIMPLER_TENSORMAP_PROFILING
+        g_insert_count++;
+#endif
+        uint32_t bucket_index = hash(addr);
+        auto ring_id = access_task_id.ring();
+        auto local_id = access_task_id.local();
+        int32_t task_slot = local_id & (task_window_sizes[ring_id] - 1);
+
+        entry->access_task_id = access_task_id;
+        entry->access_kind = TensorAccessKind::WRITER;
+        if (bucket_epochs[bucket_index] != current_epoch) {
+            buckets[bucket_index] = nullptr;
+            bucket_epochs[bucket_index] = current_epoch;
+        }
+        entry->bucket_index = bucket_index;
+        entry->next_in_bucket = buckets[bucket_index];
+        if (entry->next_in_bucket != nullptr) {
+            entry->next_in_bucket->prev_in_bucket = entry;
+        }
+        buckets[bucket_index] = entry;
+        entry->prev_in_bucket = nullptr;
+
+        if (task_entry_head_epochs[ring_id][task_slot] != current_epoch) {
+            task_entry_heads[ring_id][task_slot] = nullptr;
+            task_entry_head_epochs[ring_id][task_slot] = current_epoch;
+        }
+        entry->next_in_task = task_entry_heads[ring_id][task_slot];
+        entry->prev_in_task = nullptr;
+        if (entry->next_in_task != nullptr) {
+            entry->next_in_task->prev_in_task = entry;
+        }
+        task_entry_heads[ring_id][task_slot] = entry;
+    }
+
+    void link_entry(
+        PTO2TensorMapEntry *entry, uint64_t addr, PTO2TaskId access_task_id, TensorAccessKind access_kind
+    ) {
+        if (access_kind == TensorAccessKind::READER) {
+            link_entry_impl<TensorAccessKind::READER>(entry, addr, access_task_id);
+        } else {
+            link_entry_impl<TensorAccessKind::WRITER>(entry, addr, access_task_id);
+        }
+    }
+
     /**
      * Check if entry is valid (producer has not retired)
      */
     bool entry_valid(const PTO2TensorMapEntry &entry) const {
-        return static_cast<int32_t>(entry.producer_task_id.local()) >= last_task_alives[entry.producer_task_id.ring()];
+        return static_cast<int32_t>(entry.access_task_id.local()) >= last_task_alives[entry.access_task_id.ring()];
     }
 
     void remove_entry(PTO2TensorMapEntry &entry) {
         remove_from_task(entry);
         free_entry(entry);
+    }
+
+    void remove_writer_entry(PTO2TensorMapEntry &entry) {
+        remove_from_task(entry);
+        free_writer_entry(entry);
+    }
+
+    void remove_reader_entry(PTO2TensorMapEntry &entry) {
+        remove_from_task(entry);
+        free_reader_entry(entry);
     }
 
     /**
@@ -712,8 +858,8 @@ struct PTO2TensorMap {
         // Update predecessor's next pointer (O(1) via prev_in_task)
         if (entry.prev_in_task == nullptr) {
             // Entry is the head of its task chain, update task_entry_heads
-            int32_t ring_id = entry.producer_task_id.ring();
-            int32_t local_id = static_cast<int32_t>(entry.producer_task_id.local());
+            int32_t ring_id = entry.access_task_id.ring();
+            int32_t local_id = static_cast<int32_t>(entry.access_task_id.local());
             int32_t task_slot = local_id & (task_window_sizes[ring_id] - 1);
             task_entry_heads[ring_id][task_slot] = entry.next_in_task;
         } else {

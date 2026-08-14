@@ -65,7 +65,7 @@ inputs to each submit are captured and the graph is reconstructed afterwards.
       tensor metadata (producer/consumer shape + offset, dtype, version).
   Per-record semantics mirror runtime `submit_task` exactly: STEP 1
   (explicit deps), STEP 3 (creator retention + tensormap lookup),
-  STEP 4 (register outputs). Per-successor dedup matches
+  STEP 4 (register reader/writer accesses). Per-successor dedup matches
   `PTO2FaninBuilder::append_fanin_or_fail`. After both passes finish per
   record, the replay asserts the two producer-id → `DepFlags` mappings are
   equal (same producers and same per-producer flags); if they diverge,
@@ -86,8 +86,10 @@ nothing to capture-then-reconstruct.
 - **Capture point.** `submit_task_common` opens the task's entry, and
   `compute_task_fanin`'s `Annotate` hooks fire on each producer the runtime
   actually wires: creator retention (Step A) and tensormap lookup (Step B), plus
-  the declared dependencies at STEP 1. The edges are the runtime's own, not a
-  replay's inference, so they cannot drift from `compute_task_fanin` semantics.
+  the declared dependencies at STEP 1. A host-write node additionally records
+  its runtime-derived writer-consumer drain with source
+  `host_write_consumer`. The edges are the runtime's own, not a replay's
+  inference, so they cannot drift from dependency construction semantics.
 - **No ring, no collector, no replay.** The device-side dep_gen writer, its
   shared-memory ring, and the drain thread are all skipped
   (`dep_gen_host_graph_active()` tells the runner). Nothing is dropped under
@@ -159,7 +161,7 @@ The standard SceneTest path
      "consumer_start_offset": "0", "consumer_strides": [1]},
     {"pred": "4294967296", "succ": "4294967298", "arg": 0, "source": "tensormap",
      "flags": ["wait"],
-     "overlap": "covered",
+     "overlap": "covered", "hazard": "WAR", "access_kind": "READER",
      "tensor_id": "9514117477438350967", "consumer_dtype": "FLOAT32",
      "consumer_shape": [16384],
      "consumer_start_offset": "0", "consumer_strides": [1],
@@ -177,6 +179,11 @@ JavaScript-based JSON parsers can only safely represent integers up to
 silently lose precision if encoded as numbers. Python consumers pass
 these through `int(v)` which accepts either form, so the schema is
 JS-safe without burdening Python.
+
+TensorMap edges additionally contain `hazard` (`RAW`, `WAW`, or `WAR`) and
+`access_kind` (`WRITER` or `READER`). These fields describe why the consumer
+must wait and which access index produced the match; creator and explicit
+edges do not carry them.
 
 Task ids encode `(ring_id << 32) | local_id` — the same layout as
 `PTO2TaskId::raw`:

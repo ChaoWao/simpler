@@ -11,7 +11,7 @@
 /**
  * Scalar Data Dependency Test Orchestration
  *
- * End-to-end test for get_tensor_data, set_tensor_data, and add_inout
+ * End-to-end test for get_tensor_data, set_tensor_data, add_inout, and add_tracked_input
  * with runtime-created outputs and initial value support.
  *
  * Flow:
@@ -25,9 +25,9 @@
  *   8. check[4] = 2.0 + 77.0 = 79.0  (orchestration arithmetic)
  *   9. set_tensor_data(scalar_tensor, {0}, 42.0), get_tensor_data → check[5] = 42.0
  *  10. Orch set_tensor_data(d, {0}, 10.0) → kernel_add(d, a) → check[6] = 12.0
- *  11. WAW+WAR: kernel_add reads c → set_tensor_data(c, 88.0) auto-waits → check[7] = 88.0
- *  12. External WAR with INOUT: noop(ext_b as INOUT) → set_tensor_data(ext_b) → check[8] = 55.0
- *  13. result = a + b      (kernel_add, external output via INOUT)
+ *  11. Internal WAR: tracked kernel_add reads c → set_tensor_data(c, 88.0) waits → check[7] = 88.0
+ *  12. External WAR: tracked noop on ext_b → set_tensor_data(ext_b, 55.0) waits → check[8] = 55.0
+ *  13. result = a + b      (kernel_add, external output via add_output)
  */
 
 #include <stddef.h>
@@ -185,28 +185,17 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     // =========================================================
     // Step 11: WAW + WAR on internal tensor
-    //   c was written by Step 1 (kernel_add, TensorMap has producer entry).
-    //   Submit a new kernel that reads c as INPUT (creates consumer dep).
-    //   Then set_tensor_data(c) — no manual get_tensor_data sync.
-    //   set_tensor_data internally waits for:
-    //     - WAW: producer (Step 1) COMPLETED
-    //     - WAR: consumer (this kernel) done (fanout_refcount check)
-    //
-    //   NOTE on external tensors: ext_a was read by Step 1 as INPUT,
-    //   but TensorMap has no producer entry for ext_a (only consumers).
-    //   set_tensor_data(ext_a) would NOT detect the reader — data race.
-    //   To ensure WAR safety on external tensors, use add_inout()
-    //   instead of add_input() so TensorMap tracks the access chain.
+    //   A tracked reader consumes c while set_tensor_data prepares to overwrite it.
+    //   The host write waits for both c's earlier writer and the tracked reader.
     // =========================================================
     {
         CoreTaskArgs args;
-        args.add_input(c);
+        args.add_tracked_input(c);
         args.add_input(ext_b);
         args.add_output(inter_ci);
         (void)rt_submit_aiv_task(FUNC_ADD, args);  // NOLINT(readability/casting)
     }
 
-    // set_tensor_data auto-waits for producer + consumer before writing
     idx[0] = 0;
     set_tensor_data(c, 1, idx, 88.0f);
     float waw_val = get_tensor_data<float>(c, 1, idx);
@@ -216,32 +205,20 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     set_tensor_data(ext_check, 1, check_idx, waw_val);
 
     // =========================================================
-    // Step 12: External tensor WAR — must use add_output or add_inout, not add_input
-    //
-    //   For external tensors, using add_input() does NOT create a
-    //   TensorMap entry. set_tensor_data would then write immediately
-    //   without waiting for the reader kernel — a WAR data race.
-    //
-    //   Using add_output() (or add_inout()) creates a TensorMap entry,
-    //   enabling set_tensor_data to detect the producer via TensorMap lookup
-    //   and wait for fanout_refcount (all consumers done).
-    //
-    //   Here we submit noop with ext_b as write-only output (noop doesn't
-    //   read data), then set_tensor_data overwrites ext_b[0] = 55.0.
-    //   set_tensor_data auto-waits for the noop to complete.
+    // Step 12: WAR on an external tensor
+    //   Plain add_input would not publish the reader. add_tracked_input keeps
+    //   the argument read-only while making the reader visible to the host write.
     // =========================================================
     {
         CoreTaskArgs args;
-        args.add_output(ext_b);  // write-only: creates TensorMap entry (not add_input!)
+        args.add_tracked_input(ext_b);
         rt_submit_aiv_task(FUNC_NOOP, args);
     }
 
     idx[0] = 0;
     set_tensor_data(ext_b, 1, idx, 55.0f);
     float ext_war_val = get_tensor_data<float>(ext_b, 1, idx);
-    LOG_INFO(
-        "External WAR (INOUT): set_tensor_data(ext_b, 55.0) = %f (expected 55.0)", static_cast<double>(ext_war_val)
-    );
+    LOG_INFO("External WAR: set_tensor_data(ext_b, 55.0) = %f (expected 55.0)", static_cast<double>(ext_war_val));
 
     check_idx[0] = 8;
     set_tensor_data(ext_check, 1, check_idx, ext_war_val);

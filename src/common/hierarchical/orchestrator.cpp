@@ -1224,7 +1224,8 @@ void Orchestrator::infer_deps(
             }
             TensorArgType tag = a.tag(i);
             switch (tag) {
-            case TensorArgType::INPUT: {
+            case TensorArgType::INPUT:
+            case TensorArgType::TRACKED_INPUT: {
                 TaskSlot prod = tensormap_->lookup(run_id, key);
                 if (prod != INVALID_SLOT) add_unique_producer(prod);
                 break;

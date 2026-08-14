@@ -58,6 +58,13 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_d
     return -1;
 }
 
+extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_set_enabled(bool /*enable*/) {}
+extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_emit(const char * /*deps_json_path*/) {
+    LOG_DEBUG("dep_gen host graph not implemented for this runtime — deps.json skipped");
+    return -1;
+}
+
 // a5 sim: malloc / free wrappers shared by the four profiling subsystems'
 // init_* methods. Plain function pointers convert implicitly into the
 // framework's std::function alloc / free shapes. Kept on the subclass (not
@@ -91,6 +98,11 @@ struct DeviceRunner::ActiveRun {
 
 DeviceRunner::DeviceRunner() = default;
 DeviceRunner::~DeviceRunner() { finalize(); }
+
+void DeviceRunner::set_dep_gen_enabled(bool enable) {
+    enable_dep_gen_ = enable;
+    dep_gen_host_graph_set_enabled(enable);
+}
 
 void DeviceRunner::cleanup_active_run() noexcept {
     if (active_run_ == nullptr) return;
@@ -308,7 +320,7 @@ int DeviceRunner::prepare_execution(
     if (enable_pmu_) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
     }
-    if (enable_dep_gen_) {
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
     }
     if (enable_scope_stats_) {
@@ -367,7 +379,7 @@ int DeviceRunner::prepare_execution(
         }
     }
 
-    if (enable_dep_gen_) {
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         rc = init_dep_gen(launch_aicpu_num, device_id_);
         if (rc != 0) {
             LOG_ERROR("init_dep_gen failed: %d", rc);
@@ -463,7 +475,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                 set_platform_pmu_base_func_(kernel_args_.pmu_data_base);
                 set_pmu_enabled_func_(enable_pmu_);
                 set_platform_dep_gen_base_func_(kernel_args_.dep_gen_data_base);
-                set_dep_gen_enabled_func_(enable_dep_gen_);
+                set_dep_gen_enabled_func_(enable_dep_gen_ && !dep_gen_host_graph_active());
                 set_scope_stats_enabled_func_(enable_scope_stats_);
                 set_platform_scope_stats_base_func_(kernel_args_.scope_stats_data_base);
 
@@ -473,7 +485,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                 if (enable_chip_swimlane_) chip_swimlane_collector_.start(thread_factory);
                 if (enable_dump_args_) dump_collector_.start(thread_factory);
                 if (enable_pmu_) pmu_collector_.start(thread_factory);
-                if (enable_dep_gen_) dep_gen_collector_.start(thread_factory);
+                if (enable_dep_gen_ && !dep_gen_host_graph_active()) dep_gen_collector_.start(thread_factory);
                 if (enable_scope_stats_) scope_stats_collector_.start(thread_factory);
 
                 if (kernel_args_.device_wall_data_base != 0) {
@@ -618,13 +630,20 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     }
 
     if (enable_dep_gen_) {
-        dep_gen_collector_.stop();
-        if (dep_gen_collector_.reconcile_counters()) {
-            const auto &records = dep_gen_collector_.records();
-            const std::string deps = make_deps_json_path(output_prefix_);
-            int replay_rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
-            if (replay_rc != 0) {
-                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", replay_rc);
+        const std::string deps = make_deps_json_path(output_prefix_);
+        if (dep_gen_host_graph_active()) {
+            const int emit_rc = dep_gen_host_graph_emit(deps.c_str());
+            if (emit_rc != 0) {
+                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", emit_rc);
+            }
+        } else {
+            dep_gen_collector_.stop();
+            if (dep_gen_collector_.reconcile_counters()) {
+                const auto &records = dep_gen_collector_.records();
+                const int replay_rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+                if (replay_rc != 0) {
+                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", replay_rc);
+                }
             }
         }
     }

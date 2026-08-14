@@ -41,7 +41,7 @@ Type changes:
 | Field | Before | After |
 | ----- | ------ | ----- |
 | `PTO2TaskDescriptor.task_id` | `int32_t` | `PTO2TaskId` |
-| `PTO2TensorMapEntry.producer_task_id` | `int32_t` | `PTO2TaskId` |
+| `PTO2TensorMapEntry.access_task_id` | `int32_t` | `PTO2TaskId` |
 | `PTO2TaskSlotState.ring_id` | N/A | `uint8_t` (new, denormalized for fast access) |
 
 ## 4. Data Structures
@@ -155,8 +155,8 @@ Entry validity checks and `cleanup_retired` operate per-ring:
 
 ```cpp
 bool entry_valid(const PTO2TensorMapEntry& e) {
-    int32_t ring = e.producer_task_id.ring();
-    int32_t local = e.producer_task_id.local();
+    int32_t ring = e.access_task_id.ring();
+    int32_t local = e.access_task_id.local();
     return local >= last_task_alives[ring];
 }
 ```

@@ -18,9 +18,10 @@
  *   creator   — creator retention on an existing tensor (STEP 3 Step A).
  *   tensormap — a producer whose written slice overlaps what this task reads
  *               (STEP 3 Step B); carries both slices' geometry.
+ *   host_write_consumer — a direct consumer that a host write must wait for.
  *
  * Per-task producer dedup mirrors PTO2FaninBuilder::append_fanin_or_fail, which
- * collapses all three sources into one fanin list: the first edge to name a
+ * collapses all four sources into one fanin list: the first edge to name a
  * producer is kept. tensormap edges are exempt — a second producer slice for the
  * same task is a distinct fact about the data flow, and viewers rely on seeing
  * every overlap.
@@ -46,8 +47,8 @@ namespace {
 // Graph tables (serialized as tasks[] / tensors[] / edges[])
 // ---------------------------------------------------------------------------
 
-// Edge categories — matches the three places a runtime fanin edge is born.
-enum class EdgeSource { EXPLICIT, CREATOR, TENSORMAP };
+// Edge categories — matches the four places a runtime fanin edge is born.
+enum class EdgeSource { EXPLICIT, CREATOR, TENSORMAP, HOST_WRITE_CONSUMER };
 
 const char *edge_source_str(EdgeSource s) {
     switch (s) {
@@ -57,6 +58,8 @@ const char *edge_source_str(EdgeSource s) {
         return "creator";
     case EdgeSource::TENSORMAP:
         return "tensormap";
+    case EdgeSource::HOST_WRITE_CONSUMER:
+        return "host_write_consumer";
     }
     return "unknown";
 }
@@ -73,6 +76,20 @@ const char *overlap_status_str(OverlapStatus s) {
     return "unknown";
 }
 
+const char *hazard_kind_str(TensorHazardKind kind) {
+    switch (kind) {
+    case TensorHazardKind::RAW:
+        return "RAW";
+    case TensorHazardKind::WAW:
+        return "WAW";
+    case TensorHazardKind::WAR:
+        return "WAR";
+    }
+    return "unknown";
+}
+
+const char *access_kind_str(TensorAccessKind kind) { return kind == TensorAccessKind::READER ? "READER" : "WRITER"; }
+
 const char *arg_type_str(TensorArgType t) {
     switch (t) {
     case TensorArgType::INPUT:
@@ -83,6 +100,10 @@ const char *arg_type_str(TensorArgType t) {
         return "INOUT";
     case TensorArgType::OUTPUT_EXISTING:
         return "OUTPUT_EXISTING";
+    case TensorArgType::NO_DEP:
+        return "NO_DEP";
+    case TensorArgType::TRACKED_INPUT:
+        return "TRACKED_INPUT";
     }
     return "UNKNOWN";
 }
@@ -100,7 +121,9 @@ struct EdgeAnnot {
     int32_t consumer_arg_idx;  // -1 for EXPLICIT (not tied to a tensor arg)
     EdgeSource source;
     OverlapStatus overlap;  // only meaningful for TENSORMAP
-    uint64_t tensor_id;     // 0 for EXPLICIT
+    TensorHazardKind hazard;
+    TensorAccessKind access_kind;
+    uint64_t tensor_id;  // 0 for EXPLICIT
     // Consumer side (the ChipTensor the submitting task is reading).
     uint8_t consumer_dtype;
     uint32_t consumer_ndims;
@@ -340,6 +363,8 @@ bool write_deps_json(
         out << ",\"source\":\"" << edge_source_str(e.source) << '"';
         if (e.source == EdgeSource::TENSORMAP) {
             out << ",\"overlap\":\"" << overlap_status_str(e.overlap) << '"';
+            out << ",\"hazard\":\"" << hazard_kind_str(e.hazard) << '"';
+            out << ",\"access_kind\":\"" << access_kind_str(e.access_kind) << '"';
         }
         if (e.source != EdgeSource::EXPLICIT) {
             out << ",\"tensor_id\":\"" << e.tensor_id << '"';
@@ -466,7 +491,7 @@ void dep_gen_host_graph_add_creator_edge(uint64_t producer_raw, int32_t arg_idx,
 
 void dep_gen_host_graph_add_tensormap_edge(
     uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
-    OverlapStatus overlap
+    OverlapStatus overlap, TensorHazardKind hazard
 ) {
     HostGraphState &s = state();
     if (!s.enabled || !s.in_task) {
@@ -481,9 +506,28 @@ void dep_gen_host_graph_add_tensormap_edge(
     e.consumer_arg_idx = arg_idx;
     e.source = EdgeSource::TENSORMAP;
     e.overlap = overlap;
+    e.hazard = hazard;
+    e.access_kind = entry.access_kind;
     e.tensor_id = make_tensor_id(entry.buffer_addr, entry.version);
     fill_consumer(e, consumer);
     fill_producer(e, entry);
+    s.edges.push_back(e);
+}
+
+void dep_gen_host_graph_add_host_write_consumer_edge(
+    uint64_t producer_raw, int32_t arg_idx, const ChipTensor &consumer
+) {
+    HostGraphState &s = state();
+    if (!s.enabled || !s.in_task || !s.task_preds.insert(producer_raw).second) {
+        return;
+    }
+    EdgeAnnot e{};
+    e.pred = producer_raw;
+    e.succ = s.current_task_id;
+    e.consumer_arg_idx = arg_idx;
+    e.source = EdgeSource::HOST_WRITE_CONSUMER;
+    e.tensor_id = register_tensor(s, consumer);
+    fill_consumer(e, consumer);
     s.edges.push_back(e);
 }
 

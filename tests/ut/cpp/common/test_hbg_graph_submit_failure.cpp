@@ -63,7 +63,7 @@ protected:
     }
 };
 
-TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) {
+TEST_F(HbgGraphSubmitFailureTest, FaninSpillFailureLatchesFatalWithoutPartialUpload) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
     ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
@@ -87,6 +87,8 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
         ASSERT_TRUE(orch.submit_dummy_task(producer_args).task_id().is_valid());
     }
 
+    // A full spill pool rejects the first dependency beyond the inline payload.
+    sched.fanin_spill_capacity = sched.fanin_spill_top;
     const GraphScopeResult replay = orch.graph_begin(0x1715, boundary_args, 0x1736);
 
     EXPECT_TRUE(replay.execute_block);
@@ -95,4 +97,29 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     EXPECT_TRUE(orch.fatal);
     EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_DEP_POOL_OVERFLOW);
     EXPECT_EQ(graph_host_upload_count(*graph_state), uploads_before_failure);
+}
+
+TEST_F(HbgGraphSubmitFailureTest, TrackedInputForcesOrdinaryPathFallback) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+
+    orch.begin_scope();
+    CoreTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+    const GraphScopeResult graph = orch.graph_begin(0x1810, boundary_args, 0x1306);
+    ASSERT_TRUE(graph.recording);
+
+    CoreTaskArgs node_args;
+    node_args.add_tracked_input(boundary);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+
+    EXPECT_FALSE(orch.graph_end());
+    EXPECT_EQ(graph_host_upload_count(*graph_state), 0U);
+    EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), 0);
+
+    const TaskOutputTensors fallback = orch.submit_dummy_task(node_args);
+    EXPECT_TRUE(fallback.task_id().is_valid());
+    EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), 1);
+    orch.end_scope();
 }

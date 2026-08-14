@@ -110,19 +110,20 @@ with the unmodified boundary value.
 - Boundary ChipTensor shape, stride, dtype, size, direction, contiguity, and alias
   partition must match the first invocation.
 - Internal task scalars with no boundary source are fixed Definition data.
-- Boundary storage is caller-owned. `INPUT`, `INOUT`, `OUTPUT_EXISTING`, and
-  `NO_DEP` are supported. A boundary `TensorCreateInfo` tagged `OUTPUT` is not.
+- Boundary storage is caller-owned. `INPUT`, `TRACKED_INPUT`, `INOUT`,
+  `OUTPUT_EXISTING`, and `NO_DEP` are supported. A boundary `TensorCreateInfo`
+  tagged `OUTPUT` is not.
+- An internal node tagged `TRACKED_INPUT` forces the ordinary path because the
+  compact Definition cannot publish an internal reader for a later WAR lookup.
 - Early-resolve hints apply while recording the first invocation. Replayed
   internal nodes use the saved completion topology without the hint.
 - A recorded task may depend on a Graph-external producer when that producer
   is the creator of a boundary ChipTensor. The outer Graph owns that dependency on
   replay; arbitrary cross-boundary explicit dependencies remain unsupported.
 
-Structural or alias mismatch logs a warning and executes the Graph function
-normally for that invocation. It never reuses heap offsets recorded for a
-different shape. Debug builds also assert at these unsupported boundaries so
-development catches a violated fixed-shape contract immediately; the ordinary
-path remains the defensive release-build behavior.
+Structural, alias, or unsupported-access mismatch logs a warning and executes
+the Graph function normally for that invocation. It never reuses heap offsets
+recorded for a different shape.
 
 ## Qwen decoder-layer example
 

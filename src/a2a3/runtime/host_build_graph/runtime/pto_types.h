@@ -22,8 +22,7 @@
  * without type conflicts (Handshake, TensorPair, HostApi).
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_
+#pragma once
 
 #include <stdint.h>
 #include <string.h>
@@ -349,6 +348,15 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         ((tensors_[tensor_count_] = &args, tags_[tensor_count_] = TensorArgType::INPUT, tensor_count_++), ...);
     }
 
+    template <typename... Args>
+    void add_tracked_input(Args &&...args) {
+        assert_add_tensor_args<false, Args...>();
+        if (!check_add_tensor_capacity(static_cast<int32_t>(sizeof...(Args)))) {
+            return;
+        }
+        ((tensors_[tensor_count_] = &args, tags_[tensor_count_] = TensorArgType::TRACKED_INPUT, tensor_count_++), ...);
+    }
+
     /// Batch add outputs — all ChipTensor or all TensorCreateInfo:
     ///   add_output(ci1, ci2)         — runtime allocates buffers (OUTPUT)
     ///   add_output(t1, t2)           — write-only existing tensors (OUTPUT_EXISTING)
@@ -373,7 +381,7 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
         ((tensors_[tensor_count_] = &args, tags_[tensor_count_] = TensorArgType::INOUT, tensor_count_++), ...);
     }
 
-    /// No-dependency existing tensor: skips OverlapMap lookup, depends on creator only.
+    /// Existing tensor with creator retention but no automatic TensorMap lookup or publication.
     template <typename... Args>
     void add_no_dep(Args &&...args) {
         assert_add_tensor_args<false, Args...>();
@@ -708,5 +716,3 @@ struct ChipTaskArgs : Arg<CHIP_MAX_TENSOR_ARGS, CHIP_MAX_SCALAR_ARGS> {
         }
     }
 };
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_

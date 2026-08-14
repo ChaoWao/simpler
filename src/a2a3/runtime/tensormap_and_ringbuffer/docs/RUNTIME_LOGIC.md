@@ -320,24 +320,28 @@ This design avoids the complexity of ring-based wrapping while still being bound
 
 ### 5.4 Stale Entry Cleanup: Three-Layer Defense
 
-TensorMap must ensure entries for retired tasks (`producer_task_id < last_task_alive`) are removed, so that:
+TensorMap must ensure entries for retired tasks (`access_task_id < last_task_alive`) are removed, so that:
 
 - The pool does not grow unboundedly (capacity is finite)
 - Lookup performance does not degrade as stale entries accumulate in bucket chains
 
 Three complementary mechanisms achieve this:
 
-**Layer 1 — Chain Truncation during Lookup** (lazy, per-bucket):
+**Layer 1 — Stale Filtering during Lookup** (lazy, per-bucket):
 
-Since `insert` always prepends to the bucket head, entries in each bucket chain are in **descending task_id order**. When `PTO2TensorMap::lookup` encounters the first stale entry (`producer_task_id < last_task_alive`), all subsequent entries in the chain are guaranteed stale too. The entire tail is truncated in one operation using `prev_in_bucket` pointers for O(1) unlinking.
+`PTO2TensorMap::lookup` checks each entry against its source ring's
+`last_task_alive` and skips stale entries. Entries from different rings may be
+interleaved in one bucket, so a stale entry does not imply that the remaining
+tail is stale and lookup must not truncate the chain.
 
-This guarantees lookup only traverses valid entries — O(valid_entries_in_bucket), not O(total_entries).
+This guarantees stale entries never create dependencies; periodic cleanup below
+keeps traversal and pool use bounded.
 
 **Layer 2 — Periodic Batch Cleanup** (`cleanup_retired`, per-task):
 
 Every time the orchestrator submits a task (Step 0 of `PTO2OrchestratorState::submit_task`), it calls `PTO2TensorMap::sync_tensormap`. When `last_task_alive` has advanced by more than `PTO2_TENSORMAP_CLEANUP_INTERVAL` (default 64) tasks since the last cleanup, `PTO2TensorMap::cleanup_retired` runs:
 
-This uses the **per-task entry chain** (`task_entry_head[task_slot]`) — each task's entries are doubly-linked together at insert time via `next_in_task`/`prev_in_task`. A slot's chain can hold more than one task's entries: a task at `local_id + N * window` reuses the slot and prepends to the chain already there, and cleanup can lag that reuse. Cleanup therefore walks the chain and frees only the entries whose `producer_task_id` matches the retiring task, unlinking each and leaving the rest linked — O(entries_in_slot), with no scan of the entire pool or all buckets. Freed entries are returned to `free_entry_list` for immediate reuse.
+This uses the **per-task entry chain** (`task_entry_head[task_slot]`) — each task's entries are doubly-linked together at insert time via `next_in_task`/`prev_in_task`. A slot's chain can hold more than one task's entries: a task at `local_id + N * window` reuses the slot and prepends to the chain already there, and cleanup can lag that reuse. Cleanup therefore walks the chain and frees only the entries whose `access_task_id` matches the retiring task, unlinking each and leaving the rest linked — O(entries_in_slot), with no scan of the entire pool or all buckets. Freed entries are returned to `free_entry_list` for immediate reuse.
 
 **Layer 3 — Back-Pressure on Pool Exhaustion** (blocking):
 
@@ -349,7 +353,7 @@ This forms a back-pressure mechanism analogous to the Task Ring's flow control.
 
 | Layer | Trigger | Method | Guarantees |
 | ----- | ------- | ------ | ---------- |
-| Chain Truncation | Every lookup | Truncate stale tail of bucket chain | Lookup only visits valid entries |
+| Stale Filtering | Every lookup | Skip entries retired in their source ring | Stale entries never create dependencies |
 | Periodic Cleanup | Every 64 retired tasks | Walk per-task chains, free entries | Pool capacity reclaimed in bounded time |
 | Pool Back-Pressure | Pool exhausted | Block until scheduler advances watermark | Hard capacity bound, no OOM |
 

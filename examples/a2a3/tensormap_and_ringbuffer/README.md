@@ -18,7 +18,7 @@ For the `Worker` API underneath the framework, see
 | Example | What it teaches |
 | ------- | --------------- |
 | [`vector_example/`](vector_example/) | The smallest complete kernel: `f = (a+b+1)*(a+b+2) + (a+b)`. Runs on sim. |
-| [`scalar_data/`](scalar_data/) | Orchestration-level data manipulation — `get_tensor_data` / `set_tensor_data` round-trips, runtime-created outputs with initial values, and automatic WAW / WAR waits. Also the reference for the one case where they **don't** fire: `add_input` on an external tensor registers no TensorMap entry, so a later `set_tensor_data` races the reader. |
+| [`scalar_data/`](scalar_data/) | Orchestration-level data manipulation — `get_tensor_data` / `set_tensor_data` round-trips, runtime-created outputs with initial values, and opt-in WAR tracking through `add_tracked_input`. |
 
 ## Compute
 
@@ -70,14 +70,14 @@ Wrap hardware runs in `task-submit` on a shared box; see
 
 ## Relationship to `examples/a5/`
 
-Five examples exist under both architectures with the same name:
+Six examples exist under both architectures with the same name:
 `vector_example`, `paged_attention`, `paged_attention_manual_scope`,
-`paged_attention_unroll_manual_scope`, and `sdma_async_completion_demo`. They
+`paged_attention_unroll_manual_scope`, `scalar_data`, and
+`sdma_async_completion_demo`. They
 are ports of each other and differ mainly in tile shapes and platform strings
 — `vector_example` differs by two lines. When you change one, check whether its
 sibling needs the same change.
 
 Only here: `benchmark_bgemm` (a5 has `bgemm` instead),
 `deepseek_v4_flash_decode`, `merge_pipeline_barrier`,
-`paged_attention_ringbuffer`, `prefetch_async_demo`, `qwen3_14b_decode`,
-`scalar_data`.
+`paged_attention_ringbuffer`, `prefetch_async_demo`, `qwen3_14b_decode`.

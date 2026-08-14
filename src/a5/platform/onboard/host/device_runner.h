@@ -106,7 +106,7 @@ public:
      * a5 `dep_gen` enablement setter, overriding the base no-op. Captures
      * orchestrator submit_task inputs for offline replay into deps.json.
      */
-    void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
+    void set_dep_gen_enabled(bool enable) override;
 
     /**
      * Cleanup all resources

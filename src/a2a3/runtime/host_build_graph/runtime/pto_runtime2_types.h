@@ -10,9 +10,9 @@
  */
 
 /**
- * PTO Runtime2 - Core Type Definitions
+ * host_build_graph - Core Type Definitions
  *
- * This header defines all fundamental types used by the PTO Runtime2 system:
+ * This header defines the fundamental host_build_graph runtime types:
  * - Configuration constants
  * - Worker types and task states
  * - ChipTensor regions and task parameters
@@ -22,8 +22,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_
+#pragma once
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -85,6 +84,7 @@
 #define PTO2_HEAP_SIZE (256 * 1024 * 1024)  // 256MB
 #define PTO2_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
 #define PTO2_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
+#define PTO2_TENSORMAP_READER_NUM_BUCKETS 512  // Sparse tracked-reader sidecar (512×8B=4KB)
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth
@@ -109,11 +109,10 @@
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64
 
-// Polling-scheduler inline fanin cap. The polling model stores producer
-// dependencies as flat position-independent local-id integers on the payload
-// (no dep-pool spill), so a task's fanin degree is hard-capped here. Must cover
-// the worst-case fanin of any workload (paged_attention is the densest).
+// Polling-scheduler inline fanin cap. Additional position-independent local ids
+// continue in the scheduler-owned spill pool.
 #define PTO2_MAX_FANIN 128
+#define HBG_FANIN_SPILL_POOL_SIZE 262144
 
 // Dependency-degree diagnostic: warn once when a task's fanin or a producer's
 // fanout first exceeds this degree, so dense dependency graphs surface without
@@ -176,6 +175,7 @@ enum class TaskKind : uint8_t {
     DUMMY = 1,
     GRAPH = 2,
     GRAPH_NODE = 3,
+    HOST_WRITE = 4,
 };
 
 struct PTO2OutputLayout {
@@ -270,12 +270,14 @@ struct PTO2TaskPayload {
     // Producer dependencies as position-independent local task ids. Single-ring
     // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned
     // by fanin_satisfied / classify_fanin_state against the ring completion_flags.
-    // Hard-capped at PTO2_MAX_FANIN (no dep-pool spill).
+    // The first PTO2_MAX_FANIN ids are inline; additional ids use fanin_spill_*.
     int32_t fanin_local_ids[PTO2_MAX_FANIN];
     // Reserved: preserves the early-dispatch block and tensors[] offsets. tensors
     // must stay at byte 576 (AICore arg-materialization contract), so this fanin
     // region keeps its original 528-byte footprint.
-    int32_t _fanin_reserved[3];
+    int32_t fanin_spill_start{0};
+    int32_t fanin_spill_count{0};
+    int32_t _fanin_reserved{0};
     // Early-dispatch metadata (AICPU-side only). Ordered by descending
     // alignment (8B mask, 4B fanin, then 2B/1B counters and flags) so the block packs with no
     // internal padding. Kept here after the fanin array (not moved up front): on
@@ -589,5 +591,3 @@ static_assert(sizeof(PTO2TaskSlotState) == 64);
 // Sentinel marking a wake list as "owner already completed; no more
 // registrations accepted". Distinct from any real slot_state pointer.
 inline PTO2TaskSlotState *const WAKE_LIST_SENTINEL = reinterpret_cast<PTO2TaskSlotState *>(static_cast<uintptr_t>(0x1));
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_RUNTIME2_TYPES_H_

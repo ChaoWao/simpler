@@ -246,7 +246,7 @@ void SchedulerContext::log_stall_diagnostics(
                 int32_t rc = 0;
                 if (slot_state.payload != nullptr) {
                     for (int32_t k = 0; k < fi; k++) {
-                        int32_t pid = slot_state.payload->fanin_local_ids[k];
+                        int32_t pid = sched_->fanin_local_id(*slot_state.payload, k);
                         if (ring.is_completion_flag_set(pid, std::memory_order_relaxed)) rc++;
                     }
                 }
@@ -1156,7 +1156,7 @@ void SchedulerContext::classify_partition(int32_t thread_idx, int32_t nthreads) 
         if (state < 0) {
             sched_->push_ready_routed(&slot);
         } else {
-            int32_t prod_local = slot.payload->fanin_local_ids[state];
+            int32_t prod_local = sched_->fanin_local_id(*slot.payload, state);
             sched_->register_wake(&ring.get_slot_state_by_task_id(prod_local), &slot);
         }
     }
