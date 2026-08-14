@@ -26,5 +26,6 @@ format). Detection / isolation procedures live in
    `run_bench()` pattern from `tools/benchmark_rounds.sh`: snapshot logs, run
    `python <example>/test_<name>.py -p <platform> -d $TASK_DEVICE --rounds 10 --skip-golden`,
    find the new log, parse timing, report results.
-7. Print a final summary table with example name, average latency, trimmed
-   average, and pass/fail.
+7. Print only metrics backed by captured markers: TMR normally has Host /
+   Device / Effective / Orch / Sched; HBG has Host / Device. Never render a
+   missing HBG phase as zero. Include average, trimmed average, and pass/fail.

@@ -11,7 +11,7 @@ Benchmark runtime performance on Ascend hardware. Automatically detects whether 
 
 | Condition | Mode | What happens |
 | --------- | ---- | ------------ |
-| 0 commits ahead AND no uncommitted changes | **Single** | Benchmark current state, report Elapsed + Orch times |
+| 0 commits ahead AND no uncommitted changes | **Single** | Benchmark current state and report its runtime-specific timing columns |
 | >= 1 commits ahead OR uncommitted changes | **Compare** | Benchmark merge-base (worktree) AND current workspace, show comparison table |
 
 ## Input
@@ -34,11 +34,15 @@ The `-d` flag specifies NPU device IDs.
 
 **Hard rule: one benchmark process per device at any time.** Never run two benchmark processes on the same `-d` device concurrently — not two runtimes, not baseline + current, nothing. This prevents resource contention and ensures stable measurements.
 
+On a shared hardware host, the complete single or compare run must execute
+inside one `task-submit` allocation. Let that allocation own every device for
+the full sequence; do not submit one job per example or run the script bare.
+
 | `-d` count | Compare mode behavior |
 | ---------- | --------------------- |
 | One device (`-d 4`) | **Sequential**: baseline first, then current, both on the same device. Multiple runtimes also run serially on that device. |
 | Two devices (`-d 4 -d 6`) | **Parallel per-runtime**: for each runtime, baseline on first device and current on second device can run in parallel (different devices). Multiple runtimes still run serially — finish one runtime on both devices before starting the next. |
-| Zero (not specified) | Auto-detect idle devices (see Step 2) |
+| Zero (not specified) | Let `task-submit --device auto` allocate one device (see Step 2) |
 
 **Defaults** (when not specified): use `benchmark_rounds.sh` defaults (device 0, 100 rounds, a2a3, tensormap_and_ringbuffer).
 
@@ -47,8 +51,12 @@ The `-d` flag specifies NPU device IDs.
 `tools/benchmark_rounds.sh` supports `-r <runtime>`:
 
 - `tensormap_and_ringbuffer` (default)
+- `host_build_graph`
 
-The example list is defined at the top of the script (`TMR_EXAMPLE_CASES`).
+Each architecture/runtime quadrant has its own list at the top of the script.
+TMR reports Host / Device / Effective / Orch / Sched. HBG reports Host / Device
+because its orchestration runs on the host and has no device-side Orch/Sched
+windows. `--serial-orch-sched` is TMR-only and must be rejected for HBG.
 
 ## Step 1: Detect Mode
 
@@ -65,17 +73,35 @@ else
 fi
 ```
 
-## Step 2: Device Detection
+## Step 2: Device Isolation
 
-If `-d` was provided in args, skip detection and use the user-specified device(s).
+When `task-submit` is available, allocate the requested device IDs or use
+`--device auto`; run the architecture gate as the first command inside that
+allocation, then pass `$TASK_DEVICE` to every benchmark command. Some shared
+hosts expose DCMI only inside `task-submit`, so a lock-external precheck cannot
+detect their silicon. Hold one allocation for the whole baseline/current
+sequence. When `task-submit` is unavailable, follow
+`.claude/lib/onboard-detection.md` and clearly report that the fallback run is
+unlocked.
 
-Otherwise, detect idle NPU devices (HBM-Usage = 0):
+Before submitting, inspect the queue:
 
 ```bash
-npu-smi info
+task-submit --list
 ```
 
-Pick devices with **HBM-Usage = 0**. Find the longest consecutive sub-range (at most 4). If no idle device is found, prompt user to specify a device ID.
+Remove each `-d` option from the forwarded `BENCH_ARGS` after collecting its
+value in `REQUESTED_DEVICES`. Build the allocation arguments once and reuse
+them for the single `task-submit` call:
+
+```bash
+case "${#REQUESTED_DEVICES[@]}" in
+  0) TASK_SUBMIT_DEVICE_ARGS=(--device auto --device-num 1) ;;
+  1) TASK_SUBMIT_DEVICE_ARGS=(--device "${REQUESTED_DEVICES[0]}") ;;
+  2) TASK_SUBMIT_DEVICE_ARGS=(--device "${REQUESTED_DEVICES[0]},${REQUESTED_DEVICES[1]}") ;;
+  *) echo "ERROR: benchmark accepts at most two -d devices"; exit 1 ;;
+esac
+```
 
 ## Step 3: Confirm PTO-ISA Pin
 
@@ -95,6 +121,7 @@ The Bash tool resets its working directory to the project root on every call. Re
 PROJECT_ROOT="$(pwd)"                    # e.g. /home/user/simpler
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 WORKTREE_ABS="${PROJECT_ROOT}/tmp/worktree_baseline_${TIMESTAMP}"
+PAYLOAD_SCRIPT="${PROJECT_ROOT}/tmp/benchmark_payload_${TIMESTAMP}.sh"
 mkdir -p "${PROJECT_ROOT}/tmp"
 ```
 
@@ -113,7 +140,12 @@ WORKTREE_ABS="/home/user/simpler/tmp/worktree_baseline_20260331_102302"
 ### Single Mode
 
 ```bash
-./tools/benchmark_rounds.sh $BENCH_ARGS -r "$RUNTIME" 2>&1 | tee "tmp/benchmark_${TIMESTAMP}.txt"
+task-submit --timeout 7200 --max-time 7200 "${TASK_SUBMIT_DEVICE_ARGS[@]}" \
+  --run "set -o pipefail && \
+    .claude/skills/onboard-arch-precheck/check.sh '$PLATFORM' && \
+    BENCH_DEVICE=\${TASK_DEVICE%%,*} && \
+    ./tools/benchmark_rounds.sh $BENCH_ARGS -d \$BENCH_DEVICE -r '$RUNTIME' \
+      2>&1 | tee 'tmp/benchmark_${TIMESTAMP}.txt'"
 ```
 
 Use `--serial-orch-sched` to run each case once in the default overlapped mode
@@ -123,6 +155,35 @@ Delta/Change tables.
 ### Compare Mode
 
 Use a **git worktree** for the baseline so the current workspace is never disturbed.
+Prepare the worktree and venv before taking an NPU lock. Steps 5b and 5c below
+are the inner payload of one self-contained shell script; never execute either
+onboard command outside that script's single `task-submit` allocation. Embed
+the computed paths and selected platform/runtime as literal assignments at the
+top of the payload, then map the allocated devices and run the architecture
+check:
+
+```bash
+set -euo pipefail
+
+PROJECT_ROOT="/absolute/path/to/current"
+WORKTREE_ABS="/absolute/path/to/baseline"
+PLATFORM="a2a3"
+RUNTIME="tensormap_and_ringbuffer"
+TIMESTAMP="YYYYmmdd_HHMMSS"
+BENCH_ARGS=("-n" "100")  # all forwarded args except -d/--device and -r/--runtime
+IFS=',' read -r -a LOCKED_DEVICES <<< "$TASK_DEVICE"
+BASELINE_DEVICE="${LOCKED_DEVICES[0]}"
+CURRENT_DEVICE="${LOCKED_DEVICES[1]:-${LOCKED_DEVICES[0]}}"
+"$PROJECT_ROOT/.claude/skills/onboard-arch-precheck/check.sh" "$PLATFORM"
+```
+
+After composing the payload from the sequential or parallel block below,
+submit that script exactly once:
+
+```bash
+task-submit --timeout 7200 --max-time 7200 "${TASK_SUBMIT_DEVICE_ARGS[@]}" \
+  --run "bash '$PAYLOAD_SCRIPT'"
+```
 
 #### CRITICAL: Worktree needs its own build environment
 
@@ -158,20 +219,22 @@ Activate the venv so `benchmark_rounds.sh` (which calls `python3`) picks up the 
 
 ```bash
 # WORKTREE_ABS must be the literal absolute path.
-cd "$WORKTREE_ABS" && \
-  source .venv/bin/activate && \
-  pwd && \
-  ./tools/benchmark_rounds.sh -d "$BASELINE_DEVICE" -r "$RUNTIME" \
-  2>&1 | tee "${PROJECT_ROOT}/tmp/benchmark_baseline_${TIMESTAMP}_${RUNTIME}.txt"
+(
+  cd "$WORKTREE_ABS"
+  source .venv/bin/activate
+  pwd
+  ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$BASELINE_DEVICE" -r "$RUNTIME" \
+    2>&1 | tee "${PROJECT_ROOT}/tmp/benchmark_baseline_${TIMESTAMP}_${RUNTIME}.txt"
+)
 ```
 
-**Always include `pwd &&` after `cd` to verify you are in the correct directory.** If `pwd` does not print the worktree path, something went wrong — do not proceed.
+**Always print `pwd` after `cd` to verify you are in the correct directory.** If it does not print the worktree path, something went wrong — do not proceed.
 
 #### 5c. Run current
 
 ```bash
-# Runs from the main workspace (Bash tool default cwd)
-./tools/benchmark_rounds.sh -d $CURRENT_DEVICE -r "$RUNTIME" \
+cd "$PROJECT_ROOT"
+./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$CURRENT_DEVICE" -r "$RUNTIME" \
   2>&1 | tee "tmp/benchmark_current_${TIMESTAMP}_${RUNTIME}.txt"
 ```
 
@@ -195,9 +258,16 @@ When two devices are available, run baseline and current **for the same runtime*
 # For each runtime (serially):
 for RUNTIME in "${RUNTIMES_TO_BENCH[@]}"; do
   # Baseline on device A (from worktree with venv), current on device B (from main) — parallel
-  (cd "$WORKTREE_ABS" && source .venv/bin/activate && pwd && ./tools/benchmark_rounds.sh -d $DEVICE_BASELINE -r "$RUNTIME" ...) &
-  ./tools/benchmark_rounds.sh -d $DEVICE_CURRENT -r "$RUNTIME" ... &
-  wait  # Both finish before starting next runtime
+  (cd "$WORKTREE_ABS" && source .venv/bin/activate && pwd && ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$BASELINE_DEVICE" -r "$RUNTIME") &
+  BASELINE_PID=$!
+  (cd "$PROJECT_ROOT" && ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$CURRENT_DEVICE" -r "$RUNTIME") &
+  CURRENT_PID=$!
+  PARALLEL_RC=0
+  wait "$BASELINE_PID" || PARALLEL_RC=$?
+  wait "$CURRENT_PID" || PARALLEL_RC=$?
+  if [[ $PARALLEL_RC -ne 0 ]]; then
+    exit "$PARALLEL_RC"
+  fi
 done
 ```
 
@@ -209,15 +279,18 @@ done
 # 1. Worktree + venv already created in step 5a
 
 # 2. For each runtime (serially — one device, one process at a time):
-#    Baseline first (from worktree with venv activated)
-cd "$WORKTREE_ABS" && \
-  source .venv/bin/activate && \
-  pwd && \
-  ./tools/benchmark_rounds.sh -d "$DEVICE" -r "$RUNTIME" \
-  2>&1 | tee "${PROJECT_ROOT}/tmp/benchmark_baseline_${TIMESTAMP}_${RUNTIME}.txt"
+#    Baseline first (from worktree with venv activated in a subshell)
+(
+  cd "$WORKTREE_ABS"
+  source .venv/bin/activate
+  pwd
+  ./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$BASELINE_DEVICE" -r "$RUNTIME" \
+    2>&1 | tee "${PROJECT_ROOT}/tmp/benchmark_baseline_${TIMESTAMP}_${RUNTIME}.txt"
+)
 
-#    Then current (from main workspace — default cwd, no venv)
-./tools/benchmark_rounds.sh -d $DEVICE -r "$RUNTIME" \
+#    Then current (from main workspace, no baseline venv)
+cd "$PROJECT_ROOT"
+./tools/benchmark_rounds.sh "${BENCH_ARGS[@]}" -d "$CURRENT_DEVICE" -r "$RUNTIME" \
   2>&1 | tee "tmp/benchmark_current_${TIMESTAMP}_${RUNTIME}.txt"
 
 # 3. Cleanup
@@ -226,23 +299,28 @@ git -C "$PROJECT_ROOT" worktree remove "$WORKTREE_ABS" --force
 
 ## Step 6: Report Results
 
-Parse all five `Avg <Metric>:` lines per example (`Host`, `Device`, `Effective`, `Orch`, `Sched`) from benchmark output.
+Parse every `Avg <Metric>:` field present in the runtime's output. Missing
+runtime-inapplicable columns are not zero measurements and must not be printed.
 
 | Metric | Source | What it captures |
 | ------ | ------ | ---------------- |
 | Host | `[STRACE]` `run_prepared` span | steady_clock around dispatch (Python overhead included); rendered from markers by `strace_timing --rounds-table` |
-| Device | `[STRACE]` `run_prepared.runner_run.device_wall` span | full on-NPU AICPU run wall (`AicpuPhase::RunWall`, `max(end) − min(start)` across threads) — the whole run + teardown, strictly larger than the windows below |
-| Effective | orch/sched markers' device-domain `ts`+`dur` | `max(orch_end,sched_end) − min(orch_start,sched_start)` — the orch∪sched merged window (the old device-log "Total"), now pure-marker |
-| Orch | `[STRACE]` `…device_wall.orch` span (`--rounds-table`) | orchestrator (graph-build) window |
-| Sched | `[STRACE]` `…device_wall.sched` span (`--rounds-table`) | scheduler dispatch/execution window |
+| Device | `[STRACE]` `run_prepared.runner_run.device_wall` span | full on-NPU AICPU run wall (`AicpuPhase::RunWall`, `max(end) − min(start)` across threads); on TMR this whole run + teardown is strictly larger than the windows below |
+| Effective | TMR orch/sched markers' device-domain `ts`+`dur` | TMR only: `max(orch_end,sched_end) − min(orch_start,sched_start)` — the orch∪sched merged window |
+| Orch | `[STRACE]` `…device_wall.orch` span (`--rounds-table`) | TMR only: device orchestrator (graph-build) window |
+| Sched | `[STRACE]` `…device_wall.sched` span (`--rounds-table`) | TMR only: scheduler dispatch/execution window |
 
 The scene test only *emits* `[STRACE]` markers to stderr; `benchmark_rounds.sh`
 tees the run and renders the Host/Device/Effective/Orch/Sched table with
 `python -m simpler_setup.tools.strace_timing <log> --rounds-table`. All columns
 come from the markers (onboard and sim) — no CANN device log is read.
 
+Use Effective as the TMR headline metric. HBG has no equivalent phase window:
+report Host and Device independently and do not synthesize an overall score
+from one of them.
+
 For a per-stage breakdown of `Host`/`Device` (host `bind`/`runner_run`/`validate`
-plus the AICPU `preamble`/`so_load`/`graph_build`
+plus TMR's AICPU `preamble`/`so_load`/`graph_build`
 (`config_validate`/`arena_wire`/`sm_reset` prep sub-phases)/`post_orch`
 subdivision), parse the `[STRACE]` markers with
 `simpler_setup/tools/strace_timing.py` (add `--tree` for the nested view) — see
@@ -251,6 +329,9 @@ gate, no extra flag (set `SIMPLER_DEVICE_STRACE_ENABLE=0` to drop only the devic
 `clk=dev` markers).
 
 ### Single Mode
+
+Use the runtime's actual column set; the five-column example below is TMR. An
+HBG table contains only Host and Device.
 
 ```text
 Benchmark at: <short SHA>
@@ -265,7 +346,10 @@ benchmark_bgemm                  370000.0        7100.0          892.1          
 
 ### Compare Mode
 
-Show comparison table per metric (one row per metric per example), **grouped by runtime**. `Effective` is the headline metric used in the overall summary; the other four are sub-rows for context:
+Show a comparison table per metric (one row per metric per example), **grouped
+by runtime**. For TMR, `Effective` is the headline metric used in the overall
+summary and the other four are context. HBG has no combined headline metric:
+show Host and Device as independent rows and summarize regressions separately.
 
 ```text
 Merge-base: <short SHA>  →  HEAD: <short SHA> (+ uncommitted)
@@ -309,7 +393,7 @@ If any example shows > 5% regression, highlight it explicitly.
 
 | Error | Action |
 | ----- | ------ |
-| No idle device and no `-d` specified | Prompt user to specify device ID |
+| `task-submit` cannot allocate the requested device count | Report the queue/allocation error; do not run outside the lock |
 | Benchmark script fails | Report which examples failed; continue with remaining |
 | No timing data | Warn: "No timing markers — ensure `SIMPLER_HOST_STRACE` is enabled" |
 | All examples fail | Check: did you run `pip install -e .` in the worktree venv? |
@@ -320,13 +404,13 @@ If any example shows > 5% regression, highlight it explicitly.
 ## Checklist
 
 - [ ] Mode detected (single vs compare)
-- [ ] Idle device found or user-specified
+- [ ] Architecture precheck passed and one `task-submit` allocation owns the run
 - [ ] PTO-ISA pinned to CI commit
 - [ ] `PROJECT_ROOT` and `WORKTREE_ABS` absolute paths computed
 - [ ] (Compare mode) Worktree created, venv built with `pip install -e .`
 - [ ] (Compare mode) Baseline completed — venv activated, `pwd` confirmed worktree path before running
 - [ ] Current completed in main workspace
 - [ ] Worktree cleaned up (compare mode)
-- [ ] Results table presented with Host / Device / Effective / Orch / Sched times
+- [ ] Results table uses TMR's five columns or HBG's Host / Device columns
 - [ ] (Compare mode) Device difference noted if applicable
 - [ ] (Compare mode) Regressions > 2% flagged

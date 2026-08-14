@@ -9,6 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import json
+from io import StringIO
 
 from simpler_setup.tools.strace_timing import (
     bucket_by_hid,
@@ -18,16 +19,18 @@ from simpler_setup.tools.strace_timing import (
     main,
     parse_clock_anchors,
     parse_spans,
+    print_rounds_table,
     to_chrome_trace,
     to_host_swimlane,
 )
 
 
-def _record(pid, inv, name, attrs=""):
+def _record(pid, inv, name, attrs="", *, depth=0, ts=100, dur=20):
     """One current host-log record in the shape `HostLogger::emit` writes it."""
     return (
         f"[mono_ns={1_000_000 + pid}][T0x{pid}][TIMING] emit_host_span: "
-        f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=0 name={name} ts=100 dur=20 {attrs}"
+        f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth={depth} "
+        f"name={name} ts={ts} dur={dur} {attrs}"
     )
 
 
@@ -429,3 +432,33 @@ def test_swimlane_cli_writes_trace(tmp_path):
 
     trace = json.loads(output_path.read_text(encoding="utf-8"))
     assert any(event.get("name") == "l3.graph_build" for event in trace["traceEvents"])
+
+
+def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
+    lines = []
+    for inv, host_dur, device_dur in ((1, 100_000, 20_000), (2, 120_000, 24_000)):
+        lines.append(
+            _record(1, inv, "simpler_run", dur=host_dur)
+            + _record(
+                1,
+                inv,
+                "simpler_run.runner_run.device_wall",
+                "clk=dev",
+                depth=2,
+                dur=device_dur,
+            )
+            + "\n"
+        )
+    buckets = bucket_by_hid(group_invocations(parse_spans(lines)))
+    output = StringIO()
+
+    print_rounds_table(buckets, stream=output)
+
+    rendered = output.getvalue()
+    assert "Host (us)" in rendered
+    assert "Device (us)" in rendered
+    assert "Effective (us)" not in rendered
+    assert "Orch (us)" not in rendered
+    assert "Sched (us)" not in rendered
+    assert "Avg Host: 110.0 us" in rendered
+    assert "Avg Device: 22.0 us [2/2]" in rendered

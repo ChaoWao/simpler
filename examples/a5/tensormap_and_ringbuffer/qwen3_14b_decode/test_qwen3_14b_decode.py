@@ -426,6 +426,7 @@ class TestQwen314BDecode(SceneTestCase):
         {
             "name": "StressBatch16Seq3500",
             "platforms": ["a5"],
+            "manual": True,
             # A run takes the whole device, matching the lib default. The 40-layer
             # graph's peak in-flight dependency footprint (~32 k entries) overflows
             # the a5 ring's default dep pool (16 k); the a2a3 source's "default

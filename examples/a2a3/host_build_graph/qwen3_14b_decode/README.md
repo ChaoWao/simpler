@@ -42,5 +42,8 @@ configuration.
 task-submit --device auto --device-num 1 --run \
   ".venv/bin/python -m pytest \
   examples/a2a3/host_build_graph/qwen3_14b_decode \
-  --platform a2a3 --device \$TASK_DEVICE"
+  --platform a2a3 --device \$TASK_DEVICE --manual include"
 ```
+
+The case runs in the daily full scene-test sweep and is excluded from per-PR
+CI.

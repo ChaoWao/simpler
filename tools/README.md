@@ -9,21 +9,28 @@ invoke them via `python -m simpler_setup.tools.<name>`.
 
 ## benchmark_rounds.sh
 
-Batch-run a predefined set of ST examples on hardware, parse `orch_start` /
-`orch_end` / `sched_end` timestamps from the device log, and report per-round
-elapsed time.
+Batch-run a predefined set of scene tests on hardware and report per-round
+latency from host-emitted `[STRACE]` markers. The script supports both runtimes;
+`tensormap_and_ringbuffer` remains the default.
 
 ```bash
-# Use defaults (device 0, 10 rounds)
+# Use defaults (device 0, 100 rounds, tensormap_and_ringbuffer)
 ./tools/benchmark_rounds.sh
 
-# Specify device / rounds / runtime
-./tools/benchmark_rounds.sh -p a2a3 -d 4 -n 20 -r tensormap_and_ringbuffer
+# On a shared hardware host, hold one task-submit lock for the whole HBG sweep
+task-submit --device auto --device-num 1 --timeout 3600 --max-time 3600 \
+  --run ".claude/skills/onboard-arch-precheck/check.sh a2a3 && \
+    ./tools/benchmark_rounds.sh -p a2a3 -d \$TASK_DEVICE -n 20 -r host_build_graph"
 ```
 
-Requires `SIMPLER_DFX=1` in the runtime; device log must include the
-`orch_*` / `sched_*` lines. The `TMR_EXAMPLE_CASES` map at the top of the
-script controls which examples/cases are run.
+`strace_timing --rounds-table` renders one column per captured marker. TMR
+reports Host / Device / Effective / Orch / Sched. HBG reports Host / Device;
+its orchestration runs on the host, so the TMR-only columns are omitted. The
+four architecture/runtime corpus lists at the top of the script independently
+control a2a3 + TMR, a2a3 + HBG, a5 + TMR, and a5 + HBG. Every corpus includes
+the workloads shared by both runtimes plus its matching Qwen case:
+`StressBatch16Seq3500` for TMR and `GraphExecutionBatch16Seq3500` for HBG. SPMD
+paged attention is not part of the benchmark sweep.
 
 ## verify_packaging.sh
 

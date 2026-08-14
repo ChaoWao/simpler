@@ -2,9 +2,9 @@
 
 `simpler_run()` spans several host-side stages (`bind`, `runner_run`,
 `validate`) plus, inside `runner_run`'s enqueue-through-drain lifetime, an
-on-NPU AICPU window that itself subdivides into preamble / SO-load /
-graph-build / post-orch. The
-two headline walls (`host_wall` / `device_wall`, see
+on-NPU AICPU window. TMR subdivides that window into preamble / SO-load /
+graph-build / post-orch; HBG emits the whole device wall without those
+device-orchestrator phases. The two headline walls (`host_wall` / `device_wall`, see
 [l2-timing.md](l2-timing.md)) cannot show *where* the time goes.
 
 `[STRACE]` markers are simpler's answer — host-side trace spans emitted to the
@@ -75,13 +75,15 @@ simpler_run                                   (= host_wall)
 ├─ simpler_run.runner_run          (device enqueue + completion drain)
 │  └─ simpler_run.runner_run.device_wall      (whole on-NPU AICPU wall)
 │     └─ .{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}
-│           device-domain (clk=dev): AICPU subdivision of the on-NPU wall
+│           TMR device-domain (clk=dev): AICPU subdivision of the on-NPU wall
 └─ simpler_run.validate
 ```
 
-The `device_wall` + its `.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}`
-spans are **device-domain**, tagged `clk=dev`. They are not host `steady_clock`
-spans: the AICPU stamps raw sys-counter cycles into a host-allocated buffer
+The `device_wall` span exists for both runtimes. Its
+`.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}`
+children are TMR-only; HBG orchestration runs on the host and stamps none of
+those phases. All emitted device spans are tagged `clk=dev`. They are not host
+`steady_clock` spans: the AICPU stamps raw sys-counter cycles into a host-allocated buffer
 (whose address rides on `KernelArgs::device_wall_data_base`), the host reads it
 back after stream-sync, converts cycles → ns, and emits the marker. `orch`/
 `sched` are the orchestrator/scheduler windows that formerly only appeared as
@@ -105,7 +107,7 @@ including time the caller spends polling or doing other host work; blocking
 | 0 | `simpler_run` |
 | 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.validate` |
 | 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
-| 3 | `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched,task_slot_*}` |
+| 3 | TMR phase spans `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
 
 ## L3/L4 host scheduler spans
 
