@@ -775,6 +775,71 @@ def test_late_cleanup_error_after_successful_close_replays_stably(monkeypatch):
     assert errors == {}
 
 
+def test_close_replay_does_not_double_release_worker_chip_region_after_mapping_close_failure(monkeypatch):
+    class _FakeCloseWorker(_FakeDirectCWorker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    worker = Worker(level=3, device_ids=[0], platform="a2a3sim", runtime="tensormap_and_ringbuffer")
+    fake_c_worker = _FakeCloseWorker()
+    worker._lifecycle = worker_module._Lifecycle.READY
+    worker._worker = fake_c_worker
+    worker._init_owner_thread = threading.current_thread()
+    mapping = worker_chip_orch_comm.WorkerHostRegionMapping(
+        worker_id=0,
+        region_id=1,
+        access_profile=worker_chip_orch_comm.WorkerChipRegionAccessProfile.SIM_POSIX_SHM,
+        total_bytes=192,
+        payload_offset=0,
+        payload_bytes=64,
+        counter_offset=64,
+        counter_bytes=128,
+        handle=77,
+    )
+    region = worker_chip_orch_comm.WorkerChipOrchRegion(
+        worker,
+        0,
+        worker_chip_orch_comm.WorkerChipOrchRegionDesc(
+            magic_version=0x4C334C3200020000,
+            region_id=1,
+            payload_base=0xDEAD_0000,
+            payload_bytes=64,
+            counter_base=0xDEAD_0040,
+            counter_bytes=128,
+        ),
+        mapping,
+    )
+    worker._live_worker_chip_regions.append(region)
+    close_calls: list[int] = []
+    fail_next_mapping_close = True
+
+    def close_mapping(handle: int) -> None:
+        nonlocal fail_next_mapping_close
+        close_calls.append(int(handle))
+        if fail_next_mapping_close:
+            fail_next_mapping_close = False
+            raise RuntimeError("mapping close failed")
+
+    monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_region_close", close_mapping)
+
+    with pytest.raises(RuntimeError, match="mapping close failed"):
+        worker.close()
+
+    assert close_calls == [77]
+    assert fake_c_worker.release_calls == [(0, 1)]
+    assert worker._live_worker_chip_regions == [region]
+
+    worker.close()
+
+    assert close_calls == [77, 77]
+    assert fake_c_worker.release_calls == [(0, 1)]
+    assert worker._live_worker_chip_regions == []
+
+
 def test_concurrent_close_publishes_joiner_cleanup_error_to_every_caller(monkeypatch):
     worker = Worker(level=3, num_sub_workers=0)
     worker._lifecycle = worker_module._Lifecycle.READY

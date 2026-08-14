@@ -338,6 +338,7 @@ class _FakeRegion:
         self.region_id = 42
         self._expired = False
         self._released = False
+        self._chip_release_committed = False
 
     @property
     def expired(self) -> bool:

@@ -8057,8 +8057,9 @@ class Worker:
             except BaseException as exc:  # noqa: BLE001
                 region_errors.append(exc)
             try:
-                if self._worker is not None:
+                if self._worker is not None and not region._chip_release_committed:
                     self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
+                    region._chip_release_committed = True
                     region.free()
             except BaseException as exc:  # noqa: BLE001
                 release_error = exc
