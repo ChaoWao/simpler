@@ -35,7 +35,11 @@ repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
+        # 750 kB so the harvested whole-network chip orchestration — one
+        # generated translation unit whose size is inherent to the 43-layer
+        # program — fits under the cap.
         - id: check-added-large-files
+          args: [--maxkb=750]
         - id: check-yaml
         - id: end-of-file-fixer
           exclude: ^3rdparty/|vendor/
