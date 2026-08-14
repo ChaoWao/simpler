@@ -856,6 +856,22 @@ add_a5_hbg_runtime_test(test_a5_graph_cache a5/test_graph_cache.cpp)
 target_sources(test_a5_graph_cache PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/scheduler/graph_execution.cpp
 )
+# Incremental-activation tests init a real PTO2SchedulerState (ready queues), so
+# they link the scheduler + shared runtime out-of-line members.
+add_a2a3_hbg_runtime_test(test_graph_activation a2a3/test_graph_activation.cpp)
+target_sources(test_graph_activation PRIVATE
+    ${HBG_RUNTIME_DIR}/shared/pto_shared_memory.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_tensormap.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_runtime2_init.cpp
+    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+)
+add_a5_hbg_runtime_test(test_a5_graph_activation a5/test_graph_activation.cpp)
+target_sources(test_a5_graph_activation PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/pto_shared_memory.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/pto_tensormap.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/pto_runtime2_init.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/runtime.cpp
+)
 # PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE

@@ -52,6 +52,8 @@ void reset_execution(
     execution->materialize_busy.store(0, std::memory_order_relaxed);
     execution->remaining_nodes.store(node_count, std::memory_order_relaxed);
     execution->retired_nodes.store(0, std::memory_order_relaxed);
+    execution->published_nodes.store(0, std::memory_order_relaxed);
+    execution->route_cursor.store(0, std::memory_order_relaxed);
     execution->node_count = node_count;
     execution->materialized_nodes = 0;
     execution->materialized_tensor_patches = 0;
@@ -253,25 +255,6 @@ bool graph_definition_hash_matches(const GraphDefinition &definition) {
     return hash == definition.content_hash;
 }
 
-bool register_initial_graph_waiter(GraphExecution &execution, int32_t consumer_index) {
-    const uint32_t begin = execution.fanin_offsets[consumer_index];
-    const uint32_t end = execution.fanin_offsets[consumer_index + 1];
-    if (begin == end) return true;
-
-    const uint16_t producer_index = execution.fanin_indices[begin];
-    PTO2TaskSlotState &producer = execution.node_storage[producer_index].slot;
-    PTO2TaskSlotState &consumer = execution.node_storage[consumer_index].slot;
-
-    // Orch has already wired the dependency as a producer index in fanin CSR.
-    // This only creates the execution-local polling subscription. Activation
-    // is gated on PREPARED, so no producer can close its list concurrently.
-    PTO2TaskSlotState *head = producer.wake_list_head.load(std::memory_order_relaxed);
-    if (head == WAKE_LIST_SENTINEL) return false;
-    consumer.next_in_wake_list = head;
-    producer.wake_list_head.store(&consumer, std::memory_order_relaxed);
-    return true;
-}
-
 }  // namespace
 
 GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
@@ -374,6 +357,12 @@ GraphMaterializeResult graph_execution_materialize_slice(
             execution.materialize_busy.store(0, std::memory_order_release);
             return GraphMaterializeResult::BUSY;
         }
+        // Incremental activation reads producer slots through execution.nodes
+        // while the graph is still materializing, so publish the storage base
+        // once, before the first range. Topological node order guarantees every
+        // producer index a materialized node references is already constructed,
+        // and materialize_busy serializes this with any concurrent slice.
+        execution.nodes = execution.node_storage;
     } else if (state != GraphExecutionState::MATERIALIZING) {
         execution.materialize_busy.store(0, std::memory_order_release);
         return GraphMaterializeResult::INVALID;
@@ -592,10 +581,6 @@ GraphMaterializeResult graph_execution_materialize_slice(
             }
         }
         reset_graph_payload(payload);
-        if (!register_initial_graph_waiter(execution, i)) {
-            execution.materialize_busy.store(0, std::memory_order_release);
-            return GraphMaterializeResult::INVALID;
-        }
     }
     execution.materialized_nodes = last;
     if (nodes_materialized != nullptr) *nodes_materialized = last - first;
@@ -616,9 +601,6 @@ GraphMaterializeResult graph_execution_materialize_slice(
         return GraphMaterializeResult::INVALID;
     }
 
-    // nodes is published before PREPARED. An activator that acquires the state
-    // may therefore route saved roots without observing partially built nodes.
-    execution.nodes = execution.node_storage;
     execution.materialized_graph_key = execution.graph_key;
     execution.materialized_definition_hash = execution.definition_hash;
     execution.materialized_node_count = execution.node_count;

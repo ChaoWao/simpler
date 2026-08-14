@@ -342,6 +342,13 @@ struct GraphExecution {
     std::atomic<uint8_t> materialize_busy{0};
     std::atomic<int32_t> remaining_nodes{0};
     std::atomic<int32_t> retired_nodes{0};
+    // Incremental activation: nodes in [0, published_nodes) are fully
+    // materialized and registered, so a route pass may consider them. route_cursor
+    // is the next such node index a route pass will claim; roots below it have
+    // been pushed to the ready queue exactly once. Both advance monotonically and
+    // reset per (re)submission.
+    std::atomic<int32_t> published_nodes{0};
+    std::atomic<int32_t> route_cursor{0};
     int32_t node_count{0};
     int32_t node_capacity{0};
     int32_t materialized_nodes{0};
