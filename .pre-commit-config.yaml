@@ -35,10 +35,11 @@ repos:
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0
       hooks:
+        # 750 kB so the harvested whole-network chip orchestration — one
+        # generated translation unit whose size is inherent to the 43-layer
+        # program — fits under the cap.
         - id: check-added-large-files
-          # The harvested whole-network chip orchestration is one generated
-          # translation unit; its size is inherent to the 43-layer program.
-          exclude: ^examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/kernels/orchestration/
+          args: [--maxkb=750]
         - id: check-yaml
         - id: end-of-file-fixer
           exclude: ^3rdparty/|vendor/
