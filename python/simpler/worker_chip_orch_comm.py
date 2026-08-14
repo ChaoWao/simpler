@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -25,21 +24,15 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _worker_host_mapped_region_close,
 )
 
-from .buffer import AddressSpace, Buffer
-
-
-class NotifyOp(IntEnum):
-    Set = 0
-    Add = 1
-
-
-class WaitCmp(IntEnum):
-    EQ = 0
-    NE = 1
-    GT = 2
-    GE = 3
-    LT = 4
-    LE = 5
+from .comm_region import (
+    CounterPart,
+    HostVmmCopyAccess,
+    NotifyOp,
+    PayloadPart,
+    RegionPartSpan,
+    SignalTestResult,
+    WaitCmp,
+)
 
 
 class WorkerChipRegionAccessProfile(IntEnum):
@@ -47,13 +40,6 @@ class WorkerChipRegionAccessProfile(IntEnum):
     ONBOARD_VMM = 1
     SIM_POSIX_SHM = 2
 
-
-_MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
-
-# Wire values returned by _worker_host_mapped_counter_wait in _task_interface; must
-# match kWaitStatusTimeout / kWaitErrorSignalTimeout in task_interface.cpp.
-_WAIT_STATUS_TIMEOUT = -1
-_WAIT_ERROR_SIGNAL_TIMEOUT = 7
 
 _DESC = struct.Struct("<6Q")
 _WORKER_CHIP_ORCH_REGION_DESC_SCALAR_COUNT = 6
@@ -104,12 +90,6 @@ class WorkerChipOrchRegionDesc:
             int(self.counter_base),
             int(self.counter_bytes),
         ]
-
-
-@dataclass(frozen=True)
-class SignalTestResult:
-    matched: bool
-    observed: int
 
 
 @dataclass(frozen=True)
@@ -223,48 +203,6 @@ def validate_region_create_reply(
     return counter_offset, total_bytes
 
 
-class _PinnedBuffer:
-    def __init__(self, obj: Any, *, writable: bool = False) -> None:
-        self._keepalive: Any = obj
-        if isinstance(obj, Buffer):
-            if obj.address_space != AddressSpace.HOST:
-                raise ValueError("L3-L2 payload buffer must be host storage, not device storage")
-            self.addr = int(obj.base)
-            self.nbytes = int(obj.nbytes)
-            return
-
-        try:
-            view = memoryview(obj)
-        except TypeError as exc:
-            raise ValueError("L3-L2 payload buffer must be a contiguous L3 Host-accessible byte span") from exc
-        if not view.c_contiguous:
-            raise ValueError("L3-L2 payload buffer must be contiguous")
-        try:
-            byte_view = view if view.itemsize == 1 and view.format in {"B", "b", "c"} else view.cast("B")
-        except (TypeError, ValueError) as exc:
-            raise ValueError("L3-L2 payload buffer must be viewable as bytes") from exc
-        if writable and byte_view.readonly:
-            raise ValueError("L3-L2 payload read destination must be writable")
-        self.nbytes = int(byte_view.nbytes)
-        if byte_view.readonly:
-            staging = ctypes.create_string_buffer(byte_view.tobytes())
-            self._keepalive = staging
-            self.addr = ctypes.addressof(staging)
-            return
-        exported = ctypes.c_char.from_buffer(byte_view)
-        self._keepalive = (byte_view, exported)
-        self.addr = ctypes.addressof(exported)
-
-    def close(self) -> None:
-        self._keepalive = None
-
-    def __enter__(self) -> _PinnedBuffer:
-        return self
-
-    def __exit__(self, *_: Any) -> None:
-        self.close()
-
-
 class WorkerChipOrchCounter:
     def __init__(self, region: WorkerChipOrchRegion, offset: int) -> None:
         self._region = region
@@ -280,22 +218,15 @@ class WorkerChipOrchCounter:
 
     def notify(self, value: int, op: NotifyOp = NotifyOp.Set) -> None:
         self._region._ensure_live()
-        op = NotifyOp(op)
-        self._region._direct_counter_notify(self._offset, int(value), op)
+        self._region._counter_part.notify(self._offset, int(value), NotifyOp(op))
 
     def test(self, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
         self._region._ensure_live()
-        cmp = WaitCmp(cmp)
-        return self._region._direct_counter_test(self._offset, int(cmp_value), cmp)
+        return self._region._counter_part.test(self._offset, int(cmp_value), WaitCmp(cmp))
 
     def wait(self, cmp_value: int, cmp: WaitCmp, timeout: float) -> int:
         self._region._ensure_live()
-        cmp = WaitCmp(cmp)
-        if timeout is None or float(timeout) <= 0:
-            raise ValueError("L3-L2 counter wait requires a positive timeout")
-        timeout_s = float(timeout)
-        timeout_ns = min(int(timeout_s * 1_000_000_000), _MAX_SIGNED_CHRONO_TIMEOUT_NS)
-        return self._region._direct_counter_wait(self._offset, int(cmp_value), cmp, timeout_ns)
+        return self._region._counter_part.wait(self._offset, int(cmp_value), WaitCmp(cmp), timeout)
 
 
 class WorkerChipOrchRegion:
@@ -310,6 +241,15 @@ class WorkerChipOrchRegion:
         self._worker_id = int(worker_id)
         self._descriptor = desc
         self._worker_host_mapping = worker_host_mapping
+        access = HostVmmCopyAccess.from_mapping(worker_host_mapping)
+        self._payload_part = PayloadPart(
+            RegionPartSpan(offset=int(worker_host_mapping.payload_offset), nbytes=int(worker_host_mapping.payload_bytes)),
+            access,
+        )
+        self._counter_part = CounterPart(
+            RegionPartSpan(offset=int(worker_host_mapping.counter_offset), nbytes=int(worker_host_mapping.counter_bytes)),
+            access,
+        )
         self._released = False
         self._poisoned = False
         self._expired = False
@@ -335,32 +275,24 @@ class WorkerChipOrchRegion:
 
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
-        with _PinnedBuffer(host_buffer) as pinned:
-            size = pinned.nbytes if nbytes is None else int(nbytes)
-            self._validate_payload_range(offset, size, pinned.nbytes)
-            try:
-                _worker_host_mapped_payload_write(int(self._worker_host_mapping.handle), int(offset), pinned.addr, size)
-            except Exception:
-                self._poison()
-                raise
+        try:
+            self._payload_part.write(offset, host_buffer, nbytes)
+        except Exception:
+            self._poison()
+            raise
 
     def payload_read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
-        with _PinnedBuffer(host_buffer, writable=True) as pinned:
-            size = pinned.nbytes if nbytes is None else int(nbytes)
-            self._validate_payload_range(offset, size, pinned.nbytes)
-            try:
-                _worker_host_mapped_payload_read(int(self._worker_host_mapping.handle), int(offset), pinned.addr, size)
-            except Exception:
-                self._poison()
-                raise
+        try:
+            self._payload_part.read(offset, host_buffer, nbytes)
+        except Exception:
+            self._poison()
+            raise
 
     def counter(self, offset: int) -> WorkerChipOrchCounter:
         self._ensure_live()
         offset = int(offset)
-        # Primitive validation is 4-byte; wrapper-owned writers still need separate 64-byte cache lines.
-        if offset < 0 or offset % 4 != 0 or offset + 4 > int(self._descriptor.counter_bytes):
-            raise ValueError("L3-L2 counter offset must be 4-byte aligned and inside the counter range")
+        self._counter_part.counter(offset)
         return WorkerChipOrchCounter(self, offset)
 
     def free(self) -> None:
@@ -382,17 +314,6 @@ class WorkerChipOrchRegion:
         if self._poisoned:
             raise RuntimeError(f"L3-L2 region {self.region_id} is poisoned")
 
-    def _validate_payload_range(self, offset: int, nbytes: int, buffer_nbytes: int) -> None:
-        offset = int(offset)
-        nbytes = int(nbytes)
-        if offset < 0 or nbytes <= 0:
-            raise ValueError("L3-L2 payload offset must be non-negative and nbytes must be positive")
-        if nbytes > int(buffer_nbytes):
-            raise ValueError(f"L3-L2 payload nbytes={nbytes} exceeds host buffer size {buffer_nbytes}")
-        payload_bytes = int(self._descriptor.payload_bytes)
-        if offset + nbytes > payload_bytes:
-            raise ValueError(f"L3-L2 payload range [{offset}, {offset + nbytes}) exceeds region size {payload_bytes}")
-
     def _close_worker_host_mapping(self) -> None:
         try:
             self._worker_host_mapping.close()
@@ -401,39 +322,11 @@ class WorkerChipOrchRegion:
             raise
 
     def _direct_counter_notify(self, offset: int, value: int, op: NotifyOp) -> None:
-        worker_host_mapping = self._worker_host_mapping
-        mapping_offset = int(worker_host_mapping.counter_offset) + int(offset)
-        try:
-            _worker_host_mapped_counter_notify(int(worker_host_mapping.handle), mapping_offset, int(value), int(op))
-        except Exception:
-            self._poison()
-            raise
+        self._counter_part.notify(offset, int(value), NotifyOp(op))
 
     def _direct_counter_test(self, offset: int, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
-        worker_host_mapping = self._worker_host_mapping
-        mapping_offset = int(worker_host_mapping.counter_offset) + int(offset)
-        try:
-            matched, observed = _worker_host_mapped_counter_test(
-                int(worker_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp)
-            )
-        except Exception:
-            self._poison()
-            raise
-        return SignalTestResult(matched=bool(matched), observed=int(observed))
+        return self._counter_part.test(offset, int(cmp_value), WaitCmp(cmp))
 
     def _direct_counter_wait(self, offset: int, cmp_value: int, cmp: WaitCmp, timeout_ns: int) -> int:
-        worker_host_mapping = self._worker_host_mapping
-        mapping_offset = int(worker_host_mapping.counter_offset) + int(offset)
-        try:
-            status, error_kind, observed, _matched, message = _worker_host_mapped_counter_wait(
-                int(worker_host_mapping.handle), mapping_offset, int(cmp_value), int(cmp), int(timeout_ns)
-            )
-        except Exception:
-            self._poison()
-            raise
-        if int(status) == 0:
-            return int(observed)
-        msg = str(message) if message else "L3-L2 counter wait timed out"
-        if int(status) == _WAIT_STATUS_TIMEOUT and int(error_kind) == _WAIT_ERROR_SIGNAL_TIMEOUT:
-            raise TimeoutError(f"{msg}; observed={int(observed)}")
-        raise AssertionError(f"unexpected L3-L2 counter wait result status={int(status)} error_kind={int(error_kind)}")
+        timeout = float(timeout_ns) / 1_000_000_000
+        return self._counter_part.wait(offset, int(cmp_value), WaitCmp(cmp), timeout)

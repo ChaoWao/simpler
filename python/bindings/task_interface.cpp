@@ -820,6 +820,488 @@ private:
     std::string owner_token_;
 };
 
+std::string region_shm_name_for_open(const std::string &token) {
+    if (token.empty()) {
+        throw std::invalid_argument("mapped-region sim backing shm token must be non-empty");
+    }
+    if (token[0] == '/') {
+        return token;
+    }
+    return "/" + token;
+}
+
+WorkerChipOrchNotifyOp checked_region_notify_op(int op) {
+    auto typed = static_cast<WorkerChipOrchNotifyOp>(op);
+    if (!worker_chip_orch_comm::valid_notify_op(typed)) {
+        throw std::invalid_argument("region counter notify op is invalid");
+    }
+    return typed;
+}
+
+WorkerChipOrchWaitCmp checked_region_wait_cmp(int cmp) {
+    auto typed = static_cast<WorkerChipOrchWaitCmp>(cmp);
+    if (!worker_chip_orch_comm::valid_wait_cmp(typed)) {
+        throw std::invalid_argument("region counter wait comparison is invalid");
+    }
+    return typed;
+}
+
+class RegionCleanupErrors {
+public:
+    void record(const std::string &owner_token, const std::string &message) noexcept {
+        try {
+            std::lock_guard<std::mutex> lk(mu_);
+            append_cleanup_error(errors_[owner_token], message);
+        } catch (...) {}
+    }
+
+    std::string take(const std::string &owner_token) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = errors_.find(owner_token);
+        if (it == errors_.end()) {
+            return {};
+        }
+        std::string error = std::move(it->second);
+        errors_.erase(it);
+        return error;
+    }
+
+    std::string peek(const std::string &owner_token) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = errors_.find(owner_token);
+        return it == errors_.end() ? std::string{} : it->second;
+    }
+
+    void acknowledge(const std::string &owner_token, const std::string &observed) {
+        if (observed.empty()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = errors_.find(owner_token);
+        if (it == errors_.end()) {
+            return;
+        }
+        if (it->second == observed) {
+            errors_.erase(it);
+            return;
+        }
+        if (it->second.size() > observed.size() + 2 && it->second.compare(0, observed.size(), observed) == 0 &&
+            it->second.compare(observed.size(), 2, "; ") == 0) {
+            it->second.erase(0, observed.size() + 2);
+        }
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::unordered_map<std::string, std::string> errors_;
+};
+
+RegionCleanupErrors &region_cleanup_errors() {
+    static auto *errors = new RegionCleanupErrors();
+    return *errors;
+}
+
+enum class RegionMappingProfile { SimPosixShm, OnboardVmm };
+
+class RegionMapping {
+public:
+    RegionMapping() = default;
+    RegionMapping(const RegionMapping &) = delete;
+    RegionMapping &operator=(const RegionMapping &) = delete;
+
+    ~RegionMapping() noexcept {
+        try {
+            std::string cleanup_error;
+            close_collecting(cleanup_error);
+            if (!cleanup_error.empty()) {
+                region_cleanup_errors().record(owner_token, cleanup_error);
+            }
+        } catch (...) {
+            region_cleanup_errors().record(owner_token, "mapped-region cleanup failed with an unknown error");
+        }
+    }
+
+    std::string owner_token;
+    RegionMappingProfile profile{RegionMappingProfile::SimPosixShm};
+    int fd{-1};
+    uint64_t device_addr{0};
+    int device_id{-1};
+    uint64_t shareable_handle{0};
+    void *vmm_handle{nullptr};
+    uint64_t mapping_bytes{0};
+
+    void close() {
+        std::string cleanup_error;
+        close_collecting(cleanup_error);
+        if (!cleanup_error.empty()) {
+            throw std::runtime_error(cleanup_error);
+        }
+    }
+
+    void bind_acl_device() const {
+        if (device_id < 0) {
+            throw std::runtime_error("onboard mapped-region handle has no device id");
+        }
+        acl_api().bind_device_with_check(device_id);
+    }
+
+    void validate_mapping_range_or_throw(uint64_t offset, uint64_t nbytes) const {
+        if (nbytes == 0 || offset > mapping_bytes || nbytes > mapping_bytes - offset) {
+            throw std::out_of_range("mapped-region byte access is out of range");
+        }
+    }
+
+    void copy_to(uint64_t offset, const void *host_ptr, uint64_t nbytes) const {
+        validate_mapping_range_or_throw(offset, nbytes);
+        if (profile == RegionMappingProfile::SimPosixShm) {
+            auto *dst = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(device_addr));
+            std::memcpy(dst + offset, host_ptr, static_cast<size_t>(nbytes));
+            return;
+        }
+        bind_acl_device();
+        void *dst = reinterpret_cast<void *>(static_cast<uintptr_t>(device_addr + offset));
+        acl_api().memcpy_h2d_with_check(dst, static_cast<size_t>(nbytes), host_ptr, static_cast<size_t>(nbytes));
+    }
+
+    void copy_from(void *host_ptr, uint64_t offset, uint64_t nbytes) const {
+        validate_mapping_range_or_throw(offset, nbytes);
+        if (profile == RegionMappingProfile::SimPosixShm) {
+            const auto *src = reinterpret_cast<const uint8_t *>(static_cast<uintptr_t>(device_addr));
+            std::memcpy(host_ptr, src + offset, static_cast<size_t>(nbytes));
+            return;
+        }
+        bind_acl_device();
+        const void *src = reinterpret_cast<const void *>(static_cast<uintptr_t>(device_addr + offset));
+        acl_api().memcpy_d2h_with_check(host_ptr, static_cast<size_t>(nbytes), src, static_cast<size_t>(nbytes));
+    }
+
+    int32_t load_counter(uint64_t offset) const {
+        int32_t value = 0;
+        copy_from(&value, offset, sizeof(value));
+        return value;
+    }
+
+    void store_counter(uint64_t offset, int32_t value) const { copy_to(offset, &value, sizeof(value)); }
+
+    void notify_counter(uint64_t offset, int32_t value, WorkerChipOrchNotifyOp op) const {
+        if (offset % sizeof(int32_t) != 0) {
+            throw std::invalid_argument("region counter offset must be 4-byte aligned");
+        }
+        if (!worker_chip_orch_comm::valid_notify_op(op)) {
+            throw std::invalid_argument("region counter notify op is invalid");
+        }
+        if (op == WorkerChipOrchNotifyOp::Add) {
+            value = load_counter(offset) + value;
+        }
+        store_counter(offset, value);
+    }
+
+    std::tuple<bool, int32_t> test_counter(uint64_t offset, int32_t operand, WorkerChipOrchWaitCmp cmp) const {
+        if (offset % sizeof(int32_t) != 0) {
+            throw std::invalid_argument("region counter offset must be 4-byte aligned");
+        }
+        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
+            throw std::invalid_argument("region counter wait comparison is invalid");
+        }
+        int32_t observed = load_counter(offset);
+        return std::make_tuple(worker_chip_orch_comm::compare_counter(observed, operand, cmp), observed);
+    }
+
+    std::tuple<int, int, int32_t, bool, std::string>
+    wait_counter(uint64_t offset, int32_t operand, WorkerChipOrchWaitCmp cmp, uint64_t timeout_ns) const {
+        if (offset % sizeof(int32_t) != 0) {
+            throw std::invalid_argument("region counter offset must be 4-byte aligned");
+        }
+        if (!worker_chip_orch_comm::valid_wait_cmp(cmp)) {
+            throw std::invalid_argument("region counter wait comparison is invalid");
+        }
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout_ns);
+        while (true) {
+            int32_t observed = load_counter(offset);
+            bool matched = worker_chip_orch_comm::compare_counter(observed, operand, cmp);
+            if (matched) {
+                return std::make_tuple(kWaitStatusOk, kWaitErrorNone, observed, true, std::string{});
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return std::make_tuple(
+                    kWaitStatusTimeout, kWaitErrorSignalTimeout, observed, false, std::string{"SIGNAL_WAIT timed out"}
+                );
+            }
+            std::this_thread::sleep_for(std::chrono::nanoseconds(kWaitPollIntervalNs));
+        }
+    }
+
+private:
+    void close_collecting(std::string &cleanup_error) {
+        uint64_t mapped_addr = std::exchange(device_addr, 0);
+        uint64_t mapped_bytes = std::exchange(mapping_bytes, 0);
+        void *physical_handle = std::exchange(vmm_handle, nullptr);
+        int mapped_device_id = std::exchange(device_id, -1);
+        int mapped_fd = std::exchange(fd, -1);
+
+        if (profile == RegionMappingProfile::OnboardVmm) {
+            if (mapped_addr == 0 && physical_handle == nullptr) {
+                return;
+            }
+            try {
+                if (mapped_device_id < 0) {
+                    throw std::runtime_error("onboard mapped-region handle has no device id");
+                }
+                AclRuntimeApi &api = acl_api();
+                api.bind_device_with_check(mapped_device_id);
+                api.vmm_release_collecting(
+                    reinterpret_cast<void *>(static_cast<uintptr_t>(mapped_addr)), physical_handle, cleanup_error
+                );
+            } catch (const std::exception &exc) {
+                append_cleanup_error(cleanup_error, exc.what());
+            } catch (...) {
+                append_cleanup_error(cleanup_error, "onboard mapped-region cleanup failed");
+            }
+            return;
+        }
+
+        if (mapped_addr != 0 &&
+            munmap(reinterpret_cast<void *>(static_cast<uintptr_t>(mapped_addr)), mapped_bytes) != 0) {
+            int err = errno;
+            append_cleanup_error(cleanup_error, std::string("sim mapped-region munmap failed: ") + std::strerror(err));
+        }
+        if (mapped_fd >= 0 && ::close(mapped_fd) != 0) {
+            int err = errno;
+            append_cleanup_error(cleanup_error, std::string("sim mapped-region close failed: ") + std::strerror(err));
+        }
+    }
+
+    static constexpr int kWaitStatusOk = 0;
+    static constexpr int kWaitStatusTimeout = -1;
+    static constexpr int kWaitErrorNone = 0;
+    static constexpr int kWaitErrorSignalTimeout = 7;
+    static constexpr int64_t kWaitPollIntervalNs = 50000;
+};
+
+class RegionEntry {
+public:
+    explicit RegionEntry(std::unique_ptr<RegionMapping> mapping) :
+        mapping_(std::move(mapping)) {}
+
+    void acquire() {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != State::OPEN) {
+            throw std::runtime_error("mapped-region handle is closed or unknown");
+        }
+        active_leases_ += 1;
+    }
+
+    void release() noexcept {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (active_leases_ == 0) {
+            return;
+        }
+        active_leases_ -= 1;
+        if (active_leases_ == 0) {
+            idle_.notify_all();
+        }
+    }
+
+    RegionMapping &mapping() { return *mapping_; }
+
+    size_t active_leases() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return active_leases_;
+    }
+
+    void close() {
+        std::unique_ptr<RegionMapping> mapping;
+        std::exception_ptr close_error;
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            if (state_ != State::OPEN) {
+                idle_.wait(lk, [this]() {
+                    return state_ == State::CLOSED;
+                });
+                close_error = close_error_;
+                lk.unlock();
+                if (close_error != nullptr) {
+                    std::rethrow_exception(close_error);
+                }
+                return;
+            }
+            state_ = State::CLOSING;
+            idle_.wait(lk, [this]() {
+                return active_leases_ == 0;
+            });
+            mapping = std::move(mapping_);
+        }
+
+        try {
+            if (mapping != nullptr) {
+                mapping->close();
+            }
+        } catch (...) {
+            close_error = std::current_exception();
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            close_error_ = close_error;
+            state_ = State::CLOSED;
+        }
+        idle_.notify_all();
+        if (close_error != nullptr) {
+            std::rethrow_exception(close_error);
+        }
+    }
+
+private:
+    enum class State { OPEN, CLOSING, CLOSED };
+
+    std::unique_ptr<RegionMapping> mapping_;
+    mutable std::mutex mu_;
+    std::condition_variable idle_;
+    size_t active_leases_{0};
+    State state_{State::OPEN};
+    std::exception_ptr close_error_;
+};
+
+class RegionLease {
+public:
+    explicit RegionLease(std::shared_ptr<RegionEntry> entry) :
+        entry_(std::move(entry)) {
+        entry_->acquire();
+    }
+    RegionLease(const RegionLease &) = delete;
+    RegionLease &operator=(const RegionLease &) = delete;
+    RegionLease(RegionLease &&) noexcept = default;
+    RegionLease &operator=(RegionLease &&) = delete;
+    ~RegionLease() {
+        if (entry_ != nullptr) {
+            entry_->release();
+        }
+    }
+
+    RegionMapping *operator->() { return &entry_->mapping(); }
+
+private:
+    std::shared_ptr<RegionEntry> entry_;
+};
+
+class RegionRegistry {
+public:
+    uint64_t emplace(std::unique_ptr<RegionMapping> mapping) {
+        auto entry = std::make_shared<RegionEntry>(std::move(mapping));
+        std::lock_guard<std::mutex> lk(mu_);
+        if (std::exchange(fail_next_insert_for_test_, false)) {
+            throw std::runtime_error("injected mapped-region registry insertion failure");
+        }
+        uint64_t handle = next_handle_;
+        auto result = regions_.emplace(handle, std::move(entry));
+        if (!result.second) {
+            throw std::overflow_error("mapped-region handle space is exhausted");
+        }
+        next_handle_ += 1;
+        if (next_handle_ == 0) {
+            next_handle_ = 1;
+        }
+        return handle;
+    }
+
+    RegionLease lease(uint64_t handle) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = regions_.find(handle);
+        if (it == regions_.end()) {
+            throw std::runtime_error("mapped-region handle is closed or unknown");
+        }
+        return RegionLease(it->second);
+    }
+
+    size_t active_leases(uint64_t handle) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = regions_.find(handle);
+        if (it == regions_.end()) {
+            throw std::runtime_error("mapped-region handle is closed or unknown");
+        }
+        return it->second->active_leases();
+    }
+
+    void close(uint64_t handle) {
+        std::shared_ptr<RegionEntry> entry;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = regions_.find(handle);
+            if (it == regions_.end()) {
+                return;
+            }
+            entry = it->second;
+        }
+
+        std::exception_ptr close_error;
+        try {
+            entry->close();
+        } catch (...) {
+            close_error = std::current_exception();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = regions_.find(handle);
+            if (it != regions_.end() && it->second == entry) {
+                regions_.erase(it);
+            }
+        }
+        if (close_error != nullptr) {
+            std::rethrow_exception(close_error);
+        }
+    }
+
+    void fail_next_insert_for_test() {
+        std::lock_guard<std::mutex> lk(mu_);
+        fail_next_insert_for_test_ = true;
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::unordered_map<uint64_t, std::shared_ptr<RegionEntry>> regions_;
+    uint64_t next_handle_{1};
+    bool fail_next_insert_for_test_{false};
+};
+
+RegionRegistry &region_registry() {
+    static auto *registry = new RegionRegistry();
+    return *registry;
+}
+
+void close_region(uint64_t handle) { region_registry().close(handle); }
+
+class RegionHandle {
+public:
+    explicit RegionHandle(uint64_t handle, std::string owner_token) :
+        handle_(handle),
+        owner_token_(std::move(owner_token)) {}
+    RegionHandle(const RegionHandle &) = delete;
+    RegionHandle &operator=(const RegionHandle &) = delete;
+    RegionHandle(RegionHandle &&other) noexcept :
+        handle_(std::exchange(other.handle_, 0)),
+        owner_token_(std::move(other.owner_token_)) {}
+    RegionHandle &operator=(RegionHandle &&) = delete;
+
+    ~RegionHandle() noexcept {
+        if (handle_ == 0) {
+            return;
+        }
+        try {
+            close_region(handle_);
+        } catch (const std::exception &exc) {
+            region_cleanup_errors().record(owner_token_, exc.what());
+        } catch (...) {
+            region_cleanup_errors().record(owner_token_, "mapped-region owner cleanup failed with an unknown error");
+        }
+    }
+
+    uint64_t value() const { return handle_; }
+
+private:
+    uint64_t handle_{0};
+    std::string owner_token_;
+};
+
 class ChipChildOnboardRegionRegistry {
 public:
     uint64_t emplace(ChipChildOnboardRegion region) {
@@ -2460,10 +2942,190 @@ NB_MODULE(_task_interface, m) {
     nb::class_<WorkerHostMappedRegionHandle>(m, "_WorkerHostMappedRegionHandle")
         .def("__int__", &WorkerHostMappedRegionHandle::value);
 
+    nb::class_<RegionHandle>(m, "_RegionHandle").def("__int__", &RegionHandle::value);
+
+    m.def(
+        "_region_import_sim",
+        [](const std::string &token, uint64_t mapping_bytes, const std::string &owner_token) -> RegionHandle {
+            if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                throw std::invalid_argument("mapped-region sim import requires a positive mapping size");
+            }
+            if (owner_token.empty()) {
+                throw std::invalid_argument("mapped-region import requires a non-empty owner token");
+            }
+            std::string handle_owner_token = owner_token;
+            std::string name = region_shm_name_for_open(token);
+            auto mapping = std::make_unique<RegionMapping>();
+            mapping->owner_token = owner_token;
+            mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
+            if (mapping->fd < 0) {
+                throw std::runtime_error("mapped-region sim import shm_open failed");
+            }
+            void *base =
+                mmap(nullptr, static_cast<size_t>(mapping_bytes), PROT_READ | PROT_WRITE, MAP_SHARED, mapping->fd, 0);
+            if (base == MAP_FAILED) {
+                int err = errno;
+                throw std::runtime_error(std::string("mapped-region sim import mmap failed: ") + std::strerror(err));
+            }
+            mapping->profile = RegionMappingProfile::SimPosixShm;
+            mapping->device_addr = reinterpret_cast<uint64_t>(base);
+            mapping->mapping_bytes = mapping_bytes;
+            uint64_t handle = region_registry().emplace(std::move(mapping));
+            return RegionHandle(handle, std::move(handle_owner_token));
+        },
+        nb::arg("token"), nb::arg("mapping_bytes"), nb::arg("owner_token"), nb::call_guard<nb::gil_scoped_release>(),
+        "Import a sim POSIX shm mapped region."
+    );
+    m.def(
+        "_region_import_onboard",
+        [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes,
+           const std::string &owner_token) -> RegionHandle {
+            if (device_id < 0) {
+                throw std::invalid_argument("onboard mapped-region import requires a non-negative device id");
+            }
+            if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                throw std::invalid_argument("onboard mapped-region import requires a positive mapping size");
+            }
+            if (owner_token.empty()) {
+                throw std::invalid_argument("mapped-region import requires a non-empty owner token");
+            }
+            std::string handle_owner_token = owner_token;
+            auto mapping = std::make_unique<RegionMapping>();
+            mapping->owner_token = owner_token;
+            mapping->profile = RegionMappingProfile::OnboardVmm;
+            mapping->device_id = device_id;
+            mapping->mapping_bytes = mapping_bytes;
+            mapping->bind_acl_device();
+            AclRuntimeApi &api = acl_api();
+            mapping->shareable_handle = shareable_handle;
+            mapping->vmm_handle = api.vmm_import_shareable_with_check(shareable_handle, device_id);
+            void *mapped_addr = api.vmm_reserve_with_check(mapping_bytes);
+            mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
+            api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
+            api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
+            uint64_t handle = region_registry().emplace(std::move(mapping));
+            return RegionHandle(handle, std::move(handle_owner_token));
+        },
+        nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"), nb::arg("owner_token"),
+        nb::call_guard<nb::gil_scoped_release>(), "Import an onboard VMM mapped region."
+    );
+    m.def(
+        "_region_close",
+        [](uint64_t handle) {
+            close_region(handle);
+        },
+        nb::arg("handle"), nb::call_guard<nb::gil_scoped_release>(), "Close a mapped-region handle."
+    );
+    m.def(
+        "_region_active_leases",
+        [](uint64_t handle) {
+            return region_registry().active_leases(handle);
+        },
+        nb::arg("handle"), "Return the number of in-flight native operations holding this mapped region."
+    );
+    m.def(
+        "_region_take_cleanup_error",
+        [](const std::string &owner_token) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("cleanup-error lookup requires a non-empty owner token");
+            }
+            return region_cleanup_errors().take(owner_token);
+        },
+        nb::arg("owner_token"), "Take a mapped-region cleanup error for one owner."
+    );
+    m.def(
+        "_region_peek_cleanup_error",
+        [](const std::string &owner_token) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("cleanup-error lookup requires a non-empty owner token");
+            }
+            return region_cleanup_errors().peek(owner_token);
+        },
+        nb::arg("owner_token"), "Read one mapped-region cleanup error without consuming it."
+    );
+    m.def(
+        "_region_ack_cleanup_error",
+        [](const std::string &owner_token, const std::string &observed) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("cleanup-error acknowledgement requires an owner token");
+            }
+            region_cleanup_errors().acknowledge(owner_token, observed);
+        },
+        nb::arg("owner_token"), nb::arg("observed"), "Acknowledge a mapped-region cleanup error."
+    );
+    m.def(
+        "_region_record_cleanup_error_for_test",
+        [](const std::string &owner_token, const std::string &message) {
+            if (owner_token.empty()) {
+                throw std::invalid_argument("cleanup-error injection requires a non-empty owner token");
+            }
+            region_cleanup_errors().record(owner_token, message);
+        },
+        nb::arg("owner_token"), nb::arg("message"), "Inject one owner-scoped mapped-region cleanup error."
+    );
+    m.def(
+        "_region_fail_next_registry_insert_for_test",
+        []() {
+            region_registry().fail_next_insert_for_test();
+        },
+        "Inject one mapped-region registry insertion failure after native acquisition."
+    );
+    m.def(
+        "_host_vmm_copy_to",
+        [](uint64_t handle, uint64_t mapping_offset, uint64_t host_ptr, uint64_t nbytes) {
+            if (host_ptr == 0) {
+                throw std::invalid_argument("host_vmm_copy_to host_ptr must be nonzero");
+            }
+            RegionLease mapping = region_registry().lease(handle);
+            mapping->copy_to(mapping_offset, reinterpret_cast<const void *>(static_cast<uintptr_t>(host_ptr)), nbytes);
+        },
+        nb::arg("handle"), nb::arg("mapping_offset"), nb::arg("host_ptr"), nb::arg("nbytes"),
+        nb::call_guard<nb::gil_scoped_release>(), "Copy host bytes into an imported mapped-region byte range."
+    );
+    m.def(
+        "_host_vmm_copy_from",
+        [](uint64_t handle, uint64_t mapping_offset, uint64_t host_ptr, uint64_t nbytes) {
+            if (host_ptr == 0) {
+                throw std::invalid_argument("host_vmm_copy_from host_ptr must be nonzero");
+            }
+            RegionLease mapping = region_registry().lease(handle);
+            mapping->copy_from(reinterpret_cast<void *>(static_cast<uintptr_t>(host_ptr)), mapping_offset, nbytes);
+        },
+        nb::arg("handle"), nb::arg("mapping_offset"), nb::arg("host_ptr"), nb::arg("nbytes"),
+        nb::call_guard<nb::gil_scoped_release>(), "Copy imported mapped-region bytes into host memory."
+    );
+    m.def(
+        "_region_counter_notify",
+        [](uint64_t handle, uint64_t counter_offset, int32_t value, int op) {
+            RegionLease mapping = region_registry().lease(handle);
+            mapping->notify_counter(counter_offset, value, checked_region_notify_op(op));
+        },
+        nb::arg("handle"), nb::arg("counter_offset"), nb::arg("value"), nb::arg("op"),
+        nb::call_guard<nb::gil_scoped_release>(), "Store or add one mapped-region signal counter."
+    );
+    m.def(
+        "_region_counter_test",
+        [](uint64_t handle, uint64_t counter_offset, int32_t operand, int cmp) -> std::tuple<bool, int32_t> {
+            RegionLease mapping = region_registry().lease(handle);
+            return mapping->test_counter(counter_offset, operand, checked_region_wait_cmp(cmp));
+        },
+        nb::arg("handle"), nb::arg("counter_offset"), nb::arg("operand"), nb::arg("cmp"),
+        nb::call_guard<nb::gil_scoped_release>(), "Load and compare one mapped-region signal counter."
+    );
+    m.def(
+        "_region_counter_wait",
+        [](uint64_t handle, uint64_t counter_offset, int32_t operand, int cmp,
+           uint64_t timeout_ns) -> std::tuple<int, int, int32_t, bool, std::string> {
+            RegionLease mapping = region_registry().lease(handle);
+            return mapping->wait_counter(counter_offset, operand, checked_region_wait_cmp(cmp), timeout_ns);
+        },
+        nb::arg("handle"), nb::arg("counter_offset"), nb::arg("operand"), nb::arg("cmp"), nb::arg("timeout_ns"),
+        nb::call_guard<nb::gil_scoped_release>(), "Poll one mapped-region signal counter until match or timeout."
+    );
+
     m.def(
         "_worker_host_mapped_region_import_sim",
-        [](const std::string &token, uint64_t mapping_bytes,
-           const std::string &owner_token) -> WorkerHostMappedRegionHandle {
+        [](const std::string &token, uint64_t mapping_bytes, const std::string &owner_token) -> RegionHandle {
             if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
                 throw std::invalid_argument("L3-L2 sim L3 Host mapped-region import requires a positive mapping size");
             }
@@ -2471,8 +3133,8 @@ NB_MODULE(_task_interface, m) {
                 throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
             }
             std::string handle_owner_token = owner_token;
-            std::string name = shm_name_for_open(token);
-            auto mapping = std::make_unique<WorkerHostMappedRegion>();
+            std::string name = region_shm_name_for_open(token);
+            auto mapping = std::make_unique<RegionMapping>();
             mapping->owner_token = owner_token;
             mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
             if (mapping->fd < 0) {
@@ -2486,11 +3148,11 @@ NB_MODULE(_task_interface, m) {
                     std::string("L3-L2 sim L3 Host mapped-region import mmap failed: ") + std::strerror(err)
                 );
             }
-            mapping->profile = WorkerChipRegionAccessProfile::SIM_POSIX_SHM;
+            mapping->profile = RegionMappingProfile::SimPosixShm;
             mapping->device_addr = reinterpret_cast<uint64_t>(base);
             mapping->mapping_bytes = mapping_bytes;
-            uint64_t handle = worker_host_mapped_region_registry().emplace(std::move(mapping));
-            return WorkerHostMappedRegionHandle(handle, std::move(handle_owner_token));
+            uint64_t handle = region_registry().emplace(std::move(mapping));
+            return RegionHandle(handle, std::move(handle_owner_token));
         },
         nb::arg("token"), nb::arg("mapping_bytes"), nb::arg("owner_token"), nb::call_guard<nb::gil_scoped_release>(),
         "Import a sim L3-L2 POSIX shm region for L3 Host mapped-region access."
@@ -2498,7 +3160,7 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_worker_host_mapped_region_import_onboard",
         [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes,
-           const std::string &owner_token) -> WorkerHostMappedRegionHandle {
+           const std::string &owner_token) -> RegionHandle {
             if (device_id < 0) {
                 throw std::invalid_argument("L3-L2 onboard mapped-region import requires a non-negative device id");
             }
@@ -2509,9 +3171,9 @@ NB_MODULE(_task_interface, m) {
                 throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
             }
             std::string handle_owner_token = owner_token;
-            auto mapping = std::make_unique<WorkerHostMappedRegion>();
+            auto mapping = std::make_unique<RegionMapping>();
             mapping->owner_token = owner_token;
-            mapping->profile = WorkerChipRegionAccessProfile::ONBOARD_VMM;
+            mapping->profile = RegionMappingProfile::OnboardVmm;
             mapping->device_id = device_id;
             mapping->mapping_bytes = mapping_bytes;
             mapping->bind_acl_device();
@@ -2522,8 +3184,8 @@ NB_MODULE(_task_interface, m) {
             mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
             api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
             api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
-            uint64_t handle = worker_host_mapped_region_registry().emplace(std::move(mapping));
-            return WorkerHostMappedRegionHandle(handle, std::move(handle_owner_token));
+            uint64_t handle = region_registry().emplace(std::move(mapping));
+            return RegionHandle(handle, std::move(handle_owner_token));
         },
         nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"), nb::arg("owner_token"),
         nb::call_guard<nb::gil_scoped_release>(), "Import an onboard VMM L3-L2 region for L3 Host mapped-region access."
@@ -2531,14 +3193,14 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_worker_host_mapped_region_close",
         [](uint64_t handle) {
-            close_worker_host_mapped_region(handle);
+            close_region(handle);
         },
         nb::arg("handle"), nb::call_guard<nb::gil_scoped_release>(), "Close an L3 Host mapped-region handle."
     );
     m.def(
         "_worker_host_mapped_region_active_leases",
         [](uint64_t handle) {
-            return worker_host_mapped_region_registry().active_leases(handle);
+            return region_registry().active_leases(handle);
         },
         nb::arg("handle"), "Return the number of in-flight native operations holding this mapped region."
     );
@@ -2548,7 +3210,7 @@ NB_MODULE(_task_interface, m) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error lookup requires a non-empty Worker owner token");
             }
-            return worker_host_mapped_region_cleanup_errors().take(owner_token);
+            return region_cleanup_errors().take(owner_token);
         },
         nb::arg("owner_token"),
         "Take a cleanup error recorded by an unadopted native mapped-region owner for one Worker."
@@ -2559,7 +3221,7 @@ NB_MODULE(_task_interface, m) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error lookup requires a non-empty Worker owner token");
             }
-            return worker_host_mapped_region_cleanup_errors().peek(owner_token);
+            return region_cleanup_errors().peek(owner_token);
         },
         nb::arg("owner_token"), "Read one Worker's mapped-region cleanup error without consuming it."
     );
@@ -2569,7 +3231,7 @@ NB_MODULE(_task_interface, m) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error acknowledgement requires a Worker owner token");
             }
-            worker_host_mapped_region_cleanup_errors().acknowledge(owner_token, observed);
+            region_cleanup_errors().acknowledge(owner_token, observed);
         },
         nb::arg("owner_token"), nb::arg("observed"),
         "Acknowledge the mapped-region cleanup error already published by one Worker."
@@ -2580,14 +3242,14 @@ NB_MODULE(_task_interface, m) {
             if (owner_token.empty()) {
                 throw std::invalid_argument("L3-L2 cleanup-error injection requires a non-empty Worker owner token");
             }
-            worker_host_mapped_region_cleanup_errors().record(owner_token, message);
+            region_cleanup_errors().record(owner_token, message);
         },
         nb::arg("owner_token"), nb::arg("message"), "Inject one Worker-owned mapped-region cleanup error."
     );
     m.def(
         "_worker_host_mapped_region_fail_next_registry_insert_for_test",
         []() {
-            worker_host_mapped_region_registry().fail_next_insert_for_test();
+            region_registry().fail_next_insert_for_test();
         },
         "Inject one mapped-region registry insertion failure after native acquisition."
     );
@@ -2597,7 +3259,7 @@ NB_MODULE(_task_interface, m) {
             if (host_ptr == 0) {
                 throw std::invalid_argument("L3-L2 payload_write host_ptr must be nonzero");
             }
-            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
+            RegionLease mapping = region_registry().lease(handle);
             mapping->copy_to(payload_offset, reinterpret_cast<const void *>(static_cast<uintptr_t>(host_ptr)), nbytes);
         },
         nb::arg("handle"), nb::arg("payload_offset"), nb::arg("host_ptr"), nb::arg("nbytes"),
@@ -2609,7 +3271,7 @@ NB_MODULE(_task_interface, m) {
             if (host_ptr == 0) {
                 throw std::invalid_argument("L3-L2 payload_read host_ptr must be nonzero");
             }
-            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
+            RegionLease mapping = region_registry().lease(handle);
             mapping->copy_from(reinterpret_cast<void *>(static_cast<uintptr_t>(host_ptr)), payload_offset, nbytes);
         },
         nb::arg("handle"), nb::arg("payload_offset"), nb::arg("host_ptr"), nb::arg("nbytes"),
@@ -2618,8 +3280,8 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_worker_host_mapped_counter_notify",
         [](uint64_t handle, uint64_t counter_offset, int32_t value, int op) {
-            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
-            mapping->notify_counter(counter_offset, value, checked_notify_op(op));
+            RegionLease mapping = region_registry().lease(handle);
+            mapping->notify_counter(counter_offset, value, checked_region_notify_op(op));
         },
         nb::arg("handle"), nb::arg("counter_offset"), nb::arg("value"), nb::arg("op"),
         nb::call_guard<nb::gil_scoped_release>(), "Store or add one L3 Host-side L3-L2 signal counter."
@@ -2627,8 +3289,8 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_worker_host_mapped_counter_test",
         [](uint64_t handle, uint64_t counter_offset, int32_t operand, int cmp) -> std::tuple<bool, int32_t> {
-            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
-            return mapping->test_counter(counter_offset, operand, checked_wait_cmp(cmp));
+            RegionLease mapping = region_registry().lease(handle);
+            return mapping->test_counter(counter_offset, operand, checked_region_wait_cmp(cmp));
         },
         nb::arg("handle"), nb::arg("counter_offset"), nb::arg("operand"), nb::arg("cmp"),
         nb::call_guard<nb::gil_scoped_release>(), "Load and compare one L3 Host-side L3-L2 signal counter."
@@ -2637,8 +3299,8 @@ NB_MODULE(_task_interface, m) {
         "_worker_host_mapped_counter_wait",
         [](uint64_t handle, uint64_t counter_offset, int32_t operand, int cmp,
            uint64_t timeout_ns) -> std::tuple<int, int, int32_t, bool, std::string> {
-            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
-            return mapping->wait_counter(counter_offset, operand, checked_wait_cmp(cmp), timeout_ns);
+            RegionLease mapping = region_registry().lease(handle);
+            return mapping->wait_counter(counter_offset, operand, checked_region_wait_cmp(cmp), timeout_ns);
         },
         nb::arg("handle"), nb::arg("counter_offset"), nb::arg("operand"), nb::arg("cmp"), nb::arg("timeout_ns"),
         nb::call_guard<nb::gil_scoped_release>(), "Poll one L3 Host-side L3-L2 signal counter until match or timeout."

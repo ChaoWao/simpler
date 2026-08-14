@@ -19,6 +19,7 @@ from typing import Any, Optional, cast
 
 import pytest
 from simpler import worker as worker_module
+from simpler import comm_region
 from simpler import worker_chip_orch_comm
 from simpler.buffer import mint_owner_instance_id, wrap_fork_inherited
 from simpler.task_interface import DataType
@@ -210,23 +211,23 @@ def test_sim_direct_region_uses_lifecycle_control_and_worker_host_metadata(monke
             lambda token, mapping_bytes, owner_token: calls.append(("import", token, mapping_bytes, owner_token)) or 99,
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
-            "_worker_host_mapped_payload_write",
+            comm_region,
+            "_host_vmm_copy_to",
             lambda handle, offset, src, nbytes: calls.append(("write", handle, offset, src, nbytes)),
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
-            "_worker_host_mapped_payload_read",
+            comm_region,
+            "_host_vmm_copy_from",
             lambda handle, offset, dst, nbytes: calls.append(("read", handle, offset, dst, nbytes)),
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
-            "_worker_host_mapped_counter_notify",
+            comm_region,
+            "_region_counter_notify",
             lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
-            "_worker_host_mapped_counter_test",
+            comm_region,
+            "_region_counter_test",
             lambda handle, offset, value, cmp: (calls.append(("test", handle, offset, value, cmp)) or (True, 7)),
         )
 
@@ -269,8 +270,8 @@ def test_onboard_direct_region_imports_vmm_shareable_handle_and_uses_worker_host
             or 123,
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
-            "_worker_host_mapped_counter_notify",
+            comm_region,
+            "_region_counter_notify",
             lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
         )
 
@@ -1111,6 +1112,187 @@ def test_worker_host_mapped_counter_wait_releases_gil_for_python_notifier():
         shm.unlink()
 
 
+def test_region_neutral_counter_wait_releases_gil_for_python_notifier():
+    shm = SharedMemory(create=True, size=64)
+    handle = 0
+    try:
+        owner = _task_interface_ext._region_import_sim(shm.name, 64, "neutral-counter-wait-test")
+        handle = int(owner)
+
+        def notify() -> None:
+            time.sleep(0.05)
+            _task_interface_ext._region_counter_notify(handle, 0, 1, int(NotifyOp.Set))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(notify)
+            status, error_kind, observed, matched, message = _task_interface_ext._region_counter_wait(
+                handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000
+            )
+            future.result(timeout=1.0)
+
+        assert (status, error_kind, observed, matched, message) == (0, 0, 1, True, "")
+    finally:
+        if handle:
+            _task_interface_ext._region_close(handle)
+        shm.close()
+        shm.unlink()
+
+
+def test_region_neutral_sim_byte_copy_and_counter_helpers_roundtrip():
+    shm = SharedMemory(create=True, size=128)
+    handle = 0
+    try:
+        owner = _task_interface_ext._region_import_sim(shm.name, 128, "neutral-roundtrip-test")
+        handle = int(owner)
+        src_t = ctypes.c_uint8 * 8
+        src = src_t(*range(10, 18))
+        dst = src_t()
+
+        _task_interface_ext._host_vmm_copy_to(handle, 16, ctypes.addressof(src), 8)
+        _task_interface_ext._host_vmm_copy_from(handle, 16, ctypes.addressof(dst), 8)
+        assert bytes(dst) == bytes(range(10, 18))
+
+        _task_interface_ext._region_counter_notify(handle, 64, 3, int(NotifyOp.Set))
+        assert _task_interface_ext._region_counter_test(handle, 64, 3, int(WaitCmp.EQ)) == (True, 3)
+        _task_interface_ext._region_counter_notify(handle, 64, 4, int(NotifyOp.Add))
+        assert _task_interface_ext._region_counter_test(handle, 64, 7, int(WaitCmp.GE)) == (True, 7)
+        assert _task_interface_ext._region_counter_wait(handle, 64, 7, int(WaitCmp.EQ), 1_000_000) == (
+            0,
+            0,
+            7,
+            True,
+            "",
+        )
+
+        _task_interface_ext._region_close(handle)
+        with pytest.raises(RuntimeError, match="closed or unknown"):
+            _task_interface_ext._host_vmm_copy_from(handle, 16, ctypes.addressof(dst), 8)
+    finally:
+        if handle:
+            _task_interface_ext._region_close(handle)
+        shm.close()
+        shm.unlink()
+
+
+def test_region_neutral_counter_wait_timeout_reports_last_observed_value():
+    shm = SharedMemory(create=True, size=64)
+    handle = 0
+    try:
+        owner = _task_interface_ext._region_import_sim(shm.name, 64, "neutral-counter-timeout-test")
+        handle = int(owner)
+        _task_interface_ext._region_counter_notify(handle, 0, 0, int(NotifyOp.Set))
+        assert _task_interface_ext._region_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000) == (
+            -1,
+            7,
+            0,
+            False,
+            "SIGNAL_WAIT timed out",
+        )
+    finally:
+        if handle:
+            _task_interface_ext._region_close(handle)
+        shm.close()
+        shm.unlink()
+
+
+def test_region_neutral_import_registry_failure_releases_pre_registry_mapping():
+    if not os.path.exists("/proc/self/maps"):
+        pytest.skip("requires Linux procfs resource accounting")
+
+    shm = SharedMemory(create=True, size=64)
+    shm_token = shm.name.lstrip("/")
+    owner_token = "neutral-registry-failure-test"
+
+    def mapped_resource_counts() -> tuple[int, int]:
+        fd_count = 0
+        for fd_name in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd_name}")
+            except OSError:
+                continue
+            fd_count += shm_token in target
+        with open("/proc/self/maps", encoding="utf-8") as maps_file:
+            map_count = sum(shm_token in line for line in maps_file)
+        return fd_count, map_count
+
+    try:
+        baseline = mapped_resource_counts()
+        _task_interface_ext._region_take_cleanup_error(owner_token)
+        _task_interface_ext._region_fail_next_registry_insert_for_test()
+
+        with pytest.raises(RuntimeError, match="injected mapped-region registry insertion failure"):
+            _task_interface_ext._region_import_sim(shm.name, 64, owner_token)
+
+        gc.collect()
+        assert mapped_resource_counts() == baseline
+        assert _task_interface_ext._region_take_cleanup_error(owner_token) == ""
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def test_region_neutral_concurrent_closes_wait_for_in_flight_counter_wait():
+    shm = SharedMemory(create=True, size=64)
+    handle = 0
+    try:
+        owner = _task_interface_ext._region_import_sim(shm.name, 64, "neutral-concurrent-close-test")
+        handle = int(owner)
+        close_entered = [threading.Event(), threading.Event()]
+        close_done = [threading.Event(), threading.Event()]
+
+        def wait_for_counter():
+            return _task_interface_ext._region_counter_wait(handle, 0, 1, int(WaitCmp.EQ), 1_000_000_000)
+
+        def close_mapping(index: int) -> None:
+            close_entered[index].set()
+            _task_interface_ext._region_close(handle)
+            close_done[index].set()
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            wait_future = executor.submit(wait_for_counter)
+            deadline = time.monotonic() + 1.0
+            while _task_interface_ext._region_active_leases(handle) != 1:
+                assert time.monotonic() < deadline, "counter wait never acquired its mapped-region lease"
+                time.sleep(0.001)
+
+            close_futures = [executor.submit(close_mapping, index) for index in range(2)]
+            assert all(event.wait(1.0) for event in close_entered)
+            assert not any(event.wait(0.05) for event in close_done), (
+                "a concurrent close returned while a native operation still held the region"
+            )
+
+            cast(memoryview, shm.buf)[:4] = b"\x01\x00\x00\x00"
+            assert wait_future.result(timeout=1.0) == (0, 0, 1, True, "")
+            for close_future in close_futures:
+                close_future.result(timeout=1.0)
+
+        with pytest.raises(RuntimeError, match="closed or unknown"):
+            _task_interface_ext._region_counter_test(handle, 0, 1, int(WaitCmp.EQ))
+    finally:
+        if handle:
+            _task_interface_ext._region_close(handle)
+        shm.close()
+        shm.unlink()
+
+
+def test_region_neutral_cleanup_diagnostics_are_owner_scoped():
+    owner_token = "neutral-cleanup-owner"
+    peer_token = "neutral-cleanup-peer"
+    _task_interface_ext._region_take_cleanup_error(owner_token)
+    _task_interface_ext._region_take_cleanup_error(peer_token)
+
+    _task_interface_ext._region_record_cleanup_error_for_test(owner_token, "cleanup failed")
+
+    assert _task_interface_ext._region_peek_cleanup_error(peer_token) == ""
+    observed = _task_interface_ext._region_peek_cleanup_error(owner_token)
+    assert observed == "cleanup failed"
+    _task_interface_ext._region_record_cleanup_error_for_test(owner_token, "later cleanup failed")
+    _task_interface_ext._region_ack_cleanup_error(owner_token, observed)
+    assert _task_interface_ext._region_peek_cleanup_error(owner_token) == "later cleanup failed"
+    _task_interface_ext._region_ack_cleanup_error(owner_token, "later cleanup failed")
+    assert _task_interface_ext._region_take_cleanup_error(owner_token) == ""
+
+
 def test_worker_host_mapped_sim_payload_and_counter_helpers_roundtrip():
     shm = SharedMemory(create=True, size=128)
     handle = 0
@@ -1269,8 +1451,8 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
             worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55
         )
         monkeypatch.setattr(
-            worker_chip_orch_comm,
-            "_worker_host_mapped_payload_write",
+            comm_region,
+            "_host_vmm_copy_to",
             lambda _handle, _offset, _src, _nbytes: (_ for _ in ()).throw(RuntimeError("copy failed")),
         )
 
