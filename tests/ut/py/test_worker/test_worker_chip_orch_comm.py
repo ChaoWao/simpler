@@ -11,17 +11,16 @@ import ctypes
 import gc
 import importlib
 import os
-from pathlib import Path
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 from typing import Any, Optional, cast
 
 import pytest
+from simpler import comm_region, worker_chip_orch_comm
 from simpler import worker as worker_module
-from simpler import comm_region
-from simpler import worker_chip_orch_comm
 from simpler.buffer import mint_owner_instance_id, wrap_fork_inherited
 from simpler.task_interface import DataType
 from simpler.worker import (
@@ -1508,6 +1507,29 @@ def test_sim_direct_transfer_failure_poisons_only_region(monkeypatch):
         payload = wrap_fork_inherited(0x1234_0000, 16, mint_owner_instance_id(), 1, "L3")
         with pytest.raises(RuntimeError, match="copy failed"):
             region.payload_write(0, payload, nbytes=8)
+        with pytest.raises(RuntimeError, match="poisoned"):
+            region.descriptor_scalars()
+    finally:
+        worker._close_worker_chip_orch_comm()
+        shm.close()
+        shm.unlink()
+
+
+def test_sim_direct_counter_failure_poisons_only_region(monkeypatch):
+    worker, shm, _fake_c_worker = _make_started_sim_worker()
+    try:
+        monkeypatch.setattr(
+            worker_module, "_worker_host_mapped_region_import_sim", lambda _token, _size, _owner_token: 55
+        )
+        monkeypatch.setattr(
+            comm_region,
+            "_region_counter_notify",
+            lambda _handle, _offset, _value, _op: (_ for _ in ()).throw(RuntimeError("counter failed")),
+        )
+
+        region = worker._create_worker_chip_region(0, 64, 128)
+        with pytest.raises(RuntimeError, match="counter failed"):
+            region.counter(0).notify(1, NotifyOp.Set)
         with pytest.raises(RuntimeError, match="poisoned"):
             region.descriptor_scalars()
     finally:

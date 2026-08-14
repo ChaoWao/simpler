@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-import itertools
 import ctypes
+import itertools
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Any
@@ -177,7 +177,10 @@ class CounterPart:
     def __init__(self, span: RegionPartSpan, access: Any, handle: Any | None = None) -> None:
         self._span = span
         self._access = access
-        self._handle = int(getattr(access, "handle", handle))
+        resolved_handle = getattr(access, "handle", handle)
+        if resolved_handle is None:
+            raise ValueError("region counter access requires a native mapped-region handle")
+        self._handle = int(resolved_handle)
 
     @property
     def span(self) -> RegionPartSpan:
@@ -464,8 +467,8 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint") from exc
     if len(provider_path.segments) != 2:
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    root, child = provider_path.segments
-    if root.level != 3 or root.index is not None or child.level != 2 or child.index is None:
+    _root, child = provider_path.segments
+    if child.level != 2 or child.index is None:
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
     worker_id = int(child.index)
     try:

@@ -19,6 +19,7 @@ from simpler.comm_region import (
     MaterializationContext,
     MaterializationError,
     MaterializationRefusal,
+    NotifyOp,
     PayloadPart,
     RefusalReason,
     RegionCounter,
@@ -26,11 +27,11 @@ from simpler.comm_region import (
     RegionInstanceState,
     RegionPartSpan,
     SignalTestResult,
+    WaitCmp,
     validate_single_owner_region_shape,
 )
 from simpler.orchestrator import _callback_frame_for, _callback_run
 from simpler.worker import Worker, _Lifecycle, _RunResources
-from simpler.comm_region import NotifyOp, WaitCmp
 
 
 def _ready(worker: Worker) -> Worker:

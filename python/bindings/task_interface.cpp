@@ -69,16 +69,6 @@ namespace nb = nanobind;
 
 namespace {
 
-std::string shm_name_for_open(const std::string &token) {
-    if (token.empty()) {
-        throw std::invalid_argument("L3-L2 sim backing shm token must be non-empty");
-    }
-    if (token[0] == '/') {
-        return token;
-    }
-    return "/" + token;
-}
-
 struct LocalAclMemLocation {
     uint32_t id{0};
     int type{0};
@@ -827,6 +817,67 @@ private:
     std::string owner_token_;
 };
 
+RegionHandle import_sim_region(
+    const std::string &token, uint64_t mapping_bytes, const std::string &owner_token, const char *size_error,
+    const char *owner_error, const char *open_error, const char *mmap_error
+) {
+    if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        throw std::invalid_argument(size_error);
+    }
+    if (owner_token.empty()) {
+        throw std::invalid_argument(owner_error);
+    }
+    std::string handle_owner_token = owner_token;
+    std::string name = region_shm_name_for_open(token);
+    auto mapping = std::make_unique<RegionMapping>();
+    mapping->owner_token = owner_token;
+    mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
+    if (mapping->fd < 0) {
+        throw std::runtime_error(open_error);
+    }
+    void *base = mmap(nullptr, static_cast<size_t>(mapping_bytes), PROT_READ | PROT_WRITE, MAP_SHARED, mapping->fd, 0);
+    if (base == MAP_FAILED) {
+        int err = errno;
+        throw std::runtime_error(std::string(mmap_error) + std::strerror(err));
+    }
+    mapping->profile = RegionMappingProfile::SimPosixShm;
+    mapping->device_addr = reinterpret_cast<uint64_t>(base);
+    mapping->mapping_bytes = mapping_bytes;
+    uint64_t handle = region_registry().emplace(std::move(mapping));
+    return RegionHandle(handle, std::move(handle_owner_token));
+}
+
+RegionHandle import_onboard_region(
+    int device_id, uint64_t shareable_handle, uint64_t mapping_bytes, const std::string &owner_token,
+    const char *device_error, const char *size_error, const char *owner_error
+) {
+    if (device_id < 0) {
+        throw std::invalid_argument(device_error);
+    }
+    if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        throw std::invalid_argument(size_error);
+    }
+    if (owner_token.empty()) {
+        throw std::invalid_argument(owner_error);
+    }
+    std::string handle_owner_token = owner_token;
+    auto mapping = std::make_unique<RegionMapping>();
+    mapping->owner_token = owner_token;
+    mapping->profile = RegionMappingProfile::OnboardVmm;
+    mapping->device_id = device_id;
+    mapping->mapping_bytes = mapping_bytes;
+    mapping->bind_acl_device();
+    AclRuntimeApi &api = acl_api();
+    mapping->shareable_handle = shareable_handle;
+    mapping->vmm_handle = api.vmm_import_shareable_with_check(shareable_handle, device_id);
+    void *mapped_addr = api.vmm_reserve_with_check(mapping_bytes);
+    mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
+    api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
+    api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
+    uint64_t handle = region_registry().emplace(std::move(mapping));
+    return RegionHandle(handle, std::move(handle_owner_token));
+}
+
 class ChipChildOnboardRegionRegistry {
 public:
     uint64_t emplace(ChipChildOnboardRegion region) {
@@ -871,22 +922,6 @@ uint64_t align_vmm_bytes(uint64_t bytes, uint64_t granularity) {
         throw std::overflow_error("L3-L2 onboard VMM mapping size overflowed");
     }
     return bytes + bump;
-}
-
-WorkerChipOrchNotifyOp checked_notify_op(int op) {
-    auto typed = static_cast<WorkerChipOrchNotifyOp>(op);
-    if (!worker_chip_orch_comm::valid_notify_op(typed)) {
-        throw std::invalid_argument("L3-L2 counter notify op is invalid");
-    }
-    return typed;
-}
-
-WorkerChipOrchWaitCmp checked_wait_cmp(int cmp) {
-    auto typed = static_cast<WorkerChipOrchWaitCmp>(cmp);
-    if (!worker_chip_orch_comm::valid_wait_cmp(typed)) {
-        throw std::invalid_argument("L3-L2 counter wait comparison is invalid");
-    }
-    return typed;
 }
 
 void append_cleanup_error(std::string &cleanup_error, const std::string &message) {
@@ -2469,31 +2504,11 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_region_import_sim",
         [](const std::string &token, uint64_t mapping_bytes, const std::string &owner_token) -> RegionHandle {
-            if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-                throw std::invalid_argument("mapped-region sim import requires a positive mapping size");
-            }
-            if (owner_token.empty()) {
-                throw std::invalid_argument("mapped-region import requires a non-empty owner token");
-            }
-            std::string handle_owner_token = owner_token;
-            std::string name = region_shm_name_for_open(token);
-            auto mapping = std::make_unique<RegionMapping>();
-            mapping->owner_token = owner_token;
-            mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
-            if (mapping->fd < 0) {
-                throw std::runtime_error("mapped-region sim import shm_open failed");
-            }
-            void *base =
-                mmap(nullptr, static_cast<size_t>(mapping_bytes), PROT_READ | PROT_WRITE, MAP_SHARED, mapping->fd, 0);
-            if (base == MAP_FAILED) {
-                int err = errno;
-                throw std::runtime_error(std::string("mapped-region sim import mmap failed: ") + std::strerror(err));
-            }
-            mapping->profile = RegionMappingProfile::SimPosixShm;
-            mapping->device_addr = reinterpret_cast<uint64_t>(base);
-            mapping->mapping_bytes = mapping_bytes;
-            uint64_t handle = region_registry().emplace(std::move(mapping));
-            return RegionHandle(handle, std::move(handle_owner_token));
+            return import_sim_region(
+                token, mapping_bytes, owner_token, "mapped-region sim import requires a positive mapping size",
+                "mapped-region import requires a non-empty owner token", "mapped-region sim import shm_open failed",
+                "mapped-region sim import mmap failed: "
+            );
         },
         nb::arg("token"), nb::arg("mapping_bytes"), nb::arg("owner_token"), nb::call_guard<nb::gil_scoped_release>(),
         "Import a sim POSIX shm mapped region."
@@ -2502,31 +2517,12 @@ NB_MODULE(_task_interface, m) {
         "_region_import_onboard",
         [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes,
            const std::string &owner_token) -> RegionHandle {
-            if (device_id < 0) {
-                throw std::invalid_argument("onboard mapped-region import requires a non-negative device id");
-            }
-            if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-                throw std::invalid_argument("onboard mapped-region import requires a positive mapping size");
-            }
-            if (owner_token.empty()) {
-                throw std::invalid_argument("mapped-region import requires a non-empty owner token");
-            }
-            std::string handle_owner_token = owner_token;
-            auto mapping = std::make_unique<RegionMapping>();
-            mapping->owner_token = owner_token;
-            mapping->profile = RegionMappingProfile::OnboardVmm;
-            mapping->device_id = device_id;
-            mapping->mapping_bytes = mapping_bytes;
-            mapping->bind_acl_device();
-            AclRuntimeApi &api = acl_api();
-            mapping->shareable_handle = shareable_handle;
-            mapping->vmm_handle = api.vmm_import_shareable_with_check(shareable_handle, device_id);
-            void *mapped_addr = api.vmm_reserve_with_check(mapping_bytes);
-            mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
-            api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
-            api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
-            uint64_t handle = region_registry().emplace(std::move(mapping));
-            return RegionHandle(handle, std::move(handle_owner_token));
+            return import_onboard_region(
+                device_id, shareable_handle, mapping_bytes, owner_token,
+                "onboard mapped-region import requires a non-negative device id",
+                "onboard mapped-region import requires a positive mapping size",
+                "mapped-region import requires a non-empty owner token"
+            );
         },
         nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"), nb::arg("owner_token"),
         nb::call_guard<nb::gil_scoped_release>(), "Import an onboard VMM mapped region."
@@ -2662,33 +2658,13 @@ NB_MODULE(_task_interface, m) {
     m.def(
         "_worker_host_mapped_region_import_sim",
         [](const std::string &token, uint64_t mapping_bytes, const std::string &owner_token) -> RegionHandle {
-            if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-                throw std::invalid_argument("L3-L2 sim L3 Host mapped-region import requires a positive mapping size");
-            }
-            if (owner_token.empty()) {
-                throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
-            }
-            std::string handle_owner_token = owner_token;
-            std::string name = region_shm_name_for_open(token);
-            auto mapping = std::make_unique<RegionMapping>();
-            mapping->owner_token = owner_token;
-            mapping->fd = shm_open(name.c_str(), O_RDWR, 0);
-            if (mapping->fd < 0) {
-                throw std::runtime_error("L3-L2 sim L3 Host mapped-region import shm_open failed");
-            }
-            void *base =
-                mmap(nullptr, static_cast<size_t>(mapping_bytes), PROT_READ | PROT_WRITE, MAP_SHARED, mapping->fd, 0);
-            if (base == MAP_FAILED) {
-                int err = errno;
-                throw std::runtime_error(
-                    std::string("L3-L2 sim L3 Host mapped-region import mmap failed: ") + std::strerror(err)
-                );
-            }
-            mapping->profile = RegionMappingProfile::SimPosixShm;
-            mapping->device_addr = reinterpret_cast<uint64_t>(base);
-            mapping->mapping_bytes = mapping_bytes;
-            uint64_t handle = region_registry().emplace(std::move(mapping));
-            return RegionHandle(handle, std::move(handle_owner_token));
+            return import_sim_region(
+                token, mapping_bytes, owner_token,
+                "L3-L2 sim L3 Host mapped-region import requires a positive mapping size",
+                "L3-L2 mapped-region import requires a non-empty Worker owner token",
+                "L3-L2 sim L3 Host mapped-region import shm_open failed",
+                "L3-L2 sim L3 Host mapped-region import mmap failed: "
+            );
         },
         nb::arg("token"), nb::arg("mapping_bytes"), nb::arg("owner_token"), nb::call_guard<nb::gil_scoped_release>(),
         "Import a sim L3-L2 POSIX shm region for L3 Host mapped-region access."
@@ -2697,31 +2673,12 @@ NB_MODULE(_task_interface, m) {
         "_worker_host_mapped_region_import_onboard",
         [](int device_id, uint64_t shareable_handle, uint64_t mapping_bytes,
            const std::string &owner_token) -> RegionHandle {
-            if (device_id < 0) {
-                throw std::invalid_argument("L3-L2 onboard mapped-region import requires a non-negative device id");
-            }
-            if (mapping_bytes == 0 || mapping_bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-                throw std::invalid_argument("L3-L2 onboard mapped-region import requires a positive mapping size");
-            }
-            if (owner_token.empty()) {
-                throw std::invalid_argument("L3-L2 mapped-region import requires a non-empty Worker owner token");
-            }
-            std::string handle_owner_token = owner_token;
-            auto mapping = std::make_unique<RegionMapping>();
-            mapping->owner_token = owner_token;
-            mapping->profile = RegionMappingProfile::OnboardVmm;
-            mapping->device_id = device_id;
-            mapping->mapping_bytes = mapping_bytes;
-            mapping->bind_acl_device();
-            AclRuntimeApi &api = acl_api();
-            mapping->shareable_handle = shareable_handle;
-            mapping->vmm_handle = api.vmm_import_shareable_with_check(shareable_handle, device_id);
-            void *mapped_addr = api.vmm_reserve_with_check(mapping_bytes);
-            mapping->device_addr = reinterpret_cast<uint64_t>(mapped_addr);
-            api.vmm_map_with_check(mapped_addr, mapping_bytes, mapping->vmm_handle);
-            api.vmm_set_access_with_check(mapped_addr, mapping_bytes, device_id);
-            uint64_t handle = region_registry().emplace(std::move(mapping));
-            return RegionHandle(handle, std::move(handle_owner_token));
+            return import_onboard_region(
+                device_id, shareable_handle, mapping_bytes, owner_token,
+                "L3-L2 onboard mapped-region import requires a non-negative device id",
+                "L3-L2 onboard mapped-region import requires a positive mapping size",
+                "L3-L2 mapped-region import requires a non-empty Worker owner token"
+            );
         },
         nb::arg("device_id"), nb::arg("shareable_handle"), nb::arg("mapping_bytes"), nb::arg("owner_token"),
         nb::call_guard<nb::gil_scoped_release>(), "Import an onboard VMM L3-L2 region for L3 Host mapped-region access."

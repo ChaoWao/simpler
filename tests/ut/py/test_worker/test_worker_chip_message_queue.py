@@ -16,9 +16,8 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import Optional
 
 import pytest
-from simpler import comm_region
+from simpler import comm_region, worker_chip_orch_comm
 from simpler import worker as worker_module
-from simpler import worker_chip_orch_comm
 from simpler.buffer import AccessMode, BackendKind, CanonicalIdentity, mint_owner_instance_id, wrap_fork_inherited
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType, get_element_size

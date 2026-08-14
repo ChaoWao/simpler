@@ -16,11 +16,11 @@ from enum import IntEnum
 from typing import Any
 
 from _task_interface import (  # pyright: ignore[reportMissingImports]
-    _worker_host_mapped_counter_notify,
-    _worker_host_mapped_counter_test,
-    _worker_host_mapped_counter_wait,
-    _worker_host_mapped_payload_read,
-    _worker_host_mapped_payload_write,
+    _worker_host_mapped_counter_notify,  # noqa: F401
+    _worker_host_mapped_counter_test,  # noqa: F401
+    _worker_host_mapped_counter_wait,  # noqa: F401
+    _worker_host_mapped_payload_read,  # noqa: F401
+    _worker_host_mapped_payload_write,  # noqa: F401
     _worker_host_mapped_region_close,
 )
 
@@ -50,6 +50,7 @@ _REGION_CREATE_REQUEST_BYTES = _REGION_CREATE_REQUEST.size
 _REGION_CREATE_REPLY_BYTES = _REGION_CREATE_REPLY.size
 _REGION_LAYOUT_ALIGNMENT = 64
 _UINT64_MAX = (1 << 64) - 1
+_MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
 _REGION_MAGIC_VERSION = 0x4C334C3200020000
 
 
@@ -218,15 +219,18 @@ class WorkerChipOrchCounter:
 
     def notify(self, value: int, op: NotifyOp = NotifyOp.Set) -> None:
         self._region._ensure_live()
-        self._region._counter_part.notify(self._offset, int(value), NotifyOp(op))
+        self._region._direct_counter_notify(self._offset, int(value), NotifyOp(op))
 
     def test(self, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
         self._region._ensure_live()
-        return self._region._counter_part.test(self._offset, int(cmp_value), WaitCmp(cmp))
+        return self._region._direct_counter_test(self._offset, int(cmp_value), WaitCmp(cmp))
 
     def wait(self, cmp_value: int, cmp: WaitCmp, timeout: float) -> int:
         self._region._ensure_live()
-        return self._region._counter_part.wait(self._offset, int(cmp_value), WaitCmp(cmp), timeout)
+        if timeout is None or float(timeout) <= 0:
+            raise ValueError("region counter wait requires a positive timeout")
+        timeout_ns = min(int(float(timeout) * 1_000_000_000), _MAX_SIGNED_CHRONO_TIMEOUT_NS)
+        return self._region._direct_counter_wait(self._offset, int(cmp_value), WaitCmp(cmp), timeout_ns)
 
 
 class WorkerChipOrchRegion:
@@ -243,11 +247,15 @@ class WorkerChipOrchRegion:
         self._worker_host_mapping = worker_host_mapping
         access = HostVmmCopyAccess.from_mapping(worker_host_mapping)
         self._payload_part = PayloadPart(
-            RegionPartSpan(offset=int(worker_host_mapping.payload_offset), nbytes=int(worker_host_mapping.payload_bytes)),
+            RegionPartSpan(
+                offset=int(worker_host_mapping.payload_offset), nbytes=int(worker_host_mapping.payload_bytes)
+            ),
             access,
         )
         self._counter_part = CounterPart(
-            RegionPartSpan(offset=int(worker_host_mapping.counter_offset), nbytes=int(worker_host_mapping.counter_bytes)),
+            RegionPartSpan(
+                offset=int(worker_host_mapping.counter_offset), nbytes=int(worker_host_mapping.counter_bytes)
+            ),
             access,
         )
         self._released = False
@@ -322,11 +330,25 @@ class WorkerChipOrchRegion:
             raise
 
     def _direct_counter_notify(self, offset: int, value: int, op: NotifyOp) -> None:
-        self._counter_part.notify(offset, int(value), NotifyOp(op))
+        try:
+            self._counter_part.notify(offset, int(value), NotifyOp(op))
+        except Exception:
+            self._poison()
+            raise
 
     def _direct_counter_test(self, offset: int, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
-        return self._counter_part.test(offset, int(cmp_value), WaitCmp(cmp))
+        try:
+            return self._counter_part.test(offset, int(cmp_value), WaitCmp(cmp))
+        except Exception:
+            self._poison()
+            raise
 
     def _direct_counter_wait(self, offset: int, cmp_value: int, cmp: WaitCmp, timeout_ns: int) -> int:
         timeout = float(timeout_ns) / 1_000_000_000
-        return self._counter_part.wait(offset, int(cmp_value), WaitCmp(cmp), timeout)
+        try:
+            return self._counter_part.wait(offset, int(cmp_value), WaitCmp(cmp), timeout)
+        except TimeoutError:
+            raise
+        except Exception:
+            self._poison()
+            raise
