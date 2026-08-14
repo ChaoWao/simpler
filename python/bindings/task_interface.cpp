@@ -3083,6 +3083,20 @@ NB_MODULE(_task_interface, m) {
         nb::call_guard<nb::gil_scoped_release>(), "Copy host bytes into an imported mapped-region byte range."
     );
     m.def(
+        "_host_vmm_copy_to_with_delay_for_test",
+        [](uint64_t handle, uint64_t mapping_offset, uint64_t host_ptr, uint64_t nbytes, uint64_t delay_ms) {
+            if (host_ptr == 0) {
+                throw std::invalid_argument("host_vmm_copy_to host_ptr must be nonzero");
+            }
+            RegionLease mapping = region_registry().lease(handle);
+            mapping->copy_to(mapping_offset, reinterpret_cast<const void *>(static_cast<uintptr_t>(host_ptr)), nbytes);
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        },
+        nb::arg("handle"), nb::arg("mapping_offset"), nb::arg("host_ptr"), nb::arg("nbytes"), nb::arg("delay_ms"),
+        nb::call_guard<nb::gil_scoped_release>(),
+        "Copy host bytes into an imported mapped-region byte range while holding the native lease for tests."
+    );
+    m.def(
         "_host_vmm_copy_from",
         [](uint64_t handle, uint64_t mapping_offset, uint64_t host_ptr, uint64_t nbytes) {
             if (host_ptr == 0) {

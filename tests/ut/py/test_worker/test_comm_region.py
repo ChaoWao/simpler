@@ -22,6 +22,7 @@ from simpler.comm_region import (
     PayloadPart,
     RefusalReason,
     RegionCounter,
+    RegionInstance,
     RegionInstanceState,
     RegionPartSpan,
     SignalTestResult,
@@ -568,6 +569,28 @@ def test_region_instance_constructs_separate_w4_part_slots_and_routes_access(reg
         ("payload_read", RegionPartSpan(offset=0, nbytes=64), 12, "dst", None),
         ("counter", RegionPartSpan(offset=64, nbytes=128), 16),
     ]
+
+
+def test_region_instance_rejects_access_construction_from_non_host_vmm_copy_attachment():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    consumer = shape.consumer.identity
+    payload_by_member = _attachments(ctx.plan.payload)
+    payload_by_member[consumer] = dataclasses.replace(
+        payload_by_member[consumer],
+        adapter_kind=ce.AdapterKind.DIRECT_MAP,
+        adapter_profile=ce.AdapterProfile.HOST_SHM_MAP,
+    )
+    bad_payload = dataclasses.replace(ctx.plan.payload, attachments=tuple(payload_by_member.values()))
+    bad_ctx = dataclasses.replace(ctx, plan=dataclasses.replace(ctx.plan, payload=bad_payload))
+    fake_region = _FakeRegion([])
+    fake_region._worker_host_mapping = _FakeMapping()
+
+    instance = RegionInstance.planned(bad_ctx, shape)
+    with pytest.raises(MaterializationRefusal) as excinfo:
+        instance._adopt_worker_chip_region(fake_region)
+
+    assert excinfo.value.reason is RefusalReason.UNSUPPORTED_ATTACHMENT
 
 
 def test_live_region_instance_rollback_reuses_single_region_cleanup(region_worker):

@@ -333,12 +333,16 @@ class RegionInstance:
         mapping = getattr(region, "_worker_host_mapping", None)
         if mapping is None:
             return
-        access = HostVmmCopyAccess.from_mapping(mapping)
+        plan = self.plan
+        if not isinstance(plan, BackendPlan):
+            raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
+        payload_access = _select_host_vmm_copy_access(plan.payload, self.provider, self.consumer, mapping)
+        counter_access = _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, mapping)
         self._payload_part = PayloadPart(
-            RegionPartSpan(offset=int(mapping.payload_offset), nbytes=int(mapping.payload_bytes)), access
+            RegionPartSpan(offset=int(mapping.payload_offset), nbytes=int(mapping.payload_bytes)), payload_access
         )
         self._counter_part = CounterPart(
-            RegionPartSpan(offset=int(mapping.counter_offset), nbytes=int(mapping.counter_bytes)), access
+            RegionPartSpan(offset=int(mapping.counter_offset), nbytes=int(mapping.counter_bytes)), counter_access
         )
 
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
@@ -522,6 +526,16 @@ def _record_for(ctx: MaterializationContext, endpoint: Any) -> EndpointRecord:
         return ctx.registry.record_for(endpoint)
     except ValueError as exc:
         raise MaterializationRefusal(RefusalReason.REGISTRY_MISMATCH, str(exc)) from exc
+
+
+def _select_host_vmm_copy_access(
+    part: RegionPartPlan,
+    provider: EndpointRecord,
+    consumer: EndpointRecord,
+    mapping: Any,
+) -> HostVmmCopyAccess:
+    _validate_part(part, provider, consumer)
+    return HostVmmCopyAccess.from_mapping(mapping)
 
 
 def _validate_registry_matches_worker(ctx: MaterializationContext) -> None:

@@ -1174,6 +1174,38 @@ def test_region_neutral_sim_byte_copy_and_counter_helpers_roundtrip():
         shm.unlink()
 
 
+def test_region_neutral_byte_copy_holds_active_lease_until_native_copy_returns():
+    shm = SharedMemory(create=True, size=128)
+    handle = 0
+    try:
+        owner = _task_interface_ext._region_import_sim(shm.name, 128, "neutral-byte-copy-lease-test")
+        handle = int(owner)
+        src_t = ctypes.c_uint8 * 8
+        src = src_t(*range(1, 9))
+        delayed_copy = _task_interface_ext._host_vmm_copy_to_with_delay_for_test
+
+        def delayed_copy_to() -> None:
+            delayed_copy(handle, 16, ctypes.addressof(src), 8, 200)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(delayed_copy_to)
+            deadline = time.monotonic() + 1.0
+            while _task_interface_ext._region_active_leases(handle) != 1:
+                assert time.monotonic() < deadline, "byte copy never acquired its mapped-region lease"
+                time.sleep(0.001)
+
+            assert _task_interface_ext._region_active_leases(handle) == 1
+            future.result(timeout=1.0)
+
+        assert _task_interface_ext._region_active_leases(handle) == 0
+        assert bytes(cast(memoryview, shm.buf)[16:24]) == bytes(range(1, 9))
+    finally:
+        if handle:
+            _task_interface_ext._region_close(handle)
+        shm.close()
+        shm.unlink()
+
+
 def test_region_neutral_counter_wait_timeout_reports_last_observed_value():
     shm = SharedMemory(create=True, size=64)
     handle = 0
