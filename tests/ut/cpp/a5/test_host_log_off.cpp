@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <sstream>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -28,6 +29,7 @@
 #include <gtest/gtest.h>
 
 #include "common/host_span.h"
+#include "common/strace.h"
 #include "host_log.h"
 
 using simpler::log::LogLevel;
@@ -169,27 +171,92 @@ TEST(HostLogTest, CannConfigurationUsesGlobalModuleAndRespectsExternalOverride) 
     }
 }
 
-TEST(HostLogTest, EmitPrefixHasTimestampAndTid) {
+TEST(HostLogTest, EmitPrefixHasMonotonicNanosecondsAndTid) {
     auto captured = run_with_config(LogLevel::INFO, [] {
         HostLogger::get_instance().log(LogLevel::ERROR, "fn", "marker");
     });
-    // Expected shape: "[YYYY-MM-DD HH:MM:SS.uuuuuu][T0x...][ERROR] fn: marker\n"
-    ASSERT_FALSE(captured.err.empty());
-    EXPECT_EQ(captured.err[0], '[');
-    // Year must be 4 ASCII digits.
-    for (int i = 1; i <= 4; ++i) {
-        EXPECT_GE(captured.err[i], '0');
-        EXPECT_LE(captured.err[i], '9');
-    }
-    EXPECT_EQ(captured.err[5], '-');
+    const size_t line_start = captured.err.rfind('\n', captured.err.find("marker"));
+    const size_t prefix_start = line_start == std::string::npos ? 0 : line_start + 1;
+    ASSERT_EQ(captured.err.compare(prefix_start, 9, "[mono_ns="), 0);
+    const size_t prefix_end = captured.err.find(']', prefix_start);
+    ASSERT_NE(prefix_end, std::string::npos);
+    ASSERT_GT(prefix_end, prefix_start + 9);
+    EXPECT_TRUE(
+        std::all_of(
+            captured.err.begin() + static_cast<std::ptrdiff_t>(prefix_start + 9),
+            captured.err.begin() + static_cast<std::ptrdiff_t>(prefix_end), [](char c) {
+                return c >= '0' && c <= '9';
+            }
+        )
+    );
     // Thread-id segment "[T0x" must appear before the level tag.
-    auto tid_pos = captured.err.find("][T0x");
-    auto level_pos = captured.err.find("][ERROR]");
+    auto tid_pos = captured.err.find("][T0x", prefix_end);
+    auto level_pos = captured.err.find("][ERROR]", tid_pos);
     ASSERT_NE(tid_pos, std::string::npos);
     ASSERT_NE(level_pos, std::string::npos);
     EXPECT_LT(tid_pos, level_pos);
     // Body still present.
     EXPECT_NE(captured.err.find("marker"), std::string::npos);
+}
+
+TEST(HostLogTest, TimingStartupEmitsOneClockAnchorPerProcess) {
+    int log_pipe[2];
+    ASSERT_EQ(pipe(log_pipe), 0);
+
+    const pid_t child = fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        close(log_pipe[0]);
+        if (dup2(log_pipe[1], STDERR_FILENO) < 0) _exit(2);
+        close(log_pipe[1]);
+
+        HostLogger::get_instance().set_level(LogLevel::TIMING);
+        HostLogger::get_instance().log(LogLevel::TIMING, "child", "first-record");
+        HostLogger::get_instance().log(LogLevel::TIMING, "child", "second-record");
+        _exit(0);
+    }
+
+    close(log_pipe[1]);
+    std::string captured;
+    char buffer[1024];
+    ssize_t count = 0;
+    while ((count = read(log_pipe[0], buffer, sizeof(buffer))) > 0) {
+        captured.append(buffer, static_cast<size_t>(count));
+    }
+    close(log_pipe[0]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+
+    const size_t anchor_pos = captured.find("[CLOCK_ANCHOR]");
+    ASSERT_NE(anchor_pos, std::string::npos);
+    EXPECT_EQ(captured.find("[CLOCK_ANCHOR]", anchor_pos + 1), std::string::npos);
+    const size_t anchor_line_start = captured.rfind('\n', anchor_pos);
+    const size_t anchor_level =
+        captured.find("][TIMING]", anchor_line_start == std::string::npos ? 0 : anchor_line_start);
+    ASSERT_NE(anchor_level, std::string::npos);
+    EXPECT_LT(anchor_level, anchor_pos);
+    const size_t first_record_pos = captured.find("first-record");
+    const size_t second_record_pos = captured.find("second-record");
+    ASSERT_NE(first_record_pos, std::string::npos);
+    ASSERT_NE(second_record_pos, std::string::npos);
+    EXPECT_LT(anchor_pos, first_record_pos);
+
+    int anchor_pid = -1;
+    long long mono_ns = 0;
+    long long wall_ns = 0;
+    ASSERT_EQ(
+        sscanf(
+            captured.c_str() + anchor_pos, "[CLOCK_ANCHOR] v=1 pid=%d mono_ns=%lld wall_ns=%lld", &anchor_pid, &mono_ns,
+            &wall_ns
+        ),
+        3
+    );
+    EXPECT_EQ(anchor_pid, child);
+    EXPECT_GT(mono_ns, 0);
+    EXPECT_GT(wall_ns, 0);
 }
 
 TEST(HostLogTest, AllOutputGoesToStderr) {
@@ -231,10 +298,43 @@ TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
     EXPECT_EQ(captured.err.find("[STRACE]", marker + 1), std::string::npos);
     EXPECT_NE(captured.err.find("name=bad%20name%0A%5BSTRACE%5D%3Dx"), std::string::npos);
     EXPECT_NE(captured.err.find("run_id=7 role=worker%0A%5BSTRACE%5D injected=1"), std::string::npos);
-    EXPECT_EQ(std::count(captured.err.begin(), captured.err.end(), '\n'), 1);
-    EXPECT_LE(captured.err.size(), static_cast<size_t>(_POSIX_PIPE_BUF));
-    ASSERT_GE(captured.err.size(), 2u);
-    EXPECT_EQ(captured.err[captured.err.size() - 2], '~');
+    const std::string record = captured.err.substr(marker);
+    EXPECT_EQ(std::count(record.begin(), record.end(), '\n'), 1);
+    EXPECT_LE(record.size(), static_cast<size_t>(_POSIX_PIPE_BUF));
+    ASSERT_GE(record.size(), 2u);
+    EXPECT_EQ(record[record.size() - 2], '~');
+}
+
+TEST(HostLogTest, AllHostSpanEmitPathsPreserve64BitInvocationIds) {
+    constexpr uint64_t invocation_id = (UINT64_C(1) << 32) + 7;
+    constexpr uint64_t callable_hash = UINT64_C(0x1234);
+
+    auto captured = run_with_config(LogLevel::TIMING, [] {
+        simpler::strace::StraceContextScope context(invocation_id, callable_hash, 0);
+        { simpler::strace::StraceScope scope("scope_path"); }
+        simpler::strace::emit_host_span_at("explicit_path", 100, 25, 0);
+
+        const SimplerHostSpan span{SIMPLER_HOST_SPAN_ABI_VERSION,
+                                   sizeof(SimplerHostSpan),
+                                   invocation_id,
+                                   callable_hash,
+                                   0,
+                                   0,
+                                   200,
+                                   30,
+                                   "c_abi_path",
+                                   ""};
+        simpler_log_emit_host_span(&span);
+    });
+
+    const std::string expected_inv = "inv=" + std::to_string(invocation_id);
+    for (const char *name : {"scope_path", "explicit_path", "c_abi_path"}) {
+        const size_t name_pos = captured.err.find(std::string("name=") + name);
+        ASSERT_NE(name_pos, std::string::npos) << name;
+        const size_t record_pos = captured.err.rfind("[STRACE]", name_pos);
+        ASSERT_NE(record_pos, std::string::npos) << name;
+        EXPECT_NE(captured.err.substr(record_pos, name_pos - record_pos).find(expected_inv), std::string::npos) << name;
+    }
 }
 
 // A `%XX` escape is three bytes that only mean anything together, so a field
@@ -342,11 +442,19 @@ TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
     reader.join();
 
     std::vector<std::vector<bool>> seen(child_count, std::vector<bool>(records_per_child, false));
+    std::set<int> anchor_pids;
     std::istringstream lines(captured);
     std::string line;
     int line_count = 0;
     constexpr char payload_marker[] = " payload=";
     while (std::getline(lines, line)) {
+        const size_t anchor_pos = line.find("[CLOCK_ANCHOR]");
+        if (anchor_pos != std::string::npos) {
+            int anchor_pid = -1;
+            ASSERT_EQ(sscanf(line.c_str() + anchor_pos, "[CLOCK_ANCHOR] v=1 pid=%d", &anchor_pid), 1);
+            EXPECT_TRUE(anchor_pids.insert(anchor_pid).second);
+            continue;
+        }
         const size_t record_pos = line.find("child=");
         const size_t payload_pos = line.find(payload_marker);
         ASSERT_NE(record_pos, std::string::npos);
@@ -371,4 +479,5 @@ TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
         ++line_count;
     }
     EXPECT_EQ(line_count, child_count * records_per_child);
+    EXPECT_EQ(anchor_pids.size(), static_cast<size_t>(child_count));
 }

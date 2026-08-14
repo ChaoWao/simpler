@@ -34,7 +34,10 @@ typedef struct SimplerHostSpan {
 
 typedef void (*SimplerLogEmitHostSpanFn)(const SimplerHostSpan *span);
 
-/* The logger owns this C ABI. Consumers call it through a bound
+/* Link-time adapter used by native Host consumers. */
+void unified_log_host_span(const SimplerHostSpan *span);
+
+/* The logger owns this C ABI. Extension consumers call it through a bound
  * SimplerLogEmitHostSpanFn so an absent logger remains a supported state. */
 void simpler_log_emit_host_span(const SimplerHostSpan *span);
 

@@ -50,14 +50,12 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-# The host-log record prefix `HostLogger::emit` writes ahead of every message.
-# Its func segment excludes ':' because `LOG_TIMING` passes `__FUNCTION__`, an
-# unqualified name; a qualified name containing '::' would stop this alternative
-# from matching, leaving the `[STRACE]` alternative to bound the record instead.
-_HOST_LOG_PREFIX = (
-    r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\]"
-    r"\[T0x[0-9a-fA-F]+\]\[[A-Z]+\]\s+[^:\r\n]+:\s+"
-)
+# The monotonic prefix is current; the wall-clock form keeps archived logs
+# parseable. The func segment excludes ':' because `LOG_TIMING` passes
+# `__FUNCTION__`, an unqualified name. A qualified name containing '::' stops
+# this alternative from matching, leaving `[STRACE]` to bound the record.
+_HOST_LOG_TIME = r"(?:\[mono_ns=\d+\]|\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\])"
+_HOST_LOG_PREFIX = _HOST_LOG_TIME + r"\[T0x[0-9a-fA-F]+\]\[[A-Z]+\]\s+[^:\r\n]+:\s+"
 # MULTILINE anchors the `$` alternative at every line end, so a caller passing a
 # multi-line blob rather than one line per item keeps every record but the last.
 _STRACE_RE = re.compile(
@@ -70,6 +68,12 @@ _STRACE_RE = re.compile(
 # A record start, matched independently of whether the rest of that record
 # survived the write that emitted it.
 _STRACE_HEAD_RE = re.compile(r"\[STRACE\]\s+v=\d+")
+_CLOCK_ANCHOR_RE = re.compile(
+    r"\[mono_ns=\d+\]\[T0x[0-9a-fA-F]+\]\[TIMING\]\s+clock_anchor:\s+"
+    r"\[CLOCK_ANCHOR\]\s+v=(?P<v>\d+)\s+pid=(?P<pid>\d+)\s+"
+    r"mono_ns=(?P<mono_ns>\d+)\s+wall_ns=(?P<wall_ns>\d+)[ \t]*\r?$",
+    re.MULTILINE,
+)
 # The emitter percent-encodes any byte that would otherwise be record grammar —
 # see `encode_host_span_field` in src/common/log/host_log.cpp.
 _PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
@@ -82,6 +86,16 @@ def decode_field(text):
     marker that the value is incomplete, not an encoded byte.
     """
     return _PERCENT_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+
+
+@dataclass
+class ClockAnchor:
+    pid: int
+    mono_ns: int
+    wall_ns: int
+
+    def to_wall_ns(self, monotonic_ns):
+        return self.wall_ns + monotonic_ns - self.mono_ns
 
 
 @dataclass
@@ -134,6 +148,19 @@ def count_record_heads(lines):
     without it a torn record is indistinguishable from a real measurement.
     """
     return sum(len(_STRACE_HEAD_RE.findall(line)) for line in lines)
+
+
+def parse_clock_anchors(lines):
+    """Yield the per-process monotonic-to-wall mappings in a log."""
+    for line in lines:
+        for match in _CLOCK_ANCHOR_RE.finditer(line):
+            if int(match["v"]) != 1:
+                continue
+            yield ClockAnchor(
+                pid=int(match["pid"]),
+                mono_ns=int(match["mono_ns"]),
+                wall_ns=int(match["wall_ns"]),
+            )
 
 
 def parse_spans(lines):

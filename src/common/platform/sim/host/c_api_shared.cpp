@@ -553,7 +553,7 @@ static SimNativeRunContext *native_run_context(DeviceContextHandle ctx, RuntimeH
     return state;
 }
 
-static void emit_native_run_host_wall(unsigned trace_inv, uint64_t trace_hid, long long trace_start_ns) {
+static void emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
     STRACE_HOST_SPAN_AT("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0);
@@ -570,7 +570,7 @@ static void emit_native_run_runner_wall(SimNativeRunContext *state) {
 }
 
 static int cleanup_failed_prepare(SimNativeRunContext *state, int execution_rc, bool clear_gm_sm) {
-    const unsigned trace_inv = state->trace_inv;
+    const uint64_t trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
@@ -630,7 +630,7 @@ int simpler_prepare_run(
 
     SimNativeRunContext *state = nullptr;
     const uint64_t trace_hid = static_cast<uint64_t>(callable_id);
-    const unsigned trace_inv = STRACE_ALLOC_INV();
+    const uint64_t trace_inv = STRACE_ALLOC_INV();
     const long long trace_start_ns = STRACE_NOW_NS();
     try {
         state = new (runtime) SimNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
@@ -752,7 +752,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     SimNativeRunContext *state = native_run_context(ctx, runtime, "simpler_finalize_run");
     if (state == nullptr) return -1;
     NativeRunPhase phase = state->phase.load(std::memory_order_acquire);
-    const unsigned trace_inv = state->trace_inv;
+    const uint64_t trace_inv = state->trace_inv;
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
 

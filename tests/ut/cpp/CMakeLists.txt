@@ -909,9 +909,11 @@ set(SIMPLER_LOG_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/log)
 add_executable(test_host_log_off
     a5/test_host_log_off.cpp
     ${SIMPLER_LOG_DIR}/host_log.cpp
+    ${SIMPLER_LOG_DIR}/unified_log_host.cpp
 )
 target_include_directories(test_host_log_off PRIVATE
     ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
     ${SIMPLER_LOG_DIR}
     ${SIMPLER_LOG_DIR}/include
 )

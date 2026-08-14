@@ -21,11 +21,11 @@
 #pragma once
 
 #include "common/host_span.h"
+#include "common/log_clock.h"
 #include "profiling_config.h"
 
 #if SIMPLER_HOST_STRACE
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -44,10 +44,7 @@ inline void bind_sink(SimplerLogEmitHostSpanFn sink) noexcept { sink_slot() = si
 /** False when this module has not been bound to libsimpler_log.so. */
 inline bool sink_available() noexcept { return sink_slot() != nullptr; }
 
-inline int64_t now_ns() noexcept {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
+inline int64_t now_ns() noexcept { return simpler::log::monotonic_now_ns(); }
 
 inline void emit(
     const char *name, uint64_t invocation_id, uint64_t callable_hash, int32_t depth, int64_t timestamp_ns,
