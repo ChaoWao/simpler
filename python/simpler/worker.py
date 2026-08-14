@@ -8050,7 +8050,7 @@ class Worker:
                 tail = extra
             return primary
 
-        expired = bool(getattr(region, "expired", getattr(region, "_expired", False)))
+        expired = bool(region.expired)
         if not expired:
             try:
                 region._close_worker_host_mapping()
@@ -8059,9 +8059,7 @@ class Worker:
             try:
                 if self._worker is not None:
                     self._worker.control_worker_chip_region_release(region._worker_id, region.region_id)
-                    free = getattr(region, "free", None)
-                    if callable(free):
-                        free()
+                    region.free()
             except BaseException as exc:  # noqa: BLE001
                 release_error = exc
                 region_errors.append(exc)
