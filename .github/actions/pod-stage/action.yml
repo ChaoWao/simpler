@@ -124,3 +124,28 @@ runs:
           pip install --upgrade pip
           pip install --config-settings=build.targets=build_package_$POD_PLATFORM '.[test]'
         REMOTE_STAGE
+
+        # One mpirun command line launches an L3 rank on each machine, so the
+        # interpreter must resolve at a single absolute path on both. The
+        # launcher pinned here sources CANN, enters that machine's copy of
+        # this run's tree (rank-side orchestration imports resolve from the
+        # cwd), and execs that machine's venv python. mpirun/mpi4py are
+        # machine-provisioned; tests skip when they are absent.
+        MPI_PYTHON="/tmp/simpler-pod-mpi-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        cat > "$MPI_PYTHON" <<LOCAL_LAUNCHER
+        #!/usr/bin/env bash
+        source '$POD_CANN_ENV'
+        cd '$GITHUB_WORKSPACE'
+        exec '$GITHUB_WORKSPACE/.venv/bin/python' "\$@"
+        LOCAL_LAUNCHER
+        chmod +x "$MPI_PYTHON"
+        pod_ssh "
+          cat > '$MPI_PYTHON' <<'REMOTE_LAUNCHER'
+        #!/usr/bin/env bash
+        source '$POD_REMOTE_CANN_ENV'
+        cd '$REMOTE_WORKDIR'
+        exec '$REMOTE_WORKDIR/.venv/bin/python' \"\$@\"
+        REMOTE_LAUNCHER
+          chmod +x '$MPI_PYTHON'
+        "
+        echo "POD_MPI_PYTHON=$MPI_PYTHON" >> "$GITHUB_ENV"
