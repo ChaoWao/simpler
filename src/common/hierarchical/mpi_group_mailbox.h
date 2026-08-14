@@ -14,6 +14,16 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(__linux__)
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <ctime>
+#else
+#include <chrono>
+#endif
+
 namespace mpi_group_mailbox {
 
 inline constexpr uint8_t MAGIC[8] = {'S', 'M', 'P', 'I', 'B', 'O', 'X', '\0'};
@@ -42,6 +52,42 @@ inline constexpr size_t OFF_REQUEST_BYTES = 64;
 inline constexpr size_t OFF_RESPONSE_COUNT = 68;
 inline constexpr size_t OFF_RESPONSE_BYTES = 72;
 inline constexpr size_t OFF_ERROR_BYTES = 76;
+// Header bytes [RESERVED_OFFSET, HEADER_BYTES) are reserved in protocol
+// version 1: the creator zeroes them and every attach path rejects a mailbox
+// whose reserved bytes are non-zero, so a future version can assign them.
+inline constexpr size_t RESERVED_OFFSET = 80;
+
+// The request-state word doubles as a shared futex: the mailbox is mapped by
+// more than one process, so the wake must not use FUTEX_PRIVATE_FLAG. Both
+// helpers may return spuriously; callers re-check the word.
+inline void wake_word(int32_t *addr) {
+#if defined(__linux__)
+    (void)::syscall(SYS_futex, addr, FUTEX_WAKE, INT32_MAX, nullptr, nullptr, 0);
+#else
+    (void)addr;
+#endif
+}
+
+// Blocks until the word at `addr` differs from `expected`, a wake arrives, or
+// `timeout_s` elapses. Non-Linux builds have no futex and poll the word until
+// the timeout instead.
+inline void wait_word(int32_t *addr, int32_t expected, double timeout_s) {
+    if (!(timeout_s > 0.0)) return;
+#if defined(__linux__)
+    struct timespec ts;
+    const int64_t timeout_ns = static_cast<int64_t>(timeout_s * 1e9);
+    ts.tv_sec = static_cast<time_t>(timeout_ns / 1000000000);
+    ts.tv_nsec = static_cast<long>(timeout_ns % 1000000000);
+    (void)::syscall(SYS_futex, addr, FUTEX_WAIT, expected, &ts, nullptr, 0);
+#else
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s);
+    int32_t value = expected;
+    while (std::chrono::steady_clock::now() < deadline) {
+        __atomic_load(addr, &value, __ATOMIC_ACQUIRE);
+        if (value != expected) return;
+    }
+#endif
+}
 
 enum class GroupState : int32_t {
     INITIALIZING = 0,

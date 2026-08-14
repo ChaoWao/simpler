@@ -734,6 +734,11 @@ MpiGroupMailboxChannel::MpiGroupMailboxChannel(
         read_u32(OFF_WORLD_SIZE) != static_cast<uint32_t>(world_size_)) {
         throw std::invalid_argument("MpiGroupMailboxChannel: mailbox layout or world size mismatch");
     }
+    for (size_t offset = RESERVED_OFFSET; offset < HEADER_BYTES; ++offset) {
+        if (mailbox_[offset] != 0) {
+            throw std::invalid_argument("MpiGroupMailboxChannel: reserved header bytes must be zero");
+        }
+    }
 }
 
 int32_t MpiGroupMailboxChannel::load_i32(size_t offset) const {
@@ -744,6 +749,10 @@ int32_t MpiGroupMailboxChannel::load_i32(size_t offset) const {
 
 void MpiGroupMailboxChannel::store_i32(size_t offset, int32_t value) {
     __atomic_store(reinterpret_cast<int32_t *>(mailbox_ + offset), &value, __ATOMIC_RELEASE);
+}
+
+void MpiGroupMailboxChannel::wake_request_waiter() {
+    mpi_group_mailbox::wake_word(reinterpret_cast<int32_t *>(mailbox_ + mpi_group_mailbox::OFF_REQUEST_STATE));
 }
 
 uint32_t MpiGroupMailboxChannel::read_u32(size_t offset) const {
@@ -779,6 +788,7 @@ void MpiGroupMailboxChannel::mark_terminal(const std::string &reason) {
     write_u32(OFF_ERROR_BYTES, static_cast<uint32_t>(size));
     store_i32(OFF_GROUP_STATE, static_cast<int32_t>(GroupState::TERMINAL));
     store_i32(OFF_REQUEST_STATE, static_cast<int32_t>(RequestState::TASK_FAILED));
+    wake_request_waiter();
 }
 
 void MpiGroupMailboxChannel::kill_mpirun_group() const {
@@ -851,6 +861,7 @@ std::vector<std::vector<uint8_t>> MpiGroupMailboxChannel::run_exchange(
     const RequestState ready_state =
         opcode == Opcode::SHUTDOWN ? RequestState::SHUTDOWN_READY : RequestState::REQUEST_READY;
     store_i32(OFF_REQUEST_STATE, static_cast<int32_t>(ready_state));
+    wake_request_waiter();
 
     const Deadline deadline = deadline_from_now(runtime_timeout_s_);
     while (true) {

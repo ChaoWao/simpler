@@ -129,6 +129,8 @@ private:
 
     int32_t load_i32(size_t offset) const;
     void store_i32(size_t offset, int32_t value);
+    // Wakes the rank-0 futex wait parked on the request-state word.
+    void wake_request_waiter();
     uint32_t read_u32(size_t offset) const;
     uint64_t read_u64(size_t offset) const;
     void write_u32(size_t offset, uint32_t value);

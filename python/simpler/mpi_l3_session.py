@@ -55,6 +55,11 @@ from .remote_l3_session import (
 )
 from .worker import Worker
 
+# Upper bound on one rank-0 park on the request word. An L4 publish wakes the
+# wait immediately; the bound only caps how long a lost wake or an untracked
+# state change can defer the next predicate re-check.
+_REQUEST_WAIT_CHUNK_S = 1.0
+
 
 class MpiGlobalDomainExchange:
     """Run Global CommDomain collectives on the dispatcher thread."""
@@ -509,6 +514,10 @@ def _run_group_session(  # noqa: PLR0912, PLR0915 -- startup, ordered dispatch, 
                     elif now >= request_wait_deadline:
                         mailbox.mark_terminal(f"MPI group mailbox request lane stalled in state {request_state.name}")
                         break
+                    mailbox.wait_request_state(
+                        request_state,
+                        timeout_s=min(_REQUEST_WAIT_CHUNK_S, max(request_wait_deadline - now, 0.0)),
+                    )
                 if mailbox.group_state is MailboxGroupState.TERMINAL:
                     request = None
                 else:

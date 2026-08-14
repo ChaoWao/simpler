@@ -55,10 +55,22 @@ The header contains:
 - opcode: `TASK`, `CONTROL`, `PING`, or `SHUTDOWN`
 - target: `GROUP`, `RANK`, or `PER_RANK`
 - target rank, payload count, and byte lengths
+- reserved tail bytes (offsets 80 through 255), zero in version 1
 
-Rank 0 copies the complete request to private memory before publishing
-`TASK_ACCEPTED`. It publishes `TASK_DONE` only after gathering every rank's
-status. Duplicate or decreasing sequence ids make the group terminal.
+Rank 0 parks on the request-state word between requests — a shared futex on
+Linux, woken by every L4 publish — instead of polling it. Rank 0 copies the
+complete request to private memory before publishing `TASK_ACCEPTED`. It
+publishes `TASK_DONE` only after gathering every rank's status. Duplicate or
+decreasing sequence ids make the group terminal.
+
+### Versioning
+
+Version 1 freezes the layout above. The creator zeroes the reserved header
+bytes and both attach paths — the L4 channel and the rank-0 reopen — reject a
+mailbox whose reserved bytes are non-zero, so a version 1 peer cannot silently
+carry fields it does not understand. Any layout or semantic change bumps the
+protocol version, and each side rejects a version it does not implement: a
+mixed-version pair fails closed at attach instead of misreading the lane.
 
 Every gathered error contains `rank`, `error_type`, and `message`. Any target
 rank failure fails the group operation. A broken command processor or

@@ -938,6 +938,13 @@ TEST(MpiGroupMailboxChannel, FullGroupTaskUsesOnePerRankEnvelope) {
     EXPECT_EQ(mailbox_state(mailbox, OFF_REQUEST_STATE), static_cast<int32_t>(RequestState::IDLE));
 }
 
+TEST(MpiGroupMailboxChannel, RejectsNonZeroReservedHeaderBytes) {
+    using namespace mpi_group_mailbox;
+    auto mailbox = ready_mpi_mailbox(1);
+    mailbox[RESERVED_OFFSET + 8] = 1;
+    EXPECT_THROW(MpiGroupMailboxChannel(mailbox.data(), mailbox.size(), 1, -1, 1.0), std::invalid_argument);
+}
+
 TEST(MpiGroupMailboxChannel, TimeoutMakesGroupTerminal) {
     using namespace mpi_group_mailbox;
     auto mailbox = ready_mpi_mailbox(1);

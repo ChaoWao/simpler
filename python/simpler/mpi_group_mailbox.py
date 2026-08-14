@@ -18,6 +18,15 @@ from dataclasses import asdict, dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any
 
+# The acquire/release helpers are required, not optional: the cross-process
+# handshake is built on their publication barriers, so a missing extension must
+# fail the import instead of silently degrading to plain struct reads.
+from _task_interface import (  # pyright: ignore[reportMissingImports]
+    _mailbox_load_i32,
+    _mailbox_store_i32,
+    _mailbox_wait_i32,
+)
+
 MAILBOX_MAGIC = b"SMPIBOX\0"
 MAILBOX_PROTOCOL_VERSION = 1
 MAILBOX_HEADER_BYTES = 256
@@ -44,6 +53,15 @@ _OFF_REQUEST_BYTES = 64
 _OFF_RESPONSE_COUNT = 68
 _OFF_RESPONSE_BYTES = 72
 _OFF_ERROR_BYTES = 76
+# Header bytes [_OFF_RESERVED, MAILBOX_HEADER_BYTES) are reserved in protocol
+# version 1: the creator zeroes them and every attach path rejects non-zero
+# reserved bytes, so a future version can assign them.
+_OFF_RESERVED = 80
+
+# Per-rank error messages are capped before serializing so the gathered JSON
+# stays parseable inside MAILBOX_ERROR_BYTES instead of being clipped into
+# invalid JSON.
+_RANK_ERROR_MESSAGE_LIMIT_BYTES = 2048
 
 
 class MailboxGroupState(enum.IntEnum):
@@ -138,6 +156,40 @@ def _decode_payloads(data: bytes, expected_count: int) -> tuple[bytes, ...]:
     return tuple(payloads)
 
 
+def _bounded_rank_error(error: MpiRankError) -> MpiRankError:
+    encoded = str(error.message).encode("utf-8")
+    if len(encoded) <= _RANK_ERROR_MESSAGE_LIMIT_BYTES:
+        return error
+    clipped = encoded[:_RANK_ERROR_MESSAGE_LIMIT_BYTES].decode("utf-8", errors="replace")
+    return MpiRankError(error.rank, error.error_type, clipped + " [truncated]")
+
+
+def _encode_rank_errors(errors: tuple[MpiRankError, ...]) -> bytes:
+    """Serialize rank errors as JSON guaranteed to fit MAILBOX_ERROR_BYTES.
+
+    Oversized messages are clipped per rank; if the list itself does not fit,
+    trailing entries are replaced by one rank=-1 sentinel naming the dropped
+    count, so the stored blob always parses as JSON.
+    """
+    entries = [asdict(_bounded_rank_error(error)) for error in errors]
+    dropped = 0
+    while True:
+        payload = list(entries)
+        if dropped:
+            payload.append(
+                {
+                    "rank": -1,
+                    "error_type": "TruncatedErrorList",
+                    "message": f"{dropped} more rank errors were dropped",
+                }
+            )
+        data = json.dumps(payload, sort_keys=True).encode("utf-8")
+        if len(data) <= MAILBOX_ERROR_BYTES or not entries:
+            return data
+        entries.pop()
+        dropped += 1
+
+
 def _as_byte_view(buffer: memoryview) -> memoryview:
     """Normalize platform-specific shared-memory formats to a byte view."""
     return buffer.cast("B")
@@ -154,6 +206,9 @@ class MpiGroupMailbox:
         self._shm = shm
         self._owner = bool(owner)
         self._closed = False
+        # The mapping's base address is stable for the mapping's lifetime; the
+        # cache keeps the state-word hot path off repeated ctypes exports.
+        self._address = _buffer_address(self._buffer)
         self._validate_header()
 
     @classmethod
@@ -197,7 +252,7 @@ class MpiGroupMailbox:
     @property
     def address(self) -> int:
         self._require_open()
-        return ctypes.addressof(ctypes.c_char.from_buffer(self._buffer))
+        return self._address
 
     @property
     def world_size(self) -> int:
@@ -329,9 +384,7 @@ class MpiGroupMailbox:
         self._validate_active_sequence(sequence_id)
         if not errors:
             raise ValueError("MPI group mailbox failure requires at least one rank error")
-        data = json.dumps([asdict(error) for error in errors], sort_keys=True).encode("utf-8")
-        if len(data) > MAILBOX_ERROR_BYTES:
-            data = data[: MAILBOX_ERROR_BYTES - 1]
+        data = _encode_rank_errors(errors)
         self._write_bytes(MAILBOX_ERROR_OFFSET, data)
         self._write_u32(_OFF_ERROR_BYTES, len(data))
         if terminal:
@@ -378,9 +431,12 @@ class MpiGroupMailbox:
         error_bytes = min(self._read_u32(_OFF_ERROR_BYTES), MAILBOX_ERROR_BYTES)
         return self._read_bytes(MAILBOX_ERROR_OFFSET, error_bytes).decode("utf-8", errors="replace")
 
-    def overwrite_request_payload_for_test(self, data: bytes) -> None:
-        value = bytes(data)
-        self._write_bytes(MAILBOX_REQUEST_OFFSET, value)
+    def wait_request_state(self, expected: MailboxRequestState, *, timeout_s: float) -> None:
+        """Block until the request word differs from ``expected``, a peer wakes
+        the word, or ``timeout_s`` elapses. May return spuriously; callers
+        re-check the state."""
+        self._require_open()
+        _mailbox_wait_i32(self._address + _OFF_REQUEST_STATE, int(expected), float(timeout_s))
 
     def close(self, *, unlink: bool = False) -> None:
         if self._closed:
@@ -409,6 +465,8 @@ class MpiGroupMailbox:
             raise MpiGroupError("MPI group mailbox layout does not match the protocol")
         if self._read_u32(_OFF_WORLD_SIZE) == 0:
             raise MpiGroupError("MPI group mailbox world_size must be positive")
+        if any(bytes(self._buffer[_OFF_RESERVED:MAILBOX_HEADER_BYTES])):
+            raise MpiGroupError("MPI group mailbox reserved header bytes must be zero")
 
     def _validate_active_sequence(self, sequence_id: int) -> None:
         if self.request_state is not MailboxRequestState.TASK_ACCEPTED:
@@ -442,7 +500,7 @@ class MpiGroupMailbox:
         if offset < 0 or offset > len(buffer) or len(data) > len(buffer) - offset:
             raise ValueError("MPI group mailbox write is outside the mapping")
         if data:
-            ctypes.memmove(_buffer_address(buffer) + offset, data, len(data))
+            ctypes.memmove(self._address + offset, data, len(data))
 
     def _read_bytes(self, offset: int, length: int) -> bytes:
         self._require_open()
@@ -453,25 +511,19 @@ class MpiGroupMailbox:
             raise ValueError("MPI group mailbox read is outside the mapping")
         if length == 0:
             return b""
-        return ctypes.string_at(_buffer_address(buffer) + offset, length)
+        return ctypes.string_at(self._address + offset, length)
 
     def _load_i32(self, offset: int) -> int:
         self._require_open()
-        try:
-            from .task_interface import _mailbox_load_i32  # noqa: PLC0415
-        except (ImportError, AttributeError):
-            return self._read_i32(offset)
-        return int(_mailbox_load_i32(self.address + offset))
+        return int(_mailbox_load_i32(self._address + offset))
 
     def _store_i32(self, offset: int, value: int) -> None:
         self._require_open()
-        try:
-            from .task_interface import _mailbox_store_i32  # noqa: PLC0415
-        except (ImportError, AttributeError):
-            self._write_i32(offset, value)
-            return
-        _mailbox_store_i32(self.address + offset, int(value))
+        _mailbox_store_i32(self._address + offset, int(value))
 
+    # Plain field accessors: every non-state field is written before the
+    # release-store that publishes it and read after the acquire-load that
+    # observed it, so only the state words need the atomic helpers.
     def _read_i32(self, offset: int) -> int:
         return int(struct.unpack_from("<i", self._buffer, offset)[0])
 
