@@ -3994,13 +3994,22 @@ class TestRunHandle:
                 self.region_id = region_id
                 self._worker_id = 0
                 self.mapping_closed = False
-                self.expired = False
+                self._expired = False
+                self._released = False
+                self._chip_release_committed = False
+
+            @property
+            def expired(self):
+                return self._expired
 
             def _close_worker_host_mapping(self):
                 self.mapping_closed = True
 
+            def free(self):
+                self._released = True
+
             def _expire(self):
-                self.expired = True
+                self._expired = True
 
         class NativeWorker:
             def __init__(self):
@@ -4088,13 +4097,22 @@ class TestRunHandle:
             _worker_id = 0
 
             def __init__(self):
-                self.expired = False
+                self._expired = False
+                self._released = False
+                self._chip_release_committed = False
+
+            @property
+            def expired(self):
+                return self._expired
 
             def _close_worker_host_mapping(self):
                 raise mapping_error
 
+            def free(self):
+                self._released = True
+
             def _expire(self):
-                self.expired = True
+                self._expired = True
 
         class NativeWorker:
             def __init__(self):
@@ -4150,9 +4168,18 @@ class TestRunHandle:
                 self._worker_id = 0
                 self.mapping_closes = 0
                 self.expires = 0
+                self._released = False
+                self._chip_release_committed = False
+
+            @property
+            def expired(self):
+                return self.expires > 0
 
             def _close_worker_host_mapping(self):
                 self.mapping_closes += 1
+
+            def free(self):
+                self._released = True
 
             def _expire(self):
                 self.expires += 1
