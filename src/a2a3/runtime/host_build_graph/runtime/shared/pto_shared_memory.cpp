@@ -207,7 +207,6 @@ void PTO2SharedMemoryHandle::print_layout() {
             h->ring.task_descriptors_offset
         );
         LOG_DEBUG("  current_task_idx: %d", h->ring.fc.current_task_index.load(std::memory_order_acquire));
-        LOG_DEBUG("  last_task_alive:  %d", h->ring.fc.last_task_alive.load(std::memory_order_acquire));
     }
     LOG_DEBUG("orchestrator_done:  %d", h->orchestrator_done.load(std::memory_order_acquire));
     LOG_DEBUG("Error state:");
@@ -246,9 +245,7 @@ bool PTO2RingFlowControl::validate(PTO2SharedMemoryHandle *handle, int32_t ring_
 
     // Check flow control pointer sanity
     int32_t current = current_task_index.load(std::memory_order_acquire);
-    int32_t last_alive = last_task_alive.load(std::memory_order_acquire);
     if (current < 0) return false;
-    if (last_alive < 0) return false;
 
     return true;
 }

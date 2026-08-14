@@ -88,13 +88,13 @@ static inline const char *error_desc(int32_t code) {
         return "tasks submitted in one scope reached the ring task-window cap; their fanout "
                "references are only released at scope_end, so no slot can be reclaimed";
     case PTO2_ERROR_HEAP_RING_DEADLOCK:
-        return "the ring task allocator ran out of both task slots and heap bytes, so no further "
-               "task can be admitted";
+        return "the task allocator could not reserve the heap bytes required for another task";
     case PTO2_ERROR_FLOW_CONTROL_DEADLOCK:
-        return "the task window is blocked while the heap is not full -- typically nesting on the "
-               "same ring, where an outer task waits on an inner task that cannot get a slot";
+        return "the task allocator could not admit another task because the configured task window "
+               "had no available slot";
     case PTO2_ERROR_DEP_POOL_OVERFLOW:
-        return "a task's explicit fanin edges overflowed the ring's dependency spill pool";
+        return "a task's producer dependencies exceeded the runtime's available fanin "
+               "representation capacity";
     case PTO2_ERROR_INVALID_ARGS:
         return "an orchestration API rejected its arguments (bad alloc_tensors info, illegal nested "
                "scope, unknown task id in set_dependencies, or an CoreTaskArgs carrying an error flag)";
@@ -115,8 +115,7 @@ static inline const char *error_desc(int32_t code) {
         return "the scope task-record buffer saturated (runtime-internal; the rings normally fill "
                "first and latch SCOPE_DEADLOCK or FLOW_CONTROL_DEADLOCK)";
     case PTO2_ERROR_TENSORMAP_OVERFLOW:
-        return "the tensormap entry pool is wedged and last_task_alive cannot advance "
-               "(runtime-internal, or an extreme-scale workload)";
+        return "the tensormap could not reserve the entries required to register another task's outputs";
     case PTO2_ERROR_SCHEDULER_TIMEOUT:
         return "the scheduler saw no forward progress within its timeout; the sub_class= line below "
                "carries the device-classified reason and locators";
@@ -149,11 +148,11 @@ static inline const char *error_hint(int32_t code) {
         return "raise ring_heap (PTO2_RING_HEAP) or shrink per-task args / intermediate tensors; the "
                "'Ring buffer sizes:' line above reports the configured capacities";
     case PTO2_ERROR_FLOW_CONTROL_DEADLOCK:
-        return "check for self-dependent or nested submission on one ring; raise ring_task_window "
-               "(PTO2_RING_TASK_WINDOW) or move the nested submission to another ring";
+        return "raise ring_task_window (PTO2_RING_TASK_WINDOW) or shrink the graph; in a reclaiming "
+               "runtime also check for nested submission or a stalled consumer";
     case PTO2_ERROR_DEP_POOL_OVERFLOW:
-        return "raise ring_dep_pool (PTO2_RING_DEP_POOL) or cut the fanin count of the offending "
-               "set_dependencies() call; enable CallConfig.enable_scope_stats to locate it";
+        return "follow the preceding resource diagnostic: HBG has no spill pool, so reduce fanin to "
+               "PTO2_MAX_FANIN or less; for a reclaiming runtime raise PTO2_RING_DEP_POOL or cut fanin";
     case PTO2_ERROR_INVALID_ARGS:
         return "an orchestration bug, not a capacity problem -- resizing the rings will not help; "
                "recheck the arguments of the orchestration API calls listed above";
@@ -171,10 +170,12 @@ static inline const char *error_hint(int32_t code) {
     case PTO2_ERROR_EXPLICIT_ORCH_FATAL:
         return "self-inflicted -- follow the message passed to the rt_report_fatal() call site";
     case PTO2_ERROR_SCOPE_TASKS_OVERFLOW:
-    case PTO2_ERROR_TENSORMAP_OVERFLOW:
     case PTO2_ERROR_ASYNC_REGISTRATION_FAILED:
         return "not expected in normal operation -- keep the device log and report it to the runtime "
                "maintainers; tuning the ring capacities will not help";
+    case PTO2_ERROR_TENSORMAP_OVERFLOW:
+        return "follow the preceding resource diagnostic: in HBG increase PTO2_TENSORMAP_POOL_SIZE "
+               "or shrink the graph; in a reclaiming runtime also inspect entry-reclaim progress";
     case PTO2_ERROR_SCHEDULER_TIMEOUT:
         return "read the sub_class= line below first, then follow the S1-S5 table in the doc; raise "
                "PTO2_SCHEDULER_TIMEOUT_MS to tell a true deadlock apart from a merely slow kernel";

@@ -192,8 +192,7 @@ captured at chip_swimlane_level >= 3) and `deps.json`; consume them via
 
 ```text
 Thread X: === Orchestrator Profiling: XXX tasks, total=XXXus ===
-Thread X:   sync_tensormap : XXXus (XX.X%)
-Thread X:   task_ring_alloc: XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
+Thread X:   task_ring_alloc: XXXus (XX.X%)
 Thread X:   param_copy     : XXXus (XX.X%)  atomics=XXX
 Thread X:   lookup+dep     : XXXus (XX.X%)
 Thread X:   heap_alloc     : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX

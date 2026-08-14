@@ -113,10 +113,12 @@ block ahead of the orchestrator block faults instead of shipping a misaligned im
 The runtime uses one task ring, one graph heap, and one TensorMap pool. They are
 capacity-bounded storage, not streaming flow-control buffers:
 
-- `last_task_alive` does not advance during a run;
-- `heap_tail` does not retire task output buffers during a run;
+- the task ring and the graph heap are forward-only bump allocators;
 - task slots and heap bytes are never recycled mid-run; and
-- TensorMap entries are not reclaimed while host construction is active.
+- TensorMap entries are held for the whole run.
+
+There is no reclaim channel from the scheduler back to the allocator, so the
+allocators carry no reclaim pointer and no back-pressure wait.
 
 `completed_watermark` records the contiguous prefix of completed device tasks.
 It supports completion/consumer metadata only; it does not reclaim the task ring
@@ -129,16 +131,18 @@ image.
 ### 4.1 Allocation Failure
 
 The graph must fit the configured task window, heap, fanin capacity, and
-TensorMap pool. When an allocation cannot progress, a wall-clock backstop
-latches a fatal instead of waiting for a scheduler that has not started.
+TensorMap pool. Because nothing is reclaimed, a request that does not fit can
+never become satisfiable — the allocator names the exhausted resource and fails
+on the spot. There is no wait and no timeout.
 
 Representative allocator output is:
 
 ```text
-FATAL: Task Allocator Deadlock - Heap Exhausted!
-  Task ring:  current=..., last_alive=..., active=.../...
-  Heap ring:  top=..., tail=..., size=..., available=...
-  Requested:  ... bytes
+FATAL: Graph Heap Exhausted!
+The whole graph must fit the configured ring; nothing is reclaimed mid-run.
+  Task window: used=.../...
+  Graph heap:  used=.../..., available=...
+  Requested:   ... bytes + 1 task slot
 ```
 
 This is host-orchestration logging. The allocator records the corresponding

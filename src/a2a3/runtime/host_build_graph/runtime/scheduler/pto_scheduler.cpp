@@ -24,7 +24,6 @@
 #if SIMPLER_DFX
 // Weak fallbacks for host/UT builds that don't link the scope_stats collector.
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabled() { return false; }
-extern "C" __attribute__((weak, visibility("hidden"))) void scope_stats_note_heap_wrap(int) {}
 #endif
 
 // =============================================================================
@@ -72,17 +71,10 @@ PTO2SchedProfilingData scheduler_get_profiling(int thread_idx) {
 // =============================================================================
 
 void PTO2SchedulerState::print_stats() {
-    PTO2SchedulerState *sched = this;
     LOG_DEBUG("=== Scheduler Statistics ===");
-    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        if (sched->ring_sched_state.last_task_alive > 0) {
-            LOG_DEBUG("Ring %d:", r);
-            LOG_DEBUG("  last_task_alive: %d", sched->ring_sched_state.last_task_alive);
-        }
-    }
 #if SIMPLER_SCHED_PROFILING
-    LOG_DEBUG("tasks_completed:   %lld", (long long)sched->tasks_completed.load(std::memory_order_relaxed));
-    LOG_DEBUG("tasks_consumed:    %lld", (long long)sched->tasks_consumed.load(std::memory_order_relaxed));
+    LOG_DEBUG("tasks_completed:   %lld", (long long)tasks_completed.load(std::memory_order_relaxed));
+    LOG_DEBUG("tasks_consumed:    %lld", (long long)tasks_consumed.load(std::memory_order_relaxed));
 #endif
     LOG_DEBUG("============================");
 }

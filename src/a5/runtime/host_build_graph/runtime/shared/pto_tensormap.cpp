@@ -11,14 +11,15 @@
 /**
  * PTO Runtime2 - TensorMap Implementation
  *
- * Implements TensorMap with ring buffer pool, lazy invalidation,
- * and chain truncation optimization.
+ * Implements TensorMap with a fixed-capacity arena pool. Task completion does
+ * not invalidate entries; dependency computation explicitly removes only
+ * producers made redundant by coverage.
  *
  * Key features:
  * 1. O(1) insert at bucket head
- * 2. O(valid_entries) lookup with chain truncation
- * 3. Automatic stale entry cleanup during lookup
- * 4. Periodic explicit cleanup for long chains
+ * 2. O(live_entries) lookup
+ * 3. O(1) unlink through bucket/task predecessor links
+ * 4. Free-list reuse after explicit semantic removal
  *
  * Based on: docs/RUNTIME_LOGIC.md
  */
@@ -114,8 +115,6 @@ bool PTO2TensorMap::init_data_from_layout(const PTO2TensorMapLayout &layout, Dev
         heads_arena[i] = nullptr;
     }
     task_window_size = layout.task_window_size;
-    last_task_alive_cached = 0;
-    last_cleanup = 0;
 
     return true;
 }
@@ -143,7 +142,6 @@ void PTO2TensorMap::destroy() {
 
 void PTO2TensorMap::print_stats() {
     int32_t valid = 0;
-    int32_t stale = 0;
     int32_t empty_buckets = 0;
     int32_t max_chain = 0;
     int64_t total_chain = 0;
@@ -154,11 +152,7 @@ void PTO2TensorMap::print_stats() {
     // thus initialized; slots beyond that are untouched and must not be read.
     for (int32_t i = 0; i < next_entry_idx; i++) {
         if (entry_pool[i].bucket_index != -1) {
-            if (entry_valid(entry_pool[i])) {
-                valid++;
-            } else {
-                stale++;
-            }
+            valid++;
         }
     }
 
@@ -189,11 +183,9 @@ void PTO2TensorMap::print_stats() {
     LOG_DEBUG("Pool free_num:       %d", free_num);
     LOG_DEBUG("Num buckets:         %d", num_buckets);
     LOG_DEBUG("Valid entries:       %d", valid);
-    LOG_DEBUG("Stale entries:       %d", stale);
     LOG_DEBUG("Empty buckets:       %d", empty_buckets);
     LOG_DEBUG("Max chain len:       %d", max_chain);
     LOG_DEBUG("Avg chain len:       %.2f", non_empty_buckets > 0 ? (float)total_chain / non_empty_buckets : 0);
-    LOG_DEBUG("Last task alive:     %d", last_task_alive_cached);
     LOG_DEBUG("============================");
 }
 
@@ -203,25 +195,12 @@ int32_t PTO2TensorMap::valid_count() {
     // Init-on-write: only [0, next_entry_idx) slots have ever been allocated and
     // thus initialized; slots beyond that are untouched and must not be read.
     for (int32_t i = 0; i < next_entry_idx; i++) {
-        if (entry_pool[i].bucket_index != -1 && entry_valid(entry_pool[i])) {
+        if (entry_pool[i].bucket_index != -1) {
             count++;
         }
     }
 
     return count;
-}
-
-void PTO2TensorMap::sync_tensormap(PTO2TaskId task_id, int32_t sm_last_task_alive) {
-    auto local_id = task_id.local();
-    sync_validity(sm_last_task_alive);
-
-    // Only attempt cleanup when last_task_alive has actually advanced;
-    // otherwise cleanup_retired would empty-loop and we'd spin forever.
-    auto overlap = get_task_local_id_slot(local_id) == get_task_local_id_slot(last_cleanup);
-    if (sm_last_task_alive - last_cleanup >= PTO2_TENSORMAP_CLEANUP_INTERVAL || overlap) {
-        cleanup_retired(last_cleanup, sm_last_task_alive);
-        last_cleanup = sm_last_task_alive;
-    }
 }
 
 // =============================================================================

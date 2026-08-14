@@ -23,7 +23,7 @@
  *                            OUTPUT_EXISTING tensors. No callbacks.
  *
  * STEP 1 (explicit_deps) is intentionally left at the runtime call site because its
- * `last_task_alive` shortcut + unchecked slot lookup is subtly different from the
+ * unchecked slot lookup is subtly different from the
  * `slot_state->task->task_id == producer` reuse check in STEP 3. Unifying them would
  * require two emit semantics or a marginal behavior change in transients — not worth
  * the minor structural overlap.

@@ -17,9 +17,10 @@
  * - Used by pto_submit_task() to find dependencies
  *
  * Key design features:
- * 1. Ring buffer pool for entries (no malloc/free)
- * 2. Lazy invalidation (entries become stale when producer retires)
- * 3. Per-task per-ring entry tracking for efficient cleanup
+ * 1. Fixed-capacity arena pool for entries (no malloc/free)
+ * 2. Task completion does not retire entries; a producer stays visible until
+ *    dependency computation explicitly removes it as semantically covered
+ * 3. Per-task entry tracking for explicit removal
  * 4. OVERLAP DETECTION: Detects dependencies for overlapping sub-regions
  *
  * Hash table with chaining:
@@ -355,30 +356,24 @@ static_assert(
 /**
  * TensorMap structure
  *
- * Hash table with ring buffer entry pool and lazy invalidation.
+ * Hash table with a fixed-capacity entry pool and no watermark invalidation.
  */
 struct PTO2TensorMap {
     // Hash table buckets (fixed size, power of 2)
     PTO2TensorMapEntry **buckets;  // Array of offsets into entry_pool (-1 = empty)
     int32_t num_buckets;           // Must be power of 2 for fast modulo
 
-    // Entry pool as ring buffer
-    PTO2TensorMapEntry *entry_pool;        // Ring buffer of entries
-    PTO2TensorMapEntry **free_entry_list;  // free entry ids
-    int32_t pool_size;                     // Total pool capacity
-    int32_t next_entry_idx;                // id when next entry insert
-    int32_t free_num;                      // free entry number in entry pool
+    // Entry pool: bump allocation plus reuse of explicitly removed entries.
+    PTO2TensorMapEntry *entry_pool;
+    PTO2TensorMapEntry **free_entry_list;
+    int32_t pool_size;       // Total pool capacity
+    int32_t next_entry_idx;  // id when next entry insert
+    int32_t free_num;        // free entry number in entry pool
 
-    // Per-task entry tracking (for efficient bucket cleanup)
+    // Per-task entry tracking for O(1) unlinking of covered producers.
     // Indexed by [local_id & (task_window_size - 1)]
     PTO2TensorMapEntry **task_entry_heads;
     int32_t task_window_size;  // Task window size (for slot masking)
-
-    // Validity threshold (for lazy invalidation), cached from shared memory.
-    int32_t last_task_alive_cached;
-
-    // Cleanup progress (for periodic cleanup_retired)
-    int32_t last_cleanup{};
 
     uint32_t get_task_local_id_slot(uint32_t task_local_id) const { return task_local_id & (task_window_size - 1); }
 
@@ -389,21 +384,6 @@ struct PTO2TensorMap {
     int32_t current_used() const { return next_entry_idx - free_num; }
     int32_t pool_capacity() const { return pool_size; }
     int32_t free_entries() const { return pool_size - current_used(); }
-
-    // Reclaim retired entries, advancing the cleanup cursor (last_cleanup) to
-    // the supplied watermark. Returns last_task_alive — the monotone progress
-    // signal the orchestrator's exhaustion back-pressure loop watches to tell a
-    // transient shortage (tasks still retiring) from a wedged pool (watermark
-    // not advancing). Idempotent per watermark: a watermark that has not passed
-    // last_cleanup is skipped, so it never double-frees.
-    int64_t reclaim_retired_all(int32_t sm_last_task_alive) {
-        sync_validity(sm_last_task_alive);
-        if (sm_last_task_alive > last_cleanup) {
-            cleanup_retired(last_cleanup, sm_last_task_alive);
-            last_cleanup = sm_last_task_alive;
-        }
-        return sm_last_task_alive;
-    }
 
     // new_entry allocates a slot and initializes only its linkage (bucket_index
     // and the four link pointers) to the clean unlinked state; insert() assigns
@@ -495,19 +475,10 @@ struct PTO2TensorMap {
     void destroy();
 
     /**
-     * Update validity threshold from shared memory
-     * Called periodically to refresh the lazy invalidation threshold.
-     *
-     * @param last_task_alive  Current value from shared memory
-     */
-    void sync_validity(int32_t last_task_alive) { this->last_task_alive_cached = last_task_alive; }
-
-    /**
      * Lookup producer for a tensor region
      *
      * Searches the hash table for matching regions and invokes the callback
-     * for each overlapping valid entry.
-     * Stale entries from different rings are skipped (not truncated).
+     * for each overlapping entry.
      *
      * The callback receives (PTO2TensorMapEntry &, OverlapStatus) and should
      * return true to continue iteration, false to stop early. It is safe for
@@ -533,15 +504,7 @@ struct PTO2TensorMap {
 #if SIMPLER_TENSORMAP_PROFILING
             chain_len++;
 #endif
-            // Skip stale entries (no chain truncation — entries from different
-            // rings can be interleaved, so a stale entry from one ring does NOT
-            // imply subsequent entries from other rings are also stale)
-            if (!entry_valid(*cur_entry)) {
-                cur_entry = next_entry;
-                continue;
-            }
-
-            // Entry is valid - check if regions OVERLAP (not just exact match)
+            // Check if regions OVERLAP (not just exact match)
             // Since we hash only by base_ptr, all entries in this bucket have
             // potential to overlap. We must check actual byte-range overlap.
             if (tensor.buffer.addr == cur_entry->buffer_addr) {
@@ -575,7 +538,8 @@ struct PTO2TensorMap {
     /**
      * Insert a new entry (called when task produces output)
      *
-     * Allocates from ring buffer pool, may overwrite stale entries.
+     * Allocates from the fixed pool or its explicit-removal free list. A live
+     * entry is never overwritten.
      * Inserts at head of hash bucket chain (maintains task_id ordering).
      *
      * @param tensor            ChipTensor produced
@@ -585,43 +549,6 @@ struct PTO2TensorMap {
         PTO2TensorMapEntry *entry = new_entry();
         entry->copy_from_tensor(tensor);
         link_entry(entry, tensor.buffer.addr, producer_task_id);
-    }
-
-    /**
-     * Cleanup stale entries for retired tasks
-     *
-     * Called periodically by Orchestrator when last_task_alive advances.
-     * Removes entries from bucket chains for tasks in [old, new) range.
-     *
-     * @param old_last_task_alive  Previous threshold
-     * @param new_last_task_alive  New threshold
-     */
-    void cleanup_retired(int32_t old_last_task_alive, int32_t new_last_task_alive) {
-        // Iterate through retired tasks and remove their entries
-        for (int32_t local_id = old_last_task_alive; local_id < new_last_task_alive; local_id++) {
-            int32_t task_slot = local_id & (task_window_size - 1);
-            // A slot's task chain may also hold entries from a newer task that
-            // reused the slot (local_id + N * window) before this cleanup ran.
-            // Free only entries produced by the retiring local_id, unlinking
-            // each from the chain; entries from other tasks stay linked.
-            PTO2TaskId retired_task = PTO2TaskId::make(0, static_cast<uint32_t>(local_id));
-            PTO2TensorMapEntry *cur_entry = task_entry_heads[task_slot];
-            while (cur_entry != nullptr) {
-                PTO2TensorMapEntry *next_entry = cur_entry->next_in_task;  // free_entry clears it
-                if (cur_entry->producer_task_id == retired_task) {
-                    if (cur_entry->prev_in_task != nullptr) {
-                        cur_entry->prev_in_task->next_in_task = next_entry;
-                    } else {
-                        task_entry_heads[task_slot] = next_entry;
-                    }
-                    if (next_entry != nullptr) {
-                        next_entry->prev_in_task = cur_entry->prev_in_task;
-                    }
-                    free_entry(*cur_entry);
-                }
-                cur_entry = next_entry;
-            }
-        }
     }
 
     // =============================================================================
@@ -672,21 +599,15 @@ struct PTO2TensorMap {
         task_entry_heads[task_slot] = entry;
     }
 
-    /**
-     * Check if entry is valid (producer has not retired)
-     */
-    bool entry_valid(const PTO2TensorMapEntry &entry) const {
-        return static_cast<int32_t>(entry.producer_task_id.local()) >= last_task_alive_cached;
-    }
-
     void remove_entry(PTO2TensorMapEntry &entry) {
         remove_from_task(entry);
         free_entry(entry);
     }
 
     /**
-     * Remove entry from its task chain (O(1) with prev pointer)
-     * Called during pool wrap-around to unlink reused entries.
+     * Remove an entry from its task chain (O(1) with prev pointer). Dependency
+     * computation calls this before freeing a producer made redundant by a
+     * covering input.
      */
     void remove_from_task(PTO2TensorMapEntry &entry) {
         always_assert(entry.bucket_index != -1);  // must still be in a bucket
@@ -722,18 +643,6 @@ struct PTO2TensorMap {
      * Get count of valid entries
      */
     int32_t valid_count();
-
-    // =============================================================================
-    // TensorMap Synchronization
-    // =============================================================================
-
-    /**
-     * Sync TensorMap validity threshold from shared memory
-     *
-     * Called periodically to refresh the lazy invalidation threshold.
-     * Also triggers cleanup if threshold has advanced significantly.
-     */
-    void sync_tensormap(PTO2TaskId task_id, int32_t sm_last_task_alive);
 };
 
 #if SIMPLER_TENSORMAP_PROFILING
