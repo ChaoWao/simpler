@@ -72,6 +72,14 @@ simpler_run                                   (= host_wall)
 ├─ simpler_run.bind
 │  ├─ simpler_run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
 │  └─ simpler_run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
+│     └─ simpler_run.bind.prebuilt.arena_h2d   (HBG: arena image H2D, orch block skipped)
+│     └─ simpler_run.bind.host_orch            (HBG: whole host orchestration window)
+│        ├─ .sm_init          (host SM mirror alloc + orchestrator re-init)
+│        ├─ .orch_entry       (orch body: graph record round 0 / definition replay)
+│        ├─ .graph_upload     (graph submission POD upload)
+│        ├─ .relocate         (per-slot pointer host→device rewrite)
+│        ├─ .sm_h2d           (live-prefix SM H2D)
+│        └─ .tensor_view_unmap (halHostUnregister of staged tensors' host views)
 ├─ simpler_run.runner_run          (device enqueue + completion drain)
 │  └─ simpler_run.runner_run.device_wall      (whole on-NPU AICPU wall)
 │     └─ .{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}
@@ -106,8 +114,8 @@ including time the caller spends polling or doing other host work; blocking
 | ----- | ---------- |
 | 0 | `simpler_run` |
 | 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.validate` |
-| 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
-| 3 | TMR phase spans `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
+| 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall`, HBG `simpler_run.bind.host_orch` |
+| 3 | TMR phase spans `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}`, HBG `bind.prebuilt.arena_h2d` and `bind.host_orch.{sm_init,orch_entry,graph_upload,relocate,sm_h2d,tensor_view_unmap}`, and optional `task_slot_*` spans |
 
 ## L3/L4 host scheduler spans
 

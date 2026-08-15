@@ -67,6 +67,7 @@
 #include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
+#include "common/strace.h"
 #include "common/unified_log.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
@@ -521,62 +522,55 @@ int32_t run_host_orchestration(
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
     void *host_orch_func_ptr, const ChipTaskArgs &orch_l2
 ) {
-    // The dep_gen graph belongs to the orchestration that is about to run.
-    dep_gen_host_graph_begin_capture();
-
     // Init-on-write: descriptors, payloads, slot_states and completion_flags are
     // each written per task at submit and read only for [0, total_tasks). Zero
     // only the fixed-size header here; the per-slot segments are initialized in
     // orch::prepare_task and shipped bounded to total_tasks below.
     const pto2_sm_layout::PTO2RingSegmentOffsets sm_segs =
         pto2_sm_layout::ring_segment_offsets(eff_task_window_sizes[0]);
-    std::unique_ptr<uint8_t[]> host_sm_buf(new uint8_t[sm_size]);
-    void *host_sm = host_sm_buf.get();
-    std::memset(host_sm, 0, sm_segs.descriptors);
-
-    // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
-    // init_data_from_layout resets the orchestrator state, so this is safe.
-    if (!rt->orchestrator.init_data_from_layout(
-            layout.orch, host_arena, host_sm, gm_heap, eff_heap_sizes[0], eff_task_window_sizes[0]
-        )) {
-        LOG_ERROR("host-orch: orchestrator re-init against host SM failed");
-        return -1;
-    }
-    rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, &rt->scheduler);
-
-    // Initialize the host SM header (ring flow control) so submit_task can run.
+    std::unique_ptr<uint8_t[]> host_sm_buf;
+    GraphHostStatePtr graph_state;
     PTO2SharedMemoryHandle host_sm_handle;
-    if (!host_sm_handle.init_per_ring(host_sm, sm_size, eff_task_window_sizes, eff_heap_sizes)) {
-        LOG_ERROR("host-orch: host SM init_per_ring failed");
-        return -1;
+    {
+        STRACE("simpler_run.bind.host_orch.sm_init");
+        dep_gen_host_graph_begin_capture();
+        host_sm_buf.reset(new uint8_t[sm_size]);
+        std::memset(host_sm_buf.get(), 0, sm_segs.descriptors);
+
+        // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
+        // init_data_from_layout resets the orchestrator state, so this is safe.
+        if (!rt->orchestrator.init_data_from_layout(
+                layout.orch, host_arena, host_sm_buf.get(), gm_heap, eff_heap_sizes[0], eff_task_window_sizes[0]
+            )) {
+            LOG_ERROR("host-orch: orchestrator re-init against host SM failed");
+            return -1;
+        }
+        rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, &rt->scheduler);
+
+        if (!host_sm_handle.init_per_ring(host_sm_buf.get(), sm_size, eff_task_window_sizes, eff_heap_sizes)) {
+            LOG_ERROR("host-orch: host SM init_per_ring failed");
+            return -1;
+        }
+
+        graph_state = make_graph_host_state();
+        if (!graph_state) {
+            LOG_ERROR("host-orch: failed to allocate Graph host state");
+            return -1;
+        }
+        GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
+
+        const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
+        if (block_dim < 1) {
+            LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
+            return -1;
+        }
+        runtime_finalize_after_wire(
+            rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
+        );
+        rt->mode = PTO2_MODE_EXECUTE;
     }
 
-    GraphHostStatePtr graph_state = make_graph_host_state();
-    if (!graph_state) {
-        LOG_ERROR("host-orch: failed to allocate Graph host state");
-        return -1;
-    }
-    GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
-
-    // Install the ops table (host s_runtime_ops) and latch this run's cluster
-    // counts. worker_count is published by DeviceRunner::prepare_launch_shape
-    // before this bind, so the host orchestrator sees the same geometry the
-    // AICPU re-derives from the handshake at boot.
-    const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
-    if (block_dim < 1) {
-        LOG_ERROR("host-orch: worker_count %d yields no clusters", runtime->get_worker_count());
-        return -1;
-    }
-    runtime_finalize_after_wire(
-        rt, block_dim * PLATFORM_AIC_CORES_PER_BLOCKDIM, block_dim * PLATFORM_AIV_CORES_PER_BLOCKDIM
-    );
-    rt->mode = PTO2_MODE_EXECUTE;
-    // get_tensor_data/set_tensor_data resolve buffer.addr through the host
-    // views registered at staging time (runtime/host_tensor_access.h), so the
-    // host orchestrator can read control tensors (e.g. paged_attention's
-    // context_lens/block_table) whether or not the platform maps device memory
-    // into the host address space.
-
+    void *host_sm = host_sm_buf.get();
     const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
     if (entry_points->bind == nullptr) {
         LOG_ERROR("host-orch: orch .so framework_bind_runtime was not resolved");
@@ -591,13 +585,19 @@ int32_t run_host_orchestration(
     // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
-    rt_scope_begin(rt);
-    entry_points->entry(orch_l2);
-    rt_scope_end(rt);
-    rt_orchestration_done(rt);
+    {
+        STRACE("simpler_run.bind.host_orch.orch_entry");
+        rt_scope_begin(rt);
+        entry_points->entry(orch_l2);
+        rt_scope_end(rt);
+        rt_orchestration_done(rt);
+    }
 
     const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
-    if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
+    {
+        STRACE_A("simpler_run.bind.host_orch.graph_upload", "");
+        if (!upload_graph_submissions(runtime, api, *graph_state)) return -1;
+    }
 
     // total_tasks sizes the bounded per-segment H2D copies below; a value outside
     // [0, task_window] would make those copies read/write out of bounds.
@@ -615,12 +615,15 @@ int32_t run_host_orchestration(
                              static_cast<int64_t>(reinterpret_cast<uint64_t>(host_sm));
     const int64_t arena_delta = static_cast<int64_t>(reinterpret_cast<uint64_t>(device_arena)) -
                                 static_cast<int64_t>(reinterpret_cast<uint64_t>(host_arena.base()));
-    if (!relocate_host_orch_image(
-            host_sm_handle, reinterpret_cast<uint64_t>(host_sm), sm_size, sm_delta,
-            reinterpret_cast<uint64_t>(host_arena.base()), layout.arena_size, arena_delta
-        )) {
-        LOG_ERROR("host-orch: relocation failed; refusing to H2D an image with unrelocated host pointers");
-        return -1;
+    {
+        STRACE("simpler_run.bind.host_orch.relocate");
+        if (!relocate_host_orch_image(
+                host_sm_handle, reinterpret_cast<uint64_t>(host_sm), sm_size, sm_delta,
+                reinterpret_cast<uint64_t>(host_arena.base()), layout.arena_size, arena_delta
+            )) {
+            LOG_ERROR("host-orch: relocation failed; refusing to H2D an image with unrelocated host pointers");
+            return -1;
+        }
     }
 
     // Ship only the live prefix of each segment: the device reads no slot past
@@ -631,17 +634,22 @@ int32_t run_host_orchestration(
     const uint64_t hdr_desc_bytes = sm_segs.descriptors + nt * sizeof(PTO2TaskDescriptor);
     char *host_base = static_cast<char *>(host_sm);
     char *dev_base = static_cast<char *>(device_sm);
-    if (api->copy_to_device(dev_base, host_base, hdr_desc_bytes) != 0 ||
-        api->copy_to_device(dev_base + sm_segs.payloads, host_base + sm_segs.payloads, nt * sizeof(PTO2TaskPayload)) !=
-            0 ||
-        api->copy_to_device(
-            dev_base + sm_segs.slot_states, host_base + sm_segs.slot_states, nt * sizeof(PTO2TaskSlotState)
-        ) != 0 ||
-        api->copy_to_device(
-            dev_base + sm_segs.completion_flags, host_base + sm_segs.completion_flags, nt * sizeof(std::atomic<uint8_t>)
-        ) != 0) {
-        LOG_ERROR("host-orch: H2D of populated SM failed");
-        return -1;
+    {
+        STRACE_A("simpler_run.bind.host_orch.sm_h2d", "");
+        if (api->copy_to_device(dev_base, host_base, hdr_desc_bytes) != 0 ||
+            api->copy_to_device(
+                dev_base + sm_segs.payloads, host_base + sm_segs.payloads, nt * sizeof(PTO2TaskPayload)
+            ) != 0 ||
+            api->copy_to_device(
+                dev_base + sm_segs.slot_states, host_base + sm_segs.slot_states, nt * sizeof(PTO2TaskSlotState)
+            ) != 0 ||
+            api->copy_to_device(
+                dev_base + sm_segs.completion_flags, host_base + sm_segs.completion_flags,
+                nt * sizeof(std::atomic<uint8_t>)
+            ) != 0) {
+            LOG_ERROR("host-orch: H2D of populated SM failed");
+            return -1;
+        }
     }
     return total_tasks;
 }
@@ -806,6 +814,7 @@ extern "C" int bind_callable_to_runtime_impl(
     HostTensorAccessor tensor_access(api);
 
     int64_t t_args_start = _now_ms();
+    STRACE_A("simpler_run.bind.args", "");
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
@@ -887,124 +896,139 @@ extern "C" int bind_callable_to_runtime_impl(
     uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(eff_task_window_sizes);
 
     int64_t t_prebuilt_start = _now_ms();
-    DeviceArena host_arena;  // libc malloc backend by default
-    PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_sizes, eff_heap_sizes);
-    if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
-        LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
-        return -1;
-    }
-
-    int64_t t_setup_start = _now_ms();
-    if (api->setup_static_arena(total_heap_size, sm_size, layout.arena_size) != 0) {
-        LOG_ERROR("Failed to setup pooled static arena");
-        return -1;
-    }
-    int64_t t_setup_end = _now_ms();
-
-    int64_t t_heap_start = _now_ms();
-    void *gm_heap = api->acquire_pooled_gm_heap();
-    int64_t t_heap_end = _now_ms();
-    if (gm_heap == nullptr) {
-        LOG_ERROR("Failed to acquire pooled GM heap");
-        return -1;
-    }
-    runtime->set_gm_heap(gm_heap);
-
-    int64_t t_sm_start = _now_ms();
-    void *sm_ptr = api->acquire_pooled_gm_sm();
-    int64_t t_sm_end = _now_ms();
-    if (sm_ptr == nullptr) {
-        LOG_ERROR("Failed to acquire pooled PTO2 shared memory");
-        return -1;
-    }
-    runtime->set_gm_sm_ptr(sm_ptr);
-
-    void *runtime_arena_dev = api->acquire_pooled_runtime_arena();
-    if (runtime_arena_dev == nullptr) {
-        LOG_ERROR("Failed to acquire pooled runtime arena");
-        return -1;
-    }
-
-    // Set up orchestration state (consumed by the host orchestrator below)
-    runtime->set_orch_args(device_args);
-
-    // -------------------------------------------------------------------------
-    // Build the prebuilt runtime-arena image on host.
-    //
-    // We pre-compute every byte the AICPU's runtime arena would otherwise have
-    // to write at boot: layout offsets, sub-structure init data, and pointers
-    // back to the SM / GM heap. Then we rtMemcpy the image into the pooled
-    // runtime-arena region that DeviceRunner keeps alive across runs. AICPU
-    // boot becomes attach + wire (cheap pointer fixup) + sm_handle->init (SM
-    // reset) + a handful of device-only field fixups.
-    // -------------------------------------------------------------------------
-    PTO2Runtime *rt =
-        runtime_init_data_from_layout(host_arena, layout, PTO2_MODE_EXECUTE, sm_ptr, sm_size, gm_heap, eff_heap_sizes);
-    if (rt == nullptr) {
-        LOG_ERROR("runtime_init_data_from_layout failed");
-        return -1;
-    }
-    runtime_wire_arena_pointers(host_arena, layout, rt);
-
-    // host_build_graph host-orch: run the orchestrator on the host now, against
-    // a host SM mirror, and ship the populated SM to the device. The arena
-    // (copied to the device below) carries the resulting orchestrator/scheduler
-    // state; the device boots scheduler-only. register_callable_impl guarantees
-    // host_orch_func_ptr is non-null on success (it fails the whole prepare
-    // otherwise), so this is an assertion-style guard, not a fallback path.
-    if (host_orch_func_ptr == nullptr) {
-        LOG_ERROR("host-orch: orchestration entry points were not resolved");
-        return -1;
-    }
+    int64_t t_setup_start = 0, t_setup_end = 0, t_heap_start = 0, t_heap_end = 0, t_sm_start = 0, t_sm_end = 0;
+    int64_t t_prebuilt_end = 0;
     {
-        ChipTaskArgs orch_l2;
-        orch_l2.create_from_chip_args(device_args);
-        int32_t total_tasks = run_host_orchestration(
-            runtime, api, tensor_access, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap,
-            eff_heap_sizes, eff_task_window_sizes, host_orch_func_ptr, orch_l2
-        );
-        // The orchestrator is the only host-view reader; from here the device
-        // owns these buffers, so drop the window on both exits.
-        tensor_access.close();
-        if (total_tasks < 0) {
-            LOG_ERROR("host-orch: orchestration run failed");
+        STRACE("simpler_run.bind.prebuilt");
+        DeviceArena host_arena;  // libc malloc backend by default
+        PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, eff_task_window_sizes, eff_heap_sizes);
+        if (host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
+            LOG_ERROR("Failed to commit host arena for prebuilt runtime image");
             return -1;
         }
-        runtime->host_total_tasks = total_tasks;
-        LOG_INFO("host-orch: submitted %d tasks on host", total_tasks);
-    }
 
-    // Stash the layout inside the PTO2Runtime image so the AICPU can recover
-    // every arena-internal offset after rtMemcpy. The runtime arena's device
-    // base does NOT travel in this image — it's on the host Runtime
-    // (set_prebuilt_arena below), since the AICPU needs that pointer
-    // *before* it can dereference the image.
-    rt->prebuilt_layout = layout;
+        t_setup_start = _now_ms();
+        if (api->setup_static_arena(total_heap_size, sm_size, layout.arena_size) != 0) {
+            LOG_ERROR("Failed to setup pooled static arena");
+            return -1;
+        }
+        t_setup_end = _now_ms();
 
-    // Skip uploading the orchestrator block (fanin_seen_epoch / scope / tensormap,
-    // ~8.5 MB): it is host-only dep-computation scratch that the AICPU scheduler
-    // never reads. Ship [0, orch_start) (sm_handle) and [orch_end, arena_size)
-    // (ready queues + runtime header + mailbox) whole; the orch block between them
-    // is not sent. orch_start/orch_end are the first orch and first scheduler
-    // reservations (runtime_reserve_layout order: sm_handle -> orch -> sched); the
-    // ready queues ship in full because graph execution expands a GRAPH task into
-    // on-device nodes that push past the host task count.
-    const auto &sq = layout.sched;
-    const size_t orch_start = layout.orch.off_fanin_seen_epoch;
-    const size_t orch_end = sq.off_ready_queue_slots[0];
-    always_assert(orch_start <= orch_end);
-    char *arena_host = static_cast<char *>(host_arena.base());
-    char *arena_dev = static_cast<char *>(runtime_arena_dev);
-    int rc_upload = api->copy_to_device(arena_dev, arena_host, orch_start);
-    if (rc_upload == 0) {
-        rc_upload = api->copy_to_device(arena_dev + orch_end, arena_host + orch_end, layout.arena_size - orch_end);
+        t_heap_start = _now_ms();
+        void *gm_heap = api->acquire_pooled_gm_heap();
+        t_heap_end = _now_ms();
+        if (gm_heap == nullptr) {
+            LOG_ERROR("Failed to acquire pooled GM heap");
+            return -1;
+        }
+        runtime->set_gm_heap(gm_heap);
+
+        t_sm_start = _now_ms();
+        void *sm_ptr = api->acquire_pooled_gm_sm();
+        t_sm_end = _now_ms();
+        if (sm_ptr == nullptr) {
+            LOG_ERROR("Failed to acquire pooled PTO2 shared memory");
+            return -1;
+        }
+        runtime->set_gm_sm_ptr(sm_ptr);
+
+        void *runtime_arena_dev = api->acquire_pooled_runtime_arena();
+        if (runtime_arena_dev == nullptr) {
+            LOG_ERROR("Failed to acquire pooled runtime arena");
+            return -1;
+        }
+
+        // Set up orchestration state (consumed by the host orchestrator below)
+        runtime->set_orch_args(device_args);
+
+        // -------------------------------------------------------------------------
+        // Build the prebuilt runtime-arena image on host.
+        //
+        // We pre-compute every byte the AICPU's runtime arena would otherwise have
+        // to write at boot: layout offsets, sub-structure init data, and pointers
+        // back to the SM / GM heap. Then we rtMemcpy the image into the pooled
+        // runtime-arena region that DeviceRunner keeps alive across runs. AICPU
+        // boot becomes attach + wire (cheap pointer fixup) + sm_handle->init (SM
+        // reset) + a handful of device-only field fixups.
+        // -------------------------------------------------------------------------
+        PTO2Runtime *rt = runtime_init_data_from_layout(
+            host_arena, layout, PTO2_MODE_EXECUTE, sm_ptr, sm_size, gm_heap, eff_heap_sizes
+        );
+        if (rt == nullptr) {
+            LOG_ERROR("runtime_init_data_from_layout failed");
+            return -1;
+        }
+        runtime_wire_arena_pointers(host_arena, layout, rt);
+
+        // host_build_graph host-orch: run the orchestrator on the host now, against
+        // a host SM mirror, and ship the populated SM to the device. The arena
+        // (copied to the device below) carries the resulting orchestrator/scheduler
+        // state; the device boots scheduler-only. register_callable_impl guarantees
+        // host_orch_func_ptr is non-null on success (it fails the whole prepare
+        // otherwise), so this is an assertion-style guard, not a fallback path.
+        if (host_orch_func_ptr == nullptr) {
+            LOG_ERROR("host-orch: orchestration entry points were not resolved");
+            return -1;
+        }
+        {
+            STRACE("simpler_run.bind.host_orch");
+            ChipTaskArgs orch_l2;
+            orch_l2.create_from_chip_args(device_args);
+            int32_t total_tasks = run_host_orchestration(
+                runtime, api, tensor_access, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap,
+                eff_heap_sizes, eff_task_window_sizes, host_orch_func_ptr, orch_l2
+            );
+            // The orchestrator is the only host-view reader; from here the device
+            // owns these buffers, so drop the window on both exits.
+            {
+                STRACE("simpler_run.bind.host_orch.tensor_view_unmap");
+                tensor_access.close();
+            }
+            if (total_tasks < 0) {
+                LOG_ERROR("host-orch: orchestration run failed");
+                return -1;
+            }
+            runtime->host_total_tasks = total_tasks;
+            LOG_INFO("host-orch: submitted %d tasks on host", total_tasks);
+        }
+
+        // Stash the layout inside the PTO2Runtime image so the AICPU can recover
+        // every arena-internal offset after rtMemcpy. The runtime arena's device
+        // base does NOT travel in this image — it's on the host Runtime
+        // (set_prebuilt_arena below), since the AICPU needs that pointer
+        // *before* it can dereference the image.
+        rt->prebuilt_layout = layout;
+
+        // Skip uploading the orchestrator block (fanin_seen_epoch / scope / tensormap,
+        // ~8.5 MB): it is host-only dep-computation scratch that the AICPU scheduler
+        // never reads. Ship [0, orch_start) (sm_handle) and [orch_end, arena_size)
+        // (ready queues + runtime header + mailbox) whole; the orch block between them
+        // is not sent. orch_start/orch_end are the first orch and first scheduler
+        // reservations (runtime_reserve_layout order: sm_handle -> orch -> sched); the
+        // ready queues ship in full because graph execution expands a GRAPH task into
+        // on-device nodes that push past the host task count.
+        const auto &sq = layout.sched;
+        const size_t orch_start = layout.orch.off_fanin_seen_epoch;
+        const size_t orch_end = sq.off_ready_queue_slots[0];
+        always_assert(orch_start <= orch_end);
+        char *arena_host = static_cast<char *>(host_arena.base());
+        char *arena_dev = static_cast<char *>(runtime_arena_dev);
+        int rc_upload = 0;
+        {
+            STRACE_A("simpler_run.bind.prebuilt.arena_h2d", "");
+            rc_upload = api->copy_to_device(arena_dev, arena_host, orch_start);
+            if (rc_upload == 0) {
+                rc_upload =
+                    api->copy_to_device(arena_dev + orch_end, arena_host + orch_end, layout.arena_size - orch_end);
+            }
+        }
+        if (rc_upload != 0) {
+            LOG_ERROR("Failed to rtMemcpy prebuilt runtime arena to device (rc=%d)", rc_upload);
+            return -1;
+        }
+        runtime->set_prebuilt_arena(runtime_arena_dev, layout.off_runtime);
+        t_prebuilt_end = _now_ms();
     }
-    if (rc_upload != 0) {
-        LOG_ERROR("Failed to rtMemcpy prebuilt runtime arena to device (rc=%d)", rc_upload);
-        return -1;
-    }
-    runtime->set_prebuilt_arena(runtime_arena_dev, layout.off_runtime);
-    int64_t t_prebuilt_end = _now_ms();
 
     LOG_INFO("Device orchestration ready: %d tensors + %d scalars", tensor_count, scalar_count);
 
