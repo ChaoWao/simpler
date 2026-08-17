@@ -238,6 +238,45 @@ merely concurrent. That is a statement about pipeline depth and it is sensitive
 to host scheduling, so it is opt-in and the scene test asserts only the overlap
 property.
 
+### The scene test carries its own negative controls
+
+`tests/st/a2a3/host_build_graph/concurrent_prepare_stress` drives three arms
+through one pipeline driver and reads this same verdict, so each control differs
+from the positive arm in exactly one variable:
+
+| Arm | Variable moved | Required verdict |
+| --- | -------------- | ---------------- |
+| overlap stress | — | accepted, one check per adjacent pair |
+| serial submission | one run in flight instead of two | rejected, `did not overlap` |
+| diagnostics config | `enable_scope_stats` set | rejected, `did not overlap` |
+
+The second arm is what makes the first a detector rather than a formality.
+Between the pipeline and the verdict sits a chain — which spans are emitted,
+where their endpoints land, `bind` standing in for preparation, `runner_run`
+being a host wall span that includes caller polling — and if any link reported an
+intersection independent of real concurrency, the positive arm would still be
+green. Matching the message matters: it separates a real rejection from the
+vacuous "need at least two complete native runs" one.
+
+The third arm covers a fallback that is otherwise silent. `allow_prepared_successor`
+folds in `CallConfig::diagnostics_any()` — the OR of all five diagnostic flags —
+because a collector's setup mutates runner-global state that is not yet
+per-epoch, so *any* one of them keeps a run and its successor on separate device
+windows even at depth 2. The lane's own check declines to stage rather than
+raising, so the submissions still succeed and the goldens still pass; nothing
+else would notice. Which flag is set does not matter, only that
+`diagnostics_any()` becomes true, so the arm picks the lightest.
+
+Staging has three inputs and only that one is reachable from a submission. The
+other two — the runtime PipelineContract's `pipeline_depth` and the runtime's
+concurrent-prepare capability symbol — are compile-time properties: every onboard
+runtime declares depth 2 (`PTO_PIPELINE_MAX_DEPTH` is 2) and returns 1 from the
+capability impl, while the sim platform hardcodes 0, so overlap never happens
+under simulation. Because neither is configurable, being unable to stage a
+successor is a **failure** in the scene test rather than a skip — a skip would
+report green for the one state in which the property cannot hold. The platform
+gate runs first, so the sim path never reaches that assert.
+
 ## Why markers, not a return value
 
 Android's atrace writes to the ftrace `trace_marker` sink and systrace renders
