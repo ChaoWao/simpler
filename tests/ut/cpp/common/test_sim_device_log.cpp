@@ -14,6 +14,7 @@
 // the shared stderr concurrently. Each record is <= PIPE_BUF, so a single
 // write(2) to a pipe is atomic and cannot interleave with another writer.
 
+#include <cerrno>
 #include <cstdarg>
 #include <cstdio>
 #include <set>
@@ -61,11 +62,13 @@ std::string record(int level_idx, const char *func, const std::string &body) {
     return std::string("[") + kTags[level_idx % 5] + "] " + func + ": " + body;
 }
 
-// Redirect stderr onto a fresh pipe. All writers stay well under the pipe's
-// 64 KiB capacity, so they never block before the reader drains.
+// Redirect stderr onto a fresh pipe. The reader drains concurrently with the
+// writers, so completion does not depend on the pipe's capacity.
 struct Capture {
     int read_fd = -1;
     int saved_stderr = -1;
+    std::string output;
+    std::thread reader;
 };
 
 Capture begin_capture() {
@@ -81,21 +84,38 @@ Capture begin_capture() {
     return cap;
 }
 
-// Restore stderr (closing the last write handle so read hits EOF) and slurp
-// everything the pipe holds.
+void start_drain(Capture &cap) {
+    cap.reader = std::thread([&cap] {
+        char buf[4096];
+        while (true) {
+            ssize_t n = read(cap.read_fd, buf, sizeof(buf));
+            if (n > 0) {
+                cap.output.append(buf, static_cast<size_t>(n));
+            } else if (n == 0) {
+                break;
+            } else if (errno != EINTR) {
+                break;
+            }
+        }
+        close(cap.read_fd);
+    });
+}
+
+// Restoring stderr closes the last write handle after all writers exit, which
+// delivers EOF to the reader.
 std::string end_capture(Capture &cap) {
     fflush(stderr);
-    EXPECT_GE(dup2(cap.saved_stderr, STDERR_FILENO), 0);
+    int restored;
+    do {
+        restored = dup2(cap.saved_stderr, STDERR_FILENO);
+    } while (restored < 0 && errno == EINTR);
+    EXPECT_GE(restored, 0);
     close(cap.saved_stderr);
-
-    std::string out;
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(cap.read_fd, buf, sizeof(buf))) > 0) {
-        out.append(buf, static_cast<size_t>(n));
+    if (restored < 0) {
+        close(STDERR_FILENO);
     }
-    close(cap.read_fd);
-    return out;
+    cap.reader.join();
+    return std::move(cap.output);
 }
 
 // Assert the captured stream is exactly `expected`, one intact record per
@@ -118,7 +138,7 @@ void expect_intact(const std::string &captured, std::multiset<std::string> expec
 
 TEST(SimDeviceLogTest, MultiThreadedRecordsStayIntact) {
     constexpr int kThreads = 4;
-    constexpr int kPerThread = 200;
+    constexpr int kPerThread = 2000;
 
     std::multiset<std::string> expected;
     for (int t = 0; t < kThreads; ++t) {
@@ -130,6 +150,7 @@ TEST(SimDeviceLogTest, MultiThreadedRecordsStayIntact) {
     }
 
     Capture cap = begin_capture();
+    start_drain(cap);
     std::vector<std::thread> threads;
     threads.reserve(kThreads);
     for (int t = 0; t < kThreads; ++t) {
@@ -149,7 +170,7 @@ TEST(SimDeviceLogTest, MultiThreadedRecordsStayIntact) {
 
 TEST(SimDeviceLogTest, ForkedProcessesEmitWholeRecords) {
     constexpr int kChildren = 8;
-    constexpr int kPerChild = 100;
+    constexpr int kPerChild = 1000;
 
     std::multiset<std::string> expected;
     for (int c = 0; c < kChildren; ++c) {
@@ -174,11 +195,21 @@ TEST(SimDeviceLogTest, ForkedProcessesEmitWholeRecords) {
         }
         pids.push_back(pid);
     }
+    start_drain(cap);
     for (pid_t pid : pids) {
         int status = 0;
-        ASSERT_EQ(waitpid(pid, &status, 0), pid);
-        ASSERT_TRUE(WIFEXITED(status)) << "child terminated abnormally";
-        EXPECT_EQ(WEXITSTATUS(status), 0);
+        pid_t waited;
+        do {
+            waited = waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        EXPECT_EQ(waited, pid);
+        if (waited != pid) {
+            continue;
+        }
+        EXPECT_TRUE(WIFEXITED(status)) << "child terminated abnormally";
+        if (WIFEXITED(status)) {
+            EXPECT_EQ(WEXITSTATUS(status), 0);
+        }
     }
     std::string captured = end_capture(cap);
 

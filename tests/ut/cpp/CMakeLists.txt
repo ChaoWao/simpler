@@ -1012,7 +1012,10 @@ target_link_libraries(test_sim_device_log PRIVATE
     pthread
 )
 add_test(NAME test_sim_device_log COMMAND test_sim_device_log)
-set_tests_properties(test_sim_device_log PROPERTIES LABELS "no_hardware")
+set_tests_properties(test_sim_device_log PROPERTIES
+    LABELS "no_hardware"
+    TIMEOUT 30
+)
 
 # a2a3 host-side AICPU affinity selection (compute_allowed_cpus). Pure logic —
 # no CANN headers, no hardware: compile the probe .cpp alongside the test. The
