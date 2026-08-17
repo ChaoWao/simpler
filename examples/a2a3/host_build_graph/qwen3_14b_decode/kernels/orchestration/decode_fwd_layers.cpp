@@ -218,7 +218,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 ChipTensor graph_normed = normed__rv_v5;
                 graph_normed.owner_task_id = prev_normed_tid[0];
 
-                CoreTaskArgs graph_args;
+                GraphTaskArgs graph_args;
                 graph_args.add_input(cur__rv_v7);
                 graph_args.add_input(graph_normed);
                 graph_args.add_inout(next_hidden);
@@ -246,7 +246,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 graph_args.add_inout(bf16_scratch);
                 graph_args.add_inout(fp32_scratch);
 
-                auto layer_definition = [](const CoreTaskArgs &args) {
+                auto layer_definition = [](const GraphTaskArgs &args) {
                     const ChipTensor &cur__rv_v7 = args.tensor(0).ref();
                     const ChipTensor &normed__rv_v5 = args.tensor(1).ref();
                     const ChipTensor &next_hidden = args.tensor(2).ref();

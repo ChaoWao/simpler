@@ -19,7 +19,7 @@
 
 namespace {
 
-void mix_spmd_layer(const CoreTaskArgs &args) {
+void mix_spmd_layer(const GraphTaskArgs &args) {
     MixedKernels kernels;
     kernels.aic_kernel_id = FUNC_SPMD_MIX_AIC;
     kernels.aiv0_kernel_id = FUNC_SPMD_MIX_AIV0;
@@ -33,7 +33,7 @@ void mix_spmd_layer(const CoreTaskArgs &args) {
     rt_submit_task(kernels, task_args);
 }
 
-void submit_layer(const CoreTaskArgs &args) { rt_submit_graph(&mix_spmd_layer, args); }
+void submit_layer(const GraphTaskArgs &args) { rt_submit_graph(&mix_spmd_layer, args); }
 
 }  // namespace
 
@@ -48,7 +48,7 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &args) {
     for (int32_t output_index = 0; output_index < 3; ++output_index) {
-        CoreTaskArgs layer_args;
+        GraphTaskArgs layer_args;
         layer_args.add_inout(args.tensor(output_index).ref());
         submit_layer(layer_args);
     }

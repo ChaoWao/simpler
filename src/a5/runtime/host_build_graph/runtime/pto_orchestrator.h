@@ -156,8 +156,8 @@ struct PTO2OrchestratorState {
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);
     TaskOutputTensors alloc_tensors(const CoreTaskArgs &args);
-    GraphScopeResult graph_begin(uint64_t graph_key, const CoreTaskArgs &args, uint64_t callable_hash);
-    bool graph_prepare(const CoreTaskArgs &args);
+    GraphScopeResult graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash);
+    bool graph_prepare(const GraphTaskArgs &args);
     void graph_abort();
     bool graph_end();
     void graph_commit();

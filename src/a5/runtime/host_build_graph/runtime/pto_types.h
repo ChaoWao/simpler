@@ -685,6 +685,17 @@ private:
 //   orchestration (small, stack-friendly).
 using CoreTaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
 
+// Tensor and scalar capacity of a Graph boundary.
+inline constexpr uint32_t GRAPH_MAX_TENSOR_ARGS = 128;
+inline constexpr uint32_t GRAPH_MAX_SCALAR_ARGS = 64;
+
+// Boundary arguments of a Graph. Sized independently of CoreTaskArgs because a
+// Graph boundary never becomes a task payload — graph_reset_outer_payload zeroes
+// the outer GRAPH task's tensor_count, and the boundary is read host-side only,
+// by graph_boundary_matches and graph_build_submission_image. Widening it costs
+// orchestration stack, not PTO2TaskPayload and not the bytes shipped to device.
+using GraphTaskArgs = Arg<GRAPH_MAX_TENSOR_ARGS, GRAPH_MAX_SCALAR_ARGS>;
+
 // ChipTaskArgs — chip-level entry-arg holding the orchestration entry's
 // already-allocated inputs (capacity matches ChipStorageTaskArgs).
 // aicpu_orchestration_entry/config receive a const ChipTaskArgs&.

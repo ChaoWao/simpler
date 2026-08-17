@@ -21,7 +21,7 @@
 
 namespace {
 
-void layer(const CoreTaskArgs &args, int variant) {
+void layer(const GraphTaskArgs &args, int variant) {
     const ChipTensor &a = args.tensor(0).ref();
     const ChipTensor &b = args.tensor(1).ref();
     const ChipTensor &output = args.tensor(2).ref();
@@ -66,7 +66,7 @@ void layer(const CoreTaskArgs &args, int variant) {
     rt_submit_aiv_task(FUNC_MUL, mul_args);
 }
 
-void submit_layer(const CoreTaskArgs &args, int variant) { rt_submit_graph(&layer, args, variant); }
+void submit_layer(const GraphTaskArgs &args, int variant) { rt_submit_graph(&layer, args, variant); }
 
 }  // namespace
 
@@ -97,7 +97,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     const std::array<float, 3> unused_deltas{7.0F, 8.0F, 9.0F};
     const std::array<int, 3> variants{0, 1, 0};
     for (size_t layer = 0; layer < variants.size(); ++layer) {
-        CoreTaskArgs layer_args;
+        GraphTaskArgs layer_args;
         layer_args.add_input(seeded_a, b);
         layer_args.add_output(args.tensor(static_cast<int32_t>(layer) + 2).ref());
         if (variants[layer] == 0) {

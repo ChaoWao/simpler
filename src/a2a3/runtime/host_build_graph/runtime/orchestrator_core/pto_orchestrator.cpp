@@ -318,7 +318,7 @@ struct GraphRecording {
     // Worker-owned deep copy of the first Graph boundary. It stays valid from
     // graph_prepare through graph_end and anchors boundary scalar sources while
     // the main thread submits outer shells from later invocation arguments.
-    const CoreTaskArgs *boundary_args{nullptr};
+    const GraphTaskArgs *boundary_args{nullptr};
     int32_t boundary_scalar_count{0};
     bool unsupported{false};
     std::vector<ChipTensor> boundary_tensors;
@@ -410,10 +410,14 @@ bool graph_tensor_from_boundary(
     return false;
 }
 
+template <typename ArgT>
 GraphRecordedScalarSourceRef
-graph_classify_scalar(const GraphRecording &recording, const CoreTaskArgs &args, int32_t scalar_index) {
+graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t scalar_index) {
     if (recording.boundary_args == nullptr) return {};
-    if (&args == recording.boundary_args && scalar_index < recording.boundary_args->scalar_count()) {
+    // Identity, not type: an internal node's Arg and the boundary Arg have
+    // different capacities, so compare the addresses through void.
+    if (static_cast<const void *>(&args) == static_cast<const void *>(recording.boundary_args) &&
+        scalar_index < recording.boundary_args->scalar_count()) {
         return GraphRecordedScalarSourceRef{GraphRecordedScalarSource::BOUNDARY, static_cast<size_t>(scalar_index)};
     }
 
@@ -1254,7 +1258,7 @@ static TaskOutputTensors submit_task_common(
 
 namespace {
 
-bool graph_boundary_matches(const GraphDefinition &definition, const CoreTaskArgs &args) {
+bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskArgs &args) {
     if (args.scalar_count() != static_cast<int32_t>(definition.boundary_scalar_count) ||
         args.explicit_dep_count() != 0 || args.tensor_count() != static_cast<int32_t>(definition.boundary_count)) {
         LOG_WARN(
@@ -1312,7 +1316,7 @@ bool graph_boundary_matches(const GraphDefinition &definition, const CoreTaskArg
     return true;
 }
 
-bool graph_recording_boundary_matches(const GraphRecording &recording, const CoreTaskArgs &args) {
+bool graph_recording_boundary_matches(const GraphRecording &recording, const GraphTaskArgs &args) {
     if (args.scalar_count() != recording.boundary_scalar_count || args.explicit_dep_count() != 0 ||
         args.tensor_count() != static_cast<int32_t>(recording.boundary_tensors.size()) ||
         recording.boundary_tensors.size() != recording.boundary_types.size()) {
@@ -1372,7 +1376,7 @@ void graph_reset_outer_payload(PTO2TaskPayload &payload) {
 }
 
 bool graph_prepare_submission_image(
-    uint64_t full_key, const CoreTaskArgs &args, std::vector<std::byte> *submission_image
+    uint64_t full_key, const GraphTaskArgs &args, std::vector<std::byte> *submission_image
 ) {
     if (submission_image == nullptr) return false;
     const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
@@ -1412,7 +1416,7 @@ bool graph_prepare_submission_image(
 
 bool graph_submit_outer(
     PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, uint64_t definition_hash, int32_t owned_heap,
-    bool defer_heap, const CoreTaskArgs &args, PTO2TaskId *submitted_id
+    bool defer_heap, const GraphTaskArgs &args, PTO2TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
     auto &allocator = orch->ring.task_allocator;
@@ -1482,7 +1486,7 @@ bool graph_submit_outer(
 
 bool graph_submit_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
-    const CoreTaskArgs &args, PTO2TaskId *submitted_id
+    const GraphTaskArgs &args, PTO2TaskId *submitted_id
 ) {
     const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
@@ -1499,7 +1503,7 @@ bool graph_submit_definition(
 }
 
 bool graph_submit_pending_definition(
-    PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const CoreTaskArgs &args,
+    PTO2OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args,
     PTO2TaskId *submitted_id
 ) {
     return graph_submit_outer(orch, state, full_key, 0, 0, true, args, submitted_id);
@@ -1688,7 +1692,7 @@ TaskOutputTensors graph_record_submit_node(
 }  // namespace
 
 GraphScopeResult
-PTO2OrchestratorState::graph_begin(uint64_t graph_key, const CoreTaskArgs &args, uint64_t callable_hash) {
+PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     auto *orch = this;
     GraphScopeResult result;
     GraphHostState *state = graph_state_from(orch);
@@ -1799,7 +1803,7 @@ PTO2OrchestratorState::graph_begin(uint64_t graph_key, const CoreTaskArgs &args,
     return result;
 }
 
-bool PTO2OrchestratorState::graph_prepare(const CoreTaskArgs &args) {
+bool PTO2OrchestratorState::graph_prepare(const GraphTaskArgs &args) {
     GraphHostState *state = graph_state_from(this);
     if (state == nullptr || g_active_graph_recording != nullptr) return false;
     // graph_begin publishes this unique recording before the private job is
