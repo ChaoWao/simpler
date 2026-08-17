@@ -594,11 +594,13 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     int runtime_rc = run_completion_.first_error();
     if (runtime_rc != 0) {
         LOG_ERROR("AICPU execution failed with rc=%d", runtime_rc);
+        finish_clock_correlation_session(false);
         return runtime_rc;
     }
 
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
+    finish_clock_correlation_session(true);
     if (enable_chip_swimlane_) {
         chip_swimlane_collector_.stop();
         chip_swimlane_collector_.read_phase_header_metadata();

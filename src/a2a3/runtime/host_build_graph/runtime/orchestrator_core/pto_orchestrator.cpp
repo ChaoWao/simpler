@@ -170,6 +170,7 @@ uint64_t g_orch_scope_end_atomic_count = 0;
 #define CYCLE_COUNT_ORCH_SUBMIT_RECORD(tid)                                                         \
     do {                                                                                            \
         if (_prof_active) {                                                                         \
+            _t1 = get_sys_cnt_aicpu();                                                              \
             chip_swimlane_aicpu_record_orch_phase(_submit_start_ts, _t1, (tid), g_orch_submit_idx); \
         }                                                                                           \
     } while (0)
@@ -1432,6 +1433,7 @@ bool graph_submit_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
     const CoreTaskArgs &args, PTO2TaskId *submitted_id
 ) {
+    CYCLE_COUNT_START();
     const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
         definition->required_heap > static_cast<uint64_t>(INT32_MAX)) {
@@ -1497,6 +1499,7 @@ bool graph_submit_definition(
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(std::move(pending));
     if (submitted_id != nullptr) *submitted_id = task_id;
+    CYCLE_COUNT_ORCH_SUBMIT_RECORD(task_id.raw);
 #if SIMPLER_DFX
     orch->tasks_submitted++;
 #endif

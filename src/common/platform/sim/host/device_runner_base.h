@@ -268,6 +268,15 @@ public:
         chip_swimlane_level_ = static_cast<ChipSwimlaneLevel>(level);
         enable_chip_swimlane_ = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
     }
+    uint32_t chip_swimlane_level() const { return static_cast<uint32_t>(chip_swimlane_level_); }
+    void begin_host_orchestrator_capture(uint64_t reserve_capacity) noexcept;
+    void record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) noexcept {
+        chip_swimlane_collector_.record_host_orchestrator_phase(record);
+    }
+    void finish_host_orchestrator_capture(uint64_t expected_records) noexcept {
+        chip_swimlane_collector_.finish_host_orchestrator_capture(expected_records);
+    }
+    void finish_clock_correlation_session(bool capture_device_complete) noexcept;
     void set_dump_args_enabled(int level) {
         dump_args_level_ = static_cast<DumpArgsLevel>(level);
         enable_dump_args_ = (dump_args_level_ != DumpArgsLevel::OFF);
@@ -451,6 +460,7 @@ protected:
 
     // Performance / diagnostics collectors shared across arches.
     ChipSwimlaneCollector chip_swimlane_collector_;
+    std::unique_ptr<simpler::dfx::ClockCorrelationProvider> clock_correlation_provider_{};
     ArgsDumpCollector dump_collector_;
     PmuCollector pmu_collector_;
     ScopeStatsCollector scope_stats_collector_;

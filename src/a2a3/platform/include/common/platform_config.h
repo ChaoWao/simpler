@@ -190,6 +190,12 @@ constexpr int PLATFORM_PROF_READYQUEUE_SIZE =
  */
 constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 50000000;  // 50 MHz
 
+// aclrtEventGetTimestamp capability, verified on a2a3 silicon: the raw value
+// is device-uptime microseconds and covers the same epoch as profiling syscnt
+// after frequency normalization.
+constexpr uint64_t PLATFORM_ACL_EVENT_TIMESTAMP_FREQ_HZ = 1000000;
+constexpr const char *PLATFORM_ACL_EVENT_TIMESTAMP_UNIT = "device_uptime_us";
+
 /**
  * Unified spin-wait timeout for DFX subsystem backpressure gates (system-counter
  * cycles). Every DFX collector's park loop aborts after this budget on host

@@ -164,6 +164,26 @@ static uint64_t upload_chip_callable_buffer_wrapper(void *runner_ctx, const void
     }
 }
 
+static uint32_t get_chip_swimlane_level(void *runner_ctx) {
+    if (runner_ctx == nullptr) return 0;
+    return static_cast<SimDeviceRunnerBase *>(runner_ctx)->chip_swimlane_level();
+}
+
+static void begin_host_orchestrator_capture(void *runner_ctx, uint64_t reserve_capacity) noexcept {
+    if (runner_ctx == nullptr) return;
+    static_cast<SimDeviceRunnerBase *>(runner_ctx)->begin_host_orchestrator_capture(reserve_capacity);
+}
+
+static void record_host_orchestrator_phase(void *runner_ctx, const ChipSwimlaneHostOrchPhaseRecord *record) noexcept {
+    if (runner_ctx == nullptr || record == nullptr) return;
+    static_cast<SimDeviceRunnerBase *>(runner_ctx)->record_host_orchestrator_phase(*record);
+}
+
+static void finish_host_orchestrator_capture(void *runner_ctx, uint64_t expected_records) noexcept {
+    if (runner_ctx == nullptr) return;
+    static_cast<SimDeviceRunnerBase *>(runner_ctx)->finish_host_orchestrator_capture(expected_records);
+}
+
 static int setup_static_arena_wrapper(
     void *runner_ctx, uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
 ) {
@@ -261,6 +281,10 @@ static const HostApiOps g_host_api_ops = {
     .lookup_prebuilt_runtime_arena_cache = lookup_prebuilt_runtime_arena_cache_wrapper,
     .mark_prebuilt_runtime_arena_cached = mark_prebuilt_runtime_arena_cached_wrapper,
     .upload_chip_callable_buffer = upload_chip_callable_buffer_wrapper,
+    .get_chip_swimlane_level = get_chip_swimlane_level,
+    .begin_host_orchestrator_capture = begin_host_orchestrator_capture,
+    .record_host_orchestrator_phase = record_host_orchestrator_phase,
+    .finish_host_orchestrator_capture = finish_host_orchestrator_capture,
 };
 
 /* ===========================================================================
@@ -574,6 +598,7 @@ static int cleanup_failed_prepare(SimNativeRunContext *state, int execution_rc, 
     const uint64_t trace_hid = state->trace_hid;
     const long long trace_start_ns = state->trace_start_ns;
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
+    state->runner->finish_clock_correlation_session(false);
     int validation_rc = -1;
     try {
         validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, execution_rc);
@@ -814,6 +839,9 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->runner->abandon_prepared_execution(*state->prepared_execution);
     }
 
+    // Correlation state is runner-wide. Finish it before releasing the claim,
+    // after which a successor may begin capture and replace the provider/session.
+    state->runner->finish_clock_correlation_session(false);
     if (state->runner_claimed) {
         state->runner->release_native_run(state);
         state->runner_claimed = false;
