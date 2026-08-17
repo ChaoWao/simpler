@@ -33,6 +33,7 @@
 #include "aicpu/platform_aicpu_affinity.h"
 #include "call_config.h"
 #include "callable_protocol.h"
+#include "common/host_log_binding.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
@@ -185,6 +186,10 @@ int DeviceRunner::ensure_binaries_loaded() {
         SetLogLevelFunc set_log_level_func = nullptr;
         if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return -1;
         set_log_level_func(HostLogger::get_instance().level());
+        using SetHostLogStateFunc = void (*)(SimplerHostLogState *);
+        SetHostLogStateFunc set_host_log_state_func = nullptr;
+        if (!load_sym("set_host_log_state", reinterpret_cast<void **>(&set_host_log_state_func))) return -1;
+        set_host_log_state_func(HostLogger::get_instance().state());
 
         aicpu_so_loaded_ = true;
         LOG_INFO("DeviceRunner(sim): Loaded aicpu_execute from %s", aicpu_so_path_.c_str());
@@ -212,6 +217,19 @@ int DeviceRunner::ensure_binaries_loaded() {
         aicore_so_handle_ = dlopen(aicore_so_path_.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (aicore_so_handle_ == nullptr) {
             LOG_ERROR("dlopen failed for AICore SO: %s", dlerror());
+            return -1;
+        }
+
+        const char *bind_log_error = nullptr;
+        if (simpler::log::bind_loaded_host_log_state(
+                aicore_so_handle_, HostLogger::get_instance().state(), &bind_log_error
+            ) != 0) {
+            LOG_ERROR(
+                "AICore SO failed to bind host-log state: %s",
+                bind_log_error != nullptr ? bind_log_error : "unknown error"
+            );
+            dlclose(aicore_so_handle_);
+            aicore_so_handle_ = nullptr;
             return -1;
         }
 

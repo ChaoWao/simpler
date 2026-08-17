@@ -11,7 +11,7 @@
 import pytest
 
 
-def test_build_all_prebuilds_shared_libraries_once(monkeypatch, tmp_path):
+def test_build_all_prebuilds_sim_context_once(monkeypatch, tmp_path):
     from simpler_setup import build_runtimes  # noqa: PLC0415
     from simpler_setup.runtime_compiler import RuntimeCompiler  # noqa: PLC0415
 
@@ -23,9 +23,6 @@ def test_build_all_prebuilds_shared_libraries_once(monkeypatch, tmp_path):
 
         def __init__(self, platform):
             self.platform = platform
-
-        def ensure_simpler_log(self, *, build):
-            calls.append(("simpler_log", self.platform, build))
 
         def ensure_sim_context(self, *, build):
             calls.append(("sim_context", self.platform, build))
@@ -43,7 +40,6 @@ def test_build_all_prebuilds_shared_libraries_once(monkeypatch, tmp_path):
         platforms=["a2a3sim"],
     )
 
-    assert calls.count(("simpler_log", "a2a3sim", True)) == 1
     assert calls.count(("sim_context", "a2a3sim", True)) == 1
     assert sorted(call for call in calls if call[0] == "runtime") == [
         ("runtime", "a2a3sim", "first", True, False, None),
@@ -78,9 +74,6 @@ def test_mixed_sanitizer_builds_use_one_host_toolchain_regardless_of_order(monke
             self.platform = platform
             self.compiler = RuntimeCompiler.get_instance(platform)
 
-        def ensure_simpler_log(self, *, build):
-            calls.append(("simpler_log", self.platform, self.compiler.host_target.toolchain.cxx_path))
-
         def ensure_sim_context(self, *, build):
             calls.append(("sim_context", self.platform, self.compiler.host_target.toolchain.cxx_path))
 
@@ -106,7 +99,9 @@ def test_mixed_sanitizer_builds_use_one_host_toolchain_regardless_of_order(monke
         sanitizer="asan",
     )
 
-    assert calls[0] == ("simpler_log", platforms[0], "g++-15")
+    assert [call for call in calls if call[0] == "sim_context"] == [
+        ("sim_context", next(p for p in platforms if p.endswith("sim")), "g++-15")
+    ]
     assert {compiler for _, _, compiler in calls} == {"g++-15"}
 
 

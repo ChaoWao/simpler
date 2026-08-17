@@ -382,9 +382,8 @@ int simpler_init(
     // (rtSetDevice inside attach_current_thread): CANN snapshots the
     // device-side log session's level at context-open time, so a later
     // dlog_setlevel is a no-op for the device side. HostLogger is already
-    // seeded here by libsimpler_log.so's simpler_log_init() (runs earlier in
-    // ChipWorker::init). Skipped when ASCEND_GLOBAL_LOG_LEVEL is externally
-    // configured — CANN keeps that.
+    // bound to the process-owned state by ChipWorker before this call. Skipped
+    // when ASCEND_GLOBAL_LOG_LEVEL is externally configured — CANN keeps that.
     HostLogger::get_instance().configure_cann_log_level(dlog_setlevel);
 
     int rc;

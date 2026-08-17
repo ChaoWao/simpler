@@ -11,10 +11,15 @@
 
 #include <gtest/gtest.h>
 
+#include "chip_worker.h"
 #include "pipeline_contract.h"
 #include "pipeline_slot_pool.h"
 
 namespace {
+
+void call_existing_chip_worker_init(ChipWorker &worker) {
+    worker.init("host.so", "aicpu.so", "aicore.so", "dispatcher.so", 0);
+}
 
 // A contract a runtime could legitimately ship today: one host-filled region,
 // one device-built region, and the two execution handles.
@@ -34,6 +39,8 @@ TEST(PipelineContract, AcceptsADeclarationThisBuildCanHonor) {
     const PipelineContract c = accepted_contract();
     EXPECT_TRUE(is_valid_pipeline_contract(&c));
 }
+
+TEST(ChipWorkerApi, KeepsExistingInitArgumentOrder) { EXPECT_NE(&call_existing_chip_worker_init, nullptr); }
 
 // Runtime loading requires a contract; this helper still rejects malformed null values.
 TEST(PipelineContract, RejectsNull) { EXPECT_FALSE(is_valid_pipeline_contract(nullptr)); }

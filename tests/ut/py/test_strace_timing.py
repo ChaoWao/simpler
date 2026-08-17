@@ -46,6 +46,28 @@ def _legacy_record(pid, inv, name, attrs=""):
     )
 
 
+def _anchor_record(pid, mono_ns, wall_ns):
+    return (
+        f"[mono_ns={mono_ns}][T0x{pid}][TIMING] clock_anchor: "
+        f"[CLOCK_ANCHOR] v=1 pid={pid} mono_ns={mono_ns} wall_ns={wall_ns}\n"
+    )
+
+
+def _span_record(
+    *,
+    pid: int,
+    tid: int,
+    inv: int,
+    name: str,
+    ts: int,
+    dur: int,
+    attrs: str = "",
+    hid: str = "abc",
+    depth: int = 0,
+) -> str:
+    return f"[STRACE] v=1 pid={pid} tid={tid} inv={inv} hid={hid} depth={depth} name={name} ts={ts} dur={dur} {attrs}\n"
+
+
 def test_parse_spans_finds_adjacent_records_on_one_physical_line():
     line = (
         _record(1, 1, "simpler_run", "rank=0")
@@ -111,6 +133,75 @@ def test_parse_clock_anchor_rejects_payloads_outside_complete_anchor_records():
     assert list(parse_clock_anchors(lines)) == []
 
 
+def test_trace_renderers_add_wall_time_without_replacing_monotonic_timestamps():
+    wall_ns = 1_700_000_000_000_000_000
+    anchors = list(parse_clock_anchors([_anchor_record(41, 1_000, wall_ns)]))
+    spans = list(
+        parse_spans(
+            [
+                _span_record(pid=41, tid=410, inv=7, name="simpler_run", ts=1_250, dur=20),
+                _span_record(
+                    pid=41,
+                    tid=410,
+                    inv=7,
+                    name="simpler_run.runner_run.device_wall",
+                    ts=300,
+                    dur=40,
+                    attrs="clk=dev",
+                    depth=1,
+                ),
+            ]
+        )
+    )
+
+    invocations = group_invocations(spans)
+    chrome_trace = to_chrome_trace(invocations, bucket_by_hid(invocations), anchors=anchors)
+    host_swimlane = to_host_swimlane(spans, anchors=anchors)
+
+    for trace in (chrome_trace, host_swimlane):
+        host_event = next(event for event in trace["traceEvents"] if event.get("name") == "simpler_run")
+        assert host_event["ts"] == 1.25
+        assert host_event["args"]["wall_ts_ns"] == "1700000000000000250"
+        assert host_event["args"]["wall_time"] == "2023-11-14T22:13:20.000000250Z"
+        assert trace["clockAnchors"] == [{"pid": 41, "mono_ns": "1000", "wall_ns": "1700000000000000000"}]
+
+    device_event = next(event for event in chrome_trace["traceEvents"] if event.get("name", "").endswith("device_wall"))
+    assert "wall_ts_ns" not in device_event["args"]
+    assert "wall_time" not in device_event["args"]
+
+
+def test_wall_time_uses_the_matching_anchor_for_each_pid():
+    anchors = list(
+        parse_clock_anchors(
+            [
+                _anchor_record(41, 1_000, 1_700_000_000_000_000_000),
+                _anchor_record(52, 1_000, 1_900_000_000_000_000_000),
+                _anchor_record(64, 2_000, 2_000_000_000_000_000_000),
+            ]
+        )
+    )
+    spans = list(
+        parse_spans(
+            [
+                _span_record(pid=41, tid=410, inv=1, name="l3.submit", ts=1_500, dur=10),
+                _span_record(pid=52, tid=520, inv=1, name="l3.submit", ts=1_500, dur=10),
+                _span_record(pid=63, tid=630, inv=1, name="l3.submit", ts=1_500, dur=10),
+                _span_record(pid=64, tid=640, inv=1, name="l3.submit", ts=1_500, dur=10),
+            ]
+        )
+    )
+
+    trace = to_host_swimlane(spans, anchors=anchors)
+    events = [event for event in trace["traceEvents"] if event.get("ph") == "X"]
+
+    assert [event["args"].get("wall_ts_ns") for event in events] == [
+        "1700000000000000500",
+        "1900000000000000500",
+        None,
+        None,
+    ]
+
+
 def test_count_record_heads_sees_a_torn_record_that_parse_spans_drops():
     intact = _record(1, 1, "simpler_run", "rank=0")
     torn = intact[: intact.index(" ts=")]
@@ -118,21 +209,6 @@ def test_count_record_heads_sees_a_torn_record_that_parse_spans_drops():
 
     assert count_record_heads(lines) == 2
     assert len(list(parse_spans(lines))) == 1
-
-
-def _span_record(
-    *,
-    pid: int,
-    tid: int,
-    inv: int,
-    name: str,
-    ts: int,
-    dur: int,
-    attrs: str = "",
-    hid: str = "abc",
-    depth: int = 0,
-) -> str:
-    return f"[STRACE] v=1 pid={pid} tid={tid} inv={inv} hid={hid} depth={depth} name={name} ts={ts} dur={dur} {attrs}\n"
 
 
 def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
@@ -421,22 +497,30 @@ def test_swimlane_cli_writes_trace(tmp_path):
     log_path = tmp_path / "run.log"
     output_path = tmp_path / "host_swimlane.json"
     log_path.write_text(
-        _span_record(
-            pid=71,
-            tid=710,
-            inv=2,
-            name="l3.graph_build",
-            ts=100,
-            dur=25,
-            attrs="run_id=2 role=facade",
-        ),
+        _anchor_record(71, 50, 1_700_000_000_000_000_000)
+        + _span_record(pid=71, tid=710, inv=2, name="l3.graph_build", ts=100, dur=25, attrs="run_id=2 role=facade"),
         encoding="utf-8",
     )
 
     assert main([str(log_path), "--swimlane", str(output_path)]) == 0
 
     trace = json.loads(output_path.read_text(encoding="utf-8"))
-    assert any(event.get("name") == "l3.graph_build" for event in trace["traceEvents"])
+    event = next(event for event in trace["traceEvents"] if event.get("name") == "l3.graph_build")
+    assert event["args"]["wall_ts_ns"] == "1700000000000000050"
+
+
+def test_cli_warns_when_one_pid_has_multiple_clock_anchors(tmp_path, capsys):
+    log_path = tmp_path / "run.log"
+    log_path.write_text(
+        _anchor_record(71, 50, 1_700_000_000_000_000_000)
+        + _anchor_record(71, 75, 1_700_000_000_000_000_025)
+        + _span_record(pid=71, tid=710, inv=2, name="simpler_run", ts=100, dur=25),
+        encoding="utf-8",
+    )
+
+    assert main([str(log_path)]) == 0
+
+    assert "warning: multiple [CLOCK_ANCHOR] records found for pid 71" in capsys.readouterr().err
 
 
 def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
@@ -641,3 +725,20 @@ def test_swimlane_keeps_a_sequential_thread_on_its_own_tid():
     }
 
     assert list(lanes) == [7]
+
+
+def test_chrome_trace_cli_writes_wall_time(tmp_path):
+    log_path = tmp_path / "run.log"
+    output_path = tmp_path / "strace.json"
+    log_path.write_text(
+        _anchor_record(71, 50, 1_700_000_000_000_000_000)
+        + _span_record(pid=71, tid=710, inv=2, name="simpler_run", ts=100, dur=25),
+        encoding="utf-8",
+    )
+
+    assert main([str(log_path), "--trace-out", str(output_path)]) == 0
+
+    trace = json.loads(output_path.read_text(encoding="utf-8"))
+    event = next(event for event in trace["traceEvents"] if event.get("name") == "simpler_run")
+    assert event["ts"] == 0.1
+    assert event["args"]["wall_ts_ns"] == "1700000000000000050"

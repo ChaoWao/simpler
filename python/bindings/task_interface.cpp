@@ -57,6 +57,7 @@
 #include "chip_run_lane.h"
 #include "chip_worker.h"
 #include "common/host_span_scope.h"
+#include "host_log.h"
 #include "data_type.h"
 #include "dma_workspace.h"
 #include "worker_chip_orch_comm.h"
@@ -1000,16 +1001,13 @@ NB_MODULE(_task_interface, m) {
     m.attr("HOST_STRACE_ENABLED") = false;
 #endif
     m.def(
-        "_bind_host_span_sink",
-        [](uintptr_t address) {
-            simpler::host_trace::bind_sink(reinterpret_cast<SimplerLogEmitHostSpanFn>(address));
-            return simpler::host_trace::sink_available();
+        "_initialize_host_log",
+        [](int level) {
+            if (!simpler::log::is_valid_level(level)) return false;
+            HostLogger::get_instance().set_level(static_cast<simpler::log::LogLevel>(level));
+            return true;
         },
-        nb::arg("address"), "Bind this extension's host-span sink to the process-global logger, or zero to disable it."
-    );
-    m.def(
-        "_host_span_sink_available", &simpler::host_trace::sink_available,
-        "Whether this extension's host-span sink is bound to the process-global logger."
+        nb::arg("level"), "Seed the process-owned host-log state before workers fork or load runtime modules."
     );
     m.def(
         "_emit_host_span",
@@ -2095,18 +2093,19 @@ NB_MODULE(_task_interface, m) {
             "init",
             [](ChipWorker &self, const std::string &host_lib_path, const std::string &aicpu_path,
                const std::string &aicore_path, const std::string &dispatcher_path, int device_id,
-               std::optional<CallConfig> prewarm_config, bool enable_sdma) {
+               std::optional<CallConfig> prewarm_config, bool enable_sdma, const std::string &sim_context_path) {
                 // Translate the Python bool into a DmaWorkspaceKind bitmask so the
                 // platform-agnostic ChipWorker stays free of the enum. Empty mask
                 // when disabled leaves the Worker with no async-DMA provisioning.
                 uint32_t dma_workspace_mask = enable_sdma ? (uint32_t{1} << DMA_WORKSPACE_SDMA) : 0;
                 self.init(
                     host_lib_path, aicpu_path, aicore_path, dispatcher_path, device_id,
-                    prewarm_config.has_value() ? &(*prewarm_config) : nullptr, dma_workspace_mask
+                    prewarm_config.has_value() ? &(*prewarm_config) : nullptr, dma_workspace_mask, sim_context_path
                 );
             },
             nb::arg("host_lib_path"), nb::arg("aicpu_path"), nb::arg("aicore_path"), nb::arg("dispatcher_path"),
             nb::arg("device_id"), nb::arg("prewarm_config") = nb::none(), nb::arg("enable_sdma") = false,
+            nb::arg("sim_context_path") = "",
             // Release the GIL for the (potentially long) native device attach so
             // another Python thread can run during it — e.g. a concurrent close()
             // observing INITIALIZING and failing fast (a GIL held for the whole

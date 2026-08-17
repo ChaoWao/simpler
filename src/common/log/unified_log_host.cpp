@@ -26,7 +26,11 @@
 
 using simpler::log::LogLevel;
 
-void unified_log_host_span(const SimplerHostSpan *span) { simpler_log_emit_host_span(span); }
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
+void unified_log_host_span(const SimplerHostSpan *span) { HostLogger::get_instance().log_host_span(span); }
 
 void unified_log_error(const char *func, const char *fmt, ...) {
     va_list args;
@@ -62,3 +66,7 @@ void unified_log_debug(const char *func, const char *fmt, ...) {
     HostLogger::get_instance().vlog(LogLevel::DEBUG, func, fmt, args);
     va_end(args);
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif

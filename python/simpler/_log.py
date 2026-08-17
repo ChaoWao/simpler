@@ -12,21 +12,14 @@ The public ladder is DEBUG / INFO / TIMING / WARN / ERROR. TIMING sits between
 INFO and WARN and is the default so stable performance markers remain visible
 without enabling ordinary INFO traffic. NUL is a suppression sentinel.
 
-`Worker.init()` snapshots the effective ``simpler`` logger threshold. A
-hierarchical worker seeds the parent process before its first fork, and every
-`ChipWorker.init()` seeds its child before loading host_runtime.so; onboard
-setup maps the same threshold onto CANN's coarser severity ladder.
+`Worker.init()` snapshots the effective ``simpler`` logger threshold into the
+state owned by the native extension. A hierarchical worker seeds the parent
+process before its first fork, and every loaded host module receives a pointer
+to that state; onboard setup maps the same threshold onto CANN's coarser
+severity ladder.
 """
 
 import logging
-
-from ._log_preload import host_span_sink_address as _host_span_sink_address
-from ._log_preload import preload as _preload_simpler_log
-
-# Load the logger mapping before probing the extension below. ``simpler``
-# imports this module eagerly; once the extension is available, its local sink
-# slot is therefore bound before Worker initialization can fork.
-_host_log_handle = _preload_simpler_log()
 
 # DEFAULT_LOG_THRESHOLD is exposed by the _task_interface nanobind module so
 # Python and C++ share one constant. During a fresh `pip install -e .` the
@@ -38,13 +31,6 @@ try:
     )
 except (ImportError, AttributeError):
     _NATIVE_DEFAULT = 25
-
-try:
-    from _task_interface import _bind_host_span_sink  # pyright: ignore[reportMissingImports]
-except (ImportError, AttributeError):
-    pass
-else:
-    _bind_host_span_sink(_host_span_sink_address(_host_log_handle))
 
 # Public verbosity constants (Python integer levels).
 TIMING = 25

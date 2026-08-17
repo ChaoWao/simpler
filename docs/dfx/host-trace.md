@@ -41,6 +41,14 @@ calculations remain entirely on the monotonic clock and are unaffected by
 wall-clock corrections. Records tagged `clk=dev` use the separate device-clock
 domain described below and do not use this anchor.
 
+`strace_timing.py` applies that mapping to both `--trace-out` and `--swimlane`.
+The visible Perfetto axis remains monotonic; each mapped host event exposes the
+exact decimal `wall_ts_ns` and a UTC `wall_time` in its arguments, while the JSON
+top level retains the source mappings in `clockAnchors`. Nanosecond epoch values
+are strings because JSON consumers commonly use IEEE-754 numbers, which cannot
+represent current epoch nanoseconds exactly. Old logs without an anchor retain
+their existing output, and `clk=dev` records never receive host wall time.
+
 One line per span, emitted on scope exit
 (`src/common/log/include/common/strace.h`):
 
@@ -112,8 +120,8 @@ including time the caller spends polling or doing other host work; blocking
 ## L3/L4 host scheduler spans
 
 Every hierarchical worker that drives next-level children emits these spans
-through the same process-global `libsimpler_log.so` sink — an L3 with chips and
-an L4 pod alike, since the orchestrator and scheduler code they run is the same:
+through the logger compiled into `_task_interface` — an L3 with chips and an
+L4 pod alike, since the orchestrator and scheduler code they run is the same:
 
 | Span | Host decision point |
 | ---- | ------------------- |
@@ -140,17 +148,16 @@ scheduler thread emits the other four. `role=worker` on `l3.frame_submit`,
 `l3.activate` and `l3.complete` names the worker a dispatch targets, not the
 thread that ran it.
 
-The spans reach the logger over a fixed POD C ABI, `SimplerHostSpan` in
-`common/host_span.h`. `_task_interface` cannot link `libsimpler_log.so` — that
-library is reached by `RTLD_GLOBAL` dlopen at runtime — so each extension/DSO
-owns its own nullable sink function pointer instead of an undefined link symbol.
-`simpler._log_preload` loads the library, and `simpler._log` passes the exported
-entry-point address into `_task_interface` before Worker initialization. Every later
-`fork()` therefore inherits the bound pointer and logger mapping, so parent and
-child markers reach one sink. A process that never loads the logger leaves the
-extension-local pointer null, which disables host spans without failing anything. A later
-`ChipWorker.init` refreshes the binding after loading the required runtime
-logger. `host_runtime.so` links the library directly and needs none of this.
+The spans reach the logger over the fixed POD `SimplerHostSpan` ABI in
+`common/host_span.h`. `_task_interface` compiles the host logger directly, so
+there is no nullable sink and host-span support cannot disappear because a
+separate logger DSO was absent. Every other host consumer also compiles a
+private logger implementation, then binds it to the
+`SimplerHostLogState` owned by `_task_interface`. The hierarchical parent seeds
+that state before `fork()`; a chip child re-seeds its inherited copy and passes
+the same pointer to every runtime module it loads. The threshold and one-anchor
+coordination are therefore shared within each process without relying on
+`RTLD_GLOBAL` logger symbols.
 
 ## Reading the markers — `strace_timing.py`
 

@@ -282,9 +282,14 @@ class KernelCompiler:
         """
         include_dirs = self.get_orchestration_include_dirs(runtime_name)
         config_include_dirs, config_sources = self._get_orchestration_config(runtime_name)
+        platform_sources = self._get_orchestration_platform_sources()
+        if self._orchestration_toolchain(runtime_name).is_host:
+            include_dirs.append(str(self.project_root / "src" / "common" / "log" / "include"))
+            host_log_dir = self.project_root / "src" / "common" / "log"
+            platform_sources.extend([str(host_log_dir / "host_log.cpp"), str(host_log_dir / "unified_log_host.cpp")])
         return (
             [*include_dirs, *config_include_dirs],
-            [*config_sources, *self._get_orchestration_platform_sources()],
+            [*config_sources, *platform_sources],
         )
 
     def _orchestration_toolchain(self, runtime_name: str) -> Union[GxxToolchain, Aarch64GxxToolchain]:
@@ -301,7 +306,7 @@ class KernelCompiler:
         return [*toolchain.get_compile_flags(), *self._sanitizer_flags(toolchain)]
 
     @staticmethod
-    def _orchestration_link_flags() -> list[str]:
+    def _orchestration_link_flags(toolchain: Union[GxxToolchain, Aarch64GxxToolchain]) -> list[str]:
         """Return the link flags every orchestration ``.so`` carries on this host.
 
         macOS/clang resolves the runtime's symbols at dlopen time, so undefined
@@ -311,9 +316,10 @@ class KernelCompiler:
         explicitly keeps that id stable across toolchain versions even though
         the compiler default already injects one.
         """
-        if sys.platform == "darwin":
-            return ["-undefined", "dynamic_lookup"]
-        return ["-Wl,--build-id=sha1"]
+        flags = ["-undefined", "dynamic_lookup"] if sys.platform == "darwin" else ["-Wl,--build-id=sha1"]
+        if toolchain.is_host:
+            flags.append("-pthread")
+        return flags
 
     def compile_cache_token(self, runtime_name: str, core_types: list[str]) -> dict[str, object]:
         """Describe every compiler and fixed flag that affects kernel artifacts."""
@@ -345,7 +351,7 @@ class KernelCompiler:
             "orchestration": {
                 "identity": _executable_cache_identity(orchestration.cxx_path),
                 "compile_flags": self._orchestration_compile_flags(orchestration),
-                "link_flags": self._orchestration_link_flags(),
+                "link_flags": self._orchestration_link_flags(orchestration),
             },
             "incore": {
                 "identity": _executable_cache_identity(incore.cxx_path),
@@ -642,7 +648,11 @@ class KernelCompiler:
             prefix=f"{os.path.basename(source_path)}.orch_", suffix=".so", build_dir=build_dir
         )
 
-        cmd = [toolchain.cxx_path, *self._orchestration_compile_flags(toolchain), *self._orchestration_link_flags()]
+        cmd = [
+            toolchain.cxx_path,
+            *self._orchestration_compile_flags(toolchain),
+            *self._orchestration_link_flags(toolchain),
+        ]
 
         if extra_sources:
             for src in extra_sources:

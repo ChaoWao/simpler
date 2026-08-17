@@ -11,14 +11,10 @@
 Host-side log filter setup happens during worker initialization. A hierarchical
 `Worker` seeds the parent before its first fork; `ChipWorker.init` (see
 `simpler.task_interface`) repeats that initialization in each child before the
-C++ `_ChipWorker.init` dlopens host_runtime.so. The level forwarded is a
-one-shot snapshot of the `simpler` Python logger, and onboard `simpler_init`
-maps it onto CANN's coarser dlog ladder.
-Import time here only dlopens libsimpler_log.so into the global symbol scope
-(`simpler._log_preload`, reached through `._log` below); no level is seeded and
-no failure is raised if the library is absent. When `_task_interface` is
-available, `_log` passes the logger entry point into the extension's nullable,
-extension-local host-span sink slot before Worker initialization.
+C++ `_ChipWorker.init` loads runtime modules. The native extension owns the
+shared state; each host module contains its own logger implementation and binds
+to that state immediately after it is loaded. Onboard `simpler_init` also maps
+the threshold onto CANN's coarser dlog ladder.
 
 `Worker` and the `task_interface` submodule resolve on first attribute access
 rather than at import time: both pull in the `_task_interface` extension, so
@@ -29,7 +25,7 @@ missing or stale, including for callers that only want the logging helpers.
 import importlib
 from typing import Any
 
-# Importing _log auto-configures the simpler logger to TIMING if unset.
+# Importing _log configures the Python-side simpler logger to TIMING if unset.
 from ._log import (
     DEFAULT_THRESHOLD,
     NUL,

@@ -26,8 +26,7 @@
  * - a2a3sim / a5sim : Host-based simulation using fprintf(stderr,...)
  */
 
-#ifndef PLATFORM_DEVICE_LOG_H_
-#define PLATFORM_DEVICE_LOG_H_
+#pragma once
 
 #include <cstdio>
 #include <cstdint>
@@ -63,6 +62,10 @@ extern bool g_is_log_enable_error;
 // CANN owns its native levels; simulation applies it to the full flag table.
 extern "C" void set_log_level(int level);
 
+// Apply the platform's logging policy to a newly loaded orchestration SO.
+// Simulation binds the process-owned host state; onboard requires no handoff.
+int bind_orchestration_host_log_state(void *handle, const char **error);
+
 // =============================================================================
 // Platform-specific logging functions (low-level layer)
 //
@@ -94,5 +97,3 @@ inline bool is_log_enable_error() { return g_is_log_enable_error; }
 
 // Initialize log switch (platform-specific implementation)
 void init_log_switch();
-
-#endif  // PLATFORM_DEVICE_LOG_H_

@@ -41,6 +41,11 @@ extern "C" void set_log_level(int level) {
     g_is_log_enable_timing = level <= static_cast<int>(simpler::log::LogLevel::TIMING);
 }
 
+int bind_orchestration_host_log_state(void * /*handle*/, const char **error) {
+    if (error != nullptr) *error = nullptr;
+    return 0;
+}
+
 // =============================================================================
 // Low-level dev_log_* / dev_vlog_* (onboard: route through CANN dlog)
 //

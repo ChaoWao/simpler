@@ -116,14 +116,20 @@ runner.finalize();
 ### Layer 2: C API (`src/common/worker/pto_runtime_c_api.h`)
 
 ```c
-// libsimpler_log.so (RTLD_GLOBAL, loaded first by the Python wrapper):
-simpler_log_init(log_level);                          // seed HostLogger once
+// _task_interface owns this process's SimplerHostLogState. Python seeds its
+// threshold before entering the C++ worker.
 
-// host_runtime.so (RTLD_LOCAL, loaded after):
+// host_runtime.so is self-contained and loaded RTLD_LOCAL:
+SimplerHostLogBindStateFn bind_host_log_state =
+    (SimplerHostLogBindStateFn)dlsym(host_runtime,
+                                    "simpler_host_log_bind_state");
+bind_host_log_state(host_log_state);
 DeviceContextHandle ctx = create_device_context();
 simpler_init(ctx, device_id,                          // attach + binary takeover
              aicpu_binary, aicpu_size,
-             aicore_binary, aicore_size);
+             aicore_binary, aicore_size,
+             dispatcher_binary, dispatcher_size,
+             prewarm_config);
 size_t size = get_runtime_size();
 size_t alignment = get_runtime_alignment();
 void *runtime = allocate_zeroed_aligned(size, alignment); // stable until finalize
@@ -191,13 +197,15 @@ Python test_*.py (SceneTestCase)
   │
   └─→ ChipWorker()
        └─→ init(device_id, bins)                          # Python wrapper
-            ├─→ ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)   # once per process
-            ├─→ simpler_log_init(log_level) → HostLogger seeded
-            ├─→ ctypes.CDLL(libcpu_sim_context.so, RTLD_GLOBAL)  # sim only, once
-            └─→ _ChipWorker.init(host_path, aicpu_path, aicore_path, device_id)  # C++
+            ├─→ _initialize_host_log(log_level) → seed extension-owned state
+            └─→ _ChipWorker.init(host_path, aicpu_path, aicore_path,
+                                    dispatcher_path, device_id, ...,
+                                    sim_context_path)  # C++
+                 ├─→ process-registry sim_context.so + bind state     # sim PTO hooks
                  ├─→ dlopen(host.so, RTLD_LOCAL) → resolve C API symbols via dlsym
+                 ├─→ simpler_host_log_bind_state(host_log_state)
                  ├─→ create_device_context() → DeviceContextHandle
-                 └─→ simpler_init(ctx, device_id, aicpu*, aicpu_size, aicore*, aicore_size)
+                 └─→ simpler_init(ctx, device_id, binaries...)
                       ├─→ (onboard) dlog_setlevel(HostLogger.cann_level())   # before context open
                       ├─→ DeviceRunner::attach_current_thread(device_id)
                       │    ├─→ rtSetDevice(device_id) on onboard
