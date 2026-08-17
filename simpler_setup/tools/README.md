@@ -589,8 +589,9 @@ Top-level layout depends on `chip_swimlane_level`:
 - `>= 3`: also `aicpu_scheduler_phases[]` (per-thread phase records:
   scan / complete / dispatch / idle) and `core_to_thread[]` (core_id →
   scheduler thread index).
-- `>= 4`: also `aicpu_orchestrator_phases[]` (per-task orchestrator
-  phase records).
+- `>= 4`: also source-specific orchestrator phase records. TMR uses
+  `aicpu_orchestrator_phases[]`; HBG uses `host_orchestrator_phases[]` and
+  includes clock-alignment and capture status in `timeline_metadata`.
 
 ### Kernel Config Format
 

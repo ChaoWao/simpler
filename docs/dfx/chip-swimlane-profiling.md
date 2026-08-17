@@ -104,7 +104,7 @@ backward-compatible with the old boolean behavior).
 | 1 | AICore timing only (start_time_us/end_time_us/task_id/func_id/core_type) | No AICPU timestamps |
 | 2 | + dispatch_time_us, finish_time_us | Full per-task AICPU record |
 | 3 | + scheduler phases (`aicpu_scheduler_phases[]`) | Skips orchestrator phases |
-| 4 | + orchestrator phases (`aicpu_orchestrator_phases[]`) | Full collection |
+| 4 | + orchestrator phases | `tensormap_and_ringbuffer` (TMR) captures AICPU phases; `host_build_graph` (HBG) captures host phases and aligns them with the device clock |
 
 Dependency arrows are not produced by any swimlane level — see
 [§3.5](#35-dependency-arrows-from-dep_gen) for the dep_gen join.
@@ -133,7 +133,9 @@ region and publishes its base address through
 per-task WIP slots; AICPU commits the records on FIN. Per-task
 dispatch/finish timestamps are recorded only at level >= 2,
 scheduler phase records only at level >= 3, and orchestrator phase
-records only at level >= 4.
+records only at level >= 4. `tensormap_and_ringbuffer` records those
+orchestrator phases on AICPU; `host_build_graph` records them on the host
+and emits clock-correlation anchors around device execution.
 
 The JSON output `"chip_swimlane_level"` field is the captured perf_level:
 `1` = AICore timing only, `2` = +AICPU dispatch/finish,
@@ -186,34 +188,100 @@ layers to be aware of:**
     "clock_freq_hz": <int>,            // cycle→µs factor. a2a3=50e6, a5=1e9.
     "num_cores": <int>,                // == len(core_types)
     "core_types": ["aic"|"aiv", ...],  // indexed by core_id
-    "core_to_thread": [<int>, ...]     // optional; level >= 3 only
+    "core_to_thread": [<int>, ...],    // optional; level >= 3 only
+
+    // HBG level 4 only. The host-capture and correlation objects remain
+    // present on partial/failing captures so readers can fail closed.
+    "orchestrator_source": "host",
+    "orchestrator_clock_domain": "host_monotonic_ns",
+    "device_clock_domain": "device_syscnt_cycles",
+    "host_timestamp_resolution_ns": <int>,
+    "host_timestamp_quantization_ns": <int>,
+    "host_orchestration_origin_ns": <int>,
+    "timeline_relation": "host_orchestration_precedes_device",
+    "host_capture": {
+      "status": "complete"|"dropped"|"incomplete",
+      "expected_records": <int>,
+      "recorded_records": <int>,
+      "pool_records": <int>,
+      "dropped_records": <int>,
+      "error": null|<string>
+    },
+    "clock_anchors": {
+      "schema_version": 1,
+      "provider": "acl_event"|"sim_syscnt"|"unavailable",
+      "device_timestamp_unit": "syscnt_cycles",
+      "raw_device_timestamp_unit": "device_uptime_us"|"syscnt_cycles"|"unknown",
+      "samples_per_position": 3,
+      "samples": [{...}, ...]
+    }
   },
 
   // Bulk task streams — flat array of tuples. Column order is fixed.
   //   aicore_tasks: [core_id, task_token_raw, reg_task_id,
-  //                  start_cycles, end_cycles]
+  //                  start_cycles, end_cycles, receive_to_start_cycles]
   //   aicpu_tasks:  [core_id, reg_task_id,
   //                  dispatch_cycles, finish_cycles]
   "aicore_tasks": [[...], ...],
   "aicpu_tasks":  [[...], ...],
 
-  // Per-scheduler-thread arrays of objects (level >= 3 only).
+  // Per-lane arrays of objects (level >= 3 only).
   //   sched record: {kind, start_cycles, end_cycles, loop_iter,
   //                  tasks_processed, [pop_hit, pop_miss]}
-  //   orch record:  {submit_idx, task_id, start_cycles, end_cycles}
+  //   AICPU orch record: {submit_idx, task_id, start_cycles, end_cycles}
+  //   host orch record:  {submit_idx, task_id, start_host_ns, end_host_ns}
   // pop_hit / pop_miss are present only on Dispatch records.
   "aicpu_scheduler_phases":    [ [ {...}, ... ], ... ],
-  "aicpu_orchestrator_phases": [ [ {...}, ... ], ... ]   // level >= 4 only
+  "aicpu_orchestrator_phases": [ [ {...}, ... ], ... ],  // TMR level >= 4
+  "host_orchestrator_phases":  [ [ {...}, ... ] ]         // HBG single host lane, level >= 4
 }
 ```
 
-All timestamps on disk are raw `get_sys_cnt` cycles (uint64). The
+Task, scheduler, and TMR orchestrator timestamps on disk are raw
+`get_sys_cnt` cycles (uint64). HBG orchestrator timestamps are host monotonic
+nanoseconds; the reader maps device cycles into that domain only when the
+anchor coverage is complete. The
 join key between `aicore_tasks` and `aicpu_tasks` is
 `(core_id, reg_task_id)` — *not* `task_token_raw`, because SPMD
 `block_num > num_cores` and MIX cluster spread can dispatch the same
 `task_token_raw` to the same core multiple times. AICore is the
 canonical producer of `task_token_raw`; AICPU only stamps the
 dispatch / finish timestamps and the per-core join token.
+
+The exporter writes a file when any diagnostic stream is useful: task records,
+scheduler/orchestrator phases, host records, or a started clock-correlation
+session. A sched-only TMR capture and a metadata-only failed HBG capture are
+therefore valid artifacts. A run with none of those streams still returns
+without creating a file.
+
+On onboard platforms, `aclrtEventGetTimestamp` supplies device-uptime
+microseconds. Both platform configurations declare that 1 MHz source and the
+profiling system-counter frequency used to normalize it (50 MHz on a2a3,
+1 GHz on a5). The same-epoch contract is checked at conversion time: all device
+timestamps must fall between the selected pre-orchestration and post-execution
+anchors. Missing, invalid, or non-covering anchors produce a causal composite
+instead of cross-domain latency. Onboard validation bounded the maximum
+alignment uncertainty to 13.9–21.4 µs across a2a3 and a5 Graph Execution
+cases.
+
+#### Onboard clock-correlation validation
+
+The A2/A3 and A5 Graph Execution scene tests ran in onboard environments, with
+level 4 enabled for the `record_then_replay_1d` and
+`record_then_replay_2d` cases. Each generated `chip_swimlane_records.json` was
+loaded through `read_perf_data()`, which selected the minimum-RTT anchor from
+each three-sample endpoint group. Validation checked `layout=clock_aligned`,
+`clock_alignment.status=calibrated`, complete host capture with zero drops,
+and `cross_domain_latency_available=true`. Record counts came from the raw host,
+AICore, and AICPU streams; maximum uncertainty came from
+`timeline_metadata.clock_alignment.max_uncertainty_ns`.
+
+| Platform | Case | Syscnt frequency | Host records | AICore / AICPU tasks | Max uncertainty | Result |
+| -------- | ---- | ---------------: | -----------: | -------------------: | --------------: | ------ |
+| A3 (`a2a3`) | `record_then_replay_1d` | 50 MHz | 4 / 4 | 13 / 13 | 13.930 µs | PASS |
+| A3 (`a2a3`) | `record_then_replay_2d` | 50 MHz | 4 / 4 | 13 / 13 | 15.136 µs | PASS |
+| A5 | `record_then_replay_1d` | 1 GHz | 4 / 4 | 13 / 13 | 20.610 µs | PASS |
+| A5 | `record_then_replay_2d` | 1 GHz | 4 / 4 | 13 / 13 | 21.391 µs | PASS |
 
 #### Reader output (µs domain)
 
@@ -228,14 +296,19 @@ microseconds, downstream code sees:
 | `start_time_us` / `end_time_us` / `duration_us` | AICore execution window in microseconds |
 | `dispatch_time_us` | AICPU timestamp when this task was dispatched (filled at level >= 2; `0.0` at level 1) |
 | `finish_time_us` | AICPU timestamp when AICPU observed FIN (filled at level >= 2; `0.0` at level 1) |
+| `orchestrator_source` | `"aicpu"` for TMR or `"host"` for HBG |
+| `timeline_metadata` | HBG clock-alignment, host-capture completeness, and cross-domain latency availability; absent for TMR |
+| `aicpu_orchestrator_phases` | TMR AICPU orchestrator records |
+| `host_orchestrator_phases` | HBG host orchestrator records, expressed in the selected reader timeline |
 
 Note: per-task records carry **no** fanout edges. Dependency arrows
 come from a separate `deps.json` (dep_gen) joined at convert time —
 see [§3.5](#35-dependency-arrows-from-dep_gen).
 
-Phase records (per scheduler thread, level >= 3 for
-`aicpu_scheduler_phases[]` and level >= 4 for
-`aicpu_orchestrator_phases[]`):
+Phase records are grouped per scheduler/orchestrator lane. Level >= 3 uses
+`aicpu_scheduler_phases[]`; at level >= 4, TMR uses
+`aicpu_orchestrator_phases[]` and HBG uses `host_orchestrator_phases[]`.
+`orchestrator_source` remains the explicit source discriminator.
 
 | Field | Meaning |
 | ----- | ------- |
@@ -1072,15 +1145,20 @@ this as ERROR and does not recover. AICPU did not flush its
 active chip swimlane buffer at run end. Check the AICPU flush path runs
 for every thread that produced records.
 
-**Phase records empty.** Either the runtime did not emit phase
-data or phase initialization did not run. Both a2a3 runtimes and a5
-`tensormap_and_ringbuffer` provide the dummy-task path; a5
-`host_build_graph` does not. On both architectures collection is gated on
-`ChipSwimlaneDataHeader::num_sched_phase_threads > 0` (sched) or
-`num_orch_phase_threads > 0` (orch). Verify the runtime calls
-`chip_swimlane_aicpu_init_phase()` in its scheduler init path; check the host's
-`ChipSwimlaneCollector::initialize` zero-inits the relevant metadata
-fields.
+**Phase records empty.** Either the runtime did not emit phase data or phase
+initialization did not run. Scheduler phases and TMR orchestrator phases are
+gated on `ChipSwimlaneDataHeader::num_sched_phase_threads > 0` and
+`num_orch_phase_threads > 0`, respectively. Verify TMR calls
+`chip_swimlane_aicpu_init_phase()` and check the collector initializes the
+relevant metadata fields. HBG level 4 intentionally keeps
+`num_orch_phase_threads == 0` because it records orchestration on the host;
+inspect `metadata.host_capture`, `metadata.clock_anchors`, and
+`host_orchestrator_phases` instead.
+
+After a C++ profiling change, rebuild the platform and runtime binaries with
+`pip install --no-build-isolation -e .` before reproducing a capture. A stale
+`build/lib` can otherwise pair a runtime compiled against an older `HostApiOps`
+layout with a newer host library.
 
 **`dispatch_time_us` < `finish_time_us` mismatch.** Verify the runtime
 overwrites `task_id` with the full encoding on FIN

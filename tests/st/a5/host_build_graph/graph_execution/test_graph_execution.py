@@ -9,10 +9,16 @@
 # -----------------------------------------------------------------------------------------------------------
 """Graph Execution replays dynamic tensor and scalar bindings across config-keyed definitions."""
 
+import time
+
 import torch
 from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from tests.st.chip_swimlane_validation import scene_case_selected, validate_host_orchestrator_capture
+
+_HOST_ORCHESTRATOR_RECORDS = 4
+_SWIMLANE_CASE = "record_then_replay_2d"
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -79,6 +85,22 @@ class TestGraphExecutionHostBuildGraphA5(SceneTestCase):
         args.output_1[:] = (base + 1.0) * (base + 2.0)
         args.output_3[:] = (base + 100.0) * (base + 4.0)
         args.output_5[:] = (base + 5.0) * (base + 6.0)
+
+    def test_run(self, st_platform, st_worker, request):
+        run_marker = time.time()
+        super().test_run(st_platform, st_worker, request)
+        if (
+            not st_platform.endswith("sim")
+            or not request.config.getoption("--enable-chip-swimlane", default=0)
+            or request.config.getoption("--rounds", default=1) > 1
+            or not scene_case_selected(request, self.__class__.__name__, _SWIMLANE_CASE)
+        ):
+            return
+        validate_host_orchestrator_capture(
+            f"{self.__class__.__name__}_{_SWIMLANE_CASE}",
+            since=run_marker,
+            expected_records=_HOST_ORCHESTRATOR_RECORDS,
+        )
 
 
 if __name__ == "__main__":

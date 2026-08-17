@@ -201,8 +201,9 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
     data = sc.read_perf_data(raw)
 
     assert data["orchestrator_source"] == "host"
-    assert data["aicpu_orchestrator_phases"][0][0]["start_time_us"] == 0.0
-    assert data["aicpu_orchestrator_phases"][0][0]["end_time_us"] == 2.0
+    assert "aicpu_orchestrator_phases" not in data
+    assert data["host_orchestrator_phases"][0][0]["start_time_us"] == 0.0
+    assert data["host_orchestrator_phases"][0][0]["end_time_us"] == 2.0
     assert data["aicpu_scheduler_phases"][0][0]["start_time_us"] == 2.0
     assert data["tasks"][0]["dispatch_time_us"] == 12.0
     assert data["timeline_metadata"] == {
@@ -235,7 +236,7 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
         data["tasks"],
         str(trace_path),
         scheduler_phases=data["aicpu_scheduler_phases"],
-        orchestrator_phases=data.get("aicpu_orchestrator_phases"),
+        orchestrator_phases=data.get("host_orchestrator_phases"),
         orchestrator_source=data["orchestrator_source"],
         timeline_metadata=data["timeline_metadata"],
         core_to_thread=data["core_to_thread"],
@@ -362,8 +363,9 @@ def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
 
     data = sc.read_perf_data(raw)
 
-    assert data["aicpu_orchestrator_phases"][0][0]["start_time_us"] == 0.0
-    assert data["aicpu_orchestrator_phases"][0][0]["end_time_us"] == 0.3
+    assert "aicpu_orchestrator_phases" not in data
+    assert data["host_orchestrator_phases"][0][0]["start_time_us"] == 0.0
+    assert data["host_orchestrator_phases"][0][0]["end_time_us"] == 0.3
     assert data["tasks"][0]["dispatch_time_us"] == 1.447
     assert data["tasks"][0]["start_time_us"] == 1.55
     assert data["timeline_metadata"] == {
@@ -403,6 +405,13 @@ def test_dropped_host_capture_is_visible_and_disables_cross_domain_flows(tmp_pat
             "record_allocation_failed",
         ),
         ("all_dropped", [], "dropped", 1, "record_allocation_failed"),
+        (
+            "invalid_interval",
+            [[{"submit_idx": 0, "task_id": 7, "start_host_ns": 1_500, "end_host_ns": 1_800}]],
+            "dropped",
+            1,
+            "invalid_record_interval",
+        ),
         ("silent_missing", [], "complete", 0, None),
     ):
         raw = tmp_path / f"{case_name}.json"
@@ -462,6 +471,7 @@ def test_dropped_host_capture_is_visible_and_disables_cross_domain_flows(tmp_pat
         assert data["timeline_metadata"]["trace_status"] == "partial"
         assert data["timeline_metadata"]["clock_alignment"]["status"] == "calibrated"
         assert data["timeline_metadata"]["host_capture"]["status"] == capture_status
+        assert data["timeline_metadata"]["host_capture"]["error"] == capture_error
         assert data["timeline_metadata"]["host_records_complete"] is False
         assert data["timeline_metadata"]["cross_domain_latency_available"] is False
         assert data["timeline_metadata"].get("host_records_missing", False) is (not host_phases)
@@ -475,7 +485,7 @@ def test_dropped_host_capture_is_visible_and_disables_cross_domain_flows(tmp_pat
             data["tasks"],
             str(trace_path),
             scheduler_phases=data["aicpu_scheduler_phases"],
-            orchestrator_phases=data.get("aicpu_orchestrator_phases"),
+            orchestrator_phases=data.get("host_orchestrator_phases"),
             orchestrator_source=data["orchestrator_source"],
             timeline_metadata=data["timeline_metadata"],
             core_to_thread=data["core_to_thread"],

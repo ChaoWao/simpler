@@ -21,6 +21,8 @@
 namespace simpler::dfx {
 namespace {
 
+static_assert(PLATFORM_ACL_EVENT_TIMESTAMP_FREQ_HZ > 0, "ACL event timestamp frequency must be positive");
+
 class OnboardClockCorrelationProvider final : public ClockCorrelationProvider {
 public:
     ~OnboardClockCorrelationProvider() override { release(false); }
@@ -60,14 +62,12 @@ public:
             sample.error_code = static_cast<int32_t>(rc);
             sample.raw_device_timestamp = 0;
         } else {
-            if constexpr (PLATFORM_ACL_EVENT_TIMESTAMP_FREQ_HZ != 0) {
-                // Preserve the exact backend value, then normalize it to the
-                // platform's verified profiling-counter frequency.
-                sample.device_cycles = static_cast<uint64_t>(
-                    static_cast<__uint128_t>(sample.raw_device_timestamp) * PLATFORM_PROF_SYS_CNT_FREQ /
-                    PLATFORM_ACL_EVENT_TIMESTAMP_FREQ_HZ
-                );
-            }
+            // Preserve the exact backend value, then normalize it to the
+            // platform's verified profiling-counter frequency.
+            sample.device_cycles = static_cast<uint64_t>(
+                static_cast<__uint128_t>(sample.raw_device_timestamp) * PLATFORM_PROF_SYS_CNT_FREQ /
+                PLATFORM_ACL_EVENT_TIMESTAMP_FREQ_HZ
+            );
         }
         return sample;
     }

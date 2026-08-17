@@ -248,8 +248,8 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
 
     Returns a dict shaped for `generate_chrome_trace_json`,
     `print_task_statistics`, and `sched_overhead_analysis`: `tasks`,
-    `aicpu_scheduler_phases`, `aicpu_orchestrator_phases`,
-    `core_to_thread`.
+    `aicpu_scheduler_phases`, source-specific `aicpu_orchestrator_phases`
+    or `host_orchestrator_phases`, and `core_to_thread`.
 
     The join logic that used to live in `export_swimlane_json` (host C++):
 
@@ -621,7 +621,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
                 }
             )
         if host_orchestrator_phases:
-            out["aicpu_orchestrator_phases"] = host_orchestrator_phases
+            out["host_orchestrator_phases"] = host_orchestrator_phases
         else:
             out["timeline_metadata"]["host_records_missing"] = True
     if core_to_thread:
@@ -2887,7 +2887,7 @@ def _print_verbose_data_info(data, verbose):
         print(f"  Time Range: {min_time:.3f} us - {max_time:.3f} us (span: {max_time - min_time:.3f} us)")
     print()
     scheduler_phases = data.get("aicpu_scheduler_phases")
-    orchestrator_phases = data.get("aicpu_orchestrator_phases")
+    orchestrator_phases = data.get("host_orchestrator_phases") or data.get("aicpu_orchestrator_phases")
     core_to_thread = data.get("core_to_thread")
     if scheduler_phases:
         print(f"  Scheduler threads: {len(scheduler_phases)}")
@@ -3003,7 +3003,7 @@ def main():
             args.verbose,
             orchestrator_name=orchestrator_name,
             scheduler_phases=data.get("aicpu_scheduler_phases"),
-            orchestrator_phases=data.get("aicpu_orchestrator_phases"),
+            orchestrator_phases=data.get("host_orchestrator_phases") or data.get("aicpu_orchestrator_phases"),
             orchestrator_source=data.get("orchestrator_source"),
             timeline_metadata=data.get("timeline_metadata"),
             core_to_thread=data.get("core_to_thread"),

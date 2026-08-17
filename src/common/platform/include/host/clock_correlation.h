@@ -46,11 +46,6 @@ struct ClockAnchorSample {
     uint64_t host_after_ns{0};
     ClockAnchorErrorStage error_stage{ClockAnchorErrorStage::None};
     int32_t error_code{0};
-
-    bool valid() const {
-        return error_stage == ClockAnchorErrorStage::None && error_code == 0 && host_before_ns != 0 &&
-               host_after_ns >= host_before_ns && device_cycles != 0;
-    }
 };
 
 const char *clock_anchor_position_name(ClockAnchorPosition position);

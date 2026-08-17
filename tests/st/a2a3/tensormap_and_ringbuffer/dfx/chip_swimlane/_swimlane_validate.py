@@ -30,6 +30,7 @@ from pathlib import Path
 
 from simpler_setup.scene_test import _outputs_dir, _sanitize_for_filename
 from simpler_setup.tools.swimlane_converter import read_perf_data
+from tests.st.chip_swimlane_validation import validate_aicpu_orchestrator_capture
 
 _REQUIRED_TASK_FIELDS = (
     "task_id",
@@ -74,9 +75,10 @@ def validate_perf_artifact(case_label: str, *, since: float, expected_task_count
     # oracle below) expects. Direct json.load(perf) would see only raw
     # aicore_tasks / aicpu_tasks arrays under v2.
     data = read_perf_data(perf)
-    assert data.get("chip_swimlane_level") in (1, 2, 3, 4), (
-        f"unexpected chip_swimlane_level: {data.get('chip_swimlane_level')}"
-    )
+    level = data.get("chip_swimlane_level")
+    assert level in (1, 2, 3, 4), f"unexpected chip_swimlane_level: {data.get('chip_swimlane_level')}"
+    if level >= 4:
+        validate_aicpu_orchestrator_capture(data, perf)
     tasks = data.get("tasks")
     assert isinstance(tasks, list), "tasks field missing or not a list"
     assert len(tasks) > 0, f"perf records empty under {perf}"
