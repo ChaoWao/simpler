@@ -448,8 +448,8 @@ size_t get_host_dlopen_count(DeviceContextHandle ctx);
 
 /**
  * Number of AICore run streams the runner bound to `ctx` has created. AICPU
- * streams belong to pipeline slots for the worker's lifetime; each run gets a
- * freshly created AICore stream, so this advances once per run. Returns 0 on
+ * streams belong to pipeline slots for the worker's lifetime. A completed
+ * AICore stream is reused until a new code upload makes it stale. Returns 0 on
  * platforms whose runs use the persistent bootstrap pair.
  */
 size_t get_run_stream_set_create_count(DeviceContextHandle ctx);

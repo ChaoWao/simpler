@@ -516,6 +516,9 @@ public:
      */
     virtual bool can_accept_run() const = 0;
 
+    /** Invalidate retained run streams after new AICore code is published. */
+    virtual void mark_run_streams_stale() {}
+
     /** Provision/abandon platform resources owned by one prepared native run. */
     virtual int provision_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }
     virtual int abandon_native_run_resources(uint32_t /*pipeline_slot*/) { return 0; }

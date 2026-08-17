@@ -696,6 +696,7 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
         mem_alloc_.free(gm_addr);
         return 0;
     }
+    mark_run_streams_stale();
 
     chip_callable_buffers_.emplace(layout.content_hash, ChipCallableBuffer{chip_dev, layout.total_size, 1});
     LOG_DEBUG(
