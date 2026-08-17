@@ -184,6 +184,11 @@ public:
         return ops_->upload_chip_callable_buffer(runner_ctx_, callable);
     }
 
+    // Identity of this run's DeviceRunner + pipeline slot (for host-side caches
+    // that must not share state across depth>1 slots).
+    void *runner_ctx() const { return runner_ctx_; }
+    uint32_t pipeline_slot() const { return pipeline_slot_; }
+
 private:
     void *runner_ctx_{nullptr};
     uint32_t pipeline_slot_{0};

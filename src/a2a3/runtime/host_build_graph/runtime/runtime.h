@@ -106,6 +106,11 @@ struct Handshake {
  * ChipTensor pair for tracking host-device memory mappings.
  * Used for copy-back during finalize.
  */
+enum class TensorReleaseKind {
+    Free,        // device_malloc'd for this run — free in validate
+    BufferNoop,  // slice of HBG private per-slot staging — live across runs
+};
+
 struct TensorPair {
     void *host_ptr;
     void *dev_ptr;
@@ -114,6 +119,7 @@ struct TensorPair {
     // so the end-of-run D2H copy-back is skipped. OUTPUT/INOUT/unknown
     // keep the safe default of copying back.
     bool needs_copy_back = true;
+    TensorReleaseKind release_kind = TensorReleaseKind::Free;
 };
 
 /**
