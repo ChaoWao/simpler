@@ -450,6 +450,12 @@ _STARTUP_POLL_INTERVAL_S = 0.001
 # to close gracefully (so it unlinks the nested mailbox shms only it knows the
 # names of) before being SIGKILLed. This bounds that graceful wait.
 _ROLLBACK_GRACEFUL_TIMEOUT_S = 10.0
+# A chip/sub child exiting after SHUTDOWN still has to release everything it
+# imported — on a large-scope run (dsv4 HBG: ~80 backings incl. a 2 GiB ring
+# heap) the per-mapping teardown alone runs ~10 s — so the close-path reap
+# gets its own, larger budget. Rollback stays at the tighter value above: its
+# wait guards an unlink-only graceful path that is stuck when it exceeds it.
+_CLOSE_CHILD_REAP_TIMEOUT_S = 60.0
 # Bounded re-check interval for a close() joiner waiting on an in-flight
 # _CloseAttempt. A joiner normally wakes immediately on the completing thread's
 # notify_all(); the timeout is a backstop so that if that notify is skipped (an
@@ -11867,7 +11873,7 @@ class Worker:
             # teardown entry — so the (blocking) pre-child cleanup above cannot
             # eat it. Reap transfers a surviving pid/shm pair into the journal;
             # a later close() can retry without freeing a live mailbox.
-            reap_deadline = time.monotonic() + _ROLLBACK_GRACEFUL_TIMEOUT_S
+            reap_deadline = time.monotonic() + _CLOSE_CHILD_REAP_TIMEOUT_S
             _step(lambda: self._reclaim_child_groups(reap_deadline))
             # A prior attempt may already have transferred a surviving child
             # and its mailbox into the journal. Retry those entries only after
