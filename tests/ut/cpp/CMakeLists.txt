@@ -122,6 +122,7 @@ endfunction()
 function(add_a2a3_hbg_runtime_test name src)
     add_executable(${name}
         ${src}
+        ${ARGN}
         ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
         ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/scope_stats_collector_aicpu.cpp
     )
@@ -800,6 +801,13 @@ add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp)
+
+# The func_id -> CoreCallable dispatch table holds exactly the active callable's
+# mappings. An entry that outlives the ChipCallable buffer it points into is
+# dereferenced by the scheduler and called by the AICore (issue #1489), so this
+# links the Runtime implementation to pin the contract without a device.
+add_a2a3_hbg_runtime_test(test_dispatch_table a2a3/test_dispatch_table.cpp
+    ${HBG_RUNTIME_DIR}/shared/runtime.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 # The submit-poison test drives the real orchestrator submit path, so it links the
 # orchestrator + shared runtime out-of-line members (mirrors a2a3_rt_objs for hbg).

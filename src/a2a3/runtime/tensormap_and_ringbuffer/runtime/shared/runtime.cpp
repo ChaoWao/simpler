@@ -81,6 +81,12 @@ void Runtime::replay_function_bin_addr(int func_id, uint64_t addr) {
     dev.func_id_to_addr_[func_id] = addr;
 }
 
+void Runtime::clear_function_bin_addrs() {
+    for (int i = 0; i < RUNTIME_MAX_FUNC_ID; i++) {
+        dev.func_id_to_addr_[i] = 0;
+    }
+}
+
 // trb's device image is just the `dev` descriptor (the rest of Runtime is
 // host-only). Mirrors the host_build_graph definition (= sizeof(Runtime)).
 size_t runtime_device_copy_size(const Runtime &) { return sizeof(DeviceRuntimeLaunchDesc); }

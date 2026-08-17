@@ -999,9 +999,17 @@ int DeviceRunnerBase::bind_callable_to_runtime(
     }
     const auto &state = it->second;
 
-    // Replay each prepared kernel address into runtime.func_id_to_addr_.
-    // The kernel binaries live in the retained ChipCallable buffer for this
-    // callable_id and stay valid until `unregister_callable` or `finalize`.
+    // runtime.func_id_to_addr_ holds exactly the active callable's mappings.
+    //
+    // Each entry is an address inside that callable's retained ChipCallable
+    // buffer, which `unregister_callable` frees once its last handle goes away.
+    // The table is zeroed only in Runtime's constructor and a Runtime outlives
+    // many register/unregister cycles, so an entry left behind by a previous
+    // callable dangles into GM the allocator can hand out again. The scheduler
+    // dereferences that address to read CoreCallable::resolved_addr() and the
+    // AICore calls the result, so a stale entry is executed as code. Replaying
+    // only this callable's func_ids would leave every other entry standing.
+    runtime.clear_function_bin_addrs();
     for (const auto &kv : state.kernel_addrs) {
         if (kv.first < 0 || kv.first >= RUNTIME_MAX_FUNC_ID) {
             LOG_ERROR("bind_callable_to_runtime: func_id=%d out of range", kv.first);
