@@ -675,6 +675,56 @@ void SimDeviceRunnerBase::apply_call_config(const CallConfig &config) {
     set_output_prefix(config.output_prefix);
 }
 
+void SimDeviceRunnerBase::begin_host_orchestrator_capture(uint64_t reserve_capacity) noexcept {
+    if (clock_correlation_provider_ != nullptr) {
+        clock_correlation_provider_->release(false);
+        clock_correlation_provider_.reset();
+    }
+    chip_swimlane_collector_.begin_host_orchestrator_capture(static_cast<size_t>(reserve_capacity));
+    if (chip_swimlane_level_ != ChipSwimlaneLevel::ORCH_PHASES) return;
+
+    try {
+        clock_correlation_provider_ = simpler::dfx::make_clock_correlation_provider();
+        chip_swimlane_collector_.begin_clock_correlation_session(
+            clock_correlation_provider_->name(), clock_correlation_provider_->raw_device_timestamp_unit()
+        );
+        chip_swimlane_collector_.record_clock_anchor_samples(
+            simpler::dfx::capture_clock_anchor_group(
+                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin
+            )
+        );
+    } catch (...) {
+        clock_correlation_provider_.reset();
+        try {
+            chip_swimlane_collector_.begin_clock_correlation_session("unavailable", "unknown");
+        } catch (...) {
+            // begin() stores diagnostic strings and can still fail under
+            // allocation pressure. Keep this noexcept path fail-closed.
+            chip_swimlane_collector_.finish_clock_correlation_session();
+        }
+    }
+}
+
+void SimDeviceRunnerBase::finish_clock_correlation_session(bool capture_device_complete) noexcept {
+    if (!chip_swimlane_collector_.clock_correlation_active()) {
+        if (clock_correlation_provider_ != nullptr) clock_correlation_provider_->release(false);
+        clock_correlation_provider_.reset();
+        return;
+    }
+    if (capture_device_complete && clock_correlation_provider_ != nullptr) {
+        try {
+            chip_swimlane_collector_.record_clock_anchor_samples(
+                simpler::dfx::capture_clock_anchor_group(
+                    *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::DeviceExecutionComplete
+                )
+            );
+        } catch (...) {}
+    }
+    chip_swimlane_collector_.finish_clock_correlation_session();
+    if (clock_correlation_provider_ != nullptr) clock_correlation_provider_->release(false);
+    clock_correlation_provider_.reset();
+}
+
 uint64_t SimDeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *callable) {
     if (callable == nullptr) {
         return 0;

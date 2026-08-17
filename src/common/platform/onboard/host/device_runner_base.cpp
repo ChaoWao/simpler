@@ -1048,6 +1048,63 @@ void DeviceRunnerBase::apply_call_config(const CallConfig &config) {
     set_output_prefix(config.output_prefix);
 }
 
+void DeviceRunnerBase::begin_host_orchestrator_capture(uint64_t reserve_capacity) noexcept {
+    if (clock_correlation_provider_ != nullptr) {
+        clock_correlation_provider_->release(false);
+        clock_correlation_provider_.reset();
+    }
+    chip_swimlane_collector_.begin_host_orchestrator_capture(static_cast<size_t>(reserve_capacity));
+    if (chip_swimlane_level_ != ChipSwimlaneLevel::ORCH_PHASES) return;
+
+    try {
+        clock_correlation_provider_ = simpler::dfx::make_clock_correlation_provider();
+        chip_swimlane_collector_.begin_clock_correlation_session(
+            clock_correlation_provider_->name(), clock_correlation_provider_->raw_device_timestamp_unit()
+        );
+        chip_swimlane_collector_.record_clock_anchor_samples(
+            simpler::dfx::capture_clock_anchor_group(
+                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin
+            )
+        );
+    } catch (...) {
+        clock_correlation_provider_.reset();
+        try {
+            chip_swimlane_collector_.begin_clock_correlation_session("unavailable", "unknown");
+        } catch (...) {
+            // begin() stores diagnostic strings and can still fail under
+            // allocation pressure. Keep this noexcept path fail-closed.
+            chip_swimlane_collector_.finish_clock_correlation_session();
+        }
+    }
+}
+
+void DeviceRunnerBase::finish_clock_correlation_session(
+    bool capture_device_complete, bool abandon_device_resources
+) noexcept {
+    if (!chip_swimlane_collector_.clock_correlation_active()) {
+        if (clock_correlation_provider_ != nullptr) {
+            clock_correlation_provider_->release(abandon_device_resources);
+            clock_correlation_provider_.reset();
+        }
+        return;
+    }
+
+    if (capture_device_complete && clock_correlation_provider_ != nullptr) {
+        try {
+            chip_swimlane_collector_.record_clock_anchor_samples(
+                simpler::dfx::capture_clock_anchor_group(
+                    *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::DeviceExecutionComplete
+                )
+            );
+        } catch (...) {}
+    }
+    chip_swimlane_collector_.finish_clock_correlation_session();
+    if (clock_correlation_provider_ != nullptr) {
+        clock_correlation_provider_->release(abandon_device_resources);
+        clock_correlation_provider_.reset();
+    }
+}
+
 // =============================================================================
 // Group E (minimal) — shared AICPU launch helper
 // =============================================================================
@@ -1077,6 +1134,8 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     auto capture = [&rc](int err) {
         if (err != 0 && rc == 0) rc = err;
     };
+
+    finish_clock_correlation_session(false, abandon_device_resources);
 
     // Teardown invariant: finalize_common() is the single place that releases
     // every RTS/device-owning resource, and the subclass runs it BEFORE its
@@ -1576,11 +1635,12 @@ void DeviceRunnerBase::start_shared_collectors_for_run() {
     }
 }
 
-void DeviceRunnerBase::teardown_shared_collectors_after_run() {
+void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_execution_complete) {
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     // Diagnostic exports use the per-task `output_prefix_` directory the user
     // set on CallConfig (CallConfig::validate() enforces non-empty upstream).
+    finish_clock_correlation_session(device_execution_complete, !can_accept_run());
     if (enable_chip_swimlane_) {
         chip_swimlane_collector_.stop();
         chip_swimlane_collector_.read_phase_header_metadata();

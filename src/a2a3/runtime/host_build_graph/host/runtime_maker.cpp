@@ -109,6 +109,56 @@ static int64_t _now_ms() {
     return static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
 }
 
+namespace {
+
+thread_local const HostApi *g_host_orch_profile_api = nullptr;
+thread_local uint32_t g_host_orch_submit_idx = 0;
+
+uint64_t host_fallback_cycles_to_ns(uint64_t cycles) {
+    constexpr uint64_t kNsPerSecond = 1000000000ull;
+    return (cycles / PLATFORM_PROF_SYS_CNT_FREQ) * kNsPerSecond +
+           (cycles % PLATFORM_PROF_SYS_CNT_FREQ) * kNsPerSecond / PLATFORM_PROF_SYS_CNT_FREQ;
+}
+
+class HostOrchestratorProfileBinding {
+public:
+    HostOrchestratorProfileBinding(const HostApi *api, uint64_t task_window_size) :
+        previous_(g_host_orch_profile_api),
+        previous_submit_idx_(g_host_orch_submit_idx) {
+        if (api != nullptr && api->chip_swimlane_level() == static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES)) {
+            api->begin_host_orchestrator_capture(task_window_size);
+            g_host_orch_profile_api = api;
+            g_host_orch_submit_idx = 0;
+        }
+    }
+
+    ~HostOrchestratorProfileBinding() {
+        g_host_orch_profile_api = previous_;
+        g_host_orch_submit_idx = previous_submit_idx_;
+    }
+
+private:
+    const HostApi *previous_;
+    uint32_t previous_submit_idx_;
+};
+
+}  // namespace
+
+// Strong host-side override for the weak fallback in pto_orchestrator.cpp.
+// Its inputs are the host fallback's frequency-scaled CLOCK_MONOTONIC values;
+// convert them back to ns and route the typed record through this run's
+// HostApi binding. The AICPU build does not link runtime_maker.cpp and keeps
+// using the device collector's implementation.
+__attribute__((visibility("hidden"))) void
+chip_swimlane_aicpu_record_orch_phase(uint64_t start_time, uint64_t end_time, uint64_t task_id, uint32_t) {
+    if (g_host_orch_profile_api == nullptr) return;
+    ChipSwimlaneHostOrchPhaseRecord record{
+        host_fallback_cycles_to_ns(start_time), host_fallback_cycles_to_ns(end_time), task_id, g_host_orch_submit_idx++,
+        0
+    };
+    g_host_orch_profile_api->record_host_orchestrator_phase(record);
+}
+
 static bool is_power_of_2_u64(uint64_t value) { return value != 0 && (value & (value - 1)) == 0; }
 
 template <typename T>
@@ -496,6 +546,9 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: orchestrator re-init against host SM failed");
         return -1;
     }
+#if SIMPLER_DFX
+    rt->orchestrator.chip_swimlane_level = static_cast<ChipSwimlaneLevel>(api->chip_swimlane_level());
+#endif
     rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, &rt->scheduler);
 
     PTO2SharedMemoryHandle host_sm_handle;
@@ -535,6 +588,7 @@ int32_t run_host_orchestration(
     // rt_orchestration_done take the runtime as an argument.
     entry_points->bind(rt);
 
+    HostOrchestratorProfileBinding profile_binding(api, eff_task_window_sizes[0]);
     rt_scope_begin(rt);
     entry_points->entry(orch_l2);
     rt_scope_end(rt);
@@ -549,6 +603,7 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: total_tasks %d out of range [0, %" PRIu64 "]", total_tasks, eff_task_window_sizes[0]);
         return -1;
     }
+    api->finish_host_orchestrator_capture(static_cast<uint64_t>(total_tasks));
 
     // Relocate the host-DDR cross-task pointers to their final DEVICE addresses
     // on the host, before the SM and arena leave for the device. Pointers into

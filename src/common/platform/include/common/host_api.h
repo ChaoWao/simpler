@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 
+struct ChipSwimlaneHostOrchPhaseRecord;
+
 /**
  * Host API function pointers for device memory operations.
  * Allows a runtime to use pluggable device-memory backends.
@@ -110,6 +112,13 @@ struct HostApiOps {
     // DeviceRunner::bind_callable_to_runtime replays onto the runtime's
     // func_id_to_addr_ before each run.
     uint64_t (*upload_chip_callable_buffer)(void *runner_ctx, const void *callable);
+    // Host-build-graph level-4 profiling. Capture begins during bind, before
+    // the device collector is initialized; the runner therefore owns the
+    // pending host vector and merges it into the eventual JSON export.
+    uint32_t (*get_chip_swimlane_level)(void *runner_ctx);
+    void (*begin_host_orchestrator_capture)(void *runner_ctx, uint64_t reserve_capacity);
+    void (*record_host_orchestrator_phase)(void *runner_ctx, const ChipSwimlaneHostOrchPhaseRecord *record);
+    void (*finish_host_orchestrator_capture)(void *runner_ctx, uint64_t expected_records);
 };
 
 /**
@@ -182,6 +191,24 @@ public:
     }
     uint64_t upload_chip_callable_buffer(const void *callable) const {
         return ops_->upload_chip_callable_buffer(runner_ctx_, callable);
+    }
+    uint32_t chip_swimlane_level() const {
+        return ops_->get_chip_swimlane_level != nullptr ? ops_->get_chip_swimlane_level(runner_ctx_) : 0;
+    }
+    void begin_host_orchestrator_capture(uint64_t reserve_capacity) const noexcept {
+        if (ops_->begin_host_orchestrator_capture != nullptr) {
+            ops_->begin_host_orchestrator_capture(runner_ctx_, reserve_capacity);
+        }
+    }
+    void record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) const noexcept {
+        if (ops_->record_host_orchestrator_phase != nullptr) {
+            ops_->record_host_orchestrator_phase(runner_ctx_, &record);
+        }
+    }
+    void finish_host_orchestrator_capture(uint64_t expected_records) const noexcept {
+        if (ops_->finish_host_orchestrator_capture != nullptr) {
+            ops_->finish_host_orchestrator_capture(runner_ctx_, expected_records);
+        }
     }
 
 private:

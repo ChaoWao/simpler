@@ -613,6 +613,24 @@ struct ChipSwimlaneAicpuOrchPhaseRecord {
 };
 static_assert(sizeof(ChipSwimlaneAicpuOrchPhaseRecord) == 32, "ChipSwimlaneAicpuOrchPhaseRecord layout drift");
 
+/**
+ * Host orchestrator phase record.
+ *
+ * host_build_graph constructs the complete runtime graph on the host before
+ * device execution starts. Keep these timestamps in the host monotonic-ns
+ * clock domain. The converter uses platform anchors for a physical alignment;
+ * if that fails, it emits an explicitly marked causal composite and forbids
+ * cross-domain latency calculations.
+ */
+struct ChipSwimlaneHostOrchPhaseRecord {
+    uint64_t start_time_ns;
+    uint64_t end_time_ns;
+    uint64_t task_id;
+    uint32_t submit_idx;
+    uint32_t _pad;
+};
+static_assert(sizeof(ChipSwimlaneHostOrchPhaseRecord) == 32, "ChipSwimlaneHostOrchPhaseRecord layout drift");
+
 constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 16384;  // ~512KB per sched thread, ~512KB per orch thread
 
 // Fixed-size phase record buffers. Same TypedBuffer template as the task

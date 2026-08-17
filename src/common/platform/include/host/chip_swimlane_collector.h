@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "common/chip_swimlane_profiling.h"
+#include "host/clock_correlation.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
@@ -407,6 +408,17 @@ public:
      */
     void set_core_types(const CoreType *types, int n);
 
+    /** Reset and append host-build-graph level-4 submit records. These calls
+     * happen during bind, before initialize(), because HBG finishes host graph
+     * construction before the device collector is provisioned. */
+    void begin_host_orchestrator_capture(size_t reserve_capacity) noexcept;
+    void record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) noexcept;
+    void finish_host_orchestrator_capture(uint64_t expected_records) noexcept;
+    void begin_clock_correlation_session(const char *provider_name, const char *raw_device_timestamp_unit);
+    void record_clock_anchor_samples(std::vector<simpler::dfx::ClockAnchorSample> samples);
+    void finish_clock_correlation_session();
+    bool clock_correlation_active() const { return clock_correlation_session_.active(); }
+
     /**
      * Export collected records as a Chrome Trace Event JSON (swimlane view).
      * Writes <output_prefix>/chip_swimlane_records.json — directory is captured at
@@ -528,6 +540,8 @@ private:
     // orch records (kind-tagged at routing time; no parse-time discrimination).
     std::vector<std::vector<ChipSwimlaneAicpuSchedPhaseRecord>> collected_sched_phase_records_;
     std::vector<std::vector<ChipSwimlaneAicpuOrchPhaseRecord>> collected_orch_phase_records_;
+    std::vector<ChipSwimlaneHostOrchPhaseRecord> collected_host_orch_phase_records_;
+    simpler::dfx::ClockCorrelationSession clock_correlation_session_;
 
     // Core-to-thread mapping (core_id → scheduler thread index, -1 = unassigned)
     std::vector<int8_t> core_to_thread_;
@@ -544,6 +558,14 @@ private:
     uint64_t total_orch_phase_collected_{0};
     bool has_phase_data_{false};
     bool collector_shards_merged_{false};
+    bool host_orchestrator_capture_started_{false};
+    bool host_orchestrator_capture_enabled_{false};
+    enum class HostCaptureError : uint8_t { None = 0, ReserveFailed, RecordAllocationFailed };
+    HostCaptureError host_capture_error_{HostCaptureError::None};
+    uint64_t host_capture_reserve_requested_{0};
+    uint64_t host_capture_dropped_records_{0};
+    uint64_t host_capture_expected_records_{0};
+    bool host_capture_finished_{false};
 
     size_t normalize_collector_shard(int collector_shard) const;
     void reset_collector_shards();

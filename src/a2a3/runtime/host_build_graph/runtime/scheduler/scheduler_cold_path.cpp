@@ -837,9 +837,10 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
             // would prime zero sched pools and all sched_phase emits would silently
             // drop.
             const int sched_phase_threads = aicpu_thread_num_;
-            // Orchestration is always single-threaded, so orch-phase is one pool
-            // (ordinal 0) — see record_orch_phase.
-            const int orch_phase_threads = 1;
+            // HBG orchestration already completed on the host. Its level-4
+            // records use the host callback path, so the device initializes no
+            // dead AICPU orchestrator pool.
+            const int orch_phase_threads = 0;
             chip_swimlane_aicpu_init_phase(runtime->worker_count, sched_phase_threads, orch_phase_threads);
         }
     } else {
@@ -1055,15 +1056,6 @@ void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
 void SchedulerContext::on_orchestration_done(
     Runtime *runtime, PTO2Runtime *rt, [[maybe_unused]] int32_t thread_idx, int32_t total_tasks
 ) {
-#if SIMPLER_DFX
-    if (chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES) {
-        // Flush the orchestrator's orch-phase buffer (single instance, pool 0).
-        // The orchestrator has no scheduler-phase pool of its own — those belong
-        // to the scheduler threads and are flushed in scheduler_dispatch.
-        chip_swimlane_aicpu_flush_orch_phase_buffer(thread_idx);
-    }
-#endif
-
     total_tasks_ = total_tasks;
 
     // Allocate the per-S CompletedTaskQueues here on the boot leader, before it
