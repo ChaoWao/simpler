@@ -38,11 +38,10 @@ submission image.
 | orch window total | 1,834 µs | 836 µs | −54% |
 | **H2D upload time** | **14.66 ms** | **12.10 ms** | **−17%** |
 
-> These runs were taken with a `SIMPLER_SKIP_DEVICE_RUN=1` knob that is **not
-> present in the tree** — the string occurs nowhere in the source, so the table
-> cannot be reproduced as written. The numbers themselves agree with a
-> `--rounds 3` reproduction (see the amendment below), which measures the same
-> stage without needing that knob.
+> These runs were taken with `SIMPLER_SKIP_DEVICE_RUN=1`, which stops a run
+> after prepare so the host-side stages above are measured without the device
+> execution behind them. The numbers agree with a `--rounds 3` reproduction
+> (see the amendment below), which measures the same stage without that knob.
 
 ## Why the H2D time gain is far below the byte gain
 

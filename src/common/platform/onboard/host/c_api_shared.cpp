@@ -1006,6 +1006,14 @@ int simpler_run(
 ) {
     int rc = simpler_prepare_run(ctx, runtime, callable_id, args, config, descriptor);
     if (rc != 0) return rc;
+    // TEMPORARY (host_build_graph dsv4 bring-up): stop after prepare so the host
+    // side — orchestration, graph construction, image relocation and H2D — can be
+    // measured while the device execution of that graph still stalls. Outputs are
+    // never produced, so any run under this variable is a timing harness, not a
+    // test. Delete this together with the variable once the stall is diagnosed.
+    if (std::getenv("SIMPLER_SKIP_DEVICE_RUN") != nullptr) {
+        return simpler_finalize_run(ctx, runtime);
+    }
     rc = simpler_launch_run(ctx, runtime);
     if (rc == 0) rc = simpler_wait_run(ctx, runtime);
     int finalize_rc = simpler_finalize_run(ctx, runtime);
