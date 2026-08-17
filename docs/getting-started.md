@@ -13,16 +13,18 @@ The pto-isa dependency will be automatically cloned when you first run an exampl
 
 The pto-isa repository provides header files needed for kernel compilation on
 the `a2a3` hardware platform and for examples that use PTO ISA intrinsics.
-The preferred GitHub PTO-ISA revision is controlled by the repo-root
-`pto_isa.pin` file.
+The selected PTO-ISA revision is controlled by the repo-root `pto_isa.pin`
+file.
 
 The test framework automatically handles PTO-ISA setup:
 
 1. Reads the required commit from `pto_isa.pin`.
-2. Reuses a clean matching checkout when available.
+2. Reuses `build/pto-isa` as-is when it already sits at exactly the pinned
+   commit.
 3. Otherwise (missing, wrong revision, or a dirty working tree) re-clones
-   the pinned commit from GitHub. After three failed attempts, it clones
-   `master` from `https://gitcode.com/Youhezhen/pto-isa.git`.
+   `build/pto-isa` fresh over HTTPS directly at the pinned commit, rather than
+   `git checkout`-ing over the existing checkout — a checkout aborts on local
+   modifications and would strand the clone at the wrong revision.
 4. Passes that managed checkout to the kernel/runtime compilers.
 
 **Automatic Setup (Recommended):**
@@ -42,8 +44,9 @@ git clone --branch main https://github.com/hw-native-sys/pto-isa.git build/pto-i
 ```
 
 Manual setup still uses the standard managed location. Before it builds
-runtimes or compiles kernels, `simpler` validates the checkout through the same
-automatic acquisition flow.
+runtimes or compiles kernels, `simpler` verifies that checkout is at the commit
+in `pto_isa.pin`; if it isn't (or the working tree is dirty), it re-clones the
+repository fresh at the pinned commit.
 
 **Revision selection and compatibility checks:**
 
@@ -53,8 +56,8 @@ diff and applies the same revision to install-time runtime builds and run-time
 kernel compilation.
 
 For platforms that embed PTO-ISA headers into onboard host runtimes (a2a3
-always; a5 when an async workspace overlay is ON), builds record the requested
-pin and actual PTO-ISA HEAD in `build/lib/pto_isa_build.json`.
+always; a5 when an async workspace overlay is ON), builds record the actual
+PTO-ISA git HEAD used for each runtime in `build/lib/pto_isa_build.json`.
 This JSON is artifact provenance, not a second configuration source. Lookup
 of those runtimes **requires** the metadata file: if it is missing, or if it
 says a pre-built runtime was built for an older pin / omitted that runtime,
@@ -68,8 +71,8 @@ cat build/lib/pto_isa_build.json
 
 - If git is not available: install git, or clone PTO-ISA manually into
   `build/pto-isa` on a machine that can access GitHub.
-- If both GitHub and GitCode cloning fail due to network, try again after
-  checking access to the two HTTPS remotes.
+- If clone fails due to network: try again or manually clone with HTTPS into
+  `build/pto-isa`.
 - If runtime lookup reports missing or stale PTO-ISA metadata/binaries: rerun
   `pip install` so `build/lib` is rebuilt for the current `pto_isa.pin`.
 - Host compile receives the pin-resolved checkout as `-DPTO_ISA_ROOT=` (not

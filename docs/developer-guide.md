@@ -47,7 +47,7 @@ pto-runtime/
 │   ├── elf_parser.py                  # Authoritative copy
 │   ├── platform_info.py               # Platform/runtime discovery
 │   ├── environment.py                 # PROJECT_ROOT resolver (wheel vs source tree)
-│   ├── pto_isa.py                     # PTO-ISA checkout management
+│   ├── pto_isa.py                     # pinned PTO-ISA checkout management
 │   ├── build_runtimes.py              # Pre-build all runtime variants (invoked by pip install)
 │   └── _assets/                       # (wheel only) src/ + build/lib/ shipped with wheel
 │
@@ -186,7 +186,7 @@ This builds the nanobind `_task_interface` extension **and** pre-builds all runt
 | Nothing — but `HEAD` moved (branch switch, rebase, pull, **or your own commit**) | Re-run `pip install ...`. You may have changed no compiled file, yet the tree moved out from under a binary frozen at install time. `simpler.task_interface` refuses to import on this skew (see below) rather than let struct fields read as 0. |
 | Python-only code (`python/*.py`, `simpler_setup/*.py`) | Nothing to recompile (editable install) — but see the row above: once you *commit* it, the import guard keys on `HEAD`, so reinstall before the next import. |
 | Examples / kernels (`examples/{arch}/`, `tests/st/`) | Nothing to recompile, just re-run — same commit caveat as the row above |
-| `pto_isa.pin` changed | Re-run `pip install`. The cmake cache stamp and the `host_runtime` ccache key include the resolved PTO-ISA commit for a2a3 onboard (and a5 onboard when the SDMA overlay is enabled), so a pin bump invalidates stale runtime objects automatically. |
+| `pto_isa.pin` changed | Re-run `pip install`. The cmake cache stamp and the `host_runtime` ccache key include the pinned PTO-ISA commit for a2a3 onboard (and a5 onboard when the SDMA overlay is enabled), so a pin bump invalidates stale runtime objects automatically. |
 
 `_task_interface` records the commit it was compiled from, and
 `simpler.task_interface` compares it against the working tree at import,
@@ -208,7 +208,7 @@ against, and a build made without git carries an empty stamp.
 
 A `pto_isa.pin` bump changes the SDMA headers embedded by
 `host_runtime.so`. Install-time runtime builds and run-time kernel compilation
-both use the PTO-ISA checkout resolved from `pto_isa.pin`.
+both read `pto_isa.pin`; use a different ISA revision by updating that file.
 
 ### Runtime binary lookup
 

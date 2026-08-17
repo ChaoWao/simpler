@@ -205,7 +205,7 @@ class RuntimeBuilder:
         return platform_embeds_pto_isa(self.platform)
 
     def _resolve_build_pto_isa_commit(self) -> str:
-        """Return the resolved pto-isa commit baked into this build.
+        """Return the pinned pto-isa commit baked into this build.
 
         When host code embeds pto-isa headers (a2a3 or a5 onboard), a pto-isa
         bump must invalidate that build's
@@ -215,14 +215,15 @@ class RuntimeBuilder:
         revision does not affect the compiled objects, so return "" and leave
         the stamp keyed on the runtime HEAD.
 
-        A GitCode fallback uses its actual HEAD so cache invalidation and build
-        provenance match the headers on disk.
+        ``pto_isa.pin`` is the single source of truth. If the pin is missing or
+        invalid, let ``read_pto_isa_pin`` raise so an embedding onboard build
+        cannot silently proceed with unknown PTO-ISA headers.
         """
         if not self._requires_pto_isa_metadata_validation():
             return ""
-        from .pto_isa import get_pto_isa_resolved_commit  # noqa: PLC0415
+        from .pto_isa import read_pto_isa_pin  # noqa: PLC0415
 
-        return get_pto_isa_resolved_commit()
+        return read_pto_isa_pin()
 
     def _build_cache_stamp(self, pto_isa_commit: Optional[str] = None) -> str:
         """Stamp identifying the sources this build was compiled from.

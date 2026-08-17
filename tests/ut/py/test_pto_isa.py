@@ -6,7 +6,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Tests for managed PTO-ISA checkout resolution and build metadata."""
+"""Tests for pinned PTO-ISA checkout resolution and build metadata."""
 
 import json
 import subprocess
@@ -49,24 +49,6 @@ def test_read_pto_isa_pin_rejects_invalid_content(tmp_path):
         pto_isa.read_pto_isa_pin(pin)
 
 
-def test_get_pto_isa_resolved_commit_uses_verified_fallback_head(tmp_path, monkeypatch):
-    clone_path = tmp_path / "build" / "pto-isa"
-    pto_isa._write_fallback_state(clone_path, PIN_A, PIN_B)
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: clone_path)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-
-    assert pto_isa.get_pto_isa_resolved_commit() == PIN_B
-
-
-def test_get_pto_isa_resolved_commit_rejects_unrecorded_mismatch(tmp_path, monkeypatch):
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: tmp_path / "pto-isa")
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-
-    assert pto_isa.get_pto_isa_resolved_commit() == PIN_A
-
-
 def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
     calls = []
@@ -87,10 +69,10 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     ]
 
 
-def test_clone_falls_back_to_youhezhen_master_after_three_github_pin_failures(tmp_path, monkeypatch):
+def test_clone_falls_back_to_gitcode_after_three_github_pin_failures(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
-    clone_calls = []
-    land_results = iter([False, False, False])
+    clone_remotes = []
+    land_results = iter([False, False, False, True])
     sleeps = []
 
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
@@ -98,87 +80,45 @@ def test_clone_falls_back_to_youhezhen_master_after_three_github_pin_failures(tm
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):
         assert args[:2] == ["clone", "--no-checkout"]
-        clone_calls.append(args)
+        clone_remotes.append(args[2])
         return subprocess.CompletedProcess(["git", *args], returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
     monkeypatch.setattr(pto_isa, "_land_on_commit", lambda *args, **kwargs: next(land_results))
-    monkeypatch.setattr(pto_isa, "_land_on_branch_head", lambda *args, **kwargs: True)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
 
     assert pto_isa._clone(target, PIN_A, verbose=False)
-    assert clone_calls == [
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
-        [
-            "clone",
-            "--no-checkout",
-            "--branch",
-            "master",
-            "https://gitcode.com/Youhezhen/pto-isa.git",
-            str(target),
-        ],
+    assert clone_remotes == [
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://gitcode.com/Youhezhen/pto-isa-github.git",
     ]
     assert sleeps == [2, 4]
-    assert json.loads(pto_isa._fallback_state_path(target).read_text()) == {
-        "actual_commit": PIN_B,
-        "branch": "master",
-        "remote": "https://gitcode.com/Youhezhen/pto-isa.git",
-        "required_commit_from_pin": PIN_A,
-    }
 
 
-def test_clone_falls_back_to_youhezhen_master_after_three_github_clone_failures(tmp_path, monkeypatch):
+def test_clone_falls_back_to_gitcode_after_three_github_clone_failures(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
-    clone_calls = []
+    clone_remotes = []
 
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
     monkeypatch.setattr(pto_isa.time, "sleep", lambda _seconds: None)
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):
         assert args[:2] == ["clone", "--no-checkout"]
-        remote = args[-2]
-        clone_calls.append(args)
+        remote = args[2]
+        clone_remotes.append(remote)
         returncode = 1 if remote == "https://github.com/hw-native-sys/pto-isa.git" else 0
         return subprocess.CompletedProcess(["git", *args], returncode=returncode, stdout="", stderr="unavailable")
 
     monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
     monkeypatch.setattr(pto_isa, "_land_on_commit", lambda *args, **kwargs: True)
-    monkeypatch.setattr(pto_isa, "_land_on_branch_head", lambda *args, **kwargs: True)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
 
     assert pto_isa._clone(target, PIN_A, verbose=False)
-    assert clone_calls == [
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
-        ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
-        [
-            "clone",
-            "--no-checkout",
-            "--branch",
-            "master",
-            "https://gitcode.com/Youhezhen/pto-isa.git",
-            str(target),
-        ],
-    ]
-
-
-def test_land_on_branch_head_detaches_at_remote_branch_tip(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_run_git_resilient(args, cwd=None, timeout=30, check=False, verbose=False):
-        calls.append((args, cwd, check))
-        stdout = f"{PIN_B}\n" if args == ["rev-parse", "refs/remotes/origin/master"] else ""
-        return subprocess.CompletedProcess(["git", *args], returncode=0, stdout=stdout, stderr="")
-
-    monkeypatch.setattr(pto_isa, "_run_git_resilient", fake_run_git_resilient)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-
-    assert pto_isa._land_on_branch_head(tmp_path, "master", verbose=False)
-    assert calls == [
-        (["checkout", "--detach", "--force", "refs/remotes/origin/master"], tmp_path, True),
-        (["rev-parse", "refs/remotes/origin/master"], tmp_path, True),
+    assert clone_remotes == [
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://github.com/hw-native-sys/pto-isa.git",
+        "https://gitcode.com/Youhezhen/pto-isa-github.git",
     ]
 
 
@@ -260,54 +200,6 @@ def test_ensure_pto_isa_root_rejects_when_reclone_lands_wrong_commit(tmp_path, m
 
     with pytest.raises(OSError, match="PTO-ISA not available"):
         pto_isa.ensure_pto_isa_root()
-
-
-def test_ensure_pto_isa_root_accepts_verified_youhezhen_master_fallback(tmp_path, monkeypatch):
-    clone_path = tmp_path / "build" / "pto-isa"
-
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: clone_path)
-
-    def fake_clone(path, commit, verbose=False):
-        (path / "include").mkdir(parents=True)
-        pto_isa._write_fallback_state(path, commit, PIN_B)
-        return True
-
-    monkeypatch.setattr(pto_isa, "_clone", fake_clone)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-
-    assert pto_isa.ensure_pto_isa_root() == str(clone_path.resolve())
-
-
-def test_ensure_pto_isa_root_reuses_verified_youhezhen_master_fallback(tmp_path, monkeypatch):
-    clone_path = tmp_path / "build" / "pto-isa"
-    (clone_path / "include").mkdir(parents=True)
-    pto_isa._write_fallback_state(clone_path, PIN_A, PIN_B)
-
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: clone_path)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-    monkeypatch.setattr(
-        pto_isa,
-        "_run_git_resilient",
-        lambda *a, **k: subprocess.CompletedProcess(["git"], returncode=0, stdout="", stderr=""),
-    )
-    monkeypatch.setattr(pto_isa, "_clone", lambda *a, **k: pytest.fail("unexpected clone of valid fallback"))
-
-    assert pto_isa.ensure_pto_isa_root() == str(clone_path.resolve())
-
-
-def test_fallback_checkout_does_not_satisfy_a_different_pin(tmp_path, monkeypatch):
-    clone_path = tmp_path / "build" / "pto-isa"
-    pto_isa._write_fallback_state(clone_path, PIN_A, PIN_B)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-    monkeypatch.setattr(
-        pto_isa,
-        "_run_git_resilient",
-        lambda *a, **k: pytest.fail("dirty check must not run for a different pin"),
-    )
-
-    assert not pto_isa._is_pristine_at_commit(clone_path, "c" * 40, verbose=False)
 
 
 def test_is_pristine_at_commit_true_when_clean_and_at_pin(tmp_path, monkeypatch):
@@ -452,21 +344,6 @@ def test_write_pto_isa_build_metadata_rejects_mismatch(tmp_path, monkeypatch):
         pto_isa.write_pto_isa_build_metadata(tmp_path, str(tmp_path / "pto-isa"), [RUNTIME_A])
 
 
-def test_write_pto_isa_build_metadata_records_verified_youhezhen_master_fallback(tmp_path, monkeypatch):
-    clone_path = tmp_path / "pto-isa"
-    clone_path.mkdir()
-    pto_isa._write_fallback_state(clone_path, PIN_A, PIN_B)
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_B)
-
-    pto_isa.write_pto_isa_build_metadata(tmp_path, str(clone_path), [RUNTIME_A])
-
-    metadata = json.loads((tmp_path / pto_isa.PTO_ISA_BUILD_METADATA).read_text())
-    assert metadata["required_commit_from_pin"] == PIN_A
-    assert metadata["actual_checkout_commit"] == PIN_B
-    assert metadata["runtime_artifacts"][RUNTIME_A]["actual_checkout_commit"] == PIN_B
-
-
 def test_validate_runtime_pto_isa_current_pin_accepts_matching_metadata(tmp_path, monkeypatch):
     (tmp_path / pto_isa.PTO_ISA_BUILD_METADATA).write_text(
         json.dumps(
@@ -489,50 +366,6 @@ def test_validate_runtime_pto_isa_current_pin_accepts_matching_metadata(tmp_path
     monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
 
     pto_isa.validate_runtime_pto_isa_current_pin(tmp_path, runtime_key=RUNTIME_A)
-
-
-def test_validate_runtime_pto_isa_current_pin_accepts_matching_fallback_commit(tmp_path, monkeypatch):
-    (tmp_path / pto_isa.PTO_ISA_BUILD_METADATA).write_text(
-        json.dumps(
-            {
-                "schema_version": 3,
-                "runtime_artifacts": {
-                    RUNTIME_A: {
-                        "required_commit_from_pin": PIN_A,
-                        "actual_checkout_commit": PIN_B,
-                    }
-                },
-            }
-        )
-        + "\n"
-    )
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_resolved_commit", lambda: PIN_B)
-
-    pto_isa.validate_runtime_pto_isa_current_pin(tmp_path, runtime_key=RUNTIME_A)
-
-
-def test_validate_runtime_pto_isa_current_pin_rejects_stale_fallback_commit(tmp_path, monkeypatch):
-    (tmp_path / pto_isa.PTO_ISA_BUILD_METADATA).write_text(
-        json.dumps(
-            {
-                "schema_version": 3,
-                "runtime_artifacts": {
-                    RUNTIME_A: {
-                        "required_commit_from_pin": PIN_A,
-                        "actual_checkout_commit": PIN_B,
-                    }
-                },
-            }
-        )
-        + "\n"
-    )
-    current_fallback_commit = "c" * 40
-    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
-    monkeypatch.setattr(pto_isa, "get_pto_isa_resolved_commit", lambda: current_fallback_commit)
-
-    with pytest.raises(RuntimeError, match="resolved checkout"):
-        pto_isa.validate_runtime_pto_isa_current_pin(tmp_path, runtime_key=RUNTIME_A)
 
 
 def test_validate_runtime_pto_isa_current_pin_rejects_stale_metadata(tmp_path, monkeypatch):
