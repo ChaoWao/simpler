@@ -112,9 +112,9 @@ class TestNativeRunLifecycle(SceneTestCase):
             assert all(
                 key in attrs
                 for attrs in root_attrs
-                for key in ("run_id=", "slot=", "generation=", "dispatch_id=", "run_epoch=")
+                for key in ("run_id=", "slot_id=", "generation=", "dispatch_id=", "run_epoch=")
             )
-            assert any("slot=1" in attrs and "generation=1" in attrs for attrs in root_attrs)
+            assert any("slot_id=1" in attrs and "generation=1" in attrs for attrs in root_attrs)
 
     def _run_and_validate_l2(  # noqa: PLR0913, PLR0915 -- lifecycle contract is intentionally sequential
         self,

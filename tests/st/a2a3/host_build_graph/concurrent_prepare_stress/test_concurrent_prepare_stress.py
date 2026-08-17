@@ -28,6 +28,7 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
+from simpler_setup.tools.strace_timing import assert_native_overlap, parse_spans
 
 _VECTOR_KERNELS = "../vector_example/kernels"
 _SIZE = 128 * 128
@@ -98,7 +99,7 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         assert chip_worker is not None
         return chip_worker
 
-    def test_concurrent_prepare_overlap(self, st_platform, st_worker):
+    def test_concurrent_prepare_overlap(self, st_platform, st_worker, capfd):
         """Golden-check a 2-deep overlapping pipeline over both arena banks.
 
         Each submission prepares (fully binds) its run against one bank while the
@@ -159,3 +160,10 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
                 _retire(inflight.pop(0))
         finally:
             chip_worker._unregister_slot(callable_id)
+
+        # Each pair must prove prepare(N+1) ran concurrently with device(N) — the
+        # property this pipeline exists for. Not that prepare *finished* inside
+        # that window (`require_hidden=True`): that additionally depends on how
+        # much host CPU this shared machine gives the preparing thread.
+        checks = assert_native_overlap(parse_spans(capfd.readouterr().err.splitlines()))
+        assert len(checks) == _ITERS - 1

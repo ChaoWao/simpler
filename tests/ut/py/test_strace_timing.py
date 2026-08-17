@@ -9,9 +9,14 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import json
+from collections import defaultdict
 from io import StringIO
 
+import pytest
+
 from simpler_setup.tools.strace_timing import (
+    NativeOverlapError,
+    assert_native_overlap,
     bucket_by_hid,
     count_record_heads,
     group_invocations,
@@ -462,3 +467,177 @@ def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
     assert "Sched (us)" not in rendered
     assert "Avg Host: 110.0 us" in rendered
     assert "Avg Device: 22.0 us [2/2]" in rendered
+
+
+def _run_records(*, run_epoch, prepare, device, release, run_id=0, dispatch_id=0, slot_id=0, pid=7, inv=None):
+    """One phased native run's spans, as the `simpler_run` tree carries them.
+
+    `prepare` and `device` are (ts, dur). The root span carries the identity and
+    spans the whole lifetime, so it must enclose the children.
+    """
+    invocation = run_epoch if inv is None else inv
+    identity = f"run_id={run_id} dispatch_id={dispatch_id} slot_id={slot_id} generation=1 run_epoch={run_epoch}"
+    root_end = release + 10
+    return [
+        _record(pid, invocation, "simpler_run.bind", depth=1, ts=prepare[0], dur=prepare[1]),
+        _record(pid, invocation, "simpler_run.runner_run", depth=1, ts=device[0], dur=device[1]),
+        _record(pid, invocation, "simpler_run.claim_release", depth=1, ts=release, dur=5),
+        _record(pid, invocation, "simpler_run", identity, depth=0, ts=prepare[0], dur=root_end - prepare[0]),
+    ]
+
+
+def test_native_overlap_reads_identity_from_the_invocation_root():
+    """The identity is on the root; the windows are on its children.
+
+    `(pid, inv)` is what joins them — the same grouping the TPOT views use.
+    """
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
+
+    checks = assert_native_overlap(parse_spans(lines))
+
+    assert len(checks) == 1
+    assert (checks[0].predecessor.sequence, checks[0].successor.sequence) == (1, 2)
+
+
+def test_native_overlap_accepts_a_prepare_that_outlasts_the_device_window():
+    """Overlap means the intervals intersect, not that prepare is contained.
+
+    A prepare that starts inside the predecessor's device window and finishes
+    after it still ran concurrently with device work, which is the property being
+    proved. Demanding containment turns a slow host into a failure whose message
+    blames the wrong thing.
+    """
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, prepare=(190, 40), device=(240, 100), release=340)
+
+    assert len(assert_native_overlap(parse_spans(lines))) == 1
+
+    with pytest.raises(NativeOverlapError, match="not fully hidden"):
+        assert_native_overlap(parse_spans(lines), require_hidden=True)
+
+
+def test_native_overlap_rejects_a_prepare_after_the_device_window():
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, prepare=(210, 20), device=(240, 100), release=340)
+
+    with pytest.raises(NativeOverlapError, match="did not overlap"):
+        assert_native_overlap(parse_spans(lines))
+
+
+def test_native_overlap_rejects_device_work_before_the_predecessor_release():
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=250)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=400)
+
+    with pytest.raises(NativeOverlapError, match="reordered before the claim release"):
+        assert_native_overlap(parse_spans(lines))
+
+
+def test_native_overlap_orders_by_run_epoch_when_dispatch_id_is_absent():
+    """`_submit_chip_run_direct` defaults run_id and dispatch_id to 0.
+
+    `run_epoch` is the only identity those runs carry, so it is what orders them.
+    """
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
+
+    identities = [check.predecessor for check in assert_native_overlap(parse_spans(lines))]
+
+    assert identities[0].dispatch_id == 0
+    assert identities[0].run_epoch == 1
+    assert identities[0].sequence == 1
+
+
+def test_native_overlap_orders_by_dispatch_id_when_the_scheduler_allocates_one():
+    lines = _run_records(run_epoch=1, dispatch_id=10, run_id=5, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, dispatch_id=11, run_id=6, prepare=(150, 30), device=(240, 100), release=340)
+
+    checks = assert_native_overlap(parse_spans(lines))
+
+    assert (checks[0].predecessor.sequence, checks[0].successor.sequence) == (10, 11)
+
+
+def test_native_overlap_skips_an_invocation_that_is_not_a_phased_run():
+    """A lexical `simpler_run` carries no identity attrs, so it orders nothing."""
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
+    lines += [_record(7, 99, "simpler_run", "", depth=0, ts=10, dur=5)]
+
+    assert len(assert_native_overlap(parse_spans(lines))) == 1
+
+
+def test_native_overlap_needs_two_runs_on_one_lane():
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+
+    with pytest.raises(NativeOverlapError, match="at least two complete native runs"):
+        assert_native_overlap(parse_spans(lines))
+
+
+def test_claim_release_span_stays_inside_the_invocation_tree():
+    """It is a `simpler_run` child, so the existing views absorb it.
+
+    A separate family would have to be filtered out of every view; a depth-1
+    child of the root is what the tree already knows how to render — and it
+    cannot displace the root the way a second depth-0 span would.
+    """
+    lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
+
+    invocation = group_invocations(legacy_spans(list(parse_spans(lines))))[0]
+
+    assert invocation.root().name == "simpler_run"
+    assert invocation.by_name()["simpler_run.claim_release"].depth == 1
+    # The root still reports the whole lifetime, not a sub-stage's duration.
+    assert invocation.root().dur == 210 - 50
+
+
+def test_swimlane_splits_an_interleaved_thread_into_one_lane_per_pipeline_slot():
+    """A K-deep pipeline runs on one OS thread, so tid is not the unit of concurrency.
+
+    Flattening overlapping runs onto one lane makes Perfetto nest run N+1's spans
+    inside run N's root by timestamp containment — false nesting that hides the
+    very overlap the lane is meant to show. The pipeline slot is what a run holds
+    exclusively, so runs sharing one cannot overlap.
+    """
+    lines = _run_records(run_epoch=1, slot_id=0, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, slot_id=1, prepare=(150, 30), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=3, slot_id=0, prepare=(300, 30), device=(380, 100), release=480)
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+    lanes = {
+        event["tid"]: event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+
+    assert sorted(lanes.values()) == ["pipeline slot 0 (tid 7)", "pipeline slot 1 (tid 7)"]
+    # Two runs shared slot 0, so that lane holds both — and neither overlaps.
+    roots = defaultdict(list)
+    for event in trace["traceEvents"]:
+        if event["ph"] == "X" and event["args"]["depth"] == 0:
+            roots[event["tid"]].append((event["ts"], event["ts"] + event["dur"]))
+    assert sorted(len(windows) for windows in roots.values()) == [1, 2]
+    for windows in roots.values():
+        windows.sort()
+        assert all(a[1] <= b[0] for a, b in zip(windows, windows[1:]))
+    # The real thread stays recoverable from the slice.
+    slices = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+    assert {event["args"]["os_tid"] for event in slices} == {7}
+
+
+def test_swimlane_keeps_a_sequential_thread_on_its_own_tid():
+    """Splitting a thread whose runs never overlapped would only fragment it.
+
+    The L3 scheduler thread carries a pipeline slot but runs strictly
+    sequentially, so it must keep its real tid.
+    """
+    lines = _run_records(run_epoch=1, slot_id=0, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, slot_id=1, prepare=(300, 20), device=(350, 100), release=460)
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+    lanes = {
+        event["tid"]: event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+
+    assert list(lanes) == [7]

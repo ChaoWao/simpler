@@ -105,7 +105,7 @@ including time the caller spends polling or doing other host work; blocking
 | Depth | Span names |
 | ----- | ---------- |
 | 0 | `simpler_run` |
-| 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.validate` |
+| 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.claim_release`, `simpler_run.validate` |
 | 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
 | 3 | TMR phase spans `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
 
@@ -123,9 +123,11 @@ an L4 pod alike, since the orchestrator and scheduler code they run is the same:
 | `l3.frame_submit` | local child mailbox-frame publication |
 | `l3.activate` | prepared-frame activation |
 | `l3.complete` | terminal child progress handling |
+| `l3.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
 
 Their attributes carry the available `run_id`, `task_slot`, `group_index`,
-`worker_id`, `dispatch_id`, and endpoint kind.
+`worker_id`, `dispatch_id`, endpoint kind, and the dispatch's pipeline lease
+(`slot_id` / `generation`).
 
 Because the names do not encode which level emitted them, a pod run puts the L4
 process and each of its L3 processes on lanes that differ only by pid. The
@@ -170,14 +172,71 @@ per-invocation lane, so each call renders as an isolated nested tree in
 [Perfetto](https://ui.perfetto.dev) / `chrome://tracing`.
 
 `--swimlane` is a separate view. Host slices keep their real OS pid/tid, and
-task submission-to-dispatch handoffs render as flow arrows. Chrome Trace JSON
-has only one visible timestamp axis, so putting the raw per-invocation device
-clock beside `CLOCK_MONOTONIC` would create a multi-day empty interval. The
-converter therefore keeps `clk=dev` records, with their original ns timestamps,
-in the top-level `unalignedDeviceSpans` array instead of `traceEvents`; it does
-not guess a clock offset. Perfetto opens directly on the host activity, while
-the existing tables, tree, and `--trace-out` still provide the device-phase
-timing views.
+task submission-to-dispatch handoffs render as flow arrows.
+
+**One exception, because a K-deep pipeline is not K threads.** The direct-chip
+lane drives prepare(N+1) and finalize(N) from the *same* OS thread, so a 40-run
+K=2 stress produces 40 overlapping run lifetimes on one tid. Perfetto nests
+slices by timestamp containment within a track, so flattening them there puts
+run N+1's spans *inside* run N's root — false nesting that hides the very
+overlap the view exists to show. A thread whose depth-0 spans overlap is
+therefore split into one lane per pipeline slot (`pipeline slot 0 (tid …)`),
+which reads as a plain sequence because a run holds its slot exclusively. The
+overlap then shows where it belongs: across lanes. Each slice keeps `os_tid` in
+its args, and a thread that ran sequentially — the L3 scheduler, which carries a
+slot but never interleaves — keeps its real tid.
+
+Chrome Trace JSON has only one visible timestamp axis, so putting the raw
+per-invocation device clock beside `CLOCK_MONOTONIC` would create a multi-day
+empty interval. The converter therefore keeps `clk=dev` records, with their
+original ns timestamps, in the top-level `unalignedDeviceSpans` array instead of
+`traceEvents`; it does not guess a clock offset. Perfetto opens directly on the
+host activity, while the existing tables, tree, and `--trace-out` still provide
+the device-phase timing views.
+
+## Async pipeline proof
+
+The phased native lane claims that run N+1's preparation runs *concurrently*
+with run N's device execution. That claim is checkable from a captured log
+without any new marker family: the windows are already in the `simpler_run`
+tree, and the root span already carries the identity that tells two runs apart.
+
+| Property | Read from |
+| -------- | --------- |
+| successor's preparation | `simpler_run.bind` — its arena build + host orchestration |
+| predecessor's device work | `simpler_run.runner_run` |
+| when a successor may launch | `simpler_run.claim_release` |
+| which run each belongs to | root `simpler_run` attrs, joined by `(pid, inv)` |
+
+Only `claim_release` was added for this: it wraps `release_native_run` inside
+finalize, the point a successor's launch becomes admissible, and no other span
+marks that boundary. `l3.post_fence_retirement` covers the L3 orchestrator's
+`release_run` tail for the same reason.
+
+The identity is `run_id / dispatch_id / run_epoch / slot_id / generation`. Each
+field means one thing: `run_id` and `dispatch_id` are zero on the direct-chip
+lane, which allocates neither, and `run_epoch` is a per-process monotonic counter
+that is always set — so it is what orders runs when the other two are absent.
+`NativeDispatchIdentity.sequence` makes that choice in the parser, where it is
+visible, rather than in the record.
+
+```bash
+python -m simpler_setup.tools.strace_timing path/to/log --assert-native-overlap
+```
+
+Per adjacent run on one child process, the command requires `bind(N+1)` to
+**overlap** `runner_run(N)` — the intervals intersect — and `runner_run(N+1)` not
+to start before `claim_release(N)`. It exits nonzero on a missing identity, a
+missing span, or an ordering violation.
+
+Reading `bind` rather than the whole prepare is deliberate: `bind` sits inside
+prepare, so an overlap it reports is one the prepare certainly had.
+
+`--require-hidden-prepare` adds the stronger claim that the preparation also
+*finishes* inside the predecessor's device window — fully hidden rather than
+merely concurrent. That is a statement about pipeline depth and it is sensitive
+to host scheduling, so it is opt-in and the scene test asserts only the overlap
+property.
 
 ## Why markers, not a return value
 
