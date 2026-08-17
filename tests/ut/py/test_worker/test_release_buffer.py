@@ -9,8 +9,9 @@
 """``Worker.release_buffer()``: rejects release while an in-flight run still references the
 buffer's identity, and how that identity gets tracked in the first place.
 
-L3+ tracking hooks the two async dispatch entry points, ``Orchestrator.submit_next_level`` /
-``.submit_next_level_group``, device-free via the same fake-C++-orchestrator harness
+L3+ tracking hooks the four dispatch entry points that hand a Tensor arg to another process,
+``Orchestrator.submit_next_level`` / ``.submit_next_level_group`` / ``.submit_sub`` /
+``.submit_sub_group``, device-free via the same fake-C++-orchestrator harness
 ``test_child_addr_guard.py`` already established. L2's direct-chip dispatch
 (``_submit_l2_locked``) is a separate run-id namespace that never touches
 ``_accepted_run_handles``/``_submit_mu`` at all, so it gets its own parallel tracking dict
@@ -26,7 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from _task_interface import DataType, TensorArgType
-from simpler.buffer import create_host_shared_buffer, mint_owner_instance_id
+from simpler.buffer import AccessMode, create_host_shared_buffer, mint_owner_instance_id, wrap_device_malloc
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import CallConfig, TaskArgs
 from simpler.worker import RunHandle, Worker, _RunResources
@@ -50,7 +51,12 @@ def _buffer_args(buf) -> TaskArgs:
 def _fake_orchestrator(w: Worker, monkeypatch: pytest.MonkeyPatch) -> Orchestrator:
     import simpler.orchestrator as orch_mod  # noqa: PLC0415
 
-    def _fake_require_handle(callable_handle, **_kw):
+    def _fake_require_handle(callable_handle, *, kind, expected_namespace=None, **_kw):
+        # Per-API metadata, not one blanket tuple: a SUB submit resolves a LOCAL_PYTHON callable
+        # and a NEXT_LEVEL submit a LOCAL_CHIP one, so a fake that answered NEXT_LEVEL/LOCAL_CHIP
+        # for both would let a SUB test pass over an impossible dispatch contract.
+        if kind.startswith("orch.submit_sub"):
+            return (b"d" * 32, "SUB", "LOCAL_PYTHON", ())
         return (b"d" * 32, "NEXT_LEVEL", "LOCAL_CHIP", (0,))
 
     monkeypatch.setattr(orch_mod, "_require_handle", _fake_require_handle)
@@ -85,15 +91,69 @@ class TestTouchedIdentityTracking:
             buf_a.close()
             buf_b.close()
 
+    def test_submit_sub_records_touched_identity(self, monkeypatch):
+        # A SUB task maps the identity into a sub-worker process, so it retains the Buffer for
+        # the same reason a NEXT_LEVEL dispatch does: release_buffer() unlinking the backing
+        # mid-flight leaves the child faulting on a segment that no longer has a name.
+        w = _l3()
+        o = _fake_orchestrator(w, monkeypatch)
+        w._building_run_resources = _RunResources()
+        buf = create_host_shared_buffer(64, _OID, buffer_id=5)
+        try:
+            o.submit_sub(object(), _buffer_args(buf))
+            assert buf.identity in w._building_run_resources.touched_identities
+        finally:
+            buf.close()
+
+    def test_submit_sub_group_records_touched_identity_per_member(self, monkeypatch):
+        w = _l3()
+        o = _fake_orchestrator(w, monkeypatch)
+        w._building_run_resources = _RunResources()
+        buf_a = create_host_shared_buffer(64, _OID, buffer_id=6)
+        buf_b = create_host_shared_buffer(64, _OID, buffer_id=7)
+        try:
+            o.submit_sub_group(object(), [_buffer_args(buf_a), _buffer_args(buf_b)])
+            touched = w._building_run_resources.touched_identities
+            assert buf_a.identity in touched
+            assert buf_b.identity in touched
+        finally:
+            buf_a.close()
+            buf_b.close()
+
+    def test_submit_sub_group_records_nothing_when_a_member_is_rejected(self, monkeypatch):
+        # A rejected member means no member is dispatched, so recording the earlier members would
+        # refuse a release of buffers no task ever received. Validation is one pass, recording the
+        # next -- the same two-pass shape submit_next_level_group already uses.
+        w = _l3()
+        o = _fake_orchestrator(w, monkeypatch)
+        w._building_run_resources = _RunResources()
+        buf = create_host_shared_buffer(64, _OID, buffer_id=8)
+        device = wrap_device_malloc(0xDEAD0000, 4096, _OID, buffer_id=9, access=AccessMode.READWRITE)
+        try:
+            with pytest.raises(ValueError, match="DEVICE-space"):
+                o.submit_sub_group(object(), [_buffer_args(buf), _buffer_args(device)])
+            assert w._building_run_resources.touched_identities == set()
+        finally:
+            buf.close()
+
+    def test_submit_sub_with_no_args_records_nothing(self, monkeypatch):
+        w = _l3()
+        o = _fake_orchestrator(w, monkeypatch)
+        w._building_run_resources = _RunResources()
+        o.submit_sub(object())  # tag-less task -- must not raise on the default TaskArgs()
+        assert w._building_run_resources.touched_identities == set()
+
     def test_no_current_run_is_a_no_op(self, monkeypatch):
-        # submit_next_level runs fine with no _building_run_resources open (e.g. a direct call
-        # outside a run's orchestration callback) -- tracking is opportunistic, not required.
+        # submit_next_level / submit_sub run fine with no _building_run_resources open (e.g. a
+        # direct call outside a run's orchestration callback) -- tracking is opportunistic, not
+        # required.
         w = _l3()
         o = _fake_orchestrator(w, monkeypatch)
         assert w._building_run_resources is None
         buf = create_host_shared_buffer(64, _OID, buffer_id=4)
         try:
             o.submit_next_level(object(), _buffer_args(buf), None, worker=0)  # must not raise
+            o.submit_sub(object(), _buffer_args(buf))  # must not raise
         finally:
             buf.close()
 
@@ -117,6 +177,41 @@ def _l3_with_registered_buffer(nbytes: int = 64):
 
 
 class TestReleaseBuffer:
+    def test_rejects_a_buffer_a_submitted_sub_task_still_names(self, monkeypatch):
+        # End to end over the pair, rather than each half alone: submit_sub records into the open
+        # run's resources, and release_buffer reads them off the accepted handle. The recording has
+        # to land before admission for this to hold at every point after submit_sub returns.
+        w, buf = _l3_with_registered_buffer()
+        o = _fake_orchestrator(w, monkeypatch)
+        handle = RunHandle(w, run_id=1, keepalive=())
+        resources = _RunResources()
+        handle._resources = resources
+        w._building_run_resources = resources
+        with w._hierarchical_start_cv:
+            w._accepted_run_handles.add(handle)
+        o.submit_sub(object(), _buffer_args(buf))
+        with pytest.raises(RuntimeError, match="in-flight run"):
+            w.release_buffer(buf)
+        assert not buf.closed
+        handle._cleanup_published = True
+        w.release_buffer(buf)
+        assert buf.closed
+
+    def test_rejects_while_an_abandoned_run_still_names_the_buffer(self):
+        # _publish_abandoned_run sets _cleanup_published and drops the handle from
+        # _accepted_run_handles, but the run stays in _abandoned_run_handles until native teardown
+        # drains it -- so for an abandoned run that flag no longer means the device is done with the
+        # backing, and the accepted-set check alone would let the release through.
+        w, buf = _l3_with_registered_buffer()
+        handle = _in_flight_handle(w, buf.identity, done=True)
+        w._abandoned_run_handles.append(handle)
+        with pytest.raises(RuntimeError, match="abandoned run"):
+            w.release_buffer(buf)
+        assert not buf.closed
+        assert w._buffers.get(int(buf.identity.buffer_id)) is buf
+        w._abandoned_run_handles.clear()
+        w.release_buffer(buf)  # cleanup
+
     def test_rejects_while_in_flight(self):
         w, buf = _l3_with_registered_buffer()
         w._accepted_run_handles.add(_in_flight_handle(w, buf.identity, done=False))
@@ -324,6 +419,27 @@ class TestReleaseBufferL2InFlight:
         w.release_buffer(buf)
         assert buf.closed
         assert int(buf.identity.buffer_id) not in w._buffers
+
+
+class TestReleaseBufferReexport:
+    def test_release_drops_the_forwarding_handle_for_the_identity(self):
+        # _reexport memoizes a forwarding handle per source backing, and that handle keeps answering
+        # to_descriptor() after its backing is gone -- a later forward of the same identity would
+        # hand a child a descriptor for a name the owner has already unlinked.
+        w, buf = _l3_with_registered_buffer()
+        handle = w._reexport(buf.to_descriptor())
+        assert w._reexport_by_source[buf.identity] is handle
+        w.release_buffer(buf)
+        assert buf.identity not in w._reexport_by_source
+
+    def test_close_clears_the_forwarding_handles(self, monkeypatch):
+        # The same cache at teardown: it holds an entry per backing ever forwarded, so leaving it
+        # out of close()'s cleanup table keeps every one of them alive for the Worker's lifetime.
+        with fake_chip_l3(monkeypatch, device_ids=(0,)) as w:
+            buf = w.create_buffer(64)
+            w._reexport(buf.to_descriptor())
+            assert w._reexport_by_source
+        assert not w._reexport_by_source
 
 
 class TestReleaseBufferImportBroadcast:

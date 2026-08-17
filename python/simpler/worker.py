@@ -7309,14 +7309,20 @@ class Worker:
             sys.stderr.flush()
 
     def _release_import_recursive(self, identity: CanonicalIdentity) -> None:
-        """Drop ``identity`` from this Worker's own same-process import cache, then forward one
+        """Drop ``identity`` from this Worker's own same-process caches, then forward one
         more hop down this Worker's own children — same shape as ``_unregister_child_digest``'s
         recursive forward for callable cleanup, since a NEXT_LEVEL child may itself have
         materialized ``identity`` further down its own tree (chip/SUB leaves, or its own
         NEXT_LEVEL children in turn).
+
+        Two caches name a released identity here, not one: the import cache holds a mapping of it,
+        and ``_reexport_by_source`` holds the forwarding handle built from it. A retained re-export
+        outlives its backing, and its ``to_descriptor()`` keeps answering — so a later forward of
+        the same identity would hand a child a descriptor for a name the owner has unlinked.
         """
         if self._chip_import_registry is not None:
             self._chip_import_registry.unregister(identity)
+        self._reexport_by_source.pop(identity, None)
         self._broadcast_import_release(identity)
 
     def add_worker(self, worker: Worker) -> int:
@@ -10082,9 +10088,11 @@ class Worker:
         """Add every tensor arg's identity in ``args`` to the current run's touched set.
 
         A no-op when no run is being built (``_building_run_resources is None``) — tracking is
-        opportunistic, only meaningful inside ``submit_next_level``/``submit_next_level_group``'s
-        run context, per the ``current_resources = self._building_run_resources; if ... is not
-        None`` idiom used elsewhere for the same "attach to the open run, if any" shape.
+        opportunistic, only meaningful inside the run context of the four orchestrator dispatch
+        entry points that carry Tensor args to another process (``submit_next_level``,
+        ``submit_next_level_group``, ``submit_sub``, ``submit_sub_group``), per the
+        ``current_resources = self._building_run_resources; if ... is not None`` idiom used
+        elsewhere for the same "attach to the open run, if any" shape.
         """
         resources = self._building_run_resources
         if resources is None:
@@ -10497,13 +10505,23 @@ class Worker:
         drop its own cached import for the identity.
 
         Rejects outright if any currently in-flight L3+ run (not yet past ``_cleanup_published``)
-        sent this identity as a NEXT_LEVEL Tensor arg, or any in-flight L2 direct-chip run sent it —
-        a Buffer never goes away while a dispatched task still names it. The L3+ check takes
+        sent this identity as a NEXT_LEVEL or SUB Tensor arg, or any in-flight L2 direct-chip run
+        sent it — a Buffer never goes away while a dispatched task still names it. All three
+        dispatch paths retain: a SUB task maps the identity into a sub-worker process just as a
+        NEXT_LEVEL task maps it into a child, so unlinking the backing under either one faults the
+        consumer on a segment that no longer has a name. The L3+ check takes
         ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles`` before its
         orchestration callback (where ``touched_identities`` gets populated) has run, and that
         callback is what ``_submit_mu`` already serializes graph construction against, so taking it
         here means the check only ever runs between callbacks, never mid-callback with a
-        not-yet-complete touched set. The L2 check is independent (a separate run-id namespace with
+        not-yet-complete touched set. ``_abandoned_run_handles`` is scanned in the same block and
+        without the ``_cleanup_published`` test: ``_publish_abandoned_run`` sets that flag and drops
+        the handle from the accepted set while the run itself stays retained until native teardown
+        drains it, so an abandoned run is exactly the case where the flag stops describing whether
+        the device is done with the backing. Such a buffer therefore stops being releasable through
+        this API for the Worker's remaining life, which strands nothing: ``close()`` reclaims it via
+        ``_release_all_buffers`` calling ``Buffer.close()`` directly. The L2 check is independent (a
+        separate run-id namespace with
         no callback to serialize against — ``_chip_run_touched_identities`` is written atomically
         alongside ``_chip_runs`` under ``_registry_lock`` instead, see ``_submit_l2_locked``), so the
         two checks run sequentially rather than under one shared lock. Neither is checked once
@@ -10523,6 +10541,13 @@ class Worker:
                 for handle in self._accepted_run_handles:
                     if not handle._cleanup_published and buffer.identity in handle._resources.touched_identities:
                         raise RuntimeError(f"release_buffer: {buffer.identity} is still referenced by an in-flight run")
+                for handle in self._abandoned_run_handles:
+                    resources = handle._resources
+                    if resources is not None and buffer.identity in resources.touched_identities:
+                        raise RuntimeError(
+                            f"release_buffer: {buffer.identity} is still referenced by an abandoned run "
+                            f"whose native teardown has not completed"
+                        )
             with self._registry_lock:
                 for touched in self._chip_run_touched_identities.values():
                     if buffer.identity in touched:
@@ -11675,6 +11700,7 @@ class Worker:
             ("remote", "pending remote frees", self._flush_pending_remote_frees),
             ("buffer", "all owner Buffers", self._release_all_buffers),
             ("buffer", "fork-inherited tensor buffers", self._fork_tensor_handles.clear),
+            ("buffer", "re-exported forwarding handles", self._reexport_by_source.clear),
             ("buffer", "chip import registry", self._close_chip_import_registry),
         ):
             self._cleanup_journal.add_once(kind, identity, cleanup)

@@ -483,6 +483,8 @@ class Orchestrator:
         )
         _reject_remote_sidecar_args(args, kind="orch.submit_sub")
         _reject_device_args(args, kind="orch.submit_sub")
+        if self._worker is not None:
+            self._worker._record_touched_identities(args)
         _admit_task_submission(self._worker)
         self._o.submit_sub(digest, kind, target_namespace, args)
 
@@ -497,6 +499,12 @@ class Orchestrator:
         for args in args_list:
             _reject_remote_sidecar_args(args, kind="orch.submit_sub_group")
             _reject_device_args(args, kind="orch.submit_sub_group")
+        # Second pass, as in submit_next_level_group: a member rejected above means no member is
+        # dispatched, and identities recorded for a group that never went out would refuse a
+        # release of buffers no task ever received.
+        if self._worker is not None:
+            for args in args_list:
+                self._worker._record_touched_identities(args)
         _admit_task_submission(self._worker)
         self._o.submit_sub_group(digest, kind, target_namespace, args_list)
 

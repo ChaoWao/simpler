@@ -147,6 +147,10 @@ class Buffer:
     # guard and free/copy key on (owner_worker_id, base).
     owner_worker_id: int = 0
     closed: bool = False
+    # Owner-side only: whether the backing's name has actually been removed. Distinct from `closed`,
+    # which is the derivation gate — a close() whose unlink raised leaves this false so a retry
+    # attempts the unlink again.
+    unlinked: bool = False
 
     def to_descriptor(self) -> BufferDescriptor:
         """The wire descriptor for this backing — what a consumer needs to resolve it."""
@@ -190,17 +194,26 @@ class Buffer:
         """Release the backing. The owner unlinks it, so a later consumer map fails rather than
         resolving a name whose bytes are gone. Idempotent; a released Buffer's ``tensor()``/
         ``to_descriptor()`` are refused rather than building a view over memory that may already be
-        gone."""
-        if self.closed:
-            return
+        gone — that refusal holds from the first call on, whether or not the release itself
+        succeeded, since a partly-released backing is no safer to hand out than a fully released one.
+
+        Each OS action succeeds at most once and is retried until it does. ``shm.close()`` runs
+        first and never gates the unlink: the named backing outlives this process, so it is the leak
+        worth removing even when the local unmap raised. An unlink that raises leaves ``shm`` in
+        place, so a second ``close()`` attempts it again — that retry is what
+        ``Worker._release_all_buffers`` leaves the registry entry behind for.
+        """
         self.closed = True
         shm = self.shm
-        self.shm = None
-        if shm is not None:
-            try:
-                shm.close()
-            finally:
+        if shm is None:
+            return
+        try:
+            shm.close()
+        finally:
+            if not self.unlinked:
                 shm.unlink()
+                self.unlinked = True
+        self.shm = None
 
 
 def create_host_shared_buffer(
@@ -578,7 +591,7 @@ class ImportRegistry:
     still describes the backing that was mapped, so one identity can never come to mean two things.
     """
 
-    def __init__(self, context: ImportContext | None = None) -> None:
+    def __init__(self, context: ImportContext) -> None:
         self._by_identity: dict[CanonicalIdentity, ImportedBuffer] = {}
         self._context = context
 
@@ -616,7 +629,7 @@ class ImportRegistry:
                 )
             return cached
         if desc.address_space == AddressSpace.DEVICE:
-            if self._context is None or self._context.is_host_endpoint:
+            if self._context.is_host_endpoint:
                 raise ValueError(
                     f"ImportRegistry: [{RegionAccessReasonCode.UNSUPPORTED_ENDPOINT_RELATION.value}] "
                     f"refusing to materialize a DEVICE backing ({desc.identity}) on a host endpoint"
@@ -643,7 +656,17 @@ class ImportRegistry:
             base = int.from_bytes(desc.body, "little")
             imported = ImportedBuffer(desc.identity, base, desc.nbytes, desc.address_space, None, desc)
         elif desc.backend_kind == BackendKind.POSIX_SHM:
-            shm = SharedMemory(name=desc.body.decode("utf-8"))
+            name = desc.body.decode("utf-8")
+            try:
+                shm = SharedMemory(name=name)
+            except FileNotFoundError as exc:
+                # The owner unlinks on release, so a missing name is the expected shape of "this
+                # identity was released", not a corrupt descriptor. Naming both the identity and
+                # that reading separates it from a genuinely bad name at a glance.
+                raise FileNotFoundError(
+                    f"ImportRegistry: shm object {name!r} for {desc.identity} does not exist — its "
+                    f"owner has released the buffer, or it was never created"
+                ) from exc
             # `validate_tensor` admits a view when byte_offset + extent <= nbytes, so a backing
             # smaller than the nbytes its own descriptor advertises turns every one of those checks
             # into a comparison against a number no memory stands behind. The object's real size is
@@ -708,15 +731,36 @@ class ImportRegistry:
         ``release_buffer()`` so a long-lived endpoint does not keep every backing it ever saw
         mapped for its entire lifetime; best-effort by design, since an endpoint that never
         materialized ``identity`` has nothing to drop.
+
+        The entry is dropped only once its mapping is really gone. ``close()`` on a mapping whose
+        consumer still holds a derived ``memoryview`` raises ``BufferError``, and an entry dropped
+        before that point is a mapping nothing can reach to retry — so the raise leaves the entry
+        in place for this registry's own ``close()`` to attempt again.
         """
-        imported = self._by_identity.pop(identity, None)
-        if imported is not None and imported.shm is not None:
+        imported = self._by_identity.get(identity)
+        if imported is None:
+            return
+        if imported.shm is not None:
             imported.shm.close()
+        del self._by_identity[identity]
 
     def close(self) -> None:
         """Close every mapping this endpoint made. Consumer-side only — unlinking belongs to the
-        owning Worker, so this never destroys a backing."""
-        for imported in self._by_identity.values():
+        owning Worker, so this never destroys a backing.
+
+        Every mapping is attempted, and only the ones that closed are dropped: one endpoint holding
+        an exported view must not strand every mapping behind it in the iteration order. The first
+        error is raised once the sweep is done, so a caller still learns the endpoint leaked rather
+        than seeing a silent success.
+        """
+        errors: list[BaseException] = []
+        for identity, imported in list(self._by_identity.items()):
             if imported.shm is not None:
-                imported.shm.close()
-        self._by_identity.clear()
+                try:
+                    imported.shm.close()
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+                    continue
+            del self._by_identity[identity]
+        if errors:
+            raise errors[0]
