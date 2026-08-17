@@ -88,4 +88,4 @@ jobs:
           fi
           cmake -B tests/ut/cpp/build -S tests/ut/cpp
           cmake --build tests/ut/cpp/build --parallel 4
-          ctest --test-dir tests/ut/cpp/build -LE requires_hardware -j4 --output-on-failure
+          ctest --test-dir tests/ut/cpp/build -LE requires_hardware -j4 --output-on-failure --timeout 300
