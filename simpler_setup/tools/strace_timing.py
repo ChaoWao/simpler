@@ -40,8 +40,10 @@ Outputs:
     * optionally a Chrome-trace / Perfetto JSON (``--trace-out``): one ``ph:"X"``
       event per span on a synthetic per-invocation lane, so each host call tree
       renders as nested slices, or
-    * a host scheduler swimlane (``--swimlane``) whose host lanes retain the
-      real OS pid/tid and whose cross-thread handoffs are Chrome flow events.
+    * a host scheduler swimlane (``--swimlane``) whose lanes are the real OS
+      pid/tid, except that a thread which interleaved runs is split into one lane
+      per pipeline slot so each lane reads as a sequence; cross-thread handoffs
+      are Chrome flow events.
 """
 
 from __future__ import annotations
@@ -118,6 +120,37 @@ class Span:
         return "clk=dev" in self.attrs
 
 
+class NativeOverlapError(ValueError):
+    """Raised when pipeline markers do not prove native preparation overlap."""
+
+
+@dataclass(frozen=True)
+class NativeDispatchIdentity:
+    pid: int
+    run_id: int
+    dispatch_id: int
+    run_epoch: int
+    slot_id: int
+    generation: int
+
+    @property
+    def sequence(self):
+        """Submission order within a process.
+
+        ``dispatch_id`` is the scheduler's, and is zero on the direct-chip lane,
+        which allocates none; ``run_epoch`` is a per-process monotonic counter
+        that is always set. Neither field stands in for the other in the record —
+        the choice is made here, where it is visible.
+        """
+        return self.dispatch_id or self.run_epoch
+
+
+@dataclass(frozen=True)
+class NativeOverlapCheck:
+    predecessor: NativeDispatchIdentity
+    successor: NativeDispatchIdentity
+
+
 @dataclass
 class Invocation:
     """All spans emitted by one simpler_run call (one (pid, inv) group)."""
@@ -186,11 +219,13 @@ def parse_spans(lines):
 def legacy_spans(spans):
     """Return spans belonging to the established ``simpler_run`` views.
 
-    L3/L4 host-scheduler markers share the STRACE grammar but answer a
-    different question. Keeping them out of invocation grouping preserves the
-    TPOT, rounds, tree, and ``--trace-out`` contracts when a log contains both
-    marker families. Filter only the newly introduced namespace so existing
-    marker families such as ``simpler_prewarm`` retain their old behavior.
+    Other marker families share the STRACE grammar but answer a different
+    question, and the invocation views are keyed on ``(pid, inv)`` — a family
+    that carries no invocation id would group into one bogus lane. Keeping them
+    out here preserves the TPOT, rounds, tree, and ``--trace-out`` contracts for
+    every consumer at once; filtering downstream covers only the view that
+    filters. Existing families such as ``simpler_prewarm`` keep their old
+    behavior.
     """
     return [span for span in spans if not span.name.startswith("l3.")]
 
@@ -217,6 +252,119 @@ def bucket_by_hid(invocations):
     for bucket in buckets.values():
         bucket.sort(key=lambda i: i.inv)
     return buckets
+
+
+# The spans one native run contributes to the overlap proof. All three already
+# exist in the `simpler_run` tree; only `claim_release` was added for it.
+_PREPARE_SPAN = "simpler_run.bind"
+_DEVICE_SPAN = "simpler_run.runner_run"
+_RELEASE_SPAN = "simpler_run.claim_release"
+_NATIVE_REQUIRED_SPANS = (_PREPARE_SPAN, _DEVICE_SPAN, _RELEASE_SPAN)
+_PIPELINE_IDENTITY_FIELDS = ("run_id", "dispatch_id", "run_epoch", "slot_id", "generation")
+
+
+def _native_dispatches(invocations):
+    """Map each native run's identity to its ``{span name: span}``.
+
+    The identity rides on the root ``simpler_run`` span, and every sub-span of
+    that run shares its ``(pid, inv)`` — so grouping by invocation is what joins
+    the windows to the identity. An invocation whose root carries no identity is
+    not a phased native run and is skipped.
+    """
+    dispatches = {}
+    for invocation in invocations:
+        root = invocation.root()
+        if root is None:
+            continue
+        attrs = _parsed_attrs(root)
+        if not any(field in attrs for field in _PIPELINE_IDENTITY_FIELDS):
+            continue
+        missing = [field for field in _PIPELINE_IDENTITY_FIELDS if field not in attrs]
+        if missing:
+            raise NativeOverlapError(
+                f"{root.name} (pid={root.pid} inv={root.inv}) is missing identity field(s): {', '.join(missing)}"
+            )
+        try:
+            identity = NativeDispatchIdentity(
+                pid=root.pid,
+                run_id=int(attrs["run_id"]),
+                dispatch_id=int(attrs["dispatch_id"]),
+                run_epoch=int(attrs["run_epoch"]),
+                slot_id=int(attrs["slot_id"]),
+                generation=int(attrs["generation"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise NativeOverlapError(f"{root.name} has a non-integer identity") from exc
+        if identity.sequence == 0:
+            continue
+        if identity in dispatches:
+            raise NativeOverlapError(f"duplicate identity for pid={identity.pid} sequence={identity.sequence}")
+        dispatches[identity] = invocation.by_name()
+    return dispatches
+
+
+def assert_native_overlap(spans, *, require_hidden=False):
+    """Prove native prepare overlap and FIFO launch ordering for adjacent runs.
+
+    Two properties per adjacent pair on one process lane:
+
+    * ``bind(N+1)`` overlaps ``runner_run(N)`` — the intervals intersect, which
+      is what makes the successor's preparation concurrent with the
+      predecessor's device work.
+    * ``runner_run(N+1)`` does not start before ``claim_release(N)``.
+
+    ``bind`` is the successor's own arena build and host orchestration and sits
+    inside its prepare, so reading it is conservative: an overlap it reports is
+    one the prepare certainly had.
+
+    ``require_hidden`` additionally demands that the preparation *finish* inside
+    the predecessor's device window — fully hidden rather than merely
+    overlapping. That is a claim about pipeline depth and is sensitive to host
+    scheduling, so it is opt-in: a bind that runs long on a contended machine
+    still overlaps.
+    """
+    dispatches = _native_dispatches(group_invocations(legacy_spans(spans)))
+    by_pid = defaultdict(list)
+    for identity, by_name in dispatches.items():
+        missing = [name for name in _NATIVE_REQUIRED_SPANS if name not in by_name]
+        if missing:
+            raise NativeOverlapError(f"sequence={identity.sequence} is missing span(s): {', '.join(missing)}")
+        by_pid[identity.pid].append((identity, by_name))
+
+    checks = []
+    for lane in by_pid.values():
+        lane.sort(key=lambda item: item[1][_DEVICE_SPAN].ts)
+        for (predecessor, pred_spans), (successor, succ_spans) in zip(lane, lane[1:]):
+            if successor.sequence <= predecessor.sequence:
+                raise NativeOverlapError(
+                    f"launch order is not monotonic: predecessor={predecessor.sequence} successor={successor.sequence}"
+                )
+            pred_device = pred_spans[_DEVICE_SPAN]
+            pred_release = pred_spans[_RELEASE_SPAN]
+            succ_prepare = succ_spans[_PREPARE_SPAN]
+            succ_device = succ_spans[_DEVICE_SPAN]
+            pred_device_end = pred_device.ts + pred_device.dur
+            succ_prepare_end = succ_prepare.ts + succ_prepare.dur
+            if succ_prepare.ts >= pred_device_end or succ_prepare_end <= pred_device.ts:
+                raise NativeOverlapError(
+                    f"preparation did not overlap: sequence={successor.sequence} prepare="
+                    f"[{succ_prepare.ts},{succ_prepare_end}] predecessor_device="
+                    f"[{pred_device.ts},{pred_device_end}]"
+                )
+            if require_hidden and succ_prepare_end > pred_device_end:
+                raise NativeOverlapError(
+                    f"preparation was not fully hidden: sequence={successor.sequence} prepare_end="
+                    f"{succ_prepare_end} predecessor_device_end={pred_device_end}"
+                )
+            if succ_device.ts < pred_release.ts:
+                raise NativeOverlapError(
+                    f"device execution reordered before the claim release: sequence={successor.sequence} "
+                    f"device_start={succ_device.ts} predecessor_release={pred_release.ts}"
+                )
+            checks.append(NativeOverlapCheck(predecessor=predecessor, successor=successor))
+    if not checks:
+        raise NativeOverlapError("need at least two complete native runs on one process lane")
+    return checks
 
 
 def _fmt_us(ns: int) -> str:
@@ -475,6 +623,54 @@ def _parsed_attrs(span):
 _HOST_THREAD_ROLES = ("facade", "scheduler", "worker")
 
 
+def _roots_overlap(entries):
+    """Whether two runs were in flight at once on this thread.
+
+    A depth-0 span is one run's whole lifetime, so two of them overlapping means
+    the thread interleaved runs. Nesting *within* a run is wanted; nesting one
+    run's spans inside another's is an artifact of flattening them onto one lane.
+    """
+    roots = sorted((span.ts, span.ts + span.dur) for span, _ in entries if span.depth == 0)
+    return any(a[1] > b[0] for a, b in zip(roots, roots[1:]))
+
+
+def _slot_by_invocation(entries):
+    """Map ``(pid, inv)`` to the pipeline slot that run held.
+
+    Only the root span carries the identity; its children carry no attributes at
+    all. They share the root's ``(pid, inv)``, so that is the join — the same one
+    :func:`assert_native_overlap` uses.
+    """
+    slots = {}
+    for span, attrs in entries:
+        if "slot_id" in attrs:
+            slots[(span.pid, span.inv)] = attrs["slot_id"]
+    return slots
+
+
+def _slot_lanes(entries, slot_by_invocation):
+    """Split one thread's spans by pipeline slot, or None to leave it on its tid.
+
+    The pipeline slot is what a run holds exclusively, so runs sharing a slot
+    cannot overlap — which is what makes a per-slot lane render as a plain
+    sequence instead of false containment. Returning None keeps the real-tid
+    lane: splitting a thread whose runs never overlapped would only fragment it,
+    and the L3 scheduler thread carries a slot while running strictly
+    sequentially.
+    """
+    if not _roots_overlap(entries):
+        return None
+    by_slot = defaultdict(list)
+    for span, attrs in entries:
+        slot_id = slot_by_invocation.get((span.pid, span.inv))
+        if slot_id is None:
+            return None
+        by_slot[slot_id].append((span, attrs))
+    if len(by_slot) < 2 or any(_roots_overlap(group) for group in by_slot.values()):
+        return None
+    return dict(sorted(by_slot.items()))
+
+
 def _host_thread_name(entries):
     """Name one OS thread's lane from every span it emitted.
 
@@ -516,6 +712,35 @@ def _flow_key(span, attrs):
     return span.pid, run_id, task_slot
 
 
+def _assign_lanes(host_entries, host_threads):
+    """Choose a lane per span, and a name per lane.
+
+    A thread that interleaved runs is split by pipeline slot (see
+    :func:`_slot_lanes`); every other thread keeps its real tid. Synthetic lane
+    ids start past the observed tid space so a split lane cannot collide with a
+    real thread's.
+    """
+    lane_of = {}
+    lane_names = {}
+    next_synthetic_tid = max(tid for _, tid in host_threads) + 1
+    slot_by_invocation = _slot_by_invocation(host_entries)
+    for pid, tid in host_threads:
+        on_thread = [entry for entry in host_entries if entry[0].pid == pid and entry[0].tid == tid]
+        slot_lanes = _slot_lanes(on_thread, slot_by_invocation)
+        if slot_lanes is None:
+            lane_names[(pid, tid)] = _host_thread_name(on_thread)
+            for span, _ in on_thread:
+                lane_of[id(span)] = tid
+            continue
+        for slot_id, group in slot_lanes.items():
+            lane_tid = next_synthetic_tid
+            next_synthetic_tid += 1
+            lane_names[(pid, lane_tid)] = f"pipeline slot {slot_id} (tid {tid})"
+            for span, _ in group:
+                lane_of[id(span)] = lane_tid
+    return lane_of, lane_names
+
+
 def to_host_swimlane(spans):
     """Build a real-pid/tid host scheduling timeline for Perfetto.
 
@@ -536,6 +761,8 @@ def to_host_swimlane(spans):
     host_pids = sorted({span.pid for span, _ in host_entries})
     host_threads = sorted({(span.pid, span.tid) for span, _ in host_entries})
 
+    lane_of, lane_names = _assign_lanes(host_entries, host_threads)
+
     for pid in host_pids:
         process_spans = [span for span, _ in host_entries if span.pid == pid]
         role = "host" if any(span.name.startswith("l3.") for span in process_spans) else "chip child"
@@ -548,19 +775,25 @@ def to_host_swimlane(spans):
                 "args": {"name": f"simpler {role} (pid={pid})"},
             }
         )
-    for pid, tid in host_threads:
-        on_thread = [entry for entry in host_entries if entry[0].pid == pid and entry[0].tid == tid]
+    for (pid, lane_tid), name in sorted(lane_names.items()):
         events.append(
             {
                 "ph": "M",
                 "name": "thread_name",
                 "pid": pid,
-                "tid": tid,
-                "args": {"name": _host_thread_name(on_thread)},
+                "tid": lane_tid,
+                "args": {"name": name},
             }
         )
     for span, parsed in sorted(host_entries, key=lambda item: (item[0].ts, item[0].pid, item[0].tid, item[0].name)):
-        event_args = {"inv": span.inv, "hid": span.hid, "depth": span.depth, "attrs": span.attrs, **parsed}
+        event_args = {
+            "inv": span.inv,
+            "hid": span.hid,
+            "depth": span.depth,
+            "attrs": span.attrs,
+            "os_tid": span.tid,
+            **parsed,
+        }
         events.append(
             {
                 "name": span.name,
@@ -568,7 +801,7 @@ def to_host_swimlane(spans):
                 "ts": span.ts / 1000.0,
                 "dur": span.dur / 1000.0,
                 "pid": span.pid,
-                "tid": span.tid,
+                "tid": lane_of[id(span)],
                 "args": event_args,
             }
         )
@@ -612,7 +845,7 @@ def to_host_swimlane(spans):
                 "id": flow_id,
                 "ts": min(source.ts + source.dur, destination.ts) / 1000.0,
                 "pid": source.pid,
-                "tid": source.tid,
+                "tid": lane_of[id(source)],
                 "args": flow_args,
             }
         )
@@ -624,7 +857,7 @@ def to_host_swimlane(spans):
                 "id": flow_id,
                 "ts": destination.ts / 1000.0,
                 "pid": destination.pid,
-                "tid": destination.tid,
+                "tid": lane_of[id(destination)],
                 "args": flow_args,
             }
         )
@@ -769,6 +1002,17 @@ def main(argv=None):
         help="print an indented nested span tree per callable (device_wall → sub-phases), "
         "instead of the per-callable TPOT table",
     )
+    ap.add_argument(
+        "--assert-native-overlap",
+        action="store_true",
+        help="fail unless adjacent dispatches prove prepare(N+1) overlaps device(N) and preserve ordered launch",
+    )
+    ap.add_argument(
+        "--require-hidden-prepare",
+        action="store_true",
+        help="with --assert-native-overlap, also require prepare(N+1) to finish inside device(N) "
+        "(fully hidden, not merely overlapping — sensitive to host scheduling)",
+    )
     args = ap.parse_args(argv)
 
     if args.log == "-":
@@ -789,7 +1033,14 @@ def main(argv=None):
     invocations = group_invocations(legacy)
     buckets = bucket_by_hid(invocations)
 
-    if args.rounds_table:
+    if args.assert_native_overlap:
+        try:
+            checks = assert_native_overlap(spans, require_hidden=args.require_hidden_prepare)
+        except NativeOverlapError as exc:
+            print(f"native overlap assertion failed: {exc}", file=sys.stderr)
+            return 2
+        print(f"Native overlap verified for {len(checks)} adjacent dispatch pair(s).")
+    elif args.rounds_table:
         print_rounds_table(buckets)
     elif args.tree:
         print_tree(buckets)

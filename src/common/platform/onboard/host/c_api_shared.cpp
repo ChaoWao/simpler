@@ -696,10 +696,10 @@ int simpler_prepare_run(
         state = new (runtime) OnboardNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
         std::snprintf(
             state->trace_attrs, sizeof(state->trace_attrs),
-            "run_id=%llu slot=%u generation=%llu dispatch_id=%llu run_epoch=%llu",
-            static_cast<unsigned long long>(state->descriptor.run_id), state->descriptor.pipeline_slot,
+            "run_id=%llu dispatch_id=%llu slot_id=%u generation=%llu run_epoch=%llu",
+            static_cast<unsigned long long>(state->descriptor.run_id),
+            static_cast<unsigned long long>(state->descriptor.dispatch_id), state->descriptor.pipeline_slot,
             static_cast<unsigned long long>(state->descriptor.generation),
-            static_cast<unsigned long long>(state->descriptor.dispatch_id),
             static_cast<unsigned long long>(state->descriptor.run_epoch)
         );
         const bool allow_prepared_successor =
@@ -962,6 +962,10 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
     }
 
     if (state->runner_claimed) {
+        // The point a successor's launch becomes admissible. Ordering a
+        // successor's device work against this boundary is what separates a
+        // pipelined launch from a reordered one, and no other span marks it.
+        STRACE("simpler_run.claim_release");
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }
