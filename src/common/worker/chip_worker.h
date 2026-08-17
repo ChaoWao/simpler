@@ -161,10 +161,11 @@ public:
     /// `aicpu_dlopen_count` for the trb path; returns 0 on device-orch variants.
     size_t host_dlopen_count() const;
 
-    /// Number of AICore run streams the bound runner has created. AICPU streams
-    /// belong to slots for the worker's lifetime. Completed AICore streams are
-    /// reused until a new code upload makes them stale. Platforms using the
-    /// persistent bootstrap pair report 0.
+    /// Number of AICore run streams the bound runner has created. One AICPU +
+    /// AICore pair serves every run for the runner's lifetime. The AICPU stream
+    /// persists; the AICore stream is recreated when a new code upload makes it
+    /// stale, and destroyed when an unproven completion retires it. Platforms
+    /// using the persistent bootstrap pair report 0.
     size_t run_stream_set_create_count() const;
 
     uint64_t malloc(size_t size);

@@ -38,7 +38,7 @@
 #include "callable.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
-#include "host/run_stream_slots.h"
+#include "host/run_stream_pair.h"
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
@@ -103,9 +103,10 @@ public:
     int poll_execution(const ActiveExecution &active) override;
     int drain_execution(ActiveExecution &active) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
-    int provision_native_run_resources(uint32_t pipeline_slot) override;
-    int abandon_native_run_resources(uint32_t pipeline_slot) override;
-    void mark_run_streams_stale() override { run_stream_slots_.mark_all_stale(); }
+    // provision/abandon_native_run_resources keep the base no-op: preparation
+    // owns no stream, so there is nothing for a prepared run to provision or
+    // hand back. launch_run() readies the pair under the execution claim.
+    void mark_run_streams_stale() override { run_streams_.mark_stale(); }
 
     // Map/unmap a device buffer into host address space via
     // halHostRegister(DEV_SVM_MAP_HOST) / halHostUnregister. The returned host
@@ -182,7 +183,7 @@ public:
     // `aicpu_dlopen_count`, and `host_dlopen_count` are inherited from
     // `DeviceRunnerBase`.
 
-    size_t run_stream_set_create_count() const override { return run_stream_slots_.created_count(); }
+    size_t run_stream_set_create_count() const override { return run_streams_.created_count(); }
 
 private:
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
@@ -223,14 +224,12 @@ private:
         rtStream_t aicore{nullptr};
     };
 
-    // One slot per in-flight run the pipeline contract can declare.
-    static constexpr unsigned kRunStreamSetCount = PTO_PIPELINE_MAX_DEPTH;
-
-    // AICPU streams belong to slots for the worker's lifetime. A completed
-    // AICore stream remains reusable until a new code upload marks every slot
-    // stale. Stream lifetimes live in RunStreamSlots so publication and
-    // failed-destroy states are testable without a device.
-    RunStreamSlots run_stream_slots_{
+    // One pair carries every run: the execution claim is exclusive, so runs
+    // reach the device one at a time and the stream orders them. Pipeline slots
+    // index resources that preparation mutates, and preparing a run writes
+    // nothing to a stream. Stream lifetimes live in RunStreamPair so
+    // publication and failed-destroy states are testable without a device.
+    RunStreamPair run_streams_{
         [this](void **out) {
             return create_run_stream(out);
         },
@@ -239,13 +238,14 @@ private:
         }
     };
     int create_run_stream(void **out);
-    int ensure_run_stream_set(unsigned slot);
-    // Destroys this run's AICore stream. Returns the driver's error and KEEPS
-    // the handle when the destroy fails: the stream may still hold the previous
-    // image's instructions, so the slot must refuse the next run until finalize
-    // reclaims it.
-    int retire_run_aicore_stream(unsigned slot, RunStreamSlots::CompletionStatus completion_status);
-    int destroy_run_stream_sets();
+    int ensure_run_streams();
+    // Retires the run pair on behalf of `owner`, the PreparedExecution that
+    // submitted it. Returns the driver's error and KEEPS the handle when an
+    // unproven destroy fails, so finalize can reclaim it. A caller that never
+    // submitted retires nothing: a prepared successor overlaps its
+    // predecessor's execution and must not destroy the live pair.
+    int retire_run_aicore_stream(const void *owner, RunStreamPair::CompletionStatus completion_status);
+    int destroy_run_streams();
 
     // Release execution-owned resources in collector, runtime-argument,
     // register-buffer, then stream order. The collectors this releases were
@@ -257,7 +257,7 @@ private:
     // The kernel submission boundary is separate from the stream wait and
     // post-run teardown: launch_run() submits and drain_execution() reaps.
     LaunchTransactionResult launch_run(PreparedExecution &prepared, LaunchPermit permit);
-    int reap_run(unsigned slot);
+    int reap_run();
 
     // On an AICore launch/sync error, best-effort drain the device so a later
     // enqueue on the same DeviceRunner can recover in place; if the drain itself

@@ -7,16 +7,20 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A2A3 reuses completed AICore streams between code publications.
+"""A2A3 reuses one AICore stream between code publications.
 
-A2A3 submits each run's AICore and AICPU kernels on the stream set of the
-selected pipeline slot rather than on the persistent bootstrap pair. The AICPU
-stream carries no instruction-cache state and belongs to the slot for the
-worker's lifetime. A completed AICore stream remains reusable until a new
-AICore code buffer is uploaded, which marks every retained slot stream stale.
+A2A3 submits every run's AICore and AICPU kernels on its own run stream pair
+rather than on the persistent bootstrap pair. One pair carries all runs: the
+execution claim is exclusive, so runs reach the device one at a time and the
+stream orders them. A pipeline slot indexes the resources preparation mutates,
+and preparing a run writes nothing to a stream.
+
+The AICPU stream carries no instruction-cache state. The AICore stream stays
+reusable until a new AICore code buffer is uploaded, which marks it stale; the
+next launch then replaces it.
 
 `Worker.run_stream_set_create_count` counts AICore stream creations, so runs
-plateau after each slot is warm until another code publication.
+plateau after the first launch until another code publication.
 """
 
 import itertools
@@ -66,7 +70,7 @@ class _SubtractCallable(SceneTestCase):
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestRunStreamReuseHbg(SceneTestCase):
-    """Each pipeline slot retains a completed AICore stream until publication."""
+    """One run stream pair serves every slot until a code publication."""
 
     RTOL = 1e-5
     ATOL = 1e-5
@@ -242,30 +246,28 @@ class TestRunStreamReuseHbg(SceneTestCase):
             st_worker.unregister(sub_handle)
             st_worker.unregister(add_handle)
 
-    def test_depth_two_slots_reuse_across_resident_images(self, st_platform, st_worker):
-        """Both slots reuse their streams while resident images alternate."""
+    def test_depth_two_slots_reuse_one_pair_across_resident_images(self, st_platform, st_worker):
+        """Both slots submit on the one pair while resident images alternate."""
         if st_platform != "a2a3":
             pytest.skip("AICore code images are an a2a3 onboard resource")
 
         add_handle = st_worker.register(self.build_callable(st_platform))
         sub_handle = st_worker.register(_SubtractCallable.compile_chip_callable(st_platform))
         try:
-            for slot_id, handle, subtract in (
-                (0, add_handle, False),
-                (1, sub_handle, True),
-            ):
-                self._run_registered_with_lease(
-                    st_worker,
-                    handle,
-                    slot_id=slot_id,
-                    generation=self._next_generation(),
-                    subtract=subtract,
-                )
-
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            # The pair is warm after the first launch. A slot is an index into
+            # the resources preparation mutates, not into the stream set.
             warmed = st_worker.run_stream_set_create_count
             for slot_id, handle, subtract in (
+                (1, sub_handle, True),
                 (0, sub_handle, True),
                 (1, add_handle, False),
+                (0, add_handle, False),
             ):
                 self._run_registered_with_lease(
                     st_worker,
@@ -275,27 +277,12 @@ class TestRunStreamReuseHbg(SceneTestCase):
                     subtract=subtract,
                 )
                 assert st_worker.run_stream_set_create_count == warmed
-
-            self._run_registered_with_lease(
-                st_worker,
-                sub_handle,
-                slot_id=0,
-                generation=self._next_generation(),
-                subtract=True,
-            )
-            self._run_registered_with_lease(
-                st_worker,
-                add_handle,
-                slot_id=1,
-                generation=self._next_generation(),
-            )
-            assert st_worker.run_stream_set_create_count == warmed
         finally:
             st_worker.unregister(sub_handle)
             st_worker.unregister(add_handle)
 
-    def test_code_publication_invalidates_both_slots_across_reregistration(self, st_platform, st_worker):
-        """A->B->A uploads invalidate streams retained by either slot."""
+    def test_code_publication_invalidates_the_pair_across_reregistration(self, st_platform, st_worker):
+        """A->B->A uploads invalidate the pair a run on either slot warmed."""
         if st_platform != "a2a3":
             pytest.skip("AICore code publication is an a2a3 onboard resource")
 
@@ -368,11 +355,13 @@ class TestRunStreamReuseHbg(SceneTestCase):
                 generation=self._next_generation(),
             )
             after_slot0 = st_worker.run_stream_set_create_count
+            # Registering the callable published its code, so the first launch
+            # replaces the pair. Slot 1 then submits on that same pair: the
+            # stream set is not part of what a slot indexes.
             expected_increment = 1 if st_platform == "a2a3" else 0
             assert after_slot0 == stream_sets + expected_increment
             self._run_registered_with_lease(st_worker, add_handle, slot_id=1, generation=self._next_generation())
-            after_slot1 = st_worker.run_stream_set_create_count
-            assert after_slot1 == after_slot0 + expected_increment
+            assert st_worker.run_stream_set_create_count == after_slot0
 
             self._run_registered_with_lease(
                 st_worker,
@@ -381,7 +370,7 @@ class TestRunStreamReuseHbg(SceneTestCase):
                 generation=self._next_generation(),
             )
             self._run_registered_with_lease(st_worker, add_handle, slot_id=1, generation=self._next_generation())
-            assert st_worker.run_stream_set_create_count == after_slot1
+            assert st_worker.run_stream_set_create_count == after_slot0
 
             # hbg declares its GM heap HOST_PER_RUN, so a run on slot 1 must
             # commit a second device allocation rather than reuse slot 0's.
