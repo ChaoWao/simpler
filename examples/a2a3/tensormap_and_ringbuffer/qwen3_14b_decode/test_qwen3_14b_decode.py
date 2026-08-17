@@ -84,6 +84,7 @@ class TestQwen314BDecode(SceneTestCase):
 
     RTOL = 5e-2
     ATOL = 1e-1
+    REUSE_L2_IN_ACROSS_ROUNDS = True
 
     CALLABLE = {
         "orchestration": {

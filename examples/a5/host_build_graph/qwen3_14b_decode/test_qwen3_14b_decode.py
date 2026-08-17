@@ -30,6 +30,7 @@ class TestQwen314BDecodeHostBuildGraph(SceneTestCase):
 
     RTOL = _TmrQwen314BDecode.RTOL
     ATOL = _TmrQwen314BDecode.ATOL
+    REUSE_L2_IN_ACROSS_ROUNDS = True
     CALLABLE = _host_build_graph_callable()
 
     CASES = [
