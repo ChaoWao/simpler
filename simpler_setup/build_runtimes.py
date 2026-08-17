@@ -146,7 +146,7 @@ def build_all(
     pto_isa_runtime_keys: list[str] = []
 
     # Onboard hosts that embed pto-isa headers (a2a3 always; a5 when an async
-    # workspace overlay is opted in) hard-depend on the pinned managed
+    # workspace overlay is opted in) hard-depend on the managed
     # checkout + CANN aclnn syms. Resolve once for metadata recording;
     # RuntimeBuilder passes the path to CMake as -DPTO_ISA_ROOT= (#1403) —
     # do not export it via os.environ. Skipped when no embedding platform is

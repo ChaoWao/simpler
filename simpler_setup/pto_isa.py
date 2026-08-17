@@ -6,34 +6,43 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""PTO-ISA dependency management: resolve the pinned managed checkout.
+"""PTO-ISA dependency management: resolve the requested managed checkout.
 
-``pto_isa.pin`` is the single source of truth for the PTO-ISA revision.
+``pto_isa.pin`` is the source of truth for the requested GitHub revision. The
+temporary GitCode fallback described below may resolve that request to the
+``master`` tip advertised when GitHub is unavailable.
 ``ensure_pto_isa_root()`` always manages ``PROJECT_ROOT/build/pto-isa``:
 
 1. Read the required commit from ``pto_isa.pin``.
-2. If a managed checkout already exists **clean and at exactly the pin**, use it
-   as-is — it already *is* the pinned ISA, so no checkout and no network.
-3. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh: clone
-   over HTTPS (``--no-checkout`` so the default branch is never materialized)
-   and force-check-out the pin. GitHub is attempted three times; if it cannot
-   provide the complete pinned checkout, fall back to the GitCode mirror.
-4. Verify HEAD exactly matches the pin before returning.
+2. If a managed checkout is clean and either exactly at the pin or is the
+   recorded fallback for that pin, reuse it with no checkout and no network.
+3. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh from
+   GitHub: clone over HTTPS (``--no-checkout`` so the default branch is never
+   materialized) and force-check-out the pin. GitHub is attempted three times.
+4. If GitHub cannot provide the pin, temporarily fall back to the Youhezhen
+   GitCode ``master`` tip advertised by a fresh clone. Record both the requested
+   pin and the actual fallback commit; never report the floating mirror
+   revision as the pinned GitHub commit.
 
-Two deliberate choices:
+Three deliberate choices:
 
 - **Obtain the pin fresh instead of patching a dirty cache.** A checkout is
-  reused only when it is provably already the pin (clean working tree with
-  HEAD == pin); anything else is re-cloned rather than reset/force-checked-out
-  in place, so the build never uses an ISA tree that was checked out over local
-  modifications. Reusing a pristine cache keeps the common path network-free;
-  the one network hop of a fresh clone is retried on transient failure.
+  reused only when it is provably the requested resolution (an exact pin or its
+  recorded fallback); anything else is re-cloned rather than
+  reset/force-checked-out in place, so the build never uses an ISA tree that was
+  checked out over local modifications. Reusing a pristine cache keeps the
+  common path network-free; a fresh GitHub clone is retried on transient
+  failure.
 - **Force the checkout when landing a fresh clone.** pto-isa's default branch
   carries case-duplicate doc paths (``docs/isa/TADDDEQRELU.md`` vs
   ``TAddDeqRelu.md``) that collide on a case-insensitive filesystem (macOS CI),
   leaving even a fresh working tree "modified"; a plain checkout then aborts.
   ``--no-checkout`` (never materialize the default branch) plus a forced
   checkout of the pin sidesteps that entirely.
+- **Keep the floating fallback explicit.** The GitCode mirror has different
+  commit identities from GitHub and may be ahead of the pin. Only a checkout
+  created by the GitHub-failure fallback is accepted at a non-pin SHA, and its
+  actual ``master`` commit is retained in build metadata.
 
 Lock file under build/ serializes concurrent clones from parallel processes.
 """
@@ -53,17 +62,73 @@ from .environment import PROJECT_ROOT
 
 # A fresh clone is only needed when no usable local checkout exists; when it is,
 # guard the complete GitHub acquisition (clone plus landing on the pin) against
-# transient failures before falling back to the GitCode mirror.
+# transient failures before falling back to the Youhezhen GitCode master.
 _CLONE_ATTEMPTS = 3
 _CLONE_RETRY_BACKOFF_S = 2
 
 logger = logging.getLogger(__name__)
 
 _PTO_ISA_GITHUB_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
-_PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/luohuan40/pto-isa.git"
+_PTO_ISA_GITCODE_HTTPS = "https://gitcode.com/Youhezhen/pto-isa.git"
+_PTO_ISA_GITCODE_BRANCH = "master"
+_PTO_ISA_FALLBACK_STATE_FILE = ".pto-isa-fallback.json"
 _PTO_ISA_PIN_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PTO_ISA_PIN_FILE = "pto_isa.pin"
 PTO_ISA_BUILD_METADATA = "pto_isa_build.json"
+
+
+def _fallback_state_path(clone_path: Path) -> Path:
+    return clone_path.parent / _PTO_ISA_FALLBACK_STATE_FILE
+
+
+def _read_fallback_state(clone_path: Path) -> Optional[dict]:
+    try:
+        payload = json.loads(_fallback_state_path(clone_path).read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_fallback_state(clone_path: Path, required_commit: str, actual_commit: str) -> None:
+    state_path = _fallback_state_path(clone_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "required_commit_from_pin": required_commit,
+        "actual_commit": actual_commit,
+        "remote": _PTO_ISA_GITCODE_HTTPS,
+        "branch": _PTO_ISA_GITCODE_BRANCH,
+    }
+    tmp_path = state_path.with_name(f"{state_path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp_path.replace(state_path)
+
+
+def _clear_fallback_state(clone_path: Path) -> None:
+    _fallback_state_path(clone_path).unlink(missing_ok=True)
+
+
+def _fallback_checkout_matches(
+    clone_path: Path,
+    required_commit: str,
+    actual_commit: str,
+) -> bool:
+    state = _read_fallback_state(clone_path)
+    if state is None:
+        return False
+    return (
+        state.get("required_commit_from_pin") == required_commit
+        and state.get("actual_commit") == actual_commit
+        and state.get("remote") == _PTO_ISA_GITCODE_HTTPS
+        and state.get("branch") == _PTO_ISA_GITCODE_BRANCH
+    )
+
+
+def _checkout_matches_resolution(clone_path: Path, required_commit: str, actual_commit: str) -> bool:
+    return actual_commit == required_commit or _fallback_checkout_matches(
+        clone_path,
+        required_commit,
+        actual_commit,
+    )
 
 
 def read_pto_isa_pin(pin_path: Optional[Path] = None) -> str:
@@ -114,17 +179,37 @@ def _metadata_commit(payload: dict) -> str:
     )
 
 
+def _metadata_actual_commit(payload: dict) -> str:
+    return (
+        str(
+            payload.get("actual_checkout_commit")
+            or payload.get("required_commit_from_pin")
+            or payload.get("pto_isa_commit", "")
+        )
+        .strip()
+        .lower()
+    )
+
+
 def _metadata_entry(required_commit: str, actual_commit: str, pto_isa_root: str) -> dict:
-    return {
+    entry = {
         "required_commit_from_pin": required_commit,
         "actual_checkout_commit": actual_commit,
         "pin_file": str((PROJECT_ROOT / PTO_ISA_PIN_FILE).resolve()),
         "checkout_path": str(Path(pto_isa_root).resolve()),
     }
+    if _fallback_checkout_matches(Path(pto_isa_root), required_commit, actual_commit):
+        entry["fallback_remote"] = _PTO_ISA_GITCODE_HTTPS
+        entry["fallback_branch"] = _PTO_ISA_GITCODE_BRANCH
+    return entry
 
 
-def write_pto_isa_build_metadata(lib_dir: Path, pto_isa_root: str, runtime_keys: Iterable[str] = ()) -> None:
-    """Record the pinned PTO-ISA revision used to build runtime binaries."""
+def write_pto_isa_build_metadata(
+    lib_dir: Path,
+    pto_isa_root: str,
+    runtime_keys: Iterable[str] = (),
+) -> None:
+    """Record the requested and actual PTO-ISA revisions used by runtime binaries."""
     required_commit = read_pto_isa_pin()
     actual_commit = get_pto_isa_head(pto_isa_root)
     if not actual_commit:
@@ -133,7 +218,9 @@ def write_pto_isa_build_metadata(lib_dir: Path, pto_isa_root: str, runtime_keys:
             f"{pto_isa_root} is not a git checkout or git HEAD is unavailable. "
             "Building PTO-ISA-embedding onboard runtimes requires the managed build/pto-isa checkout."
         )
-    if actual_commit != required_commit:
+    if actual_commit != required_commit and not _fallback_checkout_matches(
+        Path(pto_isa_root), required_commit, actual_commit
+    ):
         raise RuntimeError(
             "PTO-ISA checkout mismatch while recording runtime build metadata: "
             f"pto_isa.pin requires {required_commit}, but {pto_isa_root} is at {actual_commit}."
@@ -152,14 +239,7 @@ def write_pto_isa_build_metadata(lib_dir: Path, pto_isa_root: str, runtime_keys:
         for key in keys:
             runtime_artifacts[key] = dict(entry)
 
-        metadata = {
-            "schema_version": 3,
-            "required_commit_from_pin": required_commit,
-            "actual_checkout_commit": actual_commit,
-            "pin_file": str((PROJECT_ROOT / PTO_ISA_PIN_FILE).resolve()),
-            "checkout_path": str(Path(pto_isa_root).resolve()),
-            "runtime_artifacts": runtime_artifacts,
-        }
+        metadata = {"schema_version": 3, **entry, "runtime_artifacts": runtime_artifacts}
         metadata_path = pto_isa_build_metadata_path(lib_dir)
         tmp_path = metadata_path.with_name(f".{metadata_path.name}.tmp")
         tmp_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
@@ -181,7 +261,7 @@ def read_pto_isa_build_metadata(lib_dir: Path) -> Optional[dict]:
 
 
 def validate_runtime_pto_isa_current_pin(lib_dir: Path, runtime_key: Optional[str] = None) -> None:
-    """Raise when pre-built runtime binaries do not match the current pin.
+    """Raise when pre-built runtime binaries do not match the current resolution.
 
     Called only for platforms that embed PTO-ISA headers into host runtimes
     (see :func:`simpler_setup.runtime_builder.platform_embeds_pto_isa`). Missing
@@ -216,22 +296,49 @@ def validate_runtime_pto_isa_current_pin(lib_dir: Path, runtime_key: Optional[st
                 f"runtime_artifacts[{runtime_key!r}] must be a JSON object"
             )
         build_commit = _metadata_commit(artifact)
+        actual_build_commit = _metadata_actual_commit(artifact)
     else:
         build_commit = _metadata_commit(metadata)
-    if not build_commit or build_commit == required_commit:
+        actual_build_commit = _metadata_actual_commit(metadata)
+    if build_commit and build_commit != required_commit:
+        raise RuntimeError(
+            "Stale PTO-ISA runtime binaries: current pto_isa.pin requires "
+            f"{required_commit}, but installed runtimes were requested for {build_commit}.\n"
+            f"Build metadata: {metadata_path}\n"
+            "Reinstall simpler or rebuild runtimes so build/lib matches pto_isa.pin."
+        )
+
+    resolved_commit = get_pto_isa_resolved_commit()
+    if not actual_build_commit or actual_build_commit == resolved_commit:
         return
 
     raise RuntimeError(
-        "Stale PTO-ISA runtime binaries: current pto_isa.pin requires "
-        f"{required_commit}, but installed runtimes were built for {build_commit}.\n"
+        "Stale PTO-ISA runtime binaries: the current PTO-ISA checkout resolves "
+        f"pto_isa.pin {required_commit} to {resolved_commit}, but installed runtimes "
+        f"were built with {actual_build_commit}.\n"
         f"Build metadata: {metadata_path}\n"
-        "Reinstall simpler or rebuild runtimes so build/lib matches pto_isa.pin."
+        "Reinstall simpler or rebuild runtimes so build/lib matches the resolved checkout."
     )
 
 
 def get_pto_isa_clone_path() -> Path:
     """Managed auto-clone target for PTO-ISA, anchored to PROJECT_ROOT."""
     return PROJECT_ROOT / "build" / "pto-isa"
+
+
+def get_pto_isa_resolved_commit() -> str:
+    """Return the commit whose headers should key build artifacts.
+
+    The requested pin remains the default. Once a verified Youhezhen/master
+    fallback exists for that pin, its actual HEAD keys runtime build caches and
+    compile-time provenance instead.
+    """
+    required_commit = read_pto_isa_pin()
+    clone_path = get_pto_isa_clone_path()
+    actual_commit = get_pto_isa_head(str(clone_path))
+    if _checkout_matches_resolution(clone_path, required_commit, actual_commit):
+        return actual_commit
+    return required_commit
 
 
 def _is_cloned(path: Path) -> bool:
@@ -296,16 +403,17 @@ def _run_git_resilient(
 
 
 def _remove_clone(target: Path, verbose: bool) -> None:
-    """Unconditionally remove `target` so a fresh pinned clone can replace it.
+    """Unconditionally remove `target` so a fresh managed clone can replace it.
 
     This removes even a *valid* clone when it is at the wrong (or a dirty)
     revision, and also clears partial clones between source attempts. Handles a
     directory, a plain file, or a (possibly broken) symlink.
     """
+    _clear_fallback_state(target)
     if not (target.exists() or target.is_symlink()):
         return
     if verbose:
-        logger.info(f"Removing pto-isa checkout at {target} to re-clone at the pinned commit")
+        logger.info(f"Removing pto-isa checkout at {target} to resolve the requested revision afresh")
     if target.is_dir() and not target.is_symlink():
         shutil.rmtree(target, ignore_errors=True)
     else:
@@ -360,17 +468,52 @@ def _land_on_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
         return False
 
 
-def _is_pristine_at_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
-    """True iff the checkout is clean AND already at exactly `commit`.
+def _land_on_branch_head(clone_path: Path, branch: str, verbose: bool) -> bool:
+    """Force-detach-checkout the branch tip fetched by a fresh clone."""
+    remote_ref = f"refs/remotes/origin/{branch}"
+    try:
+        _run_git_resilient(
+            ["checkout", "--detach", "--force", remote_ref],
+            cwd=clone_path,
+            timeout=30,
+            check=True,
+            verbose=verbose,
+        )
+        branch_result = _run_git_resilient(
+            ["rev-parse", remote_ref],
+            cwd=clone_path,
+            timeout=30,
+            check=True,
+            verbose=verbose,
+        )
+        expected = branch_result.stdout.strip().lower()
+        actual = get_pto_isa_head(str(clone_path))
+        if not expected or actual != expected:
+            logger.warning(
+                f"pto-isa branch checkout verification failed: expected {remote_ref} "
+                f"at {expected or '<unknown>'}, got {actual or '<unknown>'}"
+            )
+            return False
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"Failed to check out pto-isa branch {branch}: {e.stderr if hasattr(e, 'stderr') else e}")
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Unexpected error checking out pto-isa branch {branch}: {e}")
+        return False
 
-    When both hold, the working tree already *is* the pinned ISA — git content
-    is addressed by SHA, so a clean tree at HEAD == pin is byte-for-byte the pin
-    — and can be used as-is with no checkout and no network. A dirty or
-    wrong-revision tree returns False; the caller then obtains the pin with a
-    fresh clone rather than checking out over the existing tree, so the build is
-    never fed a checkout that was patched over local modifications.
+
+def _is_pristine_at_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
+    """True iff the checkout is clean and resolves the requested pin.
+
+    The normal case requires HEAD == pin. A checkout created by the explicit
+    Youhezhen/master fallback is also reusable for the same requested pin when
+    its recorded actual commit still matches HEAD. A dirty or unrelated tree
+    returns False, so the caller obtains a fresh checkout instead of patching
+    over local modifications.
     """
-    if get_pto_isa_head(str(clone_path)) != commit:
+    actual_commit = get_pto_isa_head(str(clone_path))
+    if not _checkout_matches_resolution(clone_path, commit, actual_commit):
         return False
     try:
         result = _run_git_resilient(["status", "--porcelain"], cwd=clone_path, timeout=30, verbose=verbose)
@@ -383,14 +526,21 @@ def _is_pristine_at_commit(clone_path: Path, commit: str, verbose: bool) -> bool
     return result.returncode == 0 and not result.stdout.strip()
 
 
-def _clone_from_remote(target: Path, commit: str, remote: str, attempts: int, verbose: bool) -> bool:
-    """Try complete clone-and-pin acquisitions from one remote."""
+def _clone_from_remote(
+    target: Path,
+    commit: str,
+    remote: str,
+    attempts: int,
+    verbose: bool,
+    branch_head: Optional[str] = None,
+) -> bool:
+    """Try complete pinned or branch-tip acquisitions from one remote."""
     for attempt in range(1, attempts + 1):
         if attempt > 1:
             time.sleep(_CLONE_RETRY_BACKOFF_S * (attempt - 1))
         _remove_clone(target, verbose)
         logger.info(
-            f"Cloning pto-isa from {remote} to {target} at {commit} "
+            f"Cloning pto-isa from {remote} to {target} at {branch_head or commit} "
             f"(attempt {attempt}/{attempts}, may take up to a minute)..."
         )
 
@@ -398,16 +548,26 @@ def _clone_from_remote(target: Path, commit: str, remote: str, attempts: int, ve
         try:
             # --no-checkout: never materialize the default branch. Its working
             # tree carries case-colliding docs/isa/TADDDEQRELU* paths; only lay
-            # down the pinned commit's tree in _land_on_commit.
-            result = _run_git(["clone", "--no-checkout", remote, str(target)], timeout=300)
+            # down the selected commit or branch-tip tree below.
+            clone_args = ["clone", "--no-checkout"]
+            if branch_head is not None:
+                clone_args.extend(["--branch", branch_head])
+            clone_args.extend([remote, str(target)])
+            result = _run_git(clone_args, timeout=300)
             if result.returncode != 0:
                 failure = result.stderr.strip() or f"git clone exited with status {result.returncode}"
-            elif _land_on_commit(target, commit, verbose=verbose):
+            elif (
+                _land_on_branch_head(target, branch_head, verbose=verbose)
+                if branch_head is not None
+                else _land_on_commit(target, commit, verbose=verbose)
+            ):
                 if verbose:
-                    logger.info(f"pto-isa cloned from {remote} at {commit}: {target}")
+                    revision = f"{branch_head} HEAD" if branch_head is not None else commit
+                    logger.info(f"pto-isa cloned from {remote} at {revision}: {target}")
                 return True
             else:
-                failure = f"clone succeeded but commit {commit} could not be checked out"
+                revision = f"branch {branch_head}" if branch_head is not None else f"commit {commit}"
+                failure = f"clone succeeded but {revision} could not be checked out"
         except subprocess.TimeoutExpired:
             failure = "clone operation timed out"
         except Exception as e:  # noqa: BLE001
@@ -415,7 +575,7 @@ def _clone_from_remote(target: Path, commit: str, remote: str, attempts: int, ve
 
         if verbose:
             logger.warning(f"pto-isa acquisition from {remote} attempt {attempt}/{attempts} failed:\n{failure}")
-        # A successful clone that could not land on the pin is still unusable;
+        # A successful clone that could not land on the selected revision is unusable;
         # remove it just like a partial clone before retrying or changing source.
         _remove_clone(target, verbose)
 
@@ -425,11 +585,11 @@ def _clone_from_remote(target: Path, commit: str, remote: str, attempts: int, ve
 def _clone(target: Path, commit: str, verbose: bool) -> bool:
     """Fresh-clone PTO-ISA to `target` over HTTPS and land it on `commit`.
 
-    Any existing checkout at `target` is removed first, so this always yields a
-    clean tree at exactly `commit` — the sync can never be blocked by local
-    modifications in a preexisting (cached/preset) managed checkout. GitHub is
-    tried three times for the complete clone-and-pin operation before GitCode is
-    used as a fallback source.
+    Any existing checkout at `target` is removed first, so local modifications
+    in a preexisting managed checkout can never affect the result. GitHub is
+    tried three times for a tree at exactly `commit`. If all attempts
+    fail, the Youhezhen GitCode ``master`` tip advertised by the fallback clone
+    is used and recorded as an explicit floating resolution for that pin.
     """
     if not _is_git_available():
         if verbose:
@@ -455,9 +615,23 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
 
         logger.warning(
             f"GitHub could not provide PTO-ISA commit {commit} after {_CLONE_ATTEMPTS} attempts; "
-            f"falling back to {_PTO_ISA_GITCODE_HTTPS}"
+            f"falling back to {_PTO_ISA_GITCODE_HTTPS} branch {_PTO_ISA_GITCODE_BRANCH}"
         )
-        return _clone_from_remote(target, commit, _PTO_ISA_GITCODE_HTTPS, attempts=1, verbose=verbose)
+        if not _clone_from_remote(
+            target,
+            commit,
+            _PTO_ISA_GITCODE_HTTPS,
+            attempts=1,
+            verbose=verbose,
+            branch_head=_PTO_ISA_GITCODE_BRANCH,
+        ):
+            return False
+        actual_commit = get_pto_isa_head(str(target))
+        if not actual_commit:
+            _remove_clone(target, verbose)
+            return False
+        _write_fallback_state(target, commit, actual_commit)
+        return True
     except Exception as e:  # noqa: BLE001
         if verbose:
             logger.warning(f"Failed to clone pto-isa: {e}")
@@ -466,7 +640,7 @@ def _clone(target: Path, commit: str, verbose: bool) -> bool:
 
 
 def ensure_pto_isa_root(verbose: bool = False) -> str:
-    """Resolve the pinned managed PTO-ISA checkout. Return absolute path."""
+    """Resolve the managed PTO-ISA checkout. Return its absolute path."""
     required_commit = read_pto_isa_pin()
     clone_path = get_pto_isa_clone_path()
     lock_path = clone_path.parent / ".pto-isa.lock"
@@ -479,35 +653,35 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
     if resolved is None:
         raise OSError(
             f"PTO-ISA not available.\n"
-            f"  The managed checkout must live at {clone_path} and match {PROJECT_ROOT / PTO_ISA_PIN_FILE}.\n"
-            f"  If auto-clone failed, manually run:\n"
-            f"    git clone {_PTO_ISA_GITHUB_HTTPS} {clone_path}\n"
-            f"  Or use the fallback mirror:\n"
-            f"    git clone {_PTO_ISA_GITCODE_HTTPS} {clone_path}"
+            f"  The managed checkout must live at {clone_path} and resolve {PROJECT_ROOT / PTO_ISA_PIN_FILE}.\n"
+            f"  If auto-clone failed, manually clone {_PTO_ISA_GITHUB_HTTPS} there and check out\n"
+            f"  the requested commit {required_commit}.\n"
+            f"  Automatic fallback source:\n"
+            f"    {_PTO_ISA_GITCODE_HTTPS} branch {_PTO_ISA_GITCODE_BRANCH}"
         )
     return resolved
 
 
 def _ensure_locked(clone_path: Path, required_commit: str, verbose: bool) -> Optional[str]:
     """Inner logic executed while holding the file lock."""
-    # Reuse an existing checkout ONLY when it is already exactly the pin: a clean
-    # working tree at HEAD == pin already *is* the pinned ISA (git objects are
-    # content-addressed), so use it as-is — no checkout, no network. This is the
+    # Reuse an existing checkout only when it is clean and either exactly at the
+    # pin or is the recorded Youhezhen/master fallback for that pin. This is the
     # warm-cache path on persistent runners.
     if _is_cloned(clone_path) and _is_pristine_at_commit(clone_path, required_commit, verbose=verbose):
         return str(clone_path.resolve())
 
-    # Otherwise (missing, wrong revision, or dirty) obtain the pin *fresh* rather
-    # than checking out over the existing tree: re-clone directly at the pin. We
+    # Otherwise (missing, wrong revision, or dirty) resolve the request *fresh*
+    # rather than checking out over the existing tree. We
     # never reset/force-checkout a dirty cache in place, so the build never uses
     # a checkout that was patched over local modifications.
     if not _clone(clone_path, required_commit, verbose=verbose):
         # A parallel process holding a separate lock may have prepared the
-        # checkout concurrently; accept its result only if it landed on the pin.
-        if not (_is_cloned(clone_path) and get_pto_isa_head(str(clone_path)) == required_commit):
+        # checkout concurrently; accept only an exact pin or recorded fallback.
+        actual_commit = get_pto_isa_head(str(clone_path))
+        if not (_is_cloned(clone_path) and _checkout_matches_resolution(clone_path, required_commit, actual_commit)):
             return None
         if verbose:
-            logger.info("pto-isa prepared at the pin by another process")
+            logger.info("pto-isa prepared at the requested resolution by another process")
 
     if not _is_cloned(clone_path):
         if verbose:
@@ -515,9 +689,13 @@ def _ensure_locked(clone_path: Path, required_commit: str, verbose: bool) -> Opt
         return None
 
     actual_commit = get_pto_isa_head(str(clone_path))
-    if actual_commit != required_commit:
+    if not _checkout_matches_resolution(clone_path, required_commit, actual_commit):
         if verbose:
-            logger.warning(f"pto-isa HEAD mismatch: expected {required_commit}, got {actual_commit or '<unknown>'}")
+            logger.warning(
+                "Fresh pto-isa checkout does not match the requested resolution: "
+                f"pin {required_commit}, HEAD {actual_commit or '<unknown>'}"
+            )
+        _remove_clone(clone_path, verbose)
         return None
 
     return str(clone_path.resolve())

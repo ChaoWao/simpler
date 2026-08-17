@@ -572,7 +572,7 @@ class TestBuildCacheStamp:
         assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha"
 
     def test_a5_default_folds_in_pto_isa_commit(self, monkeypatch):
-        """a5 default SDMA workspace folds the pto-isa pin into the cache stamp."""
+        """a5 default SDMA workspace folds the resolved pto-isa SHA into the cache stamp."""
         import simpler_setup.runtime_builder as rb_module  # noqa: PLC0415
         from simpler_setup import pto_isa  # noqa: PLC0415
 
@@ -607,7 +607,7 @@ class TestBuildCacheStamp:
 
 
 class TestResolveBuildPtoIsaCommit:
-    """Test PTO-ISA pin resolution used by runtime build cache keys."""
+    """Test PTO-ISA revision resolution used by runtime build cache keys."""
 
     def _make_builder(self, platform):
         from simpler_setup.platform_info import parse_platform  # noqa: PLC0415
@@ -650,6 +650,13 @@ class TestResolveBuildPtoIsaCommit:
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
         builder = self._make_builder("a2a3")
         assert builder._resolve_build_pto_isa_commit() == "isa_sha"
+
+    def test_a2a3_onboard_uses_actual_fallback_commit(self, monkeypatch):
+        from simpler_setup import pto_isa  # noqa: PLC0415
+
+        monkeypatch.setattr(pto_isa, "get_pto_isa_resolved_commit", lambda: "fallback_sha")
+        builder = self._make_builder("a2a3")
+        assert builder._resolve_build_pto_isa_commit() == "fallback_sha"
 
     def test_pin_error_propagates(self, monkeypatch):
         from simpler_setup import pto_isa  # noqa: PLC0415

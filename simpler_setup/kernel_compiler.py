@@ -711,8 +711,8 @@ class KernelCompiler:
         cmd += self._sanitizer_flags(self.gxx15)
 
         # Add PTO ISA header paths if provided. The path always comes from
-        # ensure_pto_isa_root(), which has already verified HEAD == pto_isa.pin,
-        # so no per-compile re-check is needed here.
+        # ensure_pto_isa_root(), which has already verified the exact pin or its
+        # recorded fallback resolution, so no per-compile re-check is needed.
         if pto_isa_root:
             pto_include = os.path.join(pto_isa_root, "include")
             pto_pto_include = os.path.join(pto_isa_root, "include", "pto")

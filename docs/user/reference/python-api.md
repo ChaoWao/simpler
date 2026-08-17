@@ -139,7 +139,7 @@ Compilation and test scaffolding. Exported from the package root:
 | Name | Use |
 | ---- | --- |
 | `KernelCompiler` | `compile_incore(source_path, core_type, pto_isa_root, extra_include_dirs)`, `compile_orchestration(runtime_name, source_path)`, `get_orchestration_include_dirs(runtime)` |
-| `ensure_pto_isa_root()` | Clones/updates the pinned pto-isa checkout and returns its path |
+| `ensure_pto_isa_root()` | Resolves the managed pto-isa checkout and returns its path |
 | `extract_text_section(binary)` | Required on hardware platforms before wrapping a kernel `.o` |
 | `scene_test(level, runtime)` / `SceneTestCase` | The decorator and base class for declarative examples and tests |
 | `Tensor`, `Scalar`, `TaskArgsBuilder`, `CallableNamespace` | Scene-test arg construction |
