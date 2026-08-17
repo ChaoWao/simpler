@@ -13,17 +13,22 @@ The 43-layer network, its 367 kernels and its fixture come from the
 orchestration with the host g++, runs it on the host CPU instead of the AICPU,
 and ships the built SM image to the device, which boots scheduler-only.
 
-``kernels/orchestration/decode_fwd_hostbuild.cpp`` is that case's orchestration
-with two edits and the runtime untouched: the ten ``get_tensor_data`` reads of
-``recv_count_out`` (a task-produced tensor, unreadable while the host builds the
-graph) stand in a constant, and the six ``set_initial_value`` calls are dropped
-because their target is a GM-heap device address. The graph therefore keeps the
-size and shape of the real one but not the fixture's routing — hence
-``skip_golden``. ``manual`` because the 367-kernel compile takes minutes.
+``kernels/orchestration/decode_fwd_graph.cpp`` is that case's orchestration
+with the runtime untouched, recast as a Graph: the 20-iteration decoder layer
+loop (40 of the 43 layers) submits one ``rt_submit_graph`` per iteration whose
+body is the layer's full task set, so the host records a 744-node Definition
+once and the 15991-task network collapses to 1131 host-submitted tasks. The ten
+``get_tensor_data`` reads of ``recv_count_out`` (a task-produced tensor,
+unreadable while the host builds the graph) stand in a constant, and the six
+``set_initial_value`` calls are dropped because their target is a GM-heap
+device address. The graph therefore keeps the size and shape of the real one
+but not the fixture's routing — hence ``skip_golden``. ``manual`` because the
+367-kernel compile takes minutes.
 
-Host construction completes; device execution currently stalls 12 tasks from the
-end. See README.md for the measurement, what has been ruled out, and what is
-still open.
+Host construction and Graph recording complete (1131 tasks on host); device
+execution of the non-graph remainder currently stalls 12 tasks from the end.
+See README.md for the measurement, what has been ruled out, and what is still
+open.
 
     python examples/a2a3/host_build_graph/deepseek_v4_flash_decode/\\
 test_deepseek_v4_flash_decode.py -p a2a3 -d <d0>,<d1> --manual only
@@ -76,7 +81,7 @@ def _host_build_graph_callable():
     """
     callable_config = copy.deepcopy(_TMR.TestDeepseekV4FlashDecode.CALLABLE)
     chip = callable_config["callables"][0]
-    chip["orchestration"]["source"] = str(HERE / "kernels/orchestration/decode_fwd_hostbuild.cpp")
+    chip["orchestration"]["source"] = str(HERE / "kernels/orchestration/decode_fwd_graph.cpp")
     for incore in chip["incores"]:
         incore["source"] = str(TMR_CASE_DIR / incore["source"])
     return callable_config

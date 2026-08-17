@@ -13,7 +13,14 @@ device can execute what the host built. It is deliberately not a numerics test.
 ## What differs from the TMR case
 
 `kernels/orchestration/decode_fwd_hostbuild.cpp` is the TMR orchestration with
-two edits, **51 lines in all**. The runtime is untouched.
+two edits, **51 lines in all**, kept as the non-Graph baseline.
+`kernels/orchestration/decode_fwd_graph.cpp` — the file the test points at —
+carries the same two edits and additionally recasts the 20-iteration decoder
+layer loop (40 of the 43 layers) as one `rt_submit_graph` per iteration: the
+layer's task set becomes the Graph body (a free function reading its per-layer
+views, scales and indices through `GraphTaskArgs`, positionally), and the host
+records a 744-node Definition once instead of submitting the loop's ~15600
+tasks individually. The runtime is untouched.
 
 | Edit | Sites | Why |
 | ---- | ----- | --- |
@@ -24,15 +31,22 @@ The other **31** `get_tensor_data` reads are left alone: they read external
 tensors (`ext_num_tokens_per_owner`, `hc_attn_scale_*`, `hc_ffn_scale_*`), which
 the runtime stages with a host view and which therefore return real values.
 
-Everything else — loop structure, submit order, dependencies, scope nesting,
-`valid_rows = min(n_rows - t0, 16)` — is byte-identical to the TMR source. The
-graph keeps the size and shape of the real one (15971 tasks) but not the
+Everything else — submit order, dependencies, scope nesting,
+`valid_rows = min(n_rows - t0, 16)` — is byte-identical to the TMR source inside
+the Graph body. The graph keeps the size and shape of the real one (the 15971
+device-side tasks; 1131 host-submitted with the Graph collapse) but not the
 fixture's routing, hence `skip_golden`.
 
 ## Status: host construction works, device execution stalls 12 tasks from the end
 
-Host-side orchestration completes and the graph uploads. The device then
-executes **15959 of 15971 tasks** and stalls:
+With the Graph form the host records the 744-node Definition and boots with
+**1131 tasks on host** (down from 15991 in the submit-everything form) — this is
+measured, on both ranks. The device-side replay of a Definition that large is
+**not yet exercised**: an unskipped Graph-form run fails earlier, in Graph
+activation (`sched_error_code=5 INVALID_ARGS` from the scheduler's graph
+queues), before the tail. The numbers below are the **non-Graph baseline**
+(hostbuild orchestration, no skip): the device executes
+**15959 of 15971 tasks** and stalls:
 
 ```text
 TASK ring=0 task_id=15959 state=RUNNING fanin_met=2/2 kernels=[aic:355 aiv0:-1 aiv1:-1]
@@ -124,12 +138,14 @@ pytest examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
 routing is stood in, not computed.
 
 To exercise only the host side while the stall below is unresolved, set
-`SIMPLER_SKIP_DEVICE_RUN=1`. `simpler_run` then stops after `simpler_prepare_run`
-— orchestration, graph construction, image relocation and the SM H2D all run, the
-kernel launch and its completion wait do not — and `simpler_finalize_run` still
-releases the run's resources. No outputs are produced, so a run under this
-variable is a timing harness, not a test. The variable is temporary and goes away
-with the stall.
+`SIMPLER_SKIP_DEVICE_RUN=1`. `simpler_launch_run` then completes the run before
+any execution claim — orchestration, graph recording, image relocation and the
+SM H2D all ran during prepare, the kernel launch and its completion wait do not
+happen — and `simpler_finalize_run` still releases the run's resources. The
+check sits at the launch entry because the multi-chip subprocess drives a run
+through the split `prepare/launch/wait/finalize` entry points and never calls
+`simpler_run`. No outputs are produced, so a run under this variable is a timing
+harness, not a test. The variable is temporary and goes away with the stall.
 
 To read the stall diagnostics, raise the device log level — the per-task dump is
 `LOG_INFO` and the default threshold does not open CANN's INFO stream:
@@ -143,7 +159,12 @@ export ASCEND_PROCESS_LOG_PATH="$PWD/outputs/<run>/ascend"   # dir must pre-exis
 
 Kernels, fixture and orchestration come from the TMR case; see its
 [README](../../tensormap_and_ringbuffer/deepseek_v4_flash_decode/README.md) for
-network shape, regeneration steps and cost. Only
-`kernels/orchestration/decode_fwd_hostbuild.cpp` is specific to this case, and
-it is mechanically derivable from the TMR orchestration by the two edits in the
-table above.
+network shape, regeneration steps and cost. Two orchestration files are specific
+to this case: `kernels/orchestration/decode_fwd_hostbuild.cpp` (the TMR
+orchestration with the two edits in the table above — the host-orchestration
+baseline the investigation was run against) and
+`kernels/orchestration/decode_fwd_graph.cpp` (the same program recast as a
+Graph, which the test points at). The Graph variant is derivable from the
+hostbuild one: the 20-iteration decoder layer loop becomes one
+`rt_submit_graph` per iteration with the layer's task set as the Graph body and
+its per-layer views, scales and indices crossing the boundary positionally.
