@@ -13,21 +13,16 @@ The pto-isa dependency will be automatically cloned when you first run an exampl
 
 The pto-isa repository provides header files needed for kernel compilation on
 the `a2a3` hardware platform and for examples that use PTO ISA intrinsics.
-The requested GitHub PTO-ISA revision is controlled by the repo-root
-`pto_isa.pin` file. When GitHub is unavailable, the temporary GitCode fallback
-uses the `master` tip advertised by `https://gitcode.com/Youhezhen/pto-isa.git`
-when fallback acquisition occurs and records its actual commit separately.
+The preferred GitHub PTO-ISA revision is controlled by the repo-root
+`pto_isa.pin` file.
 
 The test framework automatically handles PTO-ISA setup:
 
 1. Reads the required commit from `pto_isa.pin`.
-2. Reuses `build/pto-isa` when it is clean and either exactly at the pin or is
-   the recorded Youhezhen `master` fallback for that pin.
+2. Reuses a clean matching checkout when available.
 3. Otherwise (missing, wrong revision, or a dirty working tree) re-clones
-   `build/pto-isa` fresh from GitHub directly at the pinned commit. After three
-   failed GitHub acquisitions, it clones the currently advertised Youhezhen
-   `master` tip instead. Both paths avoid checking out over local modifications;
-   a clean recorded fallback is reused without a network request.
+   the pinned commit from GitHub. After three failed attempts, it clones
+   `master` from `https://gitcode.com/Youhezhen/pto-isa.git`.
 4. Passes that managed checkout to the kernel/runtime compilers.
 
 **Automatic Setup (Recommended):**
@@ -47,9 +42,8 @@ git clone --branch main https://github.com/hw-native-sys/pto-isa.git build/pto-i
 ```
 
 Manual setup still uses the standard managed location. Before it builds
-runtimes or compiles kernels, `simpler` verifies that checkout against
-`pto_isa.pin`; if it is unrelated or dirty, it runs the automatic GitHub then
-Youhezhen acquisition flow.
+runtimes or compiles kernels, `simpler` validates the checkout through the same
+automatic acquisition flow.
 
 **Revision selection and compatibility checks:**
 
@@ -59,10 +53,8 @@ diff and applies the same revision to install-time runtime builds and run-time
 kernel compilation.
 
 For platforms that embed PTO-ISA headers into onboard host runtimes (a2a3
-always; a5 when an async workspace overlay is ON), builds record both the
-requested pin and actual PTO-ISA git HEAD used for each runtime in
-`build/lib/pto_isa_build.json`. They differ only on the explicit GitCode
-`master` fallback.
+always; a5 when an async workspace overlay is ON), builds record the requested
+pin and actual PTO-ISA HEAD in `build/lib/pto_isa_build.json`.
 This JSON is artifact provenance, not a second configuration source. Lookup
 of those runtimes **requires** the metadata file: if it is missing, or if it
 says a pre-built runtime was built for an older pin / omitted that runtime,

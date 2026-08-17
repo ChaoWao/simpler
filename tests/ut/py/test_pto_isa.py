@@ -464,8 +464,6 @@ def test_write_pto_isa_build_metadata_records_verified_youhezhen_master_fallback
     metadata = json.loads((tmp_path / pto_isa.PTO_ISA_BUILD_METADATA).read_text())
     assert metadata["required_commit_from_pin"] == PIN_A
     assert metadata["actual_checkout_commit"] == PIN_B
-    assert metadata["fallback_remote"] == "https://gitcode.com/Youhezhen/pto-isa.git"
-    assert metadata["fallback_branch"] == "master"
     assert metadata["runtime_artifacts"][RUNTIME_A]["actual_checkout_commit"] == PIN_B
 
 
@@ -502,8 +500,6 @@ def test_validate_runtime_pto_isa_current_pin_accepts_matching_fallback_commit(t
                     RUNTIME_A: {
                         "required_commit_from_pin": PIN_A,
                         "actual_checkout_commit": PIN_B,
-                        "fallback_remote": "https://gitcode.com/Youhezhen/pto-isa.git",
-                        "fallback_branch": "master",
                     }
                 },
             }

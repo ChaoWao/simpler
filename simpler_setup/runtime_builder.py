@@ -215,10 +215,8 @@ class RuntimeBuilder:
         revision does not affect the compiled objects, so return "" and leave
         the stamp keyed on the runtime HEAD.
 
-        The normal value is ``pto_isa.pin``. When the explicit
-        Youhezhen/master fallback resolved that request to a different commit,
-        use its actual HEAD so cache invalidation and compiled provenance match
-        the headers on disk. Invalid pins still raise before a build proceeds.
+        A GitCode fallback uses its actual HEAD so cache invalidation and build
+        provenance match the headers on disk.
         """
         if not self._requires_pto_isa_metadata_validation():
             return ""

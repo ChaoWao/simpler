@@ -6,45 +6,11 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""PTO-ISA dependency management: resolve the requested managed checkout.
+"""Resolve the managed PTO-ISA checkout under ``PROJECT_ROOT/build/pto-isa``.
 
-``pto_isa.pin`` is the source of truth for the requested GitHub revision. The
-temporary GitCode fallback described below may resolve that request to the
-``master`` tip advertised when GitHub is unavailable.
-``ensure_pto_isa_root()`` always manages ``PROJECT_ROOT/build/pto-isa``:
-
-1. Read the required commit from ``pto_isa.pin``.
-2. If a managed checkout is clean and either exactly at the pin or is the
-   recorded fallback for that pin, reuse it with no checkout and no network.
-3. Otherwise (missing, wrong revision, or dirty) obtain the pin fresh from
-   GitHub: clone over HTTPS (``--no-checkout`` so the default branch is never
-   materialized) and force-check-out the pin. GitHub is attempted three times.
-4. If GitHub cannot provide the pin, temporarily fall back to the Youhezhen
-   GitCode ``master`` tip advertised by a fresh clone. Record both the requested
-   pin and the actual fallback commit; never report the floating mirror
-   revision as the pinned GitHub commit.
-
-Three deliberate choices:
-
-- **Obtain the pin fresh instead of patching a dirty cache.** A checkout is
-  reused only when it is provably the requested resolution (an exact pin or its
-  recorded fallback); anything else is re-cloned rather than
-  reset/force-checked-out in place, so the build never uses an ISA tree that was
-  checked out over local modifications. Reusing a pristine cache keeps the
-  common path network-free; a fresh GitHub clone is retried on transient
-  failure.
-- **Force the checkout when landing a fresh clone.** pto-isa's default branch
-  carries case-duplicate doc paths (``docs/isa/TADDDEQRELU.md`` vs
-  ``TAddDeqRelu.md``) that collide on a case-insensitive filesystem (macOS CI),
-  leaving even a fresh working tree "modified"; a plain checkout then aborts.
-  ``--no-checkout`` (never materialize the default branch) plus a forced
-  checkout of the pin sidesteps that entirely.
-- **Keep the floating fallback explicit.** The GitCode mirror has different
-  commit identities from GitHub and may be ahead of the pin. Only a checkout
-  created by the GitHub-failure fallback is accepted at a non-pin SHA, and its
-  actual ``master`` commit is retained in build metadata.
-
-Lock file under build/ serializes concurrent clones from parallel processes.
+``pto_isa.pin`` selects a GitHub commit. When GitHub acquisition fails, the
+resolver uses Youhezhen GitCode ``master`` and records its actual commit because
+the two repositories use different commit identities.
 """
 
 import fcntl
@@ -192,16 +158,12 @@ def _metadata_actual_commit(payload: dict) -> str:
 
 
 def _metadata_entry(required_commit: str, actual_commit: str, pto_isa_root: str) -> dict:
-    entry = {
+    return {
         "required_commit_from_pin": required_commit,
         "actual_checkout_commit": actual_commit,
         "pin_file": str((PROJECT_ROOT / PTO_ISA_PIN_FILE).resolve()),
         "checkout_path": str(Path(pto_isa_root).resolve()),
     }
-    if _fallback_checkout_matches(Path(pto_isa_root), required_commit, actual_commit):
-        entry["fallback_remote"] = _PTO_ISA_GITCODE_HTTPS
-        entry["fallback_branch"] = _PTO_ISA_GITCODE_BRANCH
-    return entry
 
 
 def write_pto_isa_build_metadata(
@@ -504,14 +466,7 @@ def _land_on_branch_head(clone_path: Path, branch: str, verbose: bool) -> bool:
 
 
 def _is_pristine_at_commit(clone_path: Path, commit: str, verbose: bool) -> bool:
-    """True iff the checkout is clean and resolves the requested pin.
-
-    The normal case requires HEAD == pin. A checkout created by the explicit
-    Youhezhen/master fallback is also reusable for the same requested pin when
-    its recorded actual commit still matches HEAD. A dirty or unrelated tree
-    returns False, so the caller obtains a fresh checkout instead of patching
-    over local modifications.
-    """
+    """Return whether the checkout is clean at the pin or its recorded fallback."""
     actual_commit = get_pto_isa_head(str(clone_path))
     if not _checkout_matches_resolution(clone_path, commit, actual_commit):
         return False
@@ -583,14 +538,7 @@ def _clone_from_remote(
 
 
 def _clone(target: Path, commit: str, verbose: bool) -> bool:
-    """Fresh-clone PTO-ISA to `target` over HTTPS and land it on `commit`.
-
-    Any existing checkout at `target` is removed first, so local modifications
-    in a preexisting managed checkout can never affect the result. GitHub is
-    tried three times for a tree at exactly `commit`. If all attempts
-    fail, the Youhezhen GitCode ``master`` tip advertised by the fallback clone
-    is used and recorded as an explicit floating resolution for that pin.
-    """
+    """Clone the GitHub commit, falling back to Youhezhen GitCode ``master``."""
     if not _is_git_available():
         if verbose:
             logger.warning("git command not available, cannot clone pto-isa")
@@ -664,16 +612,11 @@ def ensure_pto_isa_root(verbose: bool = False) -> str:
 
 def _ensure_locked(clone_path: Path, required_commit: str, verbose: bool) -> Optional[str]:
     """Inner logic executed while holding the file lock."""
-    # Reuse an existing checkout only when it is clean and either exactly at the
-    # pin or is the recorded Youhezhen/master fallback for that pin. This is the
-    # warm-cache path on persistent runners.
+    # Only a clean pin or matching recorded fallback is reusable.
     if _is_cloned(clone_path) and _is_pristine_at_commit(clone_path, required_commit, verbose=verbose):
         return str(clone_path.resolve())
 
-    # Otherwise (missing, wrong revision, or dirty) resolve the request *fresh*
-    # rather than checking out over the existing tree. We
-    # never reset/force-checkout a dirty cache in place, so the build never uses
-    # a checkout that was patched over local modifications.
+    # Re-clone instead of overwriting a dirty or unrelated checkout.
     if not _clone(clone_path, required_commit, verbose=verbose):
         # A parallel process holding a separate lock may have prepared the
         # checkout concurrently; accept only an exact pin or recorded fallback.

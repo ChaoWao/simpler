@@ -47,7 +47,7 @@ pto-runtime/
 │   ├── elf_parser.py                  # Authoritative copy
 │   ├── platform_info.py               # Platform/runtime discovery
 │   ├── environment.py                 # PROJECT_ROOT resolver (wheel vs source tree)
-│   ├── pto_isa.py                     # managed PTO-ISA checkout resolution
+│   ├── pto_isa.py                     # PTO-ISA checkout management
 │   ├── build_runtimes.py              # Pre-build all runtime variants (invoked by pip install)
 │   └── _assets/                       # (wheel only) src/ + build/lib/ shipped with wheel
 │
@@ -208,9 +208,7 @@ against, and a build made without git carries an empty stamp.
 
 A `pto_isa.pin` bump changes the SDMA headers embedded by
 `host_runtime.so`. Install-time runtime builds and run-time kernel compilation
-both resolve that pin. If GitHub cannot provide it after three attempts, the
-temporary fallback uses the Youhezhen GitCode `master` tip advertised during
-fallback acquisition and records its actual SHA alongside the requested pin.
+both use the PTO-ISA checkout resolved from `pto_isa.pin`.
 
 ### Runtime binary lookup
 
