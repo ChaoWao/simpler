@@ -459,12 +459,6 @@ bool graph_classify_tensor(
     return false;
 }
 
-void graph_record_mark_unsupported(PTO2OrchestratorState *orch) {
-    if (GraphRecording *recording = active_graph_recording(orch); recording != nullptr) {
-        recording->unsupported = true;
-    }
-}
-
 GraphBoundarySignature graph_boundary_signature(const ChipTensor &tensor, TensorArgType type, uint16_t alias_rep) {
     GraphBoundarySignature signature{};
     signature.buffer_size = tensor.buffer.size;
@@ -2079,16 +2073,14 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
         return TaskOutputTensors{};
     }
 
-    // Runtime-allocated outputs cannot be replayed by a Graph, so a Graph body
-    // that calls alloc_tensors is unsupported. Still materialize the outputs so
-    // the recording body can finish classification, then poison the recording;
-    // commit reports a fatal error because outer shells already exist.
+    // A Graph body may allocate. The allocation records as a kernel-less node —
+    // the same shape submit_dummy_task records — and replay reserves the
+    // intermediate heap for every internal node anyway, so the outputs land at
+    // addresses the replayed Definition derives for itself.
     if (active_graph_recording(orch) != nullptr) {
-        TaskOutputTensors result = graph_record_submit_node(
+        return graph_record_submit_node(
             orch, args, ActiveMask{}, TaskAttrs{}, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
         );
-        graph_record_mark_unsupported(orch);
-        return result;
     }
 
     PTO2OutputLayout layout = calculate_output_layout(args);
