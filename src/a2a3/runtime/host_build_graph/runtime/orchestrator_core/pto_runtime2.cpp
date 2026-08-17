@@ -98,7 +98,7 @@ static TaskOutputTensors submit_dummy_task_impl(PTO2Runtime *rt, const CoreTaskA
     return rt->orchestrator.submit_dummy_task(args);
 }
 
-static GraphScopeResult graph_begin_impl(PTO2Runtime *rt, uint64_t graph_key, const CoreTaskArgs &args) {
+static GraphScopeResult graph_begin_impl(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args) {
     if (rt == nullptr) return GraphScopeResult{};
     return rt->orchestrator.graph_begin(graph_key, args, rt->active_callable_hash);
 }
