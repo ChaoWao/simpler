@@ -88,6 +88,7 @@ class TestChipSwimlaneMixed(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a5sim", "a5"],
+            "manual": ["a5sim"],
             "params": {},
         },
     ]
@@ -137,17 +138,16 @@ class TestChipSwimlaneMixed(SceneTestCase):
         run_marker = int(time.time())  # floor to whole seconds: safe if outputs/ ever lands on a coarse-mtime fs
         super().test_run(st_platform, st_worker, request)
         if request.config.getoption("--enable-chip-swimlane", default=False):
-            for case in self.CASES:
-                if st_platform in case["platforms"]:
-                    # Rely on the differential gate (Pop / Fanout / Fanin) —
-                    # the chain produces 3 MIX task_ids × 2 subtask rows = 6
-                    # perf rows and 2 deps.json edges, so the dedup branch in
-                    # the oracle has an arithmetically observable effect.
-                    validate_perf_artifact(
-                        f"TestChipSwimlaneMixed_{case['name']}",
-                        since=run_marker,
-                        expected_complete_finishes=6,
-                    )
+            for case in self._matching_cases(st_platform, request):
+                # Rely on the differential gate (Pop / Fanout / Fanin) —
+                # the chain produces 3 MIX task_ids × 2 subtask rows = 6
+                # perf rows and 2 deps.json edges, so the dedup branch in
+                # the oracle has an arithmetically observable effect.
+                validate_perf_artifact(
+                    f"TestChipSwimlaneMixed_{case['name']}",
+                    since=run_marker,
+                    expected_complete_finishes=6,
+                )
         # Full-dump modes give the func_id array its regression barrier on the
         # cooperative-mix path (single-kernel coverage lives in test_args_dump).
         if int(request.config.getoption("--dump-args", default=0)) >= 2:

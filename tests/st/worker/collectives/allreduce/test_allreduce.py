@@ -141,6 +141,7 @@ class TestAllreduceRingP2(SceneTestCase):
         {
             "name": "ring",
             "platforms": ["a2a3sim", "a2a3", "a5sim", "a5"],
+            "manual": ["a2a3sim", "a5sim"],
             "config": {"device_count": 2},
             "params": {"nranks": 2, "mode_id": 2},
         }

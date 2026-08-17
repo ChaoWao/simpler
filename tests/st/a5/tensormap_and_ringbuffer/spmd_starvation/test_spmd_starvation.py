@@ -85,6 +85,7 @@ class TestSpmdStarvation(SceneTestCase):
         {
             "name": "Case1",
             "platforms": ["a5sim", "a5"],
+            "manual": ["a5sim"],
             "params": {},
         }
     ]

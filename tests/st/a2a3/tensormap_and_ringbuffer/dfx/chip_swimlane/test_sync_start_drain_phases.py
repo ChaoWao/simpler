@@ -47,7 +47,14 @@ class TestSyncStartDrainPhases(SceneTestCase):
         ],
     }
 
-    CASES = [{"name": "global_aiv", "platforms": ["a2a3sim", "a2a3"], "params": {}}]
+    CASES = [
+        {
+            "name": "global_aiv",
+            "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
+            "params": {},
+        }
+    ]
 
     def generate_args(self, params):
         return TaskArgsBuilder(

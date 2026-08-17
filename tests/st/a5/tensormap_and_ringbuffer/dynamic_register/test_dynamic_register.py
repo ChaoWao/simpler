@@ -192,6 +192,7 @@ def test_prepare_new_identity_after_start_then_run(st_platform, st_device_ids):
 
 
 @pytest.mark.platforms(["a5sim"])
+@pytest.mark.manual(["a5sim"])
 @pytest.mark.device_count(1)
 @pytest.mark.runtime(_RUNTIME)
 def test_prepare_capacity_overflow_post_start(st_platform, st_device_ids):
@@ -242,6 +243,7 @@ def test_prepare_capacity_overflow_post_start(st_platform, st_device_ids):
 
 
 @pytest.mark.platforms(["a5sim"])
+@pytest.mark.manual(["a5sim"])
 @pytest.mark.device_count(1)
 @pytest.mark.runtime(_RUNTIME)
 def test_duplicate_prepare_same_hashid_survives_one_unregister(st_platform, st_device_ids):
@@ -311,6 +313,7 @@ def test_duplicate_prepare_same_hashid_survives_one_unregister(st_platform, st_d
 
 
 @pytest.mark.platforms(["a5sim"])
+@pytest.mark.manual(["a5sim"])
 @pytest.mark.device_count(1)
 @pytest.mark.runtime(_RUNTIME)
 def test_unregister_last_handle_allows_reprepare_same_hashid(st_platform, st_device_ids):

@@ -88,6 +88,7 @@ class TestHostBuildGraphWideDispatch(SceneTestCase):
         {
             "name": "TwoThreads",
             "platforms": ["a2a3sim", "a5sim"],
+            "manual": ["a2a3sim", "a5sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
         }

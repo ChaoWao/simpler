@@ -106,9 +106,14 @@ scene-test corpus with `--manual include` once per day and supports manual
 re-runs through `workflow_dispatch`. Simulation runs on Ubuntu and macOS for
 both architectures; onboard runs on the A2/A3 and A5 self-hosted pools. The
 same DFX smoke steps used by Per-PR run once in each Daily platform job, and
-the A2/A3 Pod corpus runs through the existing two-machine workflow. Per-PR
-scene-test jobs keep the default `--manual exclude`, so moving a case to Daily
-does not require a second workflow exclusion list.
+the A2/A3 Pod corpus runs through the existing two-machine workflow. The main
+Per-PR scene-test steps keep the default `--manual exclude`, so moving an
+ordinary case to Daily does not require a second workflow exclusion list.
+Dedicated DFX steps instead use `include` for the normal Per-PR and Daily modes
+because they own the full corpus under their target paths; a `manual_mode` of
+`only` remains `only` in those steps. Marking a DFX case manual therefore
+removes its duplicate execution from the main step without removing its
+dedicated Per-PR coverage.
 
 Use `"manual": True` on an individual `SceneTestCase.CASES` entry and
 `@pytest.mark.manual` on a standalone pytest test. The reusable scene-test
@@ -117,8 +122,10 @@ Daily caller passes `include`.
 
 For platform-specific pruning, the same `manual` value accepts a platform list,
 for example `"manual": ["a2a3sim", "a5sim"]`; standalone tests use
-`@pytest.mark.manual(["a2a3sim", "a5sim"])`. This removes only the Sim execution
-from Per-PR while retaining onboard coverage.
+`@pytest.mark.manual(["a2a3sim", "a5sim"])`. This removes only the listed Sim
+executions from Per-PR. It retains same-architecture onboard coverage only when
+the case also declares that onboard platform; otherwise that architecture's
+path becomes Daily-only and must be called out in the PR's coverage analysis.
 
 ### Nightly sanitizer sweep
 

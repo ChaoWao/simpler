@@ -52,6 +52,7 @@ class TestGraphExecutionAicAivHostBuildGraph(SceneTestCase):
         {
             "name": "record_then_replay_aic_aiv",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "config": {"aicpu_thread_num": 4},
             "params": {},
         },
