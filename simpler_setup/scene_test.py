@@ -880,6 +880,19 @@ def _select_cases(test_classes, platform: str, selectors: list[tuple], manual_mo
     return selected
 
 
+def _discover_module_test_classes(module):
+    """Return scene-test classes defined by ``module``, excluding imported helpers."""
+    return [
+        value
+        for value in vars(module).values()
+        if isinstance(value, type)
+        and issubclass(value, SceneTestCase)
+        and value is not SceneTestCase
+        and value.__module__ == module.__name__
+        and hasattr(value, "CASES")
+    ]
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -1932,11 +1945,7 @@ class SceneTestCase:
         # artifacts land in distinct directories with no shared filenames.
 
         module = sys.modules[module_name]
-        test_classes = [
-            v
-            for v in vars(module).values()
-            if isinstance(v, type) and issubclass(v, SceneTestCase) and v is not SceneTestCase and hasattr(v, "CASES")
-        ]
+        test_classes = _discover_module_test_classes(module)
 
         # Apply --runtime/--level filters (child mode sets both; parent may also
         # use them when the user wants a narrow run).
