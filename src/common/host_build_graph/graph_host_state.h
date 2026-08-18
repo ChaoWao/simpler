@@ -12,8 +12,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 struct PTO2TaskSlotState;
 struct GraphHostState;
@@ -32,6 +34,19 @@ struct GraphHostUpload {
     size_t bytes;
 };
 
+// The run's distinct Definition images (already deduplicated by the host-side
+// Definition cache), for upload as shared device objects ahead of submissions.
+struct GraphHostDefinition {
+    uint64_t full_key;
+    const std::byte *data;
+    size_t bytes;
+};
+
+struct GraphHostDefinitionList {
+    std::vector<GraphHostDefinition> entries;
+};
+
 GraphHostStatePtr make_graph_host_state();
 size_t graph_host_upload_count(const GraphHostState &state);
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index);
+GraphHostDefinitionList graph_host_definitions(GraphHostState &state);

@@ -101,6 +101,29 @@ struct GraphBoundarySignature {
     uint8_t reserved;
 };
 
+// Header prefixing each device-resident Definition object. The definition
+// buffer uploaded by the host is [GraphDefinitionHeader][GraphDefinition image];
+// verify_state gates the one-time integrity hash so submissions sharing one
+// Definition each pay only a state load.
+inline constexpr uint64_t GRAPH_DEFINITION_OBJECT_MAGIC = 0x4752415048455844ULL;
+
+enum class GraphDefinitionVerifyState : uint32_t {
+    UPLOADED = 0,
+    VERIFYING = 1,
+    VERIFIED = 2,
+    INVALID = 3,
+};
+
+struct GraphDefinitionHeader {
+    uint64_t magic;
+    std::atomic<uint32_t> verify_state;
+    uint32_t definition_bytes;
+    uint64_t content_hash;
+    uint64_t full_key;
+};
+
+static_assert(std::is_standard_layout_v<GraphDefinitionHeader>);
+
 struct GraphDefinition {
     uint64_t full_key;
     uint64_t content_hash;
@@ -132,9 +155,13 @@ struct GraphSubmission {
     uint64_t execution_storage;
     uint64_t execution_storage_bytes;
     uint64_t local_execution;
+    // Device GM address of the shared Definition object this replay references
+    // (an integer-typed absolute address per the wire rules) plus the content
+    // hash the host computed for it.
+    uint64_t definition_addr;
+    uint64_t definition_hash;
     uint32_t activation_gate;
     uint32_t total_bytes;
-    uint32_t definition_offset;
     uint32_t tensors_offset;
     uint32_t tensor_count;
     uint32_t scalars_offset;
@@ -236,22 +263,6 @@ inline const T *graph_definition_ptr(const GraphDefinition &definition, uint32_t
 
 inline GraphSubmission *graph_submission_from_slot(PTO2TaskSlotState &slot) {
     return slot.task_kind == TaskKind::GRAPH ? static_cast<GraphSubmission *>(slot.graph_context) : nullptr;
-}
-
-inline const GraphDefinition *graph_submission_definition(const GraphSubmission &submission) {
-    if (submission.definition_offset == 0 || submission.definition_offset % alignof(GraphDefinition) != 0 ||
-        submission.definition_offset > submission.total_bytes ||
-        sizeof(GraphDefinition) > submission.total_bytes - submission.definition_offset) {
-        return nullptr;
-    }
-    const auto *definition = reinterpret_cast<const GraphDefinition *>(
-        reinterpret_cast<const uint8_t *>(&submission) + submission.definition_offset
-    );
-    if (definition->total_bytes < sizeof(GraphDefinition) ||
-        definition->total_bytes > submission.total_bytes - submission.definition_offset) {
-        return nullptr;
-    }
-    return definition;
 }
 
 inline bool graph_submission_wire_size_valid(const GraphSubmission &submission, size_t available_bytes) {
@@ -361,7 +372,6 @@ struct GraphExecution {
     uint32_t materialized_scalar_patches{0};
     uint32_t materialized_scalar_patch_count{0};
     size_t allocation_bytes{0};
-    size_t definition_capacity{0};
     uint64_t graph_key{0};
     uint64_t definition_hash{0};
     uint64_t materialized_graph_key{0};
@@ -373,7 +383,6 @@ struct GraphExecution {
     GraphNodeStorage *node_storage{nullptr};
     GraphTensorAddressPatch *tensor_patches{nullptr};
     GraphScalarPatch *scalar_patches{nullptr};
-    void *definition_storage{nullptr};
     const GraphDefinition *definition{nullptr};
     const uint32_t *fanin_offsets{nullptr};
     const uint16_t *fanin_indices{nullptr};
@@ -389,12 +398,11 @@ static_assert(std::is_trivially_destructible_v<GraphNodeStorage>);
 static_assert(std::is_trivially_destructible_v<GraphExecution>);
 
 inline bool graph_execution_storage_layout(
-    int32_t node_capacity, uint32_t tensor_patch_capacity, uint32_t scalar_patch_capacity, size_t definition_capacity,
-    size_t *nodes_offset, size_t *tensor_patches_offset, size_t *scalar_patches_offset, size_t *definition_offset,
-    size_t *storage_bytes
+    int32_t node_capacity, uint32_t tensor_patch_capacity, uint32_t scalar_patch_capacity, size_t *nodes_offset,
+    size_t *tensor_patches_offset, size_t *scalar_patches_offset, size_t *storage_bytes
 ) {
     if (nodes_offset == nullptr || tensor_patches_offset == nullptr || scalar_patches_offset == nullptr ||
-        definition_offset == nullptr || storage_bytes == nullptr || node_capacity <= 0 ||
+        storage_bytes == nullptr || node_capacity <= 0 ||
         static_cast<size_t>(node_capacity) > SIZE_MAX / sizeof(GraphNodeStorage) ||
         tensor_patch_capacity > GRAPH_MAX_NODES * MAX_TENSOR_ARGS ||
         scalar_patch_capacity > GRAPH_MAX_NODES * MAX_SCALAR_ARGS) {
@@ -415,25 +423,21 @@ inline bool graph_execution_storage_layout(
         !checked_align_up(
             *tensor_patches_offset + tensor_patches_bytes, alignof(GraphScalarPatch), scalar_patches_offset
         ) ||
-        *scalar_patches_offset > SIZE_MAX - scalar_patches_bytes ||
-        !checked_align_up(*scalar_patches_offset + scalar_patches_bytes, alignof(GraphDefinition), definition_offset) ||
-        *definition_offset > SIZE_MAX - definition_capacity) {
+        *scalar_patches_offset > SIZE_MAX - scalar_patches_bytes) {
         return false;
     }
-    return checked_align_up(*definition_offset + definition_capacity, alignof(GraphNodeStorage), storage_bytes);
+    return checked_align_up(*scalar_patches_offset + scalar_patches_bytes, alignof(GraphNodeStorage), storage_bytes);
 }
 
 inline bool graph_execution_storage_bytes(
-    int32_t node_capacity, uint32_t tensor_patch_capacity, uint32_t scalar_patch_capacity, size_t definition_capacity,
-    size_t *storage_bytes
+    int32_t node_capacity, uint32_t tensor_patch_capacity, uint32_t scalar_patch_capacity, size_t *storage_bytes
 ) {
     size_t nodes_offset = 0;
     size_t tensor_patches_offset = 0;
     size_t scalar_patches_offset = 0;
-    size_t definition_offset = 0;
     return graph_execution_storage_layout(
-        node_capacity, tensor_patch_capacity, scalar_patch_capacity, definition_capacity, &nodes_offset,
-        &tensor_patches_offset, &scalar_patches_offset, &definition_offset, storage_bytes
+        node_capacity, tensor_patch_capacity, scalar_patch_capacity, &nodes_offset, &tensor_patches_offset,
+        &scalar_patches_offset, storage_bytes
     );
 }
 

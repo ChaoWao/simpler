@@ -33,12 +33,10 @@ void reset_execution(
     size_t nodes_offset = 0;
     size_t tensor_patches_offset = 0;
     size_t scalar_patches_offset = 0;
-    size_t definition_offset = 0;
     size_t bytes = 0;
     if (!graph_execution_storage_layout(
-            execution->node_capacity, execution->tensor_patch_capacity, execution->scalar_patch_capacity,
-            execution->definition_capacity, &nodes_offset, &tensor_patches_offset, &scalar_patches_offset,
-            &definition_offset, &bytes
+            execution->node_capacity, execution->tensor_patch_capacity, execution->scalar_patch_capacity, &nodes_offset,
+            &tensor_patches_offset, &scalar_patches_offset, &bytes
         )) {
         return;
     }
@@ -69,7 +67,6 @@ void reset_execution(
         reinterpret_cast<GraphTensorAddressPatch *>(reinterpret_cast<uint8_t *>(execution) + tensor_patches_offset);
     execution->scalar_patches =
         reinterpret_cast<GraphScalarPatch *>(reinterpret_cast<uint8_t *>(execution) + scalar_patches_offset);
-    execution->definition_storage = reinterpret_cast<uint8_t *>(execution) + definition_offset;
     if (!execution->definition_affine_reuse) {
         execution->definition = nullptr;
         execution->fanin_offsets = nullptr;
@@ -83,7 +80,7 @@ void reset_execution(
 
 bool reusable_execution_header_valid(const GraphExecution &execution, size_t storage_bytes) {
     if (execution.storage_magic != GRAPH_EXECUTION_STORAGE_MAGIC || execution.node_capacity <= 0 ||
-        execution.node_capacity > static_cast<int32_t>(GRAPH_MAX_NODES) || execution.definition_capacity == 0 ||
+        execution.node_capacity > static_cast<int32_t>(GRAPH_MAX_NODES) ||
         execution.tensor_patch_capacity > GRAPH_MAX_NODES * MAX_TENSOR_ARGS ||
         execution.scalar_patch_capacity > GRAPH_MAX_NODES * MAX_SCALAR_ARGS ||
         execution.materialized_tensor_patch_count > execution.tensor_patch_capacity ||
@@ -97,25 +94,23 @@ bool reusable_execution_header_valid(const GraphExecution &execution, size_t sto
     size_t expected_bytes = 0;
     return graph_execution_storage_bytes(
                execution.node_capacity, execution.tensor_patch_capacity, execution.scalar_patch_capacity,
-               execution.definition_capacity, &expected_bytes
+               &expected_bytes
            ) &&
            execution.allocation_bytes == expected_bytes && expected_bytes <= storage_bytes;
 }
 
 GraphExecution *acquire_host_execution_storage(
     GraphSubmission &submission, int32_t node_count, uint64_t graph_key, uint64_t definition_hash,
-    uint32_t tensor_patch_count, uint32_t scalar_patch_count, size_t definition_bytes
+    uint32_t tensor_patch_count, uint32_t scalar_patch_count
 ) {
-    if (node_count <= 0 || node_count > static_cast<int32_t>(GRAPH_MAX_NODES) || definition_bytes == 0 ||
-        submission.execution_storage == 0 || submission.execution_storage_bytes > SIZE_MAX ||
+    if (node_count <= 0 || node_count > static_cast<int32_t>(GRAPH_MAX_NODES) || submission.execution_storage == 0 ||
+        submission.execution_storage_bytes > SIZE_MAX ||
         submission.execution_storage % alignof(GraphNodeStorage) != 0) {
         return nullptr;
     }
     const size_t storage_bytes = static_cast<size_t>(submission.execution_storage_bytes);
     size_t required_bytes = 0;
-    if (!graph_execution_storage_bytes(
-            node_count, tensor_patch_count, scalar_patch_count, definition_bytes, &required_bytes
-        ) ||
+    if (!graph_execution_storage_bytes(node_count, tensor_patch_count, scalar_patch_count, &required_bytes) ||
         required_bytes > storage_bytes) {
         return nullptr;
     }
@@ -128,15 +123,13 @@ GraphExecution *acquire_host_execution_storage(
     if (has_existing_execution && !valid_header) return nullptr;
     const bool capacities_fit = valid_header && execution->node_capacity >= node_count &&
                                 execution->tensor_patch_capacity >= tensor_patch_count &&
-                                execution->scalar_patch_capacity >= scalar_patch_count &&
-                                execution->definition_capacity >= definition_bytes;
+                                execution->scalar_patch_capacity >= scalar_patch_count;
     if (!capacities_fit) {
         if (valid_header) destroy_execution_nodes(execution);
         execution = new (execution) GraphExecution{};
         execution->node_capacity = node_count;
         execution->tensor_patch_capacity = tensor_patch_count;
         execution->scalar_patch_capacity = scalar_patch_count;
-        execution->definition_capacity = definition_bytes;
         execution->allocation_bytes = required_bytes;
     }
     reset_execution(execution, node_count, tensor_patch_count, scalar_patch_count, graph_key, definition_hash);
@@ -243,16 +236,66 @@ bool bind_graph_topology(GraphExecution &execution) {
     return true;
 }
 
-bool graph_definition_hash_matches(const GraphDefinition &definition) {
-    if (definition.content_hash == 0 || definition.total_bytes < sizeof(GraphDefinition)) return false;
+bool graph_definition_hash_matches(const GraphDefinition &definition, uint32_t definition_bytes) {
+    if (definition_bytes < sizeof(GraphDefinition) || definition.total_bytes != definition_bytes ||
+        definition.content_hash == 0) {
+        return false;
+    }
     constexpr size_t HASH_OFFSET = offsetof(GraphDefinition, content_hash);
     constexpr size_t HASH_END = HASH_OFFSET + sizeof(GraphDefinition::content_hash);
     const auto *bytes = reinterpret_cast<const uint8_t *>(&definition);
     uint64_t hash = graph_hash_bytes(1469598103934665603ULL, bytes, HASH_OFFSET);
     const uint64_t zero_hash = 0;
     hash = graph_hash_bytes(hash, &zero_hash, sizeof(zero_hash));
-    hash = graph_hash_bytes(hash, bytes + HASH_END, definition.total_bytes - HASH_END);
+    hash = graph_hash_bytes(hash, bytes + HASH_END, definition_bytes - HASH_END);
     return hash == definition.content_hash;
+}
+
+// One-time integrity gate for a shared Definition object. The first localizer
+// wins the UPLOADED->VERIFYING CAS, hashes the image once, and publishes
+// VERIFIED/INVALID. Localizers of the other submissions sharing this object
+// spin on the state word — never re-hashing, never failing while a peer is
+// mid-verify (the verify is bounded by the image size, so the spin is short).
+GraphDefinition *graph_definition_object_verified(GraphDefinitionHeader &header) {
+    if (header.magic != GRAPH_DEFINITION_OBJECT_MAGIC) return nullptr;
+    if (header.definition_bytes < sizeof(GraphDefinition)) {
+        header.verify_state.store(
+            static_cast<uint32_t>(GraphDefinitionVerifyState::INVALID), std::memory_order_release
+        );
+        return nullptr;
+    }
+    auto *definition = reinterpret_cast<GraphDefinition *>(&header + 1);
+    uint32_t observed = header.verify_state.load(std::memory_order_acquire);
+    if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::VERIFIED)) {
+        return definition;
+    }
+    if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::INVALID)) return nullptr;
+    uint32_t expected = static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED);
+    if (!header.verify_state.compare_exchange_strong(
+            expected, static_cast<uint32_t>(GraphDefinitionVerifyState::VERIFYING), std::memory_order_acq_rel,
+            std::memory_order_acquire
+        )) {
+        // A peer is verifying; wait for its verdict rather than racing it.
+        while (true) {
+            observed = header.verify_state.load(std::memory_order_acquire);
+            if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::VERIFIED)) {
+                return definition;
+            }
+            if (observed == static_cast<uint32_t>(GraphDefinitionVerifyState::INVALID)) return nullptr;
+#if defined(__aarch64__)
+            __asm__ volatile("yield");
+#elif defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    const bool matched = header.content_hash == definition->content_hash && header.full_key == definition->full_key &&
+                         graph_definition_hash_matches(*definition, header.definition_bytes);
+    header.verify_state.store(
+        static_cast<uint32_t>(matched ? GraphDefinitionVerifyState::VERIFIED : GraphDefinitionVerifyState::INVALID),
+        std::memory_order_release
+    );
+    return matched ? definition : nullptr;
 }
 
 }  // namespace
@@ -263,26 +306,27 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     if (GraphExecution *existing = graph_submission_local_execution(*submission)) return existing;
     if (graph_submission_execution_initializing(*submission)) return nullptr;
 
-    const GraphDefinition *definition = graph_submission_definition(*submission);
+    // The Definition lives in its own shared GM object; only its header is
+    // inspected here. The content hash gate runs inside the submission CAS
+    // below, so exactly one localizer verifies a shared object — concurrent
+    // localizers of other submissions see INITIALIZING and retry as BUSY
+    // rather than racing the verify state.
+    if (submission->definition_addr == 0 || submission->definition_addr % alignof(GraphDefinitionHeader) != 0) {
+        return nullptr;
+    }
+    auto *definition_header =
+        reinterpret_cast<GraphDefinitionHeader *>(static_cast<uintptr_t>(submission->definition_addr));
+    if (definition_header->magic != GRAPH_DEFINITION_OBJECT_MAGIC) return nullptr;
     const GraphTensor *boundary_tensors = graph_submission_tensors(*submission);
     const uint64_t *boundary_scalars = graph_submission_scalars(*submission);
     const size_t boundary_tensor_end = static_cast<size_t>(submission->tensors_offset) +
                                        static_cast<size_t>(submission->tensor_count) * sizeof(GraphTensor);
-    if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
-        definition->task_count > GRAPH_MAX_NODES ||
-        definition->total_bytes > submission->total_bytes - submission->definition_offset ||
-        submission->graph_key != definition->full_key || submission->tensor_count != definition->boundary_count ||
-        submission->scalar_count != definition->boundary_scalar_count || boundary_tensors == nullptr ||
+    if (boundary_tensors == nullptr || outer_slot.task == nullptr || outer_slot.task->packed_buffer_base == nullptr ||
+        outer_slot.task->packed_buffer_end == nullptr ||
         (submission->scalar_count != 0 && boundary_scalars == nullptr) ||
-        (submission->scalar_count != 0 && submission->scalars_offset < boundary_tensor_end) ||
-        submission->tensors_offset < submission->definition_offset + definition->total_bytes ||
-        !graph_definition_hash_matches(*definition) || outer_slot.task == nullptr ||
-        outer_slot.task->packed_buffer_base == nullptr || outer_slot.task->packed_buffer_end == nullptr) {
+        (submission->scalar_count != 0 && submission->scalars_offset < boundary_tensor_end)) {
         return nullptr;
     }
-    const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
-    const uintptr_t outer_end = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_end);
-    if (outer_end < outer_base || definition->required_heap > outer_end - outer_base) return nullptr;
     for (uint32_t i = 0; i < submission->tensor_count; ++i) {
         if (!graph_tensor_wire_valid(boundary_tensors[i])) return nullptr;
     }
@@ -297,9 +341,24 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
                    nullptr;
     }
 
+    const GraphDefinition *definition = graph_definition_object_verified(*definition_header);
+    if (definition == nullptr || definition->total_bytes == 0 || definition->task_count == 0 ||
+        definition->task_count > GRAPH_MAX_NODES || submission->definition_hash != definition->content_hash ||
+        submission->graph_key != definition->full_key || submission->tensor_count != definition->boundary_count ||
+        submission->scalar_count != definition->boundary_scalar_count) {
+        __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
+        return nullptr;
+    }
+    const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
+    const uintptr_t outer_end = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_end);
+    if (outer_end < outer_base || definition->required_heap > outer_end - outer_base) {
+        __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
+        return nullptr;
+    }
+
     GraphExecution *execution = acquire_host_execution_storage(
         *submission, static_cast<int32_t>(definition->task_count), submission->graph_key, definition->content_hash,
-        definition->tensor_arg_count, definition->scalar_arg_count, definition->total_bytes
+        definition->tensor_arg_count, definition->scalar_arg_count
     );
     if (execution == nullptr) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
@@ -307,8 +366,9 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     }
 
     if (!execution->definition_affine_reuse) {
-        std::memcpy(execution->definition_storage, definition, definition->total_bytes);
-        execution->definition = static_cast<const GraphDefinition *>(execution->definition_storage);
+        // The Definition is read in place from the shared GM object; no
+        // per-occurrence copy is taken.
+        execution->definition = definition;
         if (!bind_graph_topology(*execution)) {
             execution->retired_nodes.store(execution->node_count, std::memory_order_relaxed);
             execution->state.store(GraphExecutionState::COMPLETED, std::memory_order_release);
