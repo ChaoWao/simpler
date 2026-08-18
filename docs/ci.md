@@ -37,7 +37,10 @@ after checkout lives in composite actions under `.github/actions/`
 (`cache-pip`, `setup-gcc-15`, `setup-venv`, and the three `pod-*` actions).
 `setup-gcc-15` accepts a complete, pre-provisioned GCC 15 toolchain on any
 Linux runner; automatic installation of missing Linux tools is Ubuntu-only,
-while macOS installation uses Homebrew.
+while macOS installation uses Homebrew. `_packaging.yml` deliberately retains
+its separate compiler setup: Linux packaging accepts the platform compiler and
+also installs ccache, while its macOS fallback is outside the shared action's
+strict GCC 15 contract.
 
 ```text
 PullRequest
@@ -187,17 +190,19 @@ selection is not a cached CMake variable, so a later ordinary package install
 in the same worktree still uses the default `ALL` target and auto-detects every
 available platform. The pod stage passes the same target to its peer.
 Pre-commit selects its build from the existing files in the merge-base diff,
-the same file set its hooks inspect. Python-only changes build `_task_interface`
-for pyright's extension-symbol resolution; C/C++ changes build the combined
-`build_package_sim` target so clang-tidy has both simulator compile databases.
-Changes to `.pre-commit-config.yaml` also use the combined target because the
-new hook definitions can change those requirements. Diffs with neither skip
-the package build. Self-hosted CPU runs still create a lightweight venv so the
-pre-commit action never installs into the runner's system Python; the
-lint-only path leaves dependency installation to that action. Each
-sanitizer matrix cell selects its own platform. The profiling-flags smoke
-installs only the `_task_interface` binding because its matrix builds every
-runtime configuration itself.
+the same file set its hooks inspect. A clang-tidy-eligible C/C++ change builds
+the combined `build_package_sim` target so clang-tidy has both simulator
+compile databases. Files excluded by the clang-tidy hook — vendored
+`3rdparty/`, Python bindings, kernels, and AICore sources — do not trigger that
+build. Python, documentation, and other recognized non-C++ changes also skip
+it. Changes to `.pre-commit-config.yaml`, and all unrecognized paths, remain
+conservative and build the combined target. Self-hosted CPU runs still
+create a lightweight venv so the pre-commit action never installs into the
+runner's system Python; only diffs selected for clang-tidy preparation install
+the package and prepare its compiler stand-ins. Each sanitizer matrix cell
+selects its own platform. The profiling-flags smoke installs only the
+`_task_interface` binding because its matrix builds every runtime configuration
+itself.
 
 ### Sim jobs on CPU-constrained runners
 
@@ -261,7 +266,7 @@ queueing entirely:
   where the main CI passes `setup_variant=github` and GitHub-hosted runners.
   Gate outputs still come from the canonical `detect-changes` workflow, executed
   on `[self-hosted, cpu]` in this lane.
-- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel; `g++-15` is a symlink stand-in for the ubuntu-toolchain ppa g++. On the agents `g++` resolves to a conda GCC 15 prefix rather than `/usr/bin/g++`, so the lane's sim artifacts are built with GCC 15 and `compile_commands.json` names that prefix's `<triple>-g++`; `tests/lint/clang_tidy.py` drops the triple before replaying a command, without which clang-tidy adopts it as a target and resolves no C++ standard library at all. `ci.yml` lints with clang-tidy 18 and HCE 2.0 packages only LLVM 12, so an agent additionally provides 18 on `PATH` as `clang-tidy-18`, installed together with its clang builtin headers — a clang-tidy whose prefix carries no `lib/clang/<major>/include` resolves no resource dir and fails every `#include <stddef.h>`. The `pre-commit` job shadows the distro `clang-tidy` with it when present.
+- **cpu runner contract**: dnf-installed `cmake ninja-build gcc-c++ clang-tools-extra graphviz gtest-devel python3-devel`, plus a pip-installable torch aarch64 CPU wheel. When the pre-commit selector requests clang-tidy preparation — for eligible C/C++, `.pre-commit-config.yaml`, or an unknown path — the job creates `g++-15` as a stand-in for the Ubuntu Toolchain PPA compiler. On the agents `g++` resolves to a conda GCC 15 prefix rather than `/usr/bin/g++`, so that diff's sim artifacts are built with GCC 15 and `compile_commands.json` names that prefix's `<triple>-g++`; `tests/lint/clang_tidy.py` drops the triple before replaying a command, without which clang-tidy adopts it as a target and resolves no C++ standard library at all. `ci.yml` lints with clang-tidy 18 and HCE 2.0 packages only LLVM 12, so an agent additionally provides 18 on `PATH` as `clang-tidy-18`, installed together with its clang builtin headers — a clang-tidy whose prefix carries no `lib/clang/<major>/include` resolves no resource dir and fails every `#include <stddef.h>`. The pre-commit job shadows the distro `clang-tidy` only on that build path; Python-only and other lint-only diffs do not build sim artifacts or create either compiler shim.
 - The lane run is standalone — it attaches no checks to the PR; results are read from the run.
 
 ## Hardware Classification

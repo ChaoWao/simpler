@@ -78,36 +78,51 @@ def test_self_cpu_uses_the_project_venv_for_lint() -> None:
     assert workflow.count(setup) == workflow.count(lint_only) == workflow.count(activate) == workflow.count(run) == 1
     assert workflow.index(setup) < workflow.index(lint_only) < workflow.index(activate) < workflow.index(run)
     lint_only_block = workflow.split(lint_only, 1)[1].split(activate, 1)[0]
-    assert "steps.lint-build.outputs.needs_package != 'true'" in lint_only_block
+    assert "steps.lint-build.outputs.needs_build != 'true'" in lint_only_block
     assert "run: python3 -m venv .venv" in lint_only_block
     block = workflow.split(activate, 1)[1].split(run, 1)[0]
     assert "if: inputs.setup_variant == 'self-cpu'" in block
     assert 'run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"' in block
 
 
+def test_only_selected_build_paths_install_the_project() -> None:
+    workflow = WORKFLOW.read_text()
+    cache = "      - name: Cache pip packages\n"
+    install = "      - name: Install package (for clang-tidy compile databases)\n"
+    setup = "      - name: venv + deps\n"
+    lint_only = "      - name: Lint-only venv\n"
+
+    assert "pip install torch" not in workflow
+    cache_block = workflow.split(cache, 1)[1].split(install, 1)[0]
+    assert "inputs.setup_variant == 'self-cpu' || steps.lint-build.outputs.needs_build == 'true'" in cache_block
+    install_block = workflow.split(install, 1)[1].split(setup, 1)[0]
+    assert "steps.lint-build.outputs.needs_build == 'true'" in install_block
+    assert "build.targets=build_package_sim" in install_block
+    setup_block = workflow.split(setup, 1)[1].split(lint_only, 1)[0]
+    assert 'install-torch: "false"' in setup_block
+
+
 @pytest.mark.parametrize(
     ("changed_files", "expected"),
     [
-        (["docs/readme.md"], {"needs_package": "false", "needs_cpp": "false", "target": "_task_interface"}),
-        (
-            [".pre-commit-config.yaml"],
-            {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"},
-        ),
-        (["python/simpler/api.py"], {"needs_package": "true", "needs_cpp": "false", "target": "_task_interface"}),
-        (["python/simpler/api.PYI"], {"needs_package": "true", "needs_cpp": "false", "target": "_task_interface"}),
-        (["tools/server.wsgi"], {"needs_package": "true", "needs_cpp": "false", "target": "_task_interface"}),
-        (["3rdparty/tool.py"], {"needs_package": "true", "needs_cpp": "false", "target": "_task_interface"}),
-        (["src/common/api.cpp"], {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"}),
-        (["src/common/api.inl"], {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"}),
-        (["src/common/api.HPP"], {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"}),
-        (["vendor/dependency.cpp"], {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"}),
-        (["3rdparty/dependency.cpp"], {"needs_package": "false", "needs_cpp": "false", "target": "_task_interface"}),
-        (["3rdparty/dependency.CPP"], {"needs_package": "false", "needs_cpp": "false", "target": "_task_interface"}),
-        (["3RDPARTY/dependency.cpp"], {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"}),
-        (
-            ["python/simpler/api.py", "include/simpler/api.h"],
-            {"needs_package": "true", "needs_cpp": "true", "target": "build_package_sim"},
-        ),
+        (["docs/readme.md"], {"needs_build": "false"}),
+        ([".pre-commit-config.yaml"], {"needs_build": "true"}),
+        (["python/simpler/api.py"], {"needs_build": "false"}),
+        (["python/simpler/api.PYI"], {"needs_build": "false"}),
+        (["tools/server.wsgi"], {"needs_build": "false"}),
+        (["3rdparty/tool.py"], {"needs_build": "false"}),
+        (["src/common/api.cpp"], {"needs_build": "true"}),
+        (["src/common/api.inl"], {"needs_build": "true"}),
+        (["src/common/api.HPP"], {"needs_build": "true"}),
+        (["vendor/dependency.cpp"], {"needs_build": "true"}),
+        (["3rdparty/dependency.cpp"], {"needs_build": "false"}),
+        (["3rdparty/dependency.CPP"], {"needs_build": "false"}),
+        (["3RDPARTY/dependency.cpp"], {"needs_build": "true"}),
+        (["python/bindings/module.cpp"], {"needs_build": "false"}),
+        (["examples/a2a3/demo/kernels/aic/kernel.cpp"], {"needs_build": "false"}),
+        (["src/a2a3/runtime/demo/aicore/kernel.cpp"], {"needs_build": "false"}),
+        (["src/common/future.newcpp"], {"needs_build": "true"}),
+        (["python/simpler/api.py", "include/simpler/api.h"], {"needs_build": "true"}),
     ],
 )
 def test_select_lint_build_target(tmp_path: Path, changed_files: list[str], expected: dict[str, str]) -> None:
@@ -137,11 +152,7 @@ def test_deleted_source_does_not_require_a_build(tmp_path: Path) -> None:
     )
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
-    assert _run_selection(repo, base, head, tmp_path / "github-output") == {
-        "needs_package": "false",
-        "needs_cpp": "false",
-        "target": "_task_interface",
-    }
+    assert _run_selection(repo, base, head, tmp_path / "github-output") == {"needs_build": "false"}
 
 
 def test_special_characters_in_source_name_require_a_build(tmp_path: Path) -> None:
@@ -151,28 +162,20 @@ def test_special_characters_in_source_name_require_a_build(tmp_path: Path) -> No
     base = _commit(repo, "README.md", "base\n")
     head = _commit(repo, "src/common/api name\npart.cpp", "int special_name;\n")
 
-    assert _run_selection(repo, base, head, tmp_path / "github-output") == {
-        "needs_package": "true",
-        "needs_cpp": "true",
-        "target": "build_package_sim",
-    }
+    assert _run_selection(repo, base, head, tmp_path / "github-output") == {"needs_build": "true"}
 
 
-def test_trailing_newline_is_not_stripped_into_a_source_extension(tmp_path: Path) -> None:
+def test_unrecognized_path_with_trailing_newline_requires_a_build(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     base = _commit(repo, "README.md", "base\n")
     head = _commit(repo, "src/common/not-source.CPP\n", "not source\n")
 
-    assert _run_selection(repo, base, head, tmp_path / "github-output") == {
-        "needs_package": "false",
-        "needs_cpp": "false",
-        "target": "_task_interface",
-    }
+    assert _run_selection(repo, base, head, tmp_path / "github-output") == {"needs_build": "true"}
 
 
-def test_executable_python_script_requires_a_build(tmp_path: Path) -> None:
+def test_unrecognized_executable_script_requires_a_build(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -190,11 +193,7 @@ def test_executable_python_script_requires_a_build(tmp_path: Path) -> None:
     )
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
-    assert _run_selection(repo, base, head, tmp_path / "github-output") == {
-        "needs_package": "true",
-        "needs_cpp": "false",
-        "target": "_task_interface",
-    }
+    assert _run_selection(repo, base, head, tmp_path / "github-output") == {"needs_build": "true"}
 
 
 def test_selection_uses_merge_base_diff(tmp_path: Path) -> None:
@@ -206,11 +205,7 @@ def test_selection_uses_merge_base_diff(tmp_path: Path) -> None:
     subprocess.run(["git", "checkout", "-q", "--detach", common], cwd=repo, check=True)
     base = _commit(repo, "src/common/base_only.cpp", "int base_only;\n")
 
-    assert _run_selection(repo, base, head, tmp_path / "github-output") == {
-        "needs_package": "false",
-        "needs_cpp": "false",
-        "target": "_task_interface",
-    }
+    assert _run_selection(repo, base, head, tmp_path / "github-output") == {"needs_build": "false"}
 
 
 def test_selection_falls_back_when_refs_have_no_merge_base(tmp_path: Path) -> None:
@@ -223,8 +218,4 @@ def test_selection_falls_back_when_refs_have_no_merge_base(tmp_path: Path) -> No
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     head = _commit(repo, "src/common/unrelated.cpp", "int unrelated;\n")
 
-    assert _run_selection(repo, base, head, tmp_path / "github-output") == {
-        "needs_package": "true",
-        "needs_cpp": "true",
-        "target": "build_package_sim",
-    }
+    assert _run_selection(repo, base, head, tmp_path / "github-output") == {"needs_build": "true"}

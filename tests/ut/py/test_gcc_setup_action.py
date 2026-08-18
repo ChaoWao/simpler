@@ -18,6 +18,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).parents[3]
 ACTION_PATH = REPO_ROOT / ".github/actions/setup-gcc-15/action.yml"
+PPA_KEY_PATH = REPO_ROOT / ".github/actions/setup-gcc-15/ubuntu-toolchain-r-test.asc"
 SETUP_ACTION = "./.github/actions/setup-gcc-15"
 WORKFLOW_PATHS = (
     REPO_ROOT / ".github/workflows/_pre-commit.yml",
@@ -123,8 +124,34 @@ def test_linux_branch_installs_only_missing_tools_on_ubuntu_and_pins_the_ppa_key
     assert "command -v g++" in script
     fingerprint = linux["env"]["EXPECTED_PPA_FINGERPRINT"]
     assert re.fullmatch(r"[0-9A-F]{40}", fingerprint)
-    assert "search=0x${EXPECTED_PPA_FINGERPRINT}" in script
+    assert "keyserver.ubuntu.com" not in script
+    assert "${{ github.action_path }}/ubuntu-toolchain-r-test.asc" in script
+    assert ': "${VERSION_CODENAME:?Ubuntu /etc/os-release must define VERSION_CODENAME}"' in script
     assert "Signed-By: /etc/apt/keyrings/ubuntu-toolchain-r-test.gpg $EXPECTED_PPA_FINGERPRINT" in script
+
+
+def test_vendored_ppa_key_has_exactly_one_expected_primary_key() -> None:
+    linux = next(step for step in _load_yaml(ACTION_PATH)["runs"]["steps"] if step.get("if") == "runner.os == 'Linux'")
+    result = subprocess.run(
+        ["gpg", "--batch", "--show-keys", "--with-colons", str(PPA_KEY_PATH)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    primary_keys = [line for line in result.stdout.splitlines() if line.startswith("pub:")]
+    fingerprints = [line.split(":")[9] for line in result.stdout.splitlines() if line.startswith("fpr:")]
+    assert len(primary_keys) == 1
+    assert fingerprints[0] == linux["env"]["EXPECTED_PPA_FINGERPRINT"]
+
+
+def test_install_build_essential_input_documents_its_linux_only_contract() -> None:
+    description = _load_yaml(ACTION_PATH)["inputs"]["install-build-essential"]["description"]
+    assert "Linux only" in description
+    assert "_ensure_host_compilers" in description
+    assert "Simulator builds still use gcc-15/g++-15" in description
+    assert "Ignored on macOS" in description
 
 
 def test_ppa_key_validation_accepts_expected_primary_key_with_subkey(tmp_path: Path) -> None:

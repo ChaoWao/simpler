@@ -7,7 +7,9 @@ inputs:
     required: false
     default: "false"
   install-build-essential:
-    description: Require unversioned gcc and g++, installing build-essential on Ubuntu when either is missing.
+    description: >-
+      Linux only: require unversioned gcc and g++ for _ensure_host_compilers, installing build-essential on Ubuntu
+      when either is missing. Simulator builds still use gcc-15/g++-15. Ignored on macOS.
     required: false
     default: "false"
 
@@ -55,12 +57,9 @@ runs:
           export DEBIAN_FRONTEND=noninteractive
 
           if [[ "$needs_gcc_ppa" == true ]]; then
-            key_file="$RUNNER_TEMP/ubuntu-toolchain-r-test.asc"
+            : "${VERSION_CODENAME:?Ubuntu /etc/os-release must define VERSION_CODENAME}"
+            key_file="${{ github.action_path }}/ubuntu-toolchain-r-test.asc"
             keyring_file="$RUNNER_TEMP/ubuntu-toolchain-r-test.gpg"
-            curl --fail --silent --show-error --location \
-              --retry 2 --retry-all-errors --connect-timeout 10 --max-time 30 \
-              "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${EXPECTED_PPA_FINGERPRINT}" \
-              --output "$key_file"
             key_metadata="$(gpg --batch --show-keys --with-colons "$key_file")"
             primary_key_count="$(
               awk -F: '$1 == "pub" { count++ } END { print count + 0 }' <<<"$key_metadata"
