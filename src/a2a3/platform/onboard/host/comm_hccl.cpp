@@ -270,8 +270,8 @@ static aclError reserve_and_map_vmm_window(
     }
 
     // aclrtMemAccessDesc::location.id is consumed in the driver-visible space, unlike
-    // aclrtPhysicalMemProp::location.id above, which takes the ACL-logical id. Under
-    // ASCEND_RT_VISIBLE_DEVICES the logical id here names the wrong card and aclrtMemSetAccess
+    // aclrtPhysicalMemProp::location.id in its caller create_local_vmm_window, which takes the ACL-logical
+    // id. Under ASCEND_RT_VISIBLE_DEVICES the logical id here names the wrong card and aclrtMemSetAccess
     // fails with 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR). See common/acl_hal_device.h.
     aclrtMemAccessDesc access_desc{};
     access_desc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
