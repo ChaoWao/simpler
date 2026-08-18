@@ -101,6 +101,7 @@ class TestDummyTask(SceneTestCase):
             # Correctness is still just the copy.
             "name": "DenseFanoutFanin",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {"case": 4},
         },

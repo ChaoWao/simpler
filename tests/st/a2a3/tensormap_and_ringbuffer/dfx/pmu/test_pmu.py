@@ -69,6 +69,7 @@ class TestPmu(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "params": {},
         },
     ]
@@ -91,9 +92,8 @@ class TestPmu(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
         if not request.config.getoption("--enable-pmu", default=0):
             return
-        for case in self.CASES:
-            if st_platform in case["platforms"]:
-                self._validate_pmu_artifact(case, run_marker)
+        for case in self._matching_cases(st_platform, request):
+            self._validate_pmu_artifact(case, run_marker)
 
     def _validate_pmu_artifact(self, case, run_marker):
         safe_label = _sanitize_for_filename(f"TestPmu_{case['name']}")

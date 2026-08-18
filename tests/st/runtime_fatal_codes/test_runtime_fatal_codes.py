@@ -218,6 +218,15 @@ CASES = {
     # tensor_wait_timeout case.
 }
 
+_PER_PR_SIM_CASES = {"async_completion_invalid", "explicit_fatal"}
+assert _PER_PR_SIM_CASES <= CASES.keys(), f"unknown Per-PR Sim cases: {_PER_PR_SIM_CASES - CASES.keys()}"
+_SIM_CASE_PARAMS = [
+    case_name
+    if case_name in _PER_PR_SIM_CASES
+    else pytest.param(case_name, marks=pytest.mark.manual(["a2a3sim", "a5sim"]), id=case_name)
+    for case_name in CASES
+]
+
 
 def _assert_annotated(log: str, case: dict) -> None:
     """The failure line must be followed by what the code *means*, not just the number.
@@ -288,7 +297,7 @@ def _make_worker(platform: str, device_id: int, case_name: str, monkeypatch):
 @pytest.mark.platforms(["a5sim", "a2a3sim"])
 @pytest.mark.device_count(1)
 @pytest.mark.runtime(RUNTIME)
-@pytest.mark.parametrize("case_name", list(CASES))
+@pytest.mark.parametrize("case_name", _SIM_CASE_PARAMS)
 def test_fatal_code_surfaces_on_sim(st_platform, st_device_ids, case_name, monkeypatch, capfd):
     """sim: the runtime status (``code -N``) reaches the host directly."""
     configure_logging("error")

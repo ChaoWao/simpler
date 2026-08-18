@@ -1673,9 +1673,13 @@ class SceneTestCase:
 
     def test_run(self, st_platform, st_worker, request):
         """Auto test method — runs matching cases for the current platform."""
-        raw_selectors = request.config.getoption("--case", default=None) or []
-        selectors = [_parse_case_selector(v) for v in raw_selectors]
+        matched = self._matching_cases(st_platform, request)
         manual_mode = request.config.getoption("--manual", default="exclude")
+        if not matched:
+            import pytest  # noqa: PLC0415
+
+            pytest.skip(f"No cases matched {type(self).__name__} (platform={st_platform}, manual={manual_mode})")
+
         rounds = request.config.getoption("--rounds", default=1)
         skip_golden = request.config.getoption("--skip-golden", default=False)
         enable_chip_swimlane = request.config.getoption("--enable-chip-swimlane", default=0)
@@ -1698,7 +1702,6 @@ class SceneTestCase:
                 logger.warning("scope_stats disabled: --rounds > 1")
                 enable_scope_stats = False
 
-        cls_name = type(self).__name__
         callable_obj = self.build_callable(st_platform)
         sub_handles = getattr(type(self), "_st_sub_handles", {})
         # For L3, use registered chip handles instead of raw ChipCallable
@@ -1706,24 +1709,6 @@ class SceneTestCase:
         chip_handles = getattr(type(self), "_st_chip_handles", {})
         if self._st_level == 3 and chip_handles:
             callable_obj = {**chip_handles}
-
-        matched = []
-        for case in self.CASES:
-            if st_platform not in case["platforms"]:
-                continue
-            if not _match_selectors(cls_name, case["name"], selectors):
-                continue
-            is_manual = is_manual_for_platform(case.get("manual"), st_platform)
-            if manual_mode == "exclude" and is_manual:
-                continue
-            if manual_mode == "only" and not is_manual:
-                continue
-            matched.append(case)
-
-        if not matched:
-            import pytest  # noqa: PLC0415
-
-            pytest.skip(f"No cases matched {cls_name} (platform={st_platform}, manual={manual_mode})")
 
         run_class_cases(
             st_worker,
@@ -1740,6 +1725,26 @@ class SceneTestCase:
             enable_scope_stats=enable_scope_stats,
             enable_swimlane_overhead=enable_swimlane_overhead,
         )
+
+    def _matching_cases(self, st_platform, request):
+        """Return cases selected by the platform, case, and manual filters."""
+        raw_selectors = request.config.getoption("--case", default=None) or []
+        selectors = [_parse_case_selector(v) for v in raw_selectors]
+        manual_mode = request.config.getoption("--manual", default="exclude")
+        cls_name = type(self).__name__
+        matched = []
+        for case in self.CASES:
+            if st_platform not in case["platforms"]:
+                continue
+            if not _match_selectors(cls_name, case["name"], selectors):
+                continue
+            is_manual = is_manual_for_platform(case.get("manual"), st_platform)
+            if manual_mode == "exclude" and is_manual:
+                continue
+            if manual_mode == "only" and not is_manual:
+                continue
+            matched.append(case)
+        return matched
 
     # ------------------------------------------------------------------
     # Standalone entry point

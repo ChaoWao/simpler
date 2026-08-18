@@ -90,6 +90,7 @@ class TestPreparedCallableHbgA5(SceneTestCase):
         {
             "name": "prepare_run_twice",
             "platforms": _PLATFORMS,
+            "manual": ["a5sim"],
             "params": {"a": 2.0, "b": 3.0},
         },
     ]

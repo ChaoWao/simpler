@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from simpler_setup.scene_test import is_manual_for_platform
+from simpler_setup.scene_test import SceneTestCase, is_manual_for_platform
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SPEC = importlib.util.spec_from_file_location("_root_conftest_for_manual_selection_tests", _ROOT / "conftest.py")
@@ -65,6 +66,14 @@ class _FakeConfig:
 
     def getoption(self, name, default=None):
         return self.options.get(name, self.options.get(name.lstrip("-"), default))
+
+
+class _SelectionScene(SceneTestCase):
+    CASES = [
+        {"name": "ordinary", "platforms": ["a2a3sim", "a5sim"]},
+        {"name": "sim_manual", "platforms": ["a2a3sim", "a5sim"], "manual": ["a2a3sim"]},
+        {"name": "other_platform", "platforms": ["a5sim"]},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -156,3 +165,20 @@ def test_collection_filters_platform_scoped_manual_tests(platform, manual_mode, 
     root_conftest.pytest_collection_modifyitems(None, config, items)
 
     assert [item.nodeid for item in items] == expected
+
+
+@pytest.mark.parametrize(
+    ("manual_mode", "selectors", "expected"),
+    [
+        ("exclude", [], ["ordinary"]),
+        ("include", [], ["ordinary", "sim_manual"]),
+        ("only", [], ["sim_manual"]),
+        ("include", ["_SelectionScene::sim_manual"], ["sim_manual"]),
+    ],
+)
+def test_scene_case_selection_matches_run_filters(manual_mode, selectors, expected):
+    request = SimpleNamespace(config=_FakeConfig(manual=manual_mode, case=selectors))
+
+    matched = _SelectionScene()._matching_cases("a2a3sim", request)
+
+    assert [case["name"] for case in matched] == expected

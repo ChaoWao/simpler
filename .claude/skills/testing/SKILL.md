@@ -27,7 +27,7 @@ and will report failures that CI never sees:
 
 | Marker | Tests | CI behavior |
 | ------ | ----- | ----------- |
-| `@pytest.mark.manual` / `CASES[*]["manual"]` | Standalone pytest tests / individual scene-test cases; optionally scoped to a platform list | Per-PR: excluded by default on the selected platforms; `daily.yml`: full sweep with `--manual include` |
+| `@pytest.mark.manual` / `CASES[*]["manual"]` | Standalone pytest tests / individual scene-test cases; optionally scoped to a platform list | Per-PR main sweep: excluded by default on the selected platforms; dedicated DFX steps: included; `daily.yml`: full sweep with `--manual include` |
 | `@pytest.mark.sdma` | a2a3: `sdma_async_completion_demo`, `prefetch_async_demo`; a5: `sdma_async_completion_demo` | a2a3: the dedicated SDMA step; a5: included in the non-pod sweep |
 
 The a2a3 SDMA demos provision 48 device-only STARS streams, which makes an

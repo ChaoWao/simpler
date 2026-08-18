@@ -731,16 +731,21 @@ still respect the manual filter — to run a manual case by name, pass
 The separate `daily.yml` workflow runs the full corpus with `--manual include`
 once per day on A2/A3 and A5, simulation and onboard. Mark a whole standalone
 pytest test with `@pytest.mark.manual`; mark only one case in a `SceneTestCase`
-by setting `"manual": True` on that `CASES` entry. Per-PR excludes those tests,
-while Daily runs them together with the regular corpus. The A2/A3 Pod cases run
-in the same Daily workflow through their existing two-machine job.
+by setting `"manual": True` on that `CASES` entry. The main Per-PR scene sweep
+excludes those tests, while Daily runs them together with the regular corpus.
+Dedicated DFX steps are the exception: they use `--manual include` in normal
+Per-PR and Daily jobs, so marking a case under their target path removes only
+its duplicate main-sweep execution. A caller selecting `--manual only` keeps
+that mode in the DFX steps. The A2/A3 Pod cases run in the same Daily workflow
+through their existing two-machine job.
 
 To move only selected platforms, pass the platform list to the same marker:
 use `@pytest.mark.manual(["a2a3sim", "a5sim"])` (or the equivalent
 `@pytest.mark.manual(platforms=["a2a3sim", "a5sim"])`) for a standalone test,
 or `"manual": ["a2a3sim", "a5sim"]` for a scene-test case. Do not mix the two
-standalone marker forms. The onboard execution then remains in the default
-Per-PR sweep.
+standalone marker forms. An onboard execution remains in the default Per-PR
+sweep only when that case also declares the corresponding onboard platform;
+otherwise the selected architecture becomes Daily-only.
 
 ### Sharing an Example Between examples/ and tests/st/
 

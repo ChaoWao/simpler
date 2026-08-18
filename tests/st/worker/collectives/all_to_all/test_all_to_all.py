@@ -92,6 +92,7 @@ class TestAllToAllP2(SceneTestCase):
         {
             "name": "p2",
             "platforms": ["a2a3sim", "a2a3", "a5sim"],
+            "manual": ["a2a3sim", "a5sim"],
             "config": {"device_count": 2},
             "params": {"nranks": 2},
         }
