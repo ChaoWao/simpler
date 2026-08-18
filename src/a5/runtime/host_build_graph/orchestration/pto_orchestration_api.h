@@ -420,8 +420,11 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const C
         invoke();
         if (!rt_graph_end()) invoke();
     } else if (result.execute_block) {
-        // Un-cacheable at begin, or the Definition cache is full: ordinary path.
-        invoke();
+        // Un-cacheable at begin, the Definition cache is full, or the runtime
+        // went fatal (e.g. the eager Graph POD upload failed after the outer
+        // task was published): ordinary path, except that a fatal runtime must
+        // not re-run the body — its run is already doomed.
+        if (!current_runtime()->ops->is_fatal(current_runtime())) invoke();
     }
     // Cache hit: execute_block and recording are both false; the body is skipped.
     rt_graph_commit();

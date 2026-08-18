@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -337,13 +338,46 @@ struct GraphRecording {
 struct GraphPendingUpload {
     PTO2TaskSlotState *outer_slot{nullptr};
     std::vector<std::byte> image;
+    std::byte *pinned{nullptr};
+    size_t bytes{0};
+    bool h2d_done{false};
 };
 
 struct GraphHostState {
     std::unordered_map<uint64_t, std::vector<std::byte>> definitions;
     std::unique_ptr<GraphRecording> recording;
     std::vector<GraphPendingUpload> pending_uploads;
+    // Run-scoped eager-upload hook and pinned bump arena: registered per
+    // run_host_orchestration, so concurrent orchestrations each own their own
+    // uploader and bump cursor.
+    GraphHostEagerUploadFn eager_upload_fn{nullptr};
+    void *eager_upload_ctx{nullptr};
+    std::byte *pin_base{nullptr};
+    size_t pin_cap{0};
+    size_t pin_used{0};
 };
+
+namespace {
+constexpr size_t kPinnedBumpAlign = 64;
+
+std::byte *graph_host_pinned_bump(GraphHostState &state, size_t bytes) {
+    if (state.pin_base == nullptr || bytes == 0) return nullptr;
+    const size_t off = (state.pin_used + kPinnedBumpAlign - 1) & ~(kPinnedBumpAlign - 1);
+    if (off + bytes > state.pin_cap) return nullptr;
+    state.pin_used = off + bytes;
+    return state.pin_base + off;
+}
+}  // namespace
+
+void graph_host_set_pinned_arena(GraphHostState &state, std::byte *base, size_t cap) {
+    state.pin_base = base;
+    state.pin_cap = cap;
+    state.pin_used = 0;
+}
+
+std::byte *graph_host_pinned_base(const GraphHostState &state) { return state.pin_base; }
+
+size_t graph_host_pinned_used(const GraphHostState &state) { return state.pin_used; }
 
 namespace {
 
@@ -682,7 +716,11 @@ size_t graph_host_upload_count(const GraphHostState &state) { return state.pendi
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index) {
     if (index >= state.pending_uploads.size()) return std::nullopt;
     GraphPendingUpload &upload = state.pending_uploads[index];
-    if (upload.outer_slot == nullptr || upload.image.empty()) return std::nullopt;
+    if (upload.outer_slot == nullptr) return std::nullopt;
+    if (upload.pinned != nullptr && upload.bytes > 0) {
+        return GraphHostUpload{upload.outer_slot, upload.pinned, upload.bytes};
+    }
+    if (upload.image.empty()) return std::nullopt;
     return GraphHostUpload{upload.outer_slot, upload.image.data(), upload.image.size()};
 }
 
@@ -696,6 +734,19 @@ GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
         }
     }
     return list;
+}
+
+void graph_host_set_eager_upload(GraphHostState &state, GraphHostEagerUploadFn fn, void *ctx) {
+    state.eager_upload_fn = fn;
+    state.eager_upload_ctx = ctx;
+}
+
+bool graph_host_upload_h2d_done(const GraphHostState &state, size_t index) {
+    return index < state.pending_uploads.size() && state.pending_uploads[index].h2d_done;
+}
+
+void graph_host_mark_upload_h2d_done(GraphHostState &state, size_t index) {
+    if (index < state.pending_uploads.size()) state.pending_uploads[index].h2d_done = true;
 }
 
 static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
@@ -1412,45 +1463,84 @@ void graph_reset_outer_payload(PTO2TaskPayload &payload) {
     payload.early_sync_drain_state.store(PTO2_EARLY_SYNC_DRAIN_NONE, std::memory_order_relaxed);
 }
 
-bool graph_build_submission_image(
-    const std::vector<std::byte> &definition_image, const CoreTaskArgs &args, std::vector<std::byte> *submission_image
+// Output pointers the caller does not need may be null.
+static bool graph_submission_layout(
+    const std::vector<std::byte> &definition_image, const CoreTaskArgs &args, size_t *total_bytes,
+    size_t *tensors_offset, size_t *scalars_offset, size_t *scalar_bytes
 ) {
-    if (submission_image == nullptr || graph_definition(definition_image) == nullptr) return false;
-    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
+    if (total_bytes == nullptr || graph_definition(definition_image) == nullptr) {
+        return false;
+    }
+    const size_t tensors = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
     const size_t tensor_bytes = static_cast<size_t>(args.tensor_count()) * sizeof(GraphTensor);
-    if (tensors_offset > UINT32_MAX || tensors_offset > UINT32_MAX - tensor_bytes) {
+    if (tensors > UINT32_MAX || tensors > UINT32_MAX - tensor_bytes) {
         return false;
     }
-    const size_t tensors_end = tensors_offset + tensor_bytes;
-    const size_t scalar_bytes = static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t);
-    const size_t scalars_offset = args.scalar_count() == 0 ? 0 : PTO2_ALIGN_UP(tensors_end, alignof(uint64_t));
-    const size_t total_bytes = args.scalar_count() == 0 ? tensors_end : scalars_offset + scalar_bytes;
-    if ((args.scalar_count() != 0 && (scalars_offset > UINT32_MAX || scalars_offset > UINT32_MAX - scalar_bytes)) ||
-        total_bytes > UINT32_MAX) {
+    const size_t tensors_end = tensors + tensor_bytes;
+    const size_t bytes_of_scalars = static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t);
+    const size_t scalars = args.scalar_count() == 0 ? 0 : PTO2_ALIGN_UP(tensors_end, alignof(uint64_t));
+    const size_t total = args.scalar_count() == 0 ? tensors_end : scalars + bytes_of_scalars;
+    if ((args.scalar_count() != 0 && (scalars > UINT32_MAX || scalars > UINT32_MAX - bytes_of_scalars)) ||
+        total > UINT32_MAX) {
         return false;
     }
-    submission_image->assign(total_bytes, std::byte{0});
-    auto *tensors = reinterpret_cast<GraphTensor *>(submission_image->data() + tensors_offset);
+    if (tensors_offset != nullptr) *tensors_offset = tensors;
+    if (scalars_offset != nullptr) *scalars_offset = scalars;
+    if (scalar_bytes != nullptr) *scalar_bytes = bytes_of_scalars;
+    *total_bytes = total;
+    return true;
+}
+
+static bool graph_fill_submission_image(
+    const std::vector<std::byte> &definition_image, const CoreTaskArgs &args, std::byte *dst, size_t dst_bytes
+) {
+    size_t total_bytes = 0;
+    size_t tensors_offset = 0;
+    size_t scalars_offset = 0;
+    size_t scalar_bytes = 0;
+    if (dst == nullptr ||
+        !graph_submission_layout(
+            definition_image, args, &total_bytes, &tensors_offset, &scalars_offset, &scalar_bytes
+        ) ||
+        dst_bytes < total_bytes) {
+        return false;
+    }
+    std::memset(dst, 0, total_bytes);
+    auto *tensors = reinterpret_cast<GraphTensor *>(dst + tensors_offset);
     for (int32_t i = 0; i < args.tensor_count(); ++i)
         tensors[i] = graph_tensor_pack(args.tensor(i).ref());
     if (args.scalar_count() != 0) {
-        std::memcpy(
-            submission_image->data() + scalars_offset, args.scalar_data(),
-            static_cast<size_t>(args.scalar_count()) * sizeof(uint64_t)
-        );
+        std::memcpy(dst + scalars_offset, args.scalar_data(), scalar_bytes);
     }
 
     const GraphDefinition &definition = *graph_definition(definition_image);
     GraphSubmission submission{};
     submission.graph_key = definition.full_key;
     submission.definition_hash = definition.content_hash;
-    submission.total_bytes = static_cast<uint32_t>(submission_image->size());
+    submission.total_bytes = static_cast<uint32_t>(total_bytes);
     submission.tensors_offset = static_cast<uint32_t>(tensors_offset);
     submission.tensor_count = static_cast<uint32_t>(args.tensor_count());
     submission.scalars_offset = static_cast<uint32_t>(scalars_offset);
     submission.scalar_count = static_cast<uint32_t>(args.scalar_count());
-    std::memcpy(submission_image->data(), &submission, sizeof(submission));
+    std::memcpy(dst, &submission, sizeof(submission));
     return true;
+}
+
+bool graph_build_submission_image(
+    const std::vector<std::byte> &definition_image, const CoreTaskArgs &args, std::vector<std::byte> *submission_image
+) {
+    size_t total_bytes = 0;
+    size_t tensors_offset = 0;
+    size_t scalars_offset = 0;
+    size_t scalar_bytes = 0;
+    if (submission_image == nullptr ||
+        !graph_submission_layout(
+            definition_image, args, &total_bytes, &tensors_offset, &scalars_offset, &scalar_bytes
+        )) {
+        return false;
+    }
+    submission_image->assign(total_bytes, std::byte{0});
+    return graph_fill_submission_image(definition_image, args, submission_image->data(), submission_image->size());
 }
 
 bool graph_submit_definition(
@@ -1470,7 +1560,20 @@ bool graph_submit_definition(
     }
 
     GraphPendingUpload pending;
-    if (!graph_build_submission_image(definition_image, args, &pending.image)) return false;
+    size_t total_bytes = 0;
+    if (!graph_submission_layout(definition_image, args, &total_bytes, nullptr, nullptr, nullptr)) {
+        return false;
+    }
+    std::byte *pinned = graph_host_pinned_bump(*state, total_bytes);
+    if (pinned != nullptr) {
+        if (!graph_fill_submission_image(definition_image, args, pinned, total_bytes)) return false;
+        pending.pinned = pinned;
+        pending.bytes = total_bytes;
+    } else if (!graph_build_submission_image(definition_image, args, &pending.image)) {
+        return false;
+    } else {
+        pending.bytes = pending.image.size();
+    }
 
     DepInputs boundary_inputs{
         args.tensor_count(), args.tensor_data(), args.tag_data(), 0, nullptr,
@@ -1521,6 +1624,21 @@ bool graph_submit_definition(
 
     pending.outer_slot = &slot;
     state->pending_uploads.push_back(std::move(pending));
+    if (state->eager_upload_fn != nullptr) {
+        const size_t index = state->pending_uploads.size() - 1;
+        if (!state->eager_upload_fn(state->eager_upload_ctx, *state, index)) {
+            // The outer GRAPH task is already published (slot allocated, fanins
+            // wired, outputs registered), so the ordinary-path fallback the
+            // false return otherwise means would re-submit the body on top of a
+            // half-uploaded Graph task. Latch fatal so graph_begin aborts and
+            // the run fails loudly instead.
+            orch->report_fatal(
+                PTO2_ERROR_EXPLICIT_ORCH_FATAL, __FUNCTION__, "eager Graph POD H2D failed for key=%#llx",
+                static_cast<unsigned long long>(definition->full_key)
+            );
+            return false;
+        }
+    }
     if (submitted_id != nullptr) *submitted_id = task_id;
 #if SIMPLER_DFX
     orch->tasks_submitted++;
