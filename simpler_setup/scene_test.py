@@ -145,7 +145,7 @@ def _golden_thread_cap():
 class SceneTestLevel(IntEnum):
     CHIP = 2
     HOST = 3
-    POD = 4
+    NETWORK1 = 4
 
 
 def _normalize_scene_level(level: int | SceneTestLevel) -> SceneTestLevel:

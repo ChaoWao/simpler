@@ -117,36 +117,42 @@ including time the caller spends polling or doing other host work; blocking
 | 2 | `chip.run.bind.args`, `chip.run.bind.prebuilt`, `chip.run.runner_run.device_wall` |
 | 3 | TMR phase spans `chip.run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
 
-## L3/L4 host scheduler spans
+## Host scheduler spans
 
 Every hierarchical worker that drives next-level children emits these spans
-through the logger compiled into `_task_interface` — an L3 with chips and an
-L4 pod alike, since the orchestrator and scheduler code they run is the same:
+through the logger compiled into `_task_interface`, since the orchestrator and
+scheduler code they run is the same at every level above the chip. **The leading
+word names the level that emitted them**, so `<level>` below is one of `host`
+(L3), `network1` (L4), `network2` (L5) or `network3` (L6) — see
+[`python/simpler/worker_level.py`](../../python/simpler/worker_level.py) for the
+ladder:
 
 | Span | Host decision point |
 | ---- | ------------------- |
-| `host.graph_build` | serialized Python graph callback |
-| `host.submit` | next-level task publication after slot allocation |
-| `host.dispatch` | scheduler handoff to a worker thread |
-| `host.frame_submit` | local child mailbox-frame publication |
-| `host.activate` | prepared-frame activation |
-| `host.complete` | terminal child progress handling |
-| `host.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
+| `<level>.graph_build` | serialized Python graph callback |
+| `<level>.submit` | next-level task publication after slot allocation |
+| `<level>.dispatch` | scheduler handoff to a worker thread |
+| `<level>.frame_submit` | local child mailbox-frame publication |
+| `<level>.activate` | prepared-frame activation |
+| `<level>.complete` | terminal child progress handling |
+| `<level>.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
 
 Their attributes carry the available `run_id`, `task_slot`, `group_index`,
 `worker_id`, `dispatch_id`, endpoint kind, and the dispatch's pipeline lease
 (`slot_id` / `generation`).
 
-Because the names do not encode which level emitted them, a pod run puts the L4
-process and each of its L3 processes on lanes that differ only by pid. The
-per-level vocabulary that resolves this is tracked in
-[#1793](https://github.com/hw-native-sys/simpler/issues/1793).
+The word is resolved once per process, from its Worker's level, and the **first
+binding wins**: a `SpanScope` keeps the name pointer it was handed, so a process
+that inits Workers at two levels keeps the first one's word and logs a warning
+rather than relabelling spans that are still open. One process therefore carries
+one vocabulary — which is what makes an L4 run readable, since its own spans say
+`network1.` while each of its L3 children says `host.`.
 
 One process contributes at most two host lanes, because the scheduler runs on
-one thread: the facade thread emits `host.graph_build` and `host.submit`, and the
-scheduler thread emits the other four. `role=worker` on `host.frame_submit`,
-`host.activate` and `host.complete` names the worker a dispatch targets, not the
-thread that ran it.
+one thread: the facade thread emits `<level>.graph_build` and `<level>.submit`,
+and the scheduler thread emits the other four. `role=worker` on
+`<level>.frame_submit`, `<level>.activate` and `<level>.complete` names the
+worker a dispatch targets, not the thread that ran it.
 
 The spans reach the logger over the fixed POD `SimplerHostSpan` ABI in
 `common/host_span.h`. `_task_interface` compiles the host logger directly, so

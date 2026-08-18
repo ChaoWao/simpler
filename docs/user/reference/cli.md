@@ -6,7 +6,7 @@ How you select what runs, turn diagnostics on, and read the artifacts back.
 
 ```bash
 pytest examples tests/st --platform a2a3sim            # simulation, no device
-pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device 4-7  # hardware (SDMA/pod quarantined; pod runs in the two-machine job)
+pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device 4-7  # hardware (SDMA/network1 quarantined; network1 runs in the two-machine job)
 python examples/my_example/test_my_example.py -p a2a3sim   # standalone, no pytest
 ```
 
@@ -17,7 +17,7 @@ python examples/my_example/test_my_example.py -p a2a3sim   # standalone, no pyte
 | `--platform` | Target platform: `a2a3sim`, `a2a3`, `a5sim`, `a5`. Required |
 | `--device` | Device id or range, e.g. `0` or `4-7`. Default `0` |
 | `--runtime` | Restrict to one runtime (`tensormap_and_ringbuffer`, `host_build_graph`) |
-| `--level` | Restrict to one level, e.g. `--level 2`; pod wrappers use `--level 4` |
+| `--level` | Restrict to one level, e.g. `--level 2`; network1 wrappers use `--level 4` |
 | `--exclude-level` | Exclude tests explicitly carrying one level, e.g. ordinary onboard lanes use `--exclude-level 4` |
 | `--case` | Case selector, repeatable: `Foo`, `ClassA::Foo`, or `ClassA::` for a whole class |
 | `--manual` | Manual-test handling for scene cases and standalone pytest tests: `exclude` (default), `include`, `only` |

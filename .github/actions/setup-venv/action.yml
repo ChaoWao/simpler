@@ -24,7 +24,7 @@ inputs:
     default: "false"
   cann-env:
     description: >-
-      Which CANN environment script source-cann sources. The pod runners carry
+      Which CANN environment script source-cann sources. The network1 runners carry
       theirs in their own .env, so the path cannot be fixed here.
     required: false
     default: /usr/local/Ascend/cann/set_env.sh
@@ -64,7 +64,7 @@ runs:
           source "$CANN_ENV"
         fi
 
-        # Only the pod workflow passes these; every other caller runs on a
+        # Only the network1 workflow passes these; every other caller runs on a
         # machine whose own environment already says how to reach an index.
         # Exporting an empty input would erase that setting, so an unset input
         # leaves the runner's environment untouched rather than forcing direct.

@@ -71,14 +71,14 @@ class _FakeConfig:
 
 def test_scene_level_normalizes_int_and_enum():
     @scene_level(4)
-    def pod_fn():
+    def network1_fn():
         return None
 
     @scene_level(SceneTestLevel.CHIP)
     def chip_fn():
         return None
 
-    assert pod_fn._st_level is SceneTestLevel.POD
+    assert network1_fn._st_level is SceneTestLevel.NETWORK1
     assert chip_fn._st_level is SceneTestLevel.CHIP
 
 
@@ -116,13 +116,13 @@ def test_level4_filter_keeps_only_explicit_level4_functions():
     def plain_fn():
         return None
 
-    @scene_level(SceneTestLevel.POD)
-    def pod_fn():
+    @scene_level(SceneTestLevel.NETWORK1)
+    def network1_fn():
         return None
 
     items = [
         _FakeItem("tests::plain", function=plain_fn),
-        _FakeItem("tests::pod", function=pod_fn),
+        _FakeItem("tests::network1", function=network1_fn),
     ]
     config = _FakeConfig(
         platform="a2a3",
@@ -132,20 +132,20 @@ def test_level4_filter_keeps_only_explicit_level4_functions():
 
     root_conftest.pytest_collection_modifyitems(None, config, items)
 
-    assert [item.nodeid for item in items] == ["tests::pod"]
+    assert [item.nodeid for item in items] == ["tests::network1"]
 
 
 def test_exclude_level4_keeps_unlevelled_functions():
     def plain_fn():
         return None
 
-    @scene_level(SceneTestLevel.POD)
-    def pod_fn():
+    @scene_level(SceneTestLevel.NETWORK1)
+    def network1_fn():
         return None
 
     items = [
         _FakeItem("tests::plain", function=plain_fn),
-        _FakeItem("tests::pod", function=pod_fn),
+        _FakeItem("tests::network1", function=network1_fn),
     ]
     config = _FakeConfig(
         platform="a2a3",
@@ -189,12 +189,12 @@ def test_level_filters_are_mutually_exclusive():
         root_conftest._validate_level_filters(config)
 
 
-def test_pod_logs_requires_pod_level(monkeypatch):
+def test_network1_logs_requires_network1_level(monkeypatch):
     @scene_level(SceneTestLevel.CHIP)
     def chip_fn():
         return None
 
     request = SimpleNamespace(node=_FakeItem("tests::chip", function=chip_fn))
 
-    with pytest.raises(Failed, match="SceneTestLevel\\.POD"):
-        root_conftest.st_pod_logs.__wrapped__(request, monkeypatch)
+    with pytest.raises(Failed, match="SceneTestLevel\\.NETWORK1"):
+        root_conftest.st_network1_logs.__wrapped__(request, monkeypatch)

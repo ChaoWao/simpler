@@ -20,15 +20,15 @@ Detection / isolation procedures referenced below live in
    `task-submit`, let it pick via `--device auto --device-num <range size>`.
 6. **Read the marker selector out of the same job** you took the timeout from.
    `st-onboard-a2a3` is two pytest passes: the sweep deselects `-m "not sdma"`
-   and a later step runs `-m sdma`. `st-onboard-a5` uses `-m "not pod"` and
+   and a later step runs `-m sdma`. `st-onboard-a5` uses `--exclude-level 4` and
    does not exclude `sdma`. Both quarantined tests are
    `tensormap_and_ringbuffer`, so the second pass is only needed when
    `$ARGUMENTS` names that runtime.
 7. **Run through `task-submit`** (§E). On a5, the underlying command excludes
-   only pod tests, so SDMA remains in the sweep:
+   only level-4 tests, so SDMA remains in the sweep:
 
    ```bash
-   pytest examples tests/st -m "not pod" --platform a5 --runtime $ARGUMENTS \
+   pytest examples tests/st --exclude-level 4 --platform a5 --runtime $ARGUMENTS \
      --device <range-or-$TASK_DEVICE> \
      --pto-session-timeout <timeout> -v
    ```
@@ -37,7 +37,7 @@ Detection / isolation procedures referenced below live in
    is:
 
    ```bash
-   pytest examples tests/st -m "not sdma" --platform <platform> --runtime $ARGUMENTS \
+   pytest examples tests/st -m "not sdma" --exclude-level 4 --platform <platform> --runtime $ARGUMENTS \
      --device <range-or-$TASK_DEVICE> \
      --pto-session-timeout <timeout> -v
    ```

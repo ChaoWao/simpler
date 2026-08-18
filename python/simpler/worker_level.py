@@ -22,6 +22,10 @@ interconnect does not work either (mostly SU, sometimes RoCE). So they are named
 by how many network hops separate them from the host — `network1` is one hop up,
 whatever hardware implements it. The digit counts hops, not the level number:
 `network1` is L4.
+
+`docs/hierarchical-level-runtime.md` is the one place that maps these words onto
+physical entities; this module deliberately does not repeat that mapping, so the
+two cannot drift.
 """
 
 from __future__ import annotations

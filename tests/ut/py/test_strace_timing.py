@@ -21,12 +21,14 @@ from simpler_setup.tools.strace_timing import (
     count_record_heads,
     group_invocations,
     host_record_spans,
+    host_span_leaf,
     legacy_spans,
     load_host_phase_records,
     main,
     parse_clock_anchors,
     parse_spans,
     print_rounds_table,
+    span_family,
     to_chrome_trace,
     to_host_swimlane,
 )
@@ -440,6 +442,7 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
 
 
 def test_legacy_trace_output_ignores_host_swimlane_markers():
+    """The current vocabulary: the host family stays out of the invocation views."""
     old = list(
         parse_spans(
             [
@@ -476,6 +479,59 @@ def test_legacy_trace_output_ignores_host_swimlane_markers():
     assert to_chrome_trace(old_invocations, bucket_by_hid(old_invocations)) == to_chrome_trace(
         mixed_invocations, bucket_by_hid(mixed_invocations)
     )
+
+
+def test_span_family_classifies_the_level_words_and_reserves_ext():
+    assert span_family("chip.run") == "chip"
+    assert span_family("chip.run.runner_run.device_wall") == "chip"
+    assert span_family("core.pipe") == "core"
+    # Every level at or above L3 runs the same orchestrator and scheduler code,
+    # so they answer as one family whichever word the process resolved to.
+    for word in ("host", "network1", "network2", "network3"):
+        assert span_family(f"{word}.dispatch") == "host"
+    # A caller cannot land in ours, which is what `ext.` is reserved for.
+    assert span_family("ext.pypto.decode_layer") == "external"
+    assert span_family("something_else.foo") == "unknown"
+
+
+def test_retired_span_names_still_classify_so_archived_logs_stay_readable():
+    """An archived log predates the rename; its spans must still land in a family.
+
+    The retired-spelling map exists for exactly this, so it needs a test that
+    fails if someone removes it. Note the *chip* retired names survive
+    `legacy_spans()` while the retired *host* name is excluded, matching how the
+    current names behave.
+    """
+    retired = list(
+        parse_spans(
+            [
+                _span_record(pid=61, tid=610, inv=3, name="simpler_run", ts=1_000, dur=500),
+                _span_record(pid=61, tid=610, inv=3, name="simpler_run.bind", ts=1_100, dur=50, depth=1),
+                _span_record(pid=61, tid=610, inv=4, name="simpler_prewarm.build", ts=1_200, dur=75),
+                _span_record(
+                    pid=61,
+                    tid=611,
+                    inv=9,
+                    name="l3.dispatch",
+                    ts=900,
+                    dur=20,
+                    attrs="run_id=9 task_slot=4 group_index=0 worker_id=0 dispatch_id=1",
+                ),
+            ]
+        )
+    )
+
+    assert [span_family(span.name) for span in retired] == ["chip", "chip", "chip", "host"]
+    assert [span.name for span in legacy_spans(retired)] == [
+        "simpler_run",
+        "simpler_run.bind",
+        "simpler_prewarm.build",
+    ]
+    # `host_span_leaf` reads the decision point out of either spelling, which is
+    # what keeps the swimlane's flow pairing working on an old log.
+    assert host_span_leaf("l3.dispatch") == "dispatch"
+    assert host_span_leaf("network1.submit") == "submit"
+    assert host_span_leaf("chip.run") is None
 
 
 def test_invocation_by_name_uses_earliest_timestamp_not_input_order():
