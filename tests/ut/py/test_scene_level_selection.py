@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from _pytest.outcomes import Failed
 
-from simpler_setup import SceneTestLevel, scene_level, scene_test
+from simpler_setup import SceneTestCase, SceneTestLevel, scene_level, scene_test
+from simpler_setup.scene_test import _discover_module_test_classes
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SPEC = importlib.util.spec_from_file_location("_root_conftest_for_scene_level_tests", _ROOT / "conftest.py")
@@ -89,6 +90,18 @@ def test_scene_test_accepts_int_levels():
 
     assert L2._st_level is SceneTestLevel.CHIP
     assert L2._st_runtime == "tensormap_and_ringbuffer"
+
+
+def test_standalone_discovery_excludes_imported_scene_test_classes():
+    imported_module = ModuleType("tmr_case")
+    current_module = ModuleType("hbg_case")
+
+    imported_cls = type("TestTmr", (SceneTestCase,), {"__module__": imported_module.__name__, "CASES": []})
+    local_cls = type("TestHbg", (SceneTestCase,), {"__module__": current_module.__name__, "CASES": []})
+    current_module._ImportedTmr = imported_cls
+    current_module.TestHbg = local_cls
+
+    assert _discover_module_test_classes(current_module) == [local_cls]
 
 
 def test_invalid_scene_level_rejected():
