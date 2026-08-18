@@ -62,6 +62,14 @@ extern bool g_is_log_enable_error;
 // CANN owns its native levels; simulation applies it to the full flag table.
 extern "C" void set_log_level(int level);
 
+// Hand the process-owned host-log state to the simulation AICPU backend, which
+// relays it to orchestration SOs it later loads. Simulation defines this; the
+// host-side loader resolves it by name from the AICPU SO handle. Declared here
+// so both sides agree on the signature at compile time — the struct is only
+// forward-declared, keeping <dlfcn.h> and the state layout off device targets.
+struct SimplerHostLogState;
+extern "C" void set_host_log_state(struct SimplerHostLogState *state);
+
 // Apply the platform's logging policy to a newly loaded orchestration SO.
 // Simulation binds the process-owned host state; onboard requires no handoff.
 int bind_orchestration_host_log_state(void *handle, const char **error);
