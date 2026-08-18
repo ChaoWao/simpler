@@ -35,12 +35,7 @@ jobs:
 
       - name: Set up C++ compiler
         if: inputs.setup_variant == 'github'
-        run: |
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install -y ninja-build
-          sudo apt-get install -y g++-15 || sudo apt-get install -y g++
-          if ! command -v g++-15; then sudo ln -s "$(which g++)" /usr/local/bin/g++-15; fi
+        uses: ./.github/actions/setup-gcc-15
 
       - name: Set up Python 3.10
         if: inputs.setup_variant == 'github'

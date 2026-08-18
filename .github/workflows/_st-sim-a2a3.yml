@@ -61,19 +61,9 @@ jobs:
 
       - name: Set up C++ compiler
         if: inputs.setup_variant == 'github'
-        run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install -y ninja-build
-            sudo apt-get install -y g++-15 || sudo apt-get install -y g++
-            if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
-            sudo apt-get install -y graphviz
-          else
-            brew install ninja
-            brew install gcc@15 || brew install gcc
-            brew install graphviz
-          fi
+        uses: ./.github/actions/setup-gcc-15
+        with:
+          install-graphviz: "true"
 
       - name: Verify provisioned toolchain
         if: inputs.setup_variant == 'self-cpu'

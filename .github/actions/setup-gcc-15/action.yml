@@ -1,0 +1,150 @@
+name: Set up GCC 15
+description: Use and verify GCC 15 on Linux or macOS, installing missing tools on Ubuntu or macOS.
+
+inputs:
+  install-graphviz:
+    description: Install Graphviz when dot is not already available.
+    required: false
+    default: "false"
+  install-build-essential:
+    description: >-
+      Linux only: require unversioned gcc and g++ for _ensure_host_compilers, installing build-essential on Ubuntu
+      when either is missing. Simulator builds still use gcc-15/g++-15. Ignored on macOS.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install GCC 15 and build tools
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        EXPECTED_PPA_FINGERPRINT: 60C317803A41BA51845E371A1E9377A2BA9EF27F
+      run: |
+        set -euo pipefail
+
+        is_version_15() {
+          command -v "$1" >/dev/null 2>&1 &&
+            [[ "$("$1" -dumpversion | cut -d. -f1)" == 15 ]]
+        }
+
+        packages=()
+        needs_gcc_ppa=false
+        if ! is_version_15 gcc-15 || ! is_version_15 g++-15; then
+          packages+=(gcc-15 g++-15)
+          needs_gcc_ppa=true
+        fi
+        command -v ninja >/dev/null 2>&1 || packages+=(ninja-build)
+        if [[ "${{ inputs.install-graphviz }}" == true ]] && ! command -v dot >/dev/null 2>&1; then
+          packages+=(graphviz)
+        fi
+        if [[ "${{ inputs.install-build-essential }}" == true ]] &&
+          { ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; }; then
+          packages+=(build-essential)
+        fi
+
+        if (( ${#packages[@]} )); then
+          if [[ ! -r /etc/os-release ]]; then
+            echo "::error::setup-gcc-15 can automatically install missing Linux tools only on Ubuntu"
+            exit 1
+          fi
+          source /etc/os-release
+          if [[ "${ID:-}" != ubuntu ]]; then
+            echo "::error::setup-gcc-15 can automatically install missing Linux tools only on Ubuntu"
+            exit 1
+          fi
+          export DEBIAN_FRONTEND=noninteractive
+
+          if [[ "$needs_gcc_ppa" == true ]]; then
+            : "${VERSION_CODENAME:?Ubuntu /etc/os-release must define VERSION_CODENAME}"
+            key_file="${{ github.action_path }}/ubuntu-toolchain-r-test.asc"
+            keyring_file="$RUNNER_TEMP/ubuntu-toolchain-r-test.gpg"
+            key_metadata="$(gpg --batch --show-keys --with-colons "$key_file")"
+            primary_key_count="$(
+              awk -F: '$1 == "pub" { count++ } END { print count + 0 }' <<<"$key_metadata"
+            )"
+            if [[ "$primary_key_count" != 1 ]]; then
+              echo "::error::expected exactly one PPA primary key, found $primary_key_count"
+              exit 1
+            fi
+            actual_fingerprint="$(
+              awk -F: '$1 == "fpr" { print $10; exit }' <<<"$key_metadata"
+            )"
+            if [[ "$actual_fingerprint" != "$EXPECTED_PPA_FINGERPRINT" ]]; then
+              echo "::error::unexpected PPA signing key: $actual_fingerprint"
+              exit 1
+            fi
+
+            gpg --batch --yes --dearmor --output "$keyring_file" "$key_file"
+            sudo install -d -m 0755 /etc/apt/keyrings
+            sudo install -m 0644 "$keyring_file" /etc/apt/keyrings/ubuntu-toolchain-r-test.gpg
+            printf '%s\n' \
+              'Types: deb' \
+              'URIs: https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/' \
+              "Suites: $VERSION_CODENAME" \
+              'Components: main' \
+              "Signed-By: /etc/apt/keyrings/ubuntu-toolchain-r-test.gpg $EXPECTED_PPA_FINGERPRINT" |
+              sudo tee /etc/apt/sources.list.d/ubuntu-toolchain-r-test.sources >/dev/null
+          fi
+
+          apt_options=(
+            -o Acquire::Retries=3
+            -o Acquire::http::Timeout=20
+            -o Acquire::https::Timeout=20
+          )
+          sudo apt-get "${apt_options[@]}" update
+          sudo apt-get "${apt_options[@]}" install -y "${packages[@]}"
+        fi
+
+        command -v gcc-15
+        command -v g++-15
+        command -v ninja
+        is_version_15 gcc-15
+        is_version_15 g++-15
+        if [[ "${{ inputs.install-graphviz }}" == true ]]; then
+          command -v dot
+        fi
+        if [[ "${{ inputs.install-build-essential }}" == true ]]; then
+          command -v gcc
+          command -v g++
+        fi
+
+    - name: Install GCC 15 and build tools
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        is_version_15() {
+          command -v "$1" >/dev/null 2>&1 &&
+            [[ "$("$1" -dumpversion | cut -d. -f1)" == 15 ]]
+        }
+
+        formulae=()
+        command -v ninja >/dev/null 2>&1 || formulae+=(ninja)
+        if ! is_version_15 gcc-15 || ! is_version_15 g++-15; then
+          formulae+=(gcc@15)
+        fi
+        if [[ "${{ inputs.install-graphviz }}" == true ]] && ! command -v dot >/dev/null 2>&1; then
+          formulae+=(graphviz)
+        fi
+        if (( ${#formulae[@]} )); then
+          brew install "${formulae[@]}"
+        fi
+
+        command -v gcc-15
+        command -v g++-15
+        command -v ninja
+        is_version_15 gcc-15
+        is_version_15 g++-15
+        if [[ "${{ inputs.install-graphviz }}" == true ]]; then
+          command -v dot
+        fi
+
+    - name: Reject unsupported runner
+      if: runner.os != 'Linux' && runner.os != 'macOS'
+      shell: bash
+      run: |
+        echo "::error::setup-gcc-15 does not support $RUNNER_OS"
+        exit 1
