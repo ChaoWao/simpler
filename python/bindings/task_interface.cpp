@@ -56,6 +56,7 @@
 #include "callable_protocol.h"
 #include "chip_run_lane.h"
 #include "chip_worker.h"
+#include "common/host_span_names.h"
 #include "common/host_span_scope.h"
 #include "host_log.h"
 #include "data_type.h"
@@ -1050,6 +1051,21 @@ NB_MODULE(_task_interface, m) {
             return true;
         },
         nb::arg("level"), "Seed the process-owned host-log state before workers fork or load runtime modules."
+    );
+    m.def(
+        "_set_host_span_level_prefix",
+        [](const std::string &word) {
+            simpler::host_trace::set_level_prefix(word.c_str());
+#if SIMPLER_HOST_STRACE
+            return std::string(simpler::host_trace::level_prefix());
+#else
+            return word;
+#endif
+        },
+        nb::arg("word"),
+        "Bind this process's level word for host-scheduler span names, and return what is now bound. "
+        "Python owns the level -> word mapping (simpler.worker_level); this pushes the resolved word so "
+        "the C++ emit sites and Python agree on one derivation."
     );
     m.def(
         "_emit_host_span",

@@ -73,42 +73,42 @@ class TestNativeRunLifecycle(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
 
         spans = list(parse_spans(capfd.readouterr().err.splitlines()))
-        invocations = [inv for inv in group_invocations(spans) if "simpler_run" in inv.by_name()]
+        invocations = [inv for inv in group_invocations(spans) if "chip.run" in inv.by_name()]
         # Two of these are the abandoned diagnostic prepares below, which record a
-        # simpler_run invocation without ever reaching simpler_run.runner_run.
+        # chip.run invocation without ever reaching chip.run.runner_run.
         expected_invocations = 5 if st_platform.endswith("sim") else 9
         assert len(invocations) == expected_invocations
 
         common_depths = {
-            "simpler_run": 0,
-            "simpler_run.bind": 1,
-            "simpler_run.validate": 1,
+            "chip.run": 0,
+            "chip.run.bind": 1,
+            "chip.run.validate": 1,
         }
         launched_depths = {
             **common_depths,
-            "simpler_run.runner_run": 1,
-            "simpler_run.runner_run.device_wall": 2,
+            "chip.run.runner_run": 1,
+            "chip.run.runner_run.device_wall": 2,
         }
         launched_count = 0
         for invocation in invocations:
             by_name = invocation.by_name()
-            expected_depths = launched_depths if "simpler_run.runner_run" in by_name else common_depths
-            launched_count += "simpler_run.runner_run" in by_name
+            expected_depths = launched_depths if "chip.run.runner_run" in by_name else common_depths
+            launched_count += "chip.run.runner_run" in by_name
             assert expected_depths.keys() <= by_name.keys()
             assert len({span.hid for span in invocation.spans}) == 1
-            assert sum(span.name == "simpler_run" for span in invocation.spans) == 1
+            assert sum(span.name == "chip.run" for span in invocation.spans) == 1
             for name, depth in expected_depths.items():
                 assert by_name[name].depth == depth
 
-            root = by_name["simpler_run"]
+            root = by_name["chip.run"]
             root_end = root.ts + root.dur
-            for name in expected_depths.keys() - {"simpler_run", "simpler_run.runner_run.device_wall"}:
+            for name in expected_depths.keys() - {"chip.run", "chip.run.runner_run.device_wall"}:
                 stage = by_name[name]
                 assert root.ts <= stage.ts <= stage.ts + stage.dur <= root_end
         expected_launched = 2 if st_platform.endswith("sim") else 6
         assert launched_count == expected_launched
         if not st_platform.endswith("sim"):
-            root_attrs = [inv.by_name()["simpler_run"].attrs for inv in invocations]
+            root_attrs = [inv.by_name()["chip.run"].attrs for inv in invocations]
             assert all(
                 key in attrs
                 for attrs in root_attrs

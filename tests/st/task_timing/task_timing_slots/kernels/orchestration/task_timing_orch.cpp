@@ -19,7 +19,7 @@
  *
  * t1 consumes t0's output, so t1's Scheduler-observed FIN necessarily follows
  * t0's dispatch. The host reads back both slots and emits
- * `simpler_run.runner_run.device_wall.task_slot_0` / `_1` on the [STRACE]
+ * `chip.run.runner_run.device_wall.task_slot_0` / `_1` on the [STRACE]
  * timeline; tooling recovers the whole-chain interval as
  * finish(slot_1) - dispatch(slot_0).
  *

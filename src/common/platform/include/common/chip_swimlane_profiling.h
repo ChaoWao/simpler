@@ -639,7 +639,7 @@ static_assert(sizeof(HostPhaseRecord) == 32, "HostPhaseRecord layout drift");
  * What one HostPhaseRecord measured.
  *
  * The bind kinds partition the bind stage: their durations sum to the
- * `simpler_run.bind` span. The orchestrator kinds are nested inside BindHostOrch
+ * `chip.run.bind` span. The orchestrator kinds are nested inside BindHostOrch
  * and do not partition it — some are sub-operations of others.
  */
 enum class HostPhaseKind : uint32_t {

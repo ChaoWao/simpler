@@ -39,8 +39,8 @@ _CASE_NAME = "SingleDummyAutoDep"
 _RING = 64
 
 _TIMING_RE = re.compile(r"TIMING: prebuilt_runtime_arena = (\d+)ms")
-_STRACE_BIND_RE = re.compile(r"\[STRACE\].*name=simpler_run\.bind\.prebuilt\s+ts=\d+\s+dur=(\d+)")
-_STRACE_PREWARM_RE = re.compile(r"\[STRACE\].*name=simpler_prewarm\.build\s+ts=\d+\s+dur=(\d+)")
+_STRACE_BIND_RE = re.compile(r"\[STRACE\].*name=chip\.run\.bind\.prebuilt\s+ts=\d+\s+dur=(\d+)")
+_STRACE_PREWARM_RE = re.compile(r"\[STRACE\].*name=chip\.prewarm\.build\s+ts=\d+\s+dur=(\d+)")
 
 
 def _last_ms_from_ns(values: list[int]) -> float | None:
@@ -157,8 +157,8 @@ def main() -> None:
                 token in line
                 for token in (
                     "TIMING: prebuilt_runtime_arena",
-                    "name=simpler_prewarm.build",
-                    "name=simpler_run.bind.prebuilt",
+                    "name=chip.prewarm.build",
+                    "name=chip.run.bind.prebuilt",
                 )
             ):
                 print(line)
@@ -173,7 +173,7 @@ def main() -> None:
         print("\n=== SUMMARY ===")
         print(f"cold first-run bind.prebuilt (STRACE) : {_fmt_ms(cold)}")
         print(f"hot  first-run bind.prebuilt (STRACE) : {_fmt_ms(hot)}")
-        print(f"hot  init simpler_prewarm.build        : {_fmt_ms(prewarm_ms)}")
+        print(f"hot  init chip.prewarm.build        : {_fmt_ms(prewarm_ms)}")
         if cold is not None and hot is not None:
             print(f"first-run savings (cold - hot)         : {cold - hot:.2f} ms")
             if prewarm_ms is not None:

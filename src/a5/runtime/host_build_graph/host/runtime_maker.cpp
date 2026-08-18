@@ -831,7 +831,7 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
  * is already populated by register_callable_impl.
  *
  * Splitting this from register_callable_impl matches the per-callable_id
- * design: register/run_prepared invokes this every call, while the prep
+ * design: register/simpler_run invokes this every call, while the prep
  * half runs only once per callable_id.
  *
  * @param runtime    Pointer to the per-run Runtime

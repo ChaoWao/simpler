@@ -29,7 +29,7 @@
  *     host/host_phase_records.h); this runtime holds only the pool pointer.
  *
  * Timestamps are host monotonic nanoseconds — the clock the `[STRACE]` host
- * spans use — so records nest inside `simpler_run.bind` with no alignment step
+ * spans use — so records nest inside `chip.run.bind` with no alignment step
  * and share the enclosing run's (pid, inv) identity.
  */
 
@@ -43,7 +43,7 @@
  * collects them with the level at 0.
  *
  * "Breakdown" rather than "timing" because the bind stage's *duration* is
- * already published as the `simpler_run.bind` `[STRACE]` marker; what this adds
+ * already published as the `chip.run.bind` `[STRACE]` marker; what this adds
  * is the division of that one number into its parts.
  */
 bool host_phase_timing_enabled();

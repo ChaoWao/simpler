@@ -580,7 +580,7 @@ static bool stage_device_args(
     int scalar_count = orch_args->scalar_count();
 
     int64_t t_args_start = _now_ms();
-    STRACE_A("simpler_run.bind.args", "");
+    STRACE_A("chip.run.bind.args", "");
     for (int i = 0; i < tensor_count; i++) {
         ChipTensor t = orch_args->tensor(i);
 
@@ -911,7 +911,7 @@ extern "C" int bind_callable_to_runtime_impl(
 
     int64_t t_prebuilt_start = _now_ms();
     {
-        STRACE("simpler_run.bind.prebuilt");
+        STRACE("chip.run.bind.prebuilt");
         PrebuiltRuntimeArenaCacheProbe cache_probe = make_prebuilt_runtime_arena_cache_probe(sizing);
         int cache_rc = bind_cached_runtime_image(runtime, api, cache_probe, device_args);
         if (cache_rc < 0) {
@@ -968,7 +968,7 @@ extern "C" int prewarm_config_impl(
         return -1;
     }
 
-    STRACE("simpler_prewarm.build");
+    STRACE("chip.prewarm.build");
     return build_and_cache_prebuilt_arena(api, sizing) ? 0 : -1;
 }
 

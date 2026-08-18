@@ -72,29 +72,27 @@ def _span_record(
 
 def test_parse_spans_finds_adjacent_records_on_one_physical_line():
     line = (
-        _record(1, 1, "simpler_run", "rank=0")
-        + _record(2, 2, "simpler_run.runner_run.device_wall", "clk=dev rank=1")
-        + "\n"
+        _record(1, 1, "chip.run", "rank=0") + _record(2, 2, "chip.run.runner_run.device_wall", "clk=dev rank=1") + "\n"
     )
 
     spans = list(parse_spans([line]))
 
     assert [(span.pid, span.inv, span.name) for span in spans] == [
-        (1, 1, "simpler_run"),
-        (2, 2, "simpler_run.runner_run.device_wall"),
+        (1, 1, "chip.run"),
+        (2, 2, "chip.run.runner_run.device_wall"),
     ]
     assert spans[0].attrs == "rank=0"
     assert spans[1].attrs == "clk=dev rank=1"
 
 
 def test_parse_spans_keeps_every_record_of_a_multi_line_blob():
-    blob = _legacy_record(1, 1, "simpler_run", "rank=0") + "\n" + _record(2, 2, "simpler_run.bind", "rank=1") + "\n"
+    blob = _legacy_record(1, 1, "chip.run", "rank=0") + "\n" + _record(2, 2, "chip.run.bind", "rank=1") + "\n"
 
     spans = list(parse_spans([blob]))
 
     assert [(span.pid, span.inv, span.name) for span in spans] == [
-        (1, 1, "simpler_run"),
-        (2, 2, "simpler_run.bind"),
+        (1, 1, "chip.run"),
+        (2, 2, "chip.run.bind"),
     ]
     assert spans[0].attrs == "rank=0"
     assert spans[1].attrs == "rank=1"
@@ -103,7 +101,7 @@ def test_parse_spans_keeps_every_record_of_a_multi_line_blob():
 def test_parse_spans_preserves_64_bit_invocation_id():
     invocation_id = 2**32 + 7
 
-    spans = list(parse_spans([_record(41, invocation_id, "simpler_run")]))
+    spans = list(parse_spans([_record(41, invocation_id, "chip.run")]))
 
     assert len(spans) == 1
     assert spans[0].inv == invocation_id
@@ -141,12 +139,12 @@ def test_trace_renderers_add_wall_time_without_replacing_monotonic_timestamps():
     spans = list(
         parse_spans(
             [
-                _span_record(pid=41, tid=410, inv=7, name="simpler_run", ts=1_250, dur=20),
+                _span_record(pid=41, tid=410, inv=7, name="chip.run", ts=1_250, dur=20),
                 _span_record(
                     pid=41,
                     tid=410,
                     inv=7,
-                    name="simpler_run.runner_run.device_wall",
+                    name="chip.run.runner_run.device_wall",
                     ts=300,
                     dur=40,
                     attrs="clk=dev",
@@ -161,7 +159,7 @@ def test_trace_renderers_add_wall_time_without_replacing_monotonic_timestamps():
     host_swimlane = to_host_swimlane(spans, anchors=anchors)
 
     for trace in (chrome_trace, host_swimlane):
-        host_event = next(event for event in trace["traceEvents"] if event.get("name") == "simpler_run")
+        host_event = next(event for event in trace["traceEvents"] if event.get("name") == "chip.run")
         assert host_event["ts"] == 1.25
         assert host_event["args"]["wall_ts_ns"] == "1700000000000000250"
         assert host_event["args"]["wall_time"] == "2023-11-14T22:13:20.000000250Z"
@@ -185,10 +183,10 @@ def test_wall_time_uses_the_matching_anchor_for_each_pid():
     spans = list(
         parse_spans(
             [
-                _span_record(pid=41, tid=410, inv=1, name="l3.submit", ts=1_500, dur=10),
-                _span_record(pid=52, tid=520, inv=1, name="l3.submit", ts=1_500, dur=10),
-                _span_record(pid=63, tid=630, inv=1, name="l3.submit", ts=1_500, dur=10),
-                _span_record(pid=64, tid=640, inv=1, name="l3.submit", ts=1_500, dur=10),
+                _span_record(pid=41, tid=410, inv=1, name="host.submit", ts=1_500, dur=10),
+                _span_record(pid=52, tid=520, inv=1, name="host.submit", ts=1_500, dur=10),
+                _span_record(pid=63, tid=630, inv=1, name="host.submit", ts=1_500, dur=10),
+                _span_record(pid=64, tid=640, inv=1, name="host.submit", ts=1_500, dur=10),
             ]
         )
     )
@@ -205,7 +203,7 @@ def test_wall_time_uses_the_matching_anchor_for_each_pid():
 
 
 def test_count_record_heads_sees_a_torn_record_that_parse_spans_drops():
-    intact = _record(1, 1, "simpler_run", "rank=0")
+    intact = _record(1, 1, "chip.run", "rank=0")
     torn = intact[: intact.index(" ts=")]
     lines = [intact + "\n", torn + "\n"]
 
@@ -219,7 +217,7 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
             pid=41,
             tid=410,
             inv=7,
-            name="l3.graph_build",
+            name="host.graph_build",
             ts=1_000,
             dur=900,
             attrs="run_id=7 role=facade",
@@ -228,7 +226,7 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
             pid=41,
             tid=410,
             inv=7,
-            name="l3.submit",
+            name="host.submit",
             ts=1_100,
             dur=100,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 role=facade",
@@ -237,7 +235,7 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
             pid=41,
             tid=411,
             inv=7,
-            name="l3.dispatch",
+            name="host.dispatch",
             ts=1_400,
             dur=80,
             attrs=(
@@ -272,8 +270,8 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
     """The scheduler thread emits `role=worker` spans before its first `role=scheduler` one.
 
     `scheduler.cpp`'s loop is the only caller of both `dispatch_ready()` and
-    `manager->progress()`, and inside `submit_dispatch` the `l3.frame_submit`
-    scope closes within `submit_progress` — before the `l3.dispatch` record
+    `manager->progress()`, and inside `submit_dispatch` the `host.frame_submit`
+    scope closes within `submit_progress` — before the `host.dispatch` record
     emitted after the admission lock is released. Naming the lane from the
     first span it emitted therefore labels the scheduler `worker 3`.
     """
@@ -282,7 +280,7 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
             pid=41,
             tid=411,
             inv=7,
-            name="l3.frame_submit",
+            name="host.frame_submit",
             ts=1_410,
             dur=40,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=worker",
@@ -291,7 +289,7 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
             pid=41,
             tid=411,
             inv=7,
-            name="l3.dispatch",
+            name="host.dispatch",
             ts=1_400,
             dur=80,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=scheduler",
@@ -300,7 +298,7 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
             pid=41,
             tid=411,
             inv=7,
-            name="l3.complete",
+            name="host.complete",
             ts=2_000,
             dur=30,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=worker",
@@ -324,7 +322,7 @@ def test_parse_spans_decodes_percent_escaped_name_and_attribute_values():
             pid=41,
             tid=410,
             inv=7,
-            name="l3.odd%20name",
+            name="host.odd%20name",
             ts=100,
             dur=10,
             attrs="run_id=7 reason=submit%20failed%3A%20%5Bfatal%5D role=facade",
@@ -332,7 +330,7 @@ def test_parse_spans_decodes_percent_escaped_name_and_attribute_values():
     ]
 
     span = next(iter(parse_spans(lines)))
-    assert span.name == "l3.odd name"
+    assert span.name == "host.odd name"
 
     trace = to_host_swimlane([span])
     args = next(event["args"] for event in trace["traceEvents"] if event["ph"] == "X")
@@ -347,7 +345,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=410,
             inv=7,
-            name="l3.submit",
+            name="host.submit",
             ts=100,
             dur=20,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 role=facade",
@@ -356,7 +354,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=411,
             inv=7,
-            name="l3.dispatch",
+            name="host.dispatch",
             ts=200,
             dur=10,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=scheduler",
@@ -365,7 +363,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=410,
             inv=7,
-            name="l3.submit",
+            name="host.submit",
             ts=300,
             dur=20,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 role=facade",
@@ -374,7 +372,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=411,
             inv=7,
-            name="l3.dispatch",
+            name="host.dispatch",
             ts=400,
             dur=10,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=2 role=scheduler",
@@ -402,7 +400,7 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
                     pid=41,
                     tid=410,
                     inv=7,
-                    name="l3.graph_build",
+                    name="host.graph_build",
                     ts=1_000_000_000,
                     dur=900,
                     attrs="run_id=7 role=facade",
@@ -411,7 +409,7 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
                     pid=52,
                     tid=520,
                     inv=8,
-                    name="simpler_run.runner_run.device_wall",
+                    name="chip.run.runner_run.device_wall",
                     ts=300,
                     dur=40,
                     attrs="clk=dev rank=1",
@@ -424,11 +422,11 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
     visible_slices = [event for event in trace["traceEvents"] if event.get("ph") == "X"]
 
     assert [(event["name"], event["ts"], event["dur"]) for event in visible_slices] == [
-        ("l3.graph_build", 1_000_000.0, 0.9)
+        ("host.graph_build", 1_000_000.0, 0.9)
     ]
     assert trace["unalignedDeviceSpans"] == [
         {
-            "name": "simpler_run.runner_run.device_wall",
+            "name": "chip.run.runner_run.device_wall",
             "ts_ns": 300,
             "dur_ns": 40,
             "pid": 52,
@@ -445,9 +443,9 @@ def test_legacy_trace_output_ignores_host_swimlane_markers():
     old = list(
         parse_spans(
             [
-                _span_record(pid=61, tid=610, inv=3, name="simpler_run", ts=1_000, dur=500),
-                _span_record(pid=61, tid=610, inv=3, name="simpler_run.bind", ts=1_100, dur=50, depth=1),
-                _span_record(pid=61, tid=610, inv=4, name="simpler_prewarm.build", ts=1_200, dur=75),
+                _span_record(pid=61, tid=610, inv=3, name="chip.run", ts=1_000, dur=500),
+                _span_record(pid=61, tid=610, inv=3, name="chip.run.bind", ts=1_100, dur=50, depth=1),
+                _span_record(pid=61, tid=610, inv=4, name="chip.prewarm.build", ts=1_200, dur=75),
             ]
         )
     )
@@ -458,7 +456,7 @@ def test_legacy_trace_output_ignores_host_swimlane_markers():
                     pid=61,
                     tid=611,
                     inv=9,
-                    name="l3.dispatch",
+                    name="host.dispatch",
                     ts=900,
                     dur=20,
                     attrs="run_id=9 task_slot=4 group_index=0 worker_id=0 dispatch_id=1",
@@ -471,9 +469,9 @@ def test_legacy_trace_output_ignores_host_swimlane_markers():
     mixed_invocations = group_invocations(legacy_spans(mixed))
 
     assert [span.name for span in legacy_spans(mixed)] == [
-        "simpler_run",
-        "simpler_run.bind",
-        "simpler_prewarm.build",
+        "chip.run",
+        "chip.run.bind",
+        "chip.prewarm.build",
     ]
     assert to_chrome_trace(old_invocations, bucket_by_hid(old_invocations)) == to_chrome_trace(
         mixed_invocations, bucket_by_hid(mixed_invocations)
@@ -484,15 +482,15 @@ def test_invocation_by_name_uses_earliest_timestamp_not_input_order():
     spans = list(
         parse_spans(
             [
-                _span_record(pid=61, tid=610, inv=3, name="simpler_run.bind", ts=1_200, dur=20, depth=1),
-                _span_record(pid=61, tid=611, inv=3, name="simpler_run.bind", ts=1_100, dur=30, depth=1),
+                _span_record(pid=61, tid=610, inv=3, name="chip.run.bind", ts=1_200, dur=20, depth=1),
+                _span_record(pid=61, tid=611, inv=3, name="chip.run.bind", ts=1_100, dur=30, depth=1),
             ]
         )
     )
 
     invocation = group_invocations(spans)[0]
 
-    assert invocation.by_name()["simpler_run.bind"].ts == 1_100
+    assert invocation.by_name()["chip.run.bind"].ts == 1_100
 
 
 def test_swimlane_cli_writes_trace(tmp_path):
@@ -500,14 +498,14 @@ def test_swimlane_cli_writes_trace(tmp_path):
     output_path = tmp_path / "host_swimlane.json"
     log_path.write_text(
         _anchor_record(71, 50, 1_700_000_000_000_000_000)
-        + _span_record(pid=71, tid=710, inv=2, name="l3.graph_build", ts=100, dur=25, attrs="run_id=2 role=facade"),
+        + _span_record(pid=71, tid=710, inv=2, name="host.graph_build", ts=100, dur=25, attrs="run_id=2 role=facade"),
         encoding="utf-8",
     )
 
     assert main([str(log_path), "--swimlane", str(output_path)]) == 0
 
     trace = json.loads(output_path.read_text(encoding="utf-8"))
-    event = next(event for event in trace["traceEvents"] if event.get("name") == "l3.graph_build")
+    event = next(event for event in trace["traceEvents"] if event.get("name") == "host.graph_build")
     assert event["args"]["wall_ts_ns"] == "1700000000000000050"
 
 
@@ -516,7 +514,7 @@ def test_cli_warns_when_one_pid_has_multiple_clock_anchors(tmp_path, capsys):
     log_path.write_text(
         _anchor_record(71, 50, 1_700_000_000_000_000_000)
         + _anchor_record(71, 75, 1_700_000_000_000_000_025)
-        + _span_record(pid=71, tid=710, inv=2, name="simpler_run", ts=100, dur=25),
+        + _span_record(pid=71, tid=710, inv=2, name="chip.run", ts=100, dur=25),
         encoding="utf-8",
     )
 
@@ -529,11 +527,11 @@ def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
     lines = []
     for inv, host_dur, device_dur in ((1, 100_000, 20_000), (2, 120_000, 24_000)):
         lines.append(
-            _record(1, inv, "simpler_run", dur=host_dur)
+            _record(1, inv, "chip.run", dur=host_dur)
             + _record(
                 1,
                 inv,
-                "simpler_run.runner_run.device_wall",
+                "chip.run.runner_run.device_wall",
                 "clk=dev",
                 depth=2,
                 dur=device_dur,
@@ -556,7 +554,7 @@ def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
 
 
 def _run_records(*, run_epoch, prepare, device, release, run_id=0, dispatch_id=0, slot_id=0, pid=7, inv=None):
-    """One phased native run's spans, as the `simpler_run` tree carries them.
+    """One phased native run's spans, as the `chip.run` tree carries them.
 
     `prepare` and `device` are (ts, dur). The root span carries the identity and
     spans the whole lifetime, so it must enclose the children.
@@ -565,10 +563,10 @@ def _run_records(*, run_epoch, prepare, device, release, run_id=0, dispatch_id=0
     identity = f"run_id={run_id} dispatch_id={dispatch_id} slot_id={slot_id} generation=1 run_epoch={run_epoch}"
     root_end = release + 10
     return [
-        _record(pid, invocation, "simpler_run.bind", depth=1, ts=prepare[0], dur=prepare[1]),
-        _record(pid, invocation, "simpler_run.runner_run", depth=1, ts=device[0], dur=device[1]),
-        _record(pid, invocation, "simpler_run.claim_release", depth=1, ts=release, dur=5),
-        _record(pid, invocation, "simpler_run", identity, depth=0, ts=prepare[0], dur=root_end - prepare[0]),
+        _record(pid, invocation, "chip.run.bind", depth=1, ts=prepare[0], dur=prepare[1]),
+        _record(pid, invocation, "chip.run.runner_run", depth=1, ts=device[0], dur=device[1]),
+        _record(pid, invocation, "chip.run.claim_release", depth=1, ts=release, dur=5),
+        _record(pid, invocation, "chip.run", identity, depth=0, ts=prepare[0], dur=root_end - prepare[0]),
     ]
 
 
@@ -644,10 +642,10 @@ def test_native_overlap_orders_by_dispatch_id_when_the_scheduler_allocates_one()
 
 
 def test_native_overlap_skips_an_invocation_that_is_not_a_phased_run():
-    """A lexical `simpler_run` carries no identity attrs, so it orders nothing."""
+    """A lexical `chip.run` carries no identity attrs, so it orders nothing."""
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
     lines += _run_records(run_epoch=2, prepare=(150, 30), device=(240, 100), release=340)
-    lines += [_record(7, 99, "simpler_run", "", depth=0, ts=10, dur=5)]
+    lines += [_record(7, 99, "chip.run", "", depth=0, ts=10, dur=5)]
 
     assert len(assert_native_overlap(parse_spans(lines))) == 1
 
@@ -660,7 +658,7 @@ def test_native_overlap_needs_two_runs_on_one_lane():
 
 
 def test_claim_release_span_stays_inside_the_invocation_tree():
-    """It is a `simpler_run` child, so the existing views absorb it.
+    """It is a `chip.run` child, so the existing views absorb it.
 
     A separate family would have to be filtered out of every view; a depth-1
     child of the root is what the tree already knows how to render — and it
@@ -670,8 +668,8 @@ def test_claim_release_span_stays_inside_the_invocation_tree():
 
     invocation = group_invocations(legacy_spans(list(parse_spans(lines))))[0]
 
-    assert invocation.root().name == "simpler_run"
-    assert invocation.by_name()["simpler_run.claim_release"].depth == 1
+    assert invocation.root().name == "chip.run"
+    assert invocation.by_name()["chip.run.claim_release"].depth == 1
     # The root still reports the whole lifetime, not a sub-stage's duration.
     assert invocation.root().dur == 210 - 50
 
@@ -734,14 +732,14 @@ def test_chrome_trace_cli_writes_wall_time(tmp_path):
     output_path = tmp_path / "strace.json"
     log_path.write_text(
         _anchor_record(71, 50, 1_700_000_000_000_000_000)
-        + _span_record(pid=71, tid=710, inv=2, name="simpler_run", ts=100, dur=25),
+        + _span_record(pid=71, tid=710, inv=2, name="chip.run", ts=100, dur=25),
         encoding="utf-8",
     )
 
     assert main([str(log_path), "--trace-out", str(output_path)]) == 0
 
     trace = json.loads(output_path.read_text(encoding="utf-8"))
-    event = next(event for event in trace["traceEvents"] if event.get("name") == "simpler_run")
+    event = next(event for event in trace["traceEvents"] if event.get("name") == "chip.run")
     assert event["ts"] == 0.1
     assert event["args"]["wall_ts_ns"] == "1700000000000000050"
 
@@ -781,7 +779,7 @@ def test_host_phase_records_loader_keeps_only_well_formed_passes(tmp_path):
 def test_host_record_spans_nest_bind_segments_and_orchestrator_operations(tmp_path):
     """A record's kind decides its depth: a bind segment sits under the stage, an
     orchestrator operation one level further in, under the segment it ran inside."""
-    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="simpler_run.bind", ts=1_000, dur=500)]))
+    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="chip.run.bind", ts=1_000, dur=500)]))
     passes = [
         {
             "pid": 9,
@@ -799,14 +797,14 @@ def test_host_record_spans_nest_bind_segments_and_orchestrator_operations(tmp_pa
     assert covered == frozenset({(9, 5)})
     by_name = {span.name: span for span in out}
     bind_depth = spans[0].depth
-    assert by_name["simpler_run.bind.args"].depth == bind_depth + 1
-    assert by_name["simpler_run.bind.host_orch.graph_submit"].depth == bind_depth + 2
-    assert by_name["simpler_run.bind.args"].ts == 1_000
-    assert by_name["simpler_run.bind.args"].dur == 100
+    assert by_name["chip.run.bind.args"].depth == bind_depth + 1
+    assert by_name["chip.run.bind.host_orch.graph_submit"].depth == bind_depth + 2
+    assert by_name["chip.run.bind.args"].ts == 1_000
+    assert by_name["chip.run.bind.args"].dur == 100
 
 
 def test_host_record_spans_drop_passes_with_no_matching_bind(tmp_path):
-    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="simpler_run.bind", ts=1_000, dur=500)]))
+    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="chip.run.bind", ts=1_000, dur=500)]))
     passes = [{"pid": 9, "inv": 999, "records": [{"phase": "args", "start_ns": 1_000, "end_ns": 1_100}]}]
 
     out, orphaned, covered = host_record_spans(spans, passes)

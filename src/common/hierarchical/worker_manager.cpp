@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/host_span_names.h"
 #include "common/host_span_scope.h"
 #include "ring.h"
 
@@ -479,7 +480,8 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
     const int64_t trace_end_ns = simpler::host_trace::now_ns();
     const std::string trace_attrs = trace_dispatch_attrs(trace_run, d, endpoint_->caps(), "scheduler") + trace_lease;
     simpler::host_trace::emit(
-        "l3.dispatch", trace_run, trace_hash, 0, trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Dispatch), trace_run, trace_hash, 0,
+        trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
     );
 #endif
     return SubmitDispatchResult::SUBMITTED;
@@ -671,7 +673,10 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
 
 #if SIMPLER_HOST_STRACE
     complete_attrs += " outcome=" + std::to_string(static_cast<int32_t>(completion.outcome));
-    simpler::host_trace::SpanScope complete_trace("l3.complete", trace_run, trace_hash, 0, std::move(complete_attrs));
+    simpler::host_trace::SpanScope complete_trace(
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Complete), trace_run, trace_hash, 0,
+        std::move(complete_attrs)
+    );
 #endif
     on_complete_(std::move(completion));
     {
@@ -718,8 +723,8 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
 
 #if SIMPLER_HOST_STRACE
     simpler::host_trace::SpanScope frame_submit_trace(
-        "l3.frame_submit", state.run_id, trace_callable_hash(ring, dispatch.task_slot), 0,
-        trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::FrameSubmit), state.run_id,
+        trace_callable_hash(ring, dispatch.task_slot), 0, trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
     );
 #endif
 
@@ -987,7 +992,10 @@ bool LocalMailboxEndpoint::activate_progress(RunId run_id) {
                        << " dispatch_id=" << record.dispatch.dispatch_id
                        << " endpoint_kind=" << endpoint_kind_name(caps_.kind)
                        << " prepare_only=" << static_cast<int>(record.dispatch.prepare_only) << " role=worker";
-        simpler::host_trace::SpanScope activate_trace("l3.activate", run_id, 0, 0, activate_attrs.str());
+        simpler::host_trace::SpanScope activate_trace(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Activate), run_id, 0, 0,
+            activate_attrs.str()
+        );
 #endif
         record.activation_requested = true;
         char *frame = task_frame(index);
