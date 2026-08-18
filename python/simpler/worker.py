@@ -92,7 +92,6 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     RUNTIME_ENV_RING_COUNT,
     WorkerType,
     _emit_host_span,
-    _host_span_sink_available,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
     _mailbox_load_i32,
@@ -225,7 +224,7 @@ from .task_interface import (
     RemoteBufferExport,
     RemoteBufferHandle,
     TaskArgs,
-    _initialize_simpler_log,
+    _initialize_host_log,
     _Worker,
 )
 from .worker_chip_orch_comm import (
@@ -260,8 +259,8 @@ _WORKER_CHIP_ENDPOINT_ERROR_REGION_RE = re.compile(r"\bL3-L2 endpoint error\b[^\
 
 
 def _host_spans_active() -> bool:
-    """Whether an emitted host span can currently reach the logger sink."""
-    return HOST_STRACE_ENABLED and _host_span_sink_available()
+    """Whether host-span emission was compiled into this extension."""
+    return HOST_STRACE_ENABLED
 
 
 # ---------------------------------------------------------------------------
@@ -7751,12 +7750,12 @@ class Worker:
 
         # Seed this process's logger before the first fork: the spans its own
         # scheduler emits obey the Python logger level, and every child inherits
-        # the mapping. Every level needs this — `init()` rejects device_ids above
+        # the state. Every level needs this — `init()` rejects device_ids above
         # L3, so a pod process owns no chips yet still drives next-level Workers
-        # and emits their spans. A chip-owning Worker names the copy its children
-        # load; any other process seeds the copy the package already preloaded.
+        # and emits their spans. A chip child re-seeds its inherited state before
+        # binding the logger copies embedded in the runtime modules it loads.
         chip_log_level = _simpler_log.get_current_config()
-        _initialize_simpler_log(self._l3_bins if device_ids else None, chip_log_level)
+        _initialize_host_log(chip_log_level)
 
         self._startup_reaped_pids = set()
         self._startup_ready_pids = set()

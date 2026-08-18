@@ -66,8 +66,10 @@
 #include "../../../../common/task_interface/call_config.h"
 #include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
+#include "common/host_log_binding.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "host_log.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
@@ -716,6 +718,16 @@ extern "C" int register_callable_impl(const ChipCallable *callable, const HostAp
         void *handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (handle == nullptr) {
             LOG_ERROR("host-orch: dlopen failed: %s", dlerror());
+            return -1;
+        }
+        const char *bind_log_error = nullptr;
+        if (simpler::log::bind_loaded_host_log_state(handle, HostLogger::get_instance().state(), &bind_log_error) !=
+            0) {
+            LOG_ERROR(
+                "host-orch: failed to bind host-log state: %s",
+                bind_log_error != nullptr ? bind_log_error : "unknown error"
+            );
+            dlclose(handle);
             return -1;
         }
         void *entry = dlsym(handle, orch_func_name);

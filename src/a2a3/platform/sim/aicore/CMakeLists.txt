@@ -18,6 +18,8 @@ cmake_minimum_required(VERSION 3.16.3)
 
 project(aicore_sim LANGUAGES CXX)
 
+include("${SIMPLER_CMAKE_DIR}/host_log_sources.cmake")
+
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIRS "")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -40,6 +42,7 @@ set(AICORE_SOURCES "")
 # Add local platform-specific sources
 file(GLOB LOCAL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 list(APPEND AICORE_SOURCES ${LOCAL_SOURCES})
+list(APPEND AICORE_SOURCES ${SIMPLER_HOST_LOG_SOURCES})
 
 if(DEFINED CUSTOM_SOURCE_DIRS)
     foreach(SRC_DIR ${CUSTOM_SOURCE_DIRS})
@@ -52,7 +55,7 @@ endif()
 
 # Create shared library (host-compatible for dlopen)
 add_library(aicore_kernel SHARED ${AICORE_SOURCES})
-include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/profiling_config.cmake")
+include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
 simpler_configure_profiling(aicore_kernel)
 
 # Compile options (host g++)
@@ -78,11 +81,7 @@ target_include_directories(aicore_kernel
 )
 
 
-# Allow undefined HostLogger / unified_log_* symbols — resolved at runtime
-# via libsimpler_log.so loaded with RTLD_GLOBAL by ChipWorker.
-if(APPLE)
-    target_link_options(aicore_kernel PRIVATE -undefined dynamic_lookup)
-endif()
+target_link_libraries(aicore_kernel PRIVATE pthread)
 set_target_properties(aicore_kernel PROPERTIES
     OUTPUT_NAME "aicore_kernel"
     # Force .so suffix on all platforms (macOS defaults to .dylib)

@@ -394,7 +394,8 @@ int simpler_init(
     } catch (...) {
         return -1;
     }
-    // No CANN dlog on sim. HostLogger is owned by libsimpler_log.so.
+    // No CANN dlog on sim. ChipWorker bound this module's logger to the
+    // process-owned state before calling simpler_init.
 
     // Prebuilt runtime-arena prewarm for the fork-constant ring sizing, now that
     // the runner is attached. trb links a strong prewarm_config_impl; other

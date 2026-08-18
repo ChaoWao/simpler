@@ -161,9 +161,8 @@ extern "C" void pto_cpu_sim_acquire_device(int device_id) {
     std::lock_guard<std::mutex> lock(g_registry_mutex);
     if (g_device_contexts.find(device_id) == g_device_contexts.end()) {
         g_device_contexts[device_id] = new DeviceSimContext();
-        // Verifies process-wide HostLogger singleton: this LOG_INFO call
-        // resolves into libsimpler_log.so loaded by ChipWorker with
-        // RTLD_GLOBAL — same instance as host_runtime.so writes to.
+        // This module's private HostLogger copy reads the process-owned state
+        // that ChipWorker binds immediately after loading the sim context.
         LOG_INFO("cpu_sim_context: acquired device %d", device_id);
     }
 }

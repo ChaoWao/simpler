@@ -61,10 +61,9 @@ public:
         std::lock_guard<std::mutex> lk(captured_host_spans_mu);
         captured_host_span_names.clear();
         captured_host_span_attributes.clear();
-        simpler::host_trace::bind_sink(&simpler_log_emit_host_span);
     }
 
-    ~ScopedHostSpanCapture() { simpler::host_trace::bind_sink(nullptr); }
+    ~ScopedHostSpanCapture() = default;
 
     ScopedHostSpanCapture(const ScopedHostSpanCapture &) = delete;
     ScopedHostSpanCapture &operator=(const ScopedHostSpanCapture &) = delete;
@@ -87,7 +86,7 @@ std::string captured_host_span_attrs(const std::string &name) {
 
 }  // namespace
 
-extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
+extern "C" void unified_log_host_span(const SimplerHostSpan *span) {
     if (span == nullptr || span->name == nullptr) return;
     std::lock_guard<std::mutex> lk(captured_host_spans_mu);
     captured_host_span_names.emplace_back(span->name);

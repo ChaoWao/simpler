@@ -26,11 +26,25 @@
 
 #include <sys/types.h>
 
+#include "common/host_log_state.h"
 #include "common/log_level.h"
 
-class HostLogger {
+#if defined(__GNUC__) || defined(__clang__)
+#define SIMPLER_HOST_LOG_LOCAL __attribute__((visibility("hidden")))
+#else
+#define SIMPLER_HOST_LOG_LOCAL
+#endif
+
+struct SimplerHostSpan;
+
+class SIMPLER_HOST_LOG_LOCAL HostLogger {
 public:
     static HostLogger &get_instance();
+
+    // Bind this module-local logger implementation to process-owned state.
+    // Must happen during module init, before the module starts worker threads.
+    int bind_state(SimplerHostLogState *state);
+    SimplerHostLogState *state() const;
 
     void log(simpler::log::LogLevel level, const char *func, const char *fmt, ...);
 
@@ -40,7 +54,7 @@ public:
 
     void set_level(simpler::log::LogLevel level);
 
-    // host_runtime.so reads this through the RTLD_GLOBAL singleton when
+    // Runtime modules read this from their bound process-owned state when
     // populating InitArgs.log_level at device init.
     int level() const;
     int cann_level() const;
@@ -52,6 +66,10 @@ public:
 
     bool is_enabled(simpler::log::LogLevel level) const;
 
+    // Fixed host-span adapter. The logger remains the sole STRACE grammar
+    // owner even though its implementation is compiled into several DSOs.
+    void log_host_span(const SimplerHostSpan *span);
+
 private:
     HostLogger();
     ~HostLogger() = default;
@@ -62,12 +80,12 @@ private:
     HostLogger &operator=(HostLogger &&) = delete;
 
     const char *level_name(simpler::log::LogLevel level) const;
-    void emit(const char *level_tag, const char *func, const char *fmt, va_list args);
-    void emit_ungated(const char *level_tag, const char *func, const char *fmt, ...);
+    bool emit(const char *level_tag, const char *func, const char *fmt, va_list args);
+    bool emit_ungated(const char *level_tag, const char *func, const char *fmt, ...);
     void emit_clock_anchor_if_needed();
 
-    simpler::log::LogLevel current_level_;
+    std::atomic<SimplerHostLogState *> state_;
     std::mutex mutex_;
-    std::atomic<pid_t> clock_anchor_pid_{-1};
-    std::mutex clock_anchor_mutex_;
 };
+
+#undef SIMPLER_HOST_LOG_LOCAL

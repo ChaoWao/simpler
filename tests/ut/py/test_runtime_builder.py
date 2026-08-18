@@ -298,13 +298,9 @@ class TestRuntimeBuilderGetBinaries:
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
 
         builder = RuntimeBuilder(platform=default_test_platform)
-        with (
-            patch.object(builder, "ensure_simpler_log", return_value=tmp_path / "libsimpler_log.so") as log,
-            patch.object(builder, "ensure_sim_context", return_value=tmp_path / "libcpu_sim_context.so") as sim,
-        ):
+        with patch.object(builder, "ensure_sim_context", return_value=tmp_path / "libcpu_sim_context.so") as sim:
             builder.get_binaries("test_rt", build=True, build_shared=False)
 
-        log.assert_called_once_with(build=False)
         sim.assert_called_once_with(build=False)
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
@@ -373,7 +369,6 @@ class TestRuntimeBuilderGetBinaries:
 
         mock_instance = MockCompiler.get_instance.return_value
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
-        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "a" * 40)
         monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
         monkeypatch.setattr(
@@ -398,7 +393,6 @@ class TestRuntimeBuilderGetBinaries:
 
         mock_instance = MockCompiler.get_instance.return_value
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
-        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pin)
         monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
         monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
@@ -425,7 +419,6 @@ class TestRuntimeBuilderGetBinaries:
 
         mock_instance = MockCompiler.get_instance.return_value
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
-        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "a" * 40)
         monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
         monkeypatch.setattr(
@@ -449,7 +442,6 @@ class TestRuntimeBuilderGetBinaries:
         self._make_runtime(tmp_path, "a5")
         mock_instance = MockCompiler.get_instance.return_value
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
-        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pin)
         monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
         monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
@@ -472,7 +464,6 @@ class TestRuntimeBuilderGetBinaries:
 
         mock_instance = MockCompiler.get_instance.return_value
         mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
-        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
         mock_instance.compile_sim_context.return_value = tmp_path / "build" / "lib" / "libcpu_sim_context.so"
         monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: pytest.fail("unexpected metadata"))
 
@@ -668,8 +659,7 @@ class TestPlaceBinary:
     """place_binary must never rewrite the destination in place.
 
     A build that replaces a .so already dlopened by the running process — which
-    every `pip install -e .` does, and which `get_binaries(build=True)` does to
-    build/lib/libsimpler_log.so mid-test-session — corrupts that mapping if the
+    every `pip install -e .` does — corrupts that mapping if the
     destination is truncated and rewritten. The fault surfaces far away, as a
     SIGSEGV inside the dynamic linker on an unrelated dlopen or at interpreter
     exit, so the invariant is asserted here rather than left to a crash.

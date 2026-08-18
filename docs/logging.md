@@ -1,238 +1,217 @@
 # Log System
 
-Architecture and contracts for the host + device logging subsystem.
+Architecture and contracts for the host and device logging subsystem.
 
-For the **user-facing model** — one Python knob and the CLI flags
-— see [testing.md § Log levels](testing.md#log-levels). This file
-documents the implementation: layering, multi-`.so` singleton sharing, ABIs,
-build wiring, and output formats.
+For the user-facing level model and CLI flags, see
+[testing.md § Log levels](testing.md#log-levels). This document covers the
+implementation, cross-DSO state ABI, build wiring, and output formats.
 
 ## Mental model
 
 ```text
-Python: logging.getLogger("simpler").setLevel(N)
+logging.getLogger("simpler").setLevel(N)
                   │
-                  ▼  Worker.init() snapshots + normalizes the threshold once
+                  ▼  Worker.init() snapshots + normalizes the threshold
+       _task_interface owns SimplerHostLogState
                   │
-       ChipWorker.init(device_id, bins, level)             ◀── Python wrapper
-                  │
-       1. ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)  ◀── one HostLogger per process
-       2. simpler_log_init(level)    ──→ HostLogger.set_level + clock anchor
-                                     (seeds HostLogger BEFORE any host_runtime /
-                                      sim_context / aicore SO is dlopen'd, so
-                                      any LOG_* macro firing during dlopen-time
-                                      constructors already sees the right filter)
-       3. ctypes.CDLL(libcpu_sim_context.so, RTLD_GLOBAL)  (sim only)
-       4. _ChipWorker.init(host_lib, aicpu, aicore, device_id)   ◀── C++
-            ├─ dlopen libhost_runtime.so  RTLD_LOCAL   ──→ undefined HostLogger /
-            │                                              unified_log_* symbols
-            │                                              resolve via (1)
-            └─ simpler_init(ctx, device_id, aicpu*, aicore*)
-                                     ──→ (onboard) dlog_setlevel(HostLogger.cann_level())
-                                     ──→ attach thread + transfer executor binaries
+                  ├─ its own HostLogger reads that state
+                  ├─ state is inherited before hierarchical worker forks
+                  └─ ChipWorker passes the state pointer to loaded host modules
+                       │
+                       ├─ libcpu_sim_context.so (sim, RTLD_GLOBAL for PTO hooks)
+                       ├─ libhost_runtime.so (RTLD_LOCAL)
+                       ├─ generated host orchestration SOs
+                       └─ sim AICore SOs
 
-Per device init:
-       runner reads HostLogger.level() ──→ InitArgs.log_level
-       AICPU receives the threshold
-            ├─ sim: sets g_is_log_enable_* directly
-            └─ onboard: snapshots CANN CheckLogLevel() into g_is_log_enable_*
+Each host module:
+       private host_log.cpp + unified_log_host.cpp
+                  │
+                  └─ simpler_host_log_bind_state(state*)
+
+Device logging:
+       AICPU keeps the device backend
+            ├─ sim: set_log_level(...) seeds its current level flags
+            └─ onboard: CANN level is sampled during device init
 ```
 
 One threshold controls `DEBUG / INFO / TIMING / WARN / ERROR`; `NUL` suppresses
 all output. The values match Python logging (`10 / 20 / 25 / 30 / 40 / 60`).
 CANN has no TIMING level, so onboard setup maps both TIMING and WARN to CANN
-WARN. The default TIMING threshold therefore keeps host `[STRACE]` markers
-without opening CANN's INFO stream.
+WARN. The default TIMING threshold keeps host `[STRACE]` markers without
+opening CANN's INFO stream.
 
 ## File layout
 
 ```text
-src/common/log/                              ← libsimpler_log.so + public ABI
-├── CMakeLists.txt                           libsimpler_log SHARED target
+src/common/log/
 ├── include/
 │   ├── common/
-│   │   ├── log_level.h                      shared level values + CANN mapping
-│   │   └── unified_log.h                    public ABI (host AND device #include)
-│   └── host_log.h                           HostLogger class (public — pto_runtime_c_api uses it)
-├── host_log.cpp                             HostLogger impl
-└── unified_log_host.cpp                     C ABI → HostLogger adapter
+│   │   ├── host_log_binding.h     loader-side binder resolution helper
+│   │   ├── host_log_state.h       cross-DSO state ABI + binder declaration
+│   │   ├── host_span.h            host-span data ABI
+│   │   ├── log_level.h            shared levels + CANN mapping
+│   │   └── unified_log.h          LOG_* ABI used by host and device code
+│   └── host_log.h                 private HostLogger implementation interface
+├── host_log.cpp                   host envelope, filter, clock anchor, STRACE grammar
+└── unified_log_host.cpp           unified_log_* adapters → HostLogger
 
-src/common/platform/                         ← shared device-side log
-├── include/aicpu/device_log.h               low-level dev_vlog_* declarations
-├── shared/aicpu/unified_log_device.cpp      C ABI → dev_vlog_* adapter
-├── onboard/aicpu/device_log.cpp             onboard backend (CANN dlog)
-└── sim/aicpu/device_log.cpp                 sim backend (one write(2) to stderr)
+src/common/platform/
+├── include/aicpu/device_log.h               device backend declarations
+├── shared/aicpu/unified_log_device.cpp      LOG_* ABI → dev_vlog_* adapter
+├── onboard/aicpu/device_log.cpp             onboard CANN backend
+└── sim/aicpu/device_log.cpp                 sim AICPU stderr backend
 ```
 
-Both architectures link these shared implementations into their platform
-binaries; the per-architecture init kernels only forward `InitArgs.log_level`.
+There is no standalone `libsimpler_log.so`. Host consumers compile the two
+host logger translation units directly. This makes each DSO self-contained:
+loading a runtime can no longer fail because a logger artifact or a global
+logger symbol was missing.
 
 ## Three-layer ABI
 
-### Layer 1 — public macros (consumer-facing)
+### Layer 1 — consumer macros
 
-`common/unified_log.h` defines the only macros consumers should use:
+`common/unified_log.h` defines the macros consumers use:
 
 ```cpp
 LOG_DEBUG(fmt, ...)
 LOG_INFO(fmt, ...)
-LOG_TIMING(fmt, ...)     // stable performance markers such as STRACE
+LOG_TIMING(fmt, ...)
 LOG_WARN(fmt, ...)
 LOG_ERROR(fmt, ...)
 ```
 
-Each macro auto-injects `[__FILENAME__:__LINE__]` in front of the format
-string and threads `__FUNCTION__` as a separate argument.
+Each macro injects the source location and passes `__FUNCTION__` separately.
 
-### Layer 2 — C ABI
+Host spans use `SimplerHostSpan` and `unified_log_host_span`. Callers supply
+what happened—name, duration, invocation identity, and attributes—while
+`HostLogger::log_host_span` owns the PID, TID, timestamp envelope, escaping,
+and the single `[STRACE]` format string.
 
-The macros expand to five `extern "C"` functions declared in
+### Layer 2 — unified logging ABI
+
+The macros expand to five `extern "C"` functions declared by
 `common/unified_log.h`:
 
 ```cpp
 void unified_log_error(const char *func, const char *fmt, ...);
-void unified_log_warn (const char *func, const char *fmt, ...);
+void unified_log_warn(const char *func, const char *fmt, ...);
 void unified_log_timing(const char *func, const char *fmt, ...);
-void unified_log_info (const char *func, const char *fmt, ...);
+void unified_log_info(const char *func, const char *fmt, ...);
 void unified_log_debug(const char *func, const char *fmt, ...);
 ```
 
-Two implementations link the same ABI symbols:
-
-| Symbol owner | Implementation file | Backend |
-| ------------ | ------------------- | ------- |
-| `libsimpler_log.so` (host) | `src/common/log/unified_log_host.cpp` | `HostLogger` → stderr |
-| AICPU binary (device) | `src/common/platform/shared/aicpu/unified_log_device.cpp` | `dev_vlog_*` → backend |
-
-The host `.so` is loaded with `RTLD_GLOBAL` so all consumer `.so`s
-(`host_runtime`, `cpu_sim_context`, sim `aicore_kernel`, the binding) resolve
-to the **same** `HostLogger` instance. The AICPU binary is independent — it
-links its own copy of the ABI implementation that talks to `dev_log_*`
-locally.
+Host targets compile `unified_log_host.cpp`; AICPU targets compile
+`unified_log_device.cpp`. Host definitions have hidden visibility and are
+resolved inside the target that contains them. The device implementation
+forwards to its local backend.
 
 ### Layer 3 — backend primitives
 
-**Host** (`HostLogger` in `host_log.{h,cpp}`):
+`HostLogger::vlog` is the host-side authority for level gating. It formats a
+complete record and performs one `write(2)` under its module-local mutex.
+`HostLogger::log_host_span` additionally bounds and escapes machine-readable
+fields so a STRACE record fits the portable `PIPE_BUF` floor.
 
-```cpp
-class HostLogger {
-public:
-    static HostLogger &get_instance();        // process-wide singleton
-    void set_level(LogLevel);                 // Python pushes via simpler_log_init
-    void vlog(LogLevel, func, fmt, va_list);  // adapter entry point
-    int cann_level() const;                   // coarser CANN threshold
-};
+The mutex serializes writers only within the DSO that owns it. Writers from
+different DSOs, or from forked processes sharing a pipe, are indivisible only
+when their single `write(2)` is no larger than that pipe's `PIPE_BUF`.
+Machine-readable `[STRACE]` records satisfy that bound. Longer human-readable
+records are best-effort and may interleave across module boundaries. Blocking
+and drop accounting for those writes remain part of issue #1792 item 6.
+
+The AICPU `dev_vlog_*` functions remain separate. Sim formats a single stderr
+record; onboard forwards through CANN dlog. Folding sim's device logger into
+the host backend is tracked separately by issue #1792 item 5.
+
+## Cross-DSO host state
+
+Each host DSO has a private `HostLogger` object, but every copy in one process
+reads the same `SimplerHostLogState`:
+
+```c
+typedef struct SimplerHostLogState {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    int32_t threshold;
+    int32_t clock_anchor_pid;
+} SimplerHostLogState;
+
+int simpler_host_log_bind_state(SimplerHostLogState *state);
 ```
 
-`vlog` is the single authority for level gating — the C ABI adapter does not
-pre-check.
+The native `_task_interface` extension owns the state for the process. The
+fields are plain fixed-width integers to keep the ABI compiler-independent;
+`host_log.cpp` accesses mutable fields with atomic builtins. ABI version and
+size are checked before a module accepts the pointer.
 
-**Device** (`dev_vlog_*` in `aicpu/device_log.h`):
+Only `simpler_host_log_bind_state` is exported from a host logging consumer.
+`HostLogger` and every `unified_log_*` definition are hidden. This avoids
+accidentally recreating the old global-symbol singleton through ELF
+interposition while still giving loaders one stable binding entry point.
 
-```cpp
-void dev_vlog_debug (const char *func, const char *fmt, va_list);
-void dev_vlog_info  (const char *func, const char *fmt, va_list);
-void dev_vlog_timing(const char *func, const char *fmt, va_list);
-void dev_vlog_warn  (const char *func, const char *fmt, va_list);
-void dev_vlog_error (const char *func, const char *fmt, va_list);
-```
+`clock_anchor_pid` is also shared. Consequently the private logger copies
+coordinate one successful `[CLOCK_ANCHOR]` per process. A negative PID is a
+temporary writer claim; a failed stderr write releases the claim so the next
+record can retry.
 
-`unified_log_device.cpp` forwards the caller's `va_list` directly into
-`dev_vlog_*` — no intermediate `vsnprintf`-to-buffer round-trip in this
-layer. Each backend then formats one whole record and emits it in a single
-call: the sim backend writes it with one `write(2)`, kept under `PIPE_BUF` so
-concurrent AICPU sim threads or forked chip workers sharing `stderr` never
-interleave partial records; the onboard backend buffers into a stack `char`
-array and issues one `dlog_*` because CANN's `dlog` is variadic only (no
-`va_list` variant).
+### Load and bind order
 
-## Multi-`.so` singleton
-
-The host log code lives in **one** `.so` (`libsimpler_log.so`) at
-`build/lib/libsimpler_log.so` — process-global, not per arch or variant
-(the source has zero arch-specific code, so a single shared copy per host
-toolchain is sufficient). Every other `.so` that calls `LOG_*` resolves the
-symbols against this single instance via `RTLD_GLOBAL` load order.
-
-### Load order — `ChipWorker.init` (Python wrapper) → `_ChipWorker.init` (C++)
+Python seeds the extension-owned state before C++ loads consumers:
 
 ```python
-# python/simpler/task_interface.py — ChipWorker.init(device_id, bins, level)
-_preload_global(bins.simpler_log_path)              # 1: ctypes.CDLL(RTLD_GLOBAL)
-log_handle.simpler_log_init(level)                  # 2: seed HostLogger BEFORE
-                                                    #    any consumer SO is opened
-if bins.sim_context_path:
-    _preload_global(bins.sim_context_path)          # 3: ctypes.CDLL(RTLD_GLOBAL), sim only
-self._impl.init(host_path, aicpu_path, aicore_path, device_id)   # 4: C++ _ChipWorker.init
+_initialize_host_log(level)
+self._impl.init(host_path, aicpu_path, aicore_path, dispatcher_path,
+                device_id, prewarm_config, enable_sdma, sim_context_path)
 ```
 
-```cpp
-// src/common/worker/chip_worker.cpp — _ChipWorker.init(...)
-handle = dlopen(host_lib_path, RTLD_NOW | RTLD_LOCAL);  // 4a: undefined HostLogger /
-                                                        //     unified_log_* resolve via (1)
-simpler_init_fn(device_ctx, device_id,
-                aicpu_bytes, aicpu_size,
-                aicore_bytes, aicore_size);             // 4b: attach thread +
-                                                        //     transfer binaries +
-                                                        //     (onboard) sync dlog
-```
+`ChipWorker::init` then performs the module-specific work:
 
-`_preload_global` keeps a process-wide `path → ctypes.CDLL` registry so the
-RTLD_GLOBAL load happens exactly once per path (mirrors the old C++
-`std::once_flag`). `_task_interface.so` itself has no undefined `HostLogger`
-symbols, so the preload only has to precede `_ChipWorker.init`, not module
-import.
+1. On sim, load `libcpu_sim_context.so` with `RTLD_GLOBAL` once per path and
+   retain it in a process-wide registry. Global visibility remains necessary
+   for PTO simulator hooks, not for logging. Resolve its binder on the first
+   load and pass the shared state.
+2. Load `libhost_runtime.so` with `RTLD_LOCAL`.
+3. Resolve the runtime's binder from its handle and pass the shared state before
+   resolving or calling its regular C API.
+4. Call `simpler_init(...)` to configure CANN, attach the device, and take
+   ownership of executor binaries.
+5. When the runtime later loads a generated host orchestration SO or sim
+   AICore SO, resolve that SO's binder from its own handle and pass the same
+   state before invoking its entry point.
 
-Each `.so` that needs the host symbols is built **without** compiling
-`host_log.cpp` / `unified_log_host.cpp`. On macOS this requires
-`-undefined dynamic_lookup`; on Linux undefined symbols in shared libraries
-are allowed by default. CMake blocks live in:
-
-- `src/{a5,a2a3}/platform/sim/host/CMakeLists.txt`
-- `src/{a5,a2a3}/platform/sim/aicore/CMakeLists.txt`
-- `src/common/platform/sim/sim_context/CMakeLists.txt`
-
-(Onboard host `.so` builds Linux-only and needs no flag.)
-
-### Verifying singleton sharing
-
-`cpu_sim_context.cpp::pto_cpu_sim_acquire_device` emits a `LOG_INFO`
-diagnostic on first call. With `--log-level info`:
-
-```text
-[mono_ns=...][T0x...][INFO] pto_cpu_sim_acquire_device: cpu_sim_context.cpp:167] cpu_sim_context: acquired device 0
-[mono_ns=...][T0x...][INFO] init_runtime_impl:           runtime_maker.cpp:119] Registering 3 kernel(s) ...
-```
-
-Both lines carry the same `HostLogger`-formatted prefix (monotonic timestamp, thread
-id, level tag), proving that `cpu_sim_context.so` and `host_runtime.so`
-resolve to the same `HostLogger` instance. If singleton sharing were
-broken, `cpu_sim_context.so` would have its own `HostLogger` defaulting to
-TIMING and the INFO diagnostic would be silenced entirely.
+RAII guards close partially loaded DSOs when initialization fails. A successful
+host-runtime handle remains owned by `ChipWorker` and is closed during
+finalization. Successful sim-context handles remain in the process registry;
+this preserves their process-lifetime simulator state and pthread keys across
+sequential `ChipWorker` instances.
 
 ## Output formats
 
-### Host (`HostLogger::emit`)
+### Host
 
 ```text
 [mono_ns=MONOTONIC_NS][T0xTID][LEVEL] func: [file.cpp:line] message
 ```
 
-The timestamp is `CLOCK_MONOTONIC` (`steady_clock`) in nanoseconds, so it is
-comparable with host `[STRACE]` timestamps and does not jump when wall time is
-corrected. `T0x...` is `pthread_self()`.
+The prefix clock is monotonic nanoseconds, so envelope ordering and host span
+timestamps share one clock and are unaffected by wall-clock corrections.
+`T0x...` is `pthread_self()`.
 
-The first TIMING-enabled logger initialization in each process emits one
-mapping to wall time:
+The first TIMING-enabled record in a process emits a mapping to Unix wall time:
 
 ```text
 [mono_ns=...][T0x...][TIMING] clock_anchor: [CLOCK_ANCHOR] v=1 pid=<pid> mono_ns=<ns> wall_ns=<ns>
 ```
 
-For a record at monotonic time `record_ns`, its approximate absolute time is
-`wall_ns + record_ns - mono_ns`. The anchor is a TIMING record so the default
-TIMING threshold keeps it whenever host trace spans are visible. A process
-created by `fork()` emits its own anchor because ownership is keyed by PID.
+For a record at `record_ns`, the corresponding wall time is approximately
+`wall_ns + record_ns - mono_ns`. The anchor is TIMING so it is present whenever
+the default-threshold host trace is present. A forked child emits its own
+anchor because coordination is keyed by PID.
+
+`strace_timing.py` parses these anchors and adds wall-clock metadata to Chrome
+trace/swimlane JSON while leaving event timestamps monotonic and relative. See
+[Host trace](dfx/host-trace.md) for the rendering contract.
 
 ### AICPU sim
 
@@ -244,41 +223,42 @@ created by `fork()` emits its own anchor because ownership is keyed by PID.
 [ERROR]  func: [file.cpp:line] message
 ```
 
-No timestamp/tid — the AICPU sim path is its own `dev_vlog_*` writing
-straight to stderr. Onboard AICPU goes through CANN `dlog` and inherits
-its format. Device TIMING uses CANN WARN and carries a `[TIMING]` message tag.
+This is still the sim device backend, so it has no host monotonic/tid prefix.
+Onboard AICPU uses the CANN dlog format. Device TIMING uses CANN WARN and adds a
+`[TIMING]` message tag.
 
 ## Configuration flow
 
 | Stage | Action | Source |
 | ----- | ------ | ------ |
-| Python import | `_log.py` registers `TIMING` / `NUL`; sets `simpler` logger to TIMING if untouched | `python/simpler/_log.py` |
-| `Worker.init()` | reads and normalizes the `simpler` logger's effective threshold | `python/simpler/_log.py:get_current_config()` |
-| `ChipWorker.init()` (Python) | `ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)` → `simpler_log_init(level)` (seeds HostLogger) → `ctypes.CDLL(libcpu_sim_context.so, RTLD_GLOBAL)` (sim) → `_ChipWorker.init` | `python/simpler/task_interface.py` |
-| `simpler_log_init` | `HostLogger.set_level` — only writer of the host filter | `src/common/log/host_log.cpp` |
-| `_ChipWorker.init()` (C++) | `dlopen(host_runtime.so, RTLD_LOCAL)` → dlsym → `simpler_init` | `src/common/worker/chip_worker.cpp` |
-| `simpler_init` (per platform) | (onboard) `dlog_setlevel(HostLogger.cann_level())` before device-context open; then attach thread and transfer executor binaries | `src/common/platform/{onboard,sim}/host/c_api_shared.cpp` |
-| AICPU init | runner writes `HostLogger.level()` into `InitArgs`; AICPU calls `set_log_level` once | `src/{arch}/platform/onboard/aicpu/kernel.cpp` |
+| Python import | Register `TIMING` / `NUL`; default the `simpler` logger to TIMING | `python/simpler/_log.py` |
+| `Worker.init()` | Normalize the Python logger level and seed native state before the first fork | `python/simpler/worker.py` |
+| `ChipWorker.init()` | Re-seed inherited native state in a chip child, then enter C++ | `python/simpler/task_interface.py` |
+| `_ChipWorker.init()` | Load sim context and host runtime, then bind each module's logger state | `src/common/worker/chip_worker.cpp` |
+| `simpler_init` | Onboard maps the bound threshold to CANN; attach and take executor binaries | `src/common/platform/{onboard,sim}/host/c_api_shared.cpp` |
+| Nested host load | Bind generated host orchestration/AICore logger state before entry | runtime maker / sim device runner |
+| AICPU init | Snapshot the applicable device threshold | platform AICPU init |
 
-The Python-side level snapshot is **one-shot** at `Worker.init()`. Calling
-`logger.setLevel(...)` afterwards has no effect on a live `ChipWorker` —
-recreate the worker if mid-run reconfiguration is needed.
+The Python level is still sampled during worker initialization. Calling
+`logger.setLevel(...)` does not itself call the native setter; recreate or
+reinitialize the worker to apply a new Python configuration. Within a process,
+all bound host modules observe a native state update immediately instead of
+requiring threshold fan-out to every DSO.
 
 ### Forked chip subprocesses
 
-L3 / L4 hierarchical workers fork chip subprocesses. The parent snapshots the
-same threshold **before** `fork()` and passes it explicitly to
-`_chip_process_loop`, so each subprocess runs its own `ChipWorker.init` with
-that value rather than re-reading a logger the child may not have configured.
+The hierarchical parent seeds native state before `fork()` and passes the
+normalized level explicitly to `_chip_process_loop`. The child re-seeds its
+inherited copy before loading runtime modules. This covers both chip-owning L3
+workers and higher-level processes that emit scheduler spans without loading a
+chip runtime.
 
 ### Onboard AICPU severity is CANN-owned
 
-The onboard AICPU library reads severity from CANN's `dlog` (`CheckLogLevel`),
-**not** from `KernelArgs.log_level` — the one place where the single-threshold
-model does not reach directly. `simpler_init` bridges the gap: it issues
-`dlog_setlevel(-1, HostLogger.cann_level(), 0)` **unless
-`ASCEND_GLOBAL_LOG_LEVEL` is already set in the environment**, which therefore
-wins over the Python logger.
+Onboard AICPU reads severity from CANN's dlog rather than from the host state.
+`simpler_init` calls `dlog_setlevel(-1, HostLogger.cann_level(), 0)` before
+device attach unless `ASCEND_GLOBAL_LOG_LEVEL` is already set; the environment
+therefore wins over the Python logger.
 
 | Simpler threshold | CANN level |
 | ----------------- | ---------- |
@@ -289,45 +269,32 @@ wins over the Python logger.
 | `error` | ERROR |
 | `null` | NUL |
 
-CANN has no TIMING level, so TIMING and WARN both map to CANN WARN. The
-consequence is the one worth remembering: **the default TIMING threshold does
-not open CANN's INFO stream.**
-
-To configure onboard severity directly, set `ASCEND_GLOBAL_LOG_LEVEL=0..4` or
-call `dlog_setlevel(-1, level, 0)` — **before `Worker.init()`**. The AICPU
-reads CANN once, in `init_log_switch()` at the top of its init kernel, and
-latches the answer into `g_is_log_enable_*`; every later `LOG_*` tests those
-flags and never asks CANN again. Since that init kernel runs inside
-`Worker.init()`, anything set afterwards leaves device-side severity where it
-already was.
+The AICPU samples CANN during its init kernel and latches the result. Configure
+`ASCEND_GLOBAL_LOG_LEVEL` before `Worker.init()` if direct CANN control is
+needed.
 
 ## Build orchestration
 
-`libsimpler_log.so` is built **once per `pip install`** (not per
-arch/variant) before any consumer `.so`. `libcpu_sim_context.so` follows
-the same pattern (one process-global copy, sim builds only).
+There is no logger build step or logger field in `RuntimeBinaries`. Instead:
 
-| Step | File | Function |
-| ---- | ---- | -------- |
-| CMake project | `src/common/log/CMakeLists.txt` | `add_library(simpler_log SHARED ...)` |
-| Compile invocation | `simpler_setup/runtime_compiler.py` | `RuntimeCompiler.compile_simpler_log()` |
-| Build / lookup wrapper | `simpler_setup/runtime_builder.py` | `RuntimeBuilder.ensure_simpler_log()` |
-| Top-level orchestration | `simpler_setup/build_runtimes.py` | builds `simpler_log` once before the per-platform loop |
-| Output path | — | `build/lib/libsimpler_log.so` |
-| Path resolution at runtime | `simpler_setup/runtime_builder.py` | `RuntimeBinaries.simpler_log_path` |
+- `_task_interface`, all host runtimes, sim-context, and sim AICore targets add
+  `host_log.cpp` and `unified_log_host.cpp` to their source lists.
+- Host-compiled generated orchestration SOs receive the same sources through
+  `KernelCompiler.get_orchestration_cache_inputs`; those sources therefore
+  participate in the scene-test cache key.
+- AICPU orchestration built for silicon keeps the device logging ABI and does
+  not compile the host logger.
+- `libcpu_sim_context.so` remains a standalone process-global simulator helper
+  and is built once for sim platforms.
 
-`ChipWorker.init(device_id, bins)` reads `bins.simpler_log_path` (and, on sim,
-`bins.sim_context_path`) from `RuntimeBinaries` and `ctypes.CDLL(..., mode=
-RTLD_GLOBAL)`s them before handing off to the C++ `_ChipWorker.init`.
-
-## Where to look for what
+## Where to look
 
 | You want to … | Look at |
 | ------------- | ------- |
-| Change the user-facing single-knob model | `python/simpler/_log.py` + `docs/testing.md § Log levels` |
-| Change the host output format / pattern | `src/common/log/host_log.cpp::HostLogger::emit` |
-| Change the sim AICPU output format | `src/common/platform/sim/aicpu/device_log.cpp::dev_vlog_*` |
-| Change the onboard AICPU CANN dlog tagging | `src/common/platform/onboard/aicpu/device_log.cpp::dev_vlog_*` |
-| Add a new C ABI entry point (e.g. dynamic config push) | `src/common/log/include/common/unified_log.h` + `unified_log_host.cpp` + `src/common/platform/shared/aicpu/unified_log_device.cpp` |
-| Hook a new consumer `.so` | declare `target_include_directories(target PRIVATE src/common/log/include)`; for host code also link `simpler_log` (or use undefined symbol resolution at runtime via `RTLD_GLOBAL` load) |
-| Add a new level | `common/log_level.h` + `python/simpler/_log.py` + `simpler_setup/log_config.py` + AICPU `set_log_level` |
+| Change the user-facing level model | `python/simpler/_log.py` and `docs/testing.md` |
+| Change host output or STRACE grammar | `src/common/log/host_log.cpp` |
+| Change the shared-state ABI | `src/common/log/include/common/host_log_state.h` |
+| Change sim AICPU output | `src/common/platform/sim/aicpu/device_log.cpp` |
+| Change onboard CANN tagging | `src/common/platform/onboard/aicpu/device_log.cpp` |
+| Add a host logging consumer | compile both host logger sources, include `src/common/log/include`, and bind state during module init |
+| Add a level | `log_level.h`, `_log.py`, `simpler_setup/log_config.py`, and AICPU `set_log_level` |

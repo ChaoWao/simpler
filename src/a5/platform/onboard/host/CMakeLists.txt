@@ -14,6 +14,8 @@ cmake_minimum_required(VERSION 3.16.3)
 
 project(host_runtime LANGUAGES C CXX)
 
+include("${SIMPLER_CMAKE_DIR}/host_log_sources.cmake")
+
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIRS "")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
@@ -56,6 +58,7 @@ list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${PTO_ISA_ROOT}/include")
 
 # Build complete source list: core host sources + sources from CUSTOM_SOURCE_DIRS
 set(HOST_RUNTIME_SOURCES "")
+list(APPEND HOST_RUNTIME_SOURCES ${SIMPLER_HOST_LOG_SOURCES})
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/aicpu_topology_probe.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
@@ -221,6 +224,7 @@ target_link_libraries(host_runtime
         c_sec
         nnopbase
         dl
+        pthread
 )
 
 target_link_directories(host_runtime

@@ -19,6 +19,8 @@ cmake_minimum_required(VERSION 3.16.3)
 
 project(host_runtime_sim LANGUAGES C CXX)
 
+include("${SIMPLER_CMAKE_DIR}/host_log_sources.cmake")
+
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIRS "")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
@@ -40,6 +42,7 @@ endif()
 
 # Build complete source list
 set(HOST_RUNTIME_SOURCES "")
+list(APPEND HOST_RUNTIME_SOURCES ${SIMPLER_HOST_LOG_SOURCES})
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/profiling_copy.cpp"
@@ -75,7 +78,7 @@ endif()
 
 # Create shared library
 add_library(host_runtime SHARED ${HOST_RUNTIME_SOURCES})
-include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/profiling_config.cmake")
+include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
 simpler_configure_profiling(host_runtime)
 
 # C++ standard (applied only to C++ files)

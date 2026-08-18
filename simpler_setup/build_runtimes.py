@@ -156,19 +156,10 @@ def build_all(
 
         pto_isa_root_for_metadata = ensure_pto_isa_root(verbose=True)
 
-    # libsimpler_log.so and libcpu_sim_context.so are process-global (not per
-    # arch/variant) — build them once before iterating platforms. Under a
-    # sanitizer, RuntimeCompiler pins every host consumer to GCC 15, so the
-    # first platform is safe regardless of onboard/sim ordering. cpu_sim_context
-    # is only needed when building any sim platform.
+    # libcpu_sim_context.so is process-global (not per arch/variant), so build
+    # it once before iterating platforms. Under a sanitizer, RuntimeCompiler
+    # pins every host consumer to GCC 15. It is needed only for sim platforms.
     if platforms:
-        logger.info("Building simpler_log (process-global)...")
-        try:
-            RuntimeBuilder(platform=platforms[0]).ensure_simpler_log(build=True)
-        except Exception as e:
-            logger.error(f"Failed to build simpler_log: {e}")
-            raise
-
         sim_platforms = [p for p in platforms if parse_platform(p)[1] == "sim"]
         if sim_platforms:
             logger.info("Building cpu_sim_context (process-global)...")

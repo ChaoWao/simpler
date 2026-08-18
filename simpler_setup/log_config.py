@@ -11,8 +11,9 @@
 The CLI accepts a string from {debug, info, timing, warn, error, null} or a
 raw integer; we map it to a Python `logging` level and call
 `logging.getLogger("simpler").setLevel(...)`. The C++ side picks up the same
-level via `simpler_init` at `Worker.init()` time (one-shot snapshot) — there
-is no env var; the Python "simpler" logger is the single source of truth.
+level through the native state seeded at `Worker.init()` time (one-shot
+snapshot) — there is no env var; the Python "simpler" logger is the single
+source of truth.
 
 pytest is intentionally not touched — it has its own `--log-cli-level` and
 pyproject `log_cli_level` knobs.

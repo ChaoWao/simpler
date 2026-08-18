@@ -215,6 +215,10 @@ add_library(hierarchical_objs OBJECT
     ${HIERARCHICAL_SRC_DIR}/worker.cpp
     ${WORKER_SRC_DIR}/chip_run_lane.cpp
     ${WORKER_SRC_DIR}/chip_worker.cpp
+    # ChipWorker owns the process log state in production through the binding
+    # DSO. These tests link ChipWorker directly, so provide the same logger
+    # implementation while retaining their custom host-span capture adapter.
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/host_log.cpp
     # Host-side assert_impl / get_stacktrace for the unified ChipTensor's
     # always_assert (init_external and the view ops). Mirrors the binding's CMake.
     # ODR invariant: assert_impl / get_stacktrace are ALSO defined in the runtime
@@ -232,7 +236,16 @@ target_include_directories(hierarchical_objs PUBLIC
 )
 
 function(add_hierarchical_test name src)
+    set(options CUSTOM_HOST_SPAN_ADAPTER)
+    cmake_parse_arguments(TEST "${options}" "" "" ${ARGN})
+    if(TEST_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "Unknown add_hierarchical_test arguments: ${TEST_UNPARSED_ARGUMENTS}")
+    endif()
     add_executable(${name} ${src})
+    if(NOT TEST_CUSTOM_HOST_SPAN_ADAPTER)
+        target_sources(${name} PRIVATE
+            ${CMAKE_SOURCE_DIR}/../../../src/common/log/unified_log_host.cpp)
+    endif()
     target_include_directories(${name} PRIVATE ${GTEST_INCLUDE_DIRS})
     target_link_libraries(${name} PRIVATE
         hierarchical_objs
@@ -393,7 +406,7 @@ add_hierarchical_test(test_tensormap  hierarchical/test_tensormap.cpp)
 add_hierarchical_test(test_ring  hierarchical/test_ring.cpp)
 add_hierarchical_test(test_scope      hierarchical/test_scope.cpp)
 add_hierarchical_test(test_orchestrator hierarchical/test_orchestrator.cpp)
-add_hierarchical_test(test_scheduler  hierarchical/test_scheduler.cpp)
+add_hierarchical_test(test_scheduler hierarchical/test_scheduler.cpp CUSTOM_HOST_SPAN_ADAPTER)
 add_hierarchical_test(test_chip_run_lane hierarchical/test_chip_run_lane.cpp)
 add_hierarchical_test(test_remote_wire hierarchical/test_remote_wire.cpp)
 add_hierarchical_test(test_remote_endpoint hierarchical/test_remote_endpoint.cpp)
@@ -927,8 +940,8 @@ add_a5_orchestrator_runtime_test(test_a5_wiring a5/test_wiring.cpp)
 add_a5_orchestrator_runtime_test(test_a5_args_dump a5/test_args_dump.cpp)
 add_a5_runtime_test(test_a5_aicore_completion_mailbox a5/test_aicore_completion_mailbox.cpp)
 
-# Host logger silent/off behavior — no runtime deps, just compile host_log.cpp
-# alongside the test (faster than dlopen'ing libsimpler_log.so for a unit test).
+# Host logger silent/off behavior — no runtime deps, just compile the same
+# self-contained host logger sources used by production consumers.
 set(SIMPLER_LOG_DIR ${CMAKE_SOURCE_DIR}/../../../src/common/log)
 add_executable(test_host_log_off
     a5/test_host_log_off.cpp
@@ -1013,6 +1026,7 @@ add_executable(test_sim_device_log
 target_include_directories(test_sim_device_log PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${COMMON_PLATFORM_DIR}/include
+    ${SIMPLER_LOG_DIR}/include
 )
 target_link_libraries(test_sim_device_log PRIVATE
     ${GTEST_MAIN_LIB}
@@ -1098,14 +1112,6 @@ if(SIMPLER_ENABLE_HARDWARE_TESTS)
     set(HOST_RUNTIME_LIB
         "${PROJECT_ROOT}/build/lib/a2a3/onboard/tensormap_and_ringbuffer/libhost_runtime.so"
     )
-    # libsimpler_log.so must be loaded RTLD_GLOBAL before host_runtime dlopen
-    # so undefined HostLogger / unified_log_* symbols in host_runtime resolve.
-    # Mirrors what ChipWorker::init does in production. The library is
-    # process-global (one .so per host toolchain, not per arch/variant).
-    set(SIMPLER_LOG_LIB
-        "${PROJECT_ROOT}/build/lib/libsimpler_log.so"
-    )
-
     if(NOT DEFINED ENV{ASCEND_HOME_PATH})
         message(FATAL_ERROR
             "SIMPLER_ENABLE_HARDWARE_TESTS=ON requires ASCEND_HOME_PATH to be set "
@@ -1135,7 +1141,6 @@ if(SIMPLER_ENABLE_HARDWARE_TESTS)
     )
     target_compile_definitions(test_comm_lifecycle PRIVATE
         PTO_HOST_RUNTIME_LIB_PATH="${HOST_RUNTIME_LIB}"
-        SIMPLER_LOG_LIB_PATH="${SIMPLER_LOG_LIB}"
     )
     target_link_libraries(test_comm_lifecycle PRIVATE
         ${GTEST_MAIN_LIB}

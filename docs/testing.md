@@ -171,8 +171,8 @@ Profiling is enabled only on the first round to avoid overhead on subsequent ite
 
 Simpler uses one integer threshold for host, simulation, and onboard device
 logging. For implementation details
-(`libsimpler_log.so`, multi-`.so` singleton, host vs device backends, output
-formats), see [logging.md](logging.md).
+(cross-DSO shared state, self-contained logger consumers, host vs device
+backends, output formats), see [logging.md](logging.md).
 
 ### Integer layout (Python-aligned)
 
@@ -231,9 +231,9 @@ Two consequences for test authors:
 All output goes to **stderr** for host and sim AICPU; onboard AICPU lands
 wherever CANN is configured to write.
 
-For the mechanism behind all of the above — the `HostLogger` singleton, the
-`simpler_log_init` → `dlopen` ordering, the CANN mapping table, and how forked
-chip subprocesses inherit the threshold — see
+For the mechanism behind all of the above — the process-owned host-log state,
+module binding order, the CANN mapping table, and how forked chip subprocesses
+inherit the threshold — see
 [logging.md § Configuration flow](logging.md#configuration-flow).
 
 ## CLI Design Principles

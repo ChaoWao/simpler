@@ -39,11 +39,12 @@ Outputs:
       of each sub-stage across invocations), and
     * optionally a Chrome-trace / Perfetto JSON (``--trace-out``): one ``ph:"X"``
       event per span on a synthetic per-invocation lane, so each host call tree
-      renders as nested slices, or
+      renders as nested slices; host events also carry wall time when the log
+      contains a matching ``CLOCK_ANCHOR``, or
     * a host scheduler swimlane (``--swimlane``) whose lanes are the real OS
       pid/tid, except that a thread which interleaved runs is split into one lane
       per pipeline slot so each lane reads as a sequence; cross-thread handoffs
-      are Chrome flow events.
+      are Chrome flow events and host events carry matching anchor wall time.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 # The monotonic prefix is current; the wall-clock form keeps archived logs
 # parseable. The func segment excludes ':' because `LOG_TIMING` passes
@@ -214,6 +216,30 @@ def parse_spans(lines):
                 dur=int(m["dur"]),
                 attrs=m["attrs"].strip(),
             )
+
+
+def _format_wall_time(wall_ns):
+    seconds, nanoseconds = divmod(wall_ns, 1_000_000_000)
+    prefix = datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{prefix}.{nanoseconds:09d}Z"
+
+
+def _wall_time_args(pid, monotonic_ns, anchors_by_pid):
+    anchor = anchors_by_pid.get(pid)
+    if anchor is None or anchor.mono_ns > monotonic_ns:
+        return {}
+    wall_ns = anchor.to_wall_ns(monotonic_ns)
+    return {"wall_ts_ns": str(wall_ns), "wall_time": _format_wall_time(wall_ns)}
+
+
+def _trace_document(events, anchors_by_pid, **extra):
+    document = {"traceEvents": events, "displayTimeUnit": "ms", **extra}
+    if anchors_by_pid:
+        document["clockAnchors"] = [
+            {"pid": anchor.pid, "mono_ns": str(anchor.mono_ns), "wall_ns": str(anchor.wall_ns)}
+            for anchor in sorted(anchors_by_pid.values(), key=lambda item: item.pid)
+        ]
+    return document
 
 
 def legacy_spans(spans):
@@ -550,7 +576,7 @@ def _bucket_label(buckets, hid):
     return hid[:8]
 
 
-def to_chrome_trace(invocations, buckets=None):
+def to_chrome_trace(invocations, buckets=None, anchors=None):
     """Build a Chrome-trace / Perfetto event list with readable nested tracks.
 
     Each invocation gets its own named process lane ("decode inv=3" /
@@ -559,8 +585,10 @@ def to_chrome_trace(invocations, buckets=None):
     ``ts`` is a device-clock offset, the two are NOT on a common timeline and
     must not share a track. Within each track the spans nest by their own
     ``ts``/``dur`` (Perfetto renders containment as nested slices), and ``depth``
-    is carried so the structure is unambiguous.
+    is carried so the structure is unambiguous. A matching clock anchor adds
+    wall time to the event arguments without changing that monotonic axis.
     """
+    anchors_by_pid = {anchor.pid: anchor for anchor in anchors or ()}
     events = []
     lane_map = {}
     for inv in invocations:
@@ -588,6 +616,9 @@ def to_chrome_trace(invocations, buckets=None):
             {"ph": "M", "name": "thread_name", "pid": lane, "tid": dev_tid, "args": {"name": "device (clk=dev)"}}
         )
         for s in inv.spans:
+            event_args = {"inv": s.inv, "hid": s.hid, "depth": s.depth, "attrs": s.attrs}
+            if not s.is_device:
+                event_args.update(_wall_time_args(s.pid, s.ts, anchors_by_pid))
             events.append(
                 {
                     "name": s.name,
@@ -596,10 +627,10 @@ def to_chrome_trace(invocations, buckets=None):
                     "dur": s.dur / 1000.0,
                     "pid": lane,
                     "tid": dev_tid if s.is_device else host_tid,
-                    "args": {"inv": s.inv, "hid": s.hid, "depth": s.depth, "attrs": s.attrs},
+                    "args": event_args,
                 }
             )
-    return {"traceEvents": events, "displayTimeUnit": "ms"}
+    return _trace_document(events, anchors_by_pid)
 
 
 def _parsed_attrs(span):
@@ -741,7 +772,7 @@ def _assign_lanes(host_entries, host_threads):
     return lane_of, lane_names
 
 
-def to_host_swimlane(spans):
+def to_host_swimlane(spans, anchors=None):
     """Build a real-pid/tid host scheduling timeline for Perfetto.
 
     Host timestamps remain on their shared CLOCK_MONOTONIC axis. Chrome Trace
@@ -749,7 +780,9 @@ def to_host_swimlane(spans):
     alongside host events without either a false clock alignment or a huge
     empty interval. Keep those raw events in ``unalignedDeviceSpans`` for
     inspection, but do not add them to Perfetto's visible ``traceEvents``.
+    Matching anchors add wall time as host-event metadata only.
     """
+    anchors_by_pid = {anchor.pid: anchor for anchor in anchors or ()}
     # (span, parsed attributes) pairs, so the attributes travel with their span
     # through every partition below. `Span` is an unhashable dataclass, so a
     # side table would have to be keyed on identity.
@@ -794,6 +827,7 @@ def to_host_swimlane(spans):
             "os_tid": span.tid,
             **parsed,
         }
+        event_args.update(_wall_time_args(span.pid, span.ts, anchors_by_pid))
         events.append(
             {
                 "name": span.name,
@@ -836,17 +870,22 @@ def to_host_swimlane(spans):
             f"dispatch:{source.pid}:{attrs['run_id']}:{attrs.get('task_slot', attrs.get('slot'))}:"
             f"{attrs.get('group_index', -1)}:{attrs.get('worker_id', -1)}:{attrs.get('dispatch_id', 0)}"
         )
-        flow_args = {"dispatch_key": dispatch_key}
+        source_ts = min(source.ts + source.dur, destination.ts)
+        source_args = {"dispatch_key": dispatch_key, **_wall_time_args(source.pid, source_ts, anchors_by_pid)}
+        destination_args = {
+            "dispatch_key": dispatch_key,
+            **_wall_time_args(destination.pid, destination.ts, anchors_by_pid),
+        }
         events.append(
             {
                 "name": "task dispatch",
                 "cat": "host.scheduler",
                 "ph": "s",
                 "id": flow_id,
-                "ts": min(source.ts + source.dur, destination.ts) / 1000.0,
+                "ts": source_ts / 1000.0,
                 "pid": source.pid,
                 "tid": lane_of[id(source)],
-                "args": flow_args,
+                "args": source_args,
             }
         )
         events.append(
@@ -858,7 +897,7 @@ def to_host_swimlane(spans):
                 "ts": destination.ts / 1000.0,
                 "pid": destination.pid,
                 "tid": lane_of[id(destination)],
-                "args": flow_args,
+                "args": destination_args,
             }
         )
 
@@ -880,11 +919,7 @@ def to_host_swimlane(spans):
             }
         )
 
-    return {
-        "traceEvents": events,
-        "displayTimeUnit": "ms",
-        "unalignedDeviceSpans": unaligned_device_spans,
-    }
+    return _trace_document(events, anchors_by_pid, unalignedDeviceSpans=unaligned_device_spans)
 
 
 def _print_agg_tree(invs, stream=sys.stdout):
@@ -1022,6 +1057,16 @@ def main(argv=None):
             lines = f.readlines()
 
     spans = list(parse_spans(lines))
+    anchors = list(parse_clock_anchors(lines))
+    anchor_counts = defaultdict(int)
+    for anchor in anchors:
+        anchor_counts[anchor.pid] += 1
+    for pid, count in sorted(anchor_counts.items()):
+        if count > 1:
+            print(
+                f"warning: multiple [CLOCK_ANCHOR] records found for pid {pid} ({count} records); using the last one",
+                file=sys.stderr,
+            )
     heads = count_record_heads(lines)
     if heads > len(spans):
         print(
@@ -1049,12 +1094,12 @@ def main(argv=None):
 
     if args.trace_out:
         with open(args.trace_out, "w", encoding="utf-8") as f:
-            json.dump(to_chrome_trace(invocations, buckets), f)
+            json.dump(to_chrome_trace(invocations, buckets, anchors=anchors), f)
         print(f"Wrote Chrome trace: {args.trace_out} ({len(legacy)} spans)")
 
     if args.swimlane:
         with open(args.swimlane, "w", encoding="utf-8") as f:
-            json.dump(to_host_swimlane(spans), f)
+            json.dump(to_host_swimlane(spans, anchors=anchors), f)
         host_count = sum(not span.is_device for span in spans)
         print(
             f"Wrote host swimlane: {args.swimlane} "

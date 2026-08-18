@@ -33,25 +33,12 @@
 
 namespace simpler::host_trace {
 
-inline SimplerLogEmitHostSpanFn &sink_slot() noexcept {
-    static SimplerLogEmitHostSpanFn sink = nullptr;
-    return sink;
-}
-
-/** Bind this module's sink slot to the process logger before threads or forks. */
-inline void bind_sink(SimplerLogEmitHostSpanFn sink) noexcept { sink_slot() = sink; }
-
-/** False when this module has not been bound to libsimpler_log.so. */
-inline bool sink_available() noexcept { return sink_slot() != nullptr; }
-
 inline int64_t now_ns() noexcept { return simpler::log::monotonic_now_ns(); }
 
 inline void emit(
     const char *name, uint64_t invocation_id, uint64_t callable_hash, int32_t depth, int64_t timestamp_ns,
     int64_t duration_ns, const char *attributes
 ) noexcept {
-    SimplerLogEmitHostSpanFn sink = sink_slot();
-    if (sink == nullptr) return;
     const SimplerHostSpan span{
         SIMPLER_HOST_SPAN_ABI_VERSION,
         sizeof(SimplerHostSpan),
@@ -64,7 +51,7 @@ inline void emit(
         name,
         attributes
     };
-    sink(&span);
+    unified_log_host_span(&span);
 }
 
 /** Times its own scope and emits on destruction. `name` must outlive the scope;
@@ -106,8 +93,6 @@ private:
 
 namespace simpler::host_trace {
 
-inline void bind_sink(SimplerLogEmitHostSpanFn) noexcept {}
-inline bool sink_available() noexcept { return false; }
 inline int64_t now_ns() noexcept { return 0; }
 inline void emit(const char *, uint64_t, uint64_t, int32_t, int64_t, int64_t, const char *) noexcept {}
 
