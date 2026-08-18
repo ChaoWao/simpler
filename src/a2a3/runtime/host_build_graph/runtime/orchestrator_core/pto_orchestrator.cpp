@@ -636,10 +636,7 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.tensor_arg_count = static_cast<uint32_t>(tensors.size());
     definition.scalar_arg_count = static_cast<uint32_t>(scalars.size());
     size_t execution_storage_bytes = 0;
-    if (!graph_execution_storage_bytes(
-            static_cast<int32_t>(definition.task_count), definition.tensor_arg_count, definition.scalar_arg_count,
-            &execution_storage_bytes
-        ) ||
+    if (!graph_execution_storage_bytes(static_cast<int32_t>(definition.task_count), &execution_storage_bytes) ||
         execution_storage_bytes > UINT32_MAX) {
         return false;
     }
