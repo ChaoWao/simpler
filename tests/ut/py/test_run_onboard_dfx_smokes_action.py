@@ -50,6 +50,7 @@ def test_a5_dfx_smokes_adapt_to_device_count_without_overlap(tmp_path: Path, dev
               fi
               shift
             done
+            DEVICE_NUM=${DEVICE_NUM:-4}
             TASK_DEVICE=$FAKE_TASK_DEVICE bash -c "$run"
             """
         )
@@ -103,6 +104,7 @@ def test_a5_dfx_smokes_adapt_to_device_count_without_overlap(tmp_path: Path, dev
     env.update(
         {
             "DEVICE_RANGE": f"7-{6 + device_count}",
+            "DEVICE_NUM": str(device_count),
             "DFX_PLATFORM": "a5",
             "FAKE_STATE": str(state_dir),
             "FAKE_TASK_DEVICE": ",".join(str(device) for device in range(7, 7 + device_count)),
