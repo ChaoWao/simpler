@@ -170,6 +170,10 @@ python -m simpler_setup.tools.strace_timing path/to/log --trace-out strace.json
 
 # emit the L3/L4 host scheduler timeline on real OS pid/tid lanes
 python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane.json
+
+# ... and subdivide the bind stage with a runtime's own per-event records
+python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane.json \
+    --host-phase-records outputs/<case>/host_phase_records.jsonl
 ```
 
 The tool groups by `(pid, inv)`, rebuilds each invocation's tree from `depth`,
@@ -180,6 +184,17 @@ per-invocation lane, so each call renders as an isolated nested tree in
 
 `--swimlane` is a separate view. Host slices keep their real OS pid/tid, and
 task submission-to-dispatch handoffs render as flow arrows.
+
+A runtime may subdivide a stage it owns, which the markers deliberately do not
+describe — the marker grammar is a fixed per-run-stage contract, and a runtime's
+internal breakdown of one stage does not belong in it. `--host-phase-records`
+takes such a breakdown from the artifact the runtime wrote and draws each record
+inside its `simpler_run.bind`, matched on `(pid, inv)`. Both sides are the same
+`CLOCK_MONOTONIC` axis, so nothing is converted. Without the artifact the tool
+still recovers the stage's own segments from the runtime's timing log lines; where
+both are present the artifact wins, so a segment is not drawn twice. See
+[host_build_graph's profiling levels](../../src/a2a3/runtime/host_build_graph/docs/profiling_levels.md)
+for what that runtime records.
 
 **One exception, because a K-deep pipeline is not K threads.** The direct-chip
 lane drives prepare(N+1) and finalize(N) from the *same* OS thread, so a 40-run

@@ -183,19 +183,14 @@ static uint32_t get_chip_swimlane_level(void *runner_ctx) {
     return static_cast<DeviceRunnerBase *>(runner_ctx)->chip_swimlane_level();
 }
 
-static void begin_host_orchestrator_capture(void *runner_ctx, uint64_t reserve_capacity) noexcept {
-    if (runner_ctx == nullptr) return;
-    static_cast<DeviceRunnerBase *>(runner_ctx)->begin_host_orchestrator_capture(reserve_capacity);
+static void *host_phase_pool_arm(void *runner_ctx, int producer_wants_records) {
+    if (runner_ctx == nullptr) return nullptr;
+    return static_cast<DeviceRunnerBase *>(runner_ctx)->host_phase_pool_arm(producer_wants_records != 0);
 }
 
-static void record_host_orchestrator_phase(void *runner_ctx, const ChipSwimlaneHostOrchPhaseRecord *record) noexcept {
-    if (runner_ctx == nullptr || record == nullptr) return;
-    static_cast<DeviceRunnerBase *>(runner_ctx)->record_host_orchestrator_phase(*record);
-}
-
-static void finish_host_orchestrator_capture(void *runner_ctx, uint64_t expected_records) noexcept {
+static void host_phase_pool_finish(void *runner_ctx, uint64_t submitted_tasks, uint64_t invocation_id) {
     if (runner_ctx == nullptr) return;
-    static_cast<DeviceRunnerBase *>(runner_ctx)->finish_host_orchestrator_capture(expected_records);
+    static_cast<DeviceRunnerBase *>(runner_ctx)->host_phase_pool_finish(submitted_tasks, invocation_id);
 }
 
 static int setup_static_arena_wrapper(
@@ -295,9 +290,8 @@ static const HostApiOps g_host_api_ops = {
     .mark_prebuilt_runtime_arena_cached = mark_prebuilt_runtime_arena_cached_wrapper,
     .upload_chip_callable_buffer = upload_chip_callable_buffer_wrapper,
     .get_chip_swimlane_level = get_chip_swimlane_level,
-    .begin_host_orchestrator_capture = begin_host_orchestrator_capture,
-    .record_host_orchestrator_phase = record_host_orchestrator_phase,
-    .finish_host_orchestrator_capture = finish_host_orchestrator_capture,
+    .host_phase_pool_arm = host_phase_pool_arm,
+    .host_phase_pool_finish = host_phase_pool_finish,
 };
 
 /* ===========================================================================

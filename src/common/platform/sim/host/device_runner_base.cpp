@@ -675,14 +675,26 @@ void SimDeviceRunnerBase::apply_call_config(const CallConfig &config) {
     set_output_prefix(config.output_prefix);
 }
 
-void SimDeviceRunnerBase::begin_host_orchestrator_capture(uint64_t reserve_capacity) noexcept {
+HostPhaseRecordPool *SimDeviceRunnerBase::host_phase_pool_arm(bool producer_wants_records) noexcept {
     if (clock_correlation_provider_ != nullptr) {
         clock_correlation_provider_->release(false);
         clock_correlation_provider_.reset();
     }
-    chip_swimlane_collector_.begin_host_orchestrator_capture(static_cast<size_t>(reserve_capacity));
-    if (chip_swimlane_level_ != ChipSwimlaneLevel::ORCH_PHASES) return;
+    const bool swimlane_wants_records = chip_swimlane_level_ == ChipSwimlaneLevel::ORCH_PHASES;
+    chip_swimlane_collector_.set_host_orchestrated(swimlane_wants_records);
+    // arm() allocates the pool's buffers, so it can throw; this path is noexcept,
+    // where an escaping exception is std::terminate. A pass that cannot get its
+    // storage collects no records and says so by handing back nullptr.
+    HostPhaseRecordPool *pool = nullptr;
+    try {
+        pool = host_phase_records_.arm(producer_wants_records || swimlane_wants_records);
+    } catch (...) {
+        LOG_WARN("Host phase pool could not be armed; this pass collects no per-event records");
+    }
+    if (!swimlane_wants_records) return pool;
 
+    // Only the chip-swimlane reader places these records against device
+    // timestamps, so only it needs the two clocks anchored.
     try {
         clock_correlation_provider_ = simpler::dfx::make_clock_correlation_provider();
         chip_swimlane_collector_.begin_clock_correlation_session(
@@ -703,6 +715,16 @@ void SimDeviceRunnerBase::begin_host_orchestrator_capture(uint64_t reserve_capac
             chip_swimlane_collector_.finish_clock_correlation_session();
         }
     }
+    return pool;
+}
+
+void SimDeviceRunnerBase::publish_host_phase_records_to_swimlane() {
+    if (!host_phase_records_.finished()) return;
+    chip_swimlane_collector_.set_host_phase_records(
+        host_phase_records_.submit_records(), host_phase_records_.device_upload_records(),
+        host_phase_records_.submitted_tasks(), host_phase_records_.total_records(),
+        host_phase_records_.dropped_records()
+    );
 }
 
 void SimDeviceRunnerBase::finish_clock_correlation_session(bool capture_device_complete) noexcept {

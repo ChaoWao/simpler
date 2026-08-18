@@ -305,21 +305,19 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         dropped_records = int(raw_dropped_records) if raw_dropped_records is not None else None
         reported_records = host_capture.get("recorded_records")
         count_matches = reported_records is None or int(reported_records) == actual_host_record_count
-        capture_finished = host_capture.get("finished") is True
+        # Completeness is per kind: the producer records every timed host
+        # operation, of which this file carries the ones that submit a task, so
+        # `expected_records` is the pass's task count and not its record count.
+        # `pool_records`, when present, is the whole population and is carried
+        # through for context rather than checked here.
         expected_records = host_capture.get("expected_records")
         expected_count_matches = expected_records is not None and int(expected_records) == actual_host_record_count
         host_capture_complete = (
-            capture_status == "complete"
-            and dropped_records == 0
-            and count_matches
-            and capture_finished
-            and expected_count_matches
+            capture_status == "complete" and dropped_records == 0 and count_matches and expected_count_matches
         )
         validation_errors = []
         if not count_matches:
             validation_errors.append("recorded_record_count_mismatch")
-        if not capture_finished:
-            validation_errors.append("capture_not_finished")
         if expected_records is None:
             validation_errors.append("expected_record_count_missing")
         elif not expected_count_matches:
@@ -556,6 +554,19 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             converted.append(out)
         aicpu_orchestrator_phases.append(converted)
 
+    host_device_uploads = []
+    for pr in data.get("host_device_uploads") or []:
+        start_ns = int(pr.get("start_host_ns", 0))
+        end_ns = int(pr.get("end_host_ns", 0))
+        if start_ns < host_origin_ns or end_ns < start_ns:
+            raise ValueError(f"invalid host device upload: origin={host_origin_ns}, start={start_ns}, end={end_ns}")
+        out = dict(pr)
+        out["start_time_us"] = (start_ns - host_origin_ns) / 1000.0
+        out["end_time_us"] = (end_ns - host_origin_ns) / 1000.0
+        out.pop("start_host_ns", None)
+        out.pop("end_host_ns", None)
+        host_device_uploads.append(out)
+
     host_orchestrator_phases = []
     for thread_records in host_orch_phases_raw:
         converted = []
@@ -585,6 +596,8 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     if aicpu_orchestrator_phases:
         out["aicpu_orchestrator_phases"] = aicpu_orchestrator_phases
         out["orchestrator_source"] = "aicpu"
+    if host_device_uploads:
+        out["host_device_uploads"] = host_device_uploads
     if host_mode:
         if clock_alignment is None:
             raise RuntimeError("host timeline is missing its clock-alignment result")
@@ -1331,6 +1344,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     deps_kernel_map=None,
     deps_block_map=None,
     emit_overhead=False,
+    host_device_uploads=None,
 ):
     """Generate Chrome Trace Event Format JSON from task data.
 
@@ -1998,6 +2012,34 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                 "tid": 3999,
             }
         )
+
+    # Host-to-device transfer lane. These are bind segments, not orchestrator
+    # operations, and they are the ones a device timeline can say something about:
+    # drawn beside the device lanes they show the handover the device waits on,
+    # where the rest of the bind stage is host-only setup with no counterpart here.
+    if host_device_uploads:
+        events.append(
+            {"args": {"name": "Host Prepare"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 1}
+        )
+        events.append(
+            {"args": {"name": "H2D"}, "cat": "__metadata", "name": "thread_name", "ph": "M", "pid": 1, "tid": 4100}
+        )
+        for upload in host_device_uploads:
+            start_us = float(upload.get("start_time_us", 0.0))
+            end_us = float(upload.get("end_time_us", start_us))
+            events.append(
+                {
+                    "name": str(upload.get("phase", "upload")),
+                    "cat": "host_h2d",
+                    "ph": "X",
+                    "pid": 1,
+                    "tid": 4100,
+                    "ts": start_us,
+                    "dur": max(0.0, end_us - start_us),
+                    "cname": "thread_state_iowait",
+                    "args": {"bytes": upload.get("detail", 0)},
+                }
+            )
 
     # AICPU Orchestrator lane (chip_swimlane_level >= 4)
     #
@@ -2965,6 +3007,7 @@ def main():
             orchestrator_source=data.get("orchestrator_source"),
             timeline_metadata=data.get("timeline_metadata"),
             core_to_thread=data.get("core_to_thread"),
+            host_device_uploads=data.get("host_device_uploads"),
             deps_edges=deps_edges,
             deps_kernel_map=deps_kernel_map,
             deps_block_map=deps_block_map,

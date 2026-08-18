@@ -13,8 +13,6 @@
 #include <cstddef>
 #include <cstdint>
 
-struct ChipSwimlaneHostOrchPhaseRecord;
-
 /**
  * Host API function pointers for device memory operations.
  * Allows a runtime to use pluggable device-memory backends.
@@ -112,13 +110,15 @@ struct HostApiOps {
     // DeviceRunner::bind_callable_to_runtime replays onto the runtime's
     // func_id_to_addr_ before each run.
     uint64_t (*upload_chip_callable_buffer)(void *runner_ctx, const void *callable);
-    // Host-build-graph level-4 profiling. Capture begins during bind, before
-    // the device collector is initialized; the runner therefore owns the
-    // pending host vector and merges it into the eventual JSON export.
+    // Host phase records. The pool is platform-allocated but written directly by
+    // the runtime through the inline path in host/host_phase_records.h, so these
+    // two run once per prepare pass rather than once per record. Arming is the
+    // union of the two enabling conditions: the runner contributes the
+    // chip-swimlane level, `producer_wants_records` carries the producer's own
+    // (a runtime knob the platform does not read).
     uint32_t (*get_chip_swimlane_level)(void *runner_ctx);
-    void (*begin_host_orchestrator_capture)(void *runner_ctx, uint64_t reserve_capacity);
-    void (*record_host_orchestrator_phase)(void *runner_ctx, const ChipSwimlaneHostOrchPhaseRecord *record);
-    void (*finish_host_orchestrator_capture)(void *runner_ctx, uint64_t expected_records);
+    void *(*host_phase_pool_arm)(void *runner_ctx, int producer_wants_records);
+    void (*host_phase_pool_finish)(void *runner_ctx, uint64_t submitted_tasks, uint64_t invocation_id);
 };
 
 /**
@@ -195,19 +195,22 @@ public:
     uint32_t chip_swimlane_level() const {
         return ops_->get_chip_swimlane_level != nullptr ? ops_->get_chip_swimlane_level(runner_ctx_) : 0;
     }
-    void begin_host_orchestrator_capture(uint64_t reserve_capacity) const noexcept {
-        if (ops_->begin_host_orchestrator_capture != nullptr) {
-            ops_->begin_host_orchestrator_capture(runner_ctx_, reserve_capacity);
-        }
+    /**
+     * Arm this pass's host phase pool.
+     *
+     * @param producer_wants_records  the producer's own enabling condition; the
+     *                                runner ORs it with the chip-swimlane level
+     * @return HostPhaseRecordPool* to record into, or nullptr when this pass
+     *         collects no records (typed void* to keep the profiling headers out
+     *         of this one)
+     */
+    void *host_phase_pool_arm(bool producer_wants_records) const noexcept {
+        if (ops_->host_phase_pool_arm == nullptr) return nullptr;
+        return ops_->host_phase_pool_arm(runner_ctx_, producer_wants_records ? 1 : 0);
     }
-    void record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) const noexcept {
-        if (ops_->record_host_orchestrator_phase != nullptr) {
-            ops_->record_host_orchestrator_phase(runner_ctx_, &record);
-        }
-    }
-    void finish_host_orchestrator_capture(uint64_t expected_records) const noexcept {
-        if (ops_->finish_host_orchestrator_capture != nullptr) {
-            ops_->finish_host_orchestrator_capture(runner_ctx_, expected_records);
+    void host_phase_pool_finish(uint64_t submitted_tasks, uint64_t invocation_id) const noexcept {
+        if (ops_->host_phase_pool_finish != nullptr) {
+            ops_->host_phase_pool_finish(runner_ctx_, submitted_tasks, invocation_id);
         }
     }
 

@@ -408,12 +408,39 @@ public:
      */
     void set_core_types(const CoreType *types, int n);
 
-    /** Reset and append host-build-graph level-4 submit records. These calls
-     * happen during bind, before initialize(), because HBG finishes host graph
-     * construction before the device collector is provisioned. */
-    void begin_host_orchestrator_capture(size_t reserve_capacity) noexcept;
-    void record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) noexcept;
-    void finish_host_orchestrator_capture(uint64_t expected_records) noexcept;
+    /**
+     * Whether this run's orchestrator phases come from a host orchestrator.
+     *
+     * Known when the runner arms the host phase pool, which is during bind and
+     * therefore before initialize() — early enough for the device orch-phase
+     * pool to be left unallocated, which is the point. The records themselves
+     * arrive later, via set_host_phase_records().
+     */
+    void set_host_orchestrated(bool host_orchestrated) noexcept { host_orchestrated_ = host_orchestrated; }
+
+    /**
+     * Supply this run's host phase records, projected to the ones the swimlane
+     * places against device timestamps.
+     *
+     * The records are the platform runner's, not this collector's: their other
+     * reader is enabled independently. The runner hands them over before
+     * export_swimlane_json(), which is also after initialize() — unlike the
+     * records themselves, which a host-orchestrating runtime writes during bind,
+     * before the device collector is provisioned.
+     *
+     * @param submit_records   records whose kind submits a task, in order
+     * @param upload_records   records whose kind is a host-to-device transfer, in
+     *                         order; host work the device waits on, so it belongs
+     *                         beside the device lanes
+     * @param submitted_tasks  what the producer reported submitting, for the
+     *                         completeness check
+     * @param total_records    every record the producer attempted, of any kind
+     * @param dropped_records  records the pool could not store
+     */
+    void set_host_phase_records(
+        std::vector<HostPhaseRecord> submit_records, std::vector<HostPhaseRecord> upload_records,
+        uint64_t submitted_tasks, uint64_t total_records, uint64_t dropped_records
+    );
     void begin_clock_correlation_session(const char *provider_name, const char *raw_device_timestamp_unit);
     void record_clock_anchor_samples(std::vector<simpler::dfx::ClockAnchorSample> samples);
     void finish_clock_correlation_session();
@@ -540,7 +567,8 @@ private:
     // orch records (kind-tagged at routing time; no parse-time discrimination).
     std::vector<std::vector<ChipSwimlaneAicpuSchedPhaseRecord>> collected_sched_phase_records_;
     std::vector<std::vector<ChipSwimlaneAicpuOrchPhaseRecord>> collected_orch_phase_records_;
-    std::vector<ChipSwimlaneHostOrchPhaseRecord> collected_host_orch_phase_records_;
+    std::vector<HostPhaseRecord> host_submit_records_;
+    std::vector<HostPhaseRecord> host_upload_records_;
     simpler::dfx::ClockCorrelationSession clock_correlation_session_;
 
     // Core-to-thread mapping (core_id → scheduler thread index, -1 = unassigned)
@@ -558,14 +586,13 @@ private:
     uint64_t total_orch_phase_collected_{0};
     bool has_phase_data_{false};
     bool collector_shards_merged_{false};
-    bool host_orchestrator_capture_started_{false};
-    bool host_orchestrator_capture_enabled_{false};
-    enum class HostCaptureError : uint8_t { None = 0, ReserveFailed, RecordAllocationFailed };
-    HostCaptureError host_capture_error_{HostCaptureError::None};
-    uint64_t host_capture_reserve_requested_{0};
-    uint64_t host_capture_dropped_records_{0};
-    uint64_t host_capture_expected_records_{0};
-    bool host_capture_finished_{false};
+    // Set once the runner has handed over a pass's host phase records, which is
+    // also what makes the host orchestrator this run's record source.
+    bool host_orchestrated_{false};
+    bool host_phase_records_present_{false};
+    uint64_t host_phase_total_records_{0};
+    uint64_t host_phase_dropped_records_{0};
+    uint64_t host_phase_submitted_tasks_{0};
 
     size_t normalize_collector_shard(int collector_shard) const;
     void reset_collector_shards();

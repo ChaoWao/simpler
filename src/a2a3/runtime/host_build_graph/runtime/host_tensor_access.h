@@ -101,6 +101,12 @@ public:
     /** Drop every region and unregister every mapping this accessor installed. */
     void close() noexcept;
 
+    /** Mappings installed by `add` and not yet dropped by `close`. */
+    size_t mapping_count() const noexcept;
+
+    /** Total bytes covered by those mappings; excludes fallback staging views. */
+    uint64_t mapped_bytes() const noexcept;
+
 private:
     struct Impl;
     Impl *impl_;

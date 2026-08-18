@@ -20,7 +20,9 @@ from simpler_setup.tools.strace_timing import (
     bucket_by_hid,
     count_record_heads,
     group_invocations,
+    host_record_spans,
     legacy_spans,
+    load_host_phase_records,
     main,
     parse_clock_anchors,
     parse_spans,
@@ -742,3 +744,73 @@ def test_chrome_trace_cli_writes_wall_time(tmp_path):
     event = next(event for event in trace["traceEvents"] if event.get("name") == "simpler_run")
     assert event["ts"] == 0.1
     assert event["args"]["wall_ts_ns"] == "1700000000000000050"
+
+
+def test_host_phase_records_loader_keeps_only_well_formed_passes(tmp_path):
+    """Every line a consumer would choke on is dropped by the loader.
+
+    The artifact is appended to while a run is in flight, so a truncated tail is
+    ordinary. A line that parses but is not an object is malformed in the same
+    sense — the consumer indexes it as a mapping — so it is dropped here rather
+    than left for each consumer to re-check.
+    """
+    artifact = tmp_path / "host_phase_records.jsonl"
+    artifact.write_text(
+        "\n".join(
+            [
+                json.dumps({"pid": 7, "inv": 1, "records": [{"phase": "args", "start_ns": 10, "end_ns": 20}]}),
+                "null",
+                "[1, 2, 3]",
+                "42",
+                '"a string"',
+                json.dumps({"pid": 7, "inv": 2, "records": "not-a-list"}),
+                '{"pid": 7, "inv": 3, "records": [',
+                "",
+                json.dumps({"pid": 7, "inv": 4, "records": []}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    passes = load_host_phase_records([str(artifact)])
+
+    assert [one_pass["inv"] for one_pass in passes] == [1, 4]
+
+
+def test_host_record_spans_nest_bind_segments_and_orchestrator_operations(tmp_path):
+    """A record's kind decides its depth: a bind segment sits under the stage, an
+    orchestrator operation one level further in, under the segment it ran inside."""
+    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="simpler_run.bind", ts=1_000, dur=500)]))
+    passes = [
+        {
+            "pid": 9,
+            "inv": 5,
+            "records": [
+                {"phase": "args", "start_ns": 1_000, "end_ns": 1_100, "detail": 4096},
+                {"phase": "graph_submit", "start_ns": 1_200, "end_ns": 1_250, "detail": 77},
+            ],
+        }
+    ]
+
+    out, orphaned, covered = host_record_spans(spans, passes)
+
+    assert orphaned == 0
+    assert covered == frozenset({(9, 5)})
+    by_name = {span.name: span for span in out}
+    bind_depth = spans[0].depth
+    assert by_name["simpler_run.bind.args"].depth == bind_depth + 1
+    assert by_name["simpler_run.bind.host_orch.graph_submit"].depth == bind_depth + 2
+    assert by_name["simpler_run.bind.args"].ts == 1_000
+    assert by_name["simpler_run.bind.args"].dur == 100
+
+
+def test_host_record_spans_drop_passes_with_no_matching_bind(tmp_path):
+    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="simpler_run.bind", ts=1_000, dur=500)]))
+    passes = [{"pid": 9, "inv": 999, "records": [{"phase": "args", "start_ns": 1_000, "end_ns": 1_100}]}]
+
+    out, orphaned, covered = host_record_spans(spans, passes)
+
+    assert out == []
+    assert orphaned == 1
+    assert covered == frozenset()
