@@ -10092,6 +10092,14 @@ class Worker:
         ``submit_next_level_group``, ``submit_sub``, ``submit_sub_group``), per the
         ``current_resources = self._building_run_resources; if ... is not None`` idiom used
         elsewhere for the same "attach to the open run, if any" shape.
+
+        The set over-approximates in one direction on purpose: every caller records before
+        ``_admit_task_submission``, which can itself raise on a sticky ordered-cleanup failure, so an
+        identity can be recorded for a task that never went out. That costs a spurious
+        ``release_buffer`` refusal, recoverable through ``close()``, where recording after admission
+        would leave a dispatched task's identity unrecorded and let a release unlink under it. The
+        group entry points additionally validate every member before recording any, since a rejected
+        member dispatches nothing at all.
         """
         resources = self._building_run_resources
         if resources is None:
@@ -10508,29 +10516,38 @@ class Worker:
         sent it — a Buffer never goes away while a dispatched task still names it. All three
         dispatch paths retain: a SUB task maps the identity into a sub-worker process just as a
         NEXT_LEVEL task maps it into a child, so unlinking the backing under either one faults the
-        consumer on a segment that no longer has a name. The L3+ check takes
-        ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles`` before its
-        orchestration callback (where ``touched_identities`` gets populated) has run, and that
-        callback is what ``_submit_mu`` already serializes graph construction against, so taking it
-        here means the check only ever runs between callbacks, never mid-callback with a
+        consumer on a segment that no longer has a name.
+
+        The L3+ check takes ``_submit_mu`` first: a handle is visible in ``_accepted_run_handles``
+        before its orchestration callback (where ``touched_identities`` gets populated) has run, and
+        that callback is what ``_submit_mu`` already serializes graph construction against, so taking
+        it here means the check only ever runs between callbacks, never mid-callback with a
         not-yet-complete touched set. ``_abandoned_run_handles`` is scanned in the same block and
         without the ``_cleanup_published`` test: ``_publish_abandoned_run`` sets that flag and drops
         the handle from the accepted set while the run itself stays retained until native teardown
         drains it, so an abandoned run is exactly the case where the flag stops describing whether
         the device is done with the backing. Such a buffer therefore stops being releasable through
         this API for the Worker's remaining life, which strands nothing: ``close()`` reclaims it via
-        ``_release_all_buffers`` calling ``Buffer.close()`` directly. The L2 check is independent (a
-        separate run-id namespace with
-        no callback to serialize against — ``_chip_run_touched_identities`` is written atomically
-        alongside ``_chip_runs`` under ``_registry_lock`` instead, see ``_submit_l2_locked``), so the
-        two checks run sequentially rather than under one shared lock. Neither is checked once
-        ``buffer`` is already closed, matching ``Buffer.close()``'s own idempotency. The entry
-        survives a failed close, so ``_release_all_buffers`` still reports the leak at close() rather
-        than losing it here — the import-cache broadcast only fires once close() has actually
-        succeeded, so a failed release never tells a descendant to drop a mapping the owner still
-        considers live. The slot is dropped only when it still holds *this* buffer: a buffer_id
-        minted elsewhere can collide with a registry key, and evicting the live entry it names would
-        strand that backing."""
+        ``_release_all_buffers`` calling ``Buffer.close()`` directly.
+
+        The L2 check is independent (a separate run-id namespace with no callback to serialize
+        against — ``_chip_run_touched_identities`` is written atomically alongside ``_chip_runs``
+        under ``_registry_lock`` instead, see ``_submit_l2_locked``), so the two checks run
+        sequentially rather than under one shared lock. Neither is checked once ``buffer`` is already
+        closed, matching ``Buffer.close()``'s own idempotency.
+
+        The entry survives a failed close, so ``_release_all_buffers`` still reports the leak at
+        close() rather than losing it here — the import-cache broadcast only fires once close() has
+        actually succeeded, so a failed release never tells a descendant to drop a mapping the owner
+        still considers live. The converse does not hold, and is the one asymmetry here: a
+        ``Buffer.close()`` whose ``shm.close()`` raises has still unlinked the name (its ``finally``
+        runs the unlink), so the backing can be nameless while descendants keep mappings this call
+        never told them to drop. A descendant materializing that identity afterwards gets the named
+        ``FileNotFoundError`` from ``ImportRegistry.materialize``, not a silent bad mapping.
+
+        The slot is dropped only when it still holds *this* buffer: a buffer_id minted elsewhere can
+        collide with a registry key, and evicting the live entry it names would strand that
+        backing."""
         if not buffer.closed:
             # Exclusive, not shared: `shared()` would already exclude admission and so
             # satisfy the "never mid-callback" argument above, but this keeps the
@@ -10541,8 +10558,7 @@ class Worker:
                     if not handle._cleanup_published and buffer.identity in handle._resources.touched_identities:
                         raise RuntimeError(f"release_buffer: {buffer.identity} is still referenced by an in-flight run")
                 for handle in self._abandoned_run_handles:
-                    resources = handle._resources
-                    if resources is not None and buffer.identity in resources.touched_identities:
+                    if buffer.identity in handle._resources.touched_identities:
                         raise RuntimeError(
                             f"release_buffer: {buffer.identity} is still referenced by an abandoned run "
                             f"whose native teardown has not completed"
