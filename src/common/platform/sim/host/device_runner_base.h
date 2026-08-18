@@ -197,6 +197,7 @@ public:
     void *acquire_graph_execution_buffer(
         uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
     );
+    void *acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment);
     void clear_temporary_buffer();
 
     // On sim, allocate_tensor returns a plain host pointer, so the "device"
@@ -343,6 +344,10 @@ protected:
     };
     using GraphExecutionBufferMap = std::unordered_map<uint64_t, std::vector<RetainedGraphExecutionBuffer>>;
     std::array<GraphExecutionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_execution_buffers_{};
+    // Graph Definition storage, one retained block per (pipeline slot,
+    // definition key) — see HostApi acquire_graph_definition_buffer.
+    using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphExecutionBuffer>;
+    std::array<GraphDefinitionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_definition_buffers_{};
 
     // Each arena bank backs the three pooled regions (PTO2 GM heap / PTO2
     // shared memory / trb prebuilt runtime arena) for one pipeline slot. They

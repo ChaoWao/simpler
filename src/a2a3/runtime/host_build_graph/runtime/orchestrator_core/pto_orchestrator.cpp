@@ -686,6 +686,18 @@ std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t i
     return GraphHostUpload{upload.outer_slot, upload.image.data(), upload.image.size()};
 }
 
+GraphHostDefinitionList graph_host_definitions(GraphHostState &state) {
+    GraphHostDefinitionList list;
+    list.entries.reserve(state.definitions.size());
+    for (auto &[key, image] : state.definitions) {
+        const GraphDefinition *header = graph_definition(image);
+        if (header != nullptr && header->total_bytes == image.size()) {
+            list.entries.push_back(GraphHostDefinition{key, image.data(), image.size()});
+        }
+    }
+    return list;
+}
+
 static uint32_t next_fanin_seen_epoch(PTO2OrchestratorState *orch) {
     uint32_t next = orch->fanin_seen_current_epoch + 1;
     if (next == 0) {
@@ -1401,10 +1413,9 @@ bool graph_build_submission_image(
     const std::vector<std::byte> &definition_image, const CoreTaskArgs &args, std::vector<std::byte> *submission_image
 ) {
     if (submission_image == nullptr || graph_definition(definition_image) == nullptr) return false;
-    const size_t definition_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphDefinition));
-    const size_t tensors_offset = PTO2_ALIGN_UP(definition_offset + definition_image.size(), alignof(GraphTensor));
+    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
     const size_t tensor_bytes = static_cast<size_t>(args.tensor_count()) * sizeof(GraphTensor);
-    if (definition_offset > UINT32_MAX || tensors_offset > UINT32_MAX || tensors_offset > UINT32_MAX - tensor_bytes) {
+    if (tensors_offset > UINT32_MAX || tensors_offset > UINT32_MAX - tensor_bytes) {
         return false;
     }
     const size_t tensors_end = tensors_offset + tensor_bytes;
@@ -1416,7 +1427,6 @@ bool graph_build_submission_image(
         return false;
     }
     submission_image->assign(total_bytes, std::byte{0});
-    std::memcpy(submission_image->data() + definition_offset, definition_image.data(), definition_image.size());
     auto *tensors = reinterpret_cast<GraphTensor *>(submission_image->data() + tensors_offset);
     for (int32_t i = 0; i < args.tensor_count(); ++i)
         tensors[i] = graph_tensor_pack(args.tensor(i).ref());
@@ -1430,8 +1440,8 @@ bool graph_build_submission_image(
     const GraphDefinition &definition = *graph_definition(definition_image);
     GraphSubmission submission{};
     submission.graph_key = definition.full_key;
+    submission.definition_hash = definition.content_hash;
     submission.total_bytes = static_cast<uint32_t>(submission_image->size());
-    submission.definition_offset = static_cast<uint32_t>(definition_offset);
     submission.tensors_offset = static_cast<uint32_t>(tensors_offset);
     submission.tensor_count = static_cast<uint32_t>(args.tensor_count());
     submission.scalars_offset = static_cast<uint32_t>(scalars_offset);

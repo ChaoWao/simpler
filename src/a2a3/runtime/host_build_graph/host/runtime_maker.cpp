@@ -422,6 +422,50 @@ bool upload_graph_submissions(
     std::unordered_map<uint64_t, uint32_t> occurrences;
     uploaded_bytes = 0;
     const size_t count = graph_host_upload_count(graph_state);
+    // Pass 1: upload each distinct Definition once as a shared device object
+    // ([GraphDefinitionHeader][Definition image]) keyed by content identity.
+    // Submissions reference the object's GM address, so this pass completing
+    // before any submission is uploaded is what makes the reference safe —
+    // the device boots only after both passes.
+    GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
+    struct UploadedDefinition {
+        void *device_object;               // GM address; host must not dereference
+        const GraphDefinition *host_view;  // the host-side image the object was built from
+    };
+    std::unordered_map<uint64_t, UploadedDefinition> definition_objects;
+    for (const GraphHostDefinition &entry : definitions.entries) {
+        if (entry.data == nullptr || entry.bytes < sizeof(GraphDefinition)) continue;
+        const auto *definition = reinterpret_cast<const GraphDefinition *>(entry.data);
+        if (definition->total_bytes != entry.bytes || definition->full_key != entry.full_key) continue;
+        const size_t object_bytes = sizeof(GraphDefinitionHeader) + entry.bytes;
+        void *object =
+            api->acquire_graph_definition_buffer(entry.full_key, object_bytes, alignof(GraphDefinitionHeader));
+        if (object == nullptr) {
+            LOG_ERROR(
+                "host-orch: failed to retain %zu bytes for Graph Definition key=%#llx", object_bytes,
+                static_cast<unsigned long long>(entry.full_key)
+            );
+            return false;
+        }
+        std::vector<std::byte> staging(object_bytes, std::byte{0});
+        auto *header = reinterpret_cast<GraphDefinitionHeader *>(staging.data());
+        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
+        header->verify_state.store(
+            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
+        );
+        header->definition_bytes = static_cast<uint32_t>(entry.bytes);
+        header->content_hash = definition->content_hash;
+        header->full_key = definition->full_key;
+        std::memcpy(staging.data() + sizeof(GraphDefinitionHeader), entry.data, entry.bytes);
+        if (api->copy_to_device(object, staging.data(), object_bytes) != 0) {
+            LOG_ERROR("host-orch: failed to upload Graph Definition object");
+            return false;
+        }
+        definition_objects.emplace(definition->content_hash, UploadedDefinition{object, definition});
+        uploaded_bytes += object_bytes;
+    }
+
+    // Pass 2: per-submission execution storage + the small reference image.
     for (size_t index = 0; index < count; ++index) {
         std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
         if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
@@ -435,13 +479,21 @@ bool upload_graph_submissions(
             LOG_ERROR("host-orch: Graph submission size does not match its POD image");
             return false;
         }
-        const GraphDefinition *definition = graph_submission_definition(*submission);
+        auto object_it = definition_objects.find(submission->definition_hash);
+        if (object_it == definition_objects.end() || object_it->second.device_object == nullptr) {
+            LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
+            return false;
+        }
+        // Capacities come from the host-side Definition image the device
+        // object was built from; the GM object itself is never dereferenced
+        // on the host.
+        const GraphDefinition *definition = object_it->second.host_view;
         size_t execution_bytes = 0;
-        if (definition == nullptr || definition->full_key != submission->graph_key || definition->task_count == 0 ||
-            definition->task_count > GRAPH_MAX_NODES ||
+        if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
+            definition->full_key != submission->graph_key ||
             !graph_execution_storage_bytes(
                 static_cast<int32_t>(definition->task_count), definition->tensor_arg_count,
-                definition->scalar_arg_count, definition->total_bytes, &execution_bytes
+                definition->scalar_arg_count, &execution_bytes
             )) {
             LOG_ERROR("host-orch: invalid Graph execution storage request");
             return false;
@@ -457,6 +509,7 @@ bool upload_graph_submissions(
             );
             return false;
         }
+        submission->definition_addr = reinterpret_cast<uint64_t>(object_it->second.device_object);
         submission->execution_storage = reinterpret_cast<uint64_t>(execution_storage);
         submission->execution_storage_bytes = execution_bytes;
         submission->local_execution = 0;
