@@ -194,9 +194,6 @@ public:
     int device_memset(void *dev_ptr, int value, size_t bytes);
     void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, size_t *size);
     void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, size_t size);
-    void *acquire_graph_execution_buffer(
-        uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
-    );
     void *acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment);
     void clear_temporary_buffer();
 
@@ -316,7 +313,7 @@ protected:
     // Bulk-free the shared callable / chip-callable / orch-SO state. Subclass
     // finalize() calls this before mem_alloc_.finalize(). Idempotent.
     void release_callable_state();
-    void release_graph_execution_buffers();
+    void release_graph_definition_buffers();
 
     // --- Shared state (protected so subclass execution / init_* / finalize()
     // can read or write directly) ----------------------------------------
@@ -337,16 +334,16 @@ protected:
     MemoryAllocator mem_alloc_;
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
-    struct RetainedGraphExecutionBuffer {
+    // One retained device block: the raw allocation plus the aligned address
+    // handed out. Backs the Graph Definition cache below.
+    struct RetainedGraphBuffer {
         void *allocation{nullptr};
         void *aligned_addr{nullptr};
         size_t capacity{0};
     };
-    using GraphExecutionBufferMap = std::unordered_map<uint64_t, std::vector<RetainedGraphExecutionBuffer>>;
-    std::array<GraphExecutionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_execution_buffers_{};
     // Graph Definition storage, one retained block per (pipeline slot,
     // definition key) — see HostApi acquire_graph_definition_buffer.
-    using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphExecutionBuffer>;
+    using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphBuffer>;
     std::array<GraphDefinitionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_definition_buffers_{};
 
     // Each arena bank backs the three pooled regions (PTO2 GM heap / PTO2

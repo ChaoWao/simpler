@@ -144,9 +144,6 @@ public:
     int device_memset(void *dev_ptr, int value, std::size_t bytes);
     void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, std::size_t *size);
     void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, std::size_t size);
-    void *acquire_graph_execution_buffer(
-        uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, std::size_t bytes, std::size_t alignment
-    );
     void *
     acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, std::size_t bytes, std::size_t alignment);
     void clear_temporary_buffer();
@@ -916,16 +913,16 @@ protected:
      * @return 0 on success, first nonzero rc encountered otherwise.
      */
     int finalize_common();
-    void release_graph_execution_buffers();
+    void release_graph_definition_buffers();
 
     /**
-     * Drop the retained graph-execution buffers without freeing them.
+     * Drop the retained graph-definition buffers without freeing them.
      *
-     * The fatal counterpart of release_graph_execution_buffers(): a force reset
+     * The fatal counterpart of release_graph_definition_buffers(): a force reset
      * has already invalidated every allocation, so only the host-side map is
      * cleared.
      */
-    void abandon_graph_execution_buffers();
+    void abandon_graph_definition_buffers();
 
     /**
      * Clear host-side ownership after a fatal device failure without issuing
@@ -1076,18 +1073,18 @@ protected:
     // the grow/pack logic lives in trb bind.
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<std::size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
-    struct RetainedGraphExecutionBuffer {
+    // One retained device block: the raw allocation plus the aligned address
+    // handed out. Backs the Graph Definition cache below.
+    struct RetainedGraphBuffer {
         void *allocation{nullptr};
         void *aligned_addr{nullptr};
         std::size_t capacity{0};
     };
-    using GraphExecutionBufferMap = std::unordered_map<uint64_t, std::vector<RetainedGraphExecutionBuffer>>;
-    std::array<GraphExecutionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_execution_buffers_{};
     // Graph Definition storage, one retained block per (pipeline slot,
     // definition key) — see HostApi acquire_graph_definition_buffer. Keyed by
     // content identity rather than occurrence: every submission of one run
     // references the same device-resident Definition.
-    using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphExecutionBuffer>;
+    using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphBuffer>;
     std::array<GraphDefinitionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_definition_buffers_{};
 
     // One independently committed set of the three pooled device regions. A

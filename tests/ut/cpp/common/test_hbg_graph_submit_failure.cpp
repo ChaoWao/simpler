@@ -32,17 +32,24 @@ protected:
     GraphHostStatePtr graph_state;
     std::vector<char> gm_heap;
 
+    // A Graph task's heap allocation covers its nodes' packed outputs *and* the
+    // execution storage the device materializes into, so the pool has to hold a
+    // GraphExecution header plus one GraphNodeStorage (~5 KB) on top of the
+    // outputs. 4 KB used to be enough when the storage came from a separate
+    // device allocation.
+    static constexpr size_t HEAP_BYTES = 64 * 1024;
+
     void SetUp() override {
         sm_handle = PTO2SharedMemoryHandle::create_and_init_default(sm_arena);
         ASSERT_NE(sm_handle, nullptr);
-        gm_heap.resize(4096 * PTO2_MAX_RING_DEPTH);
+        gm_heap.resize(HEAP_BYTES * PTO2_MAX_RING_DEPTH);
 
         orch_layout = PTO2OrchestratorState::reserve_layout(runtime_arena, static_cast<int32_t>(PTO2_TASK_WINDOW_SIZE));
         sched_layout = PTO2SchedulerState::reserve_layout(runtime_arena);
         ASSERT_NE(runtime_arena.commit(), nullptr);
 
         ASSERT_TRUE(orch.init_data_from_layout(
-            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), 4096, PTO2_TASK_WINDOW_SIZE
+            orch_layout, runtime_arena, sm_handle->sm_base, gm_heap.data(), HEAP_BYTES, PTO2_TASK_WINDOW_SIZE
         ));
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);

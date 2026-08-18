@@ -51,24 +51,14 @@ struct HostApiOps {
     // {nullptr, 0} when nothing is retained yet.
     void (*get_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void *addr, size_t size);
-    // Runner-owned Graph execution storage. The platform keeps one grow-only
-    // block per (pipeline slot, Graph key, occurrence index), allocates it
-    // through the tracked device MemoryAllocator, and releases every block at
-    // Worker finalization. `alignment` must be a power of two. Repeated calls
-    // return the same aligned GM address while the retained capacity is large
-    // enough; a growth request replaces only that entry. Unused by runtimes
-    // without host-built Graph execution.
-    void *(*acquire_graph_execution_buffer)(
-        void *runner_ctx, uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes,
-        size_t alignment
-    );
     // Runner-owned Graph Definition storage, keyed by the Definition's content
     // identity (full_key, content_hash, total_bytes folded into one key by the
-    // caller). Same grow-only retention contract as
-    // acquire_graph_execution_buffer: one block per key, reused while capacity
+    // caller). Grow-only retention: one block per key, reused while capacity
     // fits, a growth request replaces the entry, all blocks released at Worker
-    // finalization. Lets every submission of one run reference a single
-    // device-resident Definition instead of each carrying a full copy.
+    // finalization. `alignment` must be a power of two. Lets every submission
+    // of one run reference a single device-resident Definition instead of each
+    // carrying a full copy. Execution storage needs no counterpart here — it is
+    // the tail of the outer Graph task's own heap allocation.
     void *(*acquire_graph_definition_buffer)(
         void *runner_ctx, uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
     );
@@ -167,13 +157,6 @@ public:
     }
     void set_retained_temp_buffer(void *addr, size_t size) const {
         ops_->set_retained_temp_buffer(runner_ctx_, pipeline_slot_, addr, size);
-    }
-    void *
-    acquire_graph_execution_buffer(uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment) const {
-        if (ops_->acquire_graph_execution_buffer == nullptr) return nullptr;
-        return ops_->acquire_graph_execution_buffer(
-            runner_ctx_, pipeline_slot_, graph_key, occurrence, bytes, alignment
-        );
     }
     void *acquire_graph_definition_buffer(uint64_t key, size_t bytes, size_t alignment) const {
         if (ops_->acquire_graph_definition_buffer == nullptr) return nullptr;

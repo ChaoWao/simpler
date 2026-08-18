@@ -237,39 +237,43 @@ For a cache hit, the Host Orchestrator:
 
 1. validates the fixed boundary contract;
 2. reserves one task-window slot;
-3. reserves one heap block large enough for every internal intermediate;
+3. reserves one heap block large enough for every internal intermediate, plus
+   the Definition's `execution_storage_bytes` for the execution the device
+   materializes into;
 4. computes only external fanin and boundary tensormap effects;
 5. emits one outer `GRAPH` task;
-6. stages the exact-size POD submission image for upload after orchestration;
-7. asks the host runtime for an aligned execution block sized from the recorded
-   node count, Tensor-address and scalar patch capacities, and Definition
-   bytes, then writes that device address into the submission wire image.
+6. stages the exact-size POD submission image for upload after orchestration.
 
 Internal nodes consume no ring task-window slots. Their descriptor, payload,
-and slot state are built in host-owned GM. The runtime retains one grow-only
-block per `(pipeline slot, Graph key, occurrence index)`: repeated runs on the
-same slot reuse the allocation, repeated uses of one key within a run receive
-distinct blocks, and the two pipeline slots never share an active block. Every
-allocation goes through the Worker's tracked `MemoryAllocator`, contributes to
-`committed_device_memory()`, and is released when the Worker is finalized.
+and slot state live in the tail of the outer `GRAPH` task's own heap block,
+past `required_heap`: one `PTO2TaskAllocator::alloc` covers both halves the
+task owns, so the storage is reclaimed with the task's packed outputs and
+needs no separate device allocation, retention keying or release path.
 
-The `GraphSubmission` wire POD carries the aligned device address and usable
-byte capacity explicitly. The Scheduler validates both before placement-
-constructing `GraphExecution`; it never allocates execution storage from the
-AICPU process heap. A block whose prior Definition key and content hash match
-retains the local Definition, static node fields, and the Tensor-address and
-scalar patch tables generated during its first materialization. That
-graph-affine replay skips
+The execution address is therefore not on the wire — both sides compute
+`packed_buffer_base + required_heap` and read the size from the Definition. The
+Scheduler validates that the region lies inside the outer task's allocation
+before placement-constructing `GraphExecution`; it never allocates execution
+storage from the AICPU process heap. Because those bytes are ordinary reclaimed
+heap, a stale `GRAPH_EXECUTION_STORAGE_MAGIC` can appear there; reuse
+additionally requires the recorded Definition key, content hash and node/patch
+counts to match, which only a genuine completed execution of the same Graph
+satisfies, so anything else falls through to a full rebuild.
+
+A block that does match retains the local Definition, static node fields, and
+the Tensor-address and scalar patch tables generated during its first
+materialization. That graph-affine replay skips
 topology binding, per-node count/offset validation, tensor-source
 classification, tensor wire validation, static field stores, and static scalar
 copies. It refreshes only task IDs, packed-buffer bases, boundary/internal
 tensor addresses, boundary scalar bindings, scheduling state, dispatch
 atomics, and wake registrations.
 
-The retained blocks are addressed directly by `(pipeline slot, Graph key,
-occurrence index)`. Occurrence numbering restarts deterministically for every
-run, so repeated layers map back to the same block in their pipeline slot;
-affinity does not depend on a recycler selecting a recently freed block.
+Affinity follows the allocation rather than a retention key: a replay lands on
+the previous execution exactly when the outer task's `packed_buffer_base`
+repeats, which an unchanged task layout produces because the arena base is
+stable across runs and the allocator is a deterministic bump. It does not
+depend on a recycler selecting a recently freed block.
 
 ## Scheduler flow
 
