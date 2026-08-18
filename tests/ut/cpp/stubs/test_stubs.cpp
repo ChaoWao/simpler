@@ -34,6 +34,8 @@
 
 extern "C" {
 
+int unified_log_host_span_enabled() { return 0; }
+
 void unified_log_host_span(const struct SimplerHostSpan *) {}
 
 void unified_log_error(const char *func, const char *fmt, ...) {

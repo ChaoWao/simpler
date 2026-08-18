@@ -22,6 +22,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -137,6 +138,21 @@ TEST(HostLogTest, NulLevelMutesAllSeverities) {
     });
     EXPECT_EQ(captured.out, "");
     EXPECT_EQ(captured.err, "");
+}
+
+TEST(HostLogTest, HostSpanEnabledFollowsTimingVisibility) {
+    for (const auto &[level, expected] : {
+             std::pair{LogLevel::DEBUG, 1},
+             std::pair{LogLevel::INFO, 1},
+             std::pair{LogLevel::TIMING, 1},
+             std::pair{LogLevel::WARN, 0},
+             std::pair{LogLevel::ERROR, 0},
+             std::pair{LogLevel::NUL, 0},
+         }) {
+        HostLogger::get_instance().set_level(level);
+        EXPECT_EQ(unified_log_host_span_enabled(), expected);
+    }
+    HostLogger::get_instance().set_level(LogLevel::TIMING);
 }
 
 TEST(HostLogTest, ErrorLevelEmitsErrorOnly) {
@@ -334,6 +350,20 @@ TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
     EXPECT_LE(record.size(), static_cast<size_t>(_POSIX_PIPE_BUF));
     ASSERT_GE(record.size(), 2u);
     EXPECT_EQ(record[record.size() - 2], '~');
+}
+
+TEST(HostLogTest, DisabledHostSpanProducesNoRecord) {
+    const SimplerHostSpan span{
+        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 7, 0x1234, 0, 0, 100, 25, "host.dispatch",
+        "run_id=7 role=scheduler"
+    };
+
+    auto captured = run_with_config(LogLevel::WARN, [&] {
+        unified_log_host_span(&span);
+    });
+
+    EXPECT_EQ(captured.out, "");
+    EXPECT_EQ(captured.err, "");
 }
 
 TEST(HostLogTest, AllHostSpanEmitPathsPreserve64BitInvocationIds) {

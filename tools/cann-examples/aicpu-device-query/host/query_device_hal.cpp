@@ -43,6 +43,7 @@
 #include <runtime/runtime/rts/rts_kernel.h>
 
 #include "aicpu_topology_probe.h"
+#include "host_log.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -314,6 +315,9 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "usage: %s <device_id> [--json]\n", argv[0]);
         return 1;
     }
+    // This executable owns its logger state; no loader binds it.
+    HostLogger::get_instance().set_level(simpler::log::LogLevel::TIMING);
+
     int device_id = std::atoi(argv[1]);
     const bool json_output = argc == 3;
 

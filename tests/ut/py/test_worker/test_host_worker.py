@@ -2760,6 +2760,38 @@ class TestRunHandle:
         expected_name = f"{worker._host_span_prefix}.graph_build"
         assert emitted == [(expected_name, 1, 0, 0, 100, 175, "run_id=1 role=facade")]
 
+    def test_host_spans_active_combines_build_and_runtime_gates(self, monkeypatch):
+        monkeypatch.setattr(worker_mod, "HOST_STRACE_ENABLED", True)
+        monkeypatch.setattr(worker_mod, "_native_host_spans_active", lambda: False)
+        assert not worker_mod._host_spans_active()
+
+        monkeypatch.setattr(worker_mod, "_native_host_spans_active", lambda: True)
+        assert worker_mod._host_spans_active()
+
+        monkeypatch.setattr(worker_mod, "HOST_STRACE_ENABLED", False)
+
+        def unexpected_runtime_query():
+            raise AssertionError("a trace-disabled build queried the runtime gate")
+
+        monkeypatch.setattr(worker_mod, "_native_host_spans_active", unexpected_runtime_query)
+        assert not worker_mod._host_spans_active()
+
+    def test_disabled_host_spans_skip_graph_build_instrumentation(self, monkeypatch):
+        worker, _events = self._submission_failure_worker(failures=0)
+        monkeypatch.setattr(worker_mod, "_host_spans_active", lambda: False)
+
+        def unexpected_trace_work(*_args):
+            raise AssertionError("disabled host spans performed trace work")
+
+        monkeypatch.setattr(worker_mod.time, "monotonic_ns", unexpected_trace_work)
+        monkeypatch.setattr(worker_mod, "_emit_host_span", unexpected_trace_work)
+
+        def bad_graph(*_args):
+            raise ValueError("bad graph")
+
+        with pytest.raises(ValueError, match="bad graph"):
+            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
+
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)
         graph_error = ValueError("bad graph")

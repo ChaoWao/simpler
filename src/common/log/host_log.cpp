@@ -157,10 +157,13 @@ long host_trace_tid() {
 
 namespace {
 
+// A private logger stays silent until its owner seeds this state or its loader
+// binds the process-owned state. Missing binding is therefore observable as an
+// absent module stream rather than output filtered at the wrong threshold.
 SimplerHostLogState g_module_log_state{
     SIMPLER_HOST_LOG_STATE_ABI_VERSION,
     sizeof(SimplerHostLogState),
-    static_cast<int32_t>(LogLevel::TIMING),
+    static_cast<int32_t>(LogLevel::NUL),
     0,
 };
 
@@ -309,6 +312,7 @@ void HostLogger::log(LogLevel level, const char *func, const char *fmt, ...) {
 }
 
 void HostLogger::log_host_span(const SimplerHostSpan *span) {
+    if (!is_enabled(LogLevel::TIMING)) return;
     if (span == nullptr || span->abi_version != SIMPLER_HOST_SPAN_ABI_VERSION ||
         span->struct_size < sizeof(SimplerHostSpan) || span->name == nullptr) {
         return;

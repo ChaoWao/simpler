@@ -22,6 +22,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -442,7 +443,8 @@ void WorkerThread::dispatch_prepared(WorkerDispatch d) {
 WorkerThread::SubmitDispatchResult
 WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expected_run_id) {
 #if SIMPLER_HOST_STRACE
-    const int64_t trace_start_ns = simpler::host_trace::now_ns();
+    const bool trace_enabled = simpler::host_trace::enabled();
+    const int64_t trace_start_ns = trace_enabled ? simpler::host_trace::now_ns() : 0;
 #endif
     std::unique_lock<std::mutex> admission_lk(admission_mu_);
     if (shutdown_.load(std::memory_order_acquire)) {
@@ -464,9 +466,14 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
     ++next_dispatch_id_;
     inflight_.fetch_add(1, std::memory_order_release);
 #if SIMPLER_HOST_STRACE
-    const RunId trace_run = trace_run_id(ring_, d.task_slot);
-    const uint64_t trace_hash = trace_callable_hash(ring_, d.task_slot);
-    const std::string trace_lease = trace_lease_attrs(ring_, d.task_slot);
+    RunId trace_run = INVALID_RUN_ID;
+    uint64_t trace_hash = 0;
+    std::string trace_lease;
+    if (trace_enabled) {
+        trace_run = trace_run_id(ring_, d.task_slot);
+        trace_hash = trace_callable_hash(ring_, d.task_slot);
+        trace_lease = trace_lease_attrs(ring_, d.task_slot);
+    }
 #endif
     try {
         endpoint_->submit_progress(ring_, d);
@@ -477,12 +484,15 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
     }
     admission_lk.unlock();
 #if SIMPLER_HOST_STRACE
-    const int64_t trace_end_ns = simpler::host_trace::now_ns();
-    const std::string trace_attrs = trace_dispatch_attrs(trace_run, d, endpoint_->caps(), "scheduler") + trace_lease;
-    simpler::host_trace::emit(
-        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Dispatch), trace_run, trace_hash, 0,
-        trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
-    );
+    if (trace_enabled) {
+        const int64_t trace_end_ns = simpler::host_trace::now_ns();
+        const std::string trace_attrs =
+            trace_dispatch_attrs(trace_run, d, endpoint_->caps(), "scheduler") + trace_lease;
+        simpler::host_trace::emit(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Dispatch), trace_run, trace_hash, 0,
+            trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
+        );
+    }
 #endif
     return SubmitDispatchResult::SUBMITTED;
 }
@@ -645,9 +655,15 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
     }
 
 #if SIMPLER_HOST_STRACE
-    const RunId trace_run = trace_run_id(ring_, dispatch.task_slot);
-    const uint64_t trace_hash = trace_callable_hash(ring_, dispatch.task_slot);
-    std::string complete_attrs = trace_dispatch_attrs(trace_run, dispatch, endpoint_->caps(), "worker");
+    const bool trace_enabled = simpler::host_trace::enabled();
+    RunId trace_run = INVALID_RUN_ID;
+    uint64_t trace_hash = 0;
+    std::string complete_attrs;
+    if (trace_enabled) {
+        trace_run = trace_run_id(ring_, dispatch.task_slot);
+        trace_hash = trace_callable_hash(ring_, dispatch.task_slot);
+        complete_attrs = trace_dispatch_attrs(trace_run, dispatch, endpoint_->caps(), "worker");
+    }
 #endif
     WorkerCompletion completion = progress.completion;
     if (accepted_dispatch_ids_.erase(dispatch.dispatch_id) == 0) {
@@ -672,11 +688,14 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
     }
 
 #if SIMPLER_HOST_STRACE
-    complete_attrs += " outcome=" + std::to_string(static_cast<int32_t>(completion.outcome));
-    simpler::host_trace::SpanScope complete_trace(
-        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Complete), trace_run, trace_hash, 0,
-        std::move(complete_attrs)
-    );
+    std::optional<simpler::host_trace::SpanScope> complete_trace;
+    if (trace_enabled) {
+        complete_attrs += " outcome=" + std::to_string(static_cast<int32_t>(completion.outcome));
+        complete_trace.emplace(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Complete), trace_run, trace_hash, 0,
+            std::move(complete_attrs)
+        );
+    }
 #endif
     on_complete_(std::move(completion));
     {
@@ -722,10 +741,14 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
     }
 
 #if SIMPLER_HOST_STRACE
-    simpler::host_trace::SpanScope frame_submit_trace(
-        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::FrameSubmit), state.run_id,
-        trace_callable_hash(ring, dispatch.task_slot), 0, trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
-    );
+    std::optional<simpler::host_trace::SpanScope> frame_submit_trace;
+    if (simpler::host_trace::enabled()) {
+        frame_submit_trace.emplace(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::FrameSubmit), state.run_id,
+            trace_callable_hash(ring, dispatch.task_slot), 0,
+            trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
+        );
+    }
 #endif
 
     // The lease slot id is a native pipeline slot bounded by the runtime's
@@ -986,16 +1009,19 @@ bool LocalMailboxEndpoint::activate_progress(RunId run_id) {
         FrameRecord &record = frames_[index];
         if (!record.occupied || !record.dispatch.prepare_only || record.run_id != run_id) continue;
 #if SIMPLER_HOST_STRACE
-        std::ostringstream activate_attrs;
-        activate_attrs << "run_id=" << run_id << " task_slot=" << record.dispatch.task_slot
-                       << " group_index=" << record.dispatch.group_index << " worker_id=" << caps_.worker_id
-                       << " dispatch_id=" << record.dispatch.dispatch_id
-                       << " endpoint_kind=" << endpoint_kind_name(caps_.kind)
-                       << " prepare_only=" << static_cast<int>(record.dispatch.prepare_only) << " role=worker";
-        simpler::host_trace::SpanScope activate_trace(
-            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Activate), run_id, 0, 0,
-            activate_attrs.str()
-        );
+        std::optional<simpler::host_trace::SpanScope> activate_trace;
+        if (simpler::host_trace::enabled()) {
+            std::ostringstream activate_attrs;
+            activate_attrs << "run_id=" << run_id << " task_slot=" << record.dispatch.task_slot
+                           << " group_index=" << record.dispatch.group_index << " worker_id=" << caps_.worker_id
+                           << " dispatch_id=" << record.dispatch.dispatch_id
+                           << " endpoint_kind=" << endpoint_kind_name(caps_.kind)
+                           << " prepare_only=" << static_cast<int>(record.dispatch.prepare_only) << " role=worker";
+            activate_trace.emplace(
+                simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Activate), run_id, 0, 0,
+                activate_attrs.str()
+            );
+        }
 #endif
         record.activation_requested = true;
         char *frame = task_frame(index);

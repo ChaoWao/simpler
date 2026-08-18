@@ -9,34 +9,21 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#pragma once
+#include <gtest/gtest.h>
 
-#include <stdint.h>
+#include "common/host_span.h"
+#include "common/log_level.h"
+#include "host_log.h"
 
-#define SIMPLER_HOST_SPAN_ABI_VERSION 1U
+TEST(HostLogUnboundTest, PrivateModuleStateStartsSilent) {
+    EXPECT_EQ(HostLogger::get_instance().level(), static_cast<int>(simpler::log::LogLevel::NUL));
+    EXPECT_EQ(unified_log_host_span_enabled(), 0);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef struct SimplerHostSpan {
-    uint32_t abi_version;
-    uint32_t struct_size;
-    uint64_t invocation_id;
-    uint64_t callable_hash;
-    int32_t depth;
-    int32_t reserved;
-    int64_t timestamp_ns;
-    int64_t duration_ns;
-    const char *name;
-    const char *attributes;
-} SimplerHostSpan;
-
-/* Link-time adapters used by native Host consumers. The enabled query is the
- * cheap pre-format gate for TIMING-level spans; emission rechecks the level. */
-int unified_log_host_span_enabled(void);
-void unified_log_host_span(const SimplerHostSpan *span);
-
-#ifdef __cplusplus
+    const SimplerHostSpan span{
+        SIMPLER_HOST_SPAN_ABI_VERSION, sizeof(SimplerHostSpan), 1, 0, 0, 0, 100, 25, "host.dispatch", "run_id=1"
+    };
+    testing::internal::CaptureStderr();
+    HostLogger::get_instance().log(simpler::log::LogLevel::ERROR, "unbound", "must stay silent");
+    unified_log_host_span(&span);
+    EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
 }
-#endif

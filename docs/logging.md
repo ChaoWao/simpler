@@ -67,6 +67,14 @@ host logger translation units directly. This makes each DSO self-contained:
 loading a runtime can no longer fail because a logger artifact or a global
 logger symbol was missing.
 
+Each bindable private logger starts with a `NUL` fallback threshold and stays
+silent until its loader binds the process-owned state. The `_task_interface`
+owner is seeded with the configured user-facing threshold (`TIMING` by default)
+before it forks workers or loads runtime modules. A missed binding therefore
+appears as an observably silent module instead of output filtered at the wrong
+level. A standalone executable that compiles the logger and has no loader must
+seed its own state before logging; `query_device_hal` does this explicitly.
+
 ## Three-layer ABI
 
 ### Layer 1 — consumer macros
@@ -86,7 +94,9 @@ Each macro injects the source location and passes `__FUNCTION__` separately.
 Host spans use `SimplerHostSpan` and `unified_log_host_span`. Callers supply
 what happened—name, duration, invocation identity, and attributes—while
 `HostLogger::log_host_span` owns the PID, TID, timestamp envelope, escaping,
-and the single `[STRACE]` format string.
+and the single `[STRACE]` format string. Before constructing attributes, hot
+call sites query `unified_log_host_span_enabled`; the logger rechecks the
+TIMING threshold before validating or encoding a record.
 
 ### Layer 2 — unified logging ABI
 
@@ -111,7 +121,10 @@ forwards to its local backend.
 `HostLogger::vlog` is the host-side authority for level gating. It formats a
 complete record and performs one `write(2)` under its module-local mutex.
 `HostLogger::log_host_span` additionally bounds and escapes machine-readable
-fields so a STRACE record fits the portable `PIPE_BUF` floor.
+fields so a STRACE record fits the portable `PIPE_BUF` floor. Its early gate
+keeps direct ABI and legacy STRACE callers from paying those encoding costs
+when TIMING is disabled; `vlog` remains the final check if the threshold changes
+between the caller's query and emission.
 
 The mutex serializes writers only within the DSO that owns it. Writers from
 different DSOs, or from forked processes sharing a pipe, are indivisible only

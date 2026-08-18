@@ -55,16 +55,18 @@ namespace {
 std::mutex captured_host_spans_mu;
 std::vector<std::string> captured_host_span_names;
 std::vector<std::string> captured_host_span_attributes;
+std::atomic<bool> captured_host_spans_enabled{true};
 
 class ScopedHostSpanCapture {
 public:
-    ScopedHostSpanCapture() {
+    explicit ScopedHostSpanCapture(bool enabled = true) {
+        captured_host_spans_enabled.store(enabled, std::memory_order_release);
         std::lock_guard<std::mutex> lk(captured_host_spans_mu);
         captured_host_span_names.clear();
         captured_host_span_attributes.clear();
     }
 
-    ~ScopedHostSpanCapture() = default;
+    ~ScopedHostSpanCapture() { captured_host_spans_enabled.store(true, std::memory_order_release); }
 
     ScopedHostSpanCapture(const ScopedHostSpanCapture &) = delete;
     ScopedHostSpanCapture &operator=(const ScopedHostSpanCapture &) = delete;
@@ -74,6 +76,11 @@ bool captured_host_span(const std::string &name) {
     std::lock_guard<std::mutex> lk(captured_host_spans_mu);
     return std::find(captured_host_span_names.begin(), captured_host_span_names.end(), name) !=
            captured_host_span_names.end();
+}
+
+bool captured_host_spans_empty() {
+    std::lock_guard<std::mutex> lk(captured_host_spans_mu);
+    return captured_host_span_names.empty();
 }
 
 // The attributes of the first span emitted under `name`, or "" if none was.
@@ -86,6 +93,10 @@ std::string captured_host_span_attrs(const std::string &name) {
 }
 
 }  // namespace
+
+extern "C" int unified_log_host_span_enabled() {
+    return captured_host_spans_enabled.load(std::memory_order_acquire) ? 1 : 0;
+}
 
 extern "C" void unified_log_host_span(const SimplerHostSpan *span) {
     if (span == nullptr || span->name == nullptr) return;
@@ -362,7 +373,12 @@ public:
         caps_.supports_frame_staging = true;
     }
 
-    const WorkerEndpointCaps &caps() const override { return caps_; }
+    const WorkerEndpointCaps &caps() const override {
+        caps_call_count_.fetch_add(1, std::memory_order_relaxed);
+        return caps_;
+    }
+
+    size_t caps_call_count() const { return caps_call_count_.load(std::memory_order_relaxed); }
 
     void submit_progress(Ring *ring, const WorkerDispatch &dispatch) override {
         ProgressCall call(*this);
@@ -606,6 +622,7 @@ private:
     }
 
     WorkerEndpointCaps caps_;
+    mutable std::atomic<size_t> caps_call_count_{0};
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::vector<WorkerDispatch> submitted_;
@@ -1218,6 +1235,45 @@ TEST(WorkerManagerTest, DispatchAndCompletionEmitHostSpans) {
     worker.progress();
     ASSERT_EQ(completed.size(), 1u);
     EXPECT_TRUE(captured_host_span(simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Complete)));
+
+    worker.stop();
+    allocator.shutdown();
+}
+
+TEST(WorkerManagerTest, DisabledHostSpansSkipDispatchAndCompletionTraceWork) {
+    ScopedHostSpanCapture host_span_capture(/*enabled=*/false);
+
+    Ring allocator;
+    allocator.init(/*heap_bytes=*/0);
+    TaskSlot slot = make_progress_slot(allocator, /*run_id=*/73, /*pipeline_slot=*/0, /*generation=*/1);
+    ASSERT_NE(slot, INVALID_SLOT);
+
+    WorkerThread worker;
+    auto endpoint = std::make_unique<DeterministicProgressEndpoint>();
+    DeterministicProgressEndpoint *endpoint_ptr = endpoint.get();
+    std::vector<WorkerCompletion> completed;
+    worker.start(
+        &allocator,
+        [&](WorkerCompletion completion) {
+            completed.push_back(std::move(completion));
+        },
+        [](WorkerDispatch) {}, std::move(endpoint)
+    );
+
+    const size_t caps_calls_before_dispatch = endpoint_ptr->caps_call_count();
+    worker.dispatch(WorkerDispatch{slot, 0});
+    ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
+    EXPECT_EQ(endpoint_ptr->caps_call_count(), caps_calls_before_dispatch + 1)
+        << "disabled dispatch should query caps only for admission";
+
+    const WorkerDispatch submitted = endpoint_ptr->submitted().front();
+    endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted);
+    const size_t caps_calls_before_completion = endpoint_ptr->caps_call_count();
+    worker.progress();
+    ASSERT_EQ(completed.size(), 1u);
+    EXPECT_EQ(endpoint_ptr->caps_call_count(), caps_calls_before_completion)
+        << "disabled completion should not query caps for trace attributes";
+    EXPECT_TRUE(captured_host_spans_empty());
 
     worker.stop();
     allocator.shutdown();
