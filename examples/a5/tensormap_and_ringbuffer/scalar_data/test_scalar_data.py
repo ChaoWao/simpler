@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Scalar data dependency test: GetTensorData, SetTensorData, add_inout.
+"""Scalar data dependency test: GetTensorData, SetTensorData, and tracked readers.
 
 Tests orchestration-level data manipulation: scalar initialization,
 Get/Set round-trips, WAW+WAR dependency auto-wait, and external tensor WAR.
@@ -21,7 +21,7 @@ from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
 class TestScalarData(SceneTestCase):
-    """Scalar data dependency: Get/SetTensorData, add_inout with initial value."""
+    """Scalar data dependency: host access, initial values, and tracked readers."""
 
     CALLABLE = {
         "orchestration": {
@@ -77,8 +77,8 @@ class TestScalarData(SceneTestCase):
         args.check[4] = 79.0  # orchestration arithmetic: 2.0 + 77.0
         args.check[5] = 42.0  # Orch set->get round-trip: SetTensorData then GetTensorData
         args.check[6] = 12.0  # Orch->AICore RAW: SetTensorData(d,10.0) + kernel_add(d,a) -> 10.0+2.0
-        args.check[7] = 88.0  # WAW+WAR: kernel reads c, SetTensorData(c,88.0) auto-waits
-        args.check[8] = 55.0  # External WAR: noop(ext_b INOUT) -> SetTensorData(ext_b,55.0) auto-waits
+        args.check[7] = 88.0  # host write to c completes after the tracked reader
+        args.check[8] = 55.0  # host write to external b completes after the tracked reader
 
 
 if __name__ == "__main__":

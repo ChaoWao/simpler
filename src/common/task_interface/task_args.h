@@ -302,7 +302,7 @@ inline TaskArgsView read_blob(const uint8_t *src, size_t capacity) {
 // ============================================================================
 
 // access ⊆ granted: an arg's TensorArgType may only request what the backing grants.
-//   INPUT -> READ, OUTPUT_EXISTING -> WRITE, INOUT -> READWRITE; READWRITE grants everything.
+//   INPUT/TRACKED_INPUT -> READ, OUTPUT_EXISTING -> WRITE, INOUT -> READWRITE; READWRITE grants everything.
 //   NO_DEP / OUTPUT are unconstrained.
 // Catches e.g. a READ-only copy-on-write backing tagged OUTPUT_EXISTING, whose writes in a forked
 // child would silently never reach the parent.
@@ -312,6 +312,7 @@ inline bool access_permits(uint8_t granted, TensorArgType tag) {
     };
     switch (tag) {
     case TensorArgType::INPUT:
+    case TensorArgType::TRACKED_INPUT:
         return granted_has(AccessMode::READ);
     case TensorArgType::OUTPUT_EXISTING:
         return granted_has(AccessMode::WRITE);

@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Scheduler Implementation
+ * host_build_graph - Scheduler Implementation
  *
  * Implements scheduler state management, ready queues, and task lifecycle.
  *
@@ -74,6 +74,7 @@ PTO2SchedProfilingData scheduler_get_profiling(int thread_idx) {
 void PTO2SchedulerState::print_stats() {
     PTO2SchedulerState *sched = this;
     LOG_DEBUG("=== Scheduler Statistics ===");
+    LOG_DEBUG("fanin spill: %d / %d", sched->fanin_spill_top, sched->fanin_spill_capacity);
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         if (sched->ring_sched_state.last_task_alive > 0) {
             LOG_DEBUG("Ring %d:", r);

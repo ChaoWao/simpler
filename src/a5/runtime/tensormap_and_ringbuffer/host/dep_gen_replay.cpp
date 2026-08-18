@@ -45,13 +45,13 @@
  * "kept at call site" note); both passes run the same explicit-deps loop, so
  * the comparison covers it too.
  *
- * STEP 4 (`register_task_outputs`) runs on BOTH tensor maps after both passes
+ * STEP 4 (`register_task_accesses`) runs on BOTH tensor maps after both passes
  * complete, keeping `tm_oracle` and `tm_annot` bit-equivalent for the next
  * record's INOUT+COVERED `remove_entry` mutations.
  *
  * Pool sizing: replay never advances last_task_alive, so each tensor map's
- * entry pool must accommodate every output write across the whole trace. We
- * scan the record buffer once to count INOUT + OUTPUT_EXISTING slots and size
+ * entry pool must accommodate every tracked access across the whole trace. We
+ * scan the record buffer once to count INPUT + INOUT + OUTPUT_EXISTING slots and size
  * the pool accordingly. Both maps get the same size.
  */
 
@@ -89,12 +89,12 @@ int32_t ceil_pow2(int32_t v) {
     return v + 1;
 }
 
-// Count INOUT + OUTPUT_EXISTING slots across the record buffer —
-// register_task_outputs only inserts those, and skips entries with manual_dep
+// Count TRACKED_INPUT + INOUT + OUTPUT_EXISTING slots across the record buffer —
+// register_task_accesses inserts those, and skips entries with manual_dep
 // set. Counting both without inspecting manual_dep is a conservative upper
 // bound (manual_dep is rare; the small over-allocation pays for itself in
 // avoided pool exhaustion).
-int32_t count_outputs(const DepGenRecord *records, size_t n) {
+int32_t count_accesses(const DepGenRecord *records, size_t n) {
     int32_t total = 0;
     for (size_t i = 0; i < n; i++) {
         const DepGenRecord &r = records[i];
@@ -104,7 +104,7 @@ int32_t count_outputs(const DepGenRecord *records, size_t n) {
         if (r.flags & DEP_GEN_FLAG_OVERFLOW) continue;
         for (uint16_t j = 0; j < r.tensor_count; j++) {
             auto t = static_cast<TensorArgType>(r.arg_types[j]);
-            if (t == TensorArgType::INOUT || t == TensorArgType::OUTPUT_EXISTING) {
+            if (t == TensorArgType::TRACKED_INPUT || t == TensorArgType::INOUT || t == TensorArgType::OUTPUT_EXISTING) {
                 total++;
             }
         }
@@ -158,6 +158,20 @@ const char *overlap_status_str(OverlapStatus s) {
     return "unknown";
 }
 
+const char *hazard_kind_str(TensorHazardKind kind) {
+    switch (kind) {
+    case TensorHazardKind::RAW:
+        return "RAW";
+    case TensorHazardKind::WAW:
+        return "WAW";
+    case TensorHazardKind::WAR:
+        return "WAR";
+    }
+    return "unknown";
+}
+
+const char *access_kind_str(TensorAccessKind kind) { return kind == TensorAccessKind::READER ? "READER" : "WRITER"; }
+
 // One annotated edge. consumer_* always populated. producer_* populated for
 // TENSORMAP source only — the explicit/creator emit paths don't have a
 // matched tensormap entry to copy from.
@@ -172,7 +186,9 @@ struct EdgeAnnot {
     EdgeSource source;
     DepFlags flags;         // per-edge WAIT/RETAIN semantics carried into deps.json
     OverlapStatus overlap;  // only meaningful for TENSORMAP
-    uint64_t tensor_id;     // 0 for EXPLICIT
+    TensorHazardKind hazard;
+    TensorAccessKind access_kind;
+    uint64_t tensor_id;  // 0 for EXPLICIT
     // Consumer side (the ChipTensor the submitting task is reading).
     uint8_t consumer_dtype;
     uint32_t consumer_ndims;
@@ -228,6 +244,8 @@ const char *arg_type_str(TensorArgType t) {
     switch (t) {
     case TensorArgType::INPUT:
         return "INPUT";
+    case TensorArgType::TRACKED_INPUT:
+        return "TRACKED_INPUT";
     case TensorArgType::OUTPUT:
         return "OUTPUT";
     case TensorArgType::INOUT:
@@ -394,6 +412,8 @@ bool write_deps_json(
         write_dep_flags(out, e.flags);
         if (e.source == EdgeSource::TENSORMAP) {
             out << ",\"overlap\":\"" << overlap_status_str(e.overlap) << '"';
+            out << ",\"hazard\":\"" << hazard_kind_str(e.hazard) << '"';
+            out << ",\"access_kind\":\"" << access_kind_str(e.access_kind) << '"';
         }
         if (e.source != EdgeSource::EXPLICIT) {
             out << ",\"tensor_id\":\"" << e.tensor_id << '"';
@@ -444,21 +464,29 @@ void annot_pass(
             emit_creator(owner, i, *tensor);
         }
 
-        // STEP B: tensormap lookup (only INPUT/INOUT, skip manual_dep).
-        if (ptype != TensorArgType::INPUT && ptype != TensorArgType::INOUT) {
-            continue;
-        }
         if (tensor->manual_dep) {
             continue;
         }
 
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
-            emit_tensormap(entry.producer_task_id, i, *tensor, entry, overlap_status);
-            if (ptype == TensorArgType::INOUT && overlap_status == OverlapStatus::COVERED) {
-                tensor_map.remove_entry(entry);
-            }
-            return true;
-        });
+        auto lookup = [&](TensorAccessKind access_kind, TensorHazardKind hazard) {
+            tensor_map.lookup(*tensor, access_kind, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) {
+                emit_tensormap(entry.access_task_id, i, *tensor, entry, overlap_status, hazard);
+                if (ptype == TensorArgType::INOUT && access_kind == TensorAccessKind::WRITER) {
+                    emit_tensormap(entry.access_task_id, i, *tensor, entry, overlap_status, TensorHazardKind::WAW);
+                }
+                if ((ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) &&
+                    overlap_status == OverlapStatus::COVERED) {
+                    tensor_map.remove_entry(entry);
+                }
+                return true;
+            });
+        };
+        if (ptype == TensorArgType::INPUT || ptype == TensorArgType::TRACKED_INPUT || ptype == TensorArgType::INOUT) {
+            lookup(TensorAccessKind::WRITER, TensorHazardKind::RAW);
+        }
+        if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
+            lookup(TensorAccessKind::READER, TensorHazardKind::WAR);
+        }
     }
 }
 
@@ -496,8 +524,8 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         task_window_sizes[r] = ceil_pow2(need < 16 ? 16 : need);
     }
 
-    int32_t output_count = count_outputs(records, num_records);
-    int32_t pool_size = output_count + (output_count / 10) + 64;
+    int32_t access_count = count_accesses(records, num_records);
+    int32_t pool_size = access_count + (access_count / 10) + 64;
     if (pool_size < PTO2_TENSORMAP_POOL_SIZE) {
         pool_size = PTO2_TENSORMAP_POOL_SIZE;
     }
@@ -755,7 +783,7 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
             },
             // emit_tensormap(producer, arg_idx, consumer_tensor, entry, status)
             [&](PTO2TaskId producer, int32_t arg_idx, const ChipTensor &consumer, const PTO2TensorMapEntry &entry,
-                OverlapStatus status) {
+                OverlapStatus status, TensorHazardKind hazard) {
                 // Per-(succ, arg_idx, producer_buffer_addr, producer_version)
                 // dedup gives us "the same producer slice fired twice for the
                 // same consumer arg" collapse — but two distinct slices from
@@ -771,6 +799,8 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
                 e.source = EdgeSource::TENSORMAP;
                 e.flags = DEP_WAIT;
                 e.overlap = status;
+                e.hazard = hazard;
+                e.access_kind = entry.access_kind;
                 e.tensor_id = make_tensor_id(entry.buffer_addr, entry.version);
                 fill_consumer(e, consumer);
                 fill_producer(e, entry);
@@ -807,8 +837,8 @@ dep_gen_replay_emit_deps_json(const DepGenRecord *records, size_t num_records, c
         }
 
         // ============ STEP 4 — publish outputs on BOTH maps ============
-        register_task_outputs(inputs, task_id, tm_oracle, in_manual_scope);
-        register_task_outputs(inputs, task_id, tm_annot, in_manual_scope);
+        register_task_accesses(inputs, task_id, tm_oracle, in_manual_scope);
+        register_task_accesses(inputs, task_id, tm_annot, in_manual_scope);
     }
 
     tm_oracle.destroy();

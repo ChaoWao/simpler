@@ -44,7 +44,7 @@ public:
     int finalize() override;
     // a5 dep_gen enablement setter, overriding the base no-op (the c_api
     // unconditionally calls it).
-    void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
+    void set_dep_gen_enabled(bool enable) override;
 
 private:
     struct ActiveRun;

@@ -12,12 +12,14 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstring>
 #include <limits>
 
 #include "common.h"  // debug_assert
 
 #include "common/unified_log.h"
 #include "aicpu/aicpu_device_config.h"
+#include "aicpu/cache_maintenance.h"
 #include "aicpu/device_time.h"
 #include "aicpu/platform_regs.h"
 #include "callable.h"
@@ -963,11 +965,22 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
             int dummy_got;
             while ((dummy_got = sched_->dummy_ready_queue.pop_batch(dummy_batch, DUMMY_DRAIN_BATCH)) > 0) {
                 for (int di = 0; di < dummy_got; di++) {
+                    PTO2TaskSlotState *ready = dummy_batch[di];
+                    if (ready->task_kind == TaskKind::HOST_WRITE) {
+                        PTO2TaskPayload &payload = *ready->payload;
+                        const uint64_t bytes = payload.scalars[2];
+                        if (payload.scalar_count != 3 || bytes == 0 || bytes > sizeof(uint64_t)) {
+                            fail_scheduler(runtime, thread_idx, PTO2_ERROR_INVALID_ARGS);
+                            break;
+                        }
+                        void *address = reinterpret_cast<void *>(static_cast<uintptr_t>(payload.scalars[0]));
+                        std::memcpy(address, &payload.scalars[1], static_cast<size_t>(bytes));
+                        cache_flush_range(address, static_cast<size_t>(bytes));
+                    }
 #if SIMPLER_SCHED_PROFILING
-                    PTO2SchedulerState::TaskCompletionOutcome outcome =
-                        sched_->complete_task(*dummy_batch[di], thread_idx);
+                    PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*ready, thread_idx);
 #else
-                    PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*dummy_batch[di]);
+                    PTO2SchedulerState::TaskCompletionOutcome outcome = sched_->complete_task(*ready);
 #endif
                     if (outcome.error_code != PTO2_ERROR_NONE) {
                         fail_scheduler(runtime, thread_idx, outcome.error_code);

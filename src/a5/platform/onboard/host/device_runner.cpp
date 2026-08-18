@@ -64,11 +64,23 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_d
     return -1;
 }
 
+extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
+extern "C" __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_set_enabled(bool /*enable*/) {}
+extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_emit(const char * /*deps_json_path*/) {
+    LOG_DEBUG("dep_gen host graph not implemented for this runtime — deps.json skipped");
+    return -1;
+}
+
 // =============================================================================
 // DeviceRunner Implementation
 // =============================================================================
 
 DeviceRunner::~DeviceRunner() { finalize(); }
+
+void DeviceRunner::set_dep_gen_enabled(bool enable) {
+    enable_dep_gen_ = enable;
+    dep_gen_host_graph_set_enabled(enable);
+}
 
 // `setup_static_arena`, `create_thread`, `attach_current_thread`,
 // `configure_aicore_op_timeout`, `ensure_device_initialized`,
@@ -287,7 +299,9 @@ int DeviceRunner::prepare_execution(
     if (enable_dump_args_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS);
     if (enable_chip_swimlane_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE);
     if (enable_pmu_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_PMU);
-    if (enable_dep_gen_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
+        SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN);
+    }
     if (enable_scope_stats_) SIMPLER_SET_DFX_FLAG(enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS);
     execution->kernel_args.args.enable_profiling_flag = enable_profiling_flag;
 
@@ -399,7 +413,7 @@ int DeviceRunner::prepare_execution(
         }
     }
 
-    if (enable_dep_gen_) {
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
         rc = init_dep_gen(active_aicpu_num, device_id_, execution->kernel_args);
         if (rc != 0) {
             LOG_ERROR("init_dep_gen failed: %d", rc);
@@ -454,7 +468,7 @@ DeviceRunner::launch_execution(std::unique_ptr<PreparedExecution> prepared, Laun
                 activate_launch_shape(runtime);
                 (void)arm_device_wall_buffer(prepared->kernel_args);
                 start_shared_collectors_for_run();
-                if (enable_dep_gen_) {
+                if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
                     auto thread_factory = [this](std::function<void()> fn) {
                         return create_thread(std::move(fn));
                     };
@@ -592,15 +606,21 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
     read_device_wall_ns();
     teardown_shared_collectors_after_run(true);
 
-    // a5-specific dep_gen teardown: stop + reconcile + replay emit.
     if (enable_dep_gen_) {
-        dep_gen_collector_.stop();
-        if (dep_gen_collector_.reconcile_counters()) {
-            const auto &records = dep_gen_collector_.records();
-            const std::string deps = make_deps_json_path(output_prefix_);
-            int replay_rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
-            if (replay_rc != 0) {
-                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", replay_rc);
+        const std::string deps = make_deps_json_path(output_prefix_);
+        if (dep_gen_host_graph_active()) {
+            const int emit_rc = dep_gen_host_graph_emit(deps.c_str());
+            if (emit_rc != 0) {
+                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", emit_rc);
+            }
+        } else {
+            dep_gen_collector_.stop();
+            if (dep_gen_collector_.reconcile_counters()) {
+                const auto &records = dep_gen_collector_.records();
+                const int replay_rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
+                if (replay_rc != 0) {
+                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", replay_rc);
+                }
             }
         }
     }

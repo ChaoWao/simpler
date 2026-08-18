@@ -16,11 +16,11 @@
  * Two header-only template entry points:
  *
  *   compute_task_fanin     — STEP 3 in submit_task: per-tensor creator retention (Step A)
- *                            + tensormap.lookup for INPUT/INOUT (Step B). Calls back into
- *                            user-supplied `emit` for each producer it identifies.
+ *                            + TensorMap lookup for INPUT/TRACKED_INPUT/INOUT (Step B).
+ *                            Calls back into user-supplied `emit` for each producer.
  *
- *   register_task_outputs  — STEP 4 in submit_task: tensormap.insert for INOUT and
- *                            OUTPUT_EXISTING tensors. No callbacks.
+ *   register_task_accesses — STEP 4 in submit_task: register TRACKED_INPUT readers and
+ *                            INOUT/OUTPUT_EXISTING writers. No callbacks.
  *
  * STEP 1 (explicit_deps) is intentionally left at the runtime call site because its
  * `last_task_alive` shortcut + unchecked slot lookup is subtly different from the
@@ -49,8 +49,7 @@
  * inlining and add ~5 ns/call to the orch hot path.
  */
 
-#ifndef SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_
-#define SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_
+#pragma once
 
 #include <cstdint>
 
@@ -60,7 +59,7 @@
 #include "tensor.h"
 
 /**
- * View struct for inputs to compute_task_fanin / register_task_outputs.
+ * View struct for inputs to compute_task_fanin / register_task_accesses.
  *
  * Both runtime and replay assemble one of these from their own data sources
  * (runtime: from Arg accessors; replay: from SubmitTraceEntry fields). All
@@ -80,7 +79,7 @@ struct DepInputs {
  */
 struct NoDepAnnotate {
     void creator(int32_t, const ChipTensor &, PTO2TaskId) const {}
-    void tensormap(int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus) const {}
+    void tensormap(int32_t, const ChipTensor &, const PTO2TensorMapEntry &, OverlapStatus, TensorHazardKind) const {}
 };
 
 /**
@@ -89,8 +88,8 @@ struct NoDepAnnotate {
  *
  * For each non-OUTPUT tensor:
  *   - If owner_task_id is valid, emit(owner)
- *   - For INPUT/INOUT (and not manual_dep), tensor_map.lookup(*tensor) and emit
- *     each matching producer. INOUT+COVERED triggers tensor_map.remove_entry(entry).
+ *   - For INPUT/TRACKED_INPUT/INOUT (and not manual_dep), query overlapping writers.
+ *   - For INOUT/OUTPUT_EXISTING, query overlapping tracked readers.
  *
  * @return true on success (or producer-skipped-silently); false if emit signaled
  *         fatal — caller should propagate (after any fatal bookkeeping done by emit).
@@ -122,26 +121,37 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
             annotate.creator(i, *tensor, owner);
         }
 
-        // Step B: only INPUT/INOUT need modifier dependency lookup.
-        if (ptype != TensorArgType::INPUT && ptype != TensorArgType::INOUT) {
-            continue;
-        }
         if (tensor->manual_dep) {
             continue;
         }
 
         bool fatal = false;
-        tensor_map.lookup(*tensor, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
-            if (!emit(entry.producer_task_id)) {
-                fatal = true;
-                return false;  // stop iteration
-            }
-            annotate.tensormap(i, *tensor, entry, overlap_status);
-            if (ptype == TensorArgType::INOUT && overlap_status == OverlapStatus::COVERED) {
-                tensor_map.remove_entry(entry);
-            }
-            return true;
-        });
+        auto lookup = [&](TensorAccessKind access_kind, TensorHazardKind hazard) {
+            tensor_map.lookup(
+                *tensor, access_kind, [&](PTO2TensorMapEntry &entry, OverlapStatus overlap_status) -> bool {
+                    if (!emit(entry.access_task_id)) {
+                        fatal = true;
+                        return false;  // stop iteration
+                    }
+                    annotate.tensormap(i, *tensor, entry, overlap_status, hazard);
+                    if (ptype == TensorArgType::INOUT && access_kind == TensorAccessKind::WRITER) {
+                        annotate.tensormap(i, *tensor, entry, overlap_status, TensorHazardKind::WAW);
+                    }
+                    if ((ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) &&
+                        overlap_status == OverlapStatus::COVERED) {
+                        tensor_map.remove_entry(entry);
+                    }
+                    return true;
+                }
+            );
+        };
+        if (ptype == TensorArgType::INPUT || ptype == TensorArgType::TRACKED_INPUT || ptype == TensorArgType::INOUT) {
+            lookup(TensorAccessKind::WRITER, TensorHazardKind::RAW);
+        }
+        if (!fatal && tensor_map.current_readers() != 0 &&
+            (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING)) {
+            lookup(TensorAccessKind::READER, TensorHazardKind::WAR);
+        }
         if (fatal) {
             return false;
         }
@@ -150,45 +160,47 @@ template <typename Emit, typename Annotate = NoDepAnnotate>
 }
 
 /**
- * Register a task's outputs in the tensormap (STEP 4 in submit_task).
- *
- * For INOUT and OUTPUT_EXISTING tensors (excluding manual_dep), inserts the
- * tensor into tensor_map keyed by its buffer.addr with `task_id` as producer.
+ * Register a task's accesses in the tensormap (STEP 4 in submit_task).
  *
  * No-op when in_manual_scope.
  */
 inline void
-register_task_outputs(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
+register_task_accesses(const DepInputs &inputs, PTO2TaskId task_id, PTO2TensorMap &tensor_map, bool in_manual_scope) {
     if (in_manual_scope) {
         return;
     }
     for (int32_t i = 0; i < inputs.tensor_count; i++) {
         TensorArgType ptype = inputs.arg_types[i];
-        if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
+        if (ptype == TensorArgType::TRACKED_INPUT || ptype == TensorArgType::INOUT ||
+            ptype == TensorArgType::OUTPUT_EXISTING) {
             const ChipTensor *tensor = &inputs.tensors[i].ref();
             if (!tensor->manual_dep) {
-                tensor_map.insert(*tensor, task_id);
+                if (ptype == TensorArgType::TRACKED_INPUT) {
+                    tensor_map.insert(*tensor, task_id, TensorAccessKind::READER);
+                } else {
+                    tensor_map.insert(*tensor, task_id);
+                }
             }
         }
     }
 }
 
 /**
- * Count the tensormap entries register_task_outputs() will insert for this task.
+ * Count the tensormap entries register_task_accesses() will insert for this task.
  *
- * Mirrors register_task_outputs()'s selection exactly (INOUT / OUTPUT_EXISTING,
- * excluding manual_dep), so the returned value is the precise number of
+ * Mirrors register_task_accesses() exactly, so the returned value is the precise number of
  * new_entry() calls that step makes. The orchestrator uses it to reserve pool
  * capacity before inserting. Returns 0 in a manual scope (no registration).
  */
-inline int32_t count_registrable_outputs(const DepInputs &inputs, bool in_manual_scope) {
+inline int32_t count_registrable_accesses(const DepInputs &inputs, bool in_manual_scope) {
     if (in_manual_scope) {
         return 0;
     }
     int32_t needed = 0;
     for (int32_t i = 0; i < inputs.tensor_count; i++) {
         TensorArgType ptype = inputs.arg_types[i];
-        if (ptype == TensorArgType::INOUT || ptype == TensorArgType::OUTPUT_EXISTING) {
+        if (ptype == TensorArgType::TRACKED_INPUT || ptype == TensorArgType::INOUT ||
+            ptype == TensorArgType::OUTPUT_EXISTING) {
             if (!inputs.tensors[i].ref().manual_dep) {
                 needed++;
             }
@@ -196,5 +208,3 @@ inline int32_t count_registrable_outputs(const DepInputs &inputs, bool in_manual
     }
     return needed;
 }
-
-#endif  // SRC_A2A3_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_DEP_COMPUTE_H_

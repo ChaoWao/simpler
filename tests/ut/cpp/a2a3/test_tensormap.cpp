@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "utils/device_arena.h"
+#include "pto_dep_compute.h"
 #include "pto_orchestration_api.h"
 #include "pto_tensormap.h"
 
@@ -54,6 +55,22 @@ static void run_lookup(PTO2TensorMap &tmap, const ChipTensor &tensor, TestLookup
         out.count++;
         return true;
     });
+}
+
+static void
+run_lookup(PTO2TensorMap &tmap, const ChipTensor &tensor, TensorAccessKind access_kind, TestLookupResult &out) {
+    tmap.lookup(tensor, access_kind, [&](PTO2TensorMapEntry &e, OverlapStatus s) -> bool {
+        out.entries.push_back({&e, s});
+        out.count++;
+        return true;
+    });
+}
+
+static DepInputs dep_inputs(const CoreTaskArgs &args) {
+    return DepInputs{
+        args.tensor_count(),       args.tensor_data(), args.tag_data(), static_cast<int32_t>(args.explicit_dep_count()),
+        args.explicit_deps_data(),
+    };
 }
 
 static ChipTensor make_test_tensor(uint64_t addr, uint32_t shape0, uint32_t ndims = 1, int32_t version = 0) {
@@ -99,10 +116,19 @@ protected:
 
 TEST_F(TensorMapTest, InitValidState) {
     EXPECT_EQ(tmap.num_buckets, NUM_BUCKETS);
+    EXPECT_EQ(tmap.num_reader_buckets, NUM_BUCKETS);
     EXPECT_EQ(tmap.pool_size, POOL_SIZE);
     EXPECT_EQ(tmap.next_entry_idx, 0);
     EXPECT_EQ(tmap.free_num, 0);
     EXPECT_EQ(tmap.valid_count(), 0);
+}
+
+TEST(TensorMapLayoutTest, DefaultLayoutCapsSparseReaderBuckets) {
+    DeviceArena arena;
+    int32_t window_sizes[PTO2_MAX_RING_DEPTH] = {32, 32, 32, 32};
+    auto layout = PTO2TensorMap::reserve_layout_default(arena, window_sizes);
+    EXPECT_EQ(layout.num_buckets, PTO2_TENSORMAP_NUM_BUCKETS);
+    EXPECT_EQ(layout.num_reader_buckets, PTO2_TENSORMAP_READER_NUM_BUCKETS);
 }
 
 TEST_F(TensorMapTest, InitRequiresPowerOfTwoBuckets) {
@@ -158,7 +184,7 @@ TEST_F(TensorMapTest, InsertThenLookupFindsProducer) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, tid);
+    EXPECT_EQ(result.entries[0].entry->access_task_id, tid);
 }
 
 TEST_F(TensorMapTest, LookupEmptyReturnsZero) {
@@ -192,12 +218,12 @@ TEST_F(TensorMapTest, InsertDifferentBuffersNoCollision) {
     TestLookupResult r1;
     run_lookup(tmap, t1, r1);
     EXPECT_EQ(r1.count, 1);
-    EXPECT_EQ(r1.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 0));
+    EXPECT_EQ(r1.entries[0].entry->access_task_id, PTO2TaskId::make(0, 0));
 
     TestLookupResult r2;
     run_lookup(tmap, t2, r2);
     EXPECT_EQ(r2.count, 1);
-    EXPECT_EQ(r2.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 1));
+    EXPECT_EQ(r2.entries[0].entry->access_task_id, PTO2TaskId::make(0, 1));
 }
 
 // =============================================================================
@@ -332,7 +358,7 @@ TEST_F(TensorMapTest, StaleEntriesSkippedDuringLookup) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 1));
+    EXPECT_EQ(result.entries[0].entry->access_task_id, PTO2TaskId::make(0, 1));
 }
 
 TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
@@ -348,7 +374,7 @@ TEST_F(TensorMapTest, StaleEntriesNotTruncatedAcrossRings) {
     run_lookup(tmap, t, result);
     // Ring 1 task 0 still valid, ring 0 task 0 invalidated
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(1, 0));
+    EXPECT_EQ(result.entries[0].entry->access_task_id, PTO2TaskId::make(1, 0));
 }
 
 // =============================================================================
@@ -370,7 +396,7 @@ TEST_F(TensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 2));
+    EXPECT_EQ(result.entries[0].entry->access_task_id, PTO2TaskId::make(0, 2));
 }
 
 TEST_F(TensorMapTest, CleanupRetiredPreservesOtherRings) {
@@ -385,7 +411,7 @@ TEST_F(TensorMapTest, CleanupRetiredPreservesOtherRings) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(1, 0));
+    EXPECT_EQ(result.entries[0].entry->access_task_id, PTO2TaskId::make(1, 0));
 }
 
 TEST_F(TensorMapTest, CleanupRetiredFreesEntriesToPool) {
@@ -423,7 +449,7 @@ TEST_F(TensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
     TestLookupResult result;
     run_lookup(tmap, t, result);
     ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, WINDOW_SIZE));
+    EXPECT_EQ(result.entries[0].entry->access_task_id, PTO2TaskId::make(0, WINDOW_SIZE));
 }
 
 // =============================================================================
@@ -447,7 +473,7 @@ TEST_F(TensorMapTest, MultiRingIndependentLookup) {
     TestLookupResult result2;
     run_lookup(tmap, t, result2);
     EXPECT_EQ(result2.count, 1);
-    EXPECT_EQ(result2.entries[0].entry->producer_task_id, PTO2TaskId::make(1, 3));
+    EXPECT_EQ(result2.entries[0].entry->access_task_id, PTO2TaskId::make(1, 3));
 }
 
 // =============================================================================
@@ -543,10 +569,225 @@ TEST_F(TensorMapTest, RemoveMiddleEntryPreservesChain) {
 
     std::set<uint32_t> found_locals;
     for (int i = 0; i < result.count; i++) {
-        found_locals.insert(result.entries[i].entry->producer_task_id.local());
+        found_locals.insert(result.entries[i].entry->access_task_id.local());
     }
     EXPECT_TRUE(found_locals.count(0));
     EXPECT_TRUE(found_locals.count(2));
+}
+
+TEST_F(TensorMapTest, ReaderAndWriterIndexesImplementRawWarAndOutputExistingOrdering) {
+    ChipTensor tensor = make_test_tensor(0x4000, 256);
+    const PTO2TaskId writer0 = PTO2TaskId::make(0, 1);
+    const PTO2TaskId reader0 = PTO2TaskId::make(1, 2);
+    const PTO2TaskId writer1 = PTO2TaskId::make(0, 3);
+    const PTO2TaskId reader1 = PTO2TaskId::make(2, 4);
+    const PTO2TaskId output_existing = PTO2TaskId::make(0, 5);
+    tmap.insert(tensor, writer0, TensorAccessKind::WRITER);
+
+    std::vector<PTO2TaskId> fanin;
+    auto emit = [&](PTO2TaskId id) {
+        fanin.push_back(id);
+        return true;
+    };
+
+    CoreTaskArgs untracked_input_args;
+    untracked_input_args.add_input(tensor);
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(untracked_input_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({writer0}));
+    EXPECT_EQ(count_registrable_accesses(dep_inputs(untracked_input_args), false), 0);
+    register_task_accesses(dep_inputs(untracked_input_args), reader0, tmap, false);
+
+    TestLookupResult readers;
+    run_lookup(tmap, tensor, TensorAccessKind::READER, readers);
+    EXPECT_EQ(readers.count, 0);
+
+    CoreTaskArgs input_args;
+    input_args.add_tracked_input(tensor);
+    fanin.clear();
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(input_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({writer0}));
+    EXPECT_EQ(count_registrable_accesses(dep_inputs(input_args), false), 1);
+    register_task_accesses(dep_inputs(input_args), reader0, tmap, false);
+
+    readers = {};
+    run_lookup(tmap, tensor, TensorAccessKind::READER, readers);
+    ASSERT_EQ(readers.count, 1);
+    EXPECT_EQ(readers.entries[0].entry->access_task_id, reader0);
+    TestLookupResult writers;
+    run_lookup(tmap, tensor, TensorAccessKind::WRITER, writers);
+    ASSERT_EQ(writers.count, 1);
+    EXPECT_EQ(writers.entries[0].entry->access_task_id, writer0);
+
+    CoreTaskArgs inout_args;
+    inout_args.add_inout(tensor);
+    fanin.clear();
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(inout_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({writer0, reader0}));
+    register_task_accesses(dep_inputs(inout_args), writer1, tmap, false);
+
+    CoreTaskArgs second_input_args;
+    second_input_args.add_tracked_input(tensor);
+    fanin.clear();
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(second_input_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({writer1}));
+    register_task_accesses(dep_inputs(second_input_args), reader1, tmap, false);
+
+    CoreTaskArgs output_args;
+    output_args.add_output(tensor);
+    fanin.clear();
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(output_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({reader1}));
+    register_task_accesses(dep_inputs(output_args), output_existing, tmap, false);
+
+    readers = {};
+    run_lookup(tmap, tensor, TensorAccessKind::READER, readers);
+    EXPECT_EQ(readers.count, 0);
+    writers = {};
+    run_lookup(tmap, tensor, TensorAccessKind::WRITER, writers);
+    ASSERT_EQ(writers.count, 2);
+    EXPECT_EQ(writers.entries[0].entry->access_task_id, output_existing);
+    EXPECT_EQ(writers.entries[1].entry->access_task_id, writer1);
+}
+
+TEST_F(TensorMapTest, ReadersAreIndependentAndWriterWaitsForEveryReader) {
+    ChipTensor tensor = make_test_tensor(0x4100, 256);
+    const PTO2TaskId reader0 = PTO2TaskId::make(0, 1);
+    const PTO2TaskId reader1 = PTO2TaskId::make(1, 2);
+
+    CoreTaskArgs input_args;
+    input_args.add_tracked_input(tensor);
+    std::vector<PTO2TaskId> fanin;
+    auto emit = [&](PTO2TaskId id) {
+        fanin.push_back(id);
+        return true;
+    };
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(input_args), tmap, false, emit));
+    EXPECT_TRUE(fanin.empty());
+    register_task_accesses(dep_inputs(input_args), reader0, tmap, false);
+
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(input_args), tmap, false, emit));
+    EXPECT_TRUE(fanin.empty());
+    register_task_accesses(dep_inputs(input_args), reader1, tmap, false);
+
+    CoreTaskArgs writer_args;
+    writer_args.add_output(tensor);
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(writer_args), tmap, false, emit));
+    std::set<uint64_t> fanin_raw;
+    for (PTO2TaskId id : fanin)
+        fanin_raw.insert(id.raw);
+    EXPECT_EQ(fanin_raw, std::set<uint64_t>({reader0.raw, reader1.raw}));
+    EXPECT_EQ(tmap.reader_high_water, 2);
+}
+
+TEST_F(TensorMapTest, DisjointWriteKeepsReaderAndCoveringWriteRetiresIt) {
+    ChipTensor base = make_test_tensor_2d(0x4200, 256, 1);
+    uint32_t reader_shape[] = {128, 1};
+    uint32_t reader_offset[] = {0, 0};
+    ChipTensor reader_view = base.view(reader_shape, reader_offset);
+
+    CoreTaskArgs reader_args;
+    reader_args.add_tracked_input(reader_view);
+    register_task_accesses(dep_inputs(reader_args), PTO2TaskId::make(0, 1), tmap, false);
+
+    uint32_t disjoint_offset[] = {128, 0};
+    ChipTensor disjoint = base.view(reader_shape, disjoint_offset);
+    CoreTaskArgs disjoint_args;
+    disjoint_args.add_output(disjoint);
+    std::vector<PTO2TaskId> fanin;
+    auto emit = [&](PTO2TaskId id) {
+        fanin.push_back(id);
+        return true;
+    };
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(disjoint_args), tmap, false, emit));
+    EXPECT_TRUE(fanin.empty());
+    register_task_accesses(dep_inputs(disjoint_args), PTO2TaskId::make(0, 2), tmap, false);
+    EXPECT_EQ(tmap.current_readers(), 1);
+
+    uint32_t partial_shape[] = {128, 1};
+    uint32_t partial_offset[] = {64, 0};
+    ChipTensor partial = base.view(partial_shape, partial_offset);
+    CoreTaskArgs partial_args;
+    partial_args.add_output(partial);
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(partial_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({PTO2TaskId::make(0, 1)}));
+    register_task_accesses(dep_inputs(partial_args), PTO2TaskId::make(0, 3), tmap, false);
+    EXPECT_EQ(tmap.current_readers(), 1);
+
+    CoreTaskArgs covering_args;
+    covering_args.add_output(base);
+    fanin.clear();
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(covering_args), tmap, false, emit));
+    ASSERT_EQ(fanin, std::vector<PTO2TaskId>({PTO2TaskId::make(0, 1)}));
+    register_task_accesses(dep_inputs(covering_args), PTO2TaskId::make(0, 4), tmap, false);
+    EXPECT_EQ(tmap.current_readers(), 0);
+}
+
+TEST_F(TensorMapTest, RetiredReaderDoesNotCreateStaleWar) {
+    ChipTensor tensor = make_test_tensor(0x4300, 256);
+    CoreTaskArgs reader_args;
+    reader_args.add_tracked_input(tensor);
+    register_task_accesses(dep_inputs(reader_args), PTO2TaskId::make(0, 0), tmap, false);
+    ASSERT_EQ(tmap.current_readers(), 1);
+
+    tmap.cleanup_retired(0, 0, 1);
+    ASSERT_EQ(tmap.current_readers(), 0);
+
+    CoreTaskArgs writer_args;
+    writer_args.add_output(tensor);
+    int emitted = 0;
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(writer_args), tmap, false, [&](PTO2TaskId) {
+        emitted++;
+        return true;
+    }));
+    EXPECT_EQ(emitted, 0);
+}
+
+TEST_F(TensorMapTest, TrackedAccessesSkipManualScopeAndManualTensor) {
+    ChipTensor tensor = make_test_tensor(0x5000, 64);
+    tmap.insert(tensor, PTO2TaskId::make(0, 1));
+    int emitted = 0;
+    auto emit = [&](PTO2TaskId) {
+        emitted++;
+        return true;
+    };
+
+    CoreTaskArgs manual_scope_args;
+    manual_scope_args.add_tracked_input(tensor);
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(manual_scope_args), tmap, true, emit));
+    register_task_accesses(dep_inputs(manual_scope_args), PTO2TaskId::make(0, 2), tmap, true);
+
+    tensor.manual_dep = true;
+    CoreTaskArgs manual_tensor_args;
+    manual_tensor_args.add_tracked_input(tensor);
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(manual_tensor_args), tmap, false, emit));
+    register_task_accesses(dep_inputs(manual_tensor_args), PTO2TaskId::make(0, 3), tmap, false);
+
+    EXPECT_EQ(emitted, 0);
+    EXPECT_EQ(tmap.valid_count(), 1);
+    EXPECT_EQ(tmap.current_readers(), 0);
+    EXPECT_EQ(tmap.current_writers(), 1);
+}
+
+TEST_F(TensorMapTest, NoDepRetainsCreatorWithoutTensorMapAccess) {
+    ChipTensor tensor = make_test_tensor(0x5100, 64);
+    const PTO2TaskId owner = PTO2TaskId::make(2, 7);
+    tensor.owner_task_id = owner;
+    tmap.insert(tensor, PTO2TaskId::make(0, 1));
+    std::vector<PTO2TaskId> fanin;
+    auto emit = [&](PTO2TaskId id) {
+        fanin.push_back(id);
+        return true;
+    };
+
+    CoreTaskArgs no_dep_args;
+    no_dep_args.add_no_dep(tensor);
+    ASSERT_TRUE(compute_task_fanin(dep_inputs(no_dep_args), tmap, false, emit));
+    register_task_accesses(dep_inputs(no_dep_args), PTO2TaskId::make(0, 4), tmap, false);
+
+    EXPECT_EQ(fanin, std::vector<PTO2TaskId>({owner}));
+    EXPECT_EQ(tmap.valid_count(), 1);
+    EXPECT_EQ(tmap.current_readers(), 0);
+    EXPECT_EQ(tmap.current_writers(), 1);
 }
 
 // =============================================================================

@@ -26,17 +26,17 @@
 
 #define FUNC_NOOP_KERNEL 0
 
-// PTO2LaunchSpec spells the SPMD block-count setter differently per arch
-// (a5: set_core_num, a2a3: set_block_num) for the same field. Bridge it so this
-// one fixture compiles on both; keyed off the arch's pto_types.h include guard,
-// which pto_orchestration_api.h pulls in transitively.
-static inline void set_block_count(CoreTaskArgs &args, int16_t n) {
-#if defined(SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_)
-    args.launch_spec.set_core_num(n);
-#else
-    args.launch_spec.set_block_num(n);
-#endif
+template <typename Spec>
+static inline auto set_spmd_count(Spec &spec, int16_t n) -> decltype(spec.set_block_num(n), void()) {
+    spec.set_block_num(n);
 }
+
+template <typename Spec>
+static inline auto set_spmd_count(Spec &spec, int16_t n) -> decltype(spec.set_core_num(n), void()) {
+    spec.set_core_num(n);
+}
+
+static inline void set_block_count(CoreTaskArgs &args, int16_t n) { set_spmd_count(args.launch_spec, n); }
 
 extern "C" {
 

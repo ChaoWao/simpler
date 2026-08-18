@@ -73,6 +73,7 @@
 #define PTO2_DEP_LIST_POOL_SIZE 16384       // Per-ring dependency list pool entries
 #define PTO2_TENSORMAP_POOL_SIZE (65536)    // TensorMap entry pool
 #define PTO2_TENSORMAP_NUM_BUCKETS 4096     // Power of 2 for fast hash (4096×8B=32KB fits L1)
+#define PTO2_TENSORMAP_READER_NUM_BUCKETS 512  // Sparse tracked-reader sidecar (512×12B=6KB with epochs)
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH 64  // Maximum nesting depth

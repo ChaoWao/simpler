@@ -104,6 +104,9 @@ void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
     PTO2SchedulerLayout layout{};
     layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
+    layout.fanin_spill_capacity = HBG_FANIN_SPILL_POOL_SIZE;
+    layout.off_fanin_spill_ids =
+        arena.reserve(static_cast<size_t>(layout.fanin_spill_capacity) * sizeof(int32_t), alignof(int32_t));
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
@@ -128,6 +131,8 @@ bool PTO2SchedulerState::init_data_from_layout(
 ) {
     PTO2SchedulerState *sched = this;
     sched->sm_header = reinterpret_cast<PTO2SharedMemoryHeader *>(sm_dev_base);
+    sched->fanin_spill_capacity = layout.fanin_spill_capacity;
+    sched->fanin_spill_top = 0;
 #if SIMPLER_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -185,6 +190,7 @@ bool PTO2SchedulerState::init_data_from_layout(
 
 void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena) {
     PTO2SchedulerState *sched = this;
+    sched->fanin_spill_ids = static_cast<int32_t *>(arena.region_ptr(layout.off_fanin_spill_ids));
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_wire_arena_pointers(&sched->ready_queues[i], arena, layout.off_ready_queue_slots[i]);
     }
@@ -204,6 +210,9 @@ void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, 
 
 void PTO2SchedulerState::destroy() {
     PTO2SchedulerState *sched = this;
+    sched->fanin_spill_ids = nullptr;
+    sched->fanin_spill_capacity = 0;
+    sched->fanin_spill_top = 0;
     sched->ring_sched_state.destroy();
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         ready_queue_destroy(&sched->ready_queues[i]);

@@ -94,3 +94,57 @@ TEST(DepGenHostGraphTest, BeginCaptureClearsThePreviousRunsGraph) {
     EXPECT_NE(json.find("\"task_id\":\"202\""), std::string::npos);
     std::filesystem::remove(path);
 }
+
+TEST(DepGenHostGraphTest, TensorMapEdgesIdentifyWarAndReaderAccess) {
+    const std::filesystem::path path = output_path("war_annotation");
+    std::filesystem::remove(path);
+    uint32_t shape[] = {16};
+    ChipTensor tensor =
+        make_tensor_external(reinterpret_cast<void *>(0x1000), shape, 1, DataType::FLOAT32, false, /*version=*/0);
+    TensorRef tensor_ref;
+    tensor_ref = &tensor;
+    TensorArgType arg_type = TensorArgType::OUTPUT_EXISTING;
+    const int32_t kernel_ids[3] = {1, -1, -1};
+    PTO2TensorMapEntry reader{};
+    reader.copy_from_tensor(tensor);
+    reader.access_task_id = PTO2TaskId::make(0, 7);
+    reader.access_kind = TensorAccessKind::READER;
+
+    dep_gen_host_graph_set_enabled(true);
+    dep_gen_host_graph_begin_capture();
+    dep_gen_host_graph_begin_task(8, false, false, kernel_ids, 1, 1, &tensor_ref, &arg_type);
+    dep_gen_host_graph_add_tensormap_edge(
+        reader.access_task_id.raw, 0, tensor, reader, OverlapStatus::COVERED, TensorHazardKind::WAR
+    );
+    dep_gen_host_graph_end_task();
+    ASSERT_EQ(dep_gen_host_graph_emit(path.c_str()), 0);
+
+    const std::string json = read_file(path);
+    EXPECT_NE(json.find("\"hazard\":\"WAR\""), std::string::npos);
+    EXPECT_NE(json.find("\"access_kind\":\"READER\""), std::string::npos);
+    std::filesystem::remove(path);
+}
+
+TEST(DepGenHostGraphTest, HostWriteConsumerEdgeIsNotLabeledExplicit) {
+    const std::filesystem::path path = output_path("host_write_consumer");
+    std::filesystem::remove(path);
+    uint32_t shape[] = {16};
+    ChipTensor tensor =
+        make_tensor_external(reinterpret_cast<void *>(0x2000), shape, 1, DataType::FLOAT32, false, /*version=*/0);
+    TensorRef tensor_ref;
+    tensor_ref = &tensor;
+    TensorArgType arg_type = TensorArgType::OUTPUT_EXISTING;
+    const int32_t kernel_ids[3] = {-1, -1, -1};
+
+    dep_gen_host_graph_set_enabled(true);
+    dep_gen_host_graph_begin_capture();
+    dep_gen_host_graph_begin_task(9, false, false, kernel_ids, 1, 1, &tensor_ref, &arg_type);
+    dep_gen_host_graph_add_host_write_consumer_edge(8, 0, tensor);
+    dep_gen_host_graph_end_task();
+    ASSERT_EQ(dep_gen_host_graph_emit(path.c_str()), 0);
+
+    const std::string json = read_file(path);
+    EXPECT_NE(json.find("\"source\":\"host_write_consumer\""), std::string::npos);
+    EXPECT_EQ(json.find("\"source\":\"explicit\""), std::string::npos);
+    std::filesystem::remove(path);
+}

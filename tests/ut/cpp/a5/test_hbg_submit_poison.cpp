@@ -26,6 +26,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -87,6 +88,40 @@ protected:
         std::memset(ring.task_payloads, POISON, n * sizeof(PTO2TaskPayload));
         std::memset(ring.slot_states, POISON, n * sizeof(PTO2TaskSlotState));
         std::memset(ring.completion_flags, POISON, n * sizeof(std::atomic<uint8_t>));
+    }
+
+    void verify_reader_fanout(int32_t reader_count) {
+        uint32_t shape[] = {16};
+        std::vector<float> storage(shape[0]);
+        ChipTensor tensor = make_tensor_external(storage.data(), shape, 1, DataType::FLOAT32, false, /*version=*/0);
+        std::vector<PTO2TaskId> readers;
+        readers.reserve(reader_count);
+
+        orch.begin_scope();
+        for (int32_t i = 0; i < reader_count; ++i) {
+            CoreTaskArgs args;
+            args.add_tracked_input(tensor);
+            TaskOutputTensors reader = orch.submit_dummy_task(args);
+            ASSERT_TRUE(reader.task_id().is_valid());
+            readers.push_back(reader.task_id());
+        }
+        CoreTaskArgs writer_args;
+        writer_args.add_inout(tensor);
+        TaskOutputTensors writer = orch.submit_dummy_task(writer_args);
+        ASSERT_TRUE(writer.task_id().is_valid());
+        orch.end_scope();
+
+        auto &ring = sm_handle->header->ring;
+        const PTO2TaskPayload &payload = ring.task_payloads[ring.get_slot_by_task_id(writer.task_id().local())];
+        ASSERT_EQ(payload.fanin_count, reader_count);
+        const int32_t expected_spill = std::max(0, reader_count - PTO2_MAX_FANIN);
+        ASSERT_EQ(payload.fanin_spill_count, expected_spill);
+        EXPECT_EQ(sched.fanin_spill_top, expected_spill);
+        for (int32_t i = 0; i < reader_count; ++i) {
+            SCOPED_TRACE(testing::Message() << "fanin index=" << i);
+            EXPECT_EQ(sched.fanin_local_id(payload, i), static_cast<int32_t>(readers[reader_count - 1 - i].local()));
+        }
+        EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_NONE);
     }
 };
 
@@ -182,4 +217,63 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     const PTO2TaskPayload &cons_pl = ring.task_payloads[ring.get_slot_by_task_id(consumer.task_id().local())];
     EXPECT_EQ(cons_pl.fanin_count, 1);
     EXPECT_EQ(cons_pl.fanin_local_ids[0], static_cast<int32_t>(root.task_id().local()));
+}
+
+TEST_F(HbgSubmitPoisonTest, ReaderFanoutBelowInlineBoundaryHasNoSpill) { verify_reader_fanout(64); }
+
+TEST_F(HbgSubmitPoisonTest, ReaderFanoutAtInlineBoundaryHasNoSpill) { verify_reader_fanout(PTO2_MAX_FANIN); }
+
+TEST_F(HbgSubmitPoisonTest, ReaderFanoutAboveInlineBoundarySpillsOneEdge) { verify_reader_fanout(PTO2_MAX_FANIN + 1); }
+
+TEST_F(HbgSubmitPoisonTest, ReaderFanoutBeyondInlineFaninSpillsWithoutDroppingWarEdges) { verify_reader_fanout(256); }
+
+TEST_F(HbgSubmitPoisonTest, HostWriteWaitsOnlyForConflictingWriterConsumersAndTrackedReaders) {
+    uint32_t shape[] = {16};
+    std::vector<float> storage(shape[0]);
+    ChipTensor tensor = make_tensor_external(storage.data(), shape, 1, DataType::FLOAT32, false);
+
+    orch.begin_scope();
+    CoreTaskArgs unrelated_before_args;
+    const PTO2TaskId unrelated_before = orch.submit_dummy_task(unrelated_before_args).task_id();
+
+    CoreTaskArgs writer_args;
+    writer_args.add_output(tensor);
+    const PTO2TaskId writer = orch.submit_dummy_task(writer_args).task_id();
+
+    CoreTaskArgs consumer_args;
+    consumer_args.add_input(tensor);
+    const PTO2TaskId consumer = orch.submit_dummy_task(consumer_args).task_id();
+
+    CoreTaskArgs tracked_reader_args;
+    tracked_reader_args.add_tracked_input(tensor);
+    const PTO2TaskId tracked_reader = orch.submit_dummy_task(tracked_reader_args).task_id();
+
+    CoreTaskArgs unrelated_after_args;
+    const PTO2TaskId unrelated_after = orch.submit_dummy_task(unrelated_after_args).task_id();
+
+    orch.submit_host_write(tensor, tensor.buffer.addr, 7, sizeof(uint32_t));
+    const int32_t host_write_local = sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire) - 1;
+    orch.submit_host_write(tensor, tensor.buffer.addr, 8, sizeof(uint32_t));
+    const int32_t second_host_write_local =
+        sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire) - 1;
+    orch.end_scope();
+
+    const auto &payload = sm_handle->header->ring.get_slot_state_by_task_id(host_write_local).payload[0];
+    ASSERT_EQ(payload.fanin_count, 3);
+    std::vector<int32_t> fanins;
+    for (int32_t i = 0; i < payload.fanin_count; ++i)
+        fanins.push_back(sched.fanin_local_id(payload, i));
+    EXPECT_NE(std::find(fanins.begin(), fanins.end(), static_cast<int32_t>(writer.local())), fanins.end());
+    EXPECT_NE(std::find(fanins.begin(), fanins.end(), static_cast<int32_t>(consumer.local())), fanins.end());
+    EXPECT_NE(std::find(fanins.begin(), fanins.end(), static_cast<int32_t>(tracked_reader.local())), fanins.end());
+    EXPECT_EQ(std::find(fanins.begin(), fanins.end(), static_cast<int32_t>(unrelated_before.local())), fanins.end());
+    EXPECT_EQ(std::find(fanins.begin(), fanins.end(), static_cast<int32_t>(unrelated_after.local())), fanins.end());
+
+    const auto &second_payload = sm_handle->header->ring.get_slot_state_by_task_id(second_host_write_local).payload[0];
+    ASSERT_EQ(second_payload.fanin_count, 4);
+    std::vector<int32_t> second_fanins;
+    for (int32_t i = 0; i < second_payload.fanin_count; ++i) {
+        second_fanins.push_back(sched.fanin_local_id(second_payload, i));
+    }
+    EXPECT_NE(std::find(second_fanins.begin(), second_fanins.end(), host_write_local), second_fanins.end());
 }

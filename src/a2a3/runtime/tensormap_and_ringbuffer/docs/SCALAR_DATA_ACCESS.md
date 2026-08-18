@@ -38,10 +38,11 @@ addr null-check → TensorMap lookup → spin-wait producer COMPLETED → comput
 ### 3.2 set_tensor_data Flow
 
 ```text
-addr null-check → TensorMap lookup → spin-wait producer COMPLETED → spin-wait consumers done → memcpy write
+addr null-check → writer/reader lookup → wait conflicting accesses → memcpy write
 ```
 
-One extra step versus get_tensor_data: wait for all consumers to finish (`fanout_refcount >= fanout_count - 1`, excluding the scope reference).
+Compared with `get_tensor_data`, a write also drains each writer's consumers
+and waits for every overlapping `TRACKED_INPUT` task to complete.
 
 ### 3.3 Timeout
 
@@ -104,7 +105,7 @@ Three actors:
 | - | ---------- | -------- | ------ | --------- | ----- |
 | 1 | Kernel write (OUTPUT) | Orch Read | RAW | spin-wait producer COMPLETED | Yes |
 | 2 | Kernel write (OUTPUT) | Orch Write | WAW | spin-wait producer COMPLETED | Yes |
-| 3 | Kernel read (INPUT) | Orch Write | WAR | spin-wait fanout_refcount | **Needs INOUT** |
+| 3 | Kernel read (TRACKED_INPUT) | Orch Write | WAR | spin-wait reader task | Yes |
 | 4 | Kernel read-write (INOUT) | Orch Read | RAW | spin-wait producer COMPLETED | Yes |
 | 5 | Kernel read-write (INOUT) | Orch Write | WAW+WAR | spin-wait producer + consumers | Yes |
 | 6 | Orch Write | Kernel read (INPUT) | RAW | blocking completes before next submit | Yes |
@@ -114,11 +115,12 @@ Three actors:
 
 ### Key Design Points
 
-**Scenario #3 is the only case requiring special attention**:
+**Scenario #3 requires an explicit reader annotation**:
 
-TensorMap tracks only producers (OUTPUT/INOUT), not pure INPUT consumers. If a tensor is only registered via `add_input()`, TensorMap has no producer entry for it. `set_tensor_data`'s `wait_for_tensor_ready()` finds no matching producer (the lookup callback never fires) and returns immediately — but the kernel may still be reading → **WAR data race**.
-
-**Solution**: For tensors that may later be written via `set_tensor_data`, use `add_inout()` instead of `add_input()`. INOUT registers a producer entry in TensorMap, enabling `set_tensor_data` to track all consumers through `fanout_refcount`.
+Plain `add_input()` performs the RAW lookup but does not publish a reader in
+A2/A3 `tensormap_and_ringbuffer`. If a later `set_tensor_data()` may overlap
+that read, use `add_tracked_input()`. The tracked reader remains read-only but
+is visible to the host writer's WAR lookup.
 
 **Scenarios #6–8 serial guarantee**:
 
@@ -132,6 +134,9 @@ get/set_tensor_data are blocking calls, and orchestration is single-threaded ser
 | -------- | -------- |
 | External tensor never submitted as OUTPUT/INOUT | No TensorMap entry — get/set execute immediately |
 | External tensor previously submitted as OUTPUT/INOUT | TensorMap has producer entry — get/set spin-wait |
-| External tensor submitted as INPUT, then set_tensor_data | **WAR risk** — must use INOUT instead (same as scenario #3) |
+| External tensor submitted as INPUT, then set_tensor_data | **WAR risk** — the reader was not published |
+| External tensor submitted as TRACKED_INPUT, then set_tensor_data | Host write waits for the reader task |
 
-**Key rule**: If an external tensor will later be written via `set_tensor_data`, all prior kernel accesses must use `add_inout()`, not `add_input()`.
+**Key rule**: If an external tensor will later be written via
+`set_tensor_data`, every overlapping pure reader must use
+`add_tracked_input()`.

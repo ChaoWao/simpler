@@ -165,13 +165,14 @@ AIC/MIX tasks use the available cluster count.
 
 ### 5.2 TensorMap and Fanins
 
-TensorMap maps tensor regions to producer task IDs. For every task:
+TensorMap indexes unfinished reader and writer accesses. For every task:
 
-1. INPUT/INOUT regions look up overlapping producers.
-2. Explicit and discovered producers are deduplicated into
+1. INPUT/TRACKED_INPUT/INOUT regions look up overlapping writers.
+2. INOUT/OUTPUT_EXISTING regions look up overlapping tracked readers.
+3. Explicit and discovered producers are deduplicated into
    `fanin_local_ids[]`.
-3. OUTPUT/INOUT regions register the new task as producer.
-4. Each producer tracks its highest consumer local ID for completion metadata.
+4. TRACKED_INPUT registers a reader; INOUT/OUTPUT_EXISTING register writers.
+5. Each producer tracks its highest consumer local ID for completion metadata.
 
 There is no fanout adjacency or dependency pool. A per-slot completion flag is
 the readiness truth on device.
@@ -216,10 +217,12 @@ could strand the drain protocol, so the active path relies on that invariant.
 
 ## 8. Scalar Access During Construction
 
-`get_tensor_data` and `set_tensor_data` operate on registered host views of
-external tensors. They cannot wait for a submitted device producer because the
-device scheduler starts only after orchestration returns. Runtime-created graph-
-heap outputs also have no host view.
+`get_tensor_data` reads registered host views of external tensors and therefore
+cannot wait for a submitted device producer: the scheduler starts only after
+orchestration returns. Before any task is submitted, `set_tensor_data` updates
+that host view directly. After submission begins, it emits a scheduler-local
+host-write node that waits for conflicting writers, their direct consumers, and
+tracked readers; this also supports runtime-created graph-heap outputs.
 
 Producer references are checked against the complete bound descriptor ID before
 a slot is used, preventing masked-slot aliasing. See

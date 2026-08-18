@@ -44,8 +44,9 @@ enum class TensorArgType : int32_t {
     INPUT = 0,            // Read-only input buffer
     OUTPUT = 1,           // Write-only output buffer (runtime allocates)
     INOUT = 2,            // Read-then-write: modifier for downstream
-    OUTPUT_EXISTING = 3,  // Write-only existing tensor: skips OverlapMap lookup, depends on creator
+    OUTPUT_EXISTING = 3,  // Write-only existing tensor: queries readers and publishes a writer
     NO_DEP = 4,           // No-dependency existing tensor: skips OverlapMap lookup, no publish
+    TRACKED_INPUT = 5,    // Read-only input published for later WAR dependency lookup
 };
 
 // `OverlapStatus` / `Segment` (overlap geometry) live in the runtime

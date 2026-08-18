@@ -10,7 +10,7 @@
  */
 
 /**
- * PTO Runtime2 - Scheduler Interface
+ * host_build_graph - Scheduler Interface
  *
  * The Scheduler is responsible for:
  * 1. Maintaining per-resource-shape ready queues
@@ -425,6 +425,7 @@ struct CompletionStats {
  * capacities used at layout time (init_from_layout reuses them).
  */
 struct PTO2SchedulerLayout {
+    size_t off_fanin_spill_ids;
     size_t off_ready_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_ready_sync_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_dummy_ready_queue_slots;
@@ -433,6 +434,7 @@ struct PTO2SchedulerLayout {
     size_t off_early_dispatch_queue_slots[PTO2_NUM_RESOURCE_SHAPES];
     size_t off_early_sync_start_queue_slots;
     uint64_t ready_queue_capacity;
+    int32_t fanin_spill_capacity;
 };
 
 /**
@@ -445,6 +447,9 @@ struct PTO2SchedulerLayout {
 struct PTO2SchedulerState {
     // Shared memory access
     PTO2SharedMemoryHeader *sm_header;
+    int32_t *fanin_spill_ids;
+    int32_t fanin_spill_capacity;
+    int32_t fanin_spill_top;
 
     // Per-ring state
     struct alignas(64) RingSchedState {
@@ -548,11 +553,16 @@ struct PTO2SchedulerState {
     // set its completion_flags byte. Single-ring: all producers are ring 0, so
     // there is no per-edge ring indirection.
 
+    int32_t fanin_local_id(const PTO2TaskPayload &p, int32_t index) const {
+        if (index < PTO2_MAX_FANIN) return p.fanin_local_ids[index];
+        return fanin_spill_ids[p.fanin_spill_start + index - PTO2_MAX_FANIN];
+    }
+
     bool fanin_satisfied(const PTO2TaskSlotState *s) const {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return false;
+            if (!ring.is_completion_flag_set(fanin_local_id(p, i))) return false;
         }
         return true;
     }
@@ -565,7 +575,7 @@ struct PTO2SchedulerState {
         const PTO2TaskPayload &p = *s->payload;
         const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
         for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return i;
+            if (!ring.is_completion_flag_set(fanin_local_id(p, i))) return i;
         }
         return -1;
     }
@@ -591,7 +601,7 @@ struct PTO2SchedulerState {
                 push_ready_routed(consumer);
                 return;
             }
-            producer = &ring.get_slot_state_by_task_id(consumer->payload->fanin_local_ids[state]);
+            producer = &ring.get_slot_state_by_task_id(fanin_local_id(*consumer->payload, state));
         }
     }
 
@@ -620,7 +630,7 @@ struct PTO2SchedulerState {
             if (state < 0) {
                 push_ready_routed(waiter);
             } else {
-                register_wake(&ring.get_slot_state_by_task_id(waiter->payload->fanin_local_ids[state]), waiter);
+                register_wake(&ring.get_slot_state_by_task_id(fanin_local_id(*waiter->payload, state)), waiter);
             }
             waiter = next;
         }

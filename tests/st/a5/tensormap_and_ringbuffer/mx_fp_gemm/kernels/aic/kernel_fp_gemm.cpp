@@ -10,7 +10,7 @@
  */
 
 /**
- * MXFP8 / MXFP4 matmul via pto-isa ``TMATMUL_MX`` (A5 Cube, onboard only).
+ * MXFP8 / MXFP4 matmul via pto-isa ``TMATMUL_MX``.
  *
  * Fixed tile: M=128, K=64, N=64 (K aligned to 64; scale K = K/32 = 2).
  * mode (args[5]):
@@ -18,8 +18,6 @@
  *   1 — MXFP4: A/B float4_e2m1x2 packed GM (logical [M,K]/[K,N]); same scales
  *
  * Pattern mirrors pto-isa ``tmatmul_mx_kernel.cpp`` RunTMATMULMX (no bias).
- * a5sim is not supported: CPU stub TLOAD lacks MX_A_ZZ / MX_B_NN.
- *
  * Args: [A, As, B, Bs, C, mode]
  */
 
@@ -27,8 +25,6 @@
 #include <pto/pto-inst.hpp>
 #include <pto/common/constants.hpp>
 #include <pto/common/pto_tile.hpp>
-#include <pto/npu/a5/utils.hpp>
-
 #include "tensor.h"
 
 using namespace pto;

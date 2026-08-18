@@ -63,9 +63,10 @@ refuses a wrong-arch invocation before any device lock is taken.
 
 ## Relationship to `examples/a2a3/`
 
-Five examples exist under both architectures with the same name:
+Six examples exist under both architectures with the same name:
 `vector_example`, `paged_attention`, `paged_attention_manual_scope`,
-`paged_attention_unroll_manual_scope`, and `sdma_async_completion_demo`. They
+`paged_attention_unroll_manual_scope`, `scalar_data`, and
+`sdma_async_completion_demo`. They
 are ports of each other and differ mainly in tile shapes and platform strings
 — `vector_example` differs by two lines. When you change one, check whether its
 sibling needs the same change.
@@ -73,8 +74,8 @@ sibling needs the same change.
 Only here: `bgemm` (a2a3 has `benchmark_bgemm` instead) and
 `urma_deferred_completion_demo`. a2a3 additionally carries
 `merge_pipeline_barrier`, `paged_attention_ringbuffer`, `prefetch_async_demo`,
-and `scalar_data`, none of which have an a5 port — `tests/st` tracks that gap
-separately (PR #1450 ports the `tests/st` side).
+none of which have an a5 port — `tests/st` tracks that gap separately (PR #1450
+ports the `tests/st` side).
 
 `qwen3_14b_decode/` is an **a5 port in progress** (a2a3 source → a5). It
 compiles and runs on a5 after the a2a3→a5 kernel diffs

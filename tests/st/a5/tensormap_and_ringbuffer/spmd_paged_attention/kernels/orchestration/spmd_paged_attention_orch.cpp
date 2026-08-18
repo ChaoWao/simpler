@@ -52,13 +52,17 @@ static constexpr uint32_t PIJ_SLOT_SIZE = MAX_Q_TILE * MAX_BLOCK_SIZE * sizeof(u
 static constexpr uint32_t OI_SLOT_SIZE = MAX_Q_TILE * HEAD_DIM * sizeof(float);
 static constexpr uint32_t FIFO_DEPTH = 2;
 
-static inline void set_block_count(CoreTaskArgs &args, int16_t n) {
-#if defined(SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_PTO_TYPES_H_)
-    args.launch_spec.set_core_num(n);
-#else
-    args.launch_spec.set_block_num(n);
-#endif
+template <typename Spec>
+static inline auto set_spmd_count(Spec &spec, int16_t n) -> decltype(spec.set_block_num(n), void()) {
+    spec.set_block_num(n);
 }
+
+template <typename Spec>
+static inline auto set_spmd_count(Spec &spec, int16_t n) -> decltype(spec.set_core_num(n), void()) {
+    spec.set_core_num(n);
+}
+
+static inline void set_block_count(CoreTaskArgs &args, int16_t n) { set_spmd_count(args.launch_spec, n); }
 
 extern "C" {
 

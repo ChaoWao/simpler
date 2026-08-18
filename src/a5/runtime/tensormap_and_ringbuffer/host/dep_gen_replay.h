@@ -15,7 +15,7 @@
  *
  * Takes the records the host collector drained from the device ring buffer
  * (``DepGenCollector::records()``) and runs them back through a host-resident
- * PTO2TensorMap using the same ``compute_task_fanin`` / ``register_task_outputs``
+ * PTO2TensorMap using the same ``compute_task_fanin`` / ``register_task_accesses``
  * primitives the device orchestrator uses, emitting the full
  * predecessor → successor edge list to deps.json.
  *
@@ -70,8 +70,7 @@
  * The replay is single-threaded and pure CPU: no device handle is required.
  */
 
-#ifndef SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_HOST_DEP_GEN_REPLAY_H_
-#define SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_HOST_DEP_GEN_REPLAY_H_
+#pragma once
 
 #include <stddef.h>
 #include <stdint.h>
@@ -102,5 +101,3 @@ int dep_gen_replay_emit_deps_json(const struct DepGenRecord *records, size_t num
 #ifdef __cplusplus
 }  // extern "C"
 #endif
-
-#endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_HOST_DEP_GEN_REPLAY_H_

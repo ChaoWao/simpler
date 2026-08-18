@@ -54,6 +54,7 @@ public:
     using CoreTaskArgs::add_scalar;
     using CoreTaskArgs::add_scalars;
     using CoreTaskArgs::add_scalars_i32;
+    using CoreTaskArgs::add_tracked_input;
     using CoreTaskArgs::allow_early_resolve;  // early-dispatch hint (getter)
     using CoreTaskArgs::copy_scalars_from;
     using CoreTaskArgs::set_allow_early_resolve;  // early-dispatch hint (setter)

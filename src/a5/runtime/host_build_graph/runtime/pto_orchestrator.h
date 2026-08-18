@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * PTO Runtime2 - Orchestrator Interface
+ * host_build_graph - Orchestrator Interface
  *
  * The Orchestrator is responsible for:
  * 1. Executing the orchestration function (Turing-complete control flow)
@@ -25,8 +25,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef PTO_ORCHESTRATOR_H
-#define PTO_ORCHESTRATOR_H
+#pragma once
 
 #include "common/chip_swimlane_profiling.h"
 #include "utils/device_arena.h"
@@ -160,6 +159,7 @@ struct PTO2OrchestratorState {
     void end_scope();
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);
+    void submit_host_write(const ChipTensor &tensor, uint64_t address, uint64_t value, uint64_t size);
     TaskOutputTensors alloc_tensors(const CoreTaskArgs &args);
     GraphScopeResult graph_begin(uint64_t graph_key, const CoreTaskArgs &args, uint64_t callable_hash);
     bool graph_end();
@@ -192,5 +192,3 @@ struct PTO2OrchProfilingData {
 
 PTO2OrchProfilingData orchestrator_get_profiling();
 #endif
-
-#endif  // PTO_ORCHESTRATOR_H

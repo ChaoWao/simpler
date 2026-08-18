@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""mx_fp_gemm: A5 MXFP8/MXFP4 ``TMATMUL_MX`` ST via task interface (onboard only).
+"""mx_fp_gemm: A5 MXFP8/MXFP4 ``TMATMUL_MX`` ST via task interface.
 
 Device AIC kernel calls pto-isa ``TMATMUL_MX`` (not scalar MAC). Host inputs +
 golden follow pto-isa ``tmatmul_mx`` host-prequant sample:
@@ -36,7 +36,7 @@ def _cases():
         cases.append(
             {
                 "name": "MXFP8_TMATMUL_MX",
-                "platforms": ["a5"],
+                "platforms": ["a5sim", "a5"],
                 "config": {"aicpu_thread_num": 2, "block_dim": 1},
                 "params": {"mode": 0},
             }
@@ -45,7 +45,7 @@ def _cases():
         cases.append(
             {
                 "name": "MXFP4_TMATMUL_MX",
-                "platforms": ["a5"],
+                "platforms": ["a5sim", "a5"],
                 "config": {"aicpu_thread_num": 2, "block_dim": 1},
                 "params": {"mode": 1},
             }
