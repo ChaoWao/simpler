@@ -25,28 +25,44 @@ tasks individually. The runtime is untouched.
 | Edit | Sites | Why |
 | ---- | ----- | --- |
 | `get_tensor_data(recv_count_out, …)` → `HBG_RECV_ROWS_PER_EXPERT` | 10 | HBG builds the whole graph before the device runs anything, so a read of a **task-produced** tensor has no value to return. The constant holds the per-expert tile loops at their real trip count (`ceil(16/16) == 1`, which is what the `h_i8 [512, 2048]` layout budgets per expert). |
-| `set_initial_value(0)` dropped | 6 | The fill target is a GM-heap **device** address and the host orchestrator cannot store to it. Leaving the call in place segfaults the chip subprocess — see "Runtime gaps" below. |
+| `set_initial_value(0)` dropped | 6 | The fill target is a GM-heap **device** address and the host orchestrator cannot store to it. Leaving the call in place segfaults the chip subprocess; dropping it leaves the `mixes_raw` AtomicAdd destination uninitialized — see "Runtime gaps" below. |
 
 The other **31** `get_tensor_data` reads are left alone: they read external
 tensors (`ext_num_tokens_per_owner`, `hc_attn_scale_*`, `hc_ffn_scale_*`), which
 the runtime stages with a host view and which therefore return real values.
 
-Everything else — submit order, dependencies, scope nesting,
-`valid_rows = min(n_rows - t0, 16)` — is byte-identical to the TMR source inside
-the Graph body. The graph keeps the size and shape of the real one (the 15971
-device-side tasks; 1131 host-submitted with the Graph collapse) but not the
-fixture's routing, hence `skip_golden`.
+Everything else — submit order, dependencies, scope nesting, and the
+orchestration-side `valid_rows = min(n_rows - t0, 16)` — is byte-identical to
+the TMR source inside the Graph body. The graph keeps the size and shape of the
+real one (the 15971 device-side tasks; 1131 host-submitted with the Graph
+collapse) but not the fixture's routing, hence `skip_golden`.
 
-## Status: host construction works, device execution stalls 12 tasks from the end
+## Status: the non-Graph tail completes; Graph replay remains blocked earlier
 
 With the Graph form the host records the 744-node Definition and boots with
 **1131 tasks on host** (down from 15991 in the submit-everything form) — this is
 measured, on both ranks. The device-side replay of a Definition that large is
-**not yet exercised**: an unskipped Graph-form run fails earlier, in Graph
+**not yet exercised**: an unskipped Graph-form run still fails earlier, in Graph
 activation (`sched_error_code=5 INVALID_ARGS` from the scheduler's graph
-queues), before the tail. The numbers below are the **non-Graph baseline**
-(hostbuild orchestration, no skip): the device executes
-**15959 of 15971 tasks** and stalls:
+queues), before reaching the tail.
+
+The **non-Graph baseline** (hostbuild orchestration, no skip) now completes the
+full two-rank device body after bounding `hc_head_linear` to the rows present in
+`x_flat`. Both ranks reported `outcome=0` and the case reported `PASSED` in
+`task_20260817_204500_135435017977` and
+`task_20260817_210320_91023923204`, with no MTE exception, error 507018,
+`TIMEOUT_EXIT`, or task-15959 stall.
+
+Those artifacts came from a predecessor without `342e29f1`, so their wrappers
+exited 1 only after PASS when `worker.close` exceeded its 10 s budget. This
+branch already contains that teardown fix, but no final combined launcher exit
+0 is claimed without a rerun. The `skip_golden` result establishes liveness,
+not numerical correctness.
+
+### Original non-Graph failure
+
+Before the fix, the device executed **15959 of 15971 tasks** and stopped making
+progress:
 
 ```text
 TASK ring=0 task_id=15959 state=RUNNING fanin_met=2/2 kernels=[aic:355 aiv0:-1 aiv1:-1]
@@ -55,68 +71,64 @@ SUMMARY completed=15959/15971 scan_ready=0 scan_waiting=11 scan_running=1
 CLUSTER cluster_id=0 aic=core0(busy kernel=355 task=15959 cond_reg_state=ack) …
 ```
 
-`sub_class=S1:running-stalled`; both ranks; bit-identical across every run.
-
 Task 15959 is `hc_head_linear` (kernel 355) — an AIC-only SPMD matmul in the
 head section, `block_num=16`, submitted with no predicate and no
-`require_sync_start`. Thirteen of its sixteen blocks sit at `cond_reg_state=ack`
-(dispatch acknowledged, FIN never raised) and the remaining eleven tasks of the
-network wait behind it.
+`require_sync_start`. The thirteen AIC entries shown in the TASK line are only
+the prefix that fits in its fixed 192-byte `running_on` buffer; the per-cluster
+records show all 16 executors acknowledged without FIN. CANN physical `blk` IDs
+are not the child kernel's logical `block_idx`. CANN subsequently reported MTE
+out-of-range faults inside kernel 355, so the failure was not a 13-of-16
+dispatch deadlock.
 
 ### What has been ruled out
 
 Each row was tested by changing exactly that one thing and re-running the full
-network on hardware. The stall reproduced at the identical task, core count and
+network on hardware. The failure reproduced at the identical task and
 `completed` value every time.
 
 | Ruled out | How |
 | --------- | --- |
 | pto-isa version | Stalls identically on `83d01313`, `0cefc9a5` and `f51c92f6`. (The *earlier* stall at task 2307 — issue #1839 — is a genuine ISA regression and **is** fixed by `f51c92f6`; it is a different stall.) |
 | The orchestration edits above | An earlier variant that instead used dispatch predicates and a static tile grid stalls at the same task. So does one with the predicate rewrite removed. |
-| `set_initial_value` | Present and absent both stall identically. |
+| `set_initial_value` | Present and absent both fail identically. It is not the MTE cause, but its removal remains a separate numerical-correctness gap. |
 | Runtime modifications | A `host_tensor_fill` seam was written to support `set_initial_value` on HBG and later reverted; the stall is identical with it, without it, and on a pristine tree. |
-| The kernel itself | `hc_head_linear` completes normally under TMR on the same branch, ISA and build. |
-| Kernel-internal spin | All loop bounds in `hc_head_linear` are compile-time constants; `t_dim`/`t_linear` are unused in the body. `ptoas_auto_sync_tail(kBarrierAll)` expands to `pipe_barrier(PIPE_ALL)` — intra-core, not cross-core. There is no cross-block synchronization to deadlock on. |
-| Bad tensor addresses | A host-side probe at the submit site prints `t_dim=8 t_linear=16 block_num=16`, `x_flat [8,16384] @0x12c0c0742000`, `hc_head_fn [4,16384] @0x12c0c0702000`, `mixes_raw [16,16] @0x12cd75153400 size=1024`. Shapes and sizes are self-consistent and match the constants the kernel hardcodes. |
+| A different TMR kernel binary | The HBG and TMR `hc_head_linear` binaries are byte-identical. TMR completing this kernel was an allocation-layout mask, not evidence that its memory accesses were valid. |
+| Kernel-internal spin | In the failing binary all loop bounds are compile-time constants and `t_dim`/`t_linear` are unused in the body. `ptoas_auto_sync_tail(kBarrierAll)` expands to `pipe_barrier(PIPE_ALL)` — intra-core, not cross-core. There is no cross-block synchronization to deadlock on. |
+| Malformed submitted descriptors or base pointers | A host-side probe prints `t_dim=8 t_linear=16 block_num=16`, `x_flat [8,16384] @0x12c0c0742000`, `hc_head_fn [4,16384] @0x12c0c0702000`, `mixes_raw [16,16] @0x12cd75153400 size=1024`. These descriptors are self-consistent; the bug was the kernel's later hard-coded 16-row view of the 8-row `x_flat`. |
 | Slow-not-hung | Raising `SIMPLER_SCHEDULER_TIMEOUT_MS` from 10 s to 60 s (with `SIMPLER_OP_EXECUTE_TIMEOUT_US`/`SIMPLER_STREAM_SYNC_TIMEOUT_MS` raised to keep the required ordering) leaves the stall unchanged; the device log confirms the window grew from exactly 10 s to exactly 60 s. |
 | Early-dispatch gating | A gated dispatch parks a core at its doorbell, which would look exactly like this. It cannot fire: `force_gate=true` is passed only from `stage_consumer_blocks`, whose only source `early_dispatch_queues` has no producer outside its own drain (Milestone 1 leaves early-dispatch stubbed). |
 | Pointer relocation | No `cannot relocate` / `outside both SM and arena windows` diagnostic; the SM H2D reports no error. |
 | Resource exhaustion | The ring and heap allocators report a fatal on exhaustion. None fired: `orch_error_code=0`, orchestration completed, the graph uploaded, 15959 tasks ran. |
 
-### What is still open
+### Root cause and fix
 
-The contradiction is that thirteen mutually independent, fixed-trip-count blocks
-of one SPMD matmul, holding sane addresses, sit in `ack` forever — while the
-same kernel completes under TMR.
+`x_flat [8,16384]` is a valid 512 KiB allocation, but both TLOAD views were
+hard-coded as `Shape<...,16,256>` with a 16384-element row stride. They covered
+an almost 1 MiB address range and read rows 8–15 out of bounds. HBG's exact-size
+per-tensor allocation exposed the over-read as MTE OOR; TMR's retained bump
+allocation kept it inside a larger mapping and masked the same kernel bug.
 
-Two threads worth pulling:
+The fix derives
 
-1. **What the cores actually received.** `cond_reg_state=ack` says the core took
-   the dispatch and is executing. A hang with no spin loop in the kernel points
-   at an MTE access that never returns, which would follow from a malformed
-   dispatch payload rather than from the tensor descriptors the probe printed.
-   `core_swimlane` / `insight_trace` can show where inside the kernel the core
-   stopped.
-2. **Why thirteen and not sixteen.** Block dispatch is deliberately partial —
-   `claim_block_range` takes as many blocks as there are free cores and re-pushes
-   the task for the rest, and `enter_drain_mode` only applies to
-   `require_sync_start` tasks. Thirteen is stable across runs, so either three
-   blocks completed and thirteen did not (odd, since the blocks are symmetric) or
-   only thirteen were ever placed and the remaining three can never get a core.
-   Distinguishing these two is the cheapest next measurement.
+```text
+row_base = (block_idx / 16) * 16
+valid_rows = clamp(t_dim - row_base, 0, 16)
+```
+
+The two `x_flat` views and TLOAD tiles, dependent matmul/accumulator tiles, and
+the `mixes_raw` AtomicAdd store now all use `valid_rows`. It is eight for this
+invocation, so no instruction addresses a non-existent input row.
 
 ## Runtime gaps this case exposed
 
-Neither is required for this case as it stands, but both are real and neither has
-test coverage on `host_build_graph`:
+These gaps are independent of the `hc_head_linear` MTE fault:
 
-- **`TensorCreateInfo::set_initial_value()` segfaults.** `alloc_tensors` hands
-  out GM-heap **device** addresses while `fill_tensor_initial_value` performs a
-  plain host `memcpy`. Under TMR the orchestrator runs on the AICPU where GM is
-  directly addressable, so the same code is fine. Backtrace:
-  `PTO2OrchestratorState::alloc_tensors+0x798` ← `aicpu_orchestration_entry`,
-  faulting on a device VA. No HBG scene test uses the API, which is why it went
-  unnoticed.
+- **AtomicAdd destinations cannot currently be initialized correctly by HBG.**
+  TMR calls `set_initial_value(0)` for `mixes_raw`, whose final TSTORE uses
+  `AtomicAdd`. HBG drops that call because its host `memcpy` cannot write the GM
+  device address, so the accumulation target remains undefined. This did not
+  cause the MTE fault, but HBG needs a device-side zero before it can validate
+  numerical results.
 - **`get_tensor_data` on a task-produced tensor burns its full timeout.** The
   wait can never be satisfied in this runtime — the device does not execute until
   orchestration finishes — yet `wait_for_tensor_ready` spins the whole 15 s before
@@ -137,7 +149,7 @@ pytest examples/a2a3/host_build_graph/deepseek_v4_flash_decode \
 `manual` because the 367-kernel compile takes minutes; `skip_golden` because the
 routing is stood in, not computed.
 
-To exercise only the host side while the stall below is unresolved, set
+To exercise only the host side without launching the device body, set
 `SIMPLER_SKIP_DEVICE_RUN=1`. `simpler_launch_run` then completes the run before
 any execution claim — orchestration, graph recording, image relocation and the
 SM H2D all ran during prepare, the kernel launch and its completion wait do not
@@ -145,10 +157,11 @@ happen — and `simpler_finalize_run` still releases the run's resources. The
 check sits at the launch entry because the multi-chip subprocess drives a run
 through the split `prepare/launch/wait/finalize` entry points and never calls
 `simpler_run`. No outputs are produced, so a run under this variable is a timing
-harness, not a test. The variable is temporary and goes away with the stall.
+harness, not a test.
 
-To read the stall diagnostics, raise the device log level — the per-task dump is
-`LOG_INFO` and the default threshold does not open CANN's INFO stream:
+To collect scheduler diagnostics for a regression, raise the device log level —
+the per-task dump is `LOG_INFO` and the default threshold does not open CANN's
+INFO stream:
 
 ```bash
 export ASCEND_GLOBAL_LOG_LEVEL=1     # before Worker.init()
