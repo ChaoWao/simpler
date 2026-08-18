@@ -63,6 +63,7 @@ bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena
     queue->mask = capacity - 1;
     queue->enqueue_pos.store(0, std::memory_order_relaxed);
     queue->dequeue_pos.store(0, std::memory_order_relaxed);
+    queue->max_occupancy.store(0, std::memory_order_relaxed);
 
     for (uint64_t i = 0; i < capacity; i++) {
         slots_arena[i].sequence.store((int64_t)i, std::memory_order_relaxed);

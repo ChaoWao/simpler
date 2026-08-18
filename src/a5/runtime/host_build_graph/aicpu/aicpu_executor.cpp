@@ -364,8 +364,12 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         // Destroy the host_build_graph runtime. sm_handle / rt are recreated
         // every run, so always tear them down here.
         if (rt != nullptr) {
+            rt->scheduler.print_queues();
             // Clear g_current_runtime in this DSO before destroying rt.
             framework_bind_runtime(nullptr);
+            // A Graph's expansion storage is the tail of its outer task's heap
+            // allocation, so it retires with that allocation; nothing here owns
+            // a separate block to release.
             runtime_destroy(rt, runtime_arena_);
             rt = nullptr;
         }
