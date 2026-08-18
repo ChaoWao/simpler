@@ -159,10 +159,32 @@ pending sync_start task is either already dispatched (a stale re-popped slot)
 or moot under teardown, and `deinit()` resets `drain_state_` before the next
 run. Applied to both a2a3 and a5.
 
+## Related A5 reclaim-watermark batching (2026-08-17)
+
+A5 later batched scheduler publication of `last_task_alive` every 16 local
+advances. The first design force-published only when a ring fully drained or a
+deferred consumed-head request reached the scheduler idle path. That was not a
+complete liveness boundary: the watermark is allocation credit for task slots,
+heap bytes, dependency entries, fanin spill entries, and TensorMap entries. An
+orchestrator blocked on any of those resources can prevent an open scope from
+ending, so a final partial batch cannot wait for full-ring drain.
+
+The retained design keeps K=16 on the non-blocking path and adds an explicit
+pressure handshake. A reclaim consumer requests publication per ring only after
+10 ms with no reclaim progress; scheduler thread 0 force-publishes the
+scheduler-local head and acknowledges it from both productive and idle
+iterations. Scheduler try-lock contention uses a separate deferred mask that
+only idle loops drain, so it cannot turn the productive request path into eager
+publication. Structural deadlock checks use only an acknowledged head. This is
+the same general lesson as the sync-start incident above: a batched publication
+needs a receiver-visible escape whenever that receiver depends on the
+publication for forward progress.
+
 ## References
 
 - PR #989 (this PR): where per-task batched publish + the sync_start-
   gated cross-task batched publish ship together.
+- PR #1575: A5 reclaim-watermark batching with pressure-triggered publication.
 - `spmd_sync_start_stress`
   (`tests/st/a2a3/tensormap_and_ringbuffer/spmd_sync_start_stress/`).
 - Issue #545 comment #2: the SPMD dispatch-stagger symptom the PR

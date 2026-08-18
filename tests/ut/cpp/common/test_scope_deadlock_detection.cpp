@@ -22,7 +22,11 @@ namespace {
 constexpr int32_t WINDOW_SIZE = 16;
 constexpr int32_t POOL_CAPACITY = 8;
 
-void make_head_match_old_structural_predicate(PTO2TaskSlotState &head) {
+void make_head_match_old_structural_predicate(
+    PTO2TaskSlotState &head, PTO2TaskDescriptor &descriptor, uint8_t ring_id, uint32_t local_task_id
+) {
+    descriptor.task_id = PTO2TaskId::make(ring_id, local_task_id);
+    head.task = &descriptor;
     head.task_state.store(PTO2_TASK_COMPLETED, std::memory_order_release);
     head.fanout_count = PTO2_FANOUT_SCOPE_BIT;
     head.fanout_refcount.store(0, std::memory_order_release);
@@ -40,6 +44,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
     }
 
     alignas(64) PTO2TaskSlotState slot_states[WINDOW_SIZE]{};
+    PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
     PTO2SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
@@ -48,7 +53,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolUsesTimeoutForDifferentScopeHead) {
     ring.fc.current_task_index.store(2, std::memory_order_release);
     ring.fc.last_task_alive.store(0, std::memory_order_release);
 
-    make_head_match_old_structural_predicate(slot_states[0]);
+    make_head_match_old_structural_predicate(slot_states[0], task_descriptors[0], 0, 0);
     PTO2TaskSlotState *oldest_open_task = &slot_states[1];
 
     testing::internal::CaptureStderr();
@@ -71,6 +76,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
     }
 
     alignas(64) PTO2TaskSlotState slot_states[WINDOW_SIZE]{};
+    PTO2TaskDescriptor task_descriptors[WINDOW_SIZE]{};
     PTO2SharedMemoryRingHeader ring{};
     ring.fc.init();
     ring.task_window_size = WINDOW_SIZE;
@@ -78,6 +84,7 @@ TEST(ScopeDeadlockDetectionTest, DepPoolRejectsCurrentScopeHeadStructurally) {
     ring.slot_states = slot_states;
     ring.fc.current_task_index.store(1, std::memory_order_release);
     PTO2TaskSlotState *oldest_open_task = &slot_states[0];
+    make_head_match_old_structural_predicate(slot_states[0], task_descriptors[0], 0, 0);
 
     testing::internal::CaptureStderr();
     bool available = pool.ensure_space(ring, 1, oldest_open_task);

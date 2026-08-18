@@ -1281,6 +1281,13 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         (void)try_pushed;
 #endif
 
+        // One servicer is sufficient because request bits stay latched until
+        // acknowledged. Drain mode can delay thread 0, but its completion
+        // depends on worker-core release rather than orchestrator reclamation.
+        if (thread_idx == 0 && made_progress && sched_->drain_publication_requests()) {
+            last_progress_ts = get_sys_cnt_aicpu();
+        }
+
         if (made_progress) {
             idle_iterations = 0;
             last_progress_ts = get_sys_cnt_aicpu();
@@ -1312,7 +1319,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             // still set means no retry has acquired advance_lock and cleared
             // the request yet. If the bit clears and the watermark remains
             // pinned, the stall is outside this deferred-advance path.
-            bool advanced_reclaim = sched_->drain_pending_ring_advances();
+            bool advanced_reclaim = thread_idx == 0 && sched_->drain_publication_requests();
+            advanced_reclaim = sched_->drain_pending_ring_advances() || advanced_reclaim;
             if (advanced_reclaim) {
                 idle_iterations = 0;
                 last_progress_ts = get_sys_cnt_aicpu();

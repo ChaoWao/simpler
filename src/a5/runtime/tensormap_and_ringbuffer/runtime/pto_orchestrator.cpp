@@ -514,11 +514,10 @@ static bool orch_wire_live_fanin_task(PTO2OrchestratorState *orch, PTO2TaskSlotS
     auto &rss = sched->ring_sched_states[slot_state.ring_id];
 
     // dep_pool is orchestrator-exclusive (no lock). ensure_space waits for the
-    // scheduler to advance last_task_alive and, on a wedged reclaim watermark,
-    // detects the deadlock with the same structural + wall-clock logic the
-    // heap/task-window allocator uses (all three share last_task_alive), latches
-    // PTO2_ERROR_DEP_POOL_OVERFLOW, and emits the structured report. A false
-    // return also covers a fatal already latched elsewhere.
+    // scheduler to publish last_task_alive and, on a wedged reclaim watermark,
+    // uses the same acknowledged-head structural check and wall-clock backstop
+    // as the heap/task-window allocator. A false return also covers a fatal
+    // already latched elsewhere.
     if (!rss.dep_pool.ensure_space(*rss.ring, wfanin, oldest_open_task_on_current_ring(orch))) {
         orch->fatal = true;
         return false;
@@ -782,6 +781,17 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
         return true;
     }
 
+    uint32_t all_ring_bits = 0;
+    for (int32_t r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        all_ring_bits |= PTO2SchedulerState::ring_advance_pending_bit(r);
+    }
+    // No acknowledgment is consumed here because TensorMap reclamation has no
+    // structural head classification; repeated watermark reads are sufficient.
+    auto request_reclaim_publication = [&]() {
+        if (orch->scheduler == nullptr) return;
+        orch->scheduler->publication_ack_mask.fetch_and(~all_ring_bits, std::memory_order_acq_rel);
+        orch->scheduler->publication_request_mask.fetch_or(all_ring_bits, std::memory_order_release);
+    };
     int32_t alive[PTO2_MAX_RING_DEPTH];
     auto read_alive = [&]() {
         for (int32_t r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -839,7 +849,10 @@ static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t neede
             if (!block_timing) {
                 block_cycle0 = now;
                 block_timing = true;
-            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+            } else if (now - block_cycle0 >= PTO2_PUBLICATION_REQUEST_TIMEOUT_CYCLES) {
+                request_reclaim_publication();
+            }
+            if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
                 LOG_ERROR("========================================");
                 LOG_ERROR("FATAL: TensorMap Entry Pool Deadlock Detected!");
                 LOG_ERROR("========================================");

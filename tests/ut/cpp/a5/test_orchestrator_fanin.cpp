@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "utils/device_arena.h"
@@ -57,6 +58,16 @@ protected:
         sched.destroy();
         runtime_arena.release();
         sm_arena.release();
+    }
+
+    std::thread service_reclaim_publication_once(uint8_t ring_id) {
+        return std::thread([this, ring_id]() {
+            uint32_t bit = PTO2SchedulerState::ring_advance_pending_bit(ring_id);
+            while ((sched.publication_request_mask.load(std::memory_order_acquire) & bit) == 0) {
+                std::this_thread::yield();
+            }
+            sched.drain_publication_requests();
+        });
     }
 };
 
@@ -258,9 +269,11 @@ TEST_F(OrchestratorFaninTest, SubmitPathHeapDeadlockLogReportsRingAndRealHeapSta
 
     CoreTaskArgs blocked_args;
     add_runtime_output_arg(blocked_args, create_infos, 1);
+    std::thread scheduler = service_reclaim_publication_once(1);
     testing::internal::CaptureStderr();
     TaskOutputTensors blocked = orch.submit_dummy_task(blocked_args);
     std::string log = testing::internal::GetCapturedStderr();
+    scheduler.join();
 
     EXPECT_FALSE(blocked.task_id().is_valid());
     EXPECT_TRUE(orch.fatal);
@@ -292,9 +305,11 @@ TEST_F(OrchestratorFaninTest, StructuralCheckRejectsOpenAncestorWhenNestedScopes
 
     CoreTaskArgs child_args;
     add_runtime_output_arg(child_args, create_infos, 1);
+    std::thread scheduler = service_reclaim_publication_once(PTO2_MAX_RING_DEPTH - 1);
     testing::internal::CaptureStderr();
     TaskOutputTensors child = orch.submit_dummy_task(child_args);
     std::string log = testing::internal::GetCapturedStderr();
+    scheduler.join();
 
     EXPECT_FALSE(child.task_id().is_valid());
     EXPECT_TRUE(orch.fatal);

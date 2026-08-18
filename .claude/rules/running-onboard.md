@@ -173,7 +173,7 @@ for the signature that actually fired:**
 | device-log signature | mechanism | note |
 | -------------------- | --------- | ---- |
 | `FATAL: Task Allocator Deadlock` / `FATAL: Dependency Pool Deadlock` / `FATAL: Fanin Spill Pool Deadlock` | an allocator or pool could not reclaim enough space | This header identifies the blocked resource, not the root cause. Classify it using the structural/timeout line that follows. |
-| `Provable head-of-line deadlock` | **proven open-scope structural deadlock** | TRB only: the reclaim head is the oldest task owned by an open scope on that ring. The blocked orchestrator cannot end that scope, so the head cannot become consumed. |
+| `Provable head-of-line deadlock` | **proven open-scope structural deadlock** | TRB only: the reclaim head is the oldest task owned by an open scope on that ring. The blocked orchestrator cannot end that scope, so the head cannot become consumed. On A5, classification waits for at least 10 ms without reclaim progress and an exact-watermark publication acknowledgment. |
 | `No reclaim progress for ~500 ms` / `cannot reclaim space after ~500 ms` | allocator/pool **reclaim timeout** | The 500ms backstop (`PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES`) exists in HBG and TRB. It proves prolonged lack of reclaim progress, not why progress stopped; check capacity, the dumped head, consumers and scheduler state. |
 | `Timeout (N cycles): producer/consumers ...` | **SPIN** wait on a specific producer/consumer | `pto_runtime2.cpp`. |
 | `HandleTaskTimeout` / `kill aicpu-sd` | **OS op-execute timeout** | STARS/tsdaemon, default 45s (`PLATFORM_OP_EXECUTE_TIMEOUT_US`). **A 45s kill ≠ deadlock** — the op was merely long or stalled. Raise this constant to measure true on-device duration. |
