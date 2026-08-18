@@ -100,12 +100,27 @@ If a module is pure C++ with no Python binding, test in **ut-cpp** (`tests/ut/cp
 paths and selection arguments as the subsequent scene-test command. It runs
 pytest collection, compiles each selected `SceneTestCase` class once, and
 stores the resulting `ChipCallable` under `build/cache/kernels/`. It does not
-create a `Worker` or access an NPU. Compilation is serial by default so callers
-with large models do not unexpectedly overload the host. Pass
-`--compile-workers N` to opt into compiling up to `N` test classes concurrently
-— each worker starts its own compiler process, so only raise it on a host whose
-CPU is yours. simpler's two onboard CI jobs (a2a3, a5) use eight; the sim jobs
-have no warm-up step.
+create a `Worker` or access an NPU. The default compiler budget is
+`min(8, max(1, available CPUs - 2))`; pass `--compile-workers N` to override it.
+The budget counts actual orchestration and incore compiler subprocesses rather
+than class threads. Compilation may proceed across classes and across the
+artifacts of one large callable, but all levels share the same process-local
+semaphore. Consequently class-level and per-callable parallelism do not
+multiply the number of active compilers within one process.
+simpler's two onboard CI jobs (a2a3, a5) explicitly use eight; the sim jobs have
+no warm-up step and use the same automatic token pool during cold pytest runs.
+
+The persistent cache has two levels. An unchanged callable loads its complete
+`callable.bin` directly. When that entry misses, each incore kernel loads an
+independent artifact from `build/cache/kernels/incore/`; only missing or changed
+kernels are compiled before the new callable is assembled. The incore key is
+independent of orchestration source, callable ABI, `func_id`, signature, and
+the owning test class. It uses the same compiler-visible paths as the compiler:
+paths under the checkout are relative to its root, while paths outside it stay
+absolute. This keeps `__FILE__` and `__BASE_FILE__` correct while allowing a
+cache restored on another CI runner to hit. Callables
+across case directories still share an artifact when they reference the same
+physical kernel path with the same source closure and compilation inputs.
 
 A class that fails to compile is reported and skipped rather than aborting the
 pass, so the run that follows still recompiles it and reports the error against
@@ -116,10 +131,10 @@ Pass the same paths, `-m`, `--platform`, `--runtime`, `--level`, and
 standalone run loads matching
 artifacts from the persistent cache; changed orchestration, incore, or included
 source content, compiler identity, fixed compilation flags, compilation logic,
-or compilation schema produces a new cache entry automatically. Entries unused
-for 14 days are pruned. When `build/` is not writable — a wheel installed into
-a read-only `site-packages` — the cache is skipped with a warning and every
-callable is compiled in-process, exactly as before the cache existed.
+or compilation schema produces the corresponding new cache entry automatically.
+Entries unused for 14 days are pruned. When `build/` is not writable — a wheel
+installed into a read-only `site-packages` — the cache is skipped with a warning
+and every callable is compiled in-process, exactly as before the cache existed.
 
 Scene tests support advanced CLI options for benchmarking, profiling, and runtime control. These work identically in both pytest and standalone mode.
 

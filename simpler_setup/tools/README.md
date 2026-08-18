@@ -37,14 +37,23 @@ python -m simpler_setup.tools.scene_test_compile examples tests/st \
     -m "not sdma" --platform a2a3 --require-pto-isa --compile-workers 8
 ```
 
-Compiled `ChipCallable` blobs are stored under `build/cache/kernels/`. A normal
-pytest or standalone scene-test run loads a matching blob from that directory;
-source, transitive-include, compiler, or compilation-logic changes produce a
-different content key, and entries unused for 14 days are pruned. Cache misses
-compile serially by default; pass `--compile-workers N` to opt into compiling
-up to `N` test classes concurrently, one compiler process per worker. A class
-that fails to compile is reported without aborting the rest of the pass. The
-warm-up does not inspect or access NPU devices.
+Compiled `ChipCallable` blobs are stored under `build/cache/kernels/`, with
+independent incore artifacts under `build/cache/kernels/incore/`. A normal
+pytest or standalone scene-test run first loads a matching callable blob. On a
+callable miss, unchanged incore artifacts are reused and only missing kernels
+are compiled before assembly. Source, transitive-include, compiler,
+compilation-logic, or compiler-visible path changes produce the corresponding
+new content key. The compiler runs from the checkout root, so checkout-local
+paths are stable relative paths: path-sensitive macros remain correct and cache
+entries can move between CI runners. Paths outside the checkout remain absolute.
+Entries unused for 14 days are pruned. Cache misses compile with an automatic
+process-wide budget: two logical CPUs remain available to pytest/Python and at
+most eight compiler processes run across all test classes and callable artifacts.
+`--compile-workers N` overrides that budget. Class-level and per-callable
+parallelism share it, so their worker counts never multiply into additional
+compiler processes in one process. A class that fails to compile is reported
+without aborting the rest of the pass. The warm-up does not inspect or access
+NPU devices.
 
 ---
 

@@ -311,10 +311,12 @@ populates the `build/cache/kernels/` cache; the subsequent pytest invocation
 keeps the existing batch-level device allocation and reconstructs each
 `ChipCallable` from that cache. The warm-up does not acquire one lock per case,
 and runners with exclusive devices continue to execute pytest directly.
-Compilation is serial by default; both onboard jobs pass `--compile-workers 8`,
-which assumes the runner's CPU is theirs alone — it starts eight `ccec`
-processes at once. The sim jobs run on ephemeral GitHub-hosted runners with no
-restored cache, so they compile cold every time and get no warm-up step.
+Both onboard jobs pass `--compile-workers 8`, which caps the entire warm-up at
+eight compiler processes. Class-level concurrency and the parallel artifacts
+inside a large callable share that budget instead of multiplying it. Without an
+override the automatic budget reserves two logical CPUs and caps at eight. The
+sim jobs run on ephemeral GitHub-hosted runners with no restored cache, so they
+compile cold every time and get no warm-up step.
 
 The DFX smokes reuse the runner's device allocation after the main scene-test
 sweep. The `run-onboard-dfx-smokes` CI action distributes `dep_gen`, chip
@@ -336,13 +338,19 @@ unbuildable kernel costing the whole batch its results.
 `actions/checkout` cleans ignored files before each job, so the onboard jobs
 restore and save `build/cache/kernels/` through `actions/cache`. Cache keys are
 partitioned by target architecture, runner OS/architecture, and PTO-ISA pin.
-The artifact's own key covers the contents of its orchestration, incore, and
+The callable key covers the contents of its orchestration, incore, and
 transitively included sources, the compiler identities and effective fixed
 flags, a digest of the modules that decide artifact bytes
 (`kernel_compiler.py`, `toolchain.py`, `elf_parser.py`), the binding's
-serialized-callable ABI, and a manual schema constant. It also carries the
-owning test class's qualified name, so two scene tests built from identical
-sources keep separate entries rather than sharing one.
+serialized-callable ABI, a manual schema constant, and the owning test class's
+qualified name. Each incore key covers the source closure, stable
+compiler-visible paths, and the compilation inputs that affect that kernel
+binary. The compiler runs from the checkout root and receives checkout-local
+paths relative to it, so `__FILE__` and `__BASE_FILE__` stay stable when CI
+runs on a different runner; paths outside the checkout remain absolute. The key
+excludes orchestration, callable ABI, `func_id`,
+signature, and owning test class, so callables that reference the same kernel
+path can share its artifact.
 
 Entries are content-addressed and therefore never overwritten, so a run prunes
 entries whose last use is more than 14 days old before it exits. Without that,
