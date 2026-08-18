@@ -106,6 +106,7 @@ def test_only_selected_build_paths_install_the_project() -> None:
     ("changed_files", "expected"),
     [
         (["docs/readme.md"], {"needs_build": "false"}),
+        ([".github/actions/setup-gcc-15/ubuntu-toolchain-r-test.asc"], {"needs_build": "false"}),
         ([".pre-commit-config.yaml"], {"needs_build": "true"}),
         (["python/simpler/api.py"], {"needs_build": "false"}),
         (["python/simpler/api.PYI"], {"needs_build": "false"}),

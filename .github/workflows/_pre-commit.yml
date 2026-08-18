@@ -98,7 +98,7 @@ jobs:
                       *) needs_build=true ;;
                     esac
                     ;;
-                  *.cce|*.gyp|*.gypi|*.py|*.pyi|*.pyt|*.tac|*.wsgi|*.md|*.rst|*.txt|*.yml|*.yaml|*.json|*.toml|*.pin|*.cmake|*.in|*.sh|*.bash|*.zsh|*.fish|*.gitignore|*.clang-format|*.clang-tidy)
+                  *.asc|*.cce|*.gyp|*.gypi|*.py|*.pyi|*.pyt|*.tac|*.wsgi|*.md|*.rst|*.txt|*.yml|*.yaml|*.json|*.toml|*.pin|*.cmake|*.in|*.sh|*.bash|*.zsh|*.fish|*.gitignore|*.clang-format|*.clang-tidy)
                     ;;
                   CMakeLists.txt|LICENSE|LICENSE.*) ;;
                   *) needs_build=true ;;

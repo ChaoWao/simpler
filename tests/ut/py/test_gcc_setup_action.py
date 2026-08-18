@@ -23,8 +23,12 @@ SETUP_ACTION = "./.github/actions/setup-gcc-15"
 WORKFLOW_PATHS = (
     REPO_ROOT / ".github/workflows/_pre-commit.yml",
     REPO_ROOT / ".github/workflows/_profiling-flags-smoke.yml",
+    REPO_ROOT / ".github/workflows/_st-npu-a2a3.yml",
     REPO_ROOT / ".github/workflows/_st-sim-a2a3.yml",
     REPO_ROOT / ".github/workflows/_st-sim-a5.yml",
+    REPO_ROOT / ".github/workflows/ci-self-cpu.yml",
+    REPO_ROOT / ".github/workflows/ci.yml",
+    REPO_ROOT / ".github/workflows/daily.yml",
     REPO_ROOT / ".github/workflows/sanitizers.yml",
 )
 
@@ -232,6 +236,20 @@ def test_sanitizer_requests_graphviz_and_build_essential() -> None:
         "install-graphviz": "true",
         "install-build-essential": "true",
     }
+
+
+def test_a2a3_scene_workflow_has_no_legacy_sdma_mode() -> None:
+    workflow_path = REPO_ROOT / ".github/workflows/_st-npu-a2a3.yml"
+    workflow = _load_yaml(workflow_path)
+    steps = workflow["jobs"]["run"]["steps"]
+    names = [step["name"] for step in steps]
+
+    assert "a2a3_sdma_mode" not in workflow_path.read_text()
+    assert names.count("Run pytest scene tests (a2a3)") == 1
+    assert names.count("SDMA pytest (a2a3)") == 1
+    assert not any("legacy SDMA paths" in name for name in names)
+    for caller_name in ("ci.yml", "ci-self-cpu.yml", "daily.yml"):
+        assert "a2a3_sdma_mode" not in (REPO_ROOT / ".github/workflows" / caller_name).read_text()
 
 
 @pytest.mark.parametrize("workflow_name", ["_st-sim-a2a3.yml", "_st-sim-a5.yml"])

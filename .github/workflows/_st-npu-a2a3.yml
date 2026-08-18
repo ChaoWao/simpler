@@ -19,11 +19,6 @@ on:
         required: false
         default: false
         type: boolean
-      a2a3_sdma_mode:
-        description: marker for main CI, legacy-paths for the CPU emergency lane.
-        required: false
-        default: marker
-        type: string
       manual_mode:
         description: exclude for Per-PR, include for the Daily full sweep.
         required: false
@@ -90,7 +85,6 @@ jobs:
             --manual "$MANUAL_MODE"
 
       - name: Run pytest scene tests (a2a3)
-        if: inputs.a2a3_sdma_mode == 'marker'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           if [ "$(uname -m)" = "x86_64" ]; then
@@ -100,35 +94,11 @@ jobs:
               --run ".venv/bin/python -m pytest examples tests/st -m 'not sdma' --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200 --manual '$MANUAL_MODE'"
           fi
 
-      - name: Run pytest scene tests (a2a3 legacy SDMA paths)
-        if: inputs.a2a3_sdma_mode == 'legacy-paths' && inputs.manual_mode != 'only'
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          SDMA_IGNORE="--ignore=examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo --ignore=examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
-          if [ "$(uname -m)" = "x86_64" ]; then
-            .venv/bin/python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run ".venv/bin/python -m pytest examples tests/st $SDMA_IGNORE --platform a2a3 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
-          fi
-
       - name: SDMA pytest (a2a3)
-        if: inputs.a2a3_sdma_mode == 'marker' && inputs.manual_mode != 'only'
+        if: inputs.manual_mode != 'only'
         run: |
           source /usr/local/Ascend/cann/set_env.sh
           SDMA_TESTS="examples tests/st -m sdma"
-          if [ "$(uname -m)" = "x86_64" ]; then
-            .venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
-          else
-            task-submit --timeout 1800 --max-time 1800 --device auto --device-num 2 \
-              --run ".venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 600"
-          fi
-
-      - name: SDMA pytest (a2a3 legacy paths)
-        if: inputs.a2a3_sdma_mode == 'legacy-paths' && inputs.manual_mode != 'only'
-        run: |
-          source /usr/local/Ascend/cann/set_env.sh
-          SDMA_TESTS="examples/a2a3/tensormap_and_ringbuffer/prefetch_async_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo"
           if [ "$(uname -m)" = "x86_64" ]; then
             .venv/bin/python -m pytest $SDMA_TESTS --platform a2a3 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 600
           else
