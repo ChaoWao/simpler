@@ -427,7 +427,10 @@ void SchedulerContext::dispatch_shape(
 
             if (!cores.has_value()) {
                 flush_publish();
-                disp_queues[static_cast<int32_t>(shape)].push_batch(&batch[bi], got - bi);
+                // These came off this queue and no other owner holds them, so a
+                // drop would lose them: retry until the space they vacated is
+                // free again.
+                while (!disp_queues[static_cast<int32_t>(shape)].push_batch(&batch[bi], got - bi)) {}
                 break;
             }
 
@@ -746,7 +749,15 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
         }
         int32_t freecores = bucket.has_value() ? bucket.count() : 0;
         if (freecores == 0) {  // no cores for this shape+phase — give this + the unprocessed rest back
-            sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi);
+            // A dropped candidate keeps its STAGING claim and is recovered by the
+            // producer release: try_early_dispatch_release rings whatever is staged
+            // and routes the unstaged remainder to the ready queue, because it
+            // returns on next_block_idx rather than on the claim state.
+            if (!sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi))
+                LOG_DEBUG(
+                    "[EARLY_DISPATCH] queue full on batch re-push, dropping %d candidate(s) to normal dispatch",
+                    got - bi
+                );
             break;
         }
         int32_t start = 0;

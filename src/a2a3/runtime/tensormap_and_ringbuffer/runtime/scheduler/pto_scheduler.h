@@ -122,10 +122,15 @@ struct alignas(64) PTO2ReadyQueue {
 
     // Batch push: reserve count slots with a single CAS after confirming
     // every target slot is available under the usual Vyukov sequence check.
-    void push_batch(PTO2TaskSlotState **items, int count) { push_batch_tagged(items, nullptr, count); }
+    // Returns false without publishing anything when the queue cannot take all
+    // `count` items. A target slot holding an older generation means full and
+    // ends the call; a slot a peer has reserved but not yet published is
+    // transient and retries, so this only spins while a peer is mid-publish.
+    bool push_batch(PTO2TaskSlotState **items, int count) { return push_batch_tagged(items, nullptr, count); }
 
-    void push_batch_tagged(PTO2TaskSlotState **items, const uint64_t *task_id_snapshots, int count) {
-        if (count == 0) return;
+    bool push_batch_tagged(PTO2TaskSlotState **items, const uint64_t *task_id_snapshots, int count) {
+        if (count == 0) return true;
+        if (static_cast<uint64_t>(count) > capacity) return false;
 
         uint64_t pos;
         while (true) {
@@ -135,7 +140,10 @@ struct alignas(64) PTO2ReadyQueue {
                 PTO2ReadyQueueSlot *slot = &slots[(pos + i) & mask];
                 int64_t seq = slot->sequence.load(std::memory_order_acquire);
                 int64_t diff = seq - static_cast<int64_t>(pos + i);
-                if (diff != 0) {
+                if (diff < 0) {
+                    return false;  // Queue full
+                }
+                if (diff > 0) {
                     ready = false;
                     break;
                 }
@@ -156,6 +164,7 @@ struct alignas(64) PTO2ReadyQueue {
             slot->task_id_snapshot = task_id_snapshots == nullptr ? 0 : task_id_snapshots[i];
             slot->sequence.store(static_cast<int64_t>(pos + i + 1), std::memory_order_release);
         }
+        return true;
     }
 
 #if SIMPLER_ORCH_PROFILING || SIMPLER_SCHED_PROFILING
@@ -741,8 +750,12 @@ struct PTO2SchedulerState {
     // onto ITS OWN cores (range-claim via next_block_idx), and re-pushes if blocks
     // remain — exactly mirroring how a partially-dispatched SPMD task is re-pushed to
     // the ready queue (scheduler_dispatch: pop -> claim -> re-push). A stale/released
-    // entry fails the STAGING check on pop and is dropped; a push that overflows is
-    // logged and the consumer's blocks fall back to normal dispatch.
+    // entry fails the STAGING check on pop and is dropped. Overflow at any push is
+    // safe and costs only the pre-staging: the producer release routes on
+    // next_block_idx rather than on the claim state, so it rings whatever is already
+    // staged and sends the rest to ready_queues. An initial push that overflows also
+    // rolls STAGING back to NONE, since nothing is staged yet and a task with no
+    // claim should not read as speculatively claimed.
     PTO2ReadyQueue early_dispatch_queues[PTO2_NUM_RESOURCE_SHAPES];
 
     // sync_start early-dispatch candidates park here instead of early_dispatch_queues[]:
@@ -926,10 +939,18 @@ struct PTO2SchedulerState {
         uint64_t task_id = static_cast<uint64_t>(consumer.task->task_id.raw);
         // A sync-start cohort uses one shape-agnostic queue so one owner can
         // choose an all-or-nothing local stage or the global-drain fallback.
-        if (consumer.task_attrs.requires_sync_start()) {
-            early_sync_start_queue.push_tagged(&consumer, task_id);
-        } else {
-            early_dispatch_queues[static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        bool queued = consumer.task_attrs.requires_sync_start() ?
+                          early_sync_start_queue.push_tagged(&consumer, task_id) :
+                          early_dispatch_queues[static_cast<int32_t>(shape)].push_tagged(&consumer, task_id);
+        if (!queued) {
+            // The candidate was never published to an early-dispatch drain, so
+            // drop the speculative claim and let readiness take the ordinary
+            // queue path. A concurrent producer release may already have moved
+            // STAGING to DISPATCHED; that path then owns the transition.
+            expected = PTO2_EARLY_DISPATCH_STAGING;
+            consumer.payload->early_dispatch_state.compare_exchange_strong(
+                expected, PTO2_EARLY_DISPATCH_NONE, std::memory_order_seq_cst, std::memory_order_seq_cst
+            );
         }
     }
 
