@@ -9244,7 +9244,9 @@ class Worker:
     ) -> tuple[GlobalDomainDescriptor, ...]:
         if self.level != 3 or self._worker is None:
             raise RuntimeError("Global CommDomain node prepare requires a ready L3 Worker")
-        command.attachments_for_node(node_worker_id)
+        # PREPARE_EXPORT is where the row is stored for IMPORT and COMMIT to reuse, so a table this
+        # node has no row in is rejected here rather than at the first phase that reads one.
+        _ = command.attachments_for_node(node_worker_id)
         prior = self._global_node_domains.get(command.domain_id)
         if prior is not None:
             if self._global_domain_command_identity(prior.command) != self._global_domain_command_identity(command):

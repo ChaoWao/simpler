@@ -309,6 +309,12 @@ def validate_member_table(members: tuple[GlobalDomainMember, ...]) -> None:
         raise ValueError("global domain members require unique non-negative global device ranks")
 
 
+# Wire ids for the three ``comm_endpoints`` enums this command carries. They are string enums, so
+# the wire needs its own numbering, and these numbers are part of the version-2 command format: a
+# value's id is fixed for the life of the version, and 0 is reserved for "no adapter". Adding an
+# enumerator means adding an id here; renaming or renumbering one is a wire break. Encoding and
+# decoding both reject an id this table does not name, so an enumerator that is added upstream and
+# not mirrored here fails closed rather than travelling as a wrong value.
 _ATTACHMENT_ROLE_IDS = {
     AttachmentRole.PROVIDER: 1,
     AttachmentRole.CONSUMER: 2,
@@ -392,8 +398,16 @@ def _normalize_attachment(attachment: GlobalDomainAttachment) -> GlobalDomainAtt
         role = AttachmentRole(attachment.role)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"global domain attachment role is unknown: {attachment.role!r}") from exc
-    adapter_kind = None if attachment.adapter_kind is None else AdapterKind(attachment.adapter_kind)
-    adapter_profile = None if attachment.adapter_profile is None else AdapterProfile(attachment.adapter_profile)
+    try:
+        adapter_kind = None if attachment.adapter_kind is None else AdapterKind(attachment.adapter_kind)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"global domain attachment adapter_kind is unknown: {attachment.adapter_kind!r}") from exc
+    try:
+        adapter_profile = None if attachment.adapter_profile is None else AdapterProfile(attachment.adapter_profile)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"global domain attachment adapter_profile is unknown: {attachment.adapter_profile!r}"
+        ) from exc
     if (adapter_kind is None) != (adapter_profile is None):
         raise ValueError("global domain attachment adapter_kind and adapter_profile must be paired")
     if int(attachment.node_worker_id) < 0:

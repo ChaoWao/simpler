@@ -465,6 +465,9 @@ class RegionPartKind(str, Enum):
     COUNTER = "COUNTER"
 
 
+# These three enums are also a wire contract: `global_comm_domain` maps each value to a numeric id
+# for the version-2 `GlobalDomainCommand` attachment records. A new enumerator needs a new id there,
+# and a rename or renumber is a wire break — see that module's `_ATTACHMENT_ROLE_IDS` block.
 class AttachmentRole(str, Enum):
     PROVIDER = "PROVIDER"
     CONSUMER = "CONSUMER"
