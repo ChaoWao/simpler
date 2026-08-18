@@ -19,6 +19,8 @@ from collections import Counter
 from typing import cast
 
 import pytest
+from simpler.buffer import AddressSpace
+from simpler.comm_endpoints import AdapterKind, AdapterProfile, AttachmentRole
 from simpler.global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
@@ -26,10 +28,12 @@ from simpler.global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_PREPARE,
     CTRL_GLOBAL_DOMAIN_RELEASE,
     GLOBAL_DOMAIN_DESCRIPTOR_BYTES,
+    GLOBAL_DOMAIN_MAX_ATTACHMENTS,
     GLOBAL_DOMAIN_MAX_BUFFERS,
     GLOBAL_DOMAIN_PROFILE_IDS,
     GLOBAL_DOMAIN_VERSION,
     GlobalCommInitCommand,
+    GlobalDomainAttachment,
     GlobalDomainBuffer,
     GlobalDomainCommand,
     GlobalDomainDescriptor,
@@ -52,6 +56,39 @@ def _members() -> tuple[GlobalDomainMember, ...]:
     return (
         GlobalDomainMember(0, 0, 3, 0),
         GlobalDomainMember(1, 0, 7, 1),
+    )
+
+
+def _attachments() -> tuple[GlobalDomainAttachment, ...]:
+    return (
+        GlobalDomainAttachment(
+            node_worker_id=0,
+            address_space=AddressSpace.HOST,
+            role=AttachmentRole.CONSUMER,
+            adapter_kind=AdapterKind.OWNER_DELEGATED_COPY,
+            adapter_profile=AdapterProfile.HOST_VMM_COPY,
+        ),
+        GlobalDomainAttachment(
+            node_worker_id=0,
+            address_space=AddressSpace.HOST,
+            role=AttachmentRole.CONSUMER,
+            adapter_kind=AdapterKind.OWNER_DELEGATED_COPY,
+            adapter_profile=AdapterProfile.HOST_VMM_COPY,
+        ),
+        GlobalDomainAttachment(
+            node_worker_id=1,
+            address_space=AddressSpace.HOST,
+            role=AttachmentRole.CONSUMER,
+            adapter_kind=None,
+            adapter_profile=None,
+        ),
+        GlobalDomainAttachment(
+            node_worker_id=1,
+            address_space=AddressSpace.HOST,
+            role=AttachmentRole.CONSUMER,
+            adapter_kind=None,
+            adapter_profile=None,
+        ),
     )
 
 
@@ -143,6 +180,17 @@ def test_local_l3_comm_init_rejects_unsupported_capability_without_caching_topol
 
 def test_global_domain_wire_round_trips_topology_and_descriptor_table():
     init = GlobalCommInitCommand("cluster", "topology", "sim", 0, 2, _members())
+    prepare = GlobalDomainCommand(
+        phase=GlobalDomainPhase.PREPARE_EXPORT,
+        domain_id=11,
+        generation=1,
+        name="tp",
+        profile="sim",
+        window_size=2048,
+        members=_members(),
+        buffers=(GlobalDomainBuffer("payload", 128),),
+        attachments=_attachments(),
+    )
     command = GlobalDomainCommand(
         phase=GlobalDomainPhase.IMPORT,
         domain_id=11,
@@ -156,9 +204,55 @@ def test_global_domain_wire_round_trips_topology_and_descriptor_table():
     )
 
     assert decode_comm_init(encode_comm_init(init)) == init
+    assert decode_domain_command(encode_domain_command(prepare)) == prepare
     assert decode_domain_command(encode_domain_command(command)) == command
+    assert prepare.attachments_for_node(0) == _attachments()[:2]
+    assert prepare.attachments_for_node(1) == _attachments()[2:]
     assert decode_descriptor_table(encode_descriptor_table(_descriptors())) == _descriptors()
     assert GLOBAL_DOMAIN_DESCRIPTOR_BYTES == 288
+
+
+def test_global_domain_wire_rejects_attachments_after_prepare():
+    command = GlobalDomainCommand(
+        phase=GlobalDomainPhase.IMPORT,
+        domain_id=11,
+        generation=1,
+        name="tp",
+        profile="sim",
+        window_size=2048,
+        members=_members(),
+        buffers=(),
+        descriptors=_descriptors(),
+        attachments=_attachments(),
+    )
+
+    with pytest.raises(ValueError, match="only carried by PREPARE_EXPORT"):
+        encode_domain_command(command)
+
+
+def test_global_domain_attachment_table_requires_complete_unique_receiver_rows():
+    def make_command(attachments: tuple[GlobalDomainAttachment, ...]) -> GlobalDomainCommand:
+        return GlobalDomainCommand(
+            phase=GlobalDomainPhase.PREPARE_EXPORT,
+            domain_id=11,
+            generation=1,
+            name="attachment-shape",
+            profile="sim",
+            window_size=2048,
+            members=_members(),
+            buffers=(),
+            attachments=attachments,
+        )
+
+    incomplete = make_command(_attachments()[:-1])
+    with pytest.raises(ValueError, match="complete rank rows"):
+        encode_domain_command(incomplete)
+
+    duplicate_row = make_command(_attachments()[:2] * 2)
+    with pytest.raises(ValueError, match="duplicate node row"):
+        encode_domain_command(duplicate_row)
+
+    assert GLOBAL_DOMAIN_MAX_ATTACHMENTS == 64 * 64
 
 
 def test_global_domain_encode_rejects_too_many_buffers():
@@ -318,6 +412,54 @@ def test_global_domain_transaction_aborts_all_prepared_nodes_after_phase_failure
         assert abort_nodes == list(node_ids)
         assert worker._live_global_domains == {}
         assert resources.live_global_domains == {}
+    finally:
+        _close_failure_injection_worker(worker, resources)
+
+
+def test_allocate_global_domain_builds_one_attachment_row_per_receiver_node(monkeypatch):
+    from simpler.remote_l3_protocol import ControlName  # noqa: PLC0415
+    from simpler.task_interface import CommBufferSpec  # noqa: PLC0415
+
+    worker, resources, node_ids = _failure_injection_worker()
+    commands = []
+    calls = _install_global_domain_failure_injector(
+        monkeypatch,
+        worker,
+        fail_phase=None,
+        fail_node=-1,
+    )
+    original_control = worker._global_domain_control
+
+    def capture_control(worker_id, control_name, payload):
+        if ControlName(control_name) is ControlName.ALLOC_DOMAIN:
+            commands.append(decode_domain_command(payload))
+        return original_control(worker_id, control_name, payload)
+
+    monkeypatch.setattr(worker, "_global_domain_control", capture_control)
+    try:
+        handle = worker._allocate_global_domain(
+            name="attachment-matrix",
+            members=((node_ids[0], 0), (node_ids[1], 0)),
+            window_size=4096,
+            buffers=[CommBufferSpec("payload", "uint8", 4096, 4096)],
+            retain_after_run=False,
+        )
+
+        assert len(handle.attachments) == len(node_ids) * len(handle.members)
+        for node_worker_id in node_ids:
+            row = tuple(attachment for attachment in handle.attachments if attachment.node_worker_id == node_worker_id)
+            assert len(row) == len(handle.members)
+            assert all(attachment.address_space is AddressSpace.HOST for attachment in row)
+        domain_commands = [command for command in commands if command.phase is not GlobalDomainPhase.ABORT]
+        assert domain_commands
+        prepare_commands = [command for command in domain_commands if command.phase is GlobalDomainPhase.PREPARE_EXPORT]
+        later_commands = [
+            command for command in domain_commands if command.phase is not GlobalDomainPhase.PREPARE_EXPORT
+        ]
+        assert prepare_commands
+        assert all(command.attachments == handle.attachments for command in prepare_commands)
+        assert all(not command.attachments for command in later_commands)
+        assert calls
     finally:
         _close_failure_injection_worker(worker, resources)
 
@@ -748,7 +890,7 @@ def _local_node_domain_commands():
         "members": members,
         "buffers": (GlobalDomainBuffer("payload", 64),),
     }
-    prepare = GlobalDomainCommand(phase=GlobalDomainPhase.PREPARE_EXPORT, **common)
+    prepare = GlobalDomainCommand(phase=GlobalDomainPhase.PREPARE_EXPORT, attachments=_attachments()[:2], **common)
     imported = GlobalDomainCommand(phase=GlobalDomainPhase.IMPORT, descriptors=descriptors, **common)
     return prepare, imported
 
@@ -800,6 +942,62 @@ def test_node_import_failure_rolls_back_partial_local_ranks_and_uses_configured_
         assert timeouts == [7.25, 7.25, 7.25, 7.25]
     finally:
         worker._global_node_domains.clear()
+        worker._worker = None
+        worker.close()
+
+
+def test_node_import_reuses_prepared_attachment_row_for_view():
+    from simpler.worker import (  # noqa: PLC0415
+        CTRL_GLOBAL_DOMAIN_IMPORT,
+        CTRL_GLOBAL_DOMAIN_RELEASE,
+        LOCAL_DOMAIN_MAGIC,
+        LOCAL_IMPORT_REPLY,
+        Worker,
+        _GlobalNodeDomainState,
+    )
+
+    prepare, imported = _local_node_domain_commands()
+
+    class FakeNativeWorker:
+        def control_payload(self, _kind, _worker_id, control, _payload, _timeout):
+            if control == CTRL_GLOBAL_DOMAIN_IMPORT:
+                return LOCAL_IMPORT_REPLY.pack(
+                    LOCAL_DOMAIN_MAGIC,
+                    GLOBAL_DOMAIN_VERSION,
+                    imported.domain_id,
+                    imported.generation,
+                    0x1000,
+                    0x2000,
+                    4096,
+                )
+            assert control == CTRL_GLOBAL_DOMAIN_RELEASE
+            return b""
+
+    worker = Worker(level=3, device_ids=(0, 1))
+    worker._worker = FakeNativeWorker()
+    worker._global_node_domains[prepare.domain_id] = _GlobalNodeDomainState(command=prepare)
+    commit = GlobalDomainCommand(
+        phase=GlobalDomainPhase.COMMIT,
+        domain_id=imported.domain_id,
+        generation=imported.generation,
+        name=imported.name,
+        profile=imported.profile,
+        window_size=imported.window_size,
+        members=imported.members,
+        buffers=imported.buffers,
+        descriptors=imported.descriptors,
+    )
+    try:
+        worker._import_global_domain_node(imported, 0)
+        state = worker._global_node_domains[prepare.domain_id]
+        assert state.command.attachments == prepare.attachments
+        assert state.view is not None
+        assert state.view.attachments == prepare.attachments_for_node(0)
+
+        worker._commit_global_domain_node(commit)
+        assert state.view.committed
+    finally:
+        worker._release_global_domain_node(GlobalDomainReleaseCommand(prepare.domain_id, prepare.generation))
         worker._worker = None
         worker.close()
 
@@ -1083,6 +1281,7 @@ def test_mpirun_group_global_domain_uses_mpi_prepare_commit_without_l4_import(mo
 
     worker, resources, node_ids = _mpi_static_worker()
     calls = []
+    commands = []
 
     def control(worker_id, control_name, payload, *, group=False):
         control_name = ControlName(control_name)
@@ -1098,6 +1297,7 @@ def test_mpirun_group_global_domain_uses_mpi_prepare_commit_without_l4_import(mo
             )
         assert control_name is ControlName.ALLOC_DOMAIN
         command = decode_domain_command(payload)
+        commands.append(command)
         calls.append((command.phase, worker_id))
         if command.phase is GlobalDomainPhase.PREPARE_EXPORT:
             descriptors = tuple(
@@ -1134,6 +1334,13 @@ def test_mpirun_group_global_domain_uses_mpi_prepare_commit_without_l4_import(mo
         assert counts[GlobalDomainPhase.PREPARE_EXPORT] == 1
         assert counts[GlobalDomainPhase.COMMIT] == 1
         assert counts[GlobalDomainPhase.IMPORT] == 0
+        assert len(commands) == 2
+        prepare_command = next(command for command in commands if command.phase is GlobalDomainPhase.PREPARE_EXPORT)
+        commit_command = next(command for command in commands if command.phase is GlobalDomainPhase.COMMIT)
+        assert prepare_command.attachments
+        assert not commit_command.attachments
+        assert len(prepare_command.attachments_for_node(node_ids[0])) == len(prepare_command.members)
+        assert len(prepare_command.attachments_for_node(node_ids[1])) == len(prepare_command.members)
         group_phases = [
             worker_id
             for phase, worker_id in calls

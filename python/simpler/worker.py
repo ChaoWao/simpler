@@ -79,7 +79,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from multiprocessing import resource_tracker
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, cast
@@ -143,6 +143,9 @@ from .comm_endpoints import (
     DEVICE_AICORE,
     DEVICE_AICPU,
     HOST_CPU,
+    AdapterKind,
+    AdapterProfile,
+    AttachmentRole,
     BackendPlan,
     BackendResolver,
     DefaultRegionAccessService,
@@ -155,6 +158,7 @@ from .comm_endpoints import (
     _EndpointTopologySnapshot,
     _format_worker_path,
     _normalize_node_identity,
+    at,
     parse_endpoint_path,
 )
 from .comm_region import MaterializationContext, RegionInstance, materialize_region_instance
@@ -180,6 +184,7 @@ from .global_comm_domain import (
     LOCAL_PREPARE_REQUEST,
     LOCAL_RELEASE_REQUEST,
     GlobalCommInitCommand,
+    GlobalDomainAttachment,
     GlobalDomainBuffer,
     GlobalDomainCommand,
     GlobalDomainCopyCommand,
@@ -6373,6 +6378,14 @@ class Worker:
             remote_node_identity = self._node_identity_from_remote_endpoint(spec.endpoint)
             entries.append(_EndpointTopologyEntry(remote_path, HOST_CPU, remote_node_identity))
             self._append_device_endpoint_topology(entries, remote_path, spec.device_ids, remote_node_identity)
+        mpi_groups = {group.group_id: group for group in worker._mpi_l3_groups}
+        for child_index in worker._mpi_worker_ids:
+            rank = worker._mpi_rank_by_worker_id[int(child_index)]
+            group = mpi_groups[rank.group_id]
+            mpi_node_identity = _normalize_node_identity(group.spec.hosts[rank.rank])
+            mpi_path = _format_worker_path(3, parent_path=path, index=int(child_index))
+            entries.append(_EndpointTopologyEntry(mpi_path, HOST_CPU, mpi_node_identity))
+            self._append_device_endpoint_topology(entries, mpi_path, rank.spec.device_ids, mpi_node_identity)
 
     def _append_device_endpoint_topology(
         self,
@@ -9133,7 +9146,77 @@ class Worker:
             command.window_size,
             command.members,
             command.buffers,
+            command.attachments,
         )
+
+    def _global_domain_attachment_matrix(
+        self,
+        members: tuple[GlobalDomainMember, ...],
+        receiver_nodes: tuple[int, ...],
+        window_size: int,
+    ) -> tuple[GlobalDomainAttachment, ...]:
+        """Resolve one host-consumer row for every receiving L3 node.
+
+        The endpoint planner remains the authority for adapter selection.  A
+        relation that the current planner cannot serve is retained as a
+        host-consumer attachment with no adapter; the wire therefore preserves
+        the complete matrix without claiming that an unavailable remote path
+        is usable.  A later access primitive can fill that capability without
+        changing rank membership or row cardinality.
+        """
+
+        registry = self._get_endpoint_registry()
+        resolver = BackendResolver(registry, self._get_region_access_service())
+        root_path = _format_worker_path(int(self.level))
+        attachments: list[GlobalDomainAttachment] = []
+        for receiver_node_id in sorted({int(node) for node in receiver_nodes}):
+            receiver_path = _format_worker_path(
+                3,
+                parent_path=root_path,
+                index=receiver_node_id,
+            )
+            consumer_selector = at(receiver_path, HOST_CPU)
+            for member in members:
+                member_path = _format_worker_path(
+                    2,
+                    parent_path=receiver_path
+                    if int(member.node_worker_id) == receiver_node_id
+                    else _format_worker_path(
+                        3,
+                        parent_path=root_path,
+                        index=int(member.node_worker_id),
+                    ),
+                    index=int(member.local_worker_id),
+                )
+                provider_selector = at(member_path, DEVICE_AICORE)
+                resolved = registry.resolve_region_spec(
+                    (provider_selector, consumer_selector),
+                    SingleOwner(provider=provider_selector),
+                )
+                plan = resolver.plan(
+                    resolved,
+                    RegionLayoutSpec(payload_bytes=int(window_size), counter_bytes=0),
+                )
+                adapter_kind: AdapterKind | None = None
+                adapter_profile: AdapterProfile | None = None
+                if not isinstance(plan, UnsupportedRegionPlan):
+                    consumer = next(
+                        attachment
+                        for attachment in plan.payload.attachments
+                        if attachment.role is AttachmentRole.CONSUMER
+                    )
+                    adapter_kind = consumer.adapter_kind
+                    adapter_profile = consumer.adapter_profile
+                attachments.append(
+                    GlobalDomainAttachment(
+                        node_worker_id=receiver_node_id,
+                        address_space=AddressSpace.HOST,
+                        role=AttachmentRole.CONSUMER,
+                        adapter_kind=adapter_kind,
+                        adapter_profile=adapter_profile,
+                    )
+                )
+        return tuple(attachments)
 
     @staticmethod
     def _global_domain_provenance_id(domain_id: int) -> int:
@@ -9161,6 +9244,7 @@ class Worker:
     ) -> tuple[GlobalDomainDescriptor, ...]:
         if self.level != 3 or self._worker is None:
             raise RuntimeError("Global CommDomain node prepare requires a ready L3 Worker")
+        command.attachments_for_node(node_worker_id)
         prior = self._global_node_domains.get(command.domain_id)
         if prior is not None:
             if self._global_domain_command_identity(prior.command) != self._global_domain_command_identity(command):
@@ -9222,6 +9306,15 @@ class Worker:
         state = self._global_node_domains.get(command.domain_id)
         if state is None or state.command.generation != command.generation:
             raise RuntimeError("Global CommDomain import requires a matching prepared domain")
+        if command.attachments:
+            if command.attachments != state.command.attachments:
+                raise RuntimeError("Global CommDomain import attachments conflict with prepare")
+        elif state.command.attachments:
+            # Attachments are immutable domain topology. IMPORT carries no
+            # second copy; rehydrate the prepared row before comparing the
+            # command identity and publishing the node view.
+            command = replace(command, attachments=state.command.attachments)
+        node_attachments = command.attachments_for_node(node_worker_id)
         if self._global_domain_command_identity(state.command) != self._global_domain_command_identity(command):
             raise RuntimeError("Global CommDomain import command conflicts with prepare")
         validate_descriptor_table(
@@ -9310,6 +9403,7 @@ class Worker:
                 domain_id=command.domain_id,
                 generation=command.generation,
                 mapping_size=command.descriptors[0].mapping_size,
+                attachments=node_attachments,
             )
         except BaseException:
             # A node may have imported one local rank before a later local rank
@@ -9325,6 +9419,11 @@ class Worker:
         state = self._global_node_domains.get(command.domain_id)
         if state is None or state.command.generation != command.generation:
             raise RuntimeError("Global CommDomain commit requires a matching imported domain")
+        if command.attachments:
+            if command.attachments != state.command.attachments:
+                raise RuntimeError("Global CommDomain commit attachments conflict with prepare")
+        elif state.command.attachments:
+            command = replace(command, attachments=state.command.attachments)
         if state.phase is not GlobalDomainPhase.IMPORT or state.view is None:
             raise RuntimeError("Global CommDomain commit requires IMPORT completion")
         if (
@@ -9587,6 +9686,12 @@ class Worker:
         global_buffers = tuple(GlobalDomainBuffer(buffer.name, int(buffer.nbytes)) for buffer in buffers)
         domain_members_tuple = tuple(domain_members)
         involved_nodes = tuple(dict.fromkeys(member.node_worker_id for member in domain_members_tuple))
+        attachment_nodes = tuple(sorted(involved_nodes))
+        attachment_matrix = self._global_domain_attachment_matrix(
+            domain_members_tuple,
+            attachment_nodes,
+            int(window_size),
+        )
         for node_worker_id in involved_nodes:
             node = nodes[node_worker_id]
             resolve_global_comm_capability(
@@ -9623,6 +9728,7 @@ class Worker:
             window_size=int(window_size),
             members=domain_members_tuple,
             buffers=global_buffers,
+            attachments=attachment_matrix,
         )
 
         prepared_nodes: list[int] = []
@@ -9779,6 +9885,7 @@ class Worker:
             mapping_size=descriptors[0].mapping_size,
             retain_after_run=retain_after_run,
             _release_fn=lambda released, owner=resources: self._release_global_domain_handle(released, owner),
+            attachments=attachment_matrix,
         )
         self._live_global_domains[name] = handle
         resources.live_global_domains[name] = handle
