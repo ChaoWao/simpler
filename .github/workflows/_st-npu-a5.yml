@@ -78,9 +78,8 @@ jobs:
 
       - name: Run pytest scene tests (a5)
         run: |
-          DEVICE_LIST=$(.venv/bin/python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" \
-            --run ".venv/bin/python -m pytest examples tests/st --platform a5 --exclude-level 4 --device ${DEVICE_RANGE} -v --require-pto-isa --pto-session-timeout 1200 --manual '$MANUAL_MODE'"
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+            --run ".venv/bin/python -m pytest examples tests/st --platform a5 --exclude-level 4 --device \$TASK_DEVICE -v --require-pto-isa --pto-session-timeout 1200 --manual '$MANUAL_MODE'"
 
       - name: DFX smokes (a5)
         if: inputs.include_dfx_smokes
