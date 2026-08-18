@@ -180,6 +180,18 @@ static void *acquire_graph_definition_buffer(
     }
 }
 
+static void *acquire_graph_submission_buffer(
+    void *runner_ctx, uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
+) {
+    if (runner_ctx == nullptr) return nullptr;
+    try {
+        return static_cast<DeviceRunnerBase *>(runner_ctx)
+            ->acquire_graph_submission_buffer(pipeline_slot, graph_key, occurrence, bytes, alignment);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 static uint64_t upload_chip_callable_buffer_wrapper(void *runner_ctx, const void *callable) {
     if (runner_ctx == nullptr) return 0;
     try {
@@ -295,6 +307,7 @@ static const HostApiOps g_host_api_ops = {
     .set_retained_temp_buffer = set_retained_temp_buffer,
     .acquire_graph_execution_buffer = acquire_graph_execution_buffer,
     .acquire_graph_definition_buffer = acquire_graph_definition_buffer,
+    .acquire_graph_submission_buffer = acquire_graph_submission_buffer,
     .setup_static_arena = setup_static_arena_wrapper,
     .acquire_pooled_gm_heap = acquire_pooled_gm_heap_wrapper,
     .acquire_pooled_gm_sm = acquire_pooled_gm_sm_wrapper,
