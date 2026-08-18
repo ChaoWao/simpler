@@ -97,6 +97,35 @@ The control flow is:
 5. L4 commits only after all imports succeed. Any earlier failure sends
    `ABORT` and releases every prepared local window.
 
+`GlobalDomainCommand` is the transaction wire for all four phases:
+`PREPARE_EXPORT`, `IMPORT`, `COMMIT`, and `ABORT`. Runtime data movement does
+not resend it: `COPY_TO_DOMAIN`/`COPY_FROM_DOMAIN` use
+`GlobalDomainCopyCommand`, and teardown uses `GlobalDomainReleaseCommand`.
+
+### Attachment axis
+
+`GlobalDomainMember` remains the rank table: one entry and one exported window
+per device rank. A host is not inserted into that table and never consumes an
+HCCL rank. The version-2 `GlobalDomainCommand` carries a flattened attachment
+matrix alongside `members`. Each receiving L3 node contributes one row, and
+each row has one entry for every member in dense rank order. Thus a domain with
+three ranks on two nodes carries six attachment records; a receiver selects
+the row whose `node_worker_id` is its own. MPI and non-MPI control paths use
+the same complete command bytes.
+
+The first wire form describes host consumers for the whole rank window (all
+named buffer slices); it does not create a host mapping or lease during
+`PREPARE`. Attachments are immutable for the domain lifetime and are serialized
+only on `PREPARE_EXPORT`; `IMPORT` and `COMMIT` carry the descriptor table but
+an empty attachment field, and the receiving L3 reuses the row saved by
+`PREPARE_EXPORT`. `ABORT` carries only the transaction identity needed for
+rollback. `address_space`, `role`, and the adapter fields reuse the endpoint
+planner's existing vocabulary. The planner supplies an adapter when the
+relation is currently supported; an unsupported relation remains an explicit
+host-consumer record with no adapter instead of being mistaken for a usable
+mapping. Host access still needs the separate host-window access primitive
+before a consumer can dereference a device window.
+
 The descriptor reports the backend's actual mapped size. A3 Fabric may align
 the requested size to its VMM granularity; buffer carving and bounds checks
 therefore use the returned mapping size. Handles and device pointers never

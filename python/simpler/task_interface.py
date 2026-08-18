@@ -142,7 +142,7 @@ def _assert_bindings_match_source_tree() -> None:
 
 _assert_bindings_match_source_tree()
 
-from .global_comm_domain import GlobalDomainBuffer, GlobalDomainMember  # noqa: E402
+from .global_comm_domain import GlobalDomainAttachment, GlobalDomainBuffer, GlobalDomainMember  # noqa: E402
 
 __all__ = [
     "DataType",
@@ -1097,14 +1097,16 @@ class CommDomainHandle:
 class GlobalCommDomainHandle:
     """L4-owned handle for one CommDomain spanning local and/or remote L3 nodes.
 
-    The handle contains stable topology and buffer offsets only. Device
-    addresses remain in the L3/L2 process that imported the transport handles.
+    The handle contains stable topology, attachment metadata, and buffer
+    offsets only. Device addresses remain in the L3/L2 process that imported
+    the transport handles.
     """
 
     __slots__ = (
         "_freed",
         "_release_fn",
         "_released",
+        "attachments",
         "buffers",
         "domain_id",
         "generation",
@@ -1125,10 +1127,12 @@ class GlobalCommDomainHandle:
         mapping_size: int,
         retain_after_run: bool,
         _release_fn,
+        attachments: tuple[GlobalDomainAttachment, ...] = (),
     ) -> None:
         self.name = str(name)
         self.members = tuple(members)
         self.buffers = tuple(buffers)
+        self.attachments = tuple(attachments)
         self.domain_id = int(domain_id)
         self.generation = int(generation)
         self.mapping_size = int(mapping_size)
@@ -1180,10 +1184,11 @@ class GlobalCommDomainHandle:
 
 
 class GlobalCommDomainView:
-    """L3-local imported view exposed to remote orchestration callables."""
+    """L3-local imported view and its receiving-node attachment row."""
 
     __slots__ = (
         "_committed",
+        "attachments",
         "contexts",
         "domain_id",
         "generation",
@@ -1201,9 +1206,11 @@ class GlobalCommDomainView:
         domain_id: int,
         generation: int,
         mapping_size: int,
+        attachments: tuple[GlobalDomainAttachment, ...] = (),
     ) -> None:
         self.name = str(name)
         self.members = tuple(members)
+        self.attachments = tuple(attachments)
         self.contexts = dict(contexts)
         self.domain_id = int(domain_id)
         self.generation = int(generation)
