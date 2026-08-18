@@ -24,7 +24,7 @@ from typing import cast
 import pytest
 import simpler.worker as worker_mod
 from simpler import callable_identity
-from simpler.buffer import ImportRegistry, mint_owner_instance_id, wrap_fork_inherited
+from simpler.buffer import ImportContext, ImportRegistry, mint_owner_instance_id, wrap_fork_inherited
 from simpler.callable_identity import (
     CallableHandle,
     CallableKindName,
@@ -105,7 +105,7 @@ def _remote_sleep_orch(orch, args, cfg):
 # A remote runner's orchestration function receives address-free wire ``Tensor`` args, so one that
 # computes in-process reaches the bytes the way every other consumer does: map the embedded
 # descriptor once, keyed by canonical identity, and index the view from the mapped base.
-_REMOTE_ORCH_IMPORTS = ImportRegistry()
+_REMOTE_ORCH_IMPORTS = ImportRegistry(ImportContext(is_host_endpoint=True))
 
 
 def _remote_u8_view(tensor):

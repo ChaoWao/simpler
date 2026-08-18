@@ -37,11 +37,13 @@ def _bare_worker(level: int, *, chip: int = 0, sub: int = 0, next_level: int = 0
     w._hierarchical_start_mu = threading.Lock()
     w._hierarchical_start_cv = threading.Condition(w._hierarchical_start_mu)
     w._accepted_run_handles = set()
+    w._abandoned_run_handles = []
     # Run admission is shared/exclusive now, not a plain Lock: production code calls
     # `.exclusive()` / `.shared()` on it, so the stand-in has to be the real type.
     w._submit_mu = _SharedExclusiveLock()
     w._chip_run_touched_identities = {}
     w._chip_import_registry = None
+    w._reexport_by_source = {}
     w._worker = None
     return w
 
