@@ -462,3 +462,58 @@ def test_rounds_table_omits_tmr_only_columns_when_only_host_and_device_exist():
     assert "Sched (us)" not in rendered
     assert "Avg Host: 110.0 us" in rendered
     assert "Avg Device: 22.0 us [2/2]" in rendered
+
+
+def test_rounds_table_counts_eager_h2d_as_h2d_graph_not_host_orch():
+    """Per-layer H2D nested in host_orch.entry is Gate-accounted as H2dGraph."""
+    from simpler_setup.tools.strace_timing import _round_metrics
+
+    lines = [
+        _span_record(pid=1, tid=1, inv=1, name="simpler_run", ts=0, dur=2_000_000),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.host_orch", ts=1_000, dur=1_000_000, depth=3
+        ),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_graph", ts=10_000, dur=100_000, depth=5
+        ),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_graph", ts=200_000, dur=200_000, depth=5
+        ),
+        # Leftover sync after orch: H2dGraph, not subtracted from HostOrch.
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_graph", ts=1_100_000, dur=50_000, depth=3
+        ),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_sm", ts=1_160_000, dur=30_000, depth=2
+        ),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_arena", ts=1_200_000, dur=20_000, depth=2
+        ),
+    ]
+    row = _round_metrics(group_invocations(parse_spans(lines))[0])
+    # Host Device Effective Orch Sched Args Prebuilt HostOrch Relocate H2dImage H2dGraph H2dSm H2dArena
+    assert row[7] == 700.0
+    assert row[9] == 400.0
+    assert row[10] == 350.0
+    assert row[11] == 30.0
+    assert row[12] == 20.0
+
+
+def test_rounds_table_does_not_double_count_h2d_graph_parent_and_children():
+    from simpler_setup.tools.strace_timing import _round_metrics
+
+    lines = [
+        _span_record(pid=1, tid=1, inv=1, name="simpler_run", ts=0, dur=1_000_000),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_graph", ts=10_000, dur=500_000, depth=3
+        ),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_graph", ts=20_000, dur=100_000, depth=4
+        ),
+        _span_record(
+            pid=1, tid=1, inv=1, name="simpler_run.bind.h2d_graph", ts=200_000, dur=100_000, depth=4
+        ),
+    ]
+    row = _round_metrics(group_invocations(parse_spans(lines))[0])
+    assert row[10] == 500.0
+    assert row[9] == 500.0

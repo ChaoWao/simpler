@@ -35,3 +35,18 @@ struct GraphHostUpload {
 GraphHostStatePtr make_graph_host_state();
 size_t graph_host_upload_count(const GraphHostState &state);
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index);
+
+// Optional eager H2D hook: invoked right after each Graph POD image is appended
+// during orch entry (compute-one-layer, copy-that-layer).
+using GraphHostEagerUploadFn = bool (*)(void *ctx, GraphHostState &state, size_t index);
+void graph_host_set_eager_upload(GraphHostEagerUploadFn fn, void *ctx);
+bool graph_host_upload_h2d_done(const GraphHostState &state, size_t index);
+void graph_host_mark_upload_h2d_done(GraphHostState &state, size_t index);
+
+// Optional pinned bump arena for Graph POD images. Set by host runtime before
+// orch entry so graph_submit_definition can write PODs in place. Not set →
+// fallback std::vector images.
+void graph_host_set_pinned_arena(std::byte *base, size_t cap);
+void graph_host_clear_pinned_arena();
+std::byte *graph_host_pinned_base();
+size_t graph_host_pinned_used();

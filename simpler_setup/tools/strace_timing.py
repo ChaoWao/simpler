@@ -279,22 +279,116 @@ _ROUNDS_TABLE_NAMES = {
     "device": "simpler_run.runner_run.device_wall",
     "orch": "simpler_run.runner_run.device_wall.orch",
     "sched": "simpler_run.runner_run.device_wall.sched",
+    # HBG host-bind stages (a2a3 host_build_graph). Distinct from TMR device Orch.
+    "args": "simpler_run.bind.args",
+    "prebuilt": "simpler_run.bind.prebuilt",
+    "host_orch": "simpler_run.bind.host_orch",
+    "relocate": "simpler_run.bind.relocate",
+    "h2d_image": "simpler_run.bind.h2d_image",
+    "h2d_graph": "simpler_run.bind.h2d_graph",
+    "h2d_sm": "simpler_run.bind.h2d_sm",
+    "h2d_arena": "simpler_run.bind.h2d_arena",
 }
 
 # Per-round table columns, in print order. "Effective" is the orch∪sched merged
 # window (the old device-log "Total"), recomputed here purely from the orch/sched
 # markers' device-domain ts+dur — no device log needed. label is the column
-# header / "Avg <label>".
-_ROUNDS_TABLE_COLUMNS = ("Host", "Device", "Effective", "Orch", "Sched")
+# header / "Avg <label>". HBG bind columns appear only when those spans exist.
+_ROUNDS_TABLE_COLUMNS = (
+    "Host",
+    "Device",
+    "Effective",
+    "Orch",
+    "Sched",
+    "Args",
+    "Prebuilt",
+    "HostOrch",
+    "Relocate",
+    "H2dImage",
+    "H2dGraph",
+    "H2dSm",
+    "H2dArena",
+)
+
+# Bind-stage keys used for the HBG share table (document gate = HostOrch + H2dImage).
+_BIND_SHARE_KEYS = ("args", "prebuilt", "host_orch", "relocate", "h2d_image")
+_BIND_SHARE_LABELS = {
+    "args": "Args",
+    "prebuilt": "Prebuilt",
+    "host_orch": "HostOrch",
+    "relocate": "Relocate",
+    "h2d_image": "H2dImage",
+}
+
+
+def _span_contained(inner, outer):
+    """True if ``inner``'s [ts, ts+dur] lies inside ``outer`` (and is not ``outer``)."""
+    if inner is outer:
+        return False
+    inner_end = inner.ts + inner.dur
+    outer_end = outer.ts + outer.dur
+    return inner.ts >= outer.ts and inner_end <= outer_end
+
+
+def _sum_top_level_named_ns(inv, name):
+    """Sum spans named ``name`` that are not nested inside another span of the same name."""
+    named = [s for s in inv.spans if s.name == name]
+    return sum(s.dur for s in named if not any(_span_contained(s, other) for other in named))
+
+
+def _sum_span_dur_us(inv, name):
+    """Sum every span with ``name`` in this invocation (µs).
+
+    HBG may emit several image-upload pieces. Exact-name matches are summed;
+    for ``simpler_run.bind.h2d_image`` we also fold the split children
+    ``h2d_graph`` / ``h2d_sm`` / ``h2d_arena`` so the Gate column stays one number.
+
+    Eager per-layer H2D emits ``h2d_graph`` *inside* ``host_orch.entry``. Those
+    nested copies belong to H2dGraph: HostOrch is exclusive of them, and
+    nested ``h2d_graph`` children of a leftover ``h2d_graph`` parent are not
+    double-counted.
+    """
+    if name == "simpler_run.bind.h2d_image":
+        total_ns = _sum_top_level_named_ns(inv, "simpler_run.bind.h2d_graph")
+        total_ns += sum(s.dur for s in inv.spans if s.name == "simpler_run.bind.h2d_sm")
+        total_ns += sum(s.dur for s in inv.spans if s.name == "simpler_run.bind.h2d_arena")
+        total_ns += sum(s.dur for s in inv.spans if s.name == name)
+    elif name == "simpler_run.bind.h2d_graph":
+        total_ns = _sum_top_level_named_ns(inv, name)
+    elif name == "simpler_run.bind.host_orch":
+        parents = [s for s in inv.spans if s.name == name]
+        parent = sum(s.dur for s in parents)
+        if parent > 0:
+            nested_h2d = sum(
+                s.dur
+                for s in inv.spans
+                if s.name == "simpler_run.bind.h2d_graph" and any(_span_contained(s, p) for p in parents)
+            )
+            total_ns = parent - nested_h2d
+        else:
+            total_ns = sum(
+                s.dur
+                for s in inv.spans
+                if s.name
+                in (
+                    "simpler_run.bind.host_orch.setup",
+                    "simpler_run.bind.host_orch.entry",
+                )
+            )
+    elif name == "simpler_run.bind.orch_h2d_pipe":
+        total_ns = sum(s.dur for s in inv.spans if s.name == name)
+    else:
+        total_ns = sum(s.dur for s in inv.spans if s.name == name)
+    return total_ns / 1000.0
 
 
 def _round_metrics(inv):
-    """Return one round's (Host, Device, Effective, Orch, Sched) in µs from spans.
+    """Return one round's metrics in µs; column order matches ``_ROUNDS_TABLE_COLUMNS``.
 
-    Host/Device/Orch/Sched are span durations; Effective =
+    Host/Device/Orch/Sched are single-span durations; Effective =
     ``max(orch_end, sched_end) - min(orch_start, sched_start)`` from the orch/sched
-    spans' device-domain ``ts``/``dur`` (0 when neither is present). All values in
-    µs. Column order matches ``_ROUNDS_TABLE_COLUMNS``.
+    spans' device-domain ``ts``/``dur`` (0 when neither is present). HBG bind
+    columns sum same-name spans (h2d_image may be multi-piece).
     """
     names = inv.by_name()
 
@@ -312,22 +406,38 @@ def _round_metrics(inv):
     else:
         effective = 0.0
 
-    return (_dur("host"), _dur("device"), effective, _dur("orch"), _dur("sched"))
+    return (
+        _dur("host"),
+        _dur("device"),
+        effective,
+        _dur("orch"),
+        _dur("sched"),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["args"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["prebuilt"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["host_orch"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["relocate"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["h2d_image"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["h2d_graph"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["h2d_sm"]),
+        _sum_span_dur_us(inv, _ROUNDS_TABLE_NAMES["h2d_arena"]),
+    )
 
 
 def print_rounds_table(buckets, stream=sys.stdout):
-    """Print a per-round Host/Device/Effective/Orch/Sched table (µs) for the busiest hid.
+    """Print a per-round Host/Device/Effective/Orch/Sched (+ HBG bind) table (µs).
 
     This renders the per-round benchmark table that ``scene_test`` used to print
     inline. The most-invoked hid bucket is treated as the rounds (one row per
     invocation, ordered by ``inv``); each row's metrics come from
     :func:`_round_metrics`. A column is hidden when every row read 0 (e.g.
     device/orch/sched/effective are 0 when their marker is absent; for example,
-    HBG emits device wall but has no device-side orch/sched windows).
+    HBG emits device wall but has no device-side orch/sched windows). When HBG
+    bind children are present, a bind-share summary (µs + % of bind stages, plus
+    document-gate HostOrch+H2dImage) is printed after the averages.
 
     The output format is consumed by ``tools/benchmark_rounds.sh``'s
     framework-table parser (header ``Round  Host (us) …``, ``Avg Host:``
-    terminator).
+    terminator). Extra trailing columns are ignored by that parser.
     """
     if not buckets:
         print("No [STRACE] markers found.", file=stream)
@@ -388,6 +498,98 @@ def print_rounds_table(buckets, stream=sys.stdout):
             msg += f"  |  Trimmed Avg Device: {sum(dev[trim:-trim]) / (len(dev) - 2 * trim):.1f} us"
         msg += f"  (dropped {trim} low + {trim} high, {tc} rounds used)"
         print(msg, file=stream)
+
+    # HBG bind-share: only when at least one bind-stage column was present.
+    bind_col_idxs = {
+        key: _ROUNDS_TABLE_COLUMNS.index(_BIND_SHARE_LABELS[key]) for key in _BIND_SHARE_KEYS
+    }
+    if any(bind_col_idxs[k] in nz for k in _BIND_SHARE_KEYS):
+        print_bind_share_table(rows, stream=stream)
+        if n >= 2:
+            print_bind_share_warmup_vs_steady(rows, stream=stream)
+
+
+def _bind_stage_means(rows):
+    """Per-stage mean µs over rows (zeros excluded per stage)."""
+    means = {}
+    for key in _BIND_SHARE_KEYS:
+        idx = _ROUNDS_TABLE_COLUMNS.index(_BIND_SHARE_LABELS[key])
+        vals = [r[idx] for r in rows if r[idx] > 0.0]
+        means[key] = (sum(vals) / len(vals)) if vals else 0.0
+    return means
+
+
+def _print_bind_share_block(title, means, stream):
+    total = sum(means.values())
+    print(file=stream)
+    print(f"  {title}:", file=stream)
+    if total <= 0.0:
+        print("    (no bind-stage spans)", file=stream)
+        return
+    # Rank by µs so the hotspot is obvious when warmup ≠ steady.
+    ranked = sorted(means.items(), key=lambda kv: kv[1], reverse=True)
+    top = ranked[0][0] if ranked and ranked[0][1] > 0 else None
+    for key in _BIND_SHARE_KEYS:
+        us = means[key]
+        pct = 100.0 * us / total if total > 0 else 0.0
+        mark = "  <-- top" if key == top else ""
+        print(f"    {_BIND_SHARE_LABELS[key]:<10} {us:10.1f} us  ({pct:5.1f}%){mark}", file=stream)
+    gate = means["host_orch"] + means["h2d_image"]
+    print(
+        f"    Gate(HostOrch+H2dImage) {gate:10.1f} us  (target <= 1000 us)",
+        file=stream,
+    )
+
+
+def print_bind_share_table(rows, stream=sys.stdout):
+    """Print mean µs and % share of HBG bind stages across all rounds."""
+    if not rows:
+        return
+    _print_bind_share_block(
+        "HBG bind share (all rounds, mean over rounds with each stage > 0)",
+        _bind_stage_means(rows),
+        stream,
+    )
+
+
+def print_bind_share_warmup_vs_steady(rows, stream=sys.stdout):
+    """Compare round-0 (warmup) bind share vs rounds 1..N-1 (steady).
+
+    First-run costs (cold malloc, Graph Definition record, pool first acquire)
+    often dominate round 0; optimization decisions for the 1ms gate should follow
+    the **steady** ranking unless round 0 itself is the product path.
+    """
+    if len(rows) < 2:
+        return
+    warm = _bind_stage_means(rows[:1])
+    steady = _bind_stage_means(rows[1:])
+    _print_bind_share_block("HBG bind share — round 0 (warmup)", warm, stream)
+    _print_bind_share_block(
+        f"HBG bind share — rounds 1..{len(rows) - 1} (steady, n={len(rows) - 1})",
+        steady,
+        stream,
+    )
+    # Call out ranking flips so analysis does not optimize the wrong phase.
+    def _top_key(means):
+        ranked = sorted(means.items(), key=lambda kv: kv[1], reverse=True)
+        return ranked[0][0] if ranked and ranked[0][1] > 0 else None
+
+    tw, ts = _top_key(warm), _top_key(steady)
+    print(file=stream)
+    if tw is None or ts is None:
+        print("  Warmup vs steady: insufficient bind-stage data to compare tops.", file=stream)
+    elif tw != ts:
+        print(
+            f"  Warmup vs steady: TOP DIFFERS — warmup top={_BIND_SHARE_LABELS[tw]}, "
+            f"steady top={_BIND_SHARE_LABELS[ts]} (optimize for steady unless gate is first-token).",
+            file=stream,
+        )
+    else:
+        print(
+            f"  Warmup vs steady: same top stage ({_BIND_SHARE_LABELS[tw]}); "
+            f"still compare per-stage µs above — magnitudes often differ.",
+            file=stream,
+        )
 
 
 def _bucket_label(buckets, hid):
