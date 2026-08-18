@@ -548,15 +548,6 @@ struct PTO2SchedulerState {
     // set its completion_flags byte. Single-ring: all producers are ring 0, so
     // there is no per-edge ring indirection.
 
-    bool fanin_satisfied(const PTO2TaskSlotState *s) const {
-        const PTO2TaskPayload &p = *s->payload;
-        const PTO2SharedMemoryRingHeader &ring = *ring_sched_state.ring;
-        for (int32_t i = 0; i < p.fanin_count; i++) {
-            if (!ring.is_completion_flag_set(p.fanin_local_ids[i])) return false;
-        }
-        return true;
-    }
-
     // First-unmet classification. Returns -1 (all fanins met -> route to ready)
     // or the index of the first unmet fanin (register on that producer's wake
     // list). The decision is terminal: tasks are never re-polled; a producer's

@@ -269,8 +269,9 @@ struct PTO2TaskPayload {
     int32_t fanin_count{0};  // Producer dependency count (raw, no +1 redundance)
     // Producer dependencies as position-independent local task ids. Single-ring
     // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned
-    // by fanin_satisfied / classify_fanin_state against the ring completion_flags.
-    // Hard-capped at PTO2_MAX_FANIN (no dep-pool spill).
+    // by classify_fanin_state against the ring completion_flags. A -1 result
+    // means every fanin is complete; otherwise it is the first unmet
+    // fanin index. Hard-capped at PTO2_MAX_FANIN (no dep-pool spill).
     int32_t fanin_local_ids[PTO2_MAX_FANIN];
     // Reserved: preserves the early-dispatch block and tensors[] offsets. tensors
     // must stay at byte 576 (AICore arg-materialization contract), so this fanin
