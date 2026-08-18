@@ -112,3 +112,22 @@ def test_compiler_subprocess_runs_from_checkout_root(monkeypatch):
     compiler._run_subprocess(["compiler"], "test")
 
     assert captured["cwd"] == PROJECT_ROOT
+
+
+def test_compile_cache_token_preserves_every_incore_toolchain_token(monkeypatch):
+    from simpler_setup import kernel_compiler  # noqa: PLC0415
+
+    compiler = kernel_compiler.KernelCompiler.__new__(kernel_compiler.KernelCompiler)
+    compiler._orchestration_toolchain = lambda _runtime: SimpleNamespace(cxx_path="orch-cxx")
+    compiler._orchestration_compile_flags = lambda _toolchain: ["-orch"]
+    compiler._orchestration_link_flags = lambda _toolchain: ["-link"]
+    tokens = {
+        "aic": {"core_type": "aic", "identity": {"name": "ccec"}, "flags": ["-aic"], "linker": "ld-aic"},
+        "aiv": {"core_type": "aiv", "identity": {"name": "aicore-cc"}, "flags": ["-aiv"], "linker": "ld-aiv"},
+    }
+    compiler.incore_compile_cache_token = lambda core_type: tokens[core_type]
+    monkeypatch.setattr(kernel_compiler, "_executable_cache_identity", lambda _path: {"name": "orch-cxx"})
+
+    token = compiler.compile_cache_token("host_build_graph", ["aiv", "aic"])
+
+    assert token["incore"] == {"variants": [tokens["aic"], tokens["aiv"]]}
