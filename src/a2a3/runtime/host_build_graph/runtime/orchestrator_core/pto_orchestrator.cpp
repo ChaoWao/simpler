@@ -316,7 +316,7 @@ struct GraphRecording {
     // rt_submit_graph_impl call (recording pass + graph_end). graph_end replays
     // it through graph_submit_definition to emit the outer GRAPH task with the
     // current invocation's boundary tensor addresses.
-    const CoreTaskArgs *boundary_args{nullptr};
+    const GraphTaskArgs *boundary_args{nullptr};
     bool unsupported{false};
     std::vector<ChipTensor> boundary_tensors;
     std::vector<TensorArgType> boundary_types;
@@ -381,10 +381,14 @@ bool graph_tensor_from_boundary(
     return false;
 }
 
+template <typename ArgT>
 GraphRecordedScalarSourceRef
-graph_classify_scalar(const GraphRecording &recording, const CoreTaskArgs &args, int32_t scalar_index) {
+graph_classify_scalar(const GraphRecording &recording, const ArgT &args, int32_t scalar_index) {
     if (recording.boundary_args == nullptr) return {};
-    if (&args == recording.boundary_args && scalar_index < recording.boundary_args->scalar_count()) {
+    // Identity, not type: an internal node's Arg and the boundary Arg have
+    // different capacities, so compare the addresses through void.
+    if (static_cast<const void *>(&args) == static_cast<const void *>(recording.boundary_args) &&
+        scalar_index < recording.boundary_args->scalar_count()) {
         return GraphRecordedScalarSourceRef{GraphRecordedScalarSource::BOUNDARY, static_cast<size_t>(scalar_index)};
     }
 
@@ -428,11 +432,6 @@ bool graph_classify_tensor(
         return true;
     }
     return false;
-}
-
-void graph_record_mark_unsupported(PTO2OrchestratorState *orch) {
-    GraphHostState *state = graph_state_from(orch);
-    if (state != nullptr && state->recording != nullptr) state->recording->unsupported = true;
 }
 
 GraphBoundarySignature graph_boundary_signature(const ChipTensor &tensor, TensorArgType type, uint16_t alias_rep) {
@@ -1311,7 +1310,7 @@ static TaskOutputTensors submit_task_common(
 
 namespace {
 
-bool graph_boundary_matches(const GraphDefinition &definition, const CoreTaskArgs &args) {
+bool graph_boundary_matches(const GraphDefinition &definition, const GraphTaskArgs &args) {
     if (args.scalar_count() != static_cast<int32_t>(definition.boundary_scalar_count) ||
         args.explicit_dep_count() != 0 || args.tensor_count() != static_cast<int32_t>(definition.boundary_count)) {
         LOG_WARN(
@@ -1386,7 +1385,7 @@ void graph_reset_outer_payload(PTO2TaskPayload &payload) {
 }
 
 bool graph_build_submission_image(
-    const std::vector<std::byte> &definition_image, const CoreTaskArgs &args, std::vector<std::byte> *submission_image
+    const std::vector<std::byte> &definition_image, const GraphTaskArgs &args, std::vector<std::byte> *submission_image
 ) {
     if (submission_image == nullptr || graph_definition(definition_image) == nullptr) return false;
     const size_t definition_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphDefinition));
@@ -1430,7 +1429,7 @@ bool graph_build_submission_image(
 
 bool graph_submit_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
-    const CoreTaskArgs &args, PTO2TaskId *submitted_id
+    const GraphTaskArgs &args, PTO2TaskId *submitted_id
 ) {
     const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
@@ -1655,7 +1654,7 @@ TaskOutputTensors graph_record_submit_node(
 }  // namespace
 
 GraphScopeResult
-PTO2OrchestratorState::graph_begin(uint64_t graph_key, const CoreTaskArgs &args, uint64_t callable_hash) {
+PTO2OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
     auto *orch = this;
     GraphScopeResult result;
     GraphHostState *state = graph_state_from(orch);
@@ -1929,16 +1928,14 @@ TaskOutputTensors PTO2OrchestratorState::alloc_tensors(const CoreTaskArgs &args)
         return TaskOutputTensors{};
     }
 
-    // Runtime-allocated outputs cannot be replayed by a Graph, so a Graph body
-    // that calls alloc_tensors is unsupported. Still materialize the outputs so
-    // the recording body chains correctly, then poison the recording; graph_end
-    // falls back and the body re-runs on the ordinary path.
+    // A Graph body may allocate. The allocation records as a kernel-less node —
+    // the same shape submit_dummy_task records — and replay reserves the
+    // intermediate heap for every internal node anyway, so the outputs land at
+    // addresses the replayed Definition derives for itself.
     if (GraphHostState *state = graph_state_from(orch); state != nullptr && state->recording != nullptr) {
-        TaskOutputTensors result = graph_record_submit_node(
+        return graph_record_submit_node(
             orch, args, ActiveMask{}, TaskAttrs{}, INVALID_KERNEL_ID, INVALID_KERNEL_ID, INVALID_KERNEL_ID
         );
-        graph_record_mark_unsupported(orch);
-        return result;
     }
 
     PTO2OutputLayout layout = calculate_output_layout(args);

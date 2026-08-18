@@ -93,7 +93,7 @@ typedef struct PTO2RuntimeOps {
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
-    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const CoreTaskArgs &args);
+    GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const GraphTaskArgs &args);
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);
 
@@ -213,7 +213,7 @@ static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
     return rt->ops->submit_dummy_task(rt, args);
 }
 
-static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const CoreTaskArgs &args) {
+static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const GraphTaskArgs &args) {
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt) || rt->ops->graph_begin == nullptr) {
         return GraphScopeResult{};
@@ -381,7 +381,7 @@ private:
 // normally and its sub-DAG is recorded. On a hit the function is skipped and
 // one Graph task is submitted; Scheduler expands the cached topology with the
 // current invocation's CoreTaskArgs.
-using GraphFunction = void (*)(const CoreTaskArgs &);
+using GraphFunction = void (*)(const GraphTaskArgs &);
 
 template <typename Function>
 static inline uint64_t rt_graph_function_id(Function function) {
@@ -393,7 +393,7 @@ static inline uint64_t rt_graph_function_id(Function function) {
 }
 
 template <typename Invoke>
-static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const CoreTaskArgs &args, Invoke invoke) {
+static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const GraphTaskArgs &args, Invoke invoke) {
     debug_assert(!args.has_error && "Graph boundary CoreTaskArgs construction failed");
     debug_assert(
         args.tensor_count() <= static_cast<int32_t>(GRAPH_MAX_TENSOR_ARGS) && "Graph boundary exceeds the tensor limit"
@@ -428,7 +428,7 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const C
     return result;
 }
 
-static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction function, const CoreTaskArgs &args) {
+static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction function, const GraphTaskArgs &args) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
     return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [&]() {
@@ -436,16 +436,16 @@ static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction
     });
 }
 
-static inline GraphSubmitResult rt_submit_graph(GraphFunction function, const CoreTaskArgs &args) {
+static inline GraphSubmitResult rt_submit_graph(GraphFunction function, const GraphTaskArgs &args) {
     return rt_submit_graph(rt_graph_function_id(function), function, args);
 }
 
 template <typename... Config>
-using GraphFunctionWithConfig = void (*)(const CoreTaskArgs &, Config...);
+using GraphFunctionWithConfig = void (*)(const GraphTaskArgs &, Config...);
 
 template <typename... Config>
 static inline GraphSubmitResult rt_submit_graph(
-    uint64_t graph_id, GraphFunctionWithConfig<Config...> function, const CoreTaskArgs &args, Config... config
+    uint64_t graph_id, GraphFunctionWithConfig<Config...> function, const GraphTaskArgs &args, Config... config
 ) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
@@ -456,7 +456,7 @@ static inline GraphSubmitResult rt_submit_graph(
 
 template <typename... Config>
 static inline GraphSubmitResult
-rt_submit_graph(GraphFunctionWithConfig<Config...> function, const CoreTaskArgs &args, Config... config) {
+rt_submit_graph(GraphFunctionWithConfig<Config...> function, const GraphTaskArgs &args, Config... config) {
     return rt_submit_graph(rt_graph_function_id(function), function, args, config...);
 }
 
