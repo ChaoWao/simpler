@@ -97,6 +97,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     _mailbox_load_i32,
     _mailbox_store_i32,
     _read_control_copy_request,
+    _set_host_span_level_prefix,
     _worker_host_mapped_region_ack_cleanup_error,
     _worker_host_mapped_region_close,
     _worker_host_mapped_region_import_onboard,
@@ -245,6 +246,8 @@ from .worker_chip_orch_comm import (
     peek_region_create_reply_region_id,
     validate_region_create_reply,
 )
+from .worker_level import WorkerLevel
+from .worker_level import span_prefix as _span_prefix
 
 # Upper bound on how long the parent waits for every chip's bootstrap mailbox
 # to leave IDLE.  Well above a realistic HCCL init (seconds) but short enough
@@ -4388,6 +4391,9 @@ class Worker:
         **config,
     ) -> None:
         self.level = level
+        # Rebound from the level in `init()`; the default matches the C++ table's
+        # so a span emitted before init names L3 rather than nothing.
+        self._host_span_prefix = _span_prefix(WorkerLevel.host)
         self._config = config
         self._callable_registry: dict[int, Any] = {}
         self._identity_registry: dict[bytes, _CallableIdentityState] = {}
@@ -7763,6 +7769,13 @@ class Worker:
         chip_log_level = _simpler_log.get_current_config()
         _initialize_host_log(chip_log_level)
 
+        # Bind the level word this process's host-scheduler spans lead with. The
+        # C++ emit sites in Orchestrator / WorkerThread are level-agnostic — the
+        # same code drives next-level children at every level above the chip — so
+        # the word is a property of the process. Resolved once here and pushed, so
+        # there is a single derivation rather than one on each side.
+        self._host_span_prefix = _set_host_span_level_prefix(_span_prefix(self.level))
+
         self._startup_reaped_pids = set()
         self._startup_ready_pids = set()
         self._startup_group_leader_pids = set()
@@ -10918,7 +10931,7 @@ class Worker:
                     finally:
                         graph_end_ns = time.monotonic_ns()
                         _emit_host_span(
-                            "l3.graph_build",
+                            f"{self._host_span_prefix}.graph_build",
                             run_id,
                             0,
                             0,

@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "common/host_span_names.h"
 #include "common/host_span_scope.h"
 #include "worker_manager.h"
 
@@ -377,8 +378,8 @@ void Orchestrator::release_run(RunId run_id) {
     retire_attrs << "run_id=" << run_id << " slot_id=" << lease.slot_id << " generation=" << lease.generation
                  << " role=facade";
     simpler::host_trace::emit(
-        "l3.post_fence_retirement", run_id, 0, 0, terminal_ns, simpler::host_trace::now_ns() - terminal_ns,
-        retire_attrs.str().c_str()
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::PostFenceRetirement), run_id, 0, 0,
+        terminal_ns, simpler::host_trace::now_ns() - terminal_ns, retire_attrs.str().c_str()
     );
 #endif
 }
@@ -739,7 +740,10 @@ SubmitResult Orchestrator::submit_impl(
                     << " group_index=" << (args_list.size() == 1 ? 0 : -1) << " group_size=" << args_list.size();
         if (target_worker_ids.size() == 1) trace_attrs << " worker_id=" << target_worker_ids.front();
         trace_attrs << " role=facade";
-        submit_trace.emplace("l3.submit", run->id, trace_callable_hash, 0, trace_attrs.str());
+        submit_trace.emplace(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Submit), run->id, trace_callable_hash, 0,
+            trace_attrs.str()
+        );
     }
 #endif
 

@@ -10,12 +10,12 @@
 # Benchmark wrapper: run examples on hardware and report per-round latency.
 # All columns come from the `[STRACE]` markers the run emits to stderr, parsed
 # by `strace_timing --rounds-table` (no CANN device log is read):
-#   - Host      run_prepared span (host wall, incl. Python)
-#   - Device    run_prepared.runner_run.device_wall span (full on-NPU AICPU wall)
+#   - Host      chip.run span (host wall, incl. Python)
+#   - Device    chip.run.runner_run.device_wall span (full on-NPU AICPU wall)
 #   - Effective orch∪sched merged window, from the TMR orch/sched markers'
 #               device-domain ts+dur (the old device-log "Total", now pure-marker)
-#   - Orch      TMR run_prepared.runner_run.device_wall.orch span
-#   - Sched     TMR run_prepared.runner_run.device_wall.sched span
+#   - Orch      TMR chip.run.runner_run.device_wall.orch span
+#   - Sched     TMR chip.run.runner_run.device_wall.sched span
 #
 # Usage:
 #   ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [-r <runtime>] [--serial-orch-sched]
@@ -221,7 +221,7 @@ fi
 #   Render per-round timing from the [STRACE] markers the run teed into
 #   $fw_stdout_file (host stderr, via 2>&1). All columns come from one source —
 #   the markers, parsed by `strace_timing --rounds-table`:
-#     - Host (us)      [STRACE] run_prepared span (host wall, incl. Python)
+#     - Host (us)      [STRACE] chip.run span (host wall, incl. Python)
 #     - Device (us)    [STRACE] device_wall span (full on-NPU AICPU wall)
 #     - Effective (us) orch∪sched merged window, from orch/sched device-domain ts+dur
 #     - Orch (us)      [STRACE] device_wall.orch span

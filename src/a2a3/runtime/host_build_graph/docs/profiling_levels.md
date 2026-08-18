@@ -234,7 +234,7 @@ Thread X:   overlap checks : XXX, hits=XXX (XX.X%)
 
 ## Prepare-Path Timing: One Pool, Three Views
 
-`host_build_graph` times its prepare path — the `simpler_run.bind` stage's
+`host_build_graph` times its prepare path — the `chip.run.bind` stage's
 segments, and the host orchestrator's submit-level operations inside it. One
 recorder feeds three views, and two independent switches decide which of them
 appear.
@@ -295,7 +295,7 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   the `[STRACE]` tree groups by — and one record per operation. This is the
   channel to read for a distribution or a per-event timeline; the summed lines
   cannot express either. `strace_timing.py --swimlane --host-phase-records <path>`
-  draws each record inside the matching `simpler_run.bind`.
+  draws each record inside the matching `chip.run.bind`.
 
 - **The host lanes of `chip_swimlane_records.json`**, at level 4 only, joined to
   the device timeline through the clock anchors (see `host/clock_correlation.h`).
@@ -314,7 +314,7 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   against `recorded_records` (the submit projection), plus `pool_records` for the
   whole population — a pool count above the projection is normal, not incomplete.
 
-The stage's *duration* is already published as the `simpler_run.bind` `[STRACE]`
+The stage's *duration* is already published as the `chip.run.bind` `[STRACE]`
 marker, so the marker and this breakdown are a total and its parts rather than two
 spellings of one number. The parts are not markers themselves: the marker grammar
 is the platform's public per-run-stage contract (see `pto_runtime_c_api.h` and

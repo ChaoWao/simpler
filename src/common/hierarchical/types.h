@@ -157,7 +157,7 @@ struct RunState {
     bool submission_closed{false};
     bool submission_failed{false};
     bool lease_released{false};
-    // When this run reached a terminal phase. `l3.post_fence_retirement`
+    // When this run reached a terminal phase. `host.post_fence_retirement`
     // measures from here to the end of release_run, which is the only host cost
     // that falls outside every other span.
     int64_t trace_terminal_ns{0};

@@ -72,7 +72,7 @@ deep-dive — see [l2-timing.md](l2-timing.md).
   It copies the larger task-timing tail only when the header says at least one
   tagged task was dispatched. It caches per-phase ns
   (`last_device_phase_ns`), and emits each non-zero phase as a `clk=dev`
-  `[STRACE]` marker nested under `simpler_run.runner_run.device_wall`
+  `[STRACE]` marker nested under `chip.run.runner_run.device_wall`
   (see [host-trace.md](host-trace.md)).
 
 ### Gating device-domain markers
@@ -87,7 +87,7 @@ deployment can profile the two domains separately:
   controls buffer setup/reset, AICPU stamping, D2H readback, and marker
   emission. A disabled predicate leaves the device base null, so stamping
   no-ops and the marker-only H2D/D2H transfers are skipped.
-* **Host** (`simpler_run` / `bind` / `runner_run` / `validate` spans): no new
+* **Host** (`chip.run` / `bind` / `runner_run` / `validate` spans): no new
   knob — they ride the compile-time `SIMPLER_HOST_STRACE` macro and the log level
   (`LOG_TIMING`), so raising the log threshold drops them.
 
@@ -95,7 +95,7 @@ The simulator still applies `SIMPLER_DEVICE_STRACE_ENABLE` at emission time;
 the transfer optimization above is specific to the onboard device buffer.
 
 `RunWall` is the whole on-NPU wall (the former `RunTiming.device_wall`); it is
-emitted as the `simpler_run.runner_run.device_wall` marker, not returned.
+emitted as the `chip.run.runner_run.device_wall` marker, not returned.
 
 ### Reading the phases — they nest and overlap, don't sum them
 
@@ -213,7 +213,7 @@ threads, no per-task AICore records, works in `SIMPLER_DFX=0`. See
   completeness check still decides what is emitted. Every complete slot
   (dispatch set, finish > dispatch) is
   emitted as a stable `clk=dev` span
-  `simpler_run.runner_run.device_wall.task_slot_<N>`, retaining start and
+  `chip.run.runner_run.device_wall.task_slot_<N>`, retaining start and
   duration so cross-slot intervals are recoverable; `Worker.run()` still returns
   `None`. All slots are reset every run, so a failed/short run cannot leak stale
   data; unset or incomplete slots are skipped. Slots share the phase timeline's

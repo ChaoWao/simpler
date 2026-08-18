@@ -13,7 +13,7 @@ no repo checkout required.
 - **[swimlane_converter](#swimlane_converter)** — perf JSON → Chrome Trace Event (Perfetto)
 - **[sched_overhead_analysis](#sched_overhead_analysis)** — scheduler overhead / Tail OH breakdown
 - **[critical_path](#critical_path)** — chip swimlane critical-path compute/stall analysis
-- **[strace_timing](#strace_timing)** — per-stage `simpler_run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
+- **[strace_timing](#strace_timing)** — per-stage `chip.run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
 
@@ -321,7 +321,7 @@ python -m simpler_setup.tools.strace_timing path/to/log
 # Per-round Host/Device/Orch/Sched table (the benchmark/--rounds N view)
 python -m simpler_setup.tools.strace_timing path/to/log --rounds-table
 
-# Indented nested span tree per callable (simpler_run → bind / runner_run →
+# Indented nested span tree per callable (chip.run → bind / runner_run →
 # device_wall → preamble/config_validate/arena_wire/sm_reset/orch/sched/post_orch)
 python -m simpler_setup.tools.strace_timing path/to/log --tree
 
@@ -334,7 +334,7 @@ python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane
 ```
 
 Groups spans by `(pid, inv)`, rebuilds each invocation's tree from `depth`,
-buckets by callable hash `hid`, and reports each callable's mean `simpler_run`
+buckets by callable hash `hid`, and reports each callable's mean `chip.run`
 plus per-stage means. It reads the host-emitted `[STRACE]` lines and shows the
 host stages (`bind`/`runner_run`/`validate`) alongside the AICPU phases.
 
@@ -358,7 +358,7 @@ here. Because grouping is per `(pid, inv)`, this captures **L3 multi-round**
 (every chip-child invocation), not just round 0.
 
 `--swimlane` consumes both the `l3.*` scheduler markers and child
-`simpler_run` markers. Host lanes retain their OS pid/tid. Because Chrome Trace
+`chip.run` markers. Host lanes retain their OS pid/tid. Because Chrome Trace
 JSON has one visible timestamp axis, raw device-domain `clk=dev` slices are
 stored in the top-level `unalignedDeviceSpans` array rather than placed beside
 the unrelated host clock and stretching Perfetto into an empty-looking

@@ -76,15 +76,15 @@ output sees the original text; a consumer reading the raw log does not.
 ## Span tree
 
 ```text
-simpler_run                                   (= host_wall)
-├─ simpler_run.bind
-│  ├─ simpler_run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
-│  └─ simpler_run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
-├─ simpler_run.runner_run          (device enqueue + completion drain)
-│  └─ simpler_run.runner_run.device_wall      (whole on-NPU AICPU wall)
+chip.run                                      (= host_wall)
+├─ chip.run.bind
+│  ├─ chip.run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
+│  └─ chip.run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
+├─ chip.run.runner_run          (device enqueue + completion drain)
+│  └─ chip.run.runner_run.device_wall      (whole on-NPU AICPU wall)
 │     └─ .{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}
 │           TMR device-domain (clk=dev): AICPU subdivision of the on-NPU wall
-└─ simpler_run.validate
+└─ chip.run.validate
 ```
 
 The `device_wall` span exists for both runtimes. Its
@@ -103,7 +103,7 @@ The phased native-run interface preserves this same marker contract. Prepare
 allocates one `inv` and records the host-wall start; prepare, the child progress
 path's launch/drain lifecycle, and finalize bind that `(inv, hid)` while
 emitting their spans. Finalize releases the runner claim, destroys the per-run
-state, and then emits the stored `simpler_run` wall, so the root includes that
+state, and then emits the stored `chip.run` wall, so the root includes that
 cleanup tail.
 No trace scope or synthetic nesting remains active between C API calls. For
 direct phased use the host wall is the full prepare-to-finalize lifetime,
@@ -112,10 +112,10 @@ including time the caller spends polling or doing other host work; blocking
 
 | Depth | Span names |
 | ----- | ---------- |
-| 0 | `simpler_run` |
-| 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.claim_release`, `simpler_run.validate` |
-| 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
-| 3 | TMR phase spans `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
+| 0 | `chip.run` |
+| 1 | `chip.run.bind`, `chip.run.runner_run`, `chip.run.claim_release`, `chip.run.validate` |
+| 2 | `chip.run.bind.args`, `chip.run.bind.prebuilt`, `chip.run.runner_run.device_wall` |
+| 3 | TMR phase spans `chip.run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
 
 ## L3/L4 host scheduler spans
 
@@ -125,13 +125,13 @@ L4 pod alike, since the orchestrator and scheduler code they run is the same:
 
 | Span | Host decision point |
 | ---- | ------------------- |
-| `l3.graph_build` | serialized Python graph callback |
-| `l3.submit` | next-level task publication after slot allocation |
-| `l3.dispatch` | scheduler handoff to a worker thread |
-| `l3.frame_submit` | local child mailbox-frame publication |
-| `l3.activate` | prepared-frame activation |
-| `l3.complete` | terminal child progress handling |
-| `l3.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
+| `host.graph_build` | serialized Python graph callback |
+| `host.submit` | next-level task publication after slot allocation |
+| `host.dispatch` | scheduler handoff to a worker thread |
+| `host.frame_submit` | local child mailbox-frame publication |
+| `host.activate` | prepared-frame activation |
+| `host.complete` | terminal child progress handling |
+| `host.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
 
 Their attributes carry the available `run_id`, `task_slot`, `group_index`,
 `worker_id`, `dispatch_id`, endpoint kind, and the dispatch's pipeline lease
@@ -143,9 +143,9 @@ per-level vocabulary that resolves this is tracked in
 [#1793](https://github.com/hw-native-sys/simpler/issues/1793).
 
 One process contributes at most two host lanes, because the scheduler runs on
-one thread: the facade thread emits `l3.graph_build` and `l3.submit`, and the
-scheduler thread emits the other four. `role=worker` on `l3.frame_submit`,
-`l3.activate` and `l3.complete` names the worker a dispatch targets, not the
+one thread: the facade thread emits `host.graph_build` and `host.submit`, and the
+scheduler thread emits the other four. `role=worker` on `host.frame_submit`,
+`host.activate` and `host.complete` names the worker a dispatch targets, not the
 thread that ran it.
 
 The spans reach the logger over the fixed POD `SimplerHostSpan` ABI in
@@ -177,7 +177,7 @@ python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane
 ```
 
 The tool groups by `(pid, inv)`, rebuilds each invocation's tree from `depth`,
-buckets by `hid`, and prints each callable's mean `simpler_run` plus per-stage
+buckets by `hid`, and prints each callable's mean `chip.run` plus per-stage
 means. With `--trace-out` it writes one `ph:"X"` event per span on a synthetic
 per-invocation lane, so each call renders as an isolated nested tree in
 [Perfetto](https://ui.perfetto.dev) / `chrome://tracing`.
@@ -189,7 +189,7 @@ A runtime may subdivide a stage it owns, which the markers deliberately do not
 describe — the marker grammar is a fixed per-run-stage contract, and a runtime's
 internal breakdown of one stage does not belong in it. `--host-phase-records`
 takes such a breakdown from the artifact the runtime wrote and draws each record
-inside its `simpler_run.bind`, matched on `(pid, inv)`. Both sides are the same
+inside its `chip.run.bind`, matched on `(pid, inv)`. Both sides are the same
 `CLOCK_MONOTONIC` axis, so nothing is converted. Without the artifact the tool
 still recovers the stage's own segments from the runtime's timing log lines; where
 both are present the artifact wins, so a segment is not drawn twice. See
@@ -220,19 +220,19 @@ the device-phase timing views.
 
 The phased native lane claims that run N+1's preparation runs *concurrently*
 with run N's device execution. That claim is checkable from a captured log
-without any new marker family: the windows are already in the `simpler_run`
+without any new marker family: the windows are already in the `chip.run`
 tree, and the root span already carries the identity that tells two runs apart.
 
 | Property | Read from |
 | -------- | --------- |
-| successor's preparation | `simpler_run.bind` — its arena build + host orchestration |
-| predecessor's device work | `simpler_run.runner_run` |
-| when a successor may launch | `simpler_run.claim_release` |
-| which run each belongs to | root `simpler_run` attrs, joined by `(pid, inv)` |
+| successor's preparation | `chip.run.bind` — its arena build + host orchestration |
+| predecessor's device work | `chip.run.runner_run` |
+| when a successor may launch | `chip.run.claim_release` |
+| which run each belongs to | root `chip.run` attrs, joined by `(pid, inv)` |
 
 Only `claim_release` was added for this: it wraps `release_native_run` inside
 finalize, the point a successor's launch becomes admissible, and no other span
-marks that boundary. `l3.post_fence_retirement` covers the L3 orchestrator's
+marks that boundary. `host.post_fence_retirement` covers the L3 orchestrator's
 `release_run` tail for the same reason.
 
 The identity is `run_id / dispatch_id / run_epoch / slot_id / generation`. Each

@@ -192,7 +192,7 @@ static uint32_t g_orch_submit_idx = 0;
 __attribute__((weak, visibility("hidden"))) void host_phase_record(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t) {}
 
 // Host monotonic clock shared with the `[STRACE]` span tree, so a record nests
-// under simpler_run.bind.host_orch without any clock conversion. The host build
+// under chip.run.bind.host_orch without any clock conversion. The host build
 // links the strong definition in host_phase_trace.cpp; this fallback keeps
 // non-host builds linking, where the recorder above is a no-op anyway.
 __attribute__((weak, visibility("hidden"))) uint64_t host_phase_now_ns() { return 0; }

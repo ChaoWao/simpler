@@ -14,7 +14,7 @@ markers in ``src/common/log/include/common/strace.h``), gated by the
 compile-time ``SIMPLER_HOST_STRACE`` macro (on by default) and emitted at
 ``LOG_TIMING``. Device-domain phases (AICPU subdivision of the on-NPU wall)
 are emitted by the host after readback as ``clk=dev`` spans nested under
-``simpler_run.runner_run.device_wall``.
+``chip.run.runner_run.device_wall``.
 
 Runtimes emit only the device spans they implement. Both current runtimes emit
 ``device_wall``; the finer orch/sched phase subdivision is TMR-specific.
@@ -35,7 +35,7 @@ Grouping:
       guessing): a span at depth d is a child of the most recent span at d-1.
 
 Outputs:
-    * a per-callable TPOT table (each invocation's simpler_run dur + the mean
+    * a per-callable TPOT table (each invocation's chip.run dur + the mean
       of each sub-stage across invocations), and
     * optionally a Chrome-trace / Perfetto JSON (``--trace-out``): one ``ph:"X"``
       event per span on a synthetic per-invocation lane, so each host call tree
@@ -172,7 +172,7 @@ class Invocation:
     spans: list = field(default_factory=list)
 
     def root(self):
-        """The depth-0 span (simpler_run), or None if absent."""
+        """The depth-0 span (chip.run), or None if absent."""
         for s in self.spans:
             if s.depth == 0:
                 return s
@@ -251,18 +251,75 @@ def _trace_document(events, anchors_by_pid, **extra):
     return document
 
 
-def legacy_spans(spans):
-    """Return spans belonging to the established ``simpler_run`` views.
+# A span name leads with the word for the level that produced it. The words come
+# from `simpler.worker_level.WorkerLevel`; this parser cannot import the runtime
+# package, so it carries the list and the unit tests pin the two together.
+_CHIP_WORD = "chip"
+_CORE_WORD = "core"
+_HOST_WORDS = ("host", "network1", "network2", "network3")
 
-    Other marker families share the STRACE grammar but answer a different
-    question, and the invocation views are keyed on ``(pid, inv)`` — a family
-    that carries no invocation id would group into one bogus lane. Keeping them
-    out here preserves the TPOT, rounds, tree, and ``--trace-out`` contracts for
-    every consumer at once; filtering downstream covers only the view that
-    filters. Existing families such as ``simpler_prewarm`` keep their old
-    behavior.
+# Reserved for producers outside simpler: `ext.<producer>.<span>`. Without a
+# reserved word a caller's span called `host.foo` would parse as one of ours.
+_EXTERNAL_WORD = "ext"
+
+# Spellings simpler no longer emits, mapped to the family they used to name.
+# Kept so an archived log stays readable — the same reason `_STRACE_RE` still
+# accepts the wall-clock record prefix. Note this restores the tree, swimlane and
+# invocation views on an old log, not `_ROUNDS_TABLE_NAMES`: that table is a
+# single-spelling contract with pypto.
+_RETIRED_WORDS = {"simpler_run": _CHIP_WORD, "simpler_prewarm": _CHIP_WORD, "l3": _HOST_WORDS[0]}
+
+
+def span_family(name):
+    """Classify `name` by the producer its leading word names.
+
+    Returns ``"chip"``, ``"core"``, ``"host"``, ``"external"``, or ``"unknown"``.
+    Every level at or above L3 answers ``"host"``: they run the same
+    orchestrator and scheduler code, so they form one family whichever word a
+    given process resolved to.
     """
-    return [span for span in spans if not span.name.startswith("l3.")]
+    head = name.split(".", 1)[0]
+    head = _RETIRED_WORDS.get(head, head)
+    if head == _EXTERNAL_WORD:
+        return "external"
+    if head == _CHIP_WORD:
+        return "chip"
+    if head == _CORE_WORD:
+        return "core"
+    if head in _HOST_WORDS:
+        return "host"
+    return "unknown"
+
+
+def host_span_leaf(name):
+    """The part of a host-family span name after its level word, else ``None``.
+
+    Call sites match on the leaf rather than the whole name because the level
+    word varies by the process that emitted it — ``host.submit`` from an L3 and
+    ``network1.submit`` from an L4 are the same decision point.
+    """
+    if span_family(name) != "host":
+        return None
+    _, _, leaf = name.partition(".")
+    return leaf
+
+
+def legacy_spans(spans):
+    """Return the spans the invocation-keyed views may consume.
+
+    The invocation views key on ``(pid, inv)``, so a family carrying no
+    invocation id would group into one bogus lane. Excluded: the per-task
+    ``host``/``network*`` scheduler family, and anything an external producer
+    emitted under ``ext.``. Everything else is kept, including a name this
+    parser does not recognize — dropping an unfamiliar family silently is how
+    ``chip.prewarm.build`` once vanished from the tables.
+
+    The name is retained deliberately. pypto calls this through
+    ``hasattr(_strace_timing, "legacy_spans")`` and falls back to its own
+    ``l3.``-prefix filter when it is absent, so renaming it would silently
+    re-arm that stale fallback in a downstream repository.
+    """
+    return [span for span in spans if span_family(span.name) not in ("host", "external")]
 
 
 def group_invocations(spans):
@@ -290,10 +347,10 @@ def bucket_by_hid(invocations):
 
 
 # The spans one native run contributes to the overlap proof. All three already
-# exist in the `simpler_run` tree; only `claim_release` was added for it.
-_PREPARE_SPAN = "simpler_run.bind"
-_DEVICE_SPAN = "simpler_run.runner_run"
-_RELEASE_SPAN = "simpler_run.claim_release"
+# exist in the `chip.run` tree; only `claim_release` was added for it.
+_PREPARE_SPAN = "chip.run.bind"
+_DEVICE_SPAN = "chip.run.runner_run"
+_RELEASE_SPAN = "chip.run.claim_release"
 _NATIVE_REQUIRED_SPANS = (_PREPARE_SPAN, _DEVICE_SPAN, _RELEASE_SPAN)
 _PIPELINE_IDENTITY_FIELDS = ("run_id", "dispatch_id", "run_epoch", "slot_id", "generation")
 
@@ -301,7 +358,7 @@ _PIPELINE_IDENTITY_FIELDS = ("run_id", "dispatch_id", "run_epoch", "slot_id", "g
 def _native_dispatches(invocations):
     """Map each native run's identity to its ``{span name: span}``.
 
-    The identity rides on the root ``simpler_run`` span, and every sub-span of
+    The identity rides on the root ``chip.run`` span, and every sub-span of
     that run shares its ``(pid, inv)`` — so grouping by invocation is what joins
     the windows to the identity. An invocation whose root carries no identity is
     not a phased native run and is skipped.
@@ -438,8 +495,7 @@ def print_tpot_table(buckets, label_for_hid=None, stream=sys.stdout):
         durs = [r.dur for r in roots]
         if durs:
             print(
-                f"  simpler_run: mean={_fmt_us(int(_mean(durs)))}us "
-                f"min={_fmt_us(min(durs))}us max={_fmt_us(max(durs))}us",
+                f"  chip.run: mean={_fmt_us(int(_mean(durs)))}us min={_fmt_us(min(durs))}us max={_fmt_us(max(durs))}us",
                 file=stream,
             )
 
@@ -458,10 +514,10 @@ def print_tpot_table(buckets, label_for_hid=None, stream=sys.stdout):
 
 
 _ROUNDS_TABLE_NAMES = {
-    "host": "simpler_run",
-    "device": "simpler_run.runner_run.device_wall",
-    "orch": "simpler_run.runner_run.device_wall.orch",
-    "sched": "simpler_run.runner_run.device_wall.sched",
+    "host": "chip.run",
+    "device": "chip.run.runner_run.device_wall",
+    "orch": "chip.run.runner_run.device_wall.orch",
+    "sched": "chip.run.runner_run.device_wall.sched",
 }
 
 # Per-round table columns, in print order. "Effective" is the orch∪sched merged
@@ -657,8 +713,8 @@ def _parsed_attrs(span):
 
 # Highest-precedence match wins. One OS thread emits spans of several roles: the
 # scheduler loop is the sole caller of both `dispatch_ready` and
-# `manager->progress`, so it emits `l3.dispatch` (role=scheduler) alongside
-# `l3.frame_submit` / `l3.activate` / `l3.complete`, whose `role=worker` names
+# `manager->progress`, so it emits `host.dispatch` (role=scheduler) alongside
+# `host.frame_submit` / `host.activate` / `host.complete`, whose `role=worker` names
 # the worker a dispatch targets rather than the thread doing the work.
 _HOST_THREAD_ROLES = ("facade", "scheduler", "worker")
 
@@ -720,11 +776,12 @@ def _host_thread_name(entries):
     worker_ids = set()
     for span, attrs in entries:
         role = attrs.get("role")
-        if role == "facade" or span.name in {"l3.graph_build", "l3.submit"}:
+        leaf = host_span_leaf(span.name)
+        if role == "facade" or leaf in {"graph_build", "submit"}:
             roles.add("facade")
         elif role in ("scheduler", "worker"):
             roles.add(role)
-        elif span.name.startswith("l3."):
+        elif leaf is not None:
             roles.add("worker")
         if role == "worker":
             worker_ids.add(attrs.get("worker_id"))
@@ -739,7 +796,7 @@ def _host_thread_name(entries):
         worker_id = worker_ids.pop() if len(worker_ids) == 1 else None
         return f"worker {worker_id}" if worker_id is not None else "worker"
 
-    if any(span.name == "simpler_run" or span.name.startswith("simpler_run.") for span, _ in entries):
+    if any(span_family(span.name) == "chip" for span, _ in entries):
         return "chip child"
     return f"tid {entries[0][0].tid}"
 
@@ -832,7 +889,7 @@ def host_record_spans(spans, passes):
     """Turn phase records into spans nested under their pass's ``bind``.
 
     A record carries only ``(pid, inv)`` and a host-clock interval; the thread and
-    the tree position come from the ``simpler_run.bind`` span of the same
+    the tree position come from the ``chip.run.bind`` span of the same
     invocation, which is the stage the records subdivide. Records whose pass has
     no such span are dropped — without it there is no lane to draw them on and no
     parent to nest them under.
@@ -846,9 +903,7 @@ def host_record_spans(spans, passes):
     the ``(pid, inv)`` keys the artifact covered — a caller uses the last to avoid
     drawing the same segment twice from the log lines as well.
     """
-    bind_by_key = {
-        (span.pid, span.inv): span for span in spans if span.name == "simpler_run.bind" and not span.is_device
-    }
+    bind_by_key = {(span.pid, span.inv): span for span in spans if span.name == _PREPARE_SPAN and not span.is_device}
     out = []
     dropped_passes = 0
     covered_keys = set()
@@ -866,11 +921,11 @@ def host_record_spans(spans, passes):
             except (KeyError, TypeError, ValueError):
                 continue
             if phase in _BIND_PHASE_NAMES:
-                name = f"simpler_run.bind.{phase}"
+                name = f"{_PREPARE_SPAN}.{phase}"
                 depth = parent.depth + 1
                 covered_keys.add(key)
             else:
-                name = f"simpler_run.bind.host_orch.{phase}"
+                name = f"{_PREPARE_SPAN}.host_orch.{phase}"
                 depth = parent.depth + 2
             out.append(
                 Span(
@@ -891,20 +946,20 @@ def host_record_spans(spans, passes):
 def bind_phase_spans(text, spans, skip_keys=frozenset()):
     """Recover `bind phase=` timing lines as spans nested under their ``bind``.
 
-    Without these the swimlane draws ``simpler_run.bind`` as one empty bar, which
+    Without these the swimlane draws ``chip.run.bind`` as one empty bar, which
     for a runtime with a host prepare path is most of the trace: on a 40-layer
     qwen decode the stage is seconds of tensor staging and host-view teardown,
     while the orchestration inside it is around a millisecond. The per-event
     records then land in well under a pixel with nothing to indicate where to zoom.
 
     The line carries its own ``start_ns``. The owning invocation is whichever
-    ``simpler_run.bind`` of that thread contains the interval; a phase outside
+    ``chip.run.bind`` of that thread contains the interval; a phase outside
     every bind is dropped rather than guessed at.
 
     ``skip_keys`` holds the ``(pid, inv)`` a record artifact already covered, so
     the same segment is not drawn twice when both channels are present.
     """
-    binds = [span for span in spans if span.name == "simpler_run.bind" and not span.is_device]
+    binds = [span for span in spans if span.name == _PREPARE_SPAN and not span.is_device]
     out = []
     for match in _BIND_PHASE_RE.finditer(text):
         start = int(match["start"])
@@ -925,7 +980,7 @@ def bind_phase_spans(text, spans, skip_keys=frozenset()):
                 inv=parent.inv,
                 hid=parent.hid,
                 depth=parent.depth + 1,
-                name=f"simpler_run.bind.{match['phase']}",
+                name=f"{_PREPARE_SPAN}.{match['phase']}",
                 ts=start,
                 dur=dur,
                 attrs=f"{match['attrs'].strip()} log_thread=0x{match['tid_hex']} src=bind_phase".strip(),
@@ -960,7 +1015,7 @@ def to_host_swimlane(spans, anchors=None):
 
     for pid in host_pids:
         process_spans = [span for span, _ in host_entries if span.pid == pid]
-        role = "host" if any(span.name.startswith("l3.") for span in process_spans) else "chip child"
+        role = "host" if any(span_family(span.name) == "host" for span in process_spans) else "chip child"
         events.append(
             {
                 "ph": "M",
@@ -1004,7 +1059,7 @@ def to_host_swimlane(spans, anchors=None):
 
     submits = defaultdict(list)
     for span, attrs in host_entries:
-        if span.name != "l3.submit":
+        if host_span_leaf(span.name) != "submit":
             continue
         key = _flow_key(span, attrs)
         if key is not None:
@@ -1014,7 +1069,7 @@ def to_host_swimlane(spans, anchors=None):
 
     dispatches = []
     for span, attrs in host_entries:
-        if span.name != "l3.dispatch":
+        if host_span_leaf(span.name) != "dispatch":
             continue
         key = _flow_key(span, attrs)
         source = None
@@ -1086,7 +1141,7 @@ def to_host_swimlane(spans, anchors=None):
 
 def _print_agg_tree(invs, stream=sys.stdout):
     """Print a callable's spans as a nested tree built from the dotted span
-    names (so e.g. ``simpler_run.bind.args`` nests under ``simpler_run.bind``),
+    names (so e.g. ``chip.run.bind.args`` nests under ``chip.run.bind``),
     NOT from depth+ts — host (steady_clock) and device (``clk=dev``) spans live
     on different clocks, so timestamp containment across domains is meaningless;
     the dotted name is the unambiguous parent link. Device spans are tagged
@@ -1196,7 +1251,7 @@ def write_host_swimlane(args, spans, lines, anchors):
         record_count = len(extra)
         if orphaned:
             print(
-                f"warning: {orphaned} phase-record pass(es) had no matching simpler_run.bind span "
+                f"warning: {orphaned} phase-record pass(es) had no matching chip.run.bind span "
                 "in this log and were dropped — is the log from the same run as the artifact?",
                 file=sys.stderr,
             )
@@ -1233,7 +1288,7 @@ def main(argv=None):
         action="append",
         metavar="PATH",
         help="a host_phase_records.jsonl from the same run; its per-event bind segments and "
-        "orchestrator operations are drawn inside the matching simpler_run.bind. Repeatable. Only "
+        "orchestrator operations are drawn inside the matching chip.run.bind. Repeatable. Only "
         "affects --swimlane, because the summed host-orch timing lines are cost shares and cannot "
         "be placed on a timeline",
     )
