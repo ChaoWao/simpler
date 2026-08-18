@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -19,12 +20,15 @@ from collections import Counter
 from typing import cast
 
 import pytest
+from simpler.comm_endpoints import DEVICE_AICORE, HOST_CPU, EndpointDeployment
 from simpler.global_comm_domain import (
     CTRL_GLOBAL_DOMAIN_COPY_FROM,
     CTRL_GLOBAL_DOMAIN_COPY_TO,
     CTRL_GLOBAL_DOMAIN_IMPORT,
     CTRL_GLOBAL_DOMAIN_PREPARE,
     CTRL_GLOBAL_DOMAIN_RELEASE,
+    GLOBAL_DOMAIN_COMMAND_VERSION,
+    GLOBAL_DOMAIN_DEPLOYMENT_IDS,
     GLOBAL_DOMAIN_DESCRIPTOR_BYTES,
     GLOBAL_DOMAIN_MAX_BUFFERS,
     GLOBAL_DOMAIN_PROFILE_IDS,
@@ -45,6 +49,7 @@ from simpler.global_comm_domain import (
     encode_domain_command,
     resolve_global_comm_capability,
     validate_descriptor_table,
+    validate_member_table,
 )
 
 
@@ -159,6 +164,58 @@ def test_global_domain_wire_round_trips_topology_and_descriptor_table():
     assert decode_domain_command(encode_domain_command(command)) == command
     assert decode_descriptor_table(encode_descriptor_table(_descriptors())) == _descriptors()
     assert GLOBAL_DOMAIN_DESCRIPTOR_BYTES == 288
+
+
+def test_global_domain_member_normalizes_its_deployment_to_the_enum_member():
+    """`EndpointDeployment` subclasses `str`, so an un-normalized value would encode (the wire-id
+    dict matches it by value) yet fail `validate_member_table`'s identity check. Normalizing at
+    construction keeps the two in agreement.
+    """
+    member = GlobalDomainMember(0, 0, 3, 0)
+    bare_string = cast(EndpointDeployment, str(DEVICE_AICORE.value))
+
+    assert member.deployment is DEVICE_AICORE
+    assert GlobalDomainMember(0, 0, 3, 0, bare_string).deployment is DEVICE_AICORE
+    assert GlobalDomainMember(0, 0, 3, 0, bare_string) == member
+
+
+def test_global_domain_wire_round_trips_the_member_deployment():
+    init = GlobalCommInitCommand("cluster", "topology", "sim", 0, 2, _members())
+
+    decoded = decode_comm_init(encode_comm_init(init))
+
+    assert decoded == init
+    assert [member.deployment for member in decoded.members] == [DEVICE_AICORE, DEVICE_AICORE]
+
+
+def test_global_domain_member_table_rejects_a_non_device_deployment():
+    members = (GlobalDomainMember(0, 0, 0, 0, HOST_CPU),)
+
+    with pytest.raises(ValueError, match="no host-mappable window backing is implemented"):
+        validate_member_table(members)
+
+
+def test_global_domain_wire_rejects_an_unknown_member_deployment_id():
+    encoded = bytearray(encode_comm_init(GlobalCommInitCommand("cluster", "topology", "sim", 0, 2, _members())))
+    unknown = max(GLOBAL_DOMAIN_DEPLOYMENT_IDS.values()) + 1
+    deployment_offset = encoded.rindex(struct.pack("<I", GLOBAL_DOMAIN_DEPLOYMENT_IDS[DEVICE_AICORE]))
+    encoded[deployment_offset : deployment_offset + 4] = struct.pack("<I", unknown)
+
+    with pytest.raises(ValueError, match=f"deployment id {unknown} is unknown"):
+        decode_comm_init(bytes(encoded))
+
+
+def test_global_domain_command_version_is_independent_of_the_backend_descriptor_version():
+    """The descriptor version is stamped by the platform backend (`COMM_GLOBAL_DOMAIN_VERSION`
+    in `src/common/platform_comm/comm.h`), so the L4<->L3 command layout carries its own.
+    """
+    encoded = encode_comm_init(GlobalCommInitCommand("cluster", "topology", "sim", 0, 2, _members()))
+    stale = struct.pack("<I", GLOBAL_DOMAIN_VERSION) + encoded[4:]
+
+    assert GLOBAL_DOMAIN_COMMAND_VERSION != GLOBAL_DOMAIN_VERSION
+    assert struct.unpack_from("<I", encoded)[0] == GLOBAL_DOMAIN_COMMAND_VERSION
+    with pytest.raises(ValueError, match="global comm init version mismatch"):
+        decode_comm_init(stale)
 
 
 def test_global_domain_encode_rejects_too_many_buffers():

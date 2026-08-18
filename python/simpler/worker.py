@@ -145,6 +145,7 @@ from .comm_endpoints import (
     BackendPlan,
     BackendResolver,
     DefaultRegionAccessService,
+    EndpointDeployment,
     EndpointRegistry,
     RegionAccessService,
     RegionLayoutSpec,
@@ -903,6 +904,10 @@ class _GlobalNodeRuntime:
     node_count: int
     cluster_id: str
     is_remote: bool
+    #: Deployment every Global CommDomain member on this node carries. A node contributes its
+    #: chips' device windows, and no launch path registers a host participant, so this is the
+    #: one value the member table admits.
+    deployment: EndpointDeployment = DEVICE_AICORE
 
 
 _IdentitySnapshotEntry = tuple[bytes, Any, int, str, str]
@@ -9566,6 +9571,7 @@ class Worker:
                     local_worker_id=int(local_worker_id),
                     global_device_rank=node.global_device_ranks[int(local_worker_id)],
                     domain_rank=domain_rank,
+                    deployment=node.deployment,
                 )
             )
         if len(profiles) != 1:
@@ -9591,6 +9597,7 @@ class Worker:
                         member.local_worker_id,
                         member.global_device_rank,
                         member.domain_rank,
+                        member.deployment.value,
                     )
                     for member in domain_members_tuple
                 ),

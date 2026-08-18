@@ -70,6 +70,18 @@ domain ranks. A remote node reads `comm_profile` and `global_device_ranks`
 from `RemoteWorkerSpec`; a local L3 reads the same fields from its `Worker`
 configuration. All participating nodes must use the same profile.
 
+A member is an **endpoint with a deployment**, not a position in the worker
+tree: `GlobalDomainMember` carries an `EndpointDeployment` alongside its
+address, and that deployment is what selects the backing its window is carved
+from (`comm_endpoints._backend_kind_for_provider`). The window lives in device
+memory, so every member is a `DEVICE_AICORE` endpoint and the member table
+rejects any other value. The restriction is about backing, not about level: a
+`HOST_CPU` participant needs a host-mappable window, and no platform path
+allocates one — `halHostRegister` refuses a VMM VA, so one backing cannot be
+both peer-imported by a device and mapped by a host. `Worker` resolves the
+deployment from the registered L3 node, so `allocate_global_domain` takes the
+same `(l3_worker_id, local_l2_worker_id)` members it always has.
+
 An MPI-launched group registered with `add_mpirun_worker_group` uses the same
 member contract. Rank 0 writes the group manifest before launch, every MPI rank
 must publish READY before the L4 parent exposes the returned worker ids, and

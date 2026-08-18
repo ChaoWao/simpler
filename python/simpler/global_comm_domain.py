@@ -14,7 +14,16 @@ import enum
 import struct
 from dataclasses import dataclass
 
+from .comm_endpoints import DEVICE_AICORE, EndpointDeployment
+
+#: Descriptor and L3->L2 mailbox layout. Paired with ``COMM_GLOBAL_DOMAIN_VERSION`` in
+#: ``src/common/platform_comm/comm.h``: the platform backend stamps this number into every
+#: descriptor it exports and Python checks it on decode, so the two constants move together
+#: or not at all.
 GLOBAL_DOMAIN_VERSION = 1
+#: L4<->L3 control-command layout. Python owns both ends of these commands, so it advances
+#: independently of the backend-stamped descriptor version above.
+GLOBAL_DOMAIN_COMMAND_VERSION = 2
 GLOBAL_DOMAIN_MAX_RANKS = 64
 GLOBAL_DOMAIN_MAX_BUFFERS = 64
 GLOBAL_DOMAIN_HANDLE_BYTES = 256
@@ -26,6 +35,15 @@ GLOBAL_DOMAIN_PROFILE_IDS = {
     GLOBAL_DOMAIN_PROFILE_SIM: 1,
     GLOBAL_DOMAIN_PROFILE_A3_FABRIC: 2,
 }
+#: Wire ordinal per deployment, mirroring ``GLOBAL_DOMAIN_PROFILE_IDS``: ``EndpointDeployment``
+#: carries string values, and enum declaration order is not a wire contract, so the mapping is
+#: stated here rather than derived.
+GLOBAL_DOMAIN_DEPLOYMENT_IDS = {
+    EndpointDeployment.HOST_CPU: 1,
+    EndpointDeployment.DEVICE_AICORE: 2,
+    EndpointDeployment.DEVICE_AICPU: 3,
+}
+GLOBAL_DOMAIN_DEPLOYMENTS_BY_ID = {value: key for key, value in GLOBAL_DOMAIN_DEPLOYMENT_IDS.items()}
 GLOBAL_DOMAIN_MAX_STRING_BYTES = 1024
 GLOBAL_DOMAIN_MAX_COPY_BYTES = 8 * 1024 * 1024
 
@@ -54,10 +72,22 @@ class GlobalDomainPhase(enum.IntEnum):
 
 @dataclass(frozen=True)
 class GlobalDomainMember:
+    """One endpoint of a Global CommDomain: where it sits, and what it is deployed on.
+
+    ``node_worker_id`` / ``local_worker_id`` address the endpoint, ``global_device_rank``
+    is its cluster-wide device identity and ``domain_rank`` its dense rank in this domain.
+    ``deployment`` states the kind of endpoint, which is what selects the backing its window
+    is carved from; ``validate_member_table`` admits only ``DEVICE_AICORE`` today.
+    """
+
     node_worker_id: int
     local_worker_id: int
     global_device_rank: int
     domain_rank: int
+    deployment: EndpointDeployment = DEVICE_AICORE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "deployment", EndpointDeployment(self.deployment))
 
 
 @dataclass(frozen=True)
@@ -264,6 +294,14 @@ def validate_member_table(members: tuple[GlobalDomainMember, ...]) -> None:
     global_ranks = [member.global_device_rank for member in members]
     if len(set(global_ranks)) != len(global_ranks) or any(rank < 0 for rank in global_ranks):
         raise ValueError("global domain members require unique non-negative global device ranks")
+    if any(member.deployment is not DEVICE_AICORE for member in members):
+        # The restriction is about backing, not about level: a member's window is carved by
+        # the platform backend as a device VMM window, and no host-mappable backing exists to
+        # place one anywhere else -- `halHostRegister` refuses a VMM VA.
+        raise ValueError(
+            f"global domain members must be {DEVICE_AICORE.value} endpoints: "
+            "no host-mappable window backing is implemented"
+        )
 
 
 def validate_descriptor_table(
@@ -292,23 +330,36 @@ def validate_descriptor_table(
 
 
 def _put_member(out: bytearray, member: GlobalDomainMember) -> None:
+    deployment_id = GLOBAL_DOMAIN_DEPLOYMENT_IDS.get(member.deployment)
+    if deployment_id is None:
+        raise ValueError(f"global domain member deployment {member.deployment!r} has no wire id")
     out.extend(
         struct.pack(
-            "<iIII",
+            "<iIIII",
             int(member.node_worker_id),
             int(member.local_worker_id),
             int(member.global_device_rank),
             int(member.domain_rank),
+            deployment_id,
         )
     )
 
 
 def _read_member(reader: _Reader) -> GlobalDomainMember:
+    node_worker_id = reader.i32()
+    local_worker_id = reader.u32()
+    global_device_rank = reader.u32()
+    domain_rank = reader.u32()
+    deployment_id = reader.u32()
+    deployment = GLOBAL_DOMAIN_DEPLOYMENTS_BY_ID.get(deployment_id)
+    if deployment is None:
+        raise ValueError(f"global domain member deployment id {deployment_id} is unknown")
     return GlobalDomainMember(
-        node_worker_id=reader.i32(),
-        local_worker_id=reader.u32(),
-        global_device_rank=reader.u32(),
-        domain_rank=reader.u32(),
+        node_worker_id=node_worker_id,
+        local_worker_id=local_worker_id,
+        global_device_rank=global_device_rank,
+        domain_rank=domain_rank,
+        deployment=deployment,
     )
 
 
@@ -320,7 +371,7 @@ def encode_comm_init(command: GlobalCommInitCommand) -> bytes:
         raise ValueError(f"unsupported global domain profile {command.profile!r}")
     if command.node_rank < 0 or command.node_count <= 0 or command.node_rank >= command.node_count:
         raise ValueError("global comm init node identity is invalid")
-    out = bytearray(struct.pack("<III", GLOBAL_DOMAIN_VERSION, command.node_rank, command.node_count))
+    out = bytearray(struct.pack("<III", GLOBAL_DOMAIN_COMMAND_VERSION, command.node_rank, command.node_count))
     _put_string(out, command.cluster_id, "cluster_id")
     _put_string(out, command.topology_hash, "topology_hash")
     _put_string(out, command.profile, "profile")
@@ -333,7 +384,7 @@ def encode_comm_init(command: GlobalCommInitCommand) -> bytes:
 def decode_comm_init(data: bytes) -> GlobalCommInitCommand:
     reader = _Reader(data)
     version = reader.u32()
-    if version != GLOBAL_DOMAIN_VERSION:
+    if version != GLOBAL_DOMAIN_COMMAND_VERSION:
         raise ValueError("global comm init version mismatch")
     node_rank = reader.u32()
     node_count = reader.u32()
@@ -414,7 +465,7 @@ def encode_domain_command(command: GlobalDomainCommand) -> bytes:
     out = bytearray(
         struct.pack(
             "<IIQQQ",
-            GLOBAL_DOMAIN_VERSION,
+            GLOBAL_DOMAIN_COMMAND_VERSION,
             int(command.phase),
             int(command.domain_id),
             int(command.generation),
@@ -439,7 +490,7 @@ def encode_domain_command(command: GlobalDomainCommand) -> bytes:
 def decode_domain_command(data: bytes) -> GlobalDomainCommand:
     reader = _Reader(data)
     version = reader.u32()
-    if version != GLOBAL_DOMAIN_VERSION:
+    if version != GLOBAL_DOMAIN_COMMAND_VERSION:
         raise ValueError("global domain command version mismatch")
     try:
         phase = GlobalDomainPhase(reader.u32())
@@ -502,14 +553,14 @@ def decode_descriptor_table(data: bytes) -> tuple[GlobalDomainDescriptor, ...]:
 def encode_release_command(command: GlobalDomainReleaseCommand) -> bytes:
     if command.domain_id == 0 or command.generation == 0:
         raise ValueError("global domain release identity must be positive")
-    return struct.pack("<IQQ", GLOBAL_DOMAIN_VERSION, int(command.domain_id), int(command.generation))
+    return struct.pack("<IQQ", GLOBAL_DOMAIN_COMMAND_VERSION, int(command.domain_id), int(command.generation))
 
 
 def decode_release_command(data: bytes) -> GlobalDomainReleaseCommand:
     if len(data) != struct.calcsize("<IQQ"):
         raise ValueError("global domain release size mismatch")
     version, domain_id, generation = struct.unpack("<IQQ", data)
-    if version != GLOBAL_DOMAIN_VERSION or domain_id == 0 or generation == 0:
+    if version != GLOBAL_DOMAIN_COMMAND_VERSION or domain_id == 0 or generation == 0:
         raise ValueError("global domain release identity or version is invalid")
     return GlobalDomainReleaseCommand(int(domain_id), int(generation))
 
@@ -531,7 +582,7 @@ def encode_copy_command(command: GlobalDomainCopyCommand, *, include_data: bool)
     out = bytearray(
         struct.pack(
             "<IQQIQQ",
-            GLOBAL_DOMAIN_VERSION,
+            GLOBAL_DOMAIN_COMMAND_VERSION,
             int(command.domain_id),
             int(command.generation),
             int(command.domain_rank),
@@ -558,7 +609,7 @@ def decode_copy_command(data: bytes, *, include_data: bool) -> GlobalDomainCopyC
         nbytes=int(nbytes),
         data=bytes(payload),
     )
-    if version != GLOBAL_DOMAIN_VERSION:
+    if version != GLOBAL_DOMAIN_COMMAND_VERSION:
         raise ValueError("global domain copy version mismatch")
     encode_copy_command(command, include_data=include_data)
     return command
