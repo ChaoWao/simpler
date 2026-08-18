@@ -1289,11 +1289,14 @@ static TaskOutputTensors submit_task_common(
     // Polling + host-orch: append_fanin_or_fail already wrote each producer's
     // local id into payload.fanin_local_ids and bumped its last_consumer_local_id.
     // All that remains is to record how many. There is NO fanout adjacency, NO
-    // dep_pool, and NO ready routing here — the device boot scan classifies every
-    // task exactly once (fanin_satisfied -> push_ready_routed, else register_wake)
-    // before the scheduler dispatch loop starts. Because fanin is now a flat array
-    // of position-independent integers, none of this needs host->device pointer
-    // relocation.
+    // dep_pool, and NO ready routing here — the initial device boot scan classifies
+    // each task once. A -1 result from classify_fanin_state routes the task through
+    // push_ready_routed; otherwise the returned index selects the producer passed
+    // to register_wake. Wake retargeting in register_wake may reclassify a task
+    // when the selected producer is already complete.
+    // The initial scan happens before the scheduler dispatch loop starts. Because
+    // fanin is a flat array of position-independent integers, none of this needs
+    // host->device pointer relocation.
     payload.fanin_count = fanin_builder.count;
     (void)sched;
 
