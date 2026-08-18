@@ -1074,15 +1074,12 @@ extern "C" int bind_callable_to_runtime_impl(
 
     // Skip uploading the orchestrator block (fanin_seen_epoch / scope / tensormap,
     // ~8.5 MB): it is host-only dep-computation scratch that the AICPU scheduler
-    // never reads. Ship [0, orch_start) (sm_handle) and [orch_end, arena_size)
-    // (ready queues + runtime header + mailbox) whole; the orch block between them
-    // is not sent. orch_start/orch_end are the first orch and first scheduler
-    // reservations (runtime_reserve_layout order: sm_handle -> orch -> sched); the
-    // ready queues ship in full because graph execution expands a GRAPH task into
-    // on-device nodes that push past the host task count.
-    const auto &sq = layout.sched;
+    // never reads. Ship [0, orch_start) (sm_handle) and
+    // [orch_end, arena_size) (runtime header + mailbox + every scheduler queue)
+    // whole; the orch block between them is not sent. The boundary is the
+    // layout's own, not inferred from a reservation order here.
     const size_t orch_start = layout.orch.off_fanin_seen_epoch;
-    const size_t orch_end = sq.off_ready_queue_slots[0];
+    const size_t orch_end = layout.off_uploaded_tail_begin;
     always_assert(orch_start <= orch_end);
     char *arena_host = static_cast<char *>(host_arena.base());
     char *arena_dev = static_cast<char *>(runtime_arena_dev);
