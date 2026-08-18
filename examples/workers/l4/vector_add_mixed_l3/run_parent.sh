@@ -20,7 +20,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 : "${SIMPLER_VECTOR_ADD_MIXED_L3_SESSION_TIMEOUT:=120}"
 
 cd "${ROOT_DIR}"
-# The pod job builds the venv in an earlier step, so a staging failure reaches
+# The network1 job builds the venv in an earlier step, so a staging failure reaches
 # this script before it reaches python — name it here rather than let `set -e`
 # abort on a bare "No such file or directory".
 if [[ ! -f .venv/bin/activate ]]; then

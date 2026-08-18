@@ -32,14 +32,19 @@ The runtime uses a 7-level hierarchy mirroring the physical topology of Ascend
 NPU clusters:
 
 ```text
-L6  CLOS2 / Cluster    ── full cluster (N6 super-nodes)
-L5  CLOS1 / SuperNode  ── super-node (N5 pods)
-L4  POD   / Pod        ── pod (4 hosts)
-L3  HOST  / Node       ── single host machine (16 chips + M SubWorkers)
-L2  CHIP  / Processor  ── one NPU chip (shared device memory)
-L1  DIE   / L2Cache    ── chip die (hardware-managed)
-L0  CORE  / AIV, AIC   ── individual compute core (hardware-managed)
+L6  network3  / CLOS2 / Cluster    ── full cluster (N6 super-nodes)
+L5  network2  / CLOS1 / SuperNode  ── super-node (N5 pods)
+L4  network1  / POD   / Pod        ── pod (4 hosts)
+L3  host      / HOST  / Node       ── single host machine (16 chips + M SubWorkers)
+L2  chip      / CHIP  / Processor  ── one NPU chip (shared device memory)
+L1  —         / DIE   / L2Cache    ── chip die (hardware-managed)
+L0  core      / CORE  / AIV, AIC   ── individual compute core (hardware-managed)
 ```
+
+The first column is the level word the code uses — `WorkerLevel` in
+[`python/simpler/worker_level.py`](../python/simpler/worker_level.py), the
+`[STRACE]` span prefix, and `SceneTestLevel`. L1 has no word because no Worker
+sits there.
 
 **L2 is the boundary** between two worlds:
 
@@ -57,10 +62,22 @@ L0  CORE  / AIV, AIC   ── individual compute core (hardware-managed)
 
 | Level | Workers it contains | Status |
 | ----- | ------------------- | ------ |
-| L3 (Host) | `ChipWorker` ×N + `SubWorker` ×M | Implemented |
-| L4 (Pod) | `Worker(level=3)` ×N + `SubWorker` ×M | Local implemented; remote sim implemented; HCOMM profiles pending |
-| L5 (SuperNode) | `Worker(level=4)` ×N | Local L4 code path, untested; remote proposed |
-| L6 (Cluster) | `Worker(level=5)` ×N | Local L4 code path, untested; remote proposed |
+| L3 (`host`) | `ChipWorker` ×N + `SubWorker` ×M | Implemented |
+| L4 (`network1`) | `Worker(level=3)` ×N + `SubWorker` ×M | Local implemented; remote sim implemented; HCOMM profiles pending |
+| L5 (`network2`) | `Worker(level=4)` ×N | Local L4 code path, untested; remote proposed |
+| L6 (`network3`) | `Worker(level=5)` ×N | Local L4 code path, untested; remote proposed |
+
+**This table is the one place the level words are mapped to physical entities.**
+A level above `host` is named for how many network hops separate it from the
+host, not for the hardware that implements it: `network1` is the layer commonly
+deployed as a **pod**, `network2` as a **supernode**, `network3` as a
+**cluster**. The words count hops because that correspondence is not fixed —
+sometimes a host sits under a pod, sometimes directly under a supernode — and
+naming a level after an interconnect does not work either, since it is mostly SU
+and sometimes RoCE. Note the digit counts hops rather than the level number:
+`network1` is L4. The ladder is defined once, in
+[`python/simpler/worker_level.py`](../python/simpler/worker_level.py); everything
+else in the tree uses the level word alone.
 
 `Worker` is a single C++ class that handles every level from L3 upward — the
 `level` parameter is a diagnostic label; behavior does not branch on it. The

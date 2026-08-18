@@ -80,9 +80,9 @@ Any `max_diff` above the tolerance exits non-zero.
 | `SIMPLER_GLOBAL_TLOAD_MIXED_L3_SESSION_TIMEOUT` | `120` | Seconds to wait on the remote session |
 
 The peer `TLOAD` needs real cross-device windows, so the default profile is
-`a3-fabric-v1` and requires real A3 devices on both machines. In CI the pod
-job runs the `test_global_tload_mixed_l3.py` wrapper through `pod-run-pytest`.
-CI supplies `POD_REMOTE_ENDPOINT`, `POD_REMOTE_DEVICES`,
-`POD_L3_SESSION_TIMEOUT_S`, `POD_L3_SESSION_LISTEN_HOST`, and pytest's
+`a3-fabric-v1` and requires real A3 devices on both machines. In CI the network1
+job runs the `test_global_tload_mixed_l3.py` wrapper through `network1-run-pytest`.
+CI supplies `NETWORK1_REMOTE_ENDPOINT`, `NETWORK1_REMOTE_DEVICES`,
+`NETWORK1_L3_SESSION_TIMEOUT_S`, `NETWORK1_L3_SESSION_LISTEN_HOST`, and pytest's
 `--platform` / `--device` options instead of the `SIMPLER_*` variables above;
 `run_parent.sh` remains the manual entry point.

@@ -58,7 +58,7 @@ python -m simpler_setup.tools.scene_test_compile examples tests/st \
 # provisioned SDMA workspace (issue #1425)
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5
 
-# A5 runs the non-pod corpus, including SDMA tests, on both host architectures
+# A5 runs the non-network1 corpus, including SDMA tests, on both host architectures
 pytest examples tests/st --platform a5 --exclude-level 4 --device 0-7
 
 # Single scene test (standalone)
@@ -154,7 +154,7 @@ python test_xxx.py -p a2a3sim --log-level debug                  # verbose C++ l
 | `--device IDS` | `-d` | `0` | Single id (`0`), range (`0-7`), or list (`0,2,5`). Sets the device-id pool for L3 cases and the available slots for L2 fanout. |
 | `--max-parallel N` | | `auto` | Max in-flight subprocesses (make-style). `auto` = `min(nproc, len(--device))` on sim, `len(--device)` on hardware. Decouples device-id pool size from parallelism; use to throttle sim on a CPU-constrained runner. |
 | `--runtime NAME` | | (all) | Restrict to one runtime (also used internally as the child-mode marker) |
-| `--level {2,3,4}` | | (all) | Restrict to one scene-test level. Level 4 selects pod wrappers. |
+| `--level {2,3,4}` | | (all) | Restrict to one scene-test level. Level 4 selects network1 wrappers. |
 | `--exclude-level {2,3,4}` | | (none) | Exclude tests explicitly carrying that scene-test level. Ordinary onboard lanes use `--exclude-level 4`. |
 | `--case SEL` | | (all) | Case selector, repeatable: `Foo`, `ClassA::Foo`, `ClassA::` |
 | `--manual` | | `exclude` | `exclude`/`include`/`only` for manual scene-test cases and standalone pytest tests |
@@ -736,8 +736,8 @@ excludes those tests, while Daily runs them together with the regular corpus.
 Dedicated DFX steps are the exception: they use `--manual include` in normal
 Per-PR and Daily jobs, so marking a case under their target path removes only
 its duplicate main-sweep execution. A caller selecting `--manual only` keeps
-that mode in the DFX steps. The A2/A3 Pod cases run in the same Daily workflow
-through their existing two-machine job.
+that mode in the DFX steps. The A2/A3 `network1` cases run in the same Daily
+workflow through their existing two-machine job.
 
 To move only selected platforms, pass the platform list to the same marker:
 use `@pytest.mark.manual(["a2a3sim", "a5sim"])` (or the equivalent

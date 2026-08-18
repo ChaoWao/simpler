@@ -65,6 +65,7 @@ import enum
 import hashlib
 import importlib
 import json
+import logging
 import math
 import os
 import re
@@ -7776,7 +7777,7 @@ class Worker:
         # Seed this process's logger before the first fork: the spans its own
         # scheduler emits obey the Python logger level, and every child inherits
         # the state. Every level needs this — `init()` rejects device_ids above
-        # L3, so a pod process owns no chips yet still drives next-level Workers
+        # L3, so a network1 process owns no chips yet still drives next-level Workers
         # and emits their spans. A chip child re-seeds its inherited state before
         # binding the logger copies embedded in the runtime modules it loads.
         chip_log_level = _simpler_log.get_current_config()
@@ -7787,7 +7788,21 @@ class Worker:
         # same code drives next-level children at every level above the chip — so
         # the word is a property of the process. Resolved once here and pushed, so
         # there is a single derivation rather than one on each side.
-        self._host_span_prefix = _set_host_span_level_prefix(_span_prefix(self.level))
+        #
+        # The first binding in a process wins, because a SpanScope holds the name
+        # pointer it was given. So a process that inits Workers at two levels keeps
+        # the first level's word, and self._host_span_prefix is whatever is really
+        # bound — never what this Worker asked for. Say so instead of letting the
+        # mismatch show up as mislabelled spans much later.
+        requested = _span_prefix(self.level)
+        self._host_span_prefix = _set_host_span_level_prefix(requested)
+        if self._host_span_prefix != requested:
+            logging.getLogger("simpler").warning(
+                "host-scheduler spans in this process are labelled %r, not %r: one process carries one "
+                "span vocabulary and an earlier Worker bound it first",
+                self._host_span_prefix,
+                requested,
+            )
 
         self._startup_reaped_pids = set()
         self._startup_ready_pids = set()

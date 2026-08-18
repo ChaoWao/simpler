@@ -19,14 +19,14 @@ Detection / isolation procedures referenced below live in
 5. **Read the marker selector out of the same job** you took the timeout from.
    `st-onboard-a2a3` is two pytest passes, not one: the sweep deselects
    `-m "not sdma"` and a later step runs `-m sdma`. `st-onboard-a5` uses
-   `-m "not pod"` and does not exclude `sdma`. Take the expression from
+   `--exclude-level 4` and does not exclude `sdma`. Take the expression from
    `ci.yml` rather than assuming, so this skill cannot drift from the job it
    reproduces.
 6. **Run through `task-submit`** (§E). On a5, the underlying command excludes
-   only pod tests, so SDMA remains in the sweep:
+   only level-4 tests, so SDMA remains in the sweep:
 
    ```bash
-   pytest examples tests/st -m "not pod" --platform a5 \
+   pytest examples tests/st --exclude-level 4 --platform a5 \
      --device <range-or-$TASK_DEVICE> --pto-session-timeout <timeout> -v
    ```
 
@@ -34,7 +34,7 @@ Detection / isolation procedures referenced below live in
    is:
 
    ```bash
-   pytest examples tests/st -m "not sdma" --platform <platform> \
+   pytest examples tests/st -m "not sdma" --exclude-level 4 --platform <platform> \
      --device <range-or-$TASK_DEVICE> --pto-session-timeout <timeout> -v
    ```
 

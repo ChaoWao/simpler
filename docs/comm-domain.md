@@ -145,13 +145,13 @@ final safety net.
 
 Repository CI exercises the complete transaction, rollback, and mixed
 local/remote paths with the `sim` backend. It also exercises the real
-`a3-fabric-v1` backend: the two-machine `st-pod-onboard-a2a3` job runs
+`a3-fabric-v1` backend: the two-machine `st-network1-onboard-a2a3` job runs
 `global_tload_mixed_l3` and `compute_then_tload_mixed_l3`, whose default
 profile is `a3-fabric-v1` on real A3 devices. Those two examples are the
 in-repository harness for the Fabric path; a run that needs to know whether
 Fabric was covered should read that job rather than infer it from the
 simulation checks. The job now drives their `test_*.py` wrappers through
-`pod-run-pytest` rather than calling `run_parent.sh` directly.
+`network1-run-pytest` rather than calling `run_parent.sh` directly.
 
 ---
 

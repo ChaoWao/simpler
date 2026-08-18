@@ -20,7 +20,7 @@ The complete test-type × hardware-tier matrix. Empty cells have no tests yet; o
 | Category | github-hosted (no hardware) | a2a3 runner | a5 runner |
 | -------- | --------------------------- | ----------- | --------- |
 | **ut** | `ut` (py + cpp) | `ut-a2a3` (py + cpp) | `ut-a5` (py) |
-| **st** | `st-sim-a2a3`, `st-sim-a5` | `st-onboard-a2a3`, `st-pod-onboard-a2a3` | `st-onboard-a5` |
+| **st** | `st-sim-a2a3`, `st-sim-a5` | `st-onboard-a2a3`, `st-network1-onboard-a2a3` | `st-onboard-a5` |
 
 ## GitHub Actions Jobs
 
@@ -30,11 +30,11 @@ shape. The executable job bodies live in reusable workflows:
 `_detect-changes.yml`, `_pre-commit.yml`, `_ut-no-hardware.yml`,
 `_packaging.yml`, `_profiling-flags-smoke.yml`, `_st-sim-a2a3.yml`,
 `_st-sim-a5.yml`, `_ut-npu-a2a3.yml`, `_ut-npu-a5.yml`,
-`_st-npu-a2a3.yml`, `_st-npu-a5.yml`, and `_st-pod.yml`. The scene-test and
+`_st-npu-a2a3.yml`, `_st-npu-a5.yml`, and `_st-network1.yml`. The scene-test and
 NPU unit-test bodies are split one workflow per architecture so each job
 renders only its own steps. Shared step scaffolding that is safe to run
 after checkout lives in composite actions under `.github/actions/`
-(`cache-pip`, `setup-gcc-15`, `setup-venv`, and the three `pod-*` actions).
+(`cache-pip`, `setup-gcc-15`, `setup-venv`, and the three `network1-*` actions).
 `setup-gcc-15` accepts a complete, pre-provisioned GCC 15 toolchain on any
 Linux runner; automatic installation of missing Linux tools is Ubuntu-only,
 while macOS installation uses Homebrew. `_packaging.yml` deliberately retains
@@ -53,7 +53,7 @@ PullRequest
   ├── st-sim-a5              (ubuntu + macOS)        — a5_changed && st_affected
   ├── ut-a2a3                (a2a3 self-hosted)      — Python + C++ UT, a2a3 hardware [needs ut_affected]
   ├── st-onboard-a2a3        (a2a3 self-hosted)      — a2a3_changed && st_affected
-  ├── st-pod-onboard-a2a3    (a2a3pod pair)          — a2a3_changed && st_affected
+  ├── st-network1-onboard-a2a3    (a2a3pod pair)          — a2a3_changed && st_affected
   ├── ut-a5                  (a5 self-hosted)        — Python UT, a5 hardware [needs ut_affected]
   └── st-onboard-a5          (a5 self-hosted)        — a5_changed && st_affected
 ```
@@ -67,42 +67,48 @@ PullRequest
 | `st-onboard-a2a3` | a2a3 self-hosted | `pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device ...`, then a separate `-m sdma` step, then adaptive-parallel DFX feature smokes |
 | `ut-a5` | a5 self-hosted | `pytest tests/ut --platform a5` + build `tools/cann-examples/query` and run `query version` (no device) + build `tools/cann-examples/aicpu-device-query` and `tools/cann-examples/aicpu-kernel-launch` (link smoke only) |
 | `st-onboard-a5` | a5 self-hosted | `pytest examples tests/st --platform a5 --exclude-level 4 --device ...`, including SDMA tests, then adaptive-parallel DFX feature smokes |
-| `st-pod-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st --level 4 --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
+| `st-network1-onboard-a2a3` | a pair of `a2a3pod` machines | `pytest examples tests/st --level 4 --platform a2a3 --device ... --max-parallel 1`, one L3 daemon on the peer |
 
-### Multi-machine pod jobs
+### Multi-machine network1 jobs
 
-`st-pod-onboard-a2a3` is the only job spanning two machines. The runner it
+`st-network1-onboard-a2a3` is the only job spanning two machines. The runner it
 lands on becomes the L4 parent and drives its peer entirely over ssh; the peer
 runs no workflow code at all. Everything that identifies either machine —
 addresses, the device split, ports, the staging root, proxies — comes from a
-`.env` the runner carries, so `_st-pod.yml` holds no machine-specific value.
+`.env` the runner carries, so `_st-network1.yml` holds no machine-specific value.
 Adding or re-addressing a machine is an edit to that file. Only a machine
 hosting a runner needs one.
+
+Two names in this job are provisioned on the machines rather than in this repo,
+so they still carry the older word: the `a2a3pod` runner label and the `POD_*`
+keys a machine's `.env` may use. The config loader accepts either prefix and
+exports one, so a machine converts independently; a runner label cannot be
+read either way, because a job matches every label in its list.
 
 Its body splits by what is per-run and what is per-pytest session:
 
 | Action | Called | What it does |
 | ------ | ------ | ------------ |
-| `pod-stage` | once | rsync this run's tree onto the peer and build it there |
-| `pod-run-pytest` | once | start the peer's L3 daemon, set the pod pytest environment, run `pytest examples tests/st --level 4`, stop the daemon and pull its logs |
-| `pod-teardown` | once, `if: always()` | remove the run's tree from the peer |
+| `network1-stage` | once | rsync this run's tree onto the peer and build it there |
+| `network1-run-pytest` | once | start the peer's L3 daemon, set the network1 pytest environment, run `pytest examples tests/st --level 4`, stop the daemon and pull its logs |
+| `network1-teardown` | once, `if: always()` | remove the run's tree from the peer |
 
-Staging and the peer-side build are the job's whole cost, and every pod test
+Staging and the peer-side build are the job's whole cost, and every network1 test
 runs against that same tree and venv, so they happen once. The pytest command
-owns selection through the scene-test level axis: adding an L4 pod example
-means adding a `test_*.py` wrapper with `@scene_level(SceneTestLevel.POD)`, not
-editing `_st-pod.yml`. `pod_remote_device_count` stays as the peer-resource
-declaration; `pod` is the runner topology, not a pytest selection marker.
+owns selection through the scene-test level axis: adding an L4 network1 example
+means adding a `test_*.py` wrapper with `@scene_level(SceneTestLevel.NETWORK1)`, not
+editing `_st-network1.yml`. `network1_remote_device_count` stays as the peer-resource
+declaration; `network1` is the runner topology, not a pytest selection marker.
 
-Pod logs go to `output/pod-ci-<run>-<attempt>/pytest/` while the job is running.
+Network1 logs go to `output/network1-ci-<run>-<attempt>/pytest/` while the job is running.
 Parent-side `ASCEND_PROCESS_LOG_PATH` is split per pytest nodeid by
-`st_pod_logs`; peer-side daemon/device logs are grouped for the pytest session.
+`st_network1_logs`; peer-side daemon/device logs are grouped for the pytest session.
 The directory is uploaded on a best-effort basis: artifact-service failures are
-ignored so they cannot override the POD test result. Preserve relevant
+ignored so they cannot override the `network1` test result. Preserve relevant
 diagnostics in the inline job log as well when investigating a failure.
 
 Writing an example — the files, the entry module, the `run(...)` entry point,
-the `test_*.py` pod wrapper, and the manual `run_parent.sh` — is covered in
+the `test_*.py` network1 wrapper, and the manual `run_parent.sh` — is covered in
 [`examples/workers/README.md`](../examples/workers/README.md).
 
 ### Daily full scene-test sweep
@@ -112,8 +118,8 @@ scene-test corpus with `--manual include` once per day and supports manual
 re-runs through `workflow_dispatch`. Simulation runs on Ubuntu and macOS for
 both architectures; onboard runs on the A2/A3 and A5 self-hosted pools. The
 same DFX smoke steps used by Per-PR run once in each Daily platform job, and
-the A2/A3 Pod corpus runs through the existing two-machine workflow. The main
-Per-PR scene-test steps keep the default `--manual exclude`, so moving an
+the A2/A3 `network1` corpus runs through the existing two-machine workflow. The
+main Per-PR scene-test steps keep the default `--manual exclude`, so moving an
 ordinary case to Daily does not require a second workflow exclusion list.
 Dedicated DFX steps instead use `include` for the normal Per-PR and Daily modes
 because they own the full corpus under their target paths; a `manual_mode` of
@@ -166,12 +172,12 @@ benefit — device bin-packing for L3, xdist fanout for L2, and a shared
 `ChipWorker` per `(runtime, device)`:
 
 ```bash
-# Recommended CI invocation — a2a3 deselects SDMA and pod tests, as the job does,
+# Recommended CI invocation — a2a3 deselects SDMA and network1 tests, as the job does,
 # and runs SDMA as a second pass afterwards
 pytest examples tests/st -m "not sdma" --platform a2a3 --exclude-level 4 --device 4-7 -x
 pytest examples tests/st -m sdma --platform a2a3 --device 4-5 -x
 
-# A5 runners run the non-pod corpus, including SDMA tests
+# A5 runners run the non-network1 corpus, including SDMA tests
 pytest examples tests/st --platform a5 --exclude-level 4 --device 0-7 -x
 ```
 
@@ -188,14 +194,14 @@ profiling-vs-parallelism trade-off.
 
 ### Targeted runtime builds
 
-The sim, onboard, and pod jobs select one explicit
+The sim, onboard, and network1 jobs select one explicit
 `build_package_<platform>` CMake target during package install. That aggregate
 target depends on both the `_task_interface` binding and the selected platform's
 runtime target, so scikit-build-core makes one `cmake --build` call and CMake can
 build both dependencies in parallel while omitting unused platforms. The
 selection is not a cached CMake variable, so a later ordinary package install
 in the same worktree still uses the default `ALL` target and auto-detects every
-available platform. The pod stage passes the same target to its peer.
+available platform. The network1 stage passes the same target to its peer.
 Pre-commit selects its build from the existing files in the merge-base diff,
 the same file set its hooks inspect. A clang-tidy-eligible C/C++ change builds
 the combined `build_package_sim` target so clang-tidy has both simulator
@@ -249,7 +255,7 @@ not need `--max-parallel` manually.
 
   The arch flags subtract `NON_CODE` before deciding, so a non-code-only change already makes both `false`. An arch-gated job therefore needs no separate non-code check. See [`.claude/rules/ci-change-detection.md`](../.claude/rules/ci-change-detection.md) for the invariants these gates must keep.
 
-- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them with `-m "not sdma"` and `--exclude-level 4`, and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection for SDMA remains by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Pod tests are selected by `--level 4` in `st-pod-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
+- **SDMA tests run as their own step inside `st-onboard-a2a3`.** The ordinary sweep deselects them with `-m "not sdma"` and `--exclude-level 4`, and a later step runs `-m sdma`. Ordering is what the two SDMA paths share: the SDMA step is always second, so no fault-injection case can land on a device that has already provisioned SDMA. Device acquisition differs by host arch — on aarch64 the SDMA step takes its own `task-submit --device auto --device-num 2`, so the two steps are disjoint in devices as well; on x86_64 there is no `task-submit` and both steps use the same `${DEVICE_RANGE}`, leaving ordering as the only separation. Provisioning the SDMA workspace creates device-only STARS streams that live in the device fault domain, so an AICore fault on a device that has provisioned SDMA costs minutes instead of milliseconds — the sweep's `aicore_op_timeout` fault injection must therefore never share a device with them ([#1425](https://github.com/hw-native-sys/simpler/issues/1425)). Selection for SDMA remains by marker on both sides, so the two cannot drift apart; the split can be dropped once #1425 is fixed. Network1 tests are selected by `--level 4` in `st-network1-onboard-a2a3` and explicitly excluded from ordinary onboard ST lanes.
 
 ### CPU emergency lane (`ci-self-cpu.yml`) and the `/run-cpu` button
 
@@ -298,7 +304,7 @@ runner pools, branched at run time on the host arch (`uname -m`):
   the runner — so the step runs `pytest`/`ctest` directly with
   `--device ${DEVICE_RANGE}`.
 
-a5 runners always use `task-submit` and run the full non-pod scene-test corpus,
+a5 runners always use `task-submit` and run the full non-network1 scene-test corpus,
 including SDMA tests, on both x86_64 and ARM64. Steps that only build (cmake,
 `RuntimeBuilder`, the
 `cann-examples` smokes) take no lock on either arch. The same device-lock rule

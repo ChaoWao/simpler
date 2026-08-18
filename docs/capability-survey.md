@@ -115,7 +115,7 @@ hardware-gated
 ([remote-l3-worker-design.md](remote-l3-worker-design.md):71-77).
 `examples/workers/l4/vector_add_mixed_l3/` is the L4 example — one parent
 driving a local L3 subtree and a remote one on a second machine — and the
-`st-pod-onboard-a2a3` job starts the daemon on that peer.
+`st-network1-onboard-a2a3` job starts the daemon on that peer.
 
 ## Launching AICore and AICPU work (the CANN surface)
 

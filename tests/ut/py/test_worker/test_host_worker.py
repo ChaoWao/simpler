@@ -275,7 +275,7 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
     """A chipless hierarchical process still runs a scheduler that emits host spans.
 
     `init()` rejects `device_ids` above L3, so gating the seeding on them would
-    leave exactly the pod processes unseeded — and their `HostLogger` would keep
+    leave exactly the network1 processes unseeded — and their `HostLogger` would keep
     its constructor default however the `simpler` logger is configured.
     """
 

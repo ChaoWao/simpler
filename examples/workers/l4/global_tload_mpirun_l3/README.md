@@ -22,7 +22,7 @@ it exercises that the sibling cannot:
   every device of both ranks, so descriptors are exchanged rank-side over an
   MPI collective and the L4 import fanout is skipped.
 - One TLOAD task per NPU device on each machine (the sibling drives one device
-  per side), so the domain spans four windows on the pod pair.
+  per side), so the domain spans four windows on the network1 pair.
 - One `submit_next_level_group` round over the full MPI group, so the batched
   `PER_RANK` mailbox envelope path runs alongside the directed dispatches.
 
@@ -73,8 +73,8 @@ Any `max_diff` above the tolerance exits non-zero.
 
 ## Running it in CI
 
-The pod job's `pod-stage` action writes the per-machine launcher on both
-machines at one shared path and exports it as `POD_MPI_PYTHON`; the
+The network1 job's `network1-stage` action writes the per-machine launcher on both
+machines at one shared path and exports it as `NETWORK1_MPI_PYTHON`; the
 `test_global_tload_mpirun_l3.py` wrapper reads it together with
-`POD_LOCAL_IP` and the standard pod fixtures, and skips when `mpirun`,
+`NETWORK1_LOCAL_IP` and the standard network1 fixtures, and skips when `mpirun`,
 `mpi4py`, or either variable is absent.

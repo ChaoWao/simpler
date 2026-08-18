@@ -76,7 +76,7 @@ Implemented:
   each remote session manifest and installed on that L3's L2 children.
 - The repository contains simulation coverage for the no-`mpirun` Global
   CommDomain transaction and mixed local/remote L3 topology.
-- The two-machine `st-pod-onboard-a2a3` job covers the real `a3-fabric-v1`
+- The two-machine `st-network1-onboard-a2a3` job covers the real `a3-fabric-v1`
   backend through `global_tload_mixed_l3` (L4-brokered peer `TLOAD`) and
   `compute_then_tload_mixed_l3` (one L2 compute round followed by
   cross-machine communication through the same domain).
