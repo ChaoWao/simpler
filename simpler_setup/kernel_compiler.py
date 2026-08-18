@@ -19,6 +19,7 @@ from typing import Optional, Union
 
 from simpler import env_manager
 
+from .compile_paths import compiler_visible_path
 from .environment import PROJECT_ROOT
 from .toolchain import (
     Aarch64GxxToolchain,
@@ -41,7 +42,7 @@ _COMPILE_CACHE_SCHEMA = 1
 # Modules whose logic turns kernel sources into artifact bytes: compiler
 # invocation and flags, toolchain selection, and the ELF section extraction
 # applied to every onboard incore.
-_ARTIFACT_LOGIC_MODULES = ("kernel_compiler.py", "toolchain.py", "elf_parser.py")
+_ARTIFACT_LOGIC_MODULES = ("kernel_compiler.py", "toolchain.py", "compile_paths.py", "elf_parser.py")
 
 
 @cache
@@ -324,27 +325,10 @@ class KernelCompiler:
     def compile_cache_token(self, runtime_name: str, core_types: list[str]) -> dict[str, object]:
         """Describe every compiler and fixed flag that affects kernel artifacts."""
         orchestration = self._orchestration_toolchain(runtime_name)
-        if self.platform.endswith("sim"):
-            incore = self.gxx15
-            incore_entries = [
-                {
-                    "core_type": core_type,
-                    "flags": [*incore.get_compile_flags(core_type=core_type), *self._sanitizer_flags(incore)],
-                }
-                for core_type in sorted(set(core_types))
-            ]
-            linker = None
-        else:
-            assert self.ccec is not None, "ccec toolchain is only available for hardware platforms"
-            incore = self.ccec
-            incore_entries = [
-                {"core_type": core_type, "flags": incore.get_compile_flags(core_type=core_type)}
-                for core_type in sorted(set(core_types))
-            ]
-            linker = {
-                "identity": _executable_cache_identity(self.ccec.linker_path),
-                "flags": ["-e", "kernel_entry"],
-            }
+        incore_tokens = [self.incore_compile_cache_token(core_type) for core_type in sorted(set(core_types))]
+        incore_identity = incore_tokens[0]["identity"] if incore_tokens else None
+        incore_linker = incore_tokens[0]["linker"] if incore_tokens else None
+        incore_entries = [{"core_type": token["core_type"], "flags": token["flags"]} for token in incore_tokens]
         return {
             "schema": _COMPILE_CACHE_SCHEMA,
             "logic": _artifact_logic_token(),
@@ -354,10 +338,33 @@ class KernelCompiler:
                 "link_flags": self._orchestration_link_flags(orchestration),
             },
             "incore": {
-                "identity": _executable_cache_identity(incore.cxx_path),
+                "identity": incore_identity,
                 "variants": incore_entries,
-                "linker": linker,
+                "linker": incore_linker,
             },
+        }
+
+    def incore_compile_cache_token(self, core_type: str) -> dict[str, object]:
+        """Describe the compiler inputs shared by identical incore sources."""
+        if self.platform.endswith("sim"):
+            incore = self.gxx15
+            flags = [*incore.get_compile_flags(core_type=core_type), *self._sanitizer_flags(incore)]
+            linker = None
+        else:
+            assert self.ccec is not None, "ccec toolchain is only available for hardware platforms"
+            incore = self.ccec
+            flags = incore.get_compile_flags(core_type=core_type)
+            linker = {
+                "identity": _executable_cache_identity(self.ccec.linker_path),
+                "flags": ["-e", "kernel_entry"],
+            }
+        return {
+            "schema": _COMPILE_CACHE_SCHEMA,
+            "logic": _artifact_logic_token(),
+            "identity": _executable_cache_identity(incore.cxx_path),
+            "core_type": core_type,
+            "flags": flags,
+            "linker": linker,
         }
 
     def _run_subprocess(
@@ -366,7 +373,7 @@ class KernelCompiler:
         """Run a subprocess command with standardized logging and error handling."""
         logger.debug(f"[{label}] Command: {' '.join(cmd)}")
         try:
-            result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            result = subprocess.run(cmd, check=False, capture_output=True, text=True, cwd=self.project_root)
 
             if result.stdout and logger.isEnabledFor(10):  # DEBUG = 10
                 logger.debug(f"[{label}] stdout:\n{result.stdout}")
@@ -435,12 +442,13 @@ class KernelCompiler:
 
     @staticmethod
     def _make_temp_path(prefix: str, suffix: str, build_dir: Optional[str] = None) -> str:
-        """Create a unique temporary file path in /tmp via mkstemp.
+        """Create a unique absolute temporary file path via mkstemp.
 
         The file is created atomically to avoid races, then immediately
         closed so the caller can overwrite it with compiler output.
         """
-        fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=build_dir or "/tmp")
+        directory = os.path.abspath(build_dir) if build_dir else "/tmp"
+        fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
         os.close(fd)
         return path
 
@@ -510,17 +518,17 @@ class KernelCompiler:
         )
 
         # Build command from toolchain
-        cmd = [self.ccec.cxx_path] + self.ccec.get_compile_flags(core_type=core_type)
-        cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
+        cmd = [self.ccec.cxx_path, *self.ccec.get_compile_flags(core_type=core_type)]
+        cmd.extend([f"-I{compiler_visible_path(pto_include)}", f"-I{compiler_visible_path(pto_pto_include)}"])
 
         for inc_dir in self.get_incore_include_dirs():
-            cmd.append(f"-I{os.path.abspath(inc_dir)}")
+            cmd.append(f"-I{compiler_visible_path(inc_dir)}")
 
         if extra_include_dirs:
             for inc_dir in extra_include_dirs:
-                cmd.append(f"-I{os.path.abspath(inc_dir)}")
+                cmd.append(f"-I{compiler_visible_path(inc_dir)}")
 
-        cmd.extend(["-o", output_path, source_path])
+        cmd.extend(["-o", output_path, str(compiler_visible_path(source_path))])
 
         # Execute compilation
         core_type_name = "AIV" if core_type == "aiv" else "AIC"
@@ -658,16 +666,16 @@ class KernelCompiler:
             for src in extra_sources:
                 src = os.path.abspath(src)
                 if os.path.isfile(src):
-                    cmd.append(src)
+                    cmd.append(str(compiler_visible_path(src)))
                     logger.debug(f"  Including extra source: {os.path.basename(src)}")
 
         # Add include dirs
         if extra_include_dirs:
             for inc_dir in extra_include_dirs:
-                cmd.append(f"-I{os.path.abspath(inc_dir)}")
+                cmd.append(f"-I{compiler_visible_path(inc_dir)}")
 
         # Output and input
-        cmd.extend(["-o", output_path, source_path])
+        cmd.extend(["-o", output_path, str(compiler_visible_path(source_path))])
 
         # Log compilation command
         logger.info(f"[Orchestration] Compiling: {source_path}")
@@ -717,7 +725,7 @@ class KernelCompiler:
         )
 
         # Build command from toolchain
-        cmd = [self.gxx15.cxx_path] + self.gxx15.get_compile_flags(core_type=core_type)
+        cmd = [self.gxx15.cxx_path, *self.gxx15.get_compile_flags(core_type=core_type)]
         cmd += self._sanitizer_flags(self.gxx15)
 
         # Add PTO ISA header paths if provided. The path always comes from
@@ -726,17 +734,17 @@ class KernelCompiler:
         if pto_isa_root:
             pto_include = os.path.join(pto_isa_root, "include")
             pto_pto_include = os.path.join(pto_isa_root, "include", "pto")
-            cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
+            cmd.extend([f"-I{compiler_visible_path(pto_include)}", f"-I{compiler_visible_path(pto_pto_include)}"])
 
         for inc_dir in self.get_incore_include_dirs():
-            cmd.append(f"-I{os.path.abspath(inc_dir)}")
+            cmd.append(f"-I{compiler_visible_path(inc_dir)}")
 
         # Add extra include directories if provided
         if extra_include_dirs:
             for inc_dir in extra_include_dirs:
-                cmd.append(f"-I{os.path.abspath(inc_dir)}")
+                cmd.append(f"-I{compiler_visible_path(inc_dir)}")
 
-        cmd.extend(["-o", output_path, source_path])
+        cmd.extend(["-o", output_path, str(compiler_visible_path(source_path))])
 
         # Log compilation command
         logger.info(f"[SimKernel] Compiling: {source_path}")

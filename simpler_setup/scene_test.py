@@ -28,14 +28,21 @@ import logging
 import os
 import platform as host_platform
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import IntEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .compile_pool import compile_slot, current_compile_workers
 from .log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, configure_logging
 from .pto_isa import ensure_pto_isa_root
-from .scene_test_cache import compile_artifact_key, get_or_compile
+from .scene_test_cache import (
+    compile_artifact_key,
+    compile_incore_artifact_key,
+    get_or_compile,
+    get_or_compile_incore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1173,25 +1180,36 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
     inc_dirs = kc.get_orchestration_include_dirs(runtime)
     orch_include_dirs, orch_sources = kc.get_orchestration_cache_inputs(runtime)
     orch_units = [orch["source"], *orch_sources]
-    compilation_units: list[tuple[str | Path, list[str | Path]]] = [
+    orchestration_units: list[tuple[str | Path, list[str | Path]]] = [
         (source, orch_include_dirs) for source in orch_units
     ]
     resolved_extra_dirs = []
+    incore_artifact_keys = []
     for k in incores:
         extra = _resolve_incore_include_dirs(k["extra_include_dirs"], k) if k.get("extra_include_dirs") else []
         resolved_extra_dirs.append(extra)
-        compilation_units.append(
-            (
+        include_dirs = [
+            Path(pto_isa_root) / "include",
+            Path(pto_isa_root) / "include" / "pto",
+            *kc.get_incore_include_dirs(),
+            *inc_dirs,
+            *extra,
+        ]
+        incore_artifact_keys.append(
+            compile_incore_artifact_key(
+                {
+                    "platform": platform,
+                    "host_platform": sys.platform,
+                    "host_machine": host_platform.machine(),
+                    "compiler": kc.incore_compile_cache_token(k["core_type"]),
+                },
                 k["source"],
-                [
-                    Path(pto_isa_root) / "include",
-                    Path(pto_isa_root) / "include" / "pto",
-                    *kc.get_incore_include_dirs(),
-                    *inc_dirs,
-                    *extra,
-                ],
+                include_dirs,
             )
         )
+    if len(resolved_extra_dirs) != len(incores) or len(incore_artifact_keys) != len(incores):
+        raise AssertionError("per-incore cache inputs must match the incore specification")
+    compiler_token = kc.compile_cache_token(runtime, [k["core_type"] for k in incores])
     artifact_key = compile_artifact_key(
         {
             "cache_key": cache_key,
@@ -1200,7 +1218,7 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
             "host_platform": sys.platform,
             "host_machine": host_platform.machine(),
             "sanitizers": KernelCompiler._sanitizers,
-            "compiler": kc.compile_cache_token(runtime, [k["core_type"] for k in incores]),
+            "compiler": compiler_token,
             "orchestration": {
                 "function_name": orch["function_name"],
                 "config_name": orch.get("config_name", ""),
@@ -1211,30 +1229,55 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
                     "func_id": k["func_id"],
                     "core_type": k["core_type"],
                     "signature": k.get("signature", []),
+                    "artifact_key": incore_artifact_key,
                 }
-                for k in incores
+                for k, incore_artifact_key in zip(incores, incore_artifact_keys)
             ],
         },
-        compilation_units,
+        orchestration_units,
     )
 
     def compile_callable():
-        orch_binary = kc.compile_orchestration(runtime, orch["source"])
+        def compile_orchestration():
+            with compile_slot():
+                return kc.compile_orchestration(runtime, orch["source"])
+
+        def compile_one_incore(k, extra, incore_artifact_key):
+            def compile_missing_incore():
+                with compile_slot():
+                    binary = kc.compile_incore(
+                        k["source"],
+                        core_type=k["core_type"],
+                        pto_isa_root=pto_isa_root,
+                        extra_include_dirs=inc_dirs + extra,
+                    )
+                return binary if is_sim else extract_text_section(binary)
+
+            return get_or_compile_incore(incore_artifact_key, compile_missing_incore)
+
+        max_workers = min(current_compile_workers(), len(incores) + 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            orch_future = executor.submit(compile_orchestration)
+            incore_futures = [
+                executor.submit(
+                    compile_one_incore,
+                    k,
+                    extra,
+                    incore_artifact_key,
+                )
+                for k, extra, incore_artifact_key in zip(incores, resolved_extra_dirs, incore_artifact_keys)
+            ]
+            orch_binary = orch_future.result()
+            incores_binary = [future.result() for future in incore_futures]
+
+        if len(incores_binary) != len(incores):
+            raise AssertionError("compiled incore binaries must match the incore specification")
         kernel_binaries = []
-        for k, extra in zip(incores, resolved_extra_dirs, strict=True):
-            signature = k.get("signature", [])
-            incore = kc.compile_incore(
-                k["source"],
-                core_type=k["core_type"],
-                pto_isa_root=pto_isa_root,
-                extra_include_dirs=inc_dirs + extra,
-            )
-            if not is_sim:
-                incore = extract_text_section(incore)
+        for k, incore in zip(incores, incores_binary):
             kernel_binaries.append(
                 (
                     k["func_id"],
-                    CoreCallable.build(signature=signature, binary=incore),
+                    CoreCallable.build(signature=k.get("signature", []), binary=incore),
                 )
             )
 
