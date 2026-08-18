@@ -57,10 +57,12 @@ _ITERS = 40  # 20 reuses per bank
 # A negative arm needs only enough adjacent pairs for the analyzer to have one
 # to reject; the stress count buys nothing once the property is absent.
 _CONTROL_ITERS = 3
-# The L2 st_worker is session-scoped, and the framework's own default test_run
-# registers this class's callable at id 0 and keeps it there for the session. The
-# arms below therefore own a separate registry id (capacity is 64), so their
-# register/unregister pairs cannot collide with it or evict it in any test order.
+# This class's st_worker is class-scoped (see the sibling conftest, which
+# overrides the pooled default), so all four of its tests share one slot table.
+# The framework's inherited test_run registers through the ordinary path and so
+# holds id 0 for the rest of the class. The arms below therefore own a separate
+# registry id (capacity is 64), which keeps their register/unregister pairs off
+# id 0 whatever order the four tests run in.
 _ARM_CALLABLE_ID = 1
 
 
@@ -237,6 +239,10 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         reported overlap would be measuring the span chain rather than the
         pipeline. Matching the message is load-bearing — it separates a real
         rejection from the vacuous "no pairs to check" one.
+
+        This arm names no mechanism, so it outlives any of them: one run at a
+        time cannot overlap under any admission policy. Contrast the diagnostics
+        arm below, which is tied to a fallback with an expiry date.
         """
         if st_platform != "a2a3":
             pytest.skip("concurrent native prepare / two-bank pipeline is an a2a3 onboard path")
@@ -272,6 +278,16 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
 
         Host spans are gated separately (compile-time ``SIMPLER_HOST_STRACE``),
         so the trace still comes out with device diagnostics on.
+
+        **This arm retires with the fallback it covers.** The serialization is
+        temporary by design — ``concurrent_native_prepare_supported_impl`` in
+        ``runtime_maker.cpp`` keeps collector-bearing configurations sequential
+        only *until their state is per-epoch*. Once it is and
+        ``diagnostics_any()`` leaves ``allow_prepared_successor``, a diagnostic
+        config will overlap like any other and this arm turns red with the same
+        ``did not overlap`` it currently demands. The fix at that point is to
+        delete this test, not to restore the serialization: its value and its
+        lifetime come from the same place, the fallback being silent.
         """
         if st_platform != "a2a3":
             pytest.skip("concurrent native prepare / two-bank pipeline is an a2a3 onboard path")

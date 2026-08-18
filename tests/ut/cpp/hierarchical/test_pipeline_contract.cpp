@@ -9,6 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <string>
+#include <type_traits>
+
 #include <gtest/gtest.h>
 
 #include "chip_worker.h"
@@ -17,9 +20,19 @@
 
 namespace {
 
-void call_existing_chip_worker_init(ChipWorker &worker) {
-    worker.init("host.so", "aicpu.so", "aicore.so", "dispatcher.so", 0);
-}
+// `ChipWorker::init`'s parameter order is a caller-visible contract: the Python
+// binding passes positionally, so a parameter inserted rather than appended
+// silently changes what an existing call means. Pinning the whole signature makes
+// any reordering a build failure here instead of a runtime mystery; a genuinely
+// intended change updates this alias and says so.
+using ExpectedChipWorkerInit = void (ChipWorker::*)(
+    const std::string &, const std::string &, const std::string &, const std::string &, int, const CallConfig *,
+    uint32_t, const std::string &
+);
+static_assert(
+    std::is_same_v<decltype(&ChipWorker::init), ExpectedChipWorkerInit>,
+    "ChipWorker::init signature changed: append new parameters, never insert"
+);
 
 // A contract a runtime could legitimately ship today: one host-filled region,
 // one device-built region, and the two execution handles.
@@ -39,8 +52,6 @@ TEST(PipelineContract, AcceptsADeclarationThisBuildCanHonor) {
     const PipelineContract c = accepted_contract();
     EXPECT_TRUE(is_valid_pipeline_contract(&c));
 }
-
-TEST(ChipWorkerApi, KeepsExistingInitArgumentOrder) { EXPECT_NE(&call_existing_chip_worker_init, nullptr); }
 
 // Runtime loading requires a contract; this helper still rejects malformed null values.
 TEST(PipelineContract, RejectsNull) { EXPECT_FALSE(is_valid_pipeline_contract(nullptr)); }

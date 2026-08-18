@@ -284,6 +284,16 @@ successor is a **failure** in the scene test rather than a skip — a skip would
 report green for the one state in which the property cannot hold. The platform
 gate runs first, so the sim path never reaches that assert.
 
+The two negative arms differ in how long they are meant to last. The serial one
+names no mechanism — one run in flight cannot overlap under any admission policy
+— so it is permanent. The diagnostics one is deliberately perishable:
+`concurrent_native_prepare_supported_impl` keeps collector-bearing configurations
+sequential only *until their state is per-epoch*, and once that lands and
+`diagnostics_any()` leaves `allow_prepared_successor`, this arm fails with the
+very `did not overlap` it now requires. **Delete it then; do not restore the
+serialization** — its value and its lifetime both come from the fallback being
+silent.
+
 ## Why markers, not a return value
 
 Android's atrace writes to the ftrace `trace_marker` sink and systrace renders
