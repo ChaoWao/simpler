@@ -39,6 +39,7 @@
 #include "common/unified_log.h"
 #include "cpu_sim_context.h"
 #include "host_log.h"
+#include "host/host_phase_records_artifact.h"
 #include "host/raii_scope_guard.h"
 #include "host/runtime_timeout_config.h"
 #include "runtime.h"
@@ -623,6 +624,7 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
         chip_swimlane_collector_.stop();
         chip_swimlane_collector_.read_phase_header_metadata();
         chip_swimlane_collector_.reconcile_counters();
+        publish_host_phase_records_to_swimlane();
         chip_swimlane_collector_.export_swimlane_json();
     }
 
@@ -647,6 +649,14 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
                 LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", replay_rc);
             }
         }
+    }
+
+    // Per-event view of the prepare path. Keyed on output_prefix_ rather than a
+    // flag because it is non-empty exactly when this run produces diagnostic
+    // artifacts, and on the store having finished a pass, which is what a
+    // host-orchestrating runtime leaves behind.
+    if (!output_prefix_.empty() && host_phase_records_.finished()) {
+        (void)host_phase_records_.write_records_jsonl(make_host_phase_records_path(output_prefix_));
     }
 
     if (enable_scope_stats_) {

@@ -75,6 +75,15 @@ _STRACE_RE = re.compile(
 # A record start, matched independently of whether the rest of that record
 # survived the write that emitted it.
 _STRACE_HEAD_RE = re.compile(r"\[STRACE\]\s+v=\d+")
+# `bind phase=` timing lines from a runtime with a host prepare path. Not
+# `[STRACE]` markers by design — they are a runtime's breakdown of one stage, not
+# a platform run stage. Every line is written at the end of the pass, off the path
+# being measured, so the line carries its own `start_ns` rather than leaving the
+# interval to be inferred from the log prefix's emission time.
+_BIND_PHASE_RE = re.compile(
+    r"\[mono_ns=\d+\]\[T0x(?P<tid_hex>[0-9a-fA-F]+)\]\[TIMING\]\s+\S+:\s+"
+    r"\[[^\]]*\]\s+bind phase=(?P<phase>\w+)\s+start_ns=(?P<start>\d+)\s+dur_ns=(?P<dur>\d+)(?P<attrs>[^\r\n]*)",
+)
 _CLOCK_ANCHOR_RE = re.compile(
     r"\[mono_ns=\d+\]\[T0x[0-9a-fA-F]+\]\[TIMING\]\s+clock_anchor:\s+"
     r"\[CLOCK_ANCHOR\]\s+v=(?P<v>\d+)\s+pid=(?P<pid>\d+)\s+"
@@ -772,6 +781,159 @@ def _assign_lanes(host_entries, host_threads):
     return lane_of, lane_names
 
 
+def load_host_phase_records(paths):
+    """Read host phase records from ``host_phase_records.jsonl`` files.
+
+    One JSON object per prepare pass, as written by a runtime with a host prepare
+    path. Malformed lines are skipped rather than fatal: the artifact is appended
+    to while a run is in flight, so a truncated last line is an ordinary outcome,
+    not a broken file. A line that parses but is not an object, or whose
+    ``records`` is not a list, is malformed in the same sense and skipped here so
+    no consumer has to re-check it.
+    """
+    passes = []
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    one_pass = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(one_pass, dict) or not isinstance(one_pass.get("records", []), list):
+                    continue
+                passes.append(one_pass)
+    return passes
+
+
+# The bind stage's own segments, whose durations partition it. Everything else a
+# pass records is an orchestrator operation nested inside the host_orch segment.
+_BIND_PHASE_NAMES = frozenset(
+    {
+        "args",
+        "arena_build",
+        "static_arena",
+        "gm_heap",
+        "shared_mem",
+        "runtime_init",
+        "host_orch",
+        "graph_upload",
+        "relocate",
+        "sm_h2d",
+        "arena_h2d",
+        "host_view_close",
+    }
+)
+
+
+def host_record_spans(spans, passes):
+    """Turn phase records into spans nested under their pass's ``bind``.
+
+    A record carries only ``(pid, inv)`` and a host-clock interval; the thread and
+    the tree position come from the ``simpler_run.bind`` span of the same
+    invocation, which is the stage the records subdivide. Records whose pass has
+    no such span are dropped — without it there is no lane to draw them on and no
+    parent to nest them under.
+
+    A bind segment sits directly under ``bind``; an orchestrator operation sits a
+    level deeper, under the ``host_orch`` segment it happened inside.
+
+    The clock needs no conversion: both sides are the same CLOCK_MONOTONIC axis.
+
+    Returns the spans, the number of passes with no matching ``bind`` span, and
+    the ``(pid, inv)`` keys the artifact covered — a caller uses the last to avoid
+    drawing the same segment twice from the log lines as well.
+    """
+    bind_by_key = {
+        (span.pid, span.inv): span for span in spans if span.name == "simpler_run.bind" and not span.is_device
+    }
+    out = []
+    dropped_passes = 0
+    covered_keys = set()
+    for one_pass in passes:
+        key = (one_pass.get("pid"), one_pass.get("inv"))
+        parent = bind_by_key.get(key)
+        if parent is None:
+            dropped_passes += 1
+            continue
+        for record in one_pass.get("records", []):
+            try:
+                start = int(record["start_ns"])
+                end = int(record["end_ns"])
+                phase = str(record["phase"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if phase in _BIND_PHASE_NAMES:
+                name = f"simpler_run.bind.{phase}"
+                depth = parent.depth + 1
+                covered_keys.add(key)
+            else:
+                name = f"simpler_run.bind.host_orch.{phase}"
+                depth = parent.depth + 2
+            out.append(
+                Span(
+                    pid=parent.pid,
+                    tid=parent.tid,
+                    inv=parent.inv,
+                    hid=parent.hid,
+                    depth=depth,
+                    name=name,
+                    ts=start,
+                    dur=max(0, end - start),
+                    attrs=f"detail={record.get('detail', 0)} src=host_phase_records",
+                )
+            )
+    return out, dropped_passes, frozenset(covered_keys)
+
+
+def bind_phase_spans(text, spans, skip_keys=frozenset()):
+    """Recover `bind phase=` timing lines as spans nested under their ``bind``.
+
+    Without these the swimlane draws ``simpler_run.bind`` as one empty bar, which
+    for a runtime with a host prepare path is most of the trace: on a 40-layer
+    qwen decode the stage is seconds of tensor staging and host-view teardown,
+    while the orchestration inside it is around a millisecond. The per-event
+    records then land in well under a pixel with nothing to indicate where to zoom.
+
+    The line carries its own ``start_ns``. The owning invocation is whichever
+    ``simpler_run.bind`` of that thread contains the interval; a phase outside
+    every bind is dropped rather than guessed at.
+
+    ``skip_keys`` holds the ``(pid, inv)`` a record artifact already covered, so
+    the same segment is not drawn twice when both channels are present.
+    """
+    binds = [span for span in spans if span.name == "simpler_run.bind" and not span.is_device]
+    out = []
+    for match in _BIND_PHASE_RE.finditer(text):
+        start = int(match["start"])
+        dur = int(match["dur"])
+        parent = next(
+            (b for b in binds if b.ts <= start and start + dur <= b.ts + b.dur),
+            None,
+        )
+        if parent is None or (parent.pid, parent.inv) in skip_keys:
+            continue
+        out.append(
+            Span(
+                pid=parent.pid,
+                # The log's T0x id is a pthread handle, not the tid the markers
+                # carry, so take the lane from the enclosing bind and keep the
+                # raw value only as an attribute.
+                tid=parent.tid,
+                inv=parent.inv,
+                hid=parent.hid,
+                depth=parent.depth + 1,
+                name=f"simpler_run.bind.{match['phase']}",
+                ts=start,
+                dur=dur,
+                attrs=f"{match['attrs'].strip()} log_thread=0x{match['tid_hex']} src=bind_phase".strip(),
+            )
+        )
+    return out
+
+
 def to_host_swimlane(spans, anchors=None):
     """Build a real-pid/tid host scheduling timeline for Perfetto.
 
@@ -1015,6 +1177,47 @@ def print_tree(buckets, stream=sys.stdout):
         print(file=stream)
 
 
+def write_host_swimlane(args, spans, lines, anchors):
+    """Write the host swimlane, adding whatever prepare-path detail is available.
+
+    A runtime's own stage breakdown reaches this view through two channels that
+    describe the same segments: the per-event artifact, and the timing lines in the
+    log. The artifact wins for any pass it covers and the lines fill in the rest —
+    a run with no output directory has no artifact at all, and then the lines are
+    the only source.
+    """
+    lane_spans = spans
+    record_count = 0
+    covered = frozenset()
+    if args.host_phase_records:
+        passes = load_host_phase_records(args.host_phase_records)
+        extra, orphaned, covered = host_record_spans(spans, passes)
+        lane_spans = lane_spans + extra
+        record_count = len(extra)
+        if orphaned:
+            print(
+                f"warning: {orphaned} phase-record pass(es) had no matching simpler_run.bind span "
+                "in this log and were dropped — is the log from the same run as the artifact?",
+                file=sys.stderr,
+            )
+    phase_spans = bind_phase_spans("".join(lines), spans, skip_keys=covered)
+    if phase_spans:
+        lane_spans = lane_spans + phase_spans
+    with open(args.swimlane, "w", encoding="utf-8") as f:
+        json.dump(to_host_swimlane(lane_spans, anchors=anchors), f)
+    host_count = sum(not span.is_device for span in spans)
+    extras = []
+    if phase_spans:
+        extras.append(f"{len(phase_spans)} bind phases")
+    if record_count:
+        extras.append(f"{record_count} host phase records")
+    suffix = (", " + ", ".join(extras)) if extras else ""
+    print(
+        f"Wrote host swimlane: {args.swimlane} "
+        f"({host_count} host spans, {len(spans) - host_count} unaligned device spans{suffix})"
+    )
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("log", help="path to a host/CANN log containing [STRACE] lines (or '-' for stdin)")
@@ -1024,6 +1227,15 @@ def main(argv=None):
     ap.add_argument(
         "--swimlane",
         help="write a real-pid/tid L3/L4 host swimlane JSON here (load in chrome://tracing or perfetto)",
+    )
+    ap.add_argument(
+        "--host-phase-records",
+        action="append",
+        metavar="PATH",
+        help="a host_phase_records.jsonl from the same run; its per-event bind segments and "
+        "orchestrator operations are drawn inside the matching simpler_run.bind. Repeatable. Only "
+        "affects --swimlane, because the summed host-orch timing lines are cost shares and cannot "
+        "be placed on a timeline",
     )
     ap.add_argument(
         "--rounds-table",
@@ -1098,13 +1310,7 @@ def main(argv=None):
         print(f"Wrote Chrome trace: {args.trace_out} ({len(legacy)} spans)")
 
     if args.swimlane:
-        with open(args.swimlane, "w", encoding="utf-8") as f:
-            json.dump(to_host_swimlane(spans, anchors=anchors), f)
-        host_count = sum(not span.is_device for span in spans)
-        print(
-            f"Wrote host swimlane: {args.swimlane} "
-            f"({host_count} host spans, {len(spans) - host_count} unaligned device spans)"
-        )
+        write_host_swimlane(args, spans, lines, anchors)
 
     return 0
 

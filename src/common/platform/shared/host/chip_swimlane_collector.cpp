@@ -411,8 +411,7 @@ int ChipSwimlaneCollector::initialize(
     auto orch_get_state = [](void *base, int n_cores, int t) {
         return get_orch_phase_buffer_state(base, n_cores, t);
     };
-    const int orch_buffer_count =
-        chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES && !host_orchestrator_capture_started_ ? 1 : 0;
+    const int orch_buffer_count = chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES && !host_orchestrated_ ? 1 : 0;
     if (init_phase_pools(
             static_cast<ChipSwimlaneAicpuOrchPhaseBuffer *>(nullptr), orch_get_state,
             /*state_count=*/num_phase_threads, /*buffer_count=*/orch_buffer_count,
@@ -899,53 +898,16 @@ void ChipSwimlaneCollector::set_core_types(const CoreType *types, int n) {
     core_types_.assign(types, types + n);
 }
 
-void ChipSwimlaneCollector::begin_host_orchestrator_capture(size_t reserve_capacity) noexcept {
-    // HBG profiling is depth-one while diagnostics are enabled, and its host
-    // orchestrator is synchronous. No collector thread exists yet at this
-    // point, so the runner-owned vector needs no locking.
-    collected_host_orch_phase_records_.clear();
-    clock_correlation_session_.reset();
-    host_orchestrator_capture_started_ = true;
-    host_orchestrator_capture_enabled_ = true;
-    host_capture_error_ = HostCaptureError::None;
-    host_capture_reserve_requested_ = reserve_capacity;
-    host_capture_dropped_records_ = 0;
-    host_capture_expected_records_ = 0;
-    host_capture_finished_ = false;
-    try {
-        collected_host_orch_phase_records_.reserve(reserve_capacity);
-    } catch (...) {
-        host_orchestrator_capture_enabled_ = false;
-        host_capture_error_ = HostCaptureError::ReserveFailed;
-    }
-}
-
-void ChipSwimlaneCollector::finish_host_orchestrator_capture(uint64_t expected_records) noexcept {
-    if (!host_orchestrator_capture_started_) return;
-    host_capture_expected_records_ = expected_records;
-    host_capture_finished_ = true;
-}
-
-void ChipSwimlaneCollector::record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) noexcept {
-    if (!host_orchestrator_capture_enabled_) {
-        ++host_capture_dropped_records_;
-        return;
-    }
-    if (record.end_time_ns < record.start_time_ns) {
-        LOG_WARN(
-            "Ignoring invalid host orchestrator phase: task_id=%lu start_ns=%lu end_ns=%lu",
-            static_cast<unsigned long>(record.task_id), static_cast<unsigned long>(record.start_time_ns),
-            static_cast<unsigned long>(record.end_time_ns)
-        );
-        return;
-    }
-    try {
-        collected_host_orch_phase_records_.push_back(record);
-    } catch (...) {
-        host_orchestrator_capture_enabled_ = false;
-        host_capture_error_ = HostCaptureError::RecordAllocationFailed;
-        ++host_capture_dropped_records_;
-    }
+void ChipSwimlaneCollector::set_host_phase_records(
+    std::vector<HostPhaseRecord> submit_records, std::vector<HostPhaseRecord> upload_records, uint64_t submitted_tasks,
+    uint64_t total_records, uint64_t dropped_records
+) {
+    host_submit_records_ = std::move(submit_records);
+    host_upload_records_ = std::move(upload_records);
+    host_phase_submitted_tasks_ = submitted_tasks;
+    host_phase_total_records_ = total_records;
+    host_phase_dropped_records_ = dropped_records;
+    host_phase_records_present_ = true;
 }
 
 void ChipSwimlaneCollector::begin_clock_correlation_session(
@@ -975,7 +937,8 @@ int ChipSwimlaneCollector::export_swimlane_json() {
     // Every stream is independently useful for DFX. In particular, a legal
     // HBG can contain only host-side dummy/hidden-allocation records and no
     // AICore dispatch at all.
-    bool has_any_records = !collected_host_orch_phase_records_.empty() || clock_correlation_session_.started();
+    bool has_any_records =
+        !host_submit_records_.empty() || !host_upload_records_.empty() || clock_correlation_session_.started();
     for (const auto &core_records : collected_perf_records_) {
         if (!core_records.empty()) {
             has_any_records = true;
@@ -1002,7 +965,7 @@ int ChipSwimlaneCollector::export_swimlane_json() {
         LOG_WARN("Warning: No performance data to export.");
         return -1;
     }
-    if (has_aicpu_orch_phases && host_orchestrator_capture_started_) {
+    if (has_aicpu_orch_phases && host_orchestrated_) {
         LOG_ERROR("Both host and AICPU orchestrator records are present; refusing mixed clock-domain export");
         return -1;
     }
@@ -1039,50 +1002,43 @@ int ChipSwimlaneCollector::export_swimlane_json() {
         outfile << "\"" << ((ct == CoreType::AIC) ? "aic" : "aiv") << "\"";
     }
     outfile << "]";
-    if (host_orchestrator_capture_started_) {
+    if (host_phase_records_present_) {
+        // Earliest of both projections: an upload segment can start before the
+        // first submit, and a negative offset from the origin is not renderable.
         uint64_t host_origin_ns = 0;
-        if (!collected_host_orch_phase_records_.empty()) {
-            host_origin_ns = collected_host_orch_phase_records_.front().start_time_ns;
-            for (const auto &record : collected_host_orch_phase_records_) {
-                if (record.start_time_ns < host_origin_ns) host_origin_ns = record.start_time_ns;
+        for (const auto *population : {&host_submit_records_, &host_upload_records_}) {
+            for (const auto &record : *population) {
+                if (host_origin_ns == 0 || record.start_ns < host_origin_ns) host_origin_ns = record.start_ns;
             }
         }
         outfile << ",\n    \"orchestrator_source\": \"host\"";
         outfile << ",\n    \"orchestrator_clock_domain\": \"host_monotonic_ns\"";
         outfile << ",\n    \"device_clock_domain\": \"device_syscnt_cycles\"";
-        constexpr uint64_t kNsPerSecond = 1'000'000'000ull;
-        constexpr uint64_t host_timestamp_resolution_ns =
-            (kNsPerSecond + PLATFORM_PROF_SYS_CNT_FREQ - 1) / PLATFORM_PROF_SYS_CNT_FREQ;
-        constexpr uint64_t host_timestamp_quantization_ns =
-            host_timestamp_resolution_ns > 1 ? host_timestamp_resolution_ns : 0;
-        outfile << ",\n    \"host_timestamp_resolution_ns\": " << host_timestamp_resolution_ns;
-        outfile << ",\n    \"host_timestamp_quantization_ns\": " << host_timestamp_quantization_ns;
+        // The producer stamps records straight from the host monotonic clock, so
+        // a record's resolution is the clock's nanosecond and nothing is
+        // quantized away on top of it.
+        outfile << ",\n    \"host_timestamp_resolution_ns\": 1";
+        outfile << ",\n    \"host_timestamp_quantization_ns\": 0";
         outfile << ",\n    \"host_orchestration_origin_ns\": " << host_origin_ns;
         outfile << ",\n    \"timeline_relation\": \"host_orchestration_precedes_device\"";
-        const char *capture_error = "none";
-        if (host_capture_error_ == HostCaptureError::ReserveFailed) {
-            capture_error = "reserve_failed";
-        } else if (host_capture_error_ == HostCaptureError::RecordAllocationFailed) {
-            capture_error = "record_allocation_failed";
-        }
-        const bool host_record_count_matches =
-            host_capture_finished_ && collected_host_orch_phase_records_.size() == host_capture_expected_records_;
-        const bool host_capture_complete = host_capture_error_ == HostCaptureError::None && host_record_count_matches;
-        const char *host_capture_status = host_capture_complete                         ? "complete" :
-                                          host_capture_error_ != HostCaptureError::None ? "dropped" :
-                                                                                          "incomplete";
+        // Completeness is per kind, not per record: the pool holds every timed
+        // host operation, of which the task-submitting kinds are the projection
+        // this file carries. Comparing the pool's total against total_tasks would
+        // count the sub-operations of a submit as if each were a submit.
+        const bool host_record_count_matches = host_submit_records_.size() == host_phase_submitted_tasks_;
+        const bool host_capture_complete = host_phase_dropped_records_ == 0 && host_record_count_matches;
+        const char *host_capture_status = host_capture_complete           ? "complete" :
+                                          host_phase_dropped_records_ > 0 ? "dropped" :
+                                                                            "incomplete";
         outfile << ",\n    \"host_capture\": {\"status\": \"" << host_capture_status
-                << "\", \"reserve_requested\": " << host_capture_reserve_requested_
-                << ", \"finished\": " << (host_capture_finished_ ? "true" : "false")
-                << ", \"expected_records\": " << host_capture_expected_records_
-                << ", \"recorded_records\": " << collected_host_orch_phase_records_.size()
-                << ", \"dropped_records\": " << host_capture_dropped_records_ << ", \"error\": ";
+                << "\", \"expected_records\": " << host_phase_submitted_tasks_
+                << ", \"recorded_records\": " << host_submit_records_.size()
+                << ", \"pool_records\": " << host_phase_total_records_
+                << ", \"dropped_records\": " << host_phase_dropped_records_ << ", \"error\": ";
         if (host_capture_complete) {
             outfile << "null}";
-        } else if (host_capture_error_ != HostCaptureError::None) {
-            outfile << "\"" << capture_error << "\"}";
-        } else if (!host_capture_finished_) {
-            outfile << "\"capture_not_finished\"}";
+        } else if (host_phase_dropped_records_ > 0) {
+            outfile << "\"pool_overflow\"}";
         } else {
             outfile << "\"record_count_mismatch\"}";
         }
@@ -1281,18 +1237,30 @@ int ChipSwimlaneCollector::export_swimlane_json() {
             }
             outfile << "  ]";
         }
-        if (!collected_host_orch_phase_records_.empty()) {
+        if (!host_submit_records_.empty()) {
             outfile << ",\n  \"host_orchestrator_phases\": [[";
             bool first = true;
-            for (const auto &record : collected_host_orch_phase_records_) {
+            for (const auto &record : host_submit_records_) {
                 if (!first) outfile << ",";
-                outfile << "\n      {\"submit_idx\": " << record.submit_idx << ", \"task_id\": " << record.task_id
-                        << ", \"start_host_ns\": " << record.start_time_ns
-                        << ", \"end_host_ns\": " << record.end_time_ns << "}";
+                outfile << "\n      {\"submit_idx\": " << record.index << ", \"task_id\": " << record.payload
+                        << ", \"start_host_ns\": " << record.start_ns << ", \"end_host_ns\": " << record.end_ns << "}";
                 first = false;
             }
             if (!first) outfile << "\n    ";
             outfile << "]]";
+        }
+        if (!host_upload_records_.empty()) {
+            outfile << ",\n  \"host_device_uploads\": [";
+            bool first = true;
+            for (const auto &record : host_upload_records_) {
+                if (!first) outfile << ",";
+                outfile << "\n      {\"phase\": \"" << host_phase_kind_name(static_cast<HostPhaseKind>(record.kind))
+                        << "\", \"start_host_ns\": " << record.start_ns << ", \"end_host_ns\": " << record.end_ns
+                        << ", \"detail\": " << record.payload << "}";
+                first = false;
+            }
+            if (!first) outfile << "\n    ";
+            outfile << "]";
         }
     }
 
@@ -1423,7 +1391,8 @@ int ChipSwimlaneCollector::finalize(
     collected_aicore_records_.clear();
     collected_sched_phase_records_.clear();
     collected_orch_phase_records_.clear();
-    collected_host_orch_phase_records_.clear();
+    host_submit_records_.clear();
+    host_upload_records_.clear();
     clock_correlation_session_.reset();
     perf_records_by_collector_.clear();
     aicore_records_by_collector_.clear();
@@ -1436,13 +1405,11 @@ int ChipSwimlaneCollector::finalize(
     total_sched_phase_collected_ = 0;
     total_orch_phase_collected_ = 0;
     collector_shards_merged_ = false;
-    host_orchestrator_capture_started_ = false;
-    host_orchestrator_capture_enabled_ = false;
-    host_capture_error_ = HostCaptureError::None;
-    host_capture_reserve_requested_ = 0;
-    host_capture_dropped_records_ = 0;
-    host_capture_expected_records_ = 0;
-    host_capture_finished_ = false;
+    host_orchestrated_ = false;
+    host_phase_records_present_ = false;
+    host_phase_total_records_ = 0;
+    host_phase_dropped_records_ = 0;
+    host_phase_submitted_tasks_ = 0;
     clear_memory_context();
 
     LOG_DEBUG("Performance profiling cleanup complete");

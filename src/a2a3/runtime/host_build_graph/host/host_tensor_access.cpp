@@ -38,6 +38,8 @@ struct HostTensorAccessor::Impl {
     const HostApi *api;
     std::vector<HostTensorRegion> regions;
     std::vector<void *> mappings;
+    // Bytes covered by `mappings`, i.e. excluding regions serving a fallback view.
+    uint64_t mapped_bytes;
 };
 
 // The region serving the whole of [dev_addr, dev_addr + bytes), or nullptr.
@@ -59,7 +61,7 @@ find_region(const std::vector<HostTensorRegion> &regions, uint64_t dev_addr, uin
 }
 
 HostTensorAccessor::HostTensorAccessor(const HostApi *api) :
-    impl_(new Impl{api, {}, {}}) {}
+    impl_(new Impl{api, {}, {}, 0}) {}
 
 HostTensorAccessor::~HostTensorAccessor() {
     close();
@@ -77,6 +79,7 @@ bool HostTensorAccessor::add(uint64_t dev_base, uint64_t size, void *fallback_ho
     void *host_view = impl_->api->register_device_memory_to_host(reinterpret_cast<void *>(dev_base), size);
     if (host_view != nullptr) {
         impl_->mappings.push_back(reinterpret_cast<void *>(dev_base));
+        impl_->mapped_bytes += size;
     } else {
         host_view = fallback_host_view;
     }
@@ -113,12 +116,17 @@ bool HostTensorAccessor::write(uint64_t dev_addr, const void *src, uint64_t byte
     return impl_->api->copy_to_device(reinterpret_cast<void *>(dev_addr), dst, static_cast<size_t>(bytes)) == 0;
 }
 
+size_t HostTensorAccessor::mapping_count() const noexcept { return impl_->mappings.size(); }
+
+uint64_t HostTensorAccessor::mapped_bytes() const noexcept { return impl_->mapped_bytes; }
+
 void HostTensorAccessor::close() noexcept {
     for (void *dev_ptr : impl_->mappings) {
         impl_->api->unregister_device_memory_from_host(dev_ptr);
     }
     impl_->mappings.clear();
     impl_->regions.clear();
+    impl_->mapped_bytes = 0;
 }
 
 bool host_tensor_read(HostTensorAccessor *accessor, uint64_t dev_addr, void *dst, uint64_t bytes) {

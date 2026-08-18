@@ -184,6 +184,22 @@ constexpr int PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD = 6;
 constexpr int PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD = 8;
 
 /**
+ * Host phase-record pool geometry (host_build_graph's bind path and host
+ * orchestrator).
+ *
+ * Same rotating-pool shape as the sched/orch pools above, sized for its own
+ * producer rather than theirs: a scheduler thread emits tens of thousands of
+ * records per run, while one host orchestration pass emits a few hundred (a
+ * 40-layer decode: 12 bind segments + ~325 submit-level operations). Inheriting
+ * PLATFORM_PHASE_RECORDS_PER_THREAD here would allocate 4 MB to hold 11 KB and
+ * leave the rotation path unreachable, so per-buffer capacity is 1024 records
+ * (32 KB) and the pool holds 5 of them — the floor that lets
+ * PLATFORM_PROF_SLOT_COUNT spares fill the free_queue with one buffer active.
+ */
+constexpr int PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER = 1024;
+constexpr int PLATFORM_HOST_PHASE_BUFFERS = PLATFORM_PROF_SLOT_COUNT + 1;
+
+/**
  * Per-core ChipSwimlaneAicoreTaskBuffer pre-allocation count.
  * 1 goes into the free_queue at init, the rest are recycled by host as
  * AICPU rotates per BUFFER_SIZE dispatches. Declared here so the ready-queue

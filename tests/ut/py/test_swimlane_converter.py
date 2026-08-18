@@ -180,7 +180,6 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
                     "timeline_relation": "host_orchestration_precedes_device",
                     "host_capture": {
                         "status": "complete",
-                        "finished": True,
                         "expected_records": 1,
                         "recorded_records": 1,
                         "dropped_records": 0,
@@ -220,7 +219,6 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
         },
         "host_capture": {
             "status": "complete",
-            "finished": True,
             "expected_records": 1,
             "recorded_records": 1,
             "dropped_records": 0,
@@ -255,6 +253,57 @@ def test_host_orchestrator_phases_without_anchors_are_marked_unaligned(tmp_path)
     )
 
 
+def test_host_capture_is_complete_when_the_pool_holds_more_than_the_submit_projection(tmp_path):
+    """A pool record count above the projected one is normal, not incomplete.
+
+    The producer records every timed host operation — bind segments and the
+    sub-operations of a submit — while this file carries only the ones that
+    submit a task. Completeness therefore compares `expected_records` (the pass's
+    task count) against the projection, and `pool_records` is context.
+    """
+    raw = tmp_path / "chip_swimlane_records.json"
+    raw.write_text(
+        json.dumps(
+            {
+                "chip_swimlane_level": 4,
+                "metadata": {
+                    "clock_freq_hz": 1_000_000,
+                    "num_cores": 1,
+                    "core_types": ["aiv"],
+                    "core_to_thread": [0],
+                    "orchestrator_source": "host",
+                    "orchestrator_clock_domain": "host_monotonic_ns",
+                    "host_orchestration_origin_ns": 1_000,
+                    "timeline_relation": "host_orchestration_precedes_device",
+                    "host_capture": {
+                        "status": "complete",
+                        "expected_records": 2,
+                        "recorded_records": 2,
+                        "pool_records": 339,
+                        "dropped_records": 0,
+                        "error": None,
+                    },
+                },
+                "aicore_tasks": [[0, 7, 1, 100, 110, 0]],
+                "aicpu_tasks": [[0, 1, 90, 120]],
+                "host_orchestrator_phases": [
+                    [
+                        {"submit_idx": 0, "task_id": 7, "start_host_ns": 1_000, "end_host_ns": 3_000},
+                        {"submit_idx": 1, "task_id": 8, "start_host_ns": 3_000, "end_host_ns": 4_000},
+                    ]
+                ],
+            }
+        )
+    )
+
+    data = sc.read_perf_data(raw)
+
+    assert data["timeline_metadata"]["host_records_complete"] is True
+    assert data["timeline_metadata"]["host_capture"]["status"] == "complete"
+    assert data["timeline_metadata"]["host_capture"]["pool_records"] == 339
+    assert "converter_validation_errors" not in data["timeline_metadata"]["host_capture"]
+
+
 def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
     raw = tmp_path / "chip_swimlane_records.json"
     raw.write_text(
@@ -272,7 +321,6 @@ def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
                     "timeline_relation": "host_orchestration_precedes_device",
                     "host_capture": {
                         "status": "complete",
-                        "finished": True,
                         "expected_records": 1,
                         "recorded_records": 1,
                         "dropped_records": 0,
@@ -335,7 +383,6 @@ def test_host_and_device_timestamps_use_calibrated_clock_alignment(tmp_path):
         },
         "host_capture": {
             "status": "complete",
-            "finished": True,
             "expected_records": 1,
             "recorded_records": 1,
             "dropped_records": 0,
@@ -374,7 +421,6 @@ def test_dropped_host_capture_is_visible_and_disables_cross_domain_flows(tmp_pat
                         "host_timestamp_quantization_ns": 0,
                         "host_capture": {
                             "status": capture_status,
-                            "finished": True,
                             "expected_records": sum(len(records) for records in host_phases) + 1,
                             "recorded_records": sum(len(records) for records in host_phases),
                             "dropped_records": dropped_records,

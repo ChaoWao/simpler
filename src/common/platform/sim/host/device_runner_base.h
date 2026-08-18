@@ -54,6 +54,7 @@
 #include "common/unified_log.h"
 #include "host/memory_allocator.h"
 #include "host/chip_swimlane_collector.h"
+#include "host/host_phase_records.h"
 #include "host/args_dump_collector.h"
 #include "host/pmu_collector.h"
 #include "host/scope_stats_collector.h"
@@ -269,13 +270,13 @@ public:
         enable_chip_swimlane_ = (chip_swimlane_level_ != ChipSwimlaneLevel::DISABLED);
     }
     uint32_t chip_swimlane_level() const { return static_cast<uint32_t>(chip_swimlane_level_); }
-    void begin_host_orchestrator_capture(uint64_t reserve_capacity) noexcept;
-    void record_host_orchestrator_phase(const ChipSwimlaneHostOrchPhaseRecord &record) noexcept {
-        chip_swimlane_collector_.record_host_orchestrator_phase(record);
+    HostPhaseRecordPool *host_phase_pool_arm(bool producer_wants_records) noexcept;
+    void host_phase_pool_finish(uint64_t submitted_tasks, uint64_t invocation_id) noexcept {
+        host_phase_records_.finish(submitted_tasks, invocation_id);
     }
-    void finish_host_orchestrator_capture(uint64_t expected_records) noexcept {
-        chip_swimlane_collector_.finish_host_orchestrator_capture(expected_records);
-    }
+    const simpler::dfx::HostPhaseRecordStore &host_phase_records() const { return host_phase_records_; }
+    /** Hand this pass's records to the swimlane reader, just before its export. */
+    void publish_host_phase_records_to_swimlane();
     void finish_clock_correlation_session(bool capture_device_complete) noexcept;
     void set_dump_args_enabled(int level) {
         dump_args_level_ = static_cast<DumpArgsLevel>(level);
@@ -460,6 +461,10 @@ protected:
 
     // Performance / diagnostics collectors shared across arches.
     ChipSwimlaneCollector chip_swimlane_collector_;
+    // Not a collector: the pool the runtime's prepare path writes into, read by
+    // whichever per-event views the run enabled. Its two readers are gated
+    // independently, so it belongs to neither.
+    simpler::dfx::HostPhaseRecordStore host_phase_records_;
     std::unique_ptr<simpler::dfx::ClockCorrelationProvider> clock_correlation_provider_{};
     ArgsDumpCollector dump_collector_;
     PmuCollector pmu_collector_;

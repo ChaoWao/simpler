@@ -685,6 +685,26 @@ target_link_libraries(test_scope_stats_collector PRIVATE
 add_test(NAME test_scope_stats_collector COMMAND test_scope_stats_collector)
 set_tests_properties(test_scope_stats_collector PROPERTIES LABELS "no_hardware")
 
+add_executable(test_host_phase_records
+    common/test_host_phase_records.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/host_phase_records.cpp
+    ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
+)
+target_include_directories(test_host_phase_records PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+)
+target_link_libraries(test_host_phase_records PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_host_phase_records COMMAND test_host_phase_records)
+set_tests_properties(test_host_phase_records PROPERTIES LABELS "no_hardware")
+
 add_executable(test_chip_swimlane_aicore
     common/test_chip_swimlane_aicore.cpp
 )
