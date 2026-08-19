@@ -1042,7 +1042,7 @@ void SchedulerContext::deinit() {
 
 void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
     rt_ = rt;
-    sched_ = &rt->scheduler;
+    sched_ = rt->scheduler;
 }
 
 // =============================================================================
@@ -1086,7 +1086,7 @@ void SchedulerContext::on_orchestration_done(
     if (inline_completed > 0) {
         completed_tasks_.fetch_add(inline_completed, std::memory_order_relaxed);
 #if SIMPLER_SCHED_PROFILING
-        rt->scheduler.tasks_completed.fetch_add(inline_completed, std::memory_order_relaxed);
+        rt->scheduler->tasks_completed.fetch_add(inline_completed, std::memory_order_relaxed);
 #endif
     }
 

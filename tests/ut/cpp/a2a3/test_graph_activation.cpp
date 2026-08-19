@@ -44,6 +44,9 @@ protected:
         ASSERT_NE(runtime_arena.commit(), nullptr);
         ASSERT_TRUE(sched.init_data_from_layout(sched_layout, runtime_arena, sm_handle->sm_base));
         sched.wire_arena_pointers(sched_layout, runtime_arena);
+        // Same order the AICPU boots in: the slot arrays are not part of the
+        // uploaded image, so nothing can push until they carry their ramp.
+        sched.seed_queue_slots();
     }
 
     void TearDown() override {
