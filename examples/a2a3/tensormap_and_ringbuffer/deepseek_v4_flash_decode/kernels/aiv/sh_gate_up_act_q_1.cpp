@@ -98,6 +98,35 @@ static __aicore__ inline void PTOAS__DCCI_SINGLE_CACHE_LINE(Ptr ptr) {
     dcci((__gm__ void *)ptr, cache_line_t::SINGLE_CACHE_LINE);
 }
 
+static __aicore__ inline void zero_h_tile_i8_padding(__gm__ int8_t *h_tile_i8, int32_t block_idx, int32_t block_num) {
+#if defined(__DAV_VEC__)
+    constexpr int8_t zero = 0;
+    constexpr int64_t rows_per_block = 2;
+    constexpr int64_t cols = 2048;
+    const int64_t padding_row = static_cast<int64_t>(block_num + block_idx) * rows_per_block;
+
+    Tile<
+        TileType::Vec, int8_t, 2, 2048, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+        CompactMode::Null>
+        zero_tile = Tile<
+            TileType::Vec, int8_t, 2, 2048, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Null,
+            CompactMode::Null>(rows_per_block, cols);
+    TASSIGN(zero_tile, 0);
+    TEXPANDS(zero_tile, zero);
+    set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+
+    pto::Shape<1, 1, 1, 2, 2048> shape = pto::Shape<1, 1, 1, 2, 2048>();
+    pto::Stride<4096, 4096, 4096, 2048, 1> stride = pto::Stride<4096, 4096, 4096, 2048, 1>();
+    GlobalTensor<int8_t, pto::Shape<1, 1, 1, 2, 2048>, pto::Stride<4096, 4096, 4096, 2048, 1>, pto::Layout::ND> output =
+        GlobalTensor<int8_t, pto::Shape<1, 1, 1, 2, 2048>, pto::Stride<4096, 4096, 4096, 2048, 1>, pto::Layout::ND>(
+            h_tile_i8 + padding_row * cols, shape, stride
+        );
+    wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
+    TSTORE(output, zero_tile);
+    pipe_barrier(PIPE_MTE3);
+#endif  // __DAV_VEC__
+}
+
 static __aicore__ void sh_gate_up_act_q_1(
     __gm__ float *v1, __gm__ float *v2, __gm__ int32_t *v3, __gm__ int32_t *v4, __gm__ float *v5, __gm__ float *v6,
     __gm__ float *v7, __gm__ int8_t *v8, int64_t v9, int64_t v10, int32_t v11, int32_t v12
@@ -130,6 +159,7 @@ static __aicore__ void sh_gate_up_act_q_1(
 #if defined(__DAV_VEC__)
     set_mask_norm();
     set_vector_mask(-1, -1);
+    zero_h_tile_i8_padding(v8, v11, v12);
     // pto: %row_block_inline2664_inline10978__ssa_v0, %20
     int64_t v36 = (int64_t)((uint64_t)((int64_t)v11) * (uint64_t)v25);
     // pto: %x_scale_inline2668_inline11156__tile
