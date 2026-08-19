@@ -44,6 +44,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -416,22 +417,237 @@ static bool relocate_host_orch_image(
     return ok;
 }
 
+// Retained pinned bump arena for Graph submission POD images. Orch writes each
+// layer in place; after entry() one H2D copies the used prefix into a device
+// blob reused across binds. The buffer is owned by the DeviceRunner through
+// HostApi acquire_pinned_host_buffer: the platform allocates it with
+// aclrtMallocHost (sim: aligned host memory, where it costs nothing because
+// sim copies are memcpy), reuses it while capacity fits, and releases it in
+// finalize while the device context is still alive — a pinned mapping freed
+// only at process exit races the next process's chip bring-up on the card.
+constexpr size_t kGraphPinnedArenaBytes = 16ull * 1024ull * 1024ull;
+
+struct GraphPodH2d {
+    const HostApi *api = nullptr;
+
+    struct RetainedBuf {
+        void *ptr = nullptr;
+        size_t bytes = 0;
+    };
+
+    static std::mutex &buf_mu() {
+        static std::mutex mu;
+        return mu;
+    }
+    static std::unordered_map<uint64_t, RetainedBuf> &retained_subs() {
+        // One entry per (graph, occurrence) ever submitted on this fallback
+        // path, never evicted: process-lifetime and unbounded by design. The
+        // bulk-blob path above is the steady state; this map only grows when
+        // PODs fall out of the pinned bump, and each entry is one device
+        // allocation reused across binds.
+        static std::unordered_map<uint64_t, RetainedBuf> m;
+        return m;
+    }
+    static RetainedBuf &retained_blob() {
+        static RetainedBuf b;
+        return b;
+    }
+
+    void *acquire_sized(RetainedBuf &slot, size_t bytes) {
+        if (slot.ptr != nullptr && slot.bytes >= bytes) {
+            return slot.ptr;
+        }
+        if (slot.ptr != nullptr) {
+            api->device_free(slot.ptr);
+            slot.ptr = nullptr;
+            slot.bytes = 0;
+        }
+        slot.ptr = api->device_malloc(bytes);
+        if (slot.ptr == nullptr) {
+            return nullptr;
+        }
+        slot.bytes = bytes;
+        return slot.ptr;
+    }
+
+    void *acquire_submission(uint64_t graph_key, uint32_t occurrence, size_t bytes) {
+        // FNV-1a over the full graph_key and the occurrence. A shift-based
+        // packing ((graph_key << 32) ^ occurrence) discards graph_key's upper
+        // 32 bits, so two graphs agreeing in the low half would collide on one
+        // retained buffer.
+        uint64_t key = 1469598103934665603ull;
+        for (int i = 0; i < 8; ++i) {
+            key ^= (graph_key >> (8 * i)) & 0xff;
+            key *= 1099511628211ull;
+        }
+        for (int i = 0; i < 4; ++i) {
+            key ^= (occurrence >> (8 * i)) & 0xff;
+            key *= 1099511628211ull;
+        }
+        std::scoped_lock lock(buf_mu());
+        return acquire_sized(retained_subs()[key], bytes);
+    }
+
+    void *acquire_blob(size_t bytes) {
+        std::scoped_lock lock(buf_mu());
+        return acquire_sized(retained_blob(), bytes);
+    }
+
+    // Wire the fields the device reads into a pending submission POD. Returns
+    // nullopt when the upload is invalid.
+    std::optional<GraphHostUpload> take_upload(GraphHostState &graph_state, size_t index) {
+        if (graph_host_upload_h2d_done(graph_state, index)) {
+            return std::nullopt;
+        }
+        std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
+        if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
+            upload->bytes < sizeof(GraphSubmission) || upload->outer_slot->task_kind != TaskKind::GRAPH ||
+            upload->outer_slot->task == nullptr) {
+            LOG_ERROR("host-orch: invalid pending Graph POD image");
+            return std::nullopt;
+        }
+        auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
+        if (!graph_submission_wire_size_valid(*submission, upload->bytes)) {
+            LOG_ERROR("host-orch: Graph submission size does not match its POD image");
+            return std::nullopt;
+        }
+        return upload;
+    }
+
+    // Definition objects are uploaded by content identity before any
+    // submission referencing them, so the device-side reference is safe.
+    bool wire_definition(GraphSubmission *submission, const GraphDefinition *definition, void *device_object) {
+        if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
+            definition->full_key != submission->graph_key || definition->execution_storage_bytes == 0) {
+            LOG_ERROR("host-orch: invalid Graph Definition for submission");
+            return false;
+        }
+        // Checked against the host-side Definition image the device object was
+        // built from; the GM object itself is never dereferenced on the host.
+        // Execution storage needs no retained buffer: it is the tail of the
+        // outer task's own heap allocation, which graph_submit_definition sized
+        // to required_heap + execution_storage_bytes.
+        submission->definition_addr = reinterpret_cast<uint64_t>(device_object);
+        submission->local_execution = 0;
+        submission->activation_gate = 0;
+        return true;
+    }
+
+    bool upload_per_layer(
+        GraphHostState &graph_state,
+        const std::unordered_map<uint64_t, std::pair<void *, const GraphDefinition *>> &definition_objects
+    ) {
+        const size_t count = graph_host_upload_count(graph_state);
+        for (size_t index = 0; index < count; ++index) {
+            if (graph_host_upload_h2d_done(graph_state, index)) {
+                continue;
+            }
+            std::optional<GraphHostUpload> upload = take_upload(graph_state, index);
+            if (!upload.has_value()) {
+                return false;
+            }
+            auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
+            auto object_it = definition_objects.find(submission->definition_hash);
+            if (object_it == definition_objects.end() || object_it->second.first == nullptr) {
+                LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
+                return false;
+            }
+            if (!wire_definition(submission, object_it->second.second, object_it->second.first)) {
+                return false;
+            }
+            void *device_submission =
+                acquire_submission(submission->graph_key, static_cast<uint32_t>(index), upload->bytes);
+            if (device_submission == nullptr) {
+                LOG_ERROR("host-orch: failed to allocate Graph submission");
+                return false;
+            }
+            if (api->copy_to_device(device_submission, upload->data, upload->bytes) != 0) {
+                LOG_ERROR("host-orch: failed to upload Graph submission POD image");
+                return false;
+            }
+            upload->outer_slot->graph_context = device_submission;
+            // Device POD storage is retained across binds; it must not enter
+            // tensor_pairs_, which validate frees every round.
+            graph_host_mark_upload_h2d_done(graph_state, index);
+        }
+        return true;
+    }
+
+    static bool all_pinned_in_bump(GraphHostState &graph_state, std::byte *base, size_t used) {
+        const size_t count = graph_host_upload_count(graph_state);
+        if (count == 0 || base == nullptr || used == 0) {
+            return false;
+        }
+        for (size_t index = 0; index < count; ++index) {
+            std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
+            if (!upload.has_value() || upload->data == nullptr || upload->bytes == 0) {
+                return false;
+            }
+            if (upload->data < base || upload->data + upload->bytes > base + used) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool upload_all(
+        GraphHostState &graph_state,
+        const std::unordered_map<uint64_t, std::pair<void *, const GraphDefinition *>> &definition_objects
+    ) {
+        std::byte *base = graph_host_pinned_base();
+        const size_t used = graph_host_pinned_used();
+        if (!all_pinned_in_bump(graph_state, base, used)) {
+            return upload_per_layer(graph_state, definition_objects);
+        }
+        const size_t count = graph_host_upload_count(graph_state);
+        for (size_t index = 0; index < count; ++index) {
+            std::optional<GraphHostUpload> upload = take_upload(graph_state, index);
+            if (!upload.has_value()) {
+                return false;
+            }
+            auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
+            auto object_it = definition_objects.find(submission->definition_hash);
+            if (object_it == definition_objects.end() || object_it->second.first == nullptr) {
+                LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
+                return false;
+            }
+            if (!wire_definition(submission, object_it->second.second, object_it->second.first)) {
+                return false;
+            }
+        }
+        void *device_blob = acquire_blob(used);
+        if (device_blob == nullptr) {
+            LOG_ERROR("host-orch: failed to allocate packed Graph POD blob (%zu bytes)", used);
+            return false;
+        }
+        if (api->copy_to_device(device_blob, base, used) != 0) {
+            LOG_ERROR("host-orch: failed to upload packed Graph POD blob (%zu bytes, %zu pods)", used, count);
+            return false;
+        }
+        auto *dev_bytes = static_cast<std::byte *>(device_blob);
+        for (size_t index = 0; index < count; ++index) {
+            std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
+            if (!upload.has_value()) {
+                return false;
+            }
+            upload->outer_slot->graph_context = dev_bytes + static_cast<size_t>(upload->data - base);
+            graph_host_mark_upload_h2d_done(graph_state, index);
+        }
+        return true;
+    }
+};
+
+// Upload each distinct Definition once as a shared device object
+// ([GraphDefinitionHeader][Definition image]) keyed by content identity, then
+// hand the submissions to the per-run GraphPodH2d. Definitions first:
+// submissions reference the object's GM address, and the device boots only
+// after both phases complete.
 bool upload_graph_submissions(
-    Runtime *runtime, const HostApi *api, GraphHostState &graph_state, uint64_t &uploaded_bytes
+    Runtime *runtime, const HostApi *api, GraphHostState &graph_state, uint64_t &uploaded_bytes, GraphPodH2d &h2d
 ) {
     uploaded_bytes = 0;
-    const size_t count = graph_host_upload_count(graph_state);
-    // Pass 1: upload each distinct Definition once as a shared device object
-    // ([GraphDefinitionHeader][Definition image]) keyed by content identity.
-    // Submissions reference the object's GM address, so this pass completing
-    // before any submission is uploaded is what makes the reference safe —
-    // the device boots only after both passes.
+    std::unordered_map<uint64_t, std::pair<void *, const GraphDefinition *>> definition_objects;
     GraphHostDefinitionList definitions = graph_host_definitions(graph_state);
-    struct UploadedDefinition {
-        void *device_object;               // GM address; host must not dereference
-        const GraphDefinition *host_view;  // the host-side image the object was built from
-    };
-    std::unordered_map<uint64_t, UploadedDefinition> definition_objects;
     for (const GraphHostDefinition &entry : definitions.entries) {
         if (entry.data == nullptr || entry.bytes < sizeof(GraphDefinition)) continue;
         const auto *definition = reinterpret_cast<const GraphDefinition *>(entry.data);
@@ -460,59 +676,10 @@ bool upload_graph_submissions(
             LOG_ERROR("host-orch: failed to upload Graph Definition object");
             return false;
         }
-        definition_objects.emplace(definition->content_hash, UploadedDefinition{object, definition});
+        definition_objects.emplace(definition->content_hash, std::make_pair(object, definition));
         uploaded_bytes += object_bytes;
     }
-
-    // Pass 2: per-submission execution storage + the small reference image.
-    for (size_t index = 0; index < count; ++index) {
-        std::optional<GraphHostUpload> upload = graph_host_upload(graph_state, index);
-        if (!upload.has_value() || upload->outer_slot == nullptr || upload->data == nullptr ||
-            upload->bytes < sizeof(GraphSubmission) || upload->outer_slot->task_kind != TaskKind::GRAPH ||
-            upload->outer_slot->task == nullptr) {
-            LOG_ERROR("host-orch: invalid pending Graph POD image");
-            return false;
-        }
-        auto *submission = reinterpret_cast<GraphSubmission *>(upload->data);
-        if (!graph_submission_wire_size_valid(*submission, upload->bytes)) {
-            LOG_ERROR("host-orch: Graph submission size does not match its POD image");
-            return false;
-        }
-        auto object_it = definition_objects.find(submission->definition_hash);
-        if (object_it == definition_objects.end() || object_it->second.device_object == nullptr) {
-            LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
-            return false;
-        }
-        // Checked against the host-side Definition image the device object was
-        // built from; the GM object itself is never dereferenced on the host.
-        // Execution storage needs no retained buffer: it is the tail of the
-        // outer task's own heap allocation, which graph_submit_definition sized
-        // to required_heap + execution_storage_bytes.
-        const GraphDefinition *definition = object_it->second.host_view;
-        if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
-            definition->full_key != submission->graph_key || definition->execution_storage_bytes == 0) {
-            LOG_ERROR("host-orch: invalid Graph Definition for submission");
-            return false;
-        }
-        submission->definition_addr = reinterpret_cast<uint64_t>(object_it->second.device_object);
-        submission->local_execution = 0;
-        submission->activation_gate = 0;
-
-        void *device_submission = api->device_malloc(upload->bytes);
-        if (device_submission == nullptr) {
-            LOG_ERROR("host-orch: failed to allocate %zu bytes for Graph submission", upload->bytes);
-            return false;
-        }
-        if (api->copy_to_device(device_submission, upload->data, upload->bytes) != 0) {
-            LOG_ERROR("host-orch: failed to upload Graph submission POD image");
-            api->device_free(device_submission);
-            return false;
-        }
-        upload->outer_slot->graph_context = device_submission;
-        runtime->tensor_pairs_.push_back({nullptr, device_submission, upload->bytes, false});
-        uploaded_bytes += static_cast<uint64_t>(upload->bytes);
-    }
-    return true;
+    return h2d.upload_all(graph_state, definition_objects);
 }
 
 struct GraphHostStateBinding {
@@ -565,6 +732,23 @@ int32_t run_host_orchestration(
         return -1;
     }
     GraphHostStateBinding graph_binding(rt->orchestrator, graph_state.get());
+
+    GraphPodH2d graph_h2d;
+    graph_h2d.api = api;
+    // The arena guard clears the orchestrator's pointer to the pinned bump on
+    // every exit path — an early return below must not leave the orchestrator
+    // allocating PODs from a bump owned by this run.
+    struct PinnedArenaScope {
+        ~PinnedArenaScope() { graph_host_clear_pinned_arena(); }
+    } pinned_arena_scope;
+    // The buffer is the runner's retained slot, so acquiring it here is a map
+    // lookup once it has settled at 16 MB, not a fresh aclrtMallocHost per bind.
+    if (void *pinned = api->acquire_pinned_host_buffer(kGraphPinnedArenaBytes, kGraphPinnedBumpAlign);
+        pinned != nullptr) {
+        graph_host_set_pinned_arena(static_cast<std::byte *>(pinned), kGraphPinnedArenaBytes);
+    } else {
+        LOG_WARN("host-orch: pinned Graph arena unavailable; POD H2D may stage");
+    }
 
     const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
     if (block_dim < 1) {
@@ -631,10 +815,13 @@ int32_t run_host_orchestration(
 
     const int64_t t_graph_ns = bind_now_ns();
     uint64_t graph_bytes = 0;
-    if (!upload_graph_submissions(runtime, api, *graph_state, graph_bytes)) return -1;
+    if (!upload_graph_submissions(runtime, api, *graph_state, graph_bytes, graph_h2d)) return -1;
     {
         char attrs[96];
-        snprintf(attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, graph_host_upload_count(*graph_state), graph_bytes);
+        snprintf(
+            attrs, sizeof(attrs), "count=%zu bytes=%" PRIu64, graph_host_upload_count(*graph_state),
+            graph_host_pinned_used() + graph_bytes
+        );
         record_bind_phase(HostPhaseKind::BindGraphUpload, t_graph_ns, attrs, graph_bytes);
     }
 

@@ -195,6 +195,8 @@ public:
     void get_retained_temp_buffer(uint32_t pipeline_slot, void **addr, size_t *size);
     void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, size_t size);
     void *acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment);
+    void *acquire_pinned_host_buffer(uint32_t pipeline_slot, size_t bytes, size_t alignment);
+    void release_pinned_host_buffers();
     void clear_temporary_buffer();
 
     // On sim, allocate_tensor returns a plain host pointer, so the "device"

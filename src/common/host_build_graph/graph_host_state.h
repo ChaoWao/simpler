@@ -49,4 +49,17 @@ struct GraphHostDefinitionList {
 GraphHostStatePtr make_graph_host_state();
 size_t graph_host_upload_count(const GraphHostState &state);
 std::optional<GraphHostUpload> graph_host_upload(GraphHostState &state, size_t index);
+bool graph_host_upload_h2d_done(const GraphHostState &state, size_t index);
+void graph_host_mark_upload_h2d_done(GraphHostState &state, size_t index);
 GraphHostDefinitionList graph_host_definitions(GraphHostState &state);
+
+// Optional pinned bump arena for Graph submission POD images. Set by the host
+// runtime before orch entry so graph_submit_definition can write each POD in
+// place; unset means the fallback std::vector images. The base handed to
+// graph_host_set_pinned_arena must satisfy kGraphPinnedBumpAlign — the
+// orchestrator aligns offsets relative to it without re-aligning the base.
+inline constexpr size_t kGraphPinnedBumpAlign = 64;
+void graph_host_set_pinned_arena(std::byte *base, size_t cap);
+void graph_host_clear_pinned_arena();
+std::byte *graph_host_pinned_base();
+size_t graph_host_pinned_used();

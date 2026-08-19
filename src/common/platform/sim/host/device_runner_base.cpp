@@ -426,6 +426,21 @@ void SimDeviceRunnerBase::clear_temporary_buffer() {
     }
 }
 
+void *SimDeviceRunnerBase::acquire_pinned_host_buffer(uint32_t pipeline_slot, size_t bytes, size_t alignment) {
+    // Sim device memory is host memory, so "pinned" staging is an aligned
+    // plain block through the same allocator the copies already use. The key
+    // is distinct from every Graph Definition key so the staging block never
+    // aliases a Definition buffer on the same slot; it is freed with the rest
+    // of the map by release_graph_definition_buffers() in finalize().
+    constexpr uint64_t kPinnedHostBufferKey = 0x70696e6e6564ull;  // "pinned"
+    return acquire_graph_definition_buffer(pipeline_slot, kPinnedHostBufferKey, bytes, alignment);
+}
+
+void SimDeviceRunnerBase::release_pinned_host_buffers() {
+    // No dedicated state: the staging block lives in graph_definition_buffers_
+    // and is freed with that map in finalize().
+}
+
 int SimDeviceRunnerBase::stamp_orch_so(Runtime &runtime, int32_t cid) {
     // Registered-callable flow only: the orch SO was already delivered to the
     // sim AICPU at launch_device_register time. A run just needs the active
