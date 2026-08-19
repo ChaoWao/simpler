@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 import simpler.mpi_direct_runtime as runtime_mod
+import simpler.mpi_direct_supervisor as supervisor_mod
 from simpler import remote_l3_session
 from simpler.mpi_direct_protocol import MPI_DIRECT_STARTUP_TOKEN_ENV, MpiDirectTag
 from simpler.mpi_direct_runtime import _pre_mpi_gate
@@ -181,6 +182,56 @@ def test_supervisor_mpich_command_uses_local_hostfile_without_openmpi_flags(monk
     assert command[command.index("-np") : command.index("-np") + 2] == ["-np", "3"]
     assert "-x" not in command
     assert "--map-by" not in command
+
+
+def test_run_supervisor_keeps_mpich_hostfile_until_job_finishes(tmp_path, monkeypatch):
+    topology_path = tmp_path / "topology.json"
+    topology_path.write_text(json.dumps(_topology_dict(second_host="host-b")), encoding="utf-8")
+    observed: dict[str, str] = {}
+
+    class FakeListener:
+        def setsockopt(self, *_args):
+            pass
+
+        def bind(self, _address):
+            pass
+
+        def listen(self, _backlog):
+            pass
+
+        def getsockname(self):
+            return ("host-a", 4567)
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        returncode = None
+        pid = 1
+
+        def poll(self):
+            return None
+
+        def wait(self, *_args, **_kwargs):
+            assert Path(observed["hostfile"]).is_file()
+            return 0
+
+    def popen(command, **_kwargs):
+        hostfile = command[command.index("-f") + 1]
+        observed["hostfile"] = hostfile
+        assert Path(hostfile).is_file()
+        return FakeProcess()
+
+    def startup_gate(_topology, _token, _listener, _proc):
+        assert Path(observed["hostfile"]).is_file()
+
+    monkeypatch.setattr(supervisor_mod, "_detect_mpi4py_family", lambda _python: ("mpich", "MPICH"))
+    monkeypatch.setattr(supervisor_mod.socket, "socket", lambda *_args, **_kwargs: FakeListener())
+    monkeypatch.setattr(supervisor_mod.subprocess, "Popen", popen)
+    monkeypatch.setattr(supervisor_mod, "_startup_gate", startup_gate)
+
+    assert supervisor_mod.run_supervisor(str(topology_path), "controller.py", launcher_family="mpich") == 0
+    assert not Path(observed["hostfile"]).exists()
 
 
 def test_supervisor_inline_manifest_command_adds_pre_mpi_gate():

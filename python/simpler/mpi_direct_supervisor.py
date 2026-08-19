@@ -40,6 +40,8 @@ _EXPORTED_ENV_VARS = (
     "ASCEND_OPP_PATH",
     MPI_DIRECT_STARTUP_TOKEN_ENV,
 )
+
+
 class _StartupGateRankFailure(RuntimeError):
     pass
 
@@ -136,9 +138,7 @@ def _launcher_hostfile(topology: MpiDirectTopology, launcher_family: str):
             os.unlink(path)
 
 
-def _family_launcher_args(
-    topology: MpiDirectTopology, launcher_family: str, hostfile_path: str | None
-) -> list[str]:
+def _family_launcher_args(topology: MpiDirectTopology, launcher_family: str, hostfile_path: str | None) -> list[str]:
     if launcher_family == "mpich":
         if not hostfile_path:
             raise ValueError("MPICH/Hydra launch requires a local hostfile")
@@ -338,9 +338,9 @@ def run_supervisor(
         )
     session_id = secrets.randbits(64) or 1
     manifest = topology.runtime_manifest(session_id)
-    manifest_json = base64.urlsafe_b64encode(
-        json.dumps(manifest, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
+    manifest_json = base64.urlsafe_b64encode(json.dumps(manifest, separators=(",", ":")).encode("utf-8")).decode(
+        "ascii"
+    )
     gate_token = secrets.token_urlsafe(32)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -350,8 +350,8 @@ def run_supervisor(
     gate_port = int(listener.getsockname()[1])
     proc: subprocess.Popen[Any] | None = None
     try:
-        with _startup_token_environment(gate_token):
-            with _launcher_hostfile(topology, launcher_family) as hostfile_path:
+        with _launcher_hostfile(topology, launcher_family) as hostfile_path:
+            with _startup_token_environment(gate_token):
                 command = _build_command(
                     topology,
                     mpirun_path=mpirun_path,
@@ -366,8 +366,8 @@ def run_supervisor(
                     startup_port=gate_port,
                 )
                 proc = subprocess.Popen(command, start_new_session=True)
-        _startup_gate(topology, gate_token, listener, proc)
-        return int(proc.wait())
+            _startup_gate(topology, gate_token, listener, proc)
+            return int(proc.wait())
     except BaseException:
         with contextlib.suppress(OSError):
             listener.close()
