@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import simpler.global_comm_domain as codec_mod
 from simpler.buffer import AddressSpace
 from simpler.comm_endpoints import AdapterKind, AdapterProfile, AttachmentRole
 from simpler.global_comm_domain import (
@@ -39,17 +41,22 @@ from simpler.global_comm_domain import (
     GlobalDomainAttachment,
     GlobalDomainBuffer,
     GlobalDomainCommand,
+    GlobalDomainCopyCommand,
     GlobalDomainDescriptor,
     GlobalDomainMember,
     GlobalDomainPhase,
     GlobalDomainReleaseCommand,
     decode_comm_init,
+    decode_copy_command,
     decode_descriptor_table,
     decode_domain_command,
+    decode_release_command,
     encode_comm_init,
     encode_comm_init_result,
+    encode_copy_command,
     encode_descriptor_table,
     encode_domain_command,
+    encode_release_command,
     resolve_global_comm_capability,
     validate_descriptor_table,
 )
@@ -300,6 +307,64 @@ def test_global_domain_attachment_names_every_unknown_enum_field():
     # A None pair stays legal; only a half-set pair is rejected, and by its own message.
     with pytest.raises(ValueError, match="must be paired"):
         encode_domain_command(make_command(replace(good, adapter_profile=None)))
+
+
+def test_descriptor_version_matches_the_platform_backend_macro():
+    """`GLOBAL_DOMAIN_VERSION` is stamped into each descriptor by the platform backend, not by
+    Python, so the two definitions are one contract. Advancing the Python side alone fails every
+    allocation at PREPARE with `global domain descriptor version mismatch` -- a message that
+    points at the descriptor rather than at the edit that caused it. Pin the pairing where the
+    bump is made instead of where it surfaces.
+    """
+    header = Path(__file__).resolve().parents[3] / "src" / "common" / "platform_comm" / "comm.h"
+    if not header.is_file():
+        pytest.skip("platform_comm sources are not present in this installation")
+    match = re.search(r"#define\s+COMM_GLOBAL_DOMAIN_VERSION\s+(\d+)U?", header.read_text(encoding="utf-8"))
+
+    assert match is not None, f"COMM_GLOBAL_DOMAIN_VERSION not found in {header}"
+    assert int(match.group(1)) == GLOBAL_DOMAIN_VERSION
+
+
+def test_l4_l3_commands_version_independently_of_the_descriptor(monkeypatch):
+    """Python owns both ends of the L4<->L3 commands, so their layout versions separately from the
+    backend-stamped descriptor. Both constants hold the same number today, which would let a codec
+    that still read `GLOBAL_DOMAIN_VERSION` pass unnoticed -- so drive the command version to a
+    distinct value first. Under that override a descriptor-versioned encoder stamps the wrong
+    header, and a descriptor-versioned decoder rejects a payload it should accept.
+    """
+    members = _members()
+    command_version = GLOBAL_DOMAIN_VERSION + 1
+    monkeypatch.setattr(codec_mod, "GLOBAL_DOMAIN_COMMAND_VERSION", command_version)
+    encoded = {
+        "comm_init": encode_comm_init(GlobalCommInitCommand("cluster", "topology", "sim", 0, 2, members)),
+        "domain": encode_domain_command(
+            GlobalDomainCommand(
+                phase=GlobalDomainPhase.PREPARE_EXPORT,
+                domain_id=11,
+                generation=1,
+                name="tp",
+                profile="sim",
+                window_size=2048,
+                members=members,
+                buffers=(GlobalDomainBuffer("payload", 128),),
+            )
+        ),
+        "release": encode_release_command(GlobalDomainReleaseCommand(11, 1)),
+        "copy": encode_copy_command(GlobalDomainCopyCommand(11, 1, 0, 0, 4, b"abcd"), include_data=True),
+    }
+    decoders = {
+        "comm_init": decode_comm_init,
+        "domain": decode_domain_command,
+        "release": decode_release_command,
+        "copy": lambda data: decode_copy_command(data, include_data=True),
+    }
+
+    for name, blob in encoded.items():
+        assert struct.unpack_from("<I", blob)[0] == command_version, name
+        decoders[name](blob)
+        foreign = struct.pack("<I", command_version + 1) + blob[4:]
+        with pytest.raises(ValueError, match="version"):
+            decoders[name](foreign)
 
 
 def test_global_domain_encode_rejects_too_many_buffers():
