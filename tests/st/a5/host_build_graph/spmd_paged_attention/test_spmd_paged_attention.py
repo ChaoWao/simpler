@@ -9,6 +9,8 @@
 # -----------------------------------------------------------------------------------------------------------
 """Manual HBG coverage for the disabled A5 SPMD paged-attention workload."""
 
+from copy import deepcopy
+
 from simpler_setup import scene_test
 from tests.st.a5.tensormap_and_ringbuffer.spmd_paged_attention.test_spmd_paged_attention import (
     TestSpmdPagedAttentionA5 as _TmrBase,
@@ -17,7 +19,13 @@ from tests.st.a5.tensormap_and_ringbuffer.spmd_paged_attention.test_spmd_paged_a
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestSpmdPagedAttentionHbgA5(_TmrBase):
-    CASES = [{**case, "platforms": ["a5sim", "a5"], "manual": True} for case in _TmrBase.CASES]
+    # The TMR shapes, run through host_build_graph. Deep-copied so the two
+    # classes do not share a params dict. Onboard only: the MIX kernel's
+    # TPUSH/TPOP path does not build for the CPU simulator (PTO-ISA rejects the
+    # ColMajor TMULS in the softmax tail), so a5sim is out of scope. See #1832.
+    # Every HBG case stays manual; the Per-PR sweep covers these shapes on the
+    # TMR side.
+    CASES = [{**deepcopy(case), "platforms": ["a5"], "manual": True} for case in _TmrBase.CASES]
 
 
 if __name__ == "__main__":

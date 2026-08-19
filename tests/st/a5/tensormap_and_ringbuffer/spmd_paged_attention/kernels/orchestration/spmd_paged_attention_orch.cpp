@@ -133,9 +133,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint32_t oi_fifo_total = static_cast<uint32_t>(SPMD_BLOCK_NUM) * OI_SLOT_SIZE * FIFO_DEPTH;
 
     // Allocate as 1D byte tensors (using INT32 for 4-byte alignment, divide by 4)
-    uint32_t sij_fifo_shapes[1] = {sij_fifo_total / sizeof(int32_t)};
-    uint32_t pij_fifo_shapes[1] = {pij_fifo_total / sizeof(int32_t)};
-    uint32_t oi_fifo_shapes[1] = {oi_fifo_total / sizeof(int32_t)};
+    uint32_t sij_fifo_shapes[1] = {static_cast<uint32_t>(sij_fifo_total / sizeof(int32_t))};
+    uint32_t pij_fifo_shapes[1] = {static_cast<uint32_t>(pij_fifo_total / sizeof(int32_t))};
+    uint32_t oi_fifo_shapes[1] = {static_cast<uint32_t>(oi_fifo_total / sizeof(int32_t))};
 
     TensorCreateInfo sij_fifo_ci(sij_fifo_shapes, 1, DataType::INT32);
     TensorCreateInfo pij_fifo_ci(pij_fifo_shapes, 1, DataType::INT32);

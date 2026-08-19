@@ -120,9 +120,12 @@ struct PAConfig {
     static constexpr uint32_t PIJ_SLOT_SIZE = QT * MAX_BLOCK_SIZE * sizeof(bfloat16_t);
     static constexpr uint32_t OI_SLOT_SIZE = QT * HEAD_DIM * sizeof(float);
 
-    using SijPipeT = TPipe<SIJ_FLAG_ID, Direction::DIR_C2V, SIJ_SLOT_SIZE, FIFO_DEPTH>;
-    using PijPipeT = TPipe<PIJ_FLAG_ID, Direction::DIR_V2C, PIJ_SLOT_SIZE, FIFO_DEPTH>;
-    using OiPipeT = TPipe<OI_FLAG_ID, Direction::DIR_C2V, OI_SLOT_SIZE, FIFO_DEPTH>;
+    // The FIFOs are GM ring buffers the orchestration allocates, so the pipes
+    // take the _GM directions; plain DIR_C2V / DIR_V2C select A5's on-chip
+    // VEC_FIFO path, which ignores the GM base entirely.
+    using SijPipeT = TPipe<SIJ_FLAG_ID, Direction::DIR_C2V_GM, SIJ_SLOT_SIZE, FIFO_DEPTH>;
+    using PijPipeT = TPipe<PIJ_FLAG_ID, Direction::DIR_V2C_GM, PIJ_SLOT_SIZE, FIFO_DEPTH>;
+    using OiPipeT = TPipe<OI_FLAG_ID, Direction::DIR_C2V_GM, OI_SLOT_SIZE, FIFO_DEPTH>;
 
     // AIV UB consumer buffer layout (sized for SUB_QT rows per AIV lane)
     static constexpr uint32_t SIJ_UB_BASE = 0x0;
@@ -194,7 +197,11 @@ static __aicore__ void aic_pv_step(
     GlobalB_PV vjGlobal(val_base + kv_block_id * N * K);
     TLOAD(bMatTile_PV, vjGlobal);
 
-    TPOP<PijPipeT, PijMatTile, TileSplitAxis::TILE_NO_SPLIT>(pij_pipe, pijMatTile);
+    // Cube consumes the whole Q_TILE tile, but the split axis also selects the
+    // two-lane sync: only a non-NO_SPLIT pop waits on, and frees, both AIV
+    // lanes' flag spaces (`flagId + VEC_CORE_ID_OFFSET`). The Mat-from-GM pop
+    // ignores the axis for addressing, so this is a sync-only distinction.
+    TPOP<PijPipeT, PijMatTile, TileSplitAxis::TILE_UP_DOWN>(pij_pipe, pijMatTile);
 
     // PV step uses EVENT_ID1 (QK step uses EVENT_ID0) to avoid flag aliasing
     // when pipe_barrier(PIPE_ALL) is removed between steps.
