@@ -338,10 +338,10 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
 
     layout.off_copied_begin = arena.total_size();
     layout.off_runtime = arena.reserve(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE);
-    layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
     layout.off_copied_end = arena.total_size();
 
     layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
     layout.off_scheduler = arena.reserve(sizeof(PTO2SchedulerState), alignof(PTO2SchedulerState));
     layout.sched = PTO2SchedulerState::reserve_layout(arena);
 
@@ -404,9 +404,6 @@ PTO2Runtime *runtime_init_data_from_layout(
     // never travel; the AICPU initializes them at boot. Writing them here would
     // be writing an initialization pattern that nothing reads.
     (void)sm_dev_base;
-
-    auto *mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
-    memset(mailbox, 0, sizeof(*mailbox));
 
     return rt;
 }
