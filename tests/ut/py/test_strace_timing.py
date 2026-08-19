@@ -13,16 +13,21 @@ from collections import defaultdict
 from io import StringIO
 
 import pytest
+from simpler.worker_level import WorkerLevel
 
 from simpler_setup.tools.strace_timing import (
+    _CHIP_WORD,
+    _CORE_WORD,
+    _HOST_WORDS,
     NativeOverlapError,
     assert_native_overlap,
     bucket_by_hid,
     count_record_heads,
+    external_producer,
     group_invocations,
     host_record_spans,
     host_span_leaf,
-    legacy_spans,
+    invocation_spans,
     load_host_phase_records,
     main,
     parse_clock_anchors,
@@ -34,19 +39,26 @@ from simpler_setup.tools.strace_timing import (
 )
 
 
+def _metadata(trace, kind):
+    """The `args.name` of every `kind` metadata event, in lane order."""
+    return [event["args"]["name"] for event in trace["traceEvents"] if event["ph"] == "M" and event["name"] == kind]
+
+
+def _lanes(trace):
+    """Lane tid -> lane name."""
+    return {
+        event["tid"]: event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+
+
 def _record(pid, inv, name, attrs="", *, depth=0, ts=100, dur=20):
     """One current host-log record in the shape `HostLogger::emit` writes it."""
     return (
         f"[mono_ns={1_000_000 + pid}][T0x{pid}][TIMING] emit_host_span: "
         f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth={depth} "
         f"name={name} ts={ts} dur={dur} {attrs}"
-    )
-
-
-def _legacy_record(pid, inv, name, attrs=""):
-    return (
-        f"[2026-08-04 10:00:00.00000{pid}][T0x{pid}][TIMING] emit_span: [strace.h:132] "
-        f"[STRACE] v=1 pid={pid} tid={pid} inv={inv} hid=abc depth=0 name={name} ts=100 dur=20 {attrs}"
     )
 
 
@@ -88,7 +100,29 @@ def test_parse_spans_finds_adjacent_records_on_one_physical_line():
 
 
 def test_parse_spans_keeps_every_record_of_a_multi_line_blob():
-    blob = _legacy_record(1, 1, "chip.run", "rank=0") + "\n" + _record(2, 2, "chip.run.bind", "rank=1") + "\n"
+    blob = _record(1, 1, "chip.run", "rank=0") + "\n" + _record(2, 2, "chip.run.bind", "rank=1") + "\n"
+
+    spans = list(parse_spans([blob]))
+
+    assert [(span.pid, span.inv, span.name) for span in spans] == [
+        (1, 1, "chip.run"),
+        (2, 2, "chip.run.bind"),
+    ]
+    assert spans[0].attrs == "rank=0"
+    assert spans[1].attrs == "rank=1"
+
+
+def test_parse_spans_splits_two_records_sharing_one_physical_line():
+    """The log prefix has to bound a record, not just precede one.
+
+    Ranks forked by an L3 share the capture fd, so two complete records land on
+    one physical line often enough that pypto's reader re-splits on ``[STRACE]``
+    before parsing. A record's attribute list runs to the end of the line, so
+    what stops it is the lookahead for the *next* record's log prefix — remove
+    that lookahead and the first record's ``attrs`` silently absorbs the
+    second's whole prefix rather than failing to match.
+    """
+    blob = _record(1, 1, "chip.run", "rank=0") + _record(2, 2, "chip.run.bind", "rank=1")
 
     spans = list(parse_spans([blob]))
 
@@ -441,7 +475,7 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
     ]
 
 
-def test_legacy_trace_output_ignores_host_swimlane_markers():
+def test_invocation_views_ignore_host_swimlane_markers():
     """The current vocabulary: the host family stays out of the invocation views."""
     old = list(
         parse_spans(
@@ -468,10 +502,10 @@ def test_legacy_trace_output_ignores_host_swimlane_markers():
         )
     )
 
-    old_invocations = group_invocations(legacy_spans(old))
-    mixed_invocations = group_invocations(legacy_spans(mixed))
+    old_invocations = group_invocations(invocation_spans(old))
+    mixed_invocations = group_invocations(invocation_spans(mixed))
 
-    assert [span.name for span in legacy_spans(mixed)] == [
+    assert [span.name for span in invocation_spans(mixed)] == [
         "chip.run",
         "chip.run.bind",
         "chip.prewarm.build",
@@ -487,51 +521,43 @@ def test_span_family_classifies_the_level_words_and_reserves_ext():
     assert span_family("core.pipe") == "core"
     # Every level at or above L3 runs the same orchestrator and scheduler code,
     # so they answer as one family whichever word the process resolved to.
-    for word in ("host", "network1", "network2", "network3"):
-        assert span_family(f"{word}.dispatch") == "host"
+    for level in WorkerLevel:
+        if level.value >= WorkerLevel.host.value:
+            assert span_family(f"{level.name}.dispatch") == "host"
     # A caller cannot land in ours, which is what `ext.` is reserved for.
     assert span_family("ext.pypto.decode_layer") == "external"
     assert span_family("something_else.foo") == "unknown"
-
-
-def test_retired_span_names_still_classify_so_archived_logs_stay_readable():
-    """An archived log predates the rename; its spans must still land in a family.
-
-    The retired-spelling map exists for exactly this, so it needs a test that
-    fails if someone removes it. Note the *chip* retired names survive
-    `legacy_spans()` while the retired *host* name is excluded, matching how the
-    current names behave.
-    """
-    retired = list(
-        parse_spans(
-            [
-                _span_record(pid=61, tid=610, inv=3, name="simpler_run", ts=1_000, dur=500),
-                _span_record(pid=61, tid=610, inv=3, name="simpler_run.bind", ts=1_100, dur=50, depth=1),
-                _span_record(pid=61, tid=610, inv=4, name="simpler_prewarm.build", ts=1_200, dur=75),
-                _span_record(
-                    pid=61,
-                    tid=611,
-                    inv=9,
-                    name="l3.dispatch",
-                    ts=900,
-                    dur=20,
-                    attrs="run_id=9 task_slot=4 group_index=0 worker_id=0 dispatch_id=1",
-                ),
-            ]
-        )
-    )
-
-    assert [span_family(span.name) for span in retired] == ["chip", "chip", "chip", "host"]
-    assert [span.name for span in legacy_spans(retired)] == [
-        "simpler_run",
-        "simpler_run.bind",
-        "simpler_prewarm.build",
-    ]
-    # `host_span_leaf` reads the decision point out of either spelling, which is
-    # what keeps the swimlane's flow pairing working on an old log.
-    assert host_span_leaf("l3.dispatch") == "dispatch"
+    # The leaf is what the swimlane's flow pairing matches on, so it resolves for
+    # every host level word and for nothing else.
+    assert host_span_leaf("host.dispatch") == "dispatch"
     assert host_span_leaf("network1.submit") == "submit"
     assert host_span_leaf("chip.run") is None
+
+
+def test_every_level_word_the_ladder_names_is_a_word_this_parser_knows():
+    """`WorkerLevel` is the source of truth; the parser carries a second copy.
+
+    The parser cannot import the runtime package, so the two lists are written
+    twice and only a test can hold them together. Nothing else would: a level
+    added to the ladder makes the runtime emit a word the parser does not know,
+    `span_family` answers ``unknown``, and — because unknown is deliberately
+    kept rather than dropped — those per-task spans enter invocation grouping
+    under a forged ``(pid, 0)`` key. No error anywhere, just wrong tables.
+    """
+    ladder = {level.name for level in WorkerLevel}
+    parser = set(_HOST_WORDS) | {_CHIP_WORD, _CORE_WORD}
+
+    assert ladder == parser, (
+        f"the ladder and this parser disagree: ladder-only={sorted(ladder - parser)}, "
+        f"parser-only={sorted(parser - ladder)}"
+    )
+    # Each word also has to reach the family the ladder position implies, not
+    # merely be present in some list.
+    for level in WorkerLevel:
+        expected = "host" if level.value >= WorkerLevel.host.value else level.name
+        assert span_family(f"{level.name}.something") == expected
+        # A level word is never mistaken for the external namespace.
+        assert external_producer(f"{level.name}.something") is None
 
 
 def test_invocation_by_name_uses_earliest_timestamp_not_input_order():
@@ -722,7 +748,7 @@ def test_claim_release_span_stays_inside_the_invocation_tree():
     """
     lines = _run_records(run_epoch=1, prepare=(50, 20), device=(100, 100), release=200)
 
-    invocation = group_invocations(legacy_spans(list(parse_spans(lines))))[0]
+    invocation = group_invocations(invocation_spans(list(parse_spans(lines))))[0]
 
     assert invocation.root().name == "chip.run"
     assert invocation.by_name()["chip.run.claim_release"].depth == 1
@@ -868,3 +894,183 @@ def test_host_record_spans_drop_passes_with_no_matching_bind(tmp_path):
     assert out == []
     assert orphaned == 1
     assert covered == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# The `ext.` reserved namespace — the contract an external producer codes to.
+#
+# Every level word belongs to simpler, so a producer outside this repo emits
+# under `ext.<producer>.<span>`. The tests below are the executable form of that
+# contract: what a well-formed name looks like, which views the spans reach, and
+# what a producer provably cannot do to our views. A repository adapting to it
+# (pypto, pypto-serving, a user script) can read these as the specification and
+# mirror the assertions against its own emitter.
+# ---------------------------------------------------------------------------
+
+
+def test_ext_name_attributes_a_producer_and_refuses_a_malformed_one():
+    """``ext.<producer>.<span>`` — all three segments are required for attribution.
+
+    Family and attribution answer different questions. A name under ``ext.`` is
+    never ours whatever follows it, so a malformed one still classifies as
+    external; it simply lands in an unattributed lane rather than another
+    producer's.
+    """
+    assert external_producer("ext.pypto.decode_layer") == "pypto"
+    assert external_producer("ext.pypto.attention.qk") == "pypto"
+
+    for malformed in ("ext.pypto", "ext.", "ext..decode_layer"):
+        assert span_family(malformed) == "external"
+        assert external_producer(malformed) is None
+
+    # Not external at all, so no producer.
+    assert external_producer("host.dispatch") is None
+    assert external_producer("chip.run") is None
+
+
+def test_ext_name_cannot_impersonate_one_of_our_level_words():
+    """The reason the namespace exists: a caller's ``host.foo`` must not parse as ours.
+
+    Every level word is reachable as a producer segment, and none of them
+    promotes the span into our family.
+    """
+    for word in ("core", "chip", "host", "network1", "network2", "network3"):
+        assert span_family(f"ext.{word}.foo") == "external"
+        assert external_producer(f"ext.{word}.foo") == word
+        assert host_span_leaf(f"ext.{word}.foo") is None
+
+
+def test_ext_spans_stay_out_of_the_invocation_keyed_views():
+    """A producer has no ``inv``, so admitting its spans would forge one lane for all of them.
+
+    ``inv`` is our correlation key (a native run epoch) and the public surface
+    does not expose it, so every external record carries 0. Grouping on
+    ``(pid, inv)`` would collapse unrelated producer spans into a single
+    invocation and contaminate the rounds and TPOT tables computed from it.
+    """
+    lines = [
+        _span_record(pid=41, tid=410, inv=7, name="chip.run", ts=100, dur=500, attrs="run_id=7 slot_id=0"),
+        _span_record(pid=41, tid=410, inv=0, name="ext.pypto.decode_layer", ts=120, dur=80),
+        _span_record(pid=41, tid=410, inv=0, name="ext.pypto.attention", ts=140, dur=20),
+    ]
+    spans = list(parse_spans(lines))
+
+    assert [span.name for span in invocation_spans(spans)] == ["chip.run"]
+    invocations = group_invocations(invocation_spans(spans))
+    assert [(inv.pid, inv.inv) for inv in invocations] == [(41, 7)]
+
+    trace = to_chrome_trace(invocations, bucket_by_hid(invocations))
+    assert "ext.pypto.decode_layer" not in {event.get("name") for event in trace["traceEvents"]}
+
+
+def test_ext_spans_appear_on_the_swimlane_attributed_to_their_producer():
+    """The swimlane is where an external span is visible, and the only such view.
+
+    A process that emitted nothing but external spans is not ours, so its label
+    carries no ``simpler`` prefix.
+    """
+    lines = [
+        _span_record(pid=90, tid=900, inv=0, name="ext.pypto.decode_layer", ts=100, dur=80),
+        _span_record(pid=90, tid=900, inv=0, name="ext.pypto.attention", ts=110, dur=20),
+    ]
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+
+    assert {event["name"] for event in trace["traceEvents"] if event["ph"] == "X"} == {
+        "ext.pypto.decode_layer",
+        "ext.pypto.attention",
+    }
+    assert _metadata(trace, "process_name") == ["external producer pypto (pid=90)"]
+    assert _metadata(trace, "thread_name") == ["ext pypto"]
+
+
+def test_a_shared_process_stays_ours_when_a_producer_emits_into_it():
+    """The common case: a producer calls the public API from inside our host process.
+
+    Sharing therefore says nothing about whose process it is, so any span of ours
+    keeps the process labelled as ours.
+    """
+    lines = [
+        _span_record(pid=41, tid=410, inv=7, name="host.graph_build", ts=100, dur=200, attrs="run_id=7 role=facade"),
+        _span_record(pid=41, tid=411, inv=0, name="ext.pypto.decode_layer", ts=120, dur=60),
+    ]
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+
+    assert _metadata(trace, "process_name") == ["simpler host (pid=41)"]
+    assert _lanes(trace) == {410: "orchestrator / facade", 411: "ext pypto"}
+
+
+def test_ext_attributes_cannot_take_over_one_of_our_lane_names():
+    """``role`` is an ordinary attribute key, so a producer may use it for its own meaning.
+
+    Lane naming infers our roles, so it must read only our spans — otherwise a
+    producer writing ``role=facade`` renames its lane to one of ours.
+    """
+    lines = [
+        _span_record(pid=90, tid=900, inv=0, name="ext.pypto.decode_layer", ts=100, dur=80, attrs="role=facade"),
+        _span_record(pid=90, tid=901, inv=0, name="ext.pypto.step", ts=100, dur=80, attrs="role=scheduler worker_id=3"),
+    ]
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+
+    assert _lanes(trace) == {900: "ext pypto", 901: "ext pypto"}
+
+
+def test_ext_spans_cannot_reshape_our_lanes_or_our_dispatch_flow():
+    """A pipeline slot is ours, and ``slot_id`` / ``depth`` / ``run_id`` are plain fields.
+
+    An interleaved thread splits into one lane per slot. A producer emitting on
+    that same thread must not decide whether the split happens, into how many
+    lanes, or which spans a dispatch flow arrow connects.
+    """
+    lines = _run_records(run_epoch=1, slot_id=0, prepare=(50, 20), device=(100, 100), release=200)
+    lines += _run_records(run_epoch=2, slot_id=1, prepare=(150, 30), device=(240, 100), release=340)
+    lines += _run_records(run_epoch=3, slot_id=0, prepare=(300, 30), device=(380, 100), release=480)
+    baseline = to_host_swimlane(list(parse_spans(lines)))
+
+    # The same log, plus a producer on that thread claiming a slot of its own, a
+    # root-looking depth, and the run/slot pair the flow pairing keys on.
+    lines += [
+        _span_record(
+            pid=7,
+            tid=7,
+            inv=0,
+            name="ext.pypto.decode_layer",
+            ts=60,
+            dur=400,
+            attrs="run_id=0 task_slot=12 slot_id=99 role=facade",
+        )
+    ]
+    mixed = to_host_swimlane(list(parse_spans(lines)))
+
+    def flows(trace):
+        return [event for event in trace["traceEvents"] if event["ph"] in ("s", "f")]
+
+    assert _metadata(baseline, "thread_name") == ["pipeline slot 0 (tid 7)", "pipeline slot 1 (tid 7)"]
+    assert _metadata(mixed, "thread_name") == ["ext pypto", *_metadata(baseline, "thread_name")]
+    assert flows(mixed) == flows(baseline)
+    # The producer's span is still on the timeline, on the thread's real tid.
+    external = next(event for event in mixed["traceEvents"] if event.get("name") == "ext.pypto.decode_layer")
+    assert external["tid"] == 7
+
+
+def test_ext_spans_reach_the_swimlane_but_not_the_tables_through_the_cli(tmp_path, capsys):
+    """End to end: one log carrying both, through the same CLI a downstream repo runs."""
+    log_path = tmp_path / "run.log"
+    swimlane_path = tmp_path / "host_swimlane.json"
+    trace_path = tmp_path / "strace.json"
+    log_path.write_text(
+        _span_record(pid=41, tid=410, inv=7, name="chip.run", ts=100, dur=500, attrs="run_id=7 slot_id=0")
+        + _span_record(pid=41, tid=411, inv=0, name="ext.pypto.decode_layer", ts=120, dur=80),
+        encoding="utf-8",
+    )
+
+    assert main([str(log_path), "--swimlane", str(swimlane_path), "--trace-out", str(trace_path)]) == 0
+    capsys.readouterr()
+
+    swimlane = json.loads(swimlane_path.read_text(encoding="utf-8"))
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+
+    assert "ext.pypto.decode_layer" in {event.get("name") for event in swimlane["traceEvents"]}
+    assert "ext.pypto.decode_layer" not in {event.get("name") for event in trace["traceEvents"]}

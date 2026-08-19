@@ -46,8 +46,9 @@ The visible Perfetto axis remains monotonic; each mapped host event exposes the
 exact decimal `wall_ts_ns` and a UTC `wall_time` in its arguments, while the JSON
 top level retains the source mappings in `clockAnchors`. Nanosecond epoch values
 are strings because JSON consumers commonly use IEEE-754 numbers, which cannot
-represent current epoch nanoseconds exactly. Old logs without an anchor retain
-their existing output, and `clk=dev` records never receive host wall time.
+represent current epoch nanoseconds exactly. A log with no anchor for a pid gets
+no wall time for that pid's events and is otherwise unaffected, and `clk=dev`
+records never receive host wall time.
 
 One line per span, emitted on scope exit
 (`src/common/log/include/common/strace.h`):
@@ -164,6 +165,35 @@ that state before `fork()`; a chip child re-seeds its inherited copy and passes
 the same pointer to every runtime module it loads. The threshold and one-anchor
 coordination are therefore shared within each process without relying on
 `RTLD_GLOBAL` logger symbols.
+
+## `ext.` — spans from outside simpler
+
+Every level word above belongs to simpler, so a span from any other producer
+leads with the reserved word `ext.` and names itself:
+
+```text
+ext.<producer>.<span>          e.g. ext.pypto.decode_layer
+```
+
+All three segments are required. `ext.foo` names no span of its own and
+`ext..foo` names no producer, so neither attributes to anyone — such a span is
+still recognized as external (it can never be mistaken for ours) but renders in
+an unattributed lane. A producer segment may itself be one of our level words:
+`ext.host.foo` attributes to a producer called `host` and remains external.
+
+What the namespace guarantees, in both directions:
+
+| Guarantee | What holds |
+| --------- | ---------- |
+| **Visible in** | `--swimlane`, on the emitting pid/tid. This is the only view that renders external spans. |
+| **Excluded from** | the TPOT, rounds and `--tree` tables and `--trace-out`, all of which key on `(pid, inv)`. `inv` is our native run epoch and no public surface exposes it, so admitting external spans would collapse every one of them into a single forged invocation. |
+| **Cannot affect** | lane naming, lane splitting, or dispatch-flow pairing. Our views infer those only from our own spans, so `role`, `slot_id`, `run_id` and `depth` on an external span carry whatever meaning its producer wants. |
+| **Process label** | a process that emitted only external spans is labelled `external producer <name> (pid=N)`, with no `simpler` prefix. A producer emitting into one of our processes — the common case for a caller of the public API — leaves that process labelled as ours. |
+
+The contract is executable: `tests/ut/py/test_strace_timing.py` asserts each row
+above under the `ext.` heading near the end of the file. A repository adapting to
+this namespace can read those tests as the specification and mirror them against
+its own emitter.
 
 ## Reading the markers — `strace_timing.py`
 
