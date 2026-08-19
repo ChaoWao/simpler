@@ -100,8 +100,8 @@ reserves them in this order:
 | Zone | Regions | Copied | Written by |
 | ---- | ------- | ------ | ---------- |
 | host-only | orchestrator block: `fanin_seen_epoch` / `scope_tasks` / TensorMap, ~8.5 MB | never | host, during graph construction |
-| copied | `[off_copied_begin, off_copied_end)`: runtime header, completion mailbox | whole zone, one copy | host |
-| device-only | `sm_handle`, `PTO2SchedulerState` and its thirteen queue slot arrays | never | AICPU at boot |
+| copied | `[off_copied_begin, off_copied_end)`: the runtime header | whole zone, one copy | host |
+| device-only | `sm_handle`, `PTO2SchedulerState` and its thirteen queue slot arrays, the completion mailbox | never | AICPU at boot |
 
 Putting the copied zone **between** the two zones that are never copied is what
 makes `bind` a single contiguous `copy_to_device`. Both bounds are layout fields,
@@ -142,11 +142,19 @@ per bind; the combination to avoid is resetting the positions while leaving the
 sequences mid-lap, which makes `push` read a sequence above its position and spin
 as if a peer were mid-publish.
 
-**Known gap.** The completion mailbox is still in the copied zone, but nothing
-reads its 4096 message slots before writing them (`try_push` CASes `head` and then
-writes the claimed slot), so 262,272 of the copied zone's 262,976 bytes are a
-`memset` the device does not need. By rule 2 it belongs in the device-only zone
-with its two cursors zeroed at boot.
+**Why the mailbox is device-written, and why zeroing `seq` is not optional.**
+`try_pop` bounds its scan with `head` and gates publication on
+`entries[t].seq == t + 1`, while a producer bumps `head` *before* it stores `seq`.
+So between those two a consumer already sees `t < head` and reads that slot: a
+residual `seq` equal to `t + 1` would hand out a message the producer has not
+written. `init_empty()` therefore zeroes `head`, `tail` and every slot's `seq`; the
+remaining message fields are written before their `seq` and never read ahead of
+`head`, so they need nothing. This is the one region whose device-side
+initialization is *not* O(1), and only because the cursors restart at zero every
+bind — once they persist, positions never repeat, a residual `seq` is always below
+`t + 1`, and the whole thing collapses to `tail := head`, which also discards what
+an error-aborted run left undrained. `MonotonicSeqSurvivesCapacityWrapWithoutZeroing`
+pins the invariant that makes that safe.
 
 ### 3.2 Bounded H2D Upload
 

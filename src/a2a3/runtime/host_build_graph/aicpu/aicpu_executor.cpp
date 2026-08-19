@@ -282,10 +282,13 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 run_rc = -1;
                 boot_ok = false;
             } else {
-                // Queue headers are set, so the slot arrays can take their ramp.
-                // Both precede runtime_init_ready_, which is what releases the peer
-                // threads into the dispatch loop, so no push sees either unset.
+                // Queue headers are set, so the slot arrays can take their ramp,
+                // and the mailbox ring gets its cursors and publication gates.
+                // All of it precedes runtime_init_ready_, which is what releases
+                // the peer threads into the dispatch loop, so neither a push nor a
+                // completion message sees an uninitialized region.
                 rt->scheduler->seed_queue_slots();
+                rt->aicore_mailbox->init_empty();
             }
         }
 

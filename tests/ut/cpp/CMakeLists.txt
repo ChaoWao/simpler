@@ -845,6 +845,7 @@ add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp
 # The seed test calls the real ready_queue_init_data_from_layout, so it links the
 # shared init TU (and the orchestrator/SM members that TU refers to).
 add_a2a3_hbg_runtime_test(test_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_mailbox_init common/test_hbg_mailbox_init.cpp)
 target_sources(test_hbg_ready_queue_seed PRIVATE
     ${HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
     ${HBG_RUNTIME_DIR}/orchestrator_core/pto_ring_buffer.cpp
@@ -888,6 +889,7 @@ target_sources(test_a5_hbg_graph_submit_failure PRIVATE
 )
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
+add_a5_hbg_runtime_test(test_a5_hbg_mailbox_init common/test_hbg_mailbox_init.cpp)
 target_sources(test_a5_hbg_ready_queue_seed PRIVATE
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/pto_ring_buffer.cpp

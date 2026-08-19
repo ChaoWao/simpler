@@ -115,6 +115,26 @@ struct AICoreCompletionMailbox {
     //
     // Safe to call concurrently from any number of producers; structurally
     // independent of the AsyncWaitList::busy lock.
+    // Bring the ring to its empty state on arena memory whose prior contents are
+    // unknown. head and tail are the cursors try_pop's bounds check reads, and
+    // each slot's seq is its publication gate: try_pop accepts entries[t] only
+    // when seq == t + 1, and a producer bumps head before it stores seq, so a
+    // residual seq that happens to equal t + 1 would let the consumer read a slot
+    // the producer has not written yet. Zeroing seq closes that window; the rest
+    // of a message is written before its seq and never read ahead of head, so it
+    // needs nothing.
+    //
+    // Once head and tail persist across binds this collapses to tail := head:
+    // positions never repeat, so a residual seq is always below t + 1 and only
+    // the undrained-messages case is left to discard.
+    void init_empty() {
+        head.store(0, std::memory_order_relaxed);
+        tail.store(0, std::memory_order_relaxed);
+        for (uint64_t i = 0; i < AICORE_COMPLETION_MAILBOX_CAPACITY; i++) {
+            entries[i].seq.store(0, std::memory_order_relaxed);
+        }
+    }
+
     bool try_push_condition(
         PTO2TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
     ) {
