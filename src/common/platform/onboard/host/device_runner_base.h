@@ -146,6 +146,12 @@ public:
     void set_retained_temp_buffer(uint32_t pipeline_slot, void *addr, std::size_t size);
     void *
     acquire_graph_definition_buffer(uint32_t pipeline_slot, uint64_t key, std::size_t bytes, std::size_t alignment);
+    /**
+     * Retained pinned host buffer per pipeline slot (see HostApi
+     * acquire_pinned_host_buffer). Grow-only; released in finalize_common()
+     * while the device context is alive. `alignment` must be a power of two.
+     */
+    void *acquire_pinned_host_buffer(uint32_t pipeline_slot, std::size_t bytes, std::size_t alignment);
     void clear_temporary_buffer();
     /**
      * Map a device buffer into the host address space and return a
@@ -914,6 +920,8 @@ protected:
      */
     int finalize_common();
     void release_graph_definition_buffers();
+    /** aclrtFreeHost every retained pinned host staging block (idempotent). */
+    void release_pinned_host_buffers();
 
     /**
      * Drop the retained graph-definition buffers without freeing them.
@@ -1073,6 +1081,18 @@ protected:
     // the grow/pack logic lives in trb bind.
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<std::size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
+    // Pinned host staging block per pipeline slot — the raw aclrtMallocHost
+    // allocation plus the aligned base handed out (allocation is padded by
+    // `alignment - 1` so the aligned base always exists). Freed in
+    // finalize_common() before the device reset; a pinned mapping released
+    // only at process exit races the next process's chip bring-up on the
+    // same card.
+    struct PinnedHostBuffer {
+        void *allocation{nullptr};
+        void *aligned_addr{nullptr};
+        std::size_t capacity{0};
+    };
+    std::array<PinnedHostBuffer, PTO_PIPELINE_MAX_DEPTH> pinned_host_buffers_{};
     // One retained device block: the raw allocation plus the aligned address
     // handed out. Backs the Graph Definition cache below.
     struct RetainedGraphBuffer {

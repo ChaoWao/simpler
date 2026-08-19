@@ -62,6 +62,15 @@ struct HostApiOps {
     void *(*acquire_graph_definition_buffer)(
         void *runner_ctx, uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
     );
+    // Runner-owned pinned host buffer for DMA staging (hbg's Graph submission
+    // POD arena). One {addr, size} slot per pipeline slot, grow-only: a larger
+    // request replaces the block, an equal-or-smaller one reuses it. The
+    // returned base honors `alignment` (power of two). Onboard backs it with
+    // aclrtMallocHost and releases it in finalize_common() while the device
+    // context is still alive — a pinned mapping outliving aclFinalize is what
+    // wedges the next process's chip bring-up on the same card. Sim backs it
+    // with aligned host memory (sim copies are memcpy).
+    void *(*acquire_pinned_host_buffer)(void *runner_ctx, uint32_t pipeline_slot, size_t bytes, size_t alignment);
     // Commit the three pooled regions (GM heap, runtime shared memory, and
     // prebuilt runtime arena) of the arena bank selected by this run, as three
     // independent device allocations. `runtime_arena_size == 0` skips the
@@ -161,6 +170,10 @@ public:
     void *acquire_graph_definition_buffer(uint64_t key, size_t bytes, size_t alignment) const {
         if (ops_->acquire_graph_definition_buffer == nullptr) return nullptr;
         return ops_->acquire_graph_definition_buffer(runner_ctx_, pipeline_slot_, key, bytes, alignment);
+    }
+    void *acquire_pinned_host_buffer(size_t bytes, size_t alignment) const {
+        if (ops_->acquire_pinned_host_buffer == nullptr) return nullptr;
+        return ops_->acquire_pinned_host_buffer(runner_ctx_, pipeline_slot_, bytes, alignment);
     }
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) const {
         return ops_->setup_static_arena(runner_ctx_, arena_bank_, gm_heap_size, gm_sm_size, runtime_arena_size);

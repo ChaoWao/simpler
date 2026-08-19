@@ -214,6 +214,46 @@ void DeviceRunnerBase::release_graph_definition_buffers() {
     }
 }
 
+void *DeviceRunnerBase::acquire_pinned_host_buffer(uint32_t pipeline_slot, std::size_t bytes, std::size_t alignment) {
+    if (pipeline_slot >= pinned_host_buffers_.size() || bytes == 0 || alignment == 0 ||
+        (alignment & (alignment - 1)) != 0 || bytes > SIZE_MAX - (alignment - 1)) {
+        return nullptr;
+    }
+    PinnedHostBuffer &buffer = pinned_host_buffers_[pipeline_slot];
+    if (buffer.aligned_addr != nullptr && buffer.capacity >= bytes &&
+        reinterpret_cast<uintptr_t>(buffer.aligned_addr) % alignment == 0) {
+        return buffer.aligned_addr;
+    }
+
+    const size_t allocation_bytes = bytes + alignment - 1;
+    void *allocation = nullptr;
+    if (aclrtMallocHost(&allocation, allocation_bytes) != ACL_SUCCESS || allocation == nullptr) {
+        LOG_ERROR("aclrtMallocHost(%zu) for pinned staging failed", allocation_bytes);
+        return nullptr;
+    }
+    const uintptr_t raw = reinterpret_cast<uintptr_t>(allocation);
+    if (raw > UINTPTR_MAX - (alignment - 1)) {
+        (void)aclrtFreeHost(allocation);
+        return nullptr;
+    }
+    void *aligned_addr = reinterpret_cast<void *>((raw + alignment - 1) & ~(alignment - 1));
+    if (buffer.allocation != nullptr && aclrtFreeHost(buffer.allocation) != ACL_SUCCESS) {
+        (void)aclrtFreeHost(allocation);
+        return nullptr;
+    }
+    buffer = PinnedHostBuffer{allocation, aligned_addr, bytes};
+    return aligned_addr;
+}
+
+void DeviceRunnerBase::release_pinned_host_buffers() {
+    for (PinnedHostBuffer &buffer : pinned_host_buffers_) {
+        if (buffer.allocation != nullptr) {
+            (void)aclrtFreeHost(buffer.allocation);
+        }
+        buffer = PinnedHostBuffer{};
+    }
+}
+
 void DeviceRunnerBase::abandon_graph_definition_buffers() {
     for (GraphDefinitionBufferMap &by_key : graph_definition_buffers_) {
         by_key.clear();
@@ -1290,9 +1330,15 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
         abandon_graph_definition_buffers();
         retained_temp_addrs_.fill(nullptr);
         retained_temp_sizes_.fill(0);
+        // The pinned staging blocks are host mappings, not device resources —
+        // they can and must be released even on the fatal path: a force reset
+        // does not invalidate a pinned mapping, and leaving one behind keeps a
+        // driver-side registration alive past aclFinalize.
+        release_pinned_host_buffers();
     } else {
         release_graph_definition_buffers();
         clear_temporary_buffer();
+        release_pinned_host_buffers();
     }
 
     // Free the device-phase/task-timing buffer (allocated lazily in run()) while
