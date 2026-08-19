@@ -106,6 +106,13 @@ PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
     PTO2SchedulerLayout layout{};
     layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
 
+    // Fixed-capacity early-dispatch queues first, then the PTO2_READY_QUEUE_SIZE
+    // ones. The big nine are the arena's last reservations so that the bytes bind
+    // uploads stay one contiguous range no matter how much of them is in use.
+    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
+    }
+    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     }
@@ -115,10 +122,6 @@ PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
     layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
     layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
-    }
-    layout.off_early_sync_start_queue_slots = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
     // the payload and readiness is via completion_flags.
     return layout;
@@ -338,11 +341,16 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
         layout.heap_sizes[r] = heap_sizes[r];
     }
 
+    // Reservation order defines the two ranges bind uploads. The orchestrator
+    // block is host-only dep-computation scratch the AICPU never reads, so it is
+    // skipped; everything the device does read is placed after it, which is what
+    // makes [off_uploaded_tail_begin, ...) a single range.
     layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
     layout.orch = PTO2OrchestratorState::reserve_layout(arena, static_cast<int32_t>(task_window_sizes[0]));
-    layout.sched = PTO2SchedulerState::reserve_layout(arena);
     layout.off_runtime = arena.reserve(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE);
+    layout.off_uploaded_tail_begin = layout.off_runtime;
     layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
+    layout.sched = PTO2SchedulerState::reserve_layout(arena);
 
     layout.arena_size = arena.total_size();
     return layout;

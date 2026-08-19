@@ -118,6 +118,9 @@ struct PTO2RuntimeArenaLayout {
     PTO2SchedulerLayout sched;
     size_t off_runtime{0};
     size_t off_mailbox{0};
+    // First offset past the skipped orchestrator block: the start of the single
+    // contiguous range bind uploads after [0, orch.off_fanin_seen_epoch).
+    size_t off_uploaded_tail_begin{0};
 
     // Cached parameters (re-used by init_data + wire stages).
     uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]{};
