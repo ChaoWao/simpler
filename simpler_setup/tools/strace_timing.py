@@ -57,11 +57,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-# The monotonic prefix is current; the wall-clock form keeps archived logs
-# parseable. The func segment excludes ':' because `LOG_TIMING` passes
+# A record's attribute list runs to the end of its line, so what bounds it is the
+# lookahead for the next record's log prefix — which is why this pattern exists at
+# all. Two complete records do share one physical line: ranks forked by an L3
+# share the capture fd. The func segment excludes ':' because `LOG_TIMING` passes
 # `__FUNCTION__`, an unqualified name. A qualified name containing '::' stops
 # this alternative from matching, leaving `[STRACE]` to bound the record.
-_HOST_LOG_TIME = r"(?:\[mono_ns=\d+\]|\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\])"
+_HOST_LOG_TIME = r"\[mono_ns=\d+\]"
 _HOST_LOG_PREFIX = _HOST_LOG_TIME + r"\[T0x[0-9a-fA-F]+\]\[[A-Z]+\]\s+[^:\r\n]+:\s+"
 # MULTILINE anchors the `$` alternative at every line end, so a caller passing a
 # multi-line blob rather than one line per item keeps every record but the last.
@@ -252,8 +254,12 @@ def _trace_document(events, anchors_by_pid, **extra):
 
 
 # A span name leads with the word for the level that produced it. The words come
-# from `simpler.worker_level.WorkerLevel`; this parser cannot import the runtime
-# package, so it carries the list and the unit tests pin the two together.
+# from `simpler.worker_level.WorkerLevel`, and this parser cannot import the
+# runtime package, so this is a second copy of that ladder.
+# `test_every_level_word_the_ladder_names_is_a_word_this_parser_knows` compares
+# the two as sets: a level added there and not here makes `span_family` answer
+# `unknown` for a word the runtime emits, which puts per-task spans into
+# invocation grouping instead of excluding them.
 _CHIP_WORD = "chip"
 _CORE_WORD = "core"
 _HOST_WORDS = ("host", "network1", "network2", "network3")
@@ -261,13 +267,6 @@ _HOST_WORDS = ("host", "network1", "network2", "network3")
 # Reserved for producers outside simpler: `ext.<producer>.<span>`. Without a
 # reserved word a caller's span called `host.foo` would parse as one of ours.
 _EXTERNAL_WORD = "ext"
-
-# Spellings simpler no longer emits, mapped to the family they used to name.
-# Kept so an archived log stays readable — the same reason `_STRACE_RE` still
-# accepts the wall-clock record prefix. Note this restores the tree, swimlane and
-# invocation views on an old log, not `_ROUNDS_TABLE_NAMES`: that table is a
-# single-spelling contract with pypto.
-_RETIRED_WORDS = {"simpler_run": _CHIP_WORD, "simpler_prewarm": _CHIP_WORD, "l3": _HOST_WORDS[0]}
 
 
 def span_family(name):
@@ -279,7 +278,6 @@ def span_family(name):
     given process resolved to.
     """
     head = name.split(".", 1)[0]
-    head = _RETIRED_WORDS.get(head, head)
     if head == _EXTERNAL_WORD:
         return "external"
     if head == _CHIP_WORD:
@@ -304,20 +302,36 @@ def host_span_leaf(name):
     return leaf
 
 
-def legacy_spans(spans):
+def external_producer(name):
+    """The producer segment of an ``ext.<producer>.<span>`` name, else ``None``.
+
+    All three segments are required: ``ext.pypto.decode_layer`` attributes to
+    ``pypto``, while ``ext.foo`` names no span of its own and ``ext..foo`` names
+    no producer. Neither resolves, so a malformed name lands in an unattributed
+    lane instead of another producer's.
+
+    Attribution is separate from :func:`span_family`, which answers only whether
+    a name is ours. A name under ``ext.`` is never ours whatever follows it.
+    """
+    if span_family(name) != "external":
+        return None
+    parts = name.split(".")
+    if len(parts) < 3:
+        return None
+    return parts[1] or None
+
+
+def invocation_spans(spans):
     """Return the spans the invocation-keyed views may consume.
 
-    The invocation views key on ``(pid, inv)``, so a family carrying no
-    invocation id would group into one bogus lane. Excluded: the per-task
-    ``host``/``network*`` scheduler family, and anything an external producer
-    emitted under ``ext.``. Everything else is kept, including a name this
-    parser does not recognize — dropping an unfamiliar family silently is how
-    ``chip.prewarm.build`` once vanished from the tables.
+    Those views key on ``(pid, inv)``, and ``inv`` is a native run epoch. Two
+    families carry none, so admitting either would group all of its spans into
+    one forged invocation: the per-task ``host``/``network*`` scheduler family,
+    and anything an external producer emitted under ``ext.``.
 
-    The name is retained deliberately. pypto calls this through
-    ``hasattr(_strace_timing, "legacy_spans")`` and falls back to its own
-    ``l3.``-prefix filter when it is absent, so renaming it would silently
-    re-arm that stale fallback in a downstream repository.
+    Everything else is kept, **including a name this parser does not recognize**.
+    Dropping an unfamiliar family silently is how ``chip.prewarm.build`` once
+    vanished from the tables.
     """
     return [span for span in spans if span_family(span.name) not in ("host", "external")]
 
@@ -415,7 +429,7 @@ def assert_native_overlap(spans, *, require_hidden=False):
     scheduling, so it is opt-in: a bind that runs long on a contended machine
     still overlaps.
     """
-    dispatches = _native_dispatches(group_invocations(legacy_spans(spans)))
+    dispatches = _native_dispatches(group_invocations(invocation_spans(spans)))
     by_pid = defaultdict(list)
     for identity, by_name in dispatches.items():
         missing = [name for name in _NATIVE_REQUIRED_SPANS if name not in by_name]
@@ -771,10 +785,17 @@ def _host_thread_name(entries):
     """Name one OS thread's lane from every span it emitted.
 
     `entries` are that thread's (span, parsed attributes) pairs.
+
+    Role inference reads only our own spans. `role` is an ordinary attribute key,
+    so an external producer is free to use it for its own meaning; letting one
+    reach the loop below would name its lane after one of our roles.
     """
     roles = set()
     worker_ids = set()
+    external = [(span, attrs) for span, attrs in entries if span_family(span.name) == "external"]
     for span, attrs in entries:
+        if span_family(span.name) == "external":
+            continue
         role = attrs.get("role")
         leaf = host_span_leaf(span.name)
         if role == "facade" or leaf in {"graph_build", "submit"}:
@@ -798,6 +819,10 @@ def _host_thread_name(entries):
 
     if any(span_family(span.name) == "chip" for span, _ in entries):
         return "chip child"
+    if len(external) == len(entries):
+        producers = sorted({producer for span, _ in external if (producer := external_producer(span.name))})
+        if producers:
+            return f"ext {'/'.join(producers)}"
     return f"tid {entries[0][0].tid}"
 
 
@@ -816,19 +841,31 @@ def _assign_lanes(host_entries, host_threads):
     :func:`_slot_lanes`); every other thread keeps its real tid. Synthetic lane
     ids start past the observed tid space so a split lane cannot collide with a
     real thread's.
+
+    Only our own spans shape the split. A pipeline slot is our concept and
+    `slot_id` / `depth` are ordinary record fields, so an external producer that
+    writes them would otherwise decide whether one of our threads is split and
+    into how many lanes. Its spans stay on the thread's real tid.
     """
     lane_of = {}
     lane_names = {}
     next_synthetic_tid = max(tid for _, tid in host_threads) + 1
-    slot_by_invocation = _slot_by_invocation(host_entries)
+    ours = [entry for entry in host_entries if span_family(entry[0].name) != "external"]
+    slot_by_invocation = _slot_by_invocation(ours)
     for pid, tid in host_threads:
         on_thread = [entry for entry in host_entries if entry[0].pid == pid and entry[0].tid == tid]
-        slot_lanes = _slot_lanes(on_thread, slot_by_invocation)
+        ours_on_thread = [entry for entry in on_thread if span_family(entry[0].name) != "external"]
+        slot_lanes = _slot_lanes(ours_on_thread, slot_by_invocation)
         if slot_lanes is None:
             lane_names[(pid, tid)] = _host_thread_name(on_thread)
             for span, _ in on_thread:
                 lane_of[id(span)] = tid
             continue
+        external_on_thread = [entry for entry in on_thread if span_family(entry[0].name) == "external"]
+        if external_on_thread:
+            lane_names[(pid, tid)] = _host_thread_name(external_on_thread)
+            for span, _ in external_on_thread:
+                lane_of[id(span)] = tid
         for slot_id, group in slot_lanes.items():
             lane_tid = next_synthetic_tid
             next_synthetic_tid += 1
@@ -989,6 +1026,26 @@ def bind_phase_spans(text, spans, skip_keys=frozenset()):
     return out
 
 
+def _process_label(pid, process_spans):
+    """Name one process from the families of the spans it emitted.
+
+    Any span of ours makes the process ours, and the host family wins over the
+    chip one. Sharing is the common case rather than the exception: a producer
+    calling the public tracing API emits from inside our own host process, so
+    `ext.` spans alongside ours say nothing about whose process it is. Only a
+    process that emitted external spans and nothing else belongs to a producer,
+    and then the label carries no `simpler` prefix — it is not our process.
+    """
+    families = {span_family(span.name) for span in process_spans}
+    if "host" in families:
+        return f"simpler host (pid={pid})"
+    if families == {"external"}:
+        producers = sorted({producer for span in process_spans if (producer := external_producer(span.name))})
+        named = "/".join(producers) if producers else "unattributed"
+        return f"external producer {named} (pid={pid})"
+    return f"simpler chip child (pid={pid})"
+
+
 def to_host_swimlane(spans, anchors=None):
     """Build a real-pid/tid host scheduling timeline for Perfetto.
 
@@ -1015,14 +1072,13 @@ def to_host_swimlane(spans, anchors=None):
 
     for pid in host_pids:
         process_spans = [span for span, _ in host_entries if span.pid == pid]
-        role = "host" if any(span_family(span.name) == "host" for span in process_spans) else "chip child"
         events.append(
             {
                 "ph": "M",
                 "name": "process_name",
                 "pid": pid,
                 "tid": 0,
-                "args": {"name": f"simpler {role} (pid={pid})"},
+                "args": {"name": _process_label(pid, process_spans)},
             }
         )
     for (pid, lane_tid), name in sorted(lane_names.items()):
@@ -1341,8 +1397,8 @@ def main(argv=None):
             "excluded from the timing below",
             file=sys.stderr,
         )
-    legacy = legacy_spans(spans)
-    invocations = group_invocations(legacy)
+    keyed = invocation_spans(spans)
+    invocations = group_invocations(keyed)
     buckets = bucket_by_hid(invocations)
 
     if args.assert_native_overlap:
@@ -1362,7 +1418,7 @@ def main(argv=None):
     if args.trace_out:
         with open(args.trace_out, "w", encoding="utf-8") as f:
             json.dump(to_chrome_trace(invocations, buckets, anchors=anchors), f)
-        print(f"Wrote Chrome trace: {args.trace_out} ({len(legacy)} spans)")
+        print(f"Wrote Chrome trace: {args.trace_out} ({len(keyed)} spans)")
 
     if args.swimlane:
         write_host_swimlane(args, spans, lines, anchors)

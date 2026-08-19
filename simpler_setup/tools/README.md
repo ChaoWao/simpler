@@ -366,14 +366,20 @@ to a file (`python test_*.py … --rounds N > run.log 2>&1`) and pass `run.log`
 here. Because grouping is per `(pid, inv)`, this captures **L3 multi-round**
 (every chip-child invocation), not just round 0.
 
-`--swimlane` consumes both the `l3.*` scheduler markers and child
-`chip.run` markers. Host lanes retain their OS pid/tid. Because Chrome Trace
+`--swimlane` consumes the `<level>.*` host-scheduler markers (`host.`,
+`network1.`, `network2.`, `network3.`) and child `chip.run` markers, plus any
+`ext.<producer>.*` spans a producer outside simpler emitted. Host lanes retain
+their OS pid/tid. Because Chrome Trace
 JSON has one visible timestamp axis, raw device-domain `clk=dev` slices are
 stored in the top-level `unalignedDeviceSpans` array rather than placed beside
 the unrelated host clock and stretching Perfetto into an empty-looking
 multi-day viewport. Their ns timestamps remain unchanged; no clock offset is
 invented. This does not alter the established per-invocation `--trace-out`
 view.
+
+The swimlane is the only view that renders `ext.` spans: every table and
+`--trace-out` keys on `(pid, inv)`, which no external producer has. See
+[docs/dfx/host-trace.md](../../docs/dfx/host-trace.md) for that contract.
 
 ---
 
