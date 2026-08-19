@@ -558,25 +558,21 @@ struct alignas(64) PTO2TaskSlotState {
 
     /**
      * Reset dynamic scheduling fields to their pristine values. Called once per
-     * slot as the orchestrator claims it in prepare_task — whole-graph-resident
-     * hbg has no execution-time slot recycle. Skips payload/task (bound once) and
+     * slot as the orchestrator claims it in prepare_task, and again as a Graph
+     * node's storage is materialized — whole-graph-resident hbg has no
+     * execution-time slot recycle. Skips payload/task (bound once) and
      * task_state (the orchestrator sets PENDING when it populates the slot).
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
-     * Graph-affine replay passes preserve_graph_binding=true because its node
-     * index, kind, and execution pointer are static properties of the retained
-     * storage block.
      */
-    void reset_for_reuse(bool preserve_graph_binding = false) {
+    void reset_for_reuse() {
         wake_list_head.store(nullptr, std::memory_order_relaxed);
         next_in_wake_list = nullptr;
         any_subtask_deferred.store(false, std::memory_order_relaxed);
         completed_subtasks.store(0, std::memory_order_relaxed);
         next_block_idx.store(0, std::memory_order_relaxed);
-        if (!preserve_graph_binding) {
-            graph_node_index = -1;
-            graph_context = nullptr;
-            task_kind = TaskKind::KERNEL;
-        }
+        graph_node_index = -1;
+        graph_context = nullptr;
+        task_kind = TaskKind::KERNEL;
         // Note: active_mask and task_attrs are per-submit-constant fields
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // last_consumer_local_id is seeded in prepare_task once the id is known.
