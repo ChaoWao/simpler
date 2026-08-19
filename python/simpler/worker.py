@@ -10553,7 +10553,8 @@ class Worker:
         tensor is MAP_SHARED — read-write across the fork, so usable as an OUTPUT the parent reads back;
         a plain tensor is COW read-only (input only). The handle is memoized by the tensor's storage
         base, so every ref over the same storage shares one canonical identity and dependencies key on
-        it. At L2 (no fork) any host tensor works. ``dtype`` is the ``DataType`` int value.
+        it; the ``byte_offset`` this computes is what then separates two views that do not intersect.
+        At L2 (no fork) any host tensor works. ``dtype`` is the ``DataType`` int value.
         """
         untyped_storage = getattr(tensor, "untyped_storage", None)
         if callable(untyped_storage):
@@ -10564,7 +10565,9 @@ class Worker:
             base, nbytes = host_ptr_nbytes(tensor)
             byte_offset = 0
         # Memoized per storage base so every view of one storage shares an identity and their
-        # dependencies key together. The allocator reuses addresses, though, so a hit whose size no
+        # dependencies key together — a real dependency between two views cannot then hide behind a
+        # differing offset, and the byte ranges tell the intersecting pairs from the disjoint ones
+        # under that one key. The allocator reuses addresses, though, so a hit whose size no
         # longer matches is a *different* storage that happens to sit where the last one did: it must
         # get a fresh identity, or the two would fuse into one node in the dependency graph.
         handle = self._fork_tensor_handles.get(base)

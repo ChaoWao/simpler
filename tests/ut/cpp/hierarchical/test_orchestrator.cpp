@@ -25,6 +25,33 @@
 #include "types.h"
 #include "task_args.h"
 
+// Producers under `key` whose written view overlaps `view`, in registration order.
+static std::vector<TaskSlot> map_hits(const TensorMap &tm, RunId run_id, TensorKey key, const TensorFootprint &view) {
+    std::vector<TaskSlot> out;
+    tm.lookup_overlapping(run_id, key, view, out);
+    return out;
+}
+
+// The single producer covering the whole backing under `key`, or INVALID_SLOT when there is
+// none. Asserts there is at most one: a caller states the key holds one live writer.
+static TaskSlot map_producer(const TensorMap &tm, RunId run_id, TensorKey key) {
+    std::vector<TaskSlot> out = map_hits(tm, run_id, key, TensorFootprint{});
+    EXPECT_LE(out.size(), 1u);
+    return out.empty() ? INVALID_SLOT : out[0];
+}
+
+// The footprint of byte `row` of a `rows`-byte backing — what `row_view_args` names.
+static TensorFootprint row_fp(uint64_t row, uint64_t rows) {
+    TensorFootprint f{};
+    f.byte_offset = row;
+    f.backing_nbytes = rows;
+    f.ndims = 1;
+    f.shapes[0] = 1;
+    f.strides[0] = 1;
+    f.dtype = DataType::UINT8;
+    return f;
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: wires the Orchestrator components together (no Scheduler thread)
 // ---------------------------------------------------------------------------
@@ -68,7 +95,8 @@ struct OrchestratorFixture : public ::testing::Test {
     }
 
     // A canonical identity keyed by `buffer_id` (fixed owner nonce/path), so two args with the same
-    // buffer_id collide into one dependency — the successor of the former buffer-address key.
+    // buffer_id land on one dependency key — the successor of the former buffer-address key. Whether
+    // they carry an edge is then their byte ranges' business.
     static CanonicalIdentity identity_for(uint64_t buffer_id) {
         CanonicalIdentity id{};
         id.buffer_id = buffer_id;
@@ -91,6 +119,49 @@ struct OrchestratorFixture : public ::testing::Test {
         r.ndims = 1;
         r.shapes[0] = 1;
         r.strides[0] = 1;
+        r.dtype = DataType::UINT8;
+        a.add_tensor(r, tag);
+        return a;
+    }
+
+    // Helper: a TaskArgs holding row `row` of a `rows`-row backing keyed by `buffer_id` — one
+    // UINT8 element per row, so row r is exactly byte r. The rank-major slice `x[r]` that
+    // distributed codegen hands each worker.
+    static TaskArgs row_view_args(uint64_t buffer_id, uint64_t row, uint64_t rows, TensorArgType tag) {
+        TaskArgs a;
+        Tensor r{};
+        r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+        r.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+        r.buffer.nbytes = rows;
+        r.buffer.identity = identity_for(buffer_id);
+        r.byte_offset = row;
+        r.ndims = 1;
+        r.shapes[0] = 1;
+        r.strides[0] = 1;
+        r.dtype = DataType::UINT8;
+        a.add_tensor(r, tag);
+        return a;
+    }
+
+    // Helper: a TaskArgs holding rows [r0, r0+rows) x cols [c0, c0+cols) of a `R`x`C` UINT8 matrix
+    // keyed by `buffer_id`. Two of these can be disjoint while their bounding boxes interleave,
+    // which is what makes the per-dimension stage of the overlap cascade load-bearing.
+    static TaskArgs tile_view_args(
+        uint64_t buffer_id, uint32_t r0, uint32_t rows, uint32_t c0, uint32_t cols, uint32_t R, uint32_t C,
+        TensorArgType tag
+    ) {
+        TaskArgs a;
+        Tensor r{};
+        r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+        r.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+        r.buffer.nbytes = static_cast<uint64_t>(R) * C;
+        r.buffer.identity = identity_for(buffer_id);
+        r.byte_offset = static_cast<uint64_t>(r0) * C + c0;
+        r.ndims = 2;
+        r.shapes[0] = rows;
+        r.shapes[1] = cols;
+        r.strides[0] = C;
+        r.strides[1] = 1;
         r.dtype = DataType::UINT8;
         a.add_tensor(r, tag);
         return a;
@@ -266,7 +337,7 @@ TEST_F(OrchestratorFixture, TensorMapTracksProducer) {
     TaskSlot drain_slot;
     rq.try_pop(drain_slot);
 
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0x1234)), a.task_slot);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0x1234)), a.task_slot);
 }
 
 TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
@@ -275,12 +346,12 @@ TEST_F(OrchestratorFixture, OnConsumedCleansUpTensorMap) {
     TaskSlot slot;
     rq.try_pop(slot);
 
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0x42)), slot);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0x42)), slot);
 
     S(slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
     orch.on_consumed(slot);
 
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0x42)), INVALID_SLOT);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0x42)), INVALID_SLOT);
     EXPECT_EQ(S(slot).state.load(), TaskState::CONSUMED);
 }
 
@@ -299,12 +370,12 @@ TEST_F(OrchestratorFixture, ConsumingASupersededProducerKeepsTheNewerMapping) {
     auto args_b = single_tensor_args(0x5150, TensorArgType::OUTPUT);
     auto b = orch.submit_next_level(C(43), args_b, cfg, 0);
     ASSERT_TRUE(rq.try_pop(drain));
-    ASSERT_EQ(tm.lookup(run_id, ref_key(0x5150)), b.task_slot);
+    ASSERT_EQ(map_producer(tm, run_id, ref_key(0x5150)), b.task_slot);
 
     S(a.task_slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
     ASSERT_TRUE(orch.on_consumed(a.task_slot));
 
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0x5150)), b.task_slot);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0x5150)), b.task_slot);
 
     auto args_c = single_tensor_args(0x5150, TensorArgType::INPUT);
     auto c = orch.submit_next_level(C(44), args_c, cfg, 0);
@@ -312,6 +383,150 @@ TEST_F(OrchestratorFixture, ConsumingASupersededProducerKeepsTheNewerMapping) {
     EXPECT_EQ(S(c.task_slot).fanin_count, 1);
     ASSERT_EQ(S(c.task_slot).fanin_producers.size(), 1u);
     EXPECT_EQ(S(c.task_slot).fanin_producers[0], b.task_slot);
+}
+
+TEST_F(OrchestratorFixture, DisjointViewsOfOneHostBackingDoNotSerialize) {
+    // Distributed codegen gives each rank an INOUT view of one rank-major host tensor. The two
+    // views share a key -- a host key carries no worker id to separate them -- so without the
+    // byte-range check rank 1's lookup resolves rank 0's slot and the two dispatches serialize.
+    // Each rank's kernel is meanwhile spinning on the other's cross-rank notify, so the edge
+    // deadlocks the run rather than merely slowing it (pypto#2448).
+    auto rank0 = row_view_args(0xBEEF, /*row=*/0, /*rows=*/2, TensorArgType::INOUT);
+    auto a = orch.submit_next_level(C(42), rank0, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+    ASSERT_EQ(ready, a.task_slot);
+
+    auto rank1 = row_view_args(0xBEEF, /*row=*/1, /*rows=*/2, TensorArgType::INOUT);
+    auto b = orch.submit_next_level(C(42), rank1, cfg, 0);
+
+    EXPECT_EQ(S(b.task_slot).state.load(), TaskState::READY);
+    EXPECT_EQ(S(b.task_slot).fanin_count, 0);
+    EXPECT_TRUE(S(b.task_slot).fanin_producers.empty());
+
+    // Both writers stay live under the one key, each owning its own row.
+    EXPECT_EQ(map_hits(tm, run_id, ref_key(0xBEEF), row_fp(0, 2)), (std::vector<TaskSlot>{a.task_slot}));
+    EXPECT_EQ(map_hits(tm, run_id, ref_key(0xBEEF), row_fp(1, 2)), (std::vector<TaskSlot>{b.task_slot}));
+}
+
+TEST_F(OrchestratorFixture, DisjointColumnBlocksOfOneHostBackingDoNotSerialize) {
+    // The same INOUT dispatch as above, sliced on a non-leading axis. `x[:, 0:4]` and
+    // `x[:, 8:12]` of a 16x16 matrix put every row of one between two rows of the other, so
+    // their bounding ranges interleave -- [0, 244) and [8, 252) -- and the O(1) stage alone
+    // would wire the same false edge. Only the per-dimension stage separates them, and it has
+    // to do so on the footprint infer_deps builds from the Tensor, not a hand-made one.
+    auto west = tile_view_args(0xBEEF, 0, 16, 0, 4, 16, 16, TensorArgType::INOUT);
+    auto a = orch.submit_next_level(C(42), west, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+    ASSERT_EQ(ready, a.task_slot);
+
+    auto east = tile_view_args(0xBEEF, 0, 16, 8, 4, 16, 16, TensorArgType::INOUT);
+    auto b = orch.submit_next_level(C(42), east, cfg, 0);
+
+    EXPECT_EQ(S(b.task_slot).state.load(), TaskState::READY);
+    EXPECT_EQ(S(b.task_slot).fanin_count, 0);
+    EXPECT_TRUE(S(b.task_slot).fanin_producers.empty());
+}
+
+TEST_F(OrchestratorFixture, DisjointTilesOfOneHostBackingDoNotSerialize) {
+    // A 2x2 grid of 8x8 tiles, every one INOUT: four dispatches, no edge between any pair.
+    struct {
+        uint32_t r0, c0;
+    } quads[] = {{0, 0}, {0, 8}, {8, 0}, {8, 8}};
+    for (const auto &q : quads) {
+        auto args = tile_view_args(0xBEEF, q.r0, 8, q.c0, 8, 16, 16, TensorArgType::INOUT);
+        auto res = orch.submit_next_level(C(42), args, cfg, 0);
+        EXPECT_EQ(S(res.task_slot).state.load(), TaskState::READY);
+        EXPECT_EQ(S(res.task_slot).fanin_count, 0) << "tile (" << q.r0 << ", " << q.c0 << ") took an edge";
+        TaskSlot ready;
+        ASSERT_TRUE(rq.try_pop(ready));
+        ASSERT_EQ(ready, res.task_slot);
+    }
+    // All four remain live under the one key, each owning its quadrant.
+    EXPECT_EQ(tm.size(), 4);
+}
+
+TEST_F(OrchestratorFixture, IntersectingTilesOfOneHostBackingStillSerialize) {
+    // The converse of the two above: tiles that do share elements keep their edge, so the
+    // refinement is not simply switching dependency inference off for 2-D views.
+    auto first = tile_view_args(0xBEEF, 0, 8, 0, 8, 16, 16, TensorArgType::INOUT);
+    auto a = orch.submit_next_level(C(42), first, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+
+    auto straddling = tile_view_args(0xBEEF, 4, 8, 4, 8, 16, 16, TensorArgType::INOUT);
+    auto b = orch.submit_next_level(C(43), straddling, cfg, 0);
+
+    EXPECT_EQ(S(b.task_slot).state.load(), TaskState::PENDING);
+    ASSERT_EQ(S(b.task_slot).fanin_producers.size(), 1u);
+    EXPECT_EQ(S(b.task_slot).fanin_producers[0], a.task_slot);
+}
+
+TEST_F(OrchestratorFixture, OverlappingViewsOfOneHostBackingStillSerialize) {
+    // The converse of the disjoint case: same key, ranges that share a byte, so the edge is real
+    // and must survive the refinement.
+    auto writer = row_view_args(0xBEEF, /*row=*/1, /*rows=*/4, TensorArgType::INOUT);
+    auto a = orch.submit_next_level(C(42), writer, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+
+    auto reader = row_view_args(0xBEEF, /*row=*/1, /*rows=*/4, TensorArgType::INPUT);
+    auto b = orch.submit_next_level(C(43), reader, cfg, 0);
+
+    EXPECT_EQ(S(b.task_slot).state.load(), TaskState::PENDING);
+    ASSERT_EQ(S(b.task_slot).fanin_producers.size(), 1u);
+    EXPECT_EQ(S(b.task_slot).fanin_producers[0], a.task_slot);
+}
+
+TEST_F(OrchestratorFixture, AReaderOfTheWholeBackingDependsOnEveryDisjointWriter) {
+    // A whole-backing view overlaps both rows, so it takes both edges -- the case that makes
+    // dropping a superseded-but-not-covered producer unsound.
+    auto rank0 = row_view_args(0xBEEF, /*row=*/0, /*rows=*/2, TensorArgType::OUTPUT_EXISTING);
+    auto a = orch.submit_next_level(C(42), rank0, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+
+    auto rank1 = row_view_args(0xBEEF, /*row=*/1, /*rows=*/2, TensorArgType::OUTPUT_EXISTING);
+    auto b = orch.submit_next_level(C(42), rank1, cfg, 0);
+    ASSERT_TRUE(rq.try_pop(ready));
+
+    TaskArgs full;
+    Tensor r{};
+    r.buffer.backend_kind = static_cast<uint8_t>(BackendKind::POSIX_SHM);
+    r.buffer.access = static_cast<uint8_t>(AccessMode::READWRITE);
+    r.buffer.nbytes = 2;
+    r.buffer.identity = identity_for(0xBEEF);
+    r.ndims = 1;
+    r.shapes[0] = 2;
+    r.strides[0] = 1;
+    r.dtype = DataType::UINT8;
+    full.add_tensor(r, TensorArgType::INPUT);
+
+    auto c = orch.submit_next_level(C(43), full, cfg, 0);
+    EXPECT_EQ(S(c.task_slot).state.load(), TaskState::PENDING);
+    EXPECT_EQ(S(c.task_slot).fanin_count, 2);
+    ASSERT_EQ(S(c.task_slot).fanin_producers.size(), 2u);
+    EXPECT_EQ(S(c.task_slot).fanin_producers[0], a.task_slot);
+    EXPECT_EQ(S(c.task_slot).fanin_producers[1], b.task_slot);
+}
+
+TEST_F(OrchestratorFixture, ConsumingOneDisjointWriterLeavesTheOther) {
+    auto rank0 = row_view_args(0xBEEF, /*row=*/0, /*rows=*/2, TensorArgType::INOUT);
+    auto a = orch.submit_next_level(C(42), rank0, cfg, 0);
+    TaskSlot ready;
+    ASSERT_TRUE(rq.try_pop(ready));
+
+    auto rank1 = row_view_args(0xBEEF, /*row=*/1, /*rows=*/2, TensorArgType::INOUT);
+    auto b = orch.submit_next_level(C(42), rank1, cfg, 0);
+    ASSERT_TRUE(rq.try_pop(ready));
+
+    S(a.task_slot).state.store(TaskState::COMPLETED, std::memory_order_relaxed);
+    ASSERT_TRUE(orch.on_consumed(a.task_slot));
+
+    // Cleanup is keyed by (key, owner), so it must not take the row it does not own with it.
+    EXPECT_TRUE(map_hits(tm, run_id, ref_key(0xBEEF), row_fp(0, 2)).empty());
+    EXPECT_EQ(map_hits(tm, run_id, ref_key(0xBEEF), row_fp(1, 2)), (std::vector<TaskSlot>{b.task_slot}));
 }
 
 TEST_F(OrchestratorFixture, ScopeRegistersAndReleasesRef) {
@@ -367,8 +582,8 @@ TEST_F(OrchestratorFixture, GroupTaskStoresArgsListPerMember) {
     EXPECT_EQ(S(res.task_slot).args(1).tensor(0).buffer.identity.buffer_id, 0xA1u);
 
     // Both keys registered as producers for the group slot.
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0xA0)), res.task_slot);
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0xA1)), res.task_slot);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0xA0)), res.task_slot);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0xA1)), res.task_slot);
 }
 
 TEST_F(OrchestratorFixture, SingleTaskStoresTaskArgsDirectly) {
@@ -402,7 +617,7 @@ TEST_F(OrchestratorFixture, RemoteOutputSidecarRegistersRemoteKey) {
     );
 
     TensorKey key = TensorKey::remote_buffer(TensorAddressKind::REMOTE_BUFFER, 3, 9, 2, 64);
-    EXPECT_EQ(tm.lookup(run_id, key), res.task_slot);
+    EXPECT_EQ(map_producer(tm, run_id, key), res.task_slot);
 }
 
 TEST_F(OrchestratorFixture, RemoteBarePayloadFailsBeforeSlotCommit) {
@@ -475,7 +690,7 @@ TEST_F(OrchestratorFixture, InoutWiresCreatorAsFanin) {
     rq.try_pop(writer_slot);
 
     // TensorMap now points at the new writer.
-    EXPECT_EQ(tm.lookup(run_id, ref_key(0xFEED)), writer.task_slot);
+    EXPECT_EQ(map_producer(tm, run_id, ref_key(0xFEED)), writer.task_slot);
     // Writer has the creator recorded as a fanin producer (via INOUT
     // lookup) but no *live* fanin since the creator is already COMPLETED.
     EXPECT_EQ(S(writer.task_slot).fanin_count, 0);
@@ -509,7 +724,7 @@ TEST_F(OrchestratorFixture, OutputAndOutputExistingAreInsertOnly) {
         auto writer_args = single_tensor_args(c.key, c.tag);
         auto writer = orch.submit_next_level(C(42), writer_args, cfg, 0);
 
-        EXPECT_EQ(tm.lookup(run_id, ref_key(c.key)), writer.task_slot);
+        EXPECT_EQ(map_producer(tm, run_id, ref_key(c.key)), writer.task_slot);
         EXPECT_EQ(S(writer.task_slot).fanin_count, 0);
         EXPECT_TRUE(S(writer.task_slot).fanin_producers.empty()) << "tag=" << static_cast<int>(c.tag);
         {
@@ -1312,9 +1527,9 @@ TEST_F(OrchestratorFixture, SubmitOutputJournalFailurePreservesThePreviousOwnerA
     ASSERT_NE(failed_slot, previous.task_slot);
     EXPECT_EQ(S(failed_slot).state.load(std::memory_order_acquire), TaskState::BUILDING);
     ASSERT_EQ(S(failed_slot).output_keys.size(), 2u);
-    EXPECT_EQ(tm.lookup(run_id, first_key), failed_slot)
+    EXPECT_EQ(map_producer(tm, run_id, first_key), failed_slot)
         << "the first fully-published output is needed to exercise cancellation cleanup";
-    EXPECT_EQ(tm.lookup(run_id, previous_key), previous.task_slot)
+    EXPECT_EQ(map_producer(tm, run_id, previous_key), previous.task_slot)
         << "a failed second insert displaced the prior owner before publication";
 
     orch.set_test_hook({});
@@ -1322,15 +1537,15 @@ TEST_F(OrchestratorFixture, SubmitOutputJournalFailurePreservesThePreviousOwnerA
         orch.fail_run_submission(run_id, std::make_exception_ptr(std::runtime_error("output publication failed")))
     );
     EXPECT_EQ(S(failed_slot).state.load(std::memory_order_acquire), TaskState::CONSUMED);
-    EXPECT_EQ(tm.lookup(run_id, first_key), INVALID_SLOT);
-    EXPECT_EQ(tm.lookup(run_id, previous_key), previous.task_slot)
+    EXPECT_EQ(map_producer(tm, run_id, first_key), INVALID_SLOT);
+    EXPECT_EQ(map_producer(tm, run_id, previous_key), previous.task_slot)
         << "failed-slot cleanup erased a TensorMap entry still owned by the running producer";
     EXPECT_FALSE(orch.run_done(run_id));
 
     S(previous.task_slot).state.store(TaskState::COMPLETED, std::memory_order_release);
     EXPECT_TRUE(orch.on_consumed(previous.task_slot));
     EXPECT_TRUE(orch.run_done(run_id));
-    EXPECT_EQ(tm.lookup(run_id, previous_key), INVALID_SLOT);
+    EXPECT_EQ(map_producer(tm, run_id, previous_key), INVALID_SLOT);
     EXPECT_EQ(allocator.active_count(), 0);
     EXPECT_THROW(orch.wait_run(run_id), std::runtime_error);
     orch.release_run(run_id);
