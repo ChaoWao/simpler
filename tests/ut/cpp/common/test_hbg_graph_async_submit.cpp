@@ -72,7 +72,7 @@ FakeRuntime *as_fake(PTO2Runtime *rt) { return reinterpret_cast<FakeRuntime *>(r
 
 bool fake_is_fatal(PTO2Runtime *) { return false; }
 
-GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const CoreTaskArgs &) {
+GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const GraphTaskArgs &) {
     FakeRuntime &fake = *as_fake(rt);
     std::lock_guard<std::mutex> lock(fake.mutex);
     fake.begin_calls++;
@@ -86,7 +86,7 @@ GraphScopeResult fake_graph_begin(PTO2Runtime *rt, uint64_t, const CoreTaskArgs 
     return result;
 }
 
-bool fake_graph_prepare(PTO2Runtime *rt, const CoreTaskArgs &args) {
+bool fake_graph_prepare(PTO2Runtime *rt, const GraphTaskArgs &args) {
     FakeRuntime &fake = *as_fake(rt);
     std::unique_lock<std::mutex> lock(fake.mutex);
     fake.prepare_calls++;
@@ -152,7 +152,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     uint32_t storage[4]{};
     uint32_t shape[] = {4};
     ChipTensor boundary = make_tensor_external(storage, shape, 1);
-    CoreTaskArgs args;
+    GraphTaskArgs args;
     args.add_input(boundary);
 
     int body_calls = 0;
@@ -160,7 +160,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     GraphSubmitResult first;
     {
         PTO2ScopeGuard scope;
-        first = rt_submit_graph_impl(0x1715, args, [&](const CoreTaskArgs &) {
+        first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             // Graph bodies use the ordinary task wrappers, which commit any
             // preceding outer Graph before submitting. This must not make the
             // recorder wait for its own in-flight job.
@@ -179,7 +179,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     GraphSubmitResult second;
     {
         PTO2ScopeGuard scope;
-        second = rt_submit_graph_impl(0x1715, args, [&](const CoreTaskArgs &) {
+        second = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             ADD_FAILURE() << "a later submission for an in-flight Graph must not execute the body";
         });
     }
@@ -195,7 +195,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     }
     {
         PTO2ScopeGuard scope;
-        first = rt_submit_graph_impl(0x1715, args, [&](const CoreTaskArgs &) {
+        first = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             rt_graph_commit();
             std::unique_lock<std::mutex> lock(fake.mutex);
             body_calls++;
@@ -210,7 +210,7 @@ TEST(HbgGraphAsyncSubmit, WorkerRecordsWhileMainSubmitsLaterGraphs) {
     }
     {
         PTO2ScopeGuard scope;
-        second = rt_submit_graph_impl(0x1715, args, [&](const CoreTaskArgs &) {
+        second = rt_submit_graph_impl(0x1715, args, [&](const GraphTaskArgs &) {
             ADD_FAILURE() << "a later submission for an in-flight Graph must not execute the body";
         });
     }
@@ -247,7 +247,7 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
     uint32_t shape[] = {8};
     ChipTensor boundary = make_tensor_external(storage, shape, 1);
     constexpr uint64_t kScalar = 0x5eed1715ULL;
-    CoreTaskArgs args;
+    GraphTaskArgs args;
     args.add_input(boundary);
     args.add_scalar(kScalar);
 
@@ -261,7 +261,7 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
 
     {
         PTO2ScopeGuard scope;
-        (void)rt_submit_graph_impl(0x1719, args, [](const CoreTaskArgs &) {});
+        (void)rt_submit_graph_impl(0x1719, args, [](const GraphTaskArgs &) {});
     }
     rt_graph_commit();
     framework_bind_runtime(nullptr);
@@ -275,7 +275,7 @@ TEST(HbgGraphAsyncSubmit, RecordingReadsAnOwnedCopyOfTheBoundary) {
     EXPECT_EQ(fake.recorded_tag, TensorArgType::INPUT);
     EXPECT_EQ(fake.recorded_scalar, kScalar);
 
-    EXPECT_NE(fake.recorded_args_object, caller_args_object) << "the worker must not read the caller's CoreTaskArgs";
+    EXPECT_NE(fake.recorded_args_object, caller_args_object) << "the worker must not read the caller's GraphTaskArgs";
     EXPECT_NE(fake.recorded_tensor_storage, caller_tensor_storage)
         << "the worker must not read ChipTensor storage the caller owns";
 }

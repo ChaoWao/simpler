@@ -219,7 +219,7 @@ private:
 }  // namespace
 
 TEST(GraphCache, RejectsEmptyBoundary) {
-    CoreTaskArgs args;
+    GraphTaskArgs args;
 
     EXPECT_FALSE(rt_graph_args_cacheable(args));
 }
@@ -230,7 +230,7 @@ TEST(GraphCache, AcceptsBoundaryScalars) {
     ChipTensor tensor{};
     graph_tensor_unpack(packed, &tensor);
 
-    CoreTaskArgs args;
+    GraphTaskArgs args;
     args.add_input(tensor);
     args.add_scalar(uint32_t{17});
 
