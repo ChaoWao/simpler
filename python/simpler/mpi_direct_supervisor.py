@@ -25,6 +25,7 @@ import tempfile
 import time
 from typing import Any
 
+from .mpi_direct_protocol import MPI_DIRECT_GATE_MAX_BYTES, MPI_DIRECT_STARTUP_TOKEN_ENV
 from .mpi_direct_topology import MpiDirectTopology
 
 _EXPORTED_ENV_VARS = (
@@ -37,8 +38,10 @@ _EXPORTED_ENV_VARS = (
     "PYTHONUNBUFFERED",
     "ASCEND_HOME_PATH",
     "ASCEND_OPP_PATH",
+    MPI_DIRECT_STARTUP_TOKEN_ENV,
 )
-_GATE_MAX_BYTES = 64 * 1024
+class _StartupGateRankFailure(RuntimeError):
+    pass
 
 
 def _host_slots(topology: MpiDirectTopology) -> tuple[tuple[str, int], ...]:
@@ -142,7 +145,10 @@ def _family_launcher_args(
         args = ["-f", hostfile_path]
         for name in _EXPORTED_ENV_VARS:
             if name in os.environ:
-                args.extend(("-genv", name, os.environ[name]))
+                if name == MPI_DIRECT_STARTUP_TOKEN_ENV:
+                    args.extend(("-genvlist", name))
+                else:
+                    args.extend(("-genv", name, os.environ[name]))
         return args
     if launcher_family == "openmpi":
         host_spec = ",".join(f"{host}:{slots}" for host, slots in _host_slots(topology))
@@ -169,13 +175,12 @@ def _build_command(  # noqa: PLR0913 -- launcher construction mirrors the comple
     python_executable: str | None = None,
     startup_host: str | None = None,
     startup_port: int | None = None,
-    startup_token: str | None = None,
 ) -> list[str]:
     if manifest_json is None and topology_path is None:
         raise ValueError("command requires topology_path or manifest_json")
-    gate_enabled = startup_host is not None or startup_port is not None or startup_token is not None
-    if gate_enabled and not (startup_host and startup_port and startup_token):
-        raise ValueError("startup gate requires host, port, and token")
+    gate_enabled = startup_host is not None or startup_port is not None
+    if gate_enabled and not (startup_host and startup_port):
+        raise ValueError("startup gate requires host and port")
     command = [
         mpirun_path,
         *_family_launcher_args(topology, launcher_family, hostfile_path),
@@ -198,8 +203,6 @@ def _build_command(  # noqa: PLR0913 -- launcher construction mirrors the comple
                 str(startup_host),
                 "--startup-port",
                 str(startup_port),
-                "--startup-token",
-                str(startup_token),
             )
         )
     return command
@@ -207,7 +210,7 @@ def _build_command(  # noqa: PLR0913 -- launcher construction mirrors the comple
 
 def _gate_send(sock: socket.socket, message: dict[str, object]) -> None:
     payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    if len(payload) > _GATE_MAX_BYTES:
+    if len(payload) > MPI_DIRECT_GATE_MAX_BYTES:
         raise ValueError("MPI startup gate message is too large")
     sock.sendall(struct.pack("!I", len(payload)) + payload)
 
@@ -220,7 +223,7 @@ def _gate_recv(sock: socket.socket) -> dict[str, object]:
             raise ConnectionError("MPI startup gate peer closed")
         header.extend(chunk)
     length = struct.unpack("!I", header)[0]
-    if length <= 0 or length > _GATE_MAX_BYTES:
+    if length <= 0 or length > MPI_DIRECT_GATE_MAX_BYTES:
         raise ValueError("invalid MPI startup gate message length")
     payload = bytearray()
     while len(payload) < length:
@@ -253,8 +256,8 @@ def _startup_gate(
                 peer, _address = listener.accept()
             except socket.timeout:
                 continue
-            peer.settimeout(max(0.5, deadline - time.monotonic()))
             try:
+                peer.settimeout(max(0.5, deadline - time.monotonic()))
                 message = _gate_recv(peer)
                 if message.get("token") != token:
                     raise RuntimeError("MPI startup gate token mismatch")
@@ -262,13 +265,20 @@ def _startup_gate(
                 if rank < 0 or rank >= topology.world_size or rank in peers:
                     raise RuntimeError(f"invalid or duplicate MPI startup rank {rank}")
                 if message.get("state") == "failed":
-                    raise RuntimeError(f"rank {rank} failed before MPI initialization: {message.get('error', '')}")
+                    raise _StartupGateRankFailure(
+                        f"rank {rank} failed before MPI initialization: {message.get('error', '')}"
+                    )
                 if message.get("state") != "ready":
                     raise RuntimeError(f"rank {rank} sent invalid startup state")
                 peers[rank] = peer
-            except BaseException:
-                peer.close()
+            except _StartupGateRankFailure:
+                with contextlib.suppress(OSError):
+                    peer.close()
                 raise
+            except Exception:
+                with contextlib.suppress(OSError):
+                    peer.close()
+                continue
         for rank in sorted(peers):
             _gate_send(peers[rank], {"token": token, "state": "go_mpi"})
     finally:
@@ -293,6 +303,19 @@ def _terminate_job(proc: subprocess.Popen[Any], timeout_s: float = 5.0) -> None:
         os.killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(timeout=timeout_s)
+
+
+@contextlib.contextmanager
+def _startup_token_environment(token: str):
+    previous = os.environ.get(MPI_DIRECT_STARTUP_TOKEN_ENV)
+    os.environ[MPI_DIRECT_STARTUP_TOKEN_ENV] = token
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(MPI_DIRECT_STARTUP_TOKEN_ENV, None)
+        else:
+            os.environ[MPI_DIRECT_STARTUP_TOKEN_ENV] = previous
 
 
 def run_supervisor(
@@ -321,36 +344,36 @@ def run_supervisor(
     gate_token = secrets.token_urlsafe(32)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", 0))
+    listener.bind((topology.controller_host, 0))
     listener.listen(topology.world_size)
     gate_host = topology.controller_host
     gate_port = int(listener.getsockname()[1])
-    with _launcher_hostfile(topology, launcher_family) as hostfile_path:
-        command = _build_command(
-            topology,
-            mpirun_path=mpirun_path,
-            topology_path=None,
-            session_id=session_id,
-            controller=controller,
-            launcher_family=launcher_family,
-            hostfile_path=hostfile_path,
-            manifest_json=manifest_json,
-            python_executable=python_executable,
-            startup_host=gate_host,
-            startup_port=gate_port,
-            startup_token=gate_token,
-        )
-        proc: subprocess.Popen[Any] | None = None
-        try:
-            proc = subprocess.Popen(command, start_new_session=True)
-            _startup_gate(topology, gate_token, listener, proc)
-            return int(proc.wait())
-        except BaseException:
-            with contextlib.suppress(OSError):
-                listener.close()
-            if proc is not None:
-                _terminate_job(proc)
-            raise
+    proc: subprocess.Popen[Any] | None = None
+    try:
+        with _startup_token_environment(gate_token):
+            with _launcher_hostfile(topology, launcher_family) as hostfile_path:
+                command = _build_command(
+                    topology,
+                    mpirun_path=mpirun_path,
+                    topology_path=None,
+                    session_id=session_id,
+                    controller=controller,
+                    launcher_family=launcher_family,
+                    hostfile_path=hostfile_path,
+                    manifest_json=manifest_json,
+                    python_executable=python_executable,
+                    startup_host=gate_host,
+                    startup_port=gate_port,
+                )
+                proc = subprocess.Popen(command, start_new_session=True)
+        _startup_gate(topology, gate_token, listener, proc)
+        return int(proc.wait())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            listener.close()
+        if proc is not None:
+            _terminate_job(proc)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -26,7 +26,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
-from .mpi_direct_protocol import MpiDirectTag
+from .mpi_direct_protocol import MPI_DIRECT_GATE_MAX_BYTES, MPI_DIRECT_STARTUP_TOKEN_ENV, MpiDirectTag
 from .mpi_direct_topology import MpiDirectExecutorSpec, MpiDirectTopology, load_runtime_manifest_data
 from .remote_l3_limits import FRAME_HEADER_BYTES, MAX_FRAME_BYTES
 
@@ -34,7 +34,8 @@ COMMAND_REQUEST_TAG = int(MpiDirectTag.COMMAND_REQUEST)
 COMMAND_REPLY_TAG = int(MpiDirectTag.COMMAND_REPLY)
 HEALTH_TAG = int(MpiDirectTag.HEALTH)
 LIFECYCLE_TAG = int(MpiDirectTag.LIFECYCLE)
-_GATE_MAX_BYTES = 64 * 1024
+_MPI_POLL_INTERVAL_S = 0.001
+_MPI_GATE_RETRY_INTERVAL_S = 0.01
 
 
 def _launcher_rank() -> int:
@@ -94,7 +95,7 @@ def _init_mpi(MPI, expected_rank: int, expected_world_size: int):
 
 def _gate_send(sock: socket.socket, message: dict[str, object]) -> None:
     payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    if len(payload) > _GATE_MAX_BYTES:
+    if len(payload) > MPI_DIRECT_GATE_MAX_BYTES:
         raise ValueError("MPI startup gate message is too large")
     sock.sendall(struct.pack("!I", len(payload)) + payload)
 
@@ -107,7 +108,7 @@ def _gate_recv(sock: socket.socket) -> dict[str, object]:
             raise ConnectionError("MPI startup gate closed before response")
         header += chunk
     length = struct.unpack("!I", header)[0]
-    if length <= 0 or length > _GATE_MAX_BYTES:
+    if length <= 0 or length > MPI_DIRECT_GATE_MAX_BYTES:
         raise ValueError("invalid MPI startup gate message length")
     payload = bytearray()
     while len(payload) < length:
@@ -158,6 +159,9 @@ def _pre_mpi_gate(
                 return
         except (OSError, TimeoutError, ConnectionError) as exc:
             last_error = exc
+            retry_remaining = deadline - time.monotonic()
+            if retry_remaining > 0:
+                time.sleep(min(_MPI_GATE_RETRY_INTERVAL_S, retry_remaining))
             continue
 
 
@@ -203,10 +207,12 @@ class _ControllerProgress:
         in_flight: list[tuple[Any, int, bytes]] = []
         try:
             while True:
+                did_work = False
                 remaining: list[tuple[Any, int, bytes]] = []
                 for request, ticket, frame in in_flight:
                     if request.Test():
                         self._hub.complete_outbound(ticket)
+                        did_work = True
                     else:
                         remaining.append((request, ticket, frame))
                 in_flight = remaining
@@ -221,10 +227,13 @@ class _ControllerProgress:
                         tag=int(tag),
                     )
                     in_flight.append((request, int(ticket), frame))
+                    did_work = True
 
-                self._receive_one()
+                did_work = self._receive_one() or did_work
                 if self._stop.is_set() and not in_flight and self._hub.pending_frame_bytes == 0:
                     return
+                if not did_work:
+                    time.sleep(_MPI_POLL_INTERVAL_S)
         except BaseException as exc:  # noqa: BLE001
             self._error = exc
             with contextlib.suppress(BaseException):
@@ -374,13 +383,15 @@ class _ExecutorFrameSocket:
             status = self._MPI.Status()
             with self._mpi_mu:
                 message = self._world.improbe(source=0, tag=self._MPI.ANY_TAG, status=status)
-                if message is None:
-                    continue
-                count = int(status.Get_count(self._MPI.BYTE))
-                if count < FRAME_HEADER_BYTES or count > MAX_FRAME_BYTES:
-                    raise RuntimeError(f"controller MPI frame length {count} is outside the SLR3 bounds")
-                frame = bytearray(count)
-                message.Recv([frame, self._MPI.BYTE])
+                if message is not None:
+                    count = int(status.Get_count(self._MPI.BYTE))
+                    if count < FRAME_HEADER_BYTES or count > MAX_FRAME_BYTES:
+                        raise RuntimeError(f"controller MPI frame length {count} is outside the SLR3 bounds")
+                    frame = bytearray(count)
+                    message.Recv([frame, self._MPI.BYTE])
+            if message is None:
+                time.sleep(_MPI_POLL_INTERVAL_S)
+                continue
             tag = int(status.Get_tag())
             decoded = decode_frame(bytes(frame))
             expected_tag = LIFECYCLE_TAG if decoded.header.frame_type == FrameType.SHUTDOWN else COMMAND_REQUEST_TAG
@@ -457,8 +468,10 @@ def _run_executor(MPI, world, topology: MpiDirectTopology, session_id: int, spec
     try:
         _run_command_loop(channel, manifest, worker, {}, {})  # type: ignore[arg-type]
     finally:
-        channel.close()
-        worker.close()
+        try:
+            channel.close()
+        finally:
+            worker.close()
 
 
 def run_runtime(  # noqa: PLR0912 -- startup gate, role dispatch, and MPI teardown are one ordered lifecycle
@@ -469,7 +482,6 @@ def run_runtime(  # noqa: PLR0912 -- startup gate, role dispatch, and MPI teardo
     manifest_json: str | None = None,
     startup_host: str | None = None,
     startup_port: int | None = None,
-    startup_token: str | None = None,
 ) -> int:
     if manifest_json is not None:
         try:
@@ -516,9 +528,12 @@ def run_runtime(  # noqa: PLR0912 -- startup gate, role dispatch, and MPI teardo
         if worker is not None:
             with contextlib.suppress(BaseException):
                 worker.close()
-    if startup_host is not None or startup_port is not None or startup_token is not None:
+    if startup_host is not None or startup_port is not None:
+        startup_token = os.environ.get(MPI_DIRECT_STARTUP_TOKEN_ENV)
         if not (startup_host and startup_port and startup_token):
-            raise ValueError("startup gate requires host, port, and token")
+            raise ValueError(
+                f"startup gate requires host, port, and {MPI_DIRECT_STARTUP_TOKEN_ENV} environment variable"
+            )
         _pre_mpi_gate(startup_host, int(startup_port), startup_token, rank, topology.startup_timeout_s, startup_error)
     if startup_error is not None:
         raise startup_error
@@ -557,7 +572,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--controller", required=True)
     parser.add_argument("--startup-host")
     parser.add_argument("--startup-port", type=int)
-    parser.add_argument("--startup-token")
     ns = parser.parse_args(argv)
     return run_runtime(
         ns.topology,
@@ -566,7 +580,6 @@ def main(argv: list[str] | None = None) -> int:
         manifest_json=ns.manifest_json,
         startup_host=ns.startup_host,
         startup_port=ns.startup_port,
-        startup_token=ns.startup_token,
     )
 
 

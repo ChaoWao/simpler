@@ -92,12 +92,12 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     PTO_PIPELINE_MAX_DEPTH,
     RUNTIME_ENV_RING_COUNT,
     WorkerType,
-    _MpiDirectTransportHub,
     _emit_host_span,
     _l3_child_onboard_region_close,
     _l3_child_onboard_region_create,
     _mailbox_load_i32,
     _mailbox_store_i32,
+    _MpiDirectTransportHub,
     _read_control_copy_request,
     _set_host_span_level_prefix,
     _worker_host_mapped_region_ack_cleanup_error,
@@ -4395,9 +4395,12 @@ def _forked_child_main(buf: memoryview, label: str, setup, serve, make_group_lea
 
 def _close_fork_child_fds(fds) -> None:
     for raw_fd in fds:
-        fd = int(raw_fd)
+        try:
+            fd = int(raw_fd)
+        except (TypeError, ValueError, OverflowError):
+            continue
         if fd >= 3:
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, OverflowError):
                 os.close(fd)
 
 
@@ -5502,11 +5505,10 @@ class Worker:
                         raise RuntimeError(result.error_message)
                     committed.append(worker_id)
             except BaseException:
-                for worker_id in prepared:
+                uncommitted = [worker_id for worker_id in prepared if worker_id not in committed]
+                for worker_id in uncommitted:
                     with contextlib.suppress(BaseException):
-                        self._worker.remote_abort_register(
-                            worker_id, target_registry, callable_kind, state.digest
-                        )
+                        self._worker.remote_abort_register(worker_id, target_registry, callable_kind, state.digest)
                 for worker_id in committed:
                     with contextlib.suppress(BaseException):
                         self._worker.remote_unregister(worker_id, target_registry, callable_kind, state.digest)

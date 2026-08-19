@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -122,15 +123,22 @@ TEST(MpiDirectTransportHub, PendingByteCreditIncludesMpiInFlightSend) {
 
     std::atomic<bool> submit_started{false};
     std::atomic<bool> submit_finished{false};
+    std::exception_ptr submit_error;
     std::thread submitter([&] {
         submit_started.store(true, std::memory_order_release);
-        transport.submit_frame(second);
-        submit_finished.store(true, std::memory_order_release);
+        try {
+            transport.submit_frame(second);
+            submit_finished.store(true, std::memory_order_release);
+        } catch (...) {
+            submit_error = std::current_exception();
+        }
     });
-    while (!submit_started.load(std::memory_order_acquire)) {}
+    while (!submit_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
     EXPECT_FALSE(submit_finished.load(std::memory_order_acquire));
     hub->complete_outbound(outbound->ticket);
     submitter.join();
+    ASSERT_EQ(submit_error, nullptr);
     EXPECT_TRUE(submit_finished.load(std::memory_order_acquire));
 }
 
@@ -153,9 +161,9 @@ TEST(MpiDirectTransport, WorkerManagerStopSendsLifecycleShutdownAfterProgressSto
     Ring ring;
     ring.init(/*heap_bytes=*/0);
     WorkerManager manager;
-    manager.add_next_level_endpoint(std::make_unique<RemoteL3Endpoint>(
-        WORKER_ID, SESSION_ID, "mpi-direct", std::move(transport)
-    ));
+    manager.add_next_level_endpoint(
+        std::make_unique<RemoteL3Endpoint>(WORKER_ID, SESSION_ID, "mpi-direct", std::move(transport))
+    );
     manager.start(&ring, [](WorkerCompletion) {}, [](WorkerDispatch) {});
 
     // Worker::close() stops the Scheduler first. Its final progress pass sees

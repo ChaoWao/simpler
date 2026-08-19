@@ -132,9 +132,8 @@ void MpiDirectTransportHub::enqueue(
     cv_.notify_all();
 }
 
-std::optional<std::vector<uint8_t>> MpiDirectTransportHub::poll_inbound(
-    int32_t worker_id, remote_l3::FrameType frame_type, uint64_t sequence
-) {
+std::optional<std::vector<uint8_t>>
+MpiDirectTransportHub::poll_inbound(int32_t worker_id, remote_l3::FrameType frame_type, uint64_t sequence) {
     std::lock_guard<std::mutex> lk(mu_);
     auto route_it = routes_by_worker_.find(worker_id);
     if (route_it == routes_by_worker_.end()) throw std::invalid_argument("MpiDirectTransportHub: unknown worker id");
@@ -309,8 +308,7 @@ void MpiDirectTransport::submit_frame(const std::vector<uint8_t> &frame) {
     hub_->enqueue(worker_id_, outbound_tag(decoded.header.frame_type), frame, runtime_timeout_s_);
 }
 
-std::vector<uint8_t>
-MpiDirectTransport::wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) {
+std::vector<uint8_t> MpiDirectTransport::wait_for_reply(remote_l3::FrameType frame_type, uint64_t sequence) {
     if (closed_) throw std::runtime_error("MpiDirectTransport: closed");
     return hub_->wait_inbound(worker_id_, frame_type, sequence, runtime_timeout_s_);
 }

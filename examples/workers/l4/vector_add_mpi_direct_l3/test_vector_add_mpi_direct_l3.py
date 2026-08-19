@@ -24,9 +24,9 @@ def _device_spec(device_ids) -> str:
 
 
 def _require_mpi_direct_pod_env() -> tuple[str, str, str]:
-    mpirun = shutil.which("mpirun")
-    if mpirun is None:
-        pytest.skip("mpirun is not on PATH")
+    mpi_launcher = shutil.which("mpirun") or shutil.which("mpiexec")
+    if mpi_launcher is None:
+        pytest.skip("mpirun or mpiexec is not on PATH")
     if importlib.util.find_spec("mpi4py") is None:
         pytest.skip("mpi4py is not installed")
     local_ip = os.environ.get("POD_LOCAL_IP", "")
@@ -35,7 +35,7 @@ def _require_mpi_direct_pod_env() -> tuple[str, str, str]:
     mpi_python = os.environ.get("POD_MPI_PYTHON", "")
     if not mpi_python:
         pytest.skip("POD_MPI_PYTHON is required on both MPI hosts")
-    return mpirun, local_ip, mpi_python
+    return mpi_launcher, local_ip, mpi_python
 
 
 @scene_level(SceneTestLevel.POD)

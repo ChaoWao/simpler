@@ -15,13 +15,16 @@ import threading
 from pathlib import Path
 
 import pytest
-
-from simpler.mpi_direct_protocol import MpiDirectTag
+import simpler.mpi_direct_runtime as runtime_mod
+from simpler import remote_l3_session
+from simpler.mpi_direct_protocol import MPI_DIRECT_STARTUP_TOKEN_ENV, MpiDirectTag
 from simpler.mpi_direct_runtime import _pre_mpi_gate
 from simpler.mpi_direct_supervisor import (
     _EXPORTED_ENV_VARS,
     _build_command,
     _family_launcher_args,
+    _gate_recv,
+    _gate_send,
     _host_slots,
     _mpi_vendor_family,
     _startup_gate,
@@ -67,6 +70,35 @@ def test_topology_requires_dense_rank_and_worker_mapping():
     data = _topology_dict()
     data["executor_ranks"] = list(reversed(data["executor_ranks"]))
     with pytest.raises(ValueError, match="ranks must be dense and ordered"):
+        MpiDirectTopology.from_dict(data)
+
+
+@pytest.mark.parametrize("controller_host", ["localhost", "127.0.0.1", "::1"])
+def test_topology_rejects_loopback_controller_on_multiple_hosts(controller_host):
+    data = _topology_dict(second_host="host-b")
+    data["controller_host"] = controller_host
+    with pytest.raises(ValueError, match="controller_host=.*loopback.*topology spans multiple hosts"):
+        MpiDirectTopology.from_dict(data)
+
+
+def test_topology_rejects_default_loopback_controller_on_multiple_hosts():
+    data = _topology_dict(second_host="host-b")
+    data.pop("controller_host")
+    with pytest.raises(ValueError, match="controller_host=.*loopback.*topology spans multiple hosts"):
+        MpiDirectTopology.from_dict(data)
+
+
+def test_topology_allows_loopback_controller_on_one_host():
+    data = _topology_dict(second_host="localhost")
+    data["controller_host"] = "localhost"
+    data["executor_ranks"][0]["host"] = "localhost"
+    MpiDirectTopology.from_dict(data)
+
+
+def test_topology_rejects_noncontiguous_host_order():
+    data = _topology_dict(second_host="host-a")
+    data["executor_ranks"][0]["host"] = "host-b"
+    with pytest.raises(ValueError, match="hosts must be contiguous"):
         MpiDirectTopology.from_dict(data)
 
 
@@ -165,12 +197,25 @@ def test_supervisor_inline_manifest_command_adds_pre_mpi_gate():
         python_executable="/opt/simpler-python",
         startup_host="host-a",
         startup_port=4567,
-        startup_token="token",
     )
     assert "/opt/simpler-python" in command
     assert "--manifest-json" in command
     assert "--topology" not in command
-    assert command[-6:] == ["--startup-host", "host-a", "--startup-port", "4567", "--startup-token", "token"]
+    assert command[-4:] == ["--startup-host", "host-a", "--startup-port", "4567"]
+    assert "token" not in command
+
+
+def test_startup_token_is_exported_without_appearing_in_launcher_args(monkeypatch):
+    monkeypatch.setenv(MPI_DIRECT_STARTUP_TOKEN_ENV, "secret-token")
+    topology = MpiDirectTopology.from_dict(_topology_dict(second_host="host-b"))
+
+    mpich_args = _family_launcher_args(topology, "mpich", "/tmp/hosts")
+    assert ["-genvlist", MPI_DIRECT_STARTUP_TOKEN_ENV] == mpich_args[-2:]
+    assert "secret-token" not in mpich_args
+
+    openmpi_args = _family_launcher_args(topology, "openmpi", None)
+    assert ["-x", MPI_DIRECT_STARTUP_TOKEN_ENV] == openmpi_args[-2:]
+    assert "secret-token" not in openmpi_args
 
 
 def test_pre_mpi_gate_releases_all_ready_ranks():
@@ -203,6 +248,162 @@ def test_pre_mpi_gate_releases_all_ready_ranks():
         thread.join(3.0)
     assert not errors
     assert all(not thread.is_alive() for thread in threads)
+
+
+def test_pre_mpi_gate_sleeps_between_connection_retries(monkeypatch):
+    now = [0.0]
+    sleeps = []
+
+    def monotonic():
+        return now[0]
+
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] = 1.0
+
+    def refused_connection(*_args, **_kwargs):
+        raise ConnectionRefusedError("gate is not listening")
+
+    monkeypatch.setattr(runtime_mod.time, "monotonic", monotonic)
+    monkeypatch.setattr(runtime_mod.time, "sleep", sleep)
+    monkeypatch.setattr(runtime_mod.socket, "create_connection", refused_connection)
+
+    with pytest.raises(TimeoutError, match="startup gate connection timed out"):
+        _pre_mpi_gate("controller", 4567, "token", 0, 0.1)
+
+    assert sleeps == [runtime_mod._MPI_GATE_RETRY_INTERVAL_S]
+
+
+def test_startup_gate_ignores_invalid_peer_and_releases_ready_ranks():
+    topology = MpiDirectTopology.from_dict(_topology_dict(second_host="host-b"))
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(topology.world_size)
+    port = int(listener.getsockname()[1])
+    responses = []
+
+    bad_peer = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    _gate_send(bad_peer, {"token": "wrong", "rank": 0, "state": "ready"})
+    bad_peer.close()
+
+    def enter(rank):
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0) as peer:
+            _gate_send(peer, {"token": "token", "rank": rank, "state": "ready"})
+            responses.append(_gate_recv(peer))
+
+    threads = [threading.Thread(target=enter, args=(rank,)) for rank in range(topology.world_size)]
+    for thread in threads:
+        thread.start()
+
+    class RunningProcess:
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    _startup_gate(topology, "token", listener, RunningProcess())  # type: ignore[arg-type]
+    for thread in threads:
+        thread.join(3.0)
+
+    assert responses == [{"token": "token", "state": "go_mpi"}] * topology.world_size
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_executor_cleanup_closes_worker_when_channel_close_fails(monkeypatch):
+    topology = MpiDirectTopology.from_dict(_topology_dict())
+    channel_closed = False
+
+    class FailingChannel:
+        def close(self):
+            nonlocal channel_closed
+            channel_closed = True
+            raise RuntimeError("heartbeat failed")
+
+    class FakeWorker:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    channel = FailingChannel()
+    worker = FakeWorker()
+    monkeypatch.setattr(runtime_mod, "_ExecutorFrameSocket", lambda *_args: channel)
+    monkeypatch.setattr(remote_l3_session, "_run_command_loop", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="heartbeat failed"):
+        runtime_mod._run_executor(None, None, topology, 1, topology.executors[0], worker)
+
+    assert channel_closed
+    assert worker.closed
+
+
+def test_executor_receive_sleeps_between_empty_mpi_probes(monkeypatch):
+    topology = MpiDirectTopology.from_dict(_topology_dict())
+
+    class FakeStatus:
+        pass
+
+    class FakeMPI:
+        ANY_TAG = -1
+        BYTE = object()
+
+        @staticmethod
+        def Status():
+            return FakeStatus()
+
+    class EmptyWorld:
+        def improbe(self, **_kwargs):
+            return None
+
+    channel = runtime_mod._ExecutorFrameSocket(FakeMPI, EmptyWorld(), topology.executors[0], 1, 1.0)
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        channel._health_error = RuntimeError("stop probe")
+
+    monkeypatch.setattr(runtime_mod.time, "sleep", sleep)
+    with pytest.raises(RuntimeError, match="executor heartbeat failed"):
+        channel._receive_message()
+
+    assert sleeps == [runtime_mod._MPI_POLL_INTERVAL_S]
+
+
+def test_controller_progress_sleeps_when_idle(monkeypatch):
+    class FakeStatus:
+        pass
+
+    class FakeMPI:
+        ANY_SOURCE = -1
+        ANY_TAG = -1
+        BYTE = object()
+
+        @staticmethod
+        def Status():
+            return FakeStatus()
+
+    class EmptyWorld:
+        def improbe(self, **_kwargs):
+            return None
+
+    class EmptyHub:
+        pending_frame_bytes = 0
+
+        def poll_outbound(self, _timeout):
+            return None
+
+    progress = runtime_mod._ControllerProgress(FakeMPI, EmptyWorld(), EmptyHub())
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        progress._stop.set()
+
+    monkeypatch.setattr(runtime_mod.time, "sleep", sleep)
+    progress._run()
+
+    assert sleeps == [runtime_mod._MPI_POLL_INTERVAL_S]
 
 
 def test_mpi_vendor_family_matches_supported_launchers():

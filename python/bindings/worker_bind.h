@@ -267,7 +267,10 @@ inline void bind_worker(nb::module_ &m) {
             },
             nb::arg("timeout_s") = 0.0
         )
-        .def("complete_outbound", &MpiDirectTransportHub::complete_outbound, nb::arg("ticket"))
+        .def(
+            "complete_outbound", &MpiDirectTransportHub::complete_outbound, nb::arg("ticket"),
+            nb::call_guard<nb::gil_scoped_release>()
+        )
         .def(
             "deliver",
             [](MpiDirectTransportHub &self, int32_t source_rank, int32_t raw_tag, nb::bytes frame) {
@@ -276,10 +279,11 @@ inline void bind_worker(nb::module_ &m) {
                     throw std::invalid_argument("MPI direct tag is outside the fixed transport lanes");
                 }
                 const auto *begin = reinterpret_cast<const uint8_t *>(frame.c_str());
-                self.deliver(
-                    source_rank, static_cast<MpiDirectTag>(raw_tag),
-                    std::vector<uint8_t>(begin, begin + frame.size())
-                );
+                std::vector<uint8_t> native_frame(begin, begin + frame.size());
+                {
+                    nb::gil_scoped_release release;
+                    self.deliver(source_rank, static_cast<MpiDirectTag>(raw_tag), native_frame);
+                }
             },
             nb::arg("source_rank"), nb::arg("tag"), nb::arg("frame")
         )
@@ -549,9 +553,7 @@ inline void bind_worker(nb::module_ &m) {
             [](Worker &self, int32_t worker_id, uint64_t session_id, const std::string &transport_name,
                const std::shared_ptr<MpiDirectTransportHub> &hub, double attach_timeout_s, double runtime_timeout_s) {
                 nb::gil_scoped_release release;
-                self.add_remote_l3_mpi(
-                    worker_id, session_id, transport_name, hub, attach_timeout_s, runtime_timeout_s
-                );
+                self.add_remote_l3_mpi(worker_id, session_id, transport_name, hub, attach_timeout_s, runtime_timeout_s);
             },
             nb::arg("worker_id"), nb::arg("session_id"), nb::arg("transport_name"), nb::arg("hub"),
             nb::arg("attach_timeout_s") = 30.0, nb::arg("runtime_timeout_s") = 30.0,

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 from dataclasses import dataclass, replace
@@ -24,6 +25,16 @@ def _positive_finite(value: Any, field: str) -> float:
     if not (result > 0.0 and math.isfinite(result)):
         raise ValueError(f"{field} must be a positive finite number")
     return result
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower().rstrip(".")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -135,9 +146,7 @@ class MpiDirectTopology:
             executors=executors,
             startup_timeout_s=_positive_finite(data.get("startup_timeout_s", 60.0), "startup_timeout_s"),
             session_timeout_s=_positive_finite(data.get("session_timeout_s", 30.0), "session_timeout_s"),
-            heartbeat_interval_s=_positive_finite(
-                data.get("heartbeat_interval_s", 1.0), "heartbeat_interval_s"
-            ),
+            heartbeat_interval_s=_positive_finite(data.get("heartbeat_interval_s", 1.0), "heartbeat_interval_s"),
             max_pending_frame_bytes=int(data.get("max_pending_frame_bytes", 64 * 1024 * 1024)),
             launcher_args=tuple(str(arg) for arg in data.get("launcher_args", ())),
         )
@@ -159,6 +168,20 @@ class MpiDirectTopology:
             raise ValueError("controller_host must be non-empty")
         if not self.executors:
             raise ValueError("executor_ranks must contain at least one executor")
+        if len(set(self.hosts)) > 1 and _is_loopback_host(self.controller_host):
+            raise ValueError(
+                f"controller_host={self.controller_host!r} is a loopback address, but the topology spans multiple "
+                "hosts; set controller_host to an address reachable from all MPI hosts"
+            )
+        closed_hosts: set[str] = set()
+        previous_host: str | None = None
+        for host in self.hosts:
+            if host != previous_host:
+                if host in closed_hosts:
+                    raise ValueError("topology hosts must be contiguous in rank order")
+                if previous_host is not None:
+                    closed_hosts.add(previous_host)
+                previous_host = host
         if [spec.rank for spec in self.executors] != list(range(1, self.world_size)):
             raise ValueError("executor ranks must be dense and ordered from 1 to world_size-1")
         if [spec.worker_id for spec in self.executors] != list(range(len(self.executors))):
