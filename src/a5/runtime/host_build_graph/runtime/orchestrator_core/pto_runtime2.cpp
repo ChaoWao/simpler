@@ -101,6 +101,14 @@ static GraphScopeResult graph_begin_impl(PTO2Runtime *rt, uint64_t graph_key, co
     return rt->orchestrator.graph_begin(graph_key, args, rt->active_callable_hash);
 }
 
+static bool graph_prepare_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
+    return rt != nullptr && rt->orchestrator.graph_prepare(args);
+}
+
+static void graph_abort_impl(PTO2Runtime *rt) {
+    if (rt != nullptr) rt->orchestrator.graph_abort();
+}
+
 static bool graph_end_impl(PTO2Runtime *rt) { return rt != nullptr && rt->orchestrator.graph_end(); }
 
 static void graph_commit_impl(PTO2Runtime *rt) {
@@ -115,7 +123,14 @@ void rt_scope_begin(PTO2Runtime *rt) {
 
 void rt_scope_end(PTO2Runtime *rt) { rt->orchestrator.end_scope(); }
 
-void rt_orchestration_done(PTO2Runtime *rt) { rt->orchestrator.mark_done(); }
+void rt_orchestration_done(PTO2Runtime *rt) {
+    // Host orchestration calls this runtime entry directly rather than the
+    // orchestration-SO wrapper. Commit here as well so an all-Graph entry has a
+    // final synchronization point for its asynchronous recording and deferred
+    // outer shells even when no later non-Graph task forced an earlier commit.
+    rt->orchestrator.graph_commit();
+    rt->orchestrator.mark_done();
+}
 
 static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator.fatal; }
 
@@ -379,6 +394,8 @@ static const PTO2RuntimeOps s_runtime_ops = {
     .available_cluster_count = available_cluster_count_impl,
     .available_aiv_count = available_aiv_count_impl,
     .graph_begin = graph_begin_impl,
+    .graph_prepare = graph_prepare_impl,
+    .graph_abort = graph_abort_impl,
     .graph_end = graph_end_impl,
     .graph_commit = graph_commit_impl,
 #if SIMPLER_DFX

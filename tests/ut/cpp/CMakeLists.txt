@@ -877,6 +877,7 @@ target_sources(test_hbg_graph_submit_failure PRIVATE
     ${HBG_RUNTIME_DIR}/shared/runtime.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
+add_a2a3_hbg_runtime_test(test_hbg_graph_async_submit common/test_hbg_graph_async_submit.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_graph_submit_failure common/test_hbg_graph_submit_failure.cpp)
 target_sources(test_a5_hbg_graph_submit_failure PRIVATE
     ${A5_HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
@@ -887,6 +888,7 @@ target_sources(test_a5_hbg_graph_submit_failure PRIVATE
     ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
+add_a5_hbg_runtime_test(test_a5_hbg_graph_async_submit common/test_hbg_graph_async_submit.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_mailbox_init common/test_hbg_mailbox_init.cpp)

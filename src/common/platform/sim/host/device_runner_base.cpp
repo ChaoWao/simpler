@@ -677,13 +677,14 @@ HostPhaseRecordPool *SimDeviceRunnerBase::host_phase_pool_arm(bool producer_want
         clock_correlation_provider_.reset();
     }
     const bool swimlane_wants_records = chip_swimlane_level_ == ChipSwimlaneLevel::ORCH_PHASES;
+    const bool artifact_wants_records = producer_wants_records && !output_prefix_.empty();
     chip_swimlane_collector_.set_host_orchestrated(swimlane_wants_records);
     // arm() allocates the pool's buffers, so it can throw; this path is noexcept,
     // where an escaping exception is std::terminate. A pass that cannot get its
     // storage collects no records and says so by handing back nullptr.
     HostPhaseRecordPool *pool = nullptr;
     try {
-        pool = host_phase_records_.arm(producer_wants_records || swimlane_wants_records);
+        pool = host_phase_records_.arm(artifact_wants_records || swimlane_wants_records);
     } catch (...) {
         LOG_WARN("Host phase pool could not be armed; this pass collects no per-event records");
     }

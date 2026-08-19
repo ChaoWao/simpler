@@ -25,8 +25,7 @@
  * Based on: docs/RUNTIME_LOGIC.md
  */
 
-#ifndef PTO_ORCHESTRATOR_H
-#define PTO_ORCHESTRATOR_H
+#pragma once
 
 #include "common/chip_swimlane_profiling.h"
 #include "utils/device_arena.h"
@@ -158,6 +157,8 @@ struct PTO2OrchestratorState {
     TaskOutputTensors submit_dummy_task(const CoreTaskArgs &args);
     TaskOutputTensors alloc_tensors(const CoreTaskArgs &args);
     GraphScopeResult graph_begin(uint64_t graph_key, const CoreTaskArgs &args, uint64_t callable_hash);
+    bool graph_prepare(const CoreTaskArgs &args);
+    void graph_abort();
     bool graph_end();
     void graph_commit();
     void mark_done();
@@ -185,5 +186,3 @@ struct PTO2OrchProfilingData {
 
 PTO2OrchProfilingData orchestrator_get_profiling();
 #endif
-
-#endif  // PTO_ORCHESTRATOR_H

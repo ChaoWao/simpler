@@ -36,6 +36,7 @@
 #include <set>
 
 #include "pto_ring_buffer.h"
+#include "task_interface/assert_compat.h"
 
 class HbgTaskAllocatorTest : public ::testing::Test {
 protected:
@@ -224,35 +225,68 @@ TEST_F(HbgTaskAllocatorTest, LatchedFatalShortCircuitsAlloc) {
 }
 
 // =============================================================================
-// Graph-recording scratch reservation
+// Deferred heap reservation
 // =============================================================================
 
-TEST_F(HbgTaskAllocatorTest, ReserveHeapScratchIsRollbackable) {
+// An outer Graph shell is submitted before its Definition exists, so its heap
+// block is carved afterwards. Nothing is reclaimed during a run, so a block
+// handed out after later tasks already took theirs is still sound.
+TEST_F(HbgTaskAllocatorTest, ReserveDeferredHeapCarvesAfterLaterAllocations) {
+    ASSERT_FALSE(allocator.alloc(0).failed());
     ASSERT_FALSE(allocator.alloc(256).failed());
-    uint64_t snapshot = allocator.heap_top();
+    const uint64_t top_before = allocator.heap_top();
 
-    void *scratch = allocator.reserve_heap_scratch(512);
-    ASSERT_NE(scratch, nullptr);
-    EXPECT_EQ(scratch, static_cast<void *>(heap_buf + snapshot));
-    EXPECT_EQ(allocator.heap_top(), snapshot + 512);
-
-    allocator.restore_heap_top(snapshot);
-    EXPECT_EQ(allocator.heap_top(), snapshot);
-    EXPECT_EQ(allocator.heap_available(), HEAP_SIZE - snapshot);
+    void *base = nullptr;
+    void *end = nullptr;
+    ASSERT_TRUE(allocator.reserve_deferred_heap(512, &base, &end));
+    EXPECT_EQ(base, static_cast<void *>(heap_buf + top_before));
+    EXPECT_EQ(end, static_cast<void *>(heap_buf + top_before + 512));
+    EXPECT_EQ(allocator.heap_top(), top_before + 512);
+    EXPECT_EQ(allocator.active_count(), 2) << "A deferred reservation claims no task-window slot";
 }
 
-TEST_F(HbgTaskAllocatorTest, ReserveHeapScratchFailsWithoutMutatingState) {
-    ASSERT_FALSE(allocator.alloc(256).failed());
-    uint64_t top_before = allocator.heap_top();
+TEST_F(HbgTaskAllocatorTest, ReserveDeferredHeapZeroSizeReturnsCurrentTop) {
+    ASSERT_FALSE(allocator.alloc(128).failed());
 
-    EXPECT_EQ(allocator.reserve_heap_scratch(HEAP_SIZE), nullptr);
+    void *base = nullptr;
+    void *end = nullptr;
+    ASSERT_TRUE(allocator.reserve_deferred_heap(0, &base, &end));
+    EXPECT_EQ(base, static_cast<void *>(heap_buf + 128));
+    EXPECT_EQ(base, end);
+    EXPECT_EQ(allocator.heap_top(), 128u);
+}
+
+TEST_F(HbgTaskAllocatorTest, ReserveDeferredHeapFailsWithoutMutatingState) {
+    ASSERT_FALSE(allocator.alloc(256).failed());
+    const uint64_t top_before = allocator.heap_top();
+
+    void *base = nullptr;
+    void *end = nullptr;
+    EXPECT_FALSE(allocator.reserve_deferred_heap(static_cast<int32_t>(HEAP_SIZE), &base, &end));
     EXPECT_EQ(allocator.heap_top(), top_before);
+    EXPECT_EQ(base, nullptr);
     EXPECT_EQ(error_code.load(), PTO2_ERROR_NONE) << "A rejected reservation is not a fatal";
 }
 
-TEST_F(HbgTaskAllocatorTest, ReserveHeapScratchZeroSizeReturnsCurrentTop) {
-    ASSERT_FALSE(allocator.alloc(128).failed());
-    void *p = allocator.reserve_heap_scratch(0);
-    EXPECT_EQ(p, static_cast<void *>(heap_buf + 128));
-    EXPECT_EQ(allocator.heap_top(), 128u);
+TEST_F(HbgTaskAllocatorTest, LatchedFatalShortCircuitsReserveDeferredHeap) {
+    error_code.store(PTO2_ERROR_INVALID_ARGS);
+
+    void *base = nullptr;
+    void *end = nullptr;
+    EXPECT_FALSE(allocator.reserve_deferred_heap(64, &base, &end));
+    EXPECT_EQ(allocator.heap_top(), 0u);
+}
+
+// Graph recording addresses its internal nodes' outputs from
+// GRAPH_RECORD_VIRTUAL_BASE upward and classifies internal vs boundary tensor
+// sources by address-range containment alone. A real heap that reached into that
+// range would silently misclassify, so init() refuses it.
+TEST_F(HbgTaskAllocatorTest, InitRejectsAHeapOverlappingTheRecordingVirtualRange) {
+    PTO2TaskAllocator overlapping{};
+    auto *base = reinterpret_cast<void *>(GRAPH_RECORD_VIRTUAL_BASE);
+    EXPECT_THROW(overlapping.init(WINDOW_SIZE, &current_index, base, HEAP_SIZE, &error_code), AssertionError);
+
+    PTO2TaskAllocator straddling{};
+    auto *just_below = reinterpret_cast<void *>(GRAPH_RECORD_VIRTUAL_BASE - 64);
+    EXPECT_THROW(straddling.init(WINDOW_SIZE, &current_index, just_below, HEAP_SIZE, &error_code), AssertionError);
 }

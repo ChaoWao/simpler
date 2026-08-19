@@ -12,12 +12,18 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "graph_host_state.h"
 #include "pto_orchestrator.h"
 #include "pto_shared_memory.h"
+#include "task_interface/assert_compat.h"
 #include "utils/device_arena.h"
 
 class HbgGraphSubmitFailureTest : public ::testing::Test {
@@ -70,6 +76,254 @@ protected:
     }
 };
 
+TEST_F(HbgGraphSubmitFailureTest, InFlightGraphSubmissionsReserveHeapOnlyAtCommit) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    CoreTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult first = orch.graph_begin(0x1715, boundary_args, 0x1736);
+    ASSERT_TRUE(first.recording);
+    ASSERT_TRUE(first.task_id.is_valid());
+    const GraphScopeResult second = orch.graph_begin(0x1715, boundary_args, 0x1736);
+    EXPECT_FALSE(second.recording);
+    EXPECT_FALSE(second.execute_block);
+    ASSERT_TRUE(second.task_id.is_valid());
+    EXPECT_EQ(second.task_id.local(), first.task_id.local() + 1);
+    EXPECT_EQ(orch.ring.task_allocator.heap_top(), 0u);
+    EXPECT_EQ(graph_host_upload_count(*graph_state), 2u);
+
+    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+    node_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    EXPECT_EQ(orch.ring.task_allocator.heap_top(), 0u);
+
+    orch.graph_commit();
+    EXPECT_FALSE(orch.fatal);
+    EXPECT_GT(orch.ring.task_allocator.heap_top(), 0u);
+    const std::optional<GraphHostUpload> first_upload = graph_host_upload(*graph_state, 0);
+    const std::optional<GraphHostUpload> second_upload = graph_host_upload(*graph_state, 1);
+    ASSERT_TRUE(first_upload.has_value());
+    ASSERT_TRUE(second_upload.has_value());
+    const auto *first_submission = reinterpret_cast<const GraphSubmission *>(first_upload->data);
+    const auto *second_submission = reinterpret_cast<const GraphSubmission *>(second_upload->data);
+    EXPECT_NE(first_submission->definition_hash, 0u);
+    EXPECT_EQ(second_submission->definition_hash, first_submission->definition_hash);
+    // Distinct bases alone would still pass if finalization handed out a wrong
+    // extent, so pin the length the Definition asks for and the disjointness two
+    // shells of one Graph must have.
+    const auto *first_base = static_cast<const char *>(first_upload->outer_slot->task->packed_buffer_base);
+    const auto *first_end = static_cast<const char *>(first_upload->outer_slot->task->packed_buffer_end);
+    const auto *second_base = static_cast<const char *>(second_upload->outer_slot->task->packed_buffer_base);
+    const auto *second_end = static_cast<const char *>(second_upload->outer_slot->task->packed_buffer_end);
+    const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
+    ASSERT_EQ(definitions.entries.size(), 1u);
+    ASSERT_EQ(definitions.entries[0].full_key, first_submission->graph_key);
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions.entries[0].data);
+    const uint64_t expected_extent =
+        PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
+    EXPECT_EQ(static_cast<uint64_t>(first_end - first_base), expected_extent);
+    EXPECT_EQ(static_cast<uint64_t>(second_end - second_base), expected_extent);
+    EXPECT_TRUE(first_end <= second_base || second_end <= first_base) << "two shells must not share heap bytes";
+}
+
+// The one combination the other two tests miss: real orchestrator state driven
+// by two real threads. test_hbg_graph_async_submit exercises the worker handoff
+// against a fake ops table, and every case here otherwise calls prepare/record/
+// end on the test thread, so nothing covers a worker recording *while* the main
+// thread submits same-hash shells.
+//
+// That overlap is held together only by field partitioning: under
+// recording_mutex the main thread reads boundary_tensors / boundary_types /
+// boundary_scalar_count, while the worker writes boundary_args / nodes /
+// next_virtual_offset / unsupported without it (graph_prepare skips the mutex on
+// purpose, so a submit burst cannot starve it). Nothing enforces that split, so
+// this pins the functional contract that depends on it — and gives TSAN a window
+// to report the split being broken.
+//
+// The handshake is deterministic rather than timing-based: the worker is proven
+// to be between graph_prepare and graph_end while the main thread runs its
+// in-flight graph_begin calls.
+TEST_F(HbgGraphSubmitFailureTest, WorkerRecordsWhileMainThreadSubmitsSameHashShells) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    CoreTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult first = orch.graph_begin(0x171a, boundary_args, 0x1736);
+    ASSERT_TRUE(first.recording);
+    ASSERT_TRUE(first.task_id.is_valid());
+
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool prepared = false;
+    bool main_done_submitting = false;
+    bool prepare_ok = false;
+    bool node_ok = false;
+    bool end_ok = false;
+
+    std::thread worker([&]() {
+        // Worker-owned boundary copy, alive until graph_end: graph_prepare
+        // anchors scalar sources into it and stores its address.
+        CoreTaskArgs worker_args;
+        worker_args.add_input(boundary);
+        prepare_ok = orch.graph_prepare(worker_args);
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            prepared = true;
+        }
+        gate_cv.notify_all();
+        if (!prepare_ok) return;
+
+        {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            gate_cv.wait(lock, [&]() {
+                return main_done_submitting;
+            });
+        }
+
+        CoreTaskArgs node_args;
+        node_args.add_input(boundary);
+        TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+        node_args.add_output(recorded_output);
+        node_ok = orch.submit_dummy_task(node_args).task_id().is_valid();
+        end_ok = orch.graph_end();
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        gate_cv.wait(lock, [&]() {
+            return prepared;
+        });
+    }
+
+    // The worker is now inside the recording. These two go through the in-flight
+    // branch, which reads the boundary signature under recording_mutex.
+    const GraphScopeResult second = orch.graph_begin(0x171a, boundary_args, 0x1736);
+    const GraphScopeResult third = orch.graph_begin(0x171a, boundary_args, 0x1736);
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        main_done_submitting = true;
+    }
+    gate_cv.notify_all();
+    worker.join();
+
+    ASSERT_TRUE(prepare_ok);
+    ASSERT_TRUE(node_ok);
+    ASSERT_TRUE(end_ok);
+    EXPECT_FALSE(second.recording);
+    EXPECT_FALSE(second.execute_block);
+    EXPECT_FALSE(third.execute_block);
+    ASSERT_TRUE(second.task_id.is_valid());
+    ASSERT_TRUE(third.task_id.is_valid());
+    EXPECT_EQ(second.task_id.local(), first.task_id.local() + 1);
+    EXPECT_EQ(third.task_id.local(), first.task_id.local() + 2);
+    EXPECT_EQ(orch.ring.task_allocator.heap_top(), 0u) << "no shell may take heap before commit";
+
+    orch.graph_commit();
+    ASSERT_FALSE(orch.fatal);
+    ASSERT_EQ(graph_host_upload_count(*graph_state), 3u);
+
+    const GraphHostDefinitionList definitions = graph_host_definitions(*graph_state);
+    ASSERT_EQ(definitions.entries.size(), 1u);
+    const auto *definition = reinterpret_cast<const GraphDefinition *>(definitions.entries[0].data);
+    const uint64_t expected_extent =
+        PTO2_ALIGN_UP(definition->required_heap + definition->execution_storage_bytes, PTO2_ALIGN_SIZE);
+
+    std::vector<std::pair<const char *, const char *>> ranges;
+    for (size_t i = 0; i < 3; ++i) {
+        const std::optional<GraphHostUpload> upload = graph_host_upload(*graph_state, i);
+        ASSERT_TRUE(upload.has_value());
+        const auto *submission = reinterpret_cast<const GraphSubmission *>(upload->data);
+        EXPECT_EQ(submission->definition_hash, definition->content_hash) << "shell " << i;
+        const auto *base = static_cast<const char *>(upload->outer_slot->task->packed_buffer_base);
+        const auto *end = static_cast<const char *>(upload->outer_slot->task->packed_buffer_end);
+        EXPECT_EQ(static_cast<uint64_t>(end - base), expected_extent) << "shell " << i;
+        ranges.emplace_back(base, end);
+    }
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        for (size_t j = i + 1; j < ranges.size(); ++j) {
+            EXPECT_TRUE(ranges[i].second <= ranges[j].first || ranges[j].second <= ranges[i].first)
+                << "shells " << i << " and " << j << " share heap bytes";
+        }
+    }
+}
+
+// An outer Graph shell enters the task and dependency sequence before the
+// worker has recorded the body, so a construct the recording cannot represent
+// can no longer be answered by re-running the body on the ordinary path — the
+// shell's task id and TensorMap producers are already published. Commit
+// therefore has to latch a fatal rather than leave a shell that can never
+// complete.
+TEST_F(HbgGraphSubmitFailureTest, AbortedRecordingLatchesFatalAtCommit) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    CoreTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult graph = orch.graph_begin(0x1717, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(graph.task_id.is_valid());
+    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+    node_args.add_output(recorded_output);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+
+    orch.graph_abort();
+    ASSERT_FALSE(orch.fatal) << "Abort alone must not latch; the shell is still finalizable in principle";
+
+    orch.graph_commit();
+    EXPECT_TRUE(orch.fatal) << "A shell whose Definition never arrived cannot be completed";
+}
+
+// A Graph body that allocates at runtime cannot be replayed from a Definition.
+// The recording is poisoned as it happens and graph_end refuses to publish, so
+// the caller reaches the same terminal path as an explicit abort.
+TEST_F(HbgGraphSubmitFailureTest, RuntimeAllocationInsideTheBodyPoisonsTheRecording) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+    CoreTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+
+    orch.begin_scope();
+    const GraphScopeResult graph = orch.graph_begin(0x1718, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(orch.graph_prepare(boundary_args));
+
+    CoreTaskArgs alloc_args;
+    TensorCreateInfo allocated(shape, 1, DataType::UINT32);
+    alloc_args.add_output(allocated);
+    orch.alloc_tensors(alloc_args);
+
+    // graph_end asserts on an unsupported recording, so a debug build throws
+    // where a release build returns false. rt_submit_graph_impl aborts on either,
+    // which is what the terminal path below depends on.
+    bool published = false;
+    try {
+        published = orch.graph_end();
+    } catch (const AssertionError &) {
+        orch.graph_abort();
+    }
+    EXPECT_FALSE(published);
+
+    orch.graph_commit();
+    EXPECT_TRUE(orch.fatal);
+}
+
 TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) {
     std::array<uint32_t, 16> storage{};
     uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
@@ -80,11 +334,19 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     boundary_args.add_input(boundary);
     const GraphScopeResult graph = orch.graph_begin(0x1715, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(orch.graph_prepare(boundary_args));
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
+    TensorCreateInfo recorded_output(shape, 1, DataType::UINT32);
+    node_args.add_output(recorded_output);
+    const uint64_t heap_top_before_record = orch.ring.task_allocator.heap_top();
     ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
-    orch.graph_end();
+    EXPECT_EQ(orch.ring.task_allocator.heap_top(), heap_top_before_record);
+    ASSERT_TRUE(orch.graph_end());
+    EXPECT_EQ(orch.ring.task_allocator.heap_top(), heap_top_before_record);
+    orch.graph_commit();
+    EXPECT_GT(orch.ring.task_allocator.heap_top(), heap_top_before_record);
     ASSERT_FALSE(orch.fatal);
     const size_t uploads_before_failure = graph_host_upload_count(*graph_state);
 
@@ -114,6 +376,7 @@ TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
     boundary_args.add_input(boundary);
     const GraphScopeResult graph = orch.graph_begin(0x1716, boundary_args, 0x1736);
     ASSERT_TRUE(graph.recording);
+    ASSERT_TRUE(orch.graph_prepare(boundary_args));
 
     CoreTaskArgs node_args;
     node_args.add_input(boundary);
