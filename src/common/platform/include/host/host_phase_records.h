@@ -139,9 +139,11 @@ inline HostPhaseRecordBuffer *host_phase_pool_rotate(HostPhaseRecordPool *pool) 
  * @param start_ns,end_ns  host monotonic nanoseconds
  * @param payload          task id for kinds that submit a task, else a detail count
  * @param index            submit_idx for orchestrator operations, 0 for bind segments
+ * @param thread_id        OS thread identity of the producer
  */
 inline void host_phase_pool_append(
-    HostPhaseRecordPool *pool, HostPhaseKind kind, uint64_t start_ns, uint64_t end_ns, uint64_t payload, uint32_t index
+    HostPhaseRecordPool *pool, HostPhaseKind kind, uint64_t start_ns, uint64_t end_ns, uint64_t payload, uint32_t index,
+    uint32_t thread_id = 0
 ) {
     if (pool == nullptr) return;
     pool->head.total_record_count = pool->head.total_record_count + 1;
@@ -153,6 +155,7 @@ inline void host_phase_pool_append(
             return;
         }
     }
-    active->records[active->count] = HostPhaseRecord{start_ns, end_ns, payload, static_cast<uint32_t>(kind), index};
+    active->records[active->count] =
+        HostPhaseRecord{start_ns, end_ns, payload, static_cast<uint32_t>(kind), index, thread_id, 0};
     active->count = active->count + 1;
 }

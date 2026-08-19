@@ -867,8 +867,9 @@ def test_host_record_spans_nest_bind_segments_and_orchestrator_operations(tmp_pa
             "pid": 9,
             "inv": 5,
             "records": [
-                {"phase": "args", "start_ns": 1_000, "end_ns": 1_100, "detail": 4096},
-                {"phase": "graph_submit", "start_ns": 1_200, "end_ns": 1_250, "detail": 77},
+                {"phase": "args", "start_ns": 1_000, "end_ns": 1_100, "detail": 4096, "tid": 9},
+                {"phase": "record_node", "start_ns": 1_150, "end_ns": 1_230, "detail": 4, "tid": 42},
+                {"phase": "graph_submit", "start_ns": 1_200, "end_ns": 1_250, "detail": 77, "tid": 9},
             ],
         }
     ]
@@ -883,6 +884,44 @@ def test_host_record_spans_nest_bind_segments_and_orchestrator_operations(tmp_pa
     assert by_name["chip.run.bind.host_orch.graph_submit"].depth == bind_depth + 2
     assert by_name["chip.run.bind.args"].ts == 1_000
     assert by_name["chip.run.bind.args"].dur == 100
+    assert by_name["chip.run.bind.host_orch.record_node"].tid == 42
+    assert by_name["chip.run.bind.host_orch.graph_submit"].tid == 9
+
+    trace = to_host_swimlane(spans + out)
+    lane_names = {
+        event["tid"]: event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+    assert lane_names[9] == "graph submit main"
+    assert lane_names[42] == "graph record worker"
+
+
+def test_host_record_spans_keep_legacy_recording_on_main_lane():
+    spans = list(parse_spans([_span_record(pid=9, tid=9, inv=5, name="chip.run.bind", ts=900, dur=500)]))
+    passes = [
+        {
+            "pid": 9,
+            "inv": 5,
+            "records": [
+                {"phase": "record_node", "start_ns": 1_000, "end_ns": 1_080, "detail": 4},
+                {"phase": "build_definition", "start_ns": 1_100, "end_ns": 1_180, "detail": 4},
+                {"phase": "graph_submit", "start_ns": 1_200, "end_ns": 1_250, "detail": 77},
+            ],
+        }
+    ]
+
+    out, dropped, _ = host_record_spans(spans, passes)
+
+    assert dropped == 0
+    assert {span.tid for span in out} == {9}
+    trace = to_host_swimlane(spans + out)
+    lane_names = {
+        event["tid"]: event["args"]["name"]
+        for event in trace["traceEvents"]
+        if event["ph"] == "M" and event["name"] == "thread_name"
+    }
+    assert lane_names[9] == "graph submit main"
 
 
 def test_host_record_spans_drop_passes_with_no_matching_bind(tmp_path):

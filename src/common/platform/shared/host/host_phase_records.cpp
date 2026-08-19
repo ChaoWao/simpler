@@ -92,7 +92,7 @@ int HostPhaseRecordStore::write_records_jsonl(const std::string &path) const {
         if (!first) out << ", ";
         out << "{\"phase\": \"" << host_phase_kind_name(static_cast<HostPhaseKind>(record.kind))
             << "\", \"start_ns\": " << record.start_ns << ", \"end_ns\": " << record.end_ns
-            << ", \"detail\": " << record.payload << "}";
+            << ", \"detail\": " << record.payload << ", \"tid\": " << record.thread_id << "}";
         first = false;
     }
     out << "]}\n";

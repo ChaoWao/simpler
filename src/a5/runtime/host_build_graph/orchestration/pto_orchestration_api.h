@@ -30,8 +30,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 
 // Type headers needed by orchestration
 #include "common.h"              // framework_bind_runtime / framework_current_runtime
@@ -94,6 +102,8 @@ typedef struct PTO2RuntimeOps {
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
     int32_t (*available_aiv_count)(PTO2Runtime *rt);
     GraphScopeResult (*graph_begin)(PTO2Runtime *rt, uint64_t graph_key, const CoreTaskArgs &args);
+    bool (*graph_prepare)(PTO2Runtime *rt, const CoreTaskArgs &args);
+    void (*graph_abort)(PTO2Runtime *rt);
     bool (*graph_end)(PTO2Runtime *rt);
     void (*graph_commit)(PTO2Runtime *rt);
 
@@ -116,13 +126,175 @@ struct PTO2Runtime {
     PTO2ScopeMode pending_scope_mode;
 };
 
+class GraphOwnedArgs {
+public:
+    // A CoreTaskArgs cannot report more args than its own capacity, so the loops
+    // below need no runtime bound — but only while these arrays are at least as
+    // large as that capacity. GRAPH_MAX_TENSOR_ARGS and MAX_TENSOR_ARGS are
+    // independent constants that merely happen to agree, so shrinking the Graph
+    // one would silently turn the tensor loop into an overflow that a release
+    // build cannot catch.
+    static_assert(
+        GRAPH_MAX_TENSOR_ARGS >= static_cast<uint32_t>(MAX_TENSOR_ARGS),
+        "GraphOwnedArgs must hold every tensor a CoreTaskArgs can carry"
+    );
+
+    explicit GraphOwnedArgs(const CoreTaskArgs &source) {
+        for (int32_t i = 0; i < source.tensor_count(); ++i) {
+            tensors_[static_cast<size_t>(i)].copy(source.tensor(i).ref());
+            switch (source.tag(i)) {
+            case TensorArgType::INPUT:
+                args_.add_input(tensors_[static_cast<size_t>(i)]);
+                break;
+            case TensorArgType::OUTPUT_EXISTING:
+                args_.add_output(tensors_[static_cast<size_t>(i)]);
+                break;
+            case TensorArgType::INOUT:
+                args_.add_inout(tensors_[static_cast<size_t>(i)]);
+                break;
+            case TensorArgType::NO_DEP:
+                args_.add_no_dep(tensors_[static_cast<size_t>(i)]);
+                break;
+            case TensorArgType::OUTPUT:
+                args_.set_error("Runtime-allocated output is not supported at a Graph boundary");
+                break;
+            }
+        }
+        for (int32_t i = 0; i < source.scalar_count(); ++i) {
+            scalars_[static_cast<size_t>(i)] = source.scalar(i);
+            args_.add_scalar(scalars_[static_cast<size_t>(i)]);
+        }
+        args_.launch_spec = source.launch_spec;
+        args_.set_allow_early_resolve(source.allow_early_resolve());
+        if (source.task_timing_slot() != TASK_TIMING_SLOT_NONE) {
+            args_.set_task_timing_slot(source.task_timing_slot());
+        }
+        args_.set_predicate(source.predicate());
+    }
+
+    CoreTaskArgs &args() { return args_; }
+
+private:
+    std::array<ChipTensor, GRAPH_MAX_TENSOR_ARGS> tensors_{};
+    std::array<uint64_t, MAX_SCALAR_ARGS> scalars_{};
+    CoreTaskArgs args_;
+};
+
+class GraphAsyncRecordingState {
+public:
+    GraphAsyncRecordingState() = default;
+    ~GraphAsyncRecordingState() { shutdown(); }
+
+    GraphAsyncRecordingState(const GraphAsyncRecordingState &) = delete;
+    GraphAsyncRecordingState &operator=(const GraphAsyncRecordingState &) = delete;
+
+    template <typename Job>
+    bool start(Job &&job) {
+        std::function<void()> next;
+        try {
+            next = std::forward<Job>(job);
+            ensure_worker();
+        } catch (...) {
+            return false;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        debug_assert(done_ && !pending_ && "Only one Graph recording may be in flight");
+        if (!done_ || pending_ || stopping_) return false;
+        job_ = std::move(next);
+        done_ = false;
+        pending_ = true;
+        cv_.notify_one();
+        // graph_begin() has already installed the hash-keyed RECORDING entry
+        // and submitted the zero-heap outer shell. Enqueuing the private job is
+        // therefore the last dependency of the caller; graph_prepare() and all
+        // node recording may start after later same-hash shells are submitted.
+        return true;
+    }
+
+    void wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        // Recording invokes the same public task wrappers as the outer
+        // orchestration. Those wrappers call rt_graph_commit() before a
+        // non-Graph operation. The recorder must never wait for its own job.
+        if (worker_.joinable() && worker_.get_id() == std::this_thread::get_id()) return;
+        cv_.wait(lock, [&]() {
+            return done_;
+        });
+    }
+
+private:
+    void ensure_worker() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!worker_.joinable()) {
+            worker_ = std::thread([this]() {
+                run();
+            });
+        }
+    }
+
+    void run() {
+        for (;;) {
+            std::function<void()> current;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [&]() {
+                    return pending_ || stopping_;
+                });
+                if (stopping_) return;
+                current = std::move(job_);
+                pending_ = false;
+            }
+            current();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                done_ = true;
+            }
+            cv_.notify_all();
+        }
+    }
+
+    void shutdown() {
+        wait();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    std::thread worker_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::function<void()> job_;
+    bool pending_{false};
+    bool done_{true};
+    bool stopping_{false};
+};
+
+// External linkage on purpose: `static inline` would give every translation
+// unit that submits a Graph its own recorder and its own worker thread, so a
+// commit reached from one TU would not wait for a recording another TU started.
+// Vague linkage keeps one instance — and one worker — per loaded SO.
+inline GraphAsyncRecordingState &rt_graph_async_recording() {
+    // One orchestration SO is invoked serially by its ChipWorker. Keep its
+    // recorder alive across runs so steady-state misses pay only a condition-
+    // variable wakeup, not a fresh pthread create/join. The SO's destructor
+    // stops the idle worker before dlclose unmaps its code.
+    static GraphAsyncRecordingState state;
+    return state;
+}
+
 // =============================================================================
 // Inline Convenience Wrappers (call through ops table)
 // =============================================================================
 
 static inline PTO2Runtime *current_runtime() { return framework_current_runtime(); }
+static inline void rt_graph_commit();
 
 static inline TaskOutputTensors alloc_tensors(const CoreTaskArgs &args) {
+    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
@@ -173,6 +345,7 @@ static inline TaskOutputTensors alloc_tensors(const CIs &...cis) {
 }
 
 static inline TaskOutputTensors rt_submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args) {
+    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
@@ -206,6 +379,7 @@ static inline TaskOutputTensors rt_submit_aiv_task(int32_t kernel_id, const Core
  * barrier or as a placeholder producer for tests / dep-graph wiring.
  */
 static inline TaskOutputTensors rt_submit_dummy_task(const CoreTaskArgs &args) {
+    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt)) {
         return TaskOutputTensors{};
@@ -221,11 +395,18 @@ static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const CoreTask
     return rt->ops->graph_begin(rt, graph_key, args);
 }
 
-// Finish the recording pass. Returns true when the recorded sub-DAG was emitted
-// as a single outer GRAPH task (the body must not run again); false when the
-// recording was unsupported and the caller must re-run the body on the ordinary
-// path. A fatal runtime is terminal, so it reports true to suppress a pointless
-// re-run.
+static inline bool rt_graph_prepare(const CoreTaskArgs &args) {
+    PTO2Runtime *rt = current_runtime();
+    return rt->ops->graph_prepare != nullptr && rt->ops->graph_prepare(rt, args);
+}
+
+static inline void rt_graph_abort() {
+    PTO2Runtime *rt = current_runtime();
+    if (rt->ops->graph_abort != nullptr) rt->ops->graph_abort(rt);
+}
+
+// Finish the recording pass and publish its Definition. The calling thread
+// finalizes the already-submitted outer Graph shells in rt_graph_commit.
 static inline bool rt_graph_end() {
     PTO2Runtime *rt = current_runtime();
     if (rt->ops->is_fatal(rt) || rt->ops->graph_end == nullptr) {
@@ -235,11 +416,11 @@ static inline bool rt_graph_end() {
 }
 
 static inline void rt_graph_commit() {
+    GraphAsyncRecordingState &async = rt_graph_async_recording();
+    async.wait();
+
     PTO2Runtime *rt = current_runtime();
-    if (rt->ops->is_fatal(rt) || rt->ops->graph_commit == nullptr) {
-        return;
-    }
-    rt->ops->graph_commit(rt);
+    if (!rt->ops->is_fatal(rt) && rt->ops->graph_commit != nullptr) rt->ops->graph_commit(rt);
 }
 
 static inline void rt_scope_begin(PTO2ScopeMode mode = PTO2ScopeMode::AUTO) {
@@ -260,6 +441,7 @@ static inline void rt_scope_end() {
 }
 
 static inline void rt_orchestration_done() {
+    rt_graph_commit();
     PTO2Runtime *rt = current_runtime();
     rt->ops->orchestration_done(rt);
 }
@@ -392,6 +574,12 @@ static inline uint64_t rt_graph_function_id(Function function) {
     return function_id;
 }
 
+// `invoke` is copied into the recording job and runs on the recording worker,
+// which outlives this call: the caller returns as soon as the outer shell is
+// submitted, and the body runs until the next rt_graph_commit(). So `invoke` must
+// own everything it needs by value. Capturing caller-frame storage by reference —
+// including the boundary `args` — is a use-after-free; the recorded body receives
+// its own boundary copy as a parameter for exactly that reason.
 template <typename Invoke>
 static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const CoreTaskArgs &args, Invoke invoke) {
     debug_assert(!args.has_error && "Graph boundary CoreTaskArgs construction failed");
@@ -408,31 +596,74 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const C
         );
     }
     if (!rt_graph_args_cacheable(args)) {
-        invoke();
         rt_graph_commit();
+        invoke(args);
         return GraphSubmitResult{};
     }
     GraphScopeResult result = rt_graph_begin(graph_key, args);
     if (result.recording) {
-        // First invocation: record the sub-DAG off the ring, then emit one outer
-        // GRAPH task. If the recording hit an unsupported construct, fall back and
-        // run the body on the ordinary path so its work is still submitted.
-        invoke();
-        if (!rt_graph_end()) invoke();
+        GraphAsyncRecordingState &async = rt_graph_async_recording();
+        std::shared_ptr<GraphOwnedArgs> owned_args;
+        try {
+            owned_args = std::make_shared<GraphOwnedArgs>(args);
+        } catch (...) {
+            try {
+                if (!rt_graph_prepare(args)) {
+                    rt_graph_abort();
+                    rt_graph_commit();
+                    return result;
+                }
+                invoke(args);
+                (void)rt_graph_end();
+            } catch (...) {
+                rt_graph_abort();
+                throw;
+            }
+            rt_graph_commit();
+            return result;
+        }
+        auto record = [owned_args, invoke]() mutable {
+            try {
+                if (!rt_graph_prepare(owned_args->args())) {
+                    rt_graph_abort();
+                    return;
+                }
+                invoke(owned_args->args());
+                (void)rt_graph_end();
+            } catch (...) {
+                rt_graph_abort();
+            }
+        };
+        if (!async.start(std::move(record))) {
+            try {
+                if (!rt_graph_prepare(owned_args->args())) {
+                    rt_graph_abort();
+                    rt_graph_commit();
+                    return result;
+                }
+                invoke(owned_args->args());
+                (void)rt_graph_end();
+            } catch (...) {
+                rt_graph_abort();
+                throw;
+            }
+            rt_graph_commit();
+        }
     } else if (result.execute_block) {
         // Un-cacheable at begin, or the Definition cache is full: ordinary path.
-        invoke();
+        rt_graph_commit();
+        if (!current_runtime()->ops->is_fatal(current_runtime())) invoke(args);
     }
-    // Cache hit: execute_block and recording are both false; the body is skipped.
-    rt_graph_commit();
+    // A cache hit or an in-flight hit skips the body. In-flight Graph tasks are
+    // finalized before the next non-Graph operation or orchestration completion.
     return result;
 }
 
 static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction function, const CoreTaskArgs &args) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
-    return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [&]() {
-        function(args);
+    return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [function](const CoreTaskArgs &record_args) {
+        function(record_args);
     });
 }
 
@@ -449,9 +680,17 @@ static inline GraphSubmitResult rt_submit_graph(
 ) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
-    return rt_submit_graph_impl(rt_graph_make_key(graph_id, config...), args, [&]() {
-        function(args, config...);
-    });
+    auto configs = std::make_tuple(config...);
+    return rt_submit_graph_impl(
+        rt_graph_make_key(graph_id, config...), args, [function, configs](const CoreTaskArgs &record_args) {
+            std::apply(
+                [&](auto... values) {
+                    function(record_args, values...);
+                },
+                configs
+            );
+        }
+    );
 }
 
 template <typename... Config>

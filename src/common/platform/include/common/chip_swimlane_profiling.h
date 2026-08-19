@@ -614,7 +614,7 @@ struct ChipSwimlaneAicpuOrchPhaseRecord {
 static_assert(sizeof(ChipSwimlaneAicpuOrchPhaseRecord) == 32, "ChipSwimlaneAicpuOrchPhaseRecord layout drift");
 
 /**
- * Host phase record (32 bytes).
+ * Host phase record (40 bytes).
  *
  * One record per timed host operation on host_build_graph's prepare path —
  * both the bind stage's segments and the host orchestrator's submit-level
@@ -630,10 +630,12 @@ struct HostPhaseRecord {
     uint64_t start_ns;
     uint64_t end_ns;
     uint64_t payload;
-    uint32_t kind;   // HostPhaseKind
-    uint32_t index;  // submit_idx for orchestrator operations, 0 for bind segments
+    uint32_t kind;       // HostPhaseKind
+    uint32_t index;      // submit_idx for orchestrator operations, 0 for bind segments
+    uint32_t thread_id;  // OS tid when available, stable producer id otherwise
+    uint32_t _pad;
 };
-static_assert(sizeof(HostPhaseRecord) == 32, "HostPhaseRecord layout drift");
+static_assert(sizeof(HostPhaseRecord) == 40, "HostPhaseRecord layout drift");
 
 /**
  * What one HostPhaseRecord measured.
@@ -747,8 +749,9 @@ using ChipSwimlaneAicpuSchedPhasePool = ChipSwimlaneAicpuTaskPool;
 using ChipSwimlaneAicpuOrchPhasePool = ChipSwimlaneAicpuTaskPool;
 
 // The host phase pool is the same head + free_queue plumbing over host DDR
-// instead of device shared memory: one producer rotates through a fixed set of
-// fixed-size buffers, and a reader walks them in rotation order. Its buffers are
+// instead of device shared memory: producers are serialized by the host trace
+// sink while rotating through a fixed set of fixed-size buffers, and a reader
+// walks them in rotation order. Its buffers are
 // smaller and fewer than a device thread's because its producer emits hundreds
 // of records per pass rather than tens of thousands (see
 // PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER).

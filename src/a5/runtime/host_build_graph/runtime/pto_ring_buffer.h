@@ -42,6 +42,14 @@
 #include "pto_shared_memory.h"
 #include "common/unified_log.h"
 
+// Base of the address range Graph recording hands to an internal node's packed
+// outputs. Recorded addresses are never dereferenced: they exist so
+// graph_classify_tensor can tell an internal producer's output from a boundary
+// tensor by address-range containment alone, and the Definition stores them as
+// offsets. That classification is only sound while the range is disjoint from
+// every real heap address, which PTO2TaskAllocator::init() asserts.
+inline constexpr uint64_t GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63;
+
 // Dep pool spin limit - if exceeded, dep pool capacity too small for workload
 #define PTO2_DEP_POOL_SPIN_LIMIT 100000
 
@@ -92,6 +100,14 @@ public:
         error_code_ptr_ = error_code_ptr;
         local_task_id_ = 0;
         heap_top_ = 0;
+        // Every address this allocator hands out lies in
+        // [heap_base_, heap_base_ + heap_size_), so checking the range once here
+        // keeps it disjoint from GRAPH_RECORD_VIRTUAL_BASE for every allocation.
+        const uint64_t heap_base_addr = reinterpret_cast<uint64_t>(heap_base);
+        always_assert(
+            heap_base_addr < GRAPH_RECORD_VIRTUAL_BASE && heap_size <= GRAPH_RECORD_VIRTUAL_BASE - heap_base_addr &&
+            "Graph heap overlaps the Graph-recording virtual address range"
+        );
     }
 
     /**
@@ -129,6 +145,20 @@ public:
         return {task_id, task_id & window_mask_, heap_ptr, static_cast<char *>(heap_ptr) + aligned_size};
     }
 
+    bool reserve_deferred_heap(int32_t output_size, void **packed_base, void **packed_end) {
+        if (output_size < 0 || packed_base == nullptr || packed_end == nullptr) return false;
+        if (error_code_ptr_ != nullptr && error_code_ptr_->load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
+            return false;
+        }
+        const uint64_t aligned_size =
+            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
+        void *base = try_bump_heap(aligned_size);
+        if (base == nullptr) return false;
+        *packed_base = base;
+        *packed_end = static_cast<char *>(base) + aligned_size;
+        return true;
+    }
+
     // =========================================================================
     // State queries
     // =========================================================================
@@ -146,28 +176,6 @@ public:
     uint64_t heap_top() const { return heap_top_; }
     uint64_t heap_capacity() const { return heap_size_; }
     uint64_t heap_used_bytes() const { return heap_top_; }
-
-    // Reserve output-buffer bytes without claiming a task-window slot. Graph
-    // recording gives each internal node a disjoint, valid heap address so
-    // tensor-source classification works, then releases the whole range with
-    // restore_heap_top() once the consolidated outer GRAPH task reclaims it as a
-    // single block. On exhaustion it returns nullptr and leaves allocator state
-    // unchanged; graph_record_submit_node treats that as an unsupported
-    // recording and falls back to the ordinary path. A zero size returns the
-    // current position.
-    void *reserve_heap_scratch(int32_t output_size) {
-        uint64_t aligned_size =
-            output_size > 0 ? PTO2_ALIGN_UP(static_cast<uint64_t>(output_size), PTO2_ALIGN_SIZE) : 0;
-        uint64_t top = heap_top_;
-        if (aligned_size == 0) return static_cast<char *>(heap_base_) + top;
-        if (heap_size_ - top < aligned_size) return nullptr;
-        heap_top_ = top + aligned_size;
-        return static_cast<char *>(heap_base_) + top;
-    }
-
-    // Roll the heap allocation pointer back to a value previously returned by
-    // heap_top().
-    void restore_heap_top(uint64_t top) { heap_top_ = top; }
 
 private:
     // --- Task Ring ---

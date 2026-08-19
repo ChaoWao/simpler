@@ -281,9 +281,15 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   variable. One `bind phase=<p> start_ns=<n> dur_ns=<n> <attrs>` line per
   segment, plus one `host-orch phase=<p> total_ns=<n> count=<k> detail_sum=<n>
   dropped=<n>` line per orchestrator kind. They come from per-kind counters, not
-  from the record pool, so a total stays exact even if the pool was never armed or
-  overflowed — that is what makes this the channel for steady state, where
-  `--rounds > 1` switches every artifact collector off.
+  from the record pool. The counters use lock-free atomic additions across the
+  main and recording-worker lanes, with every phase isolated on its own cache
+  line so concurrent `graph_submit` and `record_node` updates do not
+  false-share. The per-event pool is armed when the level-4 artifact is being
+  written (a producer that wants records *and* an output prefix) or whenever the
+  chip swimlane is at `ORCH_PHASES`; a steady-state run satisfies neither, so it
+  pays no pool append and no artifact lock at all. A total stays exact even if
+  the pool was never armed or overflowed — that is what makes this the channel
+  for steady state, where `--rounds > 1` switches every artifact collector off.
 
   Every line is written at the end of the pass, keeping the log write off the path
   being measured. The line therefore carries its own `start_ns`; the log prefix
@@ -293,8 +299,11 @@ python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 
   has one. One JSON Lines object per pass carrying `pid` / `inv` — the identity
   the `[STRACE]` tree groups by — and one record per operation. This is the
   channel to read for a distribution or a per-event timeline; the summed lines
-  cannot express either. `strace_timing.py --swimlane --host-phase-records <path>`
-  draws each record inside the matching `chip.run.bind`.
+  cannot express either. Every record carries its producer Linux tid.
+  `strace_timing.py --swimlane --host-phase-records <path>` draws each record
+  inside the matching `chip.run.bind`; `record_node` and `build_definition`
+  appear on the `graph record worker` lane, while outer `graph_submit` events
+  appear on the `graph submit main` lane.
 
 - **The host lanes of `chip_swimlane_records.json`**, at level 4 only, joined to
   the device timeline through the clock anchors (see `host/clock_correlation.h`).
@@ -323,12 +332,13 @@ not belong in it.
 
 ### Cost and capacity
 
-A record costs two clock reads, a store and two counter updates — roughly 47 ns
-on an aarch64 host, for ~337 operations in a 40-layer decode pass. Cheap, but it
-sits on the path being measured, which is why neither switch is on by default.
+A record costs two clock reads and a store. Its per-kind counter update is a
+lock-free atomic add; only the per-event pool append is serialized, and only
+when the pool is armed. It sits on the path being measured, which is why neither
+switch is on by default.
 
 The pool holds `PLATFORM_HOST_PHASE_BUFFERS × PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER`
-records (5 × 1024 = 5120, 160 KB) in fixed-size buffers rotated in index order,
+records (5 × 1024 = 5120, 200 KiB) in fixed-size buffers rotated in index order,
 the same shape as the device sched/orch pools with host DDR as its backing.
 Beyond that, records are dropped from the tail and counted: the per-event views
 truncate, the per-kind totals stay exact, and `dropped=` on every `host-orch` line

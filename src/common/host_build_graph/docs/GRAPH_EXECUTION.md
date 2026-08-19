@@ -4,18 +4,23 @@ Graph Execution is available only in the `host_build_graph` runtime. A Graph is
 a composite incore task: it is submitted and completed once like an AIC, AIV,
 MIX, or SPMD task, but contains a recorded task DAG.
 
-Every invocation places exactly one `GRAPH` task in the host task window. The
-first invocation records the DAG off the ring — its internal submissions build
-host-only node metadata and reserve scratch output buffers instead of consuming
-task-window slots — then emits the outer `GRAPH` task from the freshly built
-Definition. Later invocations reuse the cached Definition and emit the same one
-`GRAPH` task directly. In both cases the device Scheduler expands the saved
-topology and dispatches the internal nodes; the Host Orchestrator never submits
-those nodes as ring tasks.
+Every invocation places exactly one `GRAPH` task in the host task window. On a
+first miss, the caller immediately submits an outer task shell keyed by Graph
+identity while a worker records the DAG off the ring. Internal submissions
+build host-only node metadata and assign output addresses from a private bit-63
+virtual range instead of consuming task-window slots or heap. Later calls for
+the same in-flight identity submit more shells without waiting for recording.
+Before leaving that consecutive Graph batch, the caller joins the worker and
+fills every shell's heap range and Definition content hash. Cached invocations
+submit the same one `GRAPH` task directly. In both cases the device Scheduler
+expands the saved topology and dispatches the internal nodes; the Host
+Orchestrator never submits those nodes as ring tasks.
 
-A recording that hits an unsupported construct is discarded and the body re-runs
-on the ordinary task-submit path so its work is still submitted; the internal
-nodes then occupy the ring only for that one fallback invocation.
+Boundary contracts are checked before an in-flight shell is accepted. Once a
+shell has entered the task/dependency sequence, an unsupported construct found
+by asynchronous recording is terminal for that orchestration; it cannot be
+replayed as ordinary tasks without rolling back already assigned task IDs and
+TensorMap producers.
 
 ## API
 
@@ -183,11 +188,13 @@ void decode_three_layers(
 }
 ```
 
-All three layers submit one Graph task each: the first records the sub-DAG off
-the ring and emits its Graph task, layers two and three replay the cached
-Definition when their ChipTensor metadata and boundary scalar count match. Each
-invocation patches the current layer's `token_position`; it is a dynamic
-boundary scalar refreshed on every submission and is not part of the Graph key.
+All three layers submit one Graph task each. The first starts background
+recording, while layers two and three immediately submit outer task shells for
+the same in-flight identity. The first following non-Graph operation (or
+orchestration completion) joins recording and finalizes all three shells with
+the new Definition. Each invocation patches the current layer's
+`token_position`; it is a dynamic boundary scalar refreshed on every submission
+and is not part of the Graph key.
 
 ## Definition
 
@@ -195,11 +202,65 @@ Recording uses host-only C++ state:
 
 - `std::vector` for nodes, tensors, scalars, fanins, and pending uploads;
 - `std::unordered_map` for the per-run Definition cache;
-- `std::unique_ptr` for the active recording.
+- `std::unique_ptr` for the active recording, guarded by a mutex and completion
+  condition while the recording worker publishes the Definition.
 
 The cache stores at most 16 Definitions and allocates each entry to its actual
 serialized size. No fixed maximum-size recording array is copied on a cache
 hit.
+
+Recorded output addresses start at `GRAPH_RECORD_VIRTUAL_BASE = 1ULL << 63`.
+They exist only to classify `OWN_OUTPUT` and `INTERNAL` Tensor sources and are
+converted to offsets in the Definition; they are never dereferenced or placed
+on the wire. Classification is by address-range containment alone, so it is only
+sound while no real heap address can fall in that range:
+`PTO2TaskAllocator::init()` asserts the whole configured heap lies below
+`GRAPH_RECORD_VIRTUAL_BASE`, which makes an overlapping device GM heap a loud
+failure at setup instead of a silently misclassified Tensor source. Recording
+therefore leaves the shared task allocator unchanged.
+
+### First-miss host threading
+
+`graph_begin` computes the Graph identity before the body is recorded. On a
+cache miss, the calling thread allocates a zero-heap outer task shell, records
+its boundary dependency edges, and returns. A worker receives a deep copy of
+the boundary arguments, records the internal nodes in the private virtual
+address range, and builds and hashes the Definition. The first call waits only
+until that private job has been installed in the worker queue; it does not wait
+for the operating system to schedule the worker or for `graph_prepare` to bind
+the private recording state. The hash-keyed `RECORDING` entry and zero-heap
+outer shell already exist before the job is enqueued, so later same-identity
+submissions can safely proceed immediately. The worker remains parked on a
+condition variable for the lifetime of the loaded orchestration SO and is
+reused by later runs, so only its first miss pays thread creation. Unloading the
+SO stops and joins the idle worker before its code is unmapped.
+
+The queue handoff publishes the already-created recording to `graph_prepare`.
+Prepare therefore does not reacquire the Definition-state mutex: until the
+worker ends or aborts, later same-identity submissions only read the immutable
+boundary signature under that mutex. Avoiding the redundant acquire prevents
+the short main-thread submit loop from starving the worker before it can enter
+its private recording state.
+
+Calls for the same identity while recording is in flight follow the same shell
+submission path on the calling thread. Their task IDs and TensorMap producers
+therefore enter the ordinary program-order sequence while the worker is still
+executing `record_node` and `build_definition`.
+
+`rt_graph_commit` is a barrier before a non-Graph operation or orchestration
+completion. It waits for the current worker job, reserves each shell's real heap
+block in task order using the Definition's `required_heap`, patches the task
+descriptor and Definition content hash, and then permits ordinary submission to continue. A
+scope transition is deliberately not a barrier: the main thread has already
+submitted the outer Graph shell into that scope, while scopes executed by the
+recording worker are no-ops on the real scope stack. This lets consecutive
+Graph calls in separate outer scopes continue submitting while recording is in
+flight. No unrelated heap allocation can appear between a deferred shell and
+this finalization. Cache-hit submissions after the barrier already know
+`required_heap` and use the ordinary immediate path.
+
+Host phase records therefore show `graph_submit` on the main lane overlapping
+`record_node` and `build_definition` on the recording-worker lane.
 
 At `graph_end`, recording is compacted into one contiguous, pointer-free POD
 Definition. It contains:
@@ -333,21 +394,30 @@ error instead of leaving an already-submitted outer Graph unable to complete.
 
 ## Current unsupported cases
 
-These cases assert in debug builds and execute through the ordinary path in a
-release build:
+Conditions detected before an outer shell is accepted use the ordinary path:
 
 - an empty Graph boundary;
 - variable ChipTensor shape or metadata;
 - changed boundary aliasing;
 - runtime-allocated boundary outputs;
+- more than 32 boundary Tensors;
+- more than 16 Definitions;
+- insufficient task-window or known cache-hit heap capacity.
+
+The following constructs are discovered only while the worker records the
+first Definition. Because its outer shell is already in the task/dependency
+sequence, they assert in debug builds and fail the orchestration in release
+builds:
+
 - nested Graph recording;
 - dispatch predicates;
 - cross-boundary explicit dependencies that are not represented by a boundary
   ChipTensor's creator;
 - an unclassifiable internal ChipTensor source;
 - a boundary-derived scalar accessed through mutable `scalar()`;
-- more than 16 Definitions, 1024 internal nodes, or 32 boundary Tensors;
-- insufficient task-window or heap capacity detected before outer submission.
+- runtime allocation inside the Graph body;
+- more than 1024 internal nodes;
+- insufficient heap capacity while deferred shells are finalized.
 
 An AICPU execution-pool or materialization failure happens after the outer
 Graph has already been submitted. It therefore latches a Scheduler fatal error

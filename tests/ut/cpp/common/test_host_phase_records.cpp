@@ -17,10 +17,12 @@ using simpler::dfx::HostPhaseRecordStore;
 
 namespace {
 
-void record_n(HostPhaseRecordPool *pool, HostPhaseKind kind, uint32_t n, uint64_t first_start = 0) {
+void record_n(
+    HostPhaseRecordPool *pool, HostPhaseKind kind, uint32_t n, uint64_t first_start = 0, uint32_t thread_id = 0
+) {
     for (uint32_t i = 0; i < n; ++i) {
         const uint64_t start = first_start + i;
-        host_phase_pool_append(pool, kind, start, start + 1, i, i);
+        host_phase_pool_append(pool, kind, start, start + 1, i, i, thread_id);
     }
 }
 
@@ -114,6 +116,21 @@ TEST(HostPhaseRecords, ReArmClearsThePreviousPass) {
     record_n(pool, HostPhaseKind::OrchGraphSubmit, 3);
     store.finish(3, /*invocation_id=*/9);
     EXPECT_EQ(store.records().size(), 3u);
+}
+
+TEST(HostPhaseRecords, ProducerThreadIdSurvivesTheArtifactStore) {
+    HostPhaseRecordStore store;
+    HostPhaseRecordPool *pool = store.arm(true);
+    ASSERT_NE(pool, nullptr);
+
+    record_n(pool, HostPhaseKind::OrchRecordNode, 1, /*first_start=*/10, /*thread_id=*/101);
+    record_n(pool, HostPhaseKind::OrchGraphSubmit, 1, /*first_start=*/20, /*thread_id=*/202);
+    store.finish(1, /*invocation_id=*/9);
+
+    const auto records = store.records();
+    ASSERT_EQ(records.size(), 2u);
+    EXPECT_EQ(records[0].thread_id, 101u);
+    EXPECT_EQ(records[1].thread_id, 202u);
 }
 
 TEST(HostPhaseRecords, SubmitProjectionKeepsOnlyTaskSubmittingKinds) {

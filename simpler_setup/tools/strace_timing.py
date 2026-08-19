@@ -791,6 +791,12 @@ def _lane_name(entries):
     so an external producer is free to use it for its own meaning; letting one
     reach the loop below would name its lane after one of our roles.
     """
+    phase_threads = {attrs.get("host_phase_thread") for _, attrs in entries}
+    if "graph_record_worker" in phase_threads:
+        return "graph record worker"
+    if "graph_submit_main" in phase_threads:
+        return "graph submit main"
+
     roles = set()
     worker_ids = set()
     external = [(span, attrs) for span, attrs in entries if span_family(span.name) == "external"]
@@ -958,24 +964,40 @@ def host_record_spans(spans, passes):
                 phase = str(record["phase"])
             except (KeyError, TypeError, ValueError):
                 continue
+            raw_tid = record.get("tid", parent.tid)
+            try:
+                record_tid = int(raw_tid)
+            except (TypeError, ValueError):
+                record_tid = parent.tid
+            if record_tid <= 0:
+                record_tid = parent.tid
+            is_record_worker = "tid" in record and record_tid != parent.tid
             if phase in _BIND_PHASE_NAMES:
                 name = f"{_PREPARE_SPAN}.{phase}"
                 depth = parent.depth + 1
+                record_tid = parent.tid
+                phase_thread = "host_main"
                 covered_keys.add(key)
             else:
                 name = f"{_PREPARE_SPAN}.host_orch.{phase}"
                 depth = parent.depth + 2
+                if phase in {"record_node", "build_definition"} and is_record_worker:
+                    phase_thread = "graph_record_worker"
+                elif phase == "graph_submit":
+                    phase_thread = "graph_submit_main"
+                else:
+                    phase_thread = "host_main"
             out.append(
                 Span(
                     pid=parent.pid,
-                    tid=parent.tid,
+                    tid=record_tid,
                     inv=parent.inv,
                     hid=parent.hid,
                     depth=depth,
                     name=name,
                     ts=start,
                     dur=max(0, end - start),
-                    attrs=f"detail={record.get('detail', 0)} src=host_phase_records",
+                    attrs=(f"detail={record.get('detail', 0)} src=host_phase_records host_phase_thread={phase_thread}"),
                 )
             )
     return out, dropped_passes, frozenset(covered_keys)
