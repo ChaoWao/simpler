@@ -40,6 +40,7 @@ class _CompileBudget:
 @dataclass
 class _CompilePoolState:
     budget: _CompileBudget
+    override_active: bool = False
 
 
 _budget_guard = threading.Lock()
@@ -54,17 +55,21 @@ def current_compile_workers() -> int:
 
 @contextlib.contextmanager
 def compile_worker_budget(max_workers: int):
-    """Temporarily set the process-wide compiler budget for a complete compile batch."""
+    """Temporarily set the compiler budget; only one process-wide override may be active."""
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
     with _budget_guard:
+        if _state.override_active:
+            raise RuntimeError("only one process-wide compile worker budget override may be active")
         previous = _state.budget
         _state.budget = _CompileBudget(max_workers, threading.BoundedSemaphore(max_workers))
+        _state.override_active = True
     try:
         yield
     finally:
         with _budget_guard:
             _state.budget = previous
+            _state.override_active = False
 
 
 @contextlib.contextmanager

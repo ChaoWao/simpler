@@ -91,6 +91,8 @@ class TestDepGenChain(SceneTestCase):
             "config": {"aicpu_thread_num": 2},
             "params": {"n": 64},
         },
+        # Keep one representative boundary in the default Sim sweep; the
+        # dedicated DFX step reruns it with dep-gen capture/replay enabled.
         {
             "name": "n_65_single_overflow",
             "platforms": ["a2a3sim", "a2a3"],

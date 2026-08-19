@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event, Lock
+from threading import Barrier, Event, Lock, Thread
+
+import pytest
 
 from simpler_setup import compile_pool
 
@@ -74,3 +76,29 @@ def test_compile_slots_bound_nested_thread_pools():
                 future.result()
 
     assert peak == 2
+
+
+def test_compile_worker_budget_rejects_nested_overrides():
+    with compile_pool.compile_worker_budget(2), pytest.raises(RuntimeError, match="only one process-wide"):
+        with compile_pool.compile_worker_budget(1):
+            pass
+
+
+def test_compile_worker_budget_rejects_concurrent_overrides():
+    entered = Event()
+    release = Event()
+
+    def hold_override():
+        with compile_pool.compile_worker_budget(2):
+            entered.set()
+            assert release.wait(timeout=2)
+
+    worker = Thread(target=hold_override)
+    worker.start()
+    assert entered.wait(timeout=2)
+    with pytest.raises(RuntimeError, match="only one process-wide"):
+        with compile_pool.compile_worker_budget(1):
+            pass
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()

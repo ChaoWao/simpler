@@ -121,11 +121,14 @@ same DFX smoke steps used by Per-PR run once in each Daily platform job, and
 the A2/A3 `network1` corpus runs through the existing two-machine workflow. The
 main Per-PR scene-test steps keep the default `--manual exclude`, so moving an
 ordinary case to Daily does not require a second workflow exclusion list.
-Dedicated DFX steps instead use `include` for the normal Per-PR and Daily modes
-because they own the full corpus under their target paths; a `manual_mode` of
-`only` remains `only` in those steps. Marking a DFX case manual therefore
-removes its duplicate execution from the main step without removing its
-dedicated Per-PR coverage.
+The dedicated dep-gen, chip-swimlane, PMU, and args-dump steps instead use
+`include` for the normal Per-PR and Daily modes because they own the full
+corpus under their target paths; a `manual_mode` of `only` remains `only` in
+those steps. Marking a case under one of those paths manual therefore removes
+its duplicate main-step execution without removing its dedicated Per-PR
+coverage. Scope-stats has no dedicated CI smoke: its ordinary scene test stays
+in the main sweep, and artifact validation runs only when
+`--enable-scope-stats` is supplied explicitly.
 
 Use `"manual": True` on an individual `SceneTestCase.CASES` entry and
 `@pytest.mark.manual` on a standalone pytest test. The reusable scene-test
@@ -203,7 +206,9 @@ selection is not a cached CMake variable, so a later ordinary package install
 in the same worktree still uses the default `ALL` target and auto-detects every
 available platform. The network1 stage passes the same target to its peer.
 Pre-commit selects its build from the existing files in the merge-base diff,
-the same file set its hooks inspect. A clang-tidy-eligible C/C++ change builds
+the same file set its hooks inspect. `tests/lint/clang_tidy_paths.py` supplies
+the shared path policy for the clang-tidy hook and this build selection. A
+clang-tidy-eligible C/C++ change builds
 the combined `build_package_sim` target so clang-tidy has both simulator
 compile databases. Files excluded by the clang-tidy hook — vendored
 `3rdparty/`, Python bindings, kernels, and AICore sources — do not trigger that
@@ -347,7 +352,7 @@ partitioned by target architecture, runner OS/architecture, and PTO-ISA pin.
 The callable key covers the contents of its orchestration, incore, and
 transitively included sources, the compiler identities and effective fixed
 flags, a digest of the modules that decide artifact bytes
-(`kernel_compiler.py`, `toolchain.py`, `elf_parser.py`), the binding's
+(`kernel_compiler.py`, `toolchain.py`, `compile_paths.py`, `elf_parser.py`), the binding's
 serialized-callable ABI, a manual schema constant, and the owning test class's
 qualified name. Each incore key covers the source closure, stable
 compiler-visible paths, and the compilation inputs that affect that kernel
@@ -357,6 +362,11 @@ runs on a different runner; paths outside the checkout remain absolute. The key
 excludes orchestration, callable ABI, `func_id`,
 signature, and owning test class, so callables that reference the same kernel
 path can share its artifact.
+
+This cache complements rather than replaces `ccache`: the packaging workflow
+uses `ccache` for supported CMake compiler invocations, while scene-test cache
+entries also retain serialized callables and final incore bytes, including the
+CCEC/linker and ELF-section processing used by onboard builds.
 
 Entries are content-addressed and therefore never overwritten, so a run prunes
 entries whose last use is more than 14 days old before it exits. Without that,

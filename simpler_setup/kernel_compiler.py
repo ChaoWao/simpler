@@ -326,9 +326,6 @@ class KernelCompiler:
         """Describe every compiler and fixed flag that affects kernel artifacts."""
         orchestration = self._orchestration_toolchain(runtime_name)
         incore_tokens = [self.incore_compile_cache_token(core_type) for core_type in sorted(set(core_types))]
-        incore_identity = incore_tokens[0]["identity"] if incore_tokens else None
-        incore_linker = incore_tokens[0]["linker"] if incore_tokens else None
-        incore_entries = [{"core_type": token["core_type"], "flags": token["flags"]} for token in incore_tokens]
         return {
             "schema": _COMPILE_CACHE_SCHEMA,
             "logic": _artifact_logic_token(),
@@ -338,9 +335,7 @@ class KernelCompiler:
                 "link_flags": self._orchestration_link_flags(orchestration),
             },
             "incore": {
-                "identity": incore_identity,
-                "variants": incore_entries,
-                "linker": incore_linker,
+                "variants": incore_tokens,
             },
         }
 

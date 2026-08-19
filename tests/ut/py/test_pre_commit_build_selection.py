@@ -7,15 +7,41 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import importlib.util
 import os
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).parents[3]
 WORKFLOW = REPO_ROOT / ".github/workflows/_pre-commit.yml"
+PATH_HELPER = REPO_ROOT / "tests/lint/clang_tidy_paths.py"
+CLANG_TIDY = REPO_ROOT / "tests/lint/clang_tidy.py"
+PRE_COMMIT_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
+
+
+def _load_path_helper():
+    spec = importlib.util.spec_from_file_location("clang_tidy_paths", PATH_HELPER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PATH_HELPER_MODULE = _load_path_helper()
+
+
+def _load_clang_tidy_module(monkeypatch):
+    monkeypatch.syspath_prepend(str(CLANG_TIDY.parent))
+    spec = importlib.util.spec_from_file_location("clang_tidy_under_test", CLANG_TIDY)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _selection_script() -> str:
@@ -44,7 +70,14 @@ def _commit(repo: Path, relative_path: str, contents: str) -> str:
 
 def _run_selection(repo: Path, base: str, head: str, output: Path) -> dict[str, str]:
     env = os.environ.copy()
-    env.update({"BASE_SHA": base, "HEAD_SHA": head, "GITHUB_OUTPUT": str(output)})
+    env.update(
+        {
+            "BASE_SHA": base,
+            "HEAD_SHA": head,
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_WORKSPACE": str(REPO_ROOT),
+        }
+    )
     result = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", _selection_script()],
         cwd=repo,
@@ -60,12 +93,66 @@ def _run_selection(repo: Path, base: str, head: str, output: Path) -> dict[str, 
     return dict(line.split("=", 1) for line in output.read_text().splitlines())
 
 
-def test_selection_script_uses_macos_bash_compatible_case_matching() -> None:
+def test_selection_script_delegates_path_matching_to_the_shared_helper() -> None:
     script = _selection_script()
 
-    assert "${path,,}" not in script
-    assert "shopt -s nocasematch" in script
-    assert "shopt -u nocasematch" in script
+    assert 'python "$GITHUB_WORKSPACE/tests/lint/clang_tidy_paths.py" --needs-build --null' in script
+    assert 'case "$path"' not in script
+
+
+def test_clang_tidy_hook_delegates_path_matching_to_the_shared_helper() -> None:
+    config = yaml.safe_load(PRE_COMMIT_CONFIG.read_text())
+    clang_tidy_hook = next(
+        hook
+        for repository in config["repos"]
+        if repository["repo"] == "local"
+        for hook in repository["hooks"]
+        if hook["id"] == "clang-tidy"
+    )
+
+    assert "types_or" not in clang_tidy_hook
+    assert "exclude" not in clang_tidy_hook
+    assert "from clang_tidy_paths import should_run_clang_tidy" in CLANG_TIDY.read_text()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("src/common/api.cpp", True),
+        ("3rdparty/dependency.cpp", False),
+        ("python/bindings/module.cpp", False),
+        ("examples/a2a3/demo/kernels/aic/kernel.cpp", False),
+        ("src/a2a3/runtime/demo/aicore/kernel.cpp", False),
+        (str(REPO_ROOT / "python/bindings/module.cpp"), False),
+        (str(REPO_ROOT / "examples/a2a3/demo/kernels/aic/kernel.cpp"), False),
+        (str(REPO_ROOT / "src/common/api.cpp"), True),
+        ("Python/Bindings/module.cpp", True),
+        ("src/a2a3/runtime/demo/Kernels/kernel.cpp", True),
+    ],
+)
+def test_clang_tidy_path_selection_has_one_case_sensitive_contract(path: str, expected: bool) -> None:
+    assert PATH_HELPER_MODULE.should_run_clang_tidy(path) is expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "3rdparty/dependency.cpp",
+        "python/bindings/module.cpp",
+        "examples/a2a3/demo/kernels/aic/kernel.cpp",
+        "src/a2a3/runtime/demo/aicore/kernel.cpp",
+    ],
+)
+def test_clang_tidy_excluded_paths_exit_before_build_or_compile_database(monkeypatch, path: str) -> None:
+    module = _load_clang_tidy_module(monkeypatch)
+
+    def unexpected_build() -> None:
+        pytest.fail("excluded path reached clang-tidy build/cache handling")
+
+    monkeypatch.setattr(module, "_ensure_sim_cache", unexpected_build)
+    monkeypatch.setattr(sys, "argv", [str(CLANG_TIDY), path])
+
+    assert module.main() == 0
 
 
 def test_self_cpu_uses_the_project_venv_for_lint() -> None:
@@ -108,6 +195,9 @@ def test_only_selected_build_paths_install_the_project() -> None:
         (["docs/readme.md"], {"needs_build": "false"}),
         ([".github/actions/setup-gcc-15/ubuntu-toolchain-r-test.asc"], {"needs_build": "false"}),
         ([".pre-commit-config.yaml"], {"needs_build": "true"}),
+        ([".clang-tidy"], {"needs_build": "false"}),
+        ([".clang-format"], {"needs_build": "false"}),
+        ([".gitignore"], {"needs_build": "false"}),
         (["python/simpler/api.py"], {"needs_build": "false"}),
         (["python/simpler/api.PYI"], {"needs_build": "false"}),
         (["tools/server.wsgi"], {"needs_build": "false"}),

@@ -1207,8 +1207,6 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
                 include_dirs,
             )
         )
-    if len(resolved_extra_dirs) != len(incores) or len(incore_artifact_keys) != len(incores):
-        raise AssertionError("per-incore cache inputs must match the incore specification")
     compiler_token = kc.compile_cache_token(runtime, [k["core_type"] for k in incores])
     artifact_key = compile_artifact_key(
         {
@@ -1231,7 +1229,7 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
                     "signature": k.get("signature", []),
                     "artifact_key": incore_artifact_key,
                 }
-                for k, incore_artifact_key in zip(incores, incore_artifact_keys)
+                for k, incore_artifact_key in zip(incores, incore_artifact_keys, strict=True)
             ],
         },
         orchestration_units,
@@ -1251,6 +1249,7 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
                         pto_isa_root=pto_isa_root,
                         extra_include_dirs=inc_dirs + extra,
                     )
+                # The cached representation is determined only by platform, which is in the artifact key.
                 return binary if is_sim else extract_text_section(binary)
 
             return get_or_compile_incore(incore_artifact_key, compile_missing_incore)
@@ -1265,7 +1264,9 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
                     extra,
                     incore_artifact_key,
                 )
-                for k, extra, incore_artifact_key in zip(incores, resolved_extra_dirs, incore_artifact_keys)
+                for k, extra, incore_artifact_key in zip(
+                    incores, resolved_extra_dirs, incore_artifact_keys, strict=True
+                )
             ]
             orch_binary = orch_future.result()
             incores_binary = [future.result() for future in incore_futures]
@@ -1719,6 +1720,8 @@ class SceneTestCase:
         matched = self._matching_cases(st_platform, request)
         manual_mode = request.config.getoption("--manual", default="exclude")
         if not matched:
+            # Skip before building and before control returns to subclass
+            # overrides: no case ran, so their post-run validators must not run.
             import pytest  # noqa: PLC0415
 
             pytest.skip(f"No cases matched {type(self).__name__} (platform={st_platform}, manual={manual_mode})")
