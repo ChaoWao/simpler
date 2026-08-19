@@ -1087,6 +1087,18 @@ extern "C" uint32_t dma_workspace_supported_mask(void) {
 #endif
 }
 
+extern "C" uint32_t dma_workspace_channel_count(void) {
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    // kSdmaMaxChannelGroups, not the device-side kSdmaMaxChannel: the two are the
+    // same 48 (PTO static_asserts kPostMaxQueues == kSdmaMaxChannelGroups) but
+    // only this one comes in through the host-safe workspace-manager header, and
+    // it is what SdmaWorkspaceManager::Init actually creates streams for.
+    return pto::comm::sdma::kSdmaMaxChannelGroups;
+#else
+    return 0;
+#endif
+}
+
 extern "C" int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_out, int count, void **handle_out) {
     if (!addr_out || !handle_out || count < 0) return -1;
     *handle_out = nullptr;

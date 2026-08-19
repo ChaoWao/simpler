@@ -401,9 +401,15 @@ public:
      * a platform/runtime without SDMA fails fast. The provider handle is released
      * by finalize_common().
      *
+     * `sdma_warmup_binary` / `sdma_warmup_size`, when non-empty, are handed to
+     * launch_sdma_warmup_kernel() once the workspace is live. A failed or absent
+     * warmup does NOT fail provisioning.
+     *
      * @return 0 on success, negative on unsupported/failed provisioning.
      */
-    int provision_dma_workspace(uint32_t required_mask);
+    int provision_dma_workspace(
+        uint32_t required_mask, const void *sdma_warmup_binary = nullptr, size_t sdma_warmup_size = 0
+    );
 
     /**
      * Content-derived stable identity for a registered callable: the
@@ -661,6 +667,31 @@ public:
      * device-resident KernelArgs payload pointer.
      */
     int launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args);
+
+    /**
+     * Walk the SDMA control path once per channel, so the first TPREFETCH_ASYNC
+     * of a run does not pay it. Called from provision_dma_workspace() once the
+     * workspace is live, on `stream_aicore_`, and synchronized before returning.
+     *
+     * `binary` is a vector-only ELF, registered separately from the executor
+     * (`RT_DEV_BINARY_MAGIC_ELF_AIVEC`, its own handle) because the executor is a
+     * resident loop launched per run with a `block_dim_` that is still 0 here.
+     *
+     * Best-effort by design: an absent binary, a launch failure or a channel that
+     * declines to warm are all logged and swallowed, since the only consequence is
+     * first-call latency.
+     *
+     * @return 0 always.
+     */
+    int launch_sdma_warmup_kernel(const void *binary, size_t size);
+
+    /**
+     * Read back the warmup kernel's per-channel status slots and report how many
+     * channels came up warm. Takes ownership of `status_dev` and frees it.
+     * `elapsed_ms` is the launch-to-sync wall time, reported alongside the count
+     * because it is the init-time cost being traded for first-run latency.
+     */
+    void report_sdma_warmup_status(void *status_dev, uint32_t channel_count, double elapsed_ms);
 
     /**
      * Enablement setters for the four shared diagnostics sub-features.
@@ -1054,6 +1085,11 @@ protected:
     // `nullptr` in `finalize()`; CANN releases the device-side state
     // implicitly when the device context tears down.
     void *aicore_bin_handle_{nullptr};
+    // SDMA warmup ELF handle from `rtRegisterAllKernel`, kept separate from
+    // `aicore_bin_handle_` because it is a different (vector-only) binary. Only
+    // ever registered once, during provisioning. Reset the same way in
+    // `finalize()`.
+    void *sdma_warmup_bin_handle_{nullptr};
     // Dispatcher SO bytes — populated once via `set_dispatcher_binary()`
     // during simpler_init. Consumed exclusively by
     // `BootstrapDispatcher` on the first run and released by
