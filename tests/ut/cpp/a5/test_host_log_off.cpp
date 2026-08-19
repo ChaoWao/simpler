@@ -384,7 +384,7 @@ TEST(HostLogTest, HostSpanTruncationDropsAWholeEscapeRatherThanItsLastByte) {
                                0,
                                100,
                                25,
-                               "host.dispatch",
+                               "node.dispatch",
                                attributes.c_str()};
 
     auto captured = run_with_config(LogLevel::TIMING, [&] {

@@ -714,7 +714,7 @@ def pytest_collection_modifyitems(session, config, items):  # noqa: PLR0912
         l3_items = [
             i
             for i in items
-            if _item_scene_level(i) == SceneTestLevel.HOST and not any(m.name == "skip" for m in i.iter_markers())
+            if _item_scene_level(i) == SceneTestLevel.NODE and not any(m.name == "skip" for m in i.iter_markers())
         ]
         if l3_items:
             sample = ", ".join(sorted({i.nodeid for i in l3_items})[:3])
@@ -1137,7 +1137,7 @@ def pytest_runtestloop(session):
     # levels the dispatcher itself uses for children, it wants direct control.
     if runtime_filter is not None:
         return
-    if _normalize_cli_scene_level(level_filter) in (SceneTestLevel.CHIP, SceneTestLevel.HOST):
+    if _normalize_cli_scene_level(level_filter) in (SceneTestLevel.CHIP, SceneTestLevel.NODE):
         return
 
     # User explicitly asked for collect-only / scoped-run — don't orchestrate.

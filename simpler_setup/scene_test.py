@@ -151,7 +151,7 @@ def _golden_thread_cap():
 
 class SceneTestLevel(IntEnum):
     CHIP = 2
-    HOST = 3
+    NODE = 3
     NETWORK1 = 4
 
 

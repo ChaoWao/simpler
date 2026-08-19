@@ -123,13 +123,14 @@ including time the caller spends polling or doing other host work; blocking
 Every hierarchical worker that drives next-level children emits these spans
 through the logger compiled into `_task_interface`, since the orchestrator and
 scheduler code they run is the same at every level above the chip. **The leading
-word names the level that emitted them**, so `<level>` below is one of `host`
+word names the level that emitted them**, so `<level>` below is one of `node`
 (L3), `network1` (L4), `network2` (L5) or `network3` (L6) — see
 [`python/simpler/worker_level.py`](../../python/simpler/worker_level.py) for the
-ladder:
+ladder. It is never `host`: that names the *processor* this span ABI belongs to,
+which every one of those levels runs on:
 
-| Span | Host decision point |
-| ---- | ------------------- |
+| Span | Decision point |
+| ---- | -------------- |
 | `<level>.graph_build` | serialized Python graph callback |
 | `<level>.submit` | next-level task publication after slot allocation |
 | `<level>.dispatch` | scheduler handoff to a worker thread |
@@ -268,7 +269,7 @@ tree, and the root span already carries the identity that tells two runs apart.
 
 Only `claim_release` was added for this: it wraps `release_native_run` inside
 finalize, the point a successor's launch becomes admissible, and no other span
-marks that boundary. `host.post_fence_retirement` covers the L3 orchestrator's
+marks that boundary. `node.post_fence_retirement` covers the L3 orchestrator's
 `release_run` tail for the same reason.
 
 The identity is `run_id / dispatch_id / run_epoch / slot_id / generation`. Each
