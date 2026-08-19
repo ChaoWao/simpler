@@ -262,7 +262,7 @@ def _trace_document(events, anchors_by_pid, **extra):
 # invocation grouping instead of excluding them.
 _CHIP_WORD = "chip"
 _CORE_WORD = "core"
-_HOST_WORDS = ("host", "network1", "network2", "network3")
+_NODE_WORDS = ("node", "network1", "network2", "network3")
 
 # Reserved for producers outside simpler: `ext.<producer>.<span>`. Without a
 # reserved word a caller's span called `host.foo` would parse as one of ours.
@@ -272,10 +272,10 @@ _EXTERNAL_WORD = "ext"
 def span_family(name):
     """Classify `name` by the producer its leading word names.
 
-    Returns ``"chip"``, ``"core"``, ``"host"``, ``"external"``, or ``"unknown"``.
-    Every level at or above L3 answers ``"host"``: they run the same
-    orchestrator and scheduler code, so they form one family whichever word a
-    given process resolved to.
+    Returns ``"chip"``, ``"core"``, ``"node"``, ``"external"``, or ``"unknown"``.
+    Every level at or above L3 answers ``"node"`` — the family takes its lowest
+    member's name — because they run the same orchestrator and scheduler code and
+    so form one family whichever word a given process resolved to.
     """
     head = name.split(".", 1)[0]
     if head == _EXTERNAL_WORD:
@@ -284,19 +284,19 @@ def span_family(name):
         return "chip"
     if head == _CORE_WORD:
         return "core"
-    if head in _HOST_WORDS:
-        return "host"
+    if head in _NODE_WORDS:
+        return "node"
     return "unknown"
 
 
-def host_span_leaf(name):
-    """The part of a host-family span name after its level word, else ``None``.
+def node_span_leaf(name):
+    """The part of a node-family span name after its level word, else ``None``.
 
     Call sites match on the leaf rather than the whole name because the level
-    word varies by the process that emitted it — ``host.submit`` from an L3 and
+    word varies by the process that emitted it — ``node.submit`` from an L3 and
     ``network1.submit`` from an L4 are the same decision point.
     """
-    if span_family(name) != "host":
+    if span_family(name) != "node":
         return None
     _, _, leaf = name.partition(".")
     return leaf
@@ -305,9 +305,10 @@ def host_span_leaf(name):
 def external_producer(name):
     """The producer segment of an ``ext.<producer>.<span>`` name, else ``None``.
 
-    All three segments are required: ``ext.pypto.decode_layer`` attributes to
-    ``pypto``, while ``ext.foo`` names no span of its own and ``ext..foo`` names
-    no producer. Neither resolves, so a malformed name lands in an unattributed
+    All three segments must be present and non-empty: ``ext.pypto.decode_layer``
+    attributes to ``pypto``, while ``ext.foo`` names no span of its own,
+    ``ext..foo`` names no producer, and ``ext.pypto.`` names a producer but no
+    span. None of those resolve, so a malformed name lands in an unattributed
     lane instead of another producer's.
 
     Attribution is separate from :func:`span_family`, which answers only whether
@@ -316,9 +317,9 @@ def external_producer(name):
     if span_family(name) != "external":
         return None
     parts = name.split(".")
-    if len(parts) < 3:
+    if len(parts) < 3 or not parts[1] or not parts[2]:
         return None
-    return parts[1] or None
+    return parts[1]
 
 
 def invocation_spans(spans):
@@ -326,14 +327,14 @@ def invocation_spans(spans):
 
     Those views key on ``(pid, inv)``, and ``inv`` is a native run epoch. Two
     families carry none, so admitting either would group all of its spans into
-    one forged invocation: the per-task ``host``/``network*`` scheduler family,
+    one forged invocation: the per-task ``node``/``network*`` scheduler family,
     and anything an external producer emitted under ``ext.``.
 
     Everything else is kept, **including a name this parser does not recognize**.
     Dropping an unfamiliar family silently is how ``chip.prewarm.build`` once
     vanished from the tables.
     """
-    return [span for span in spans if span_family(span.name) not in ("host", "external")]
+    return [span for span in spans if span_family(span.name) not in ("node", "external")]
 
 
 def group_invocations(spans):
@@ -528,7 +529,7 @@ def print_tpot_table(buckets, label_for_hid=None, stream=sys.stdout):
 
 
 _ROUNDS_TABLE_NAMES = {
-    "host": "chip.run",
+    "run": "chip.run",
     "device": "chip.run.runner_run.device_wall",
     "orch": "chip.run.runner_run.device_wall.orch",
     "sched": "chip.run.runner_run.device_wall.sched",
@@ -565,7 +566,7 @@ def _round_metrics(inv):
     else:
         effective = 0.0
 
-    return (_dur("host"), _dur("device"), effective, _dur("orch"), _dur("sched"))
+    return (_dur("run"), _dur("device"), effective, _dur("orch"), _dur("sched"))
 
 
 def print_rounds_table(buckets, stream=sys.stdout):
@@ -727,8 +728,8 @@ def _parsed_attrs(span):
 
 # Highest-precedence match wins. One OS thread emits spans of several roles: the
 # scheduler loop is the sole caller of both `dispatch_ready` and
-# `manager->progress`, so it emits `host.dispatch` (role=scheduler) alongside
-# `host.frame_submit` / `host.activate` / `host.complete`, whose `role=worker` names
+# `manager->progress`, so it emits `node.dispatch` (role=scheduler) alongside
+# `node.frame_submit` / `node.activate` / `node.complete`, whose `role=worker` names
 # the worker a dispatch targets rather than the thread doing the work.
 _HOST_THREAD_ROLES = ("facade", "scheduler", "worker")
 
@@ -781,7 +782,7 @@ def _slot_lanes(entries, slot_by_invocation):
     return dict(sorted(by_slot.items()))
 
 
-def _host_thread_name(entries):
+def _lane_name(entries):
     """Name one OS thread's lane from every span it emitted.
 
     `entries` are that thread's (span, parsed attributes) pairs.
@@ -797,7 +798,7 @@ def _host_thread_name(entries):
         if span_family(span.name) == "external":
             continue
         role = attrs.get("role")
-        leaf = host_span_leaf(span.name)
+        leaf = node_span_leaf(span.name)
         if role == "facade" or leaf in {"graph_build", "submit"}:
             roles.add("facade")
         elif role in ("scheduler", "worker"):
@@ -834,7 +835,7 @@ def _flow_key(span, attrs):
     return span.pid, run_id, task_slot
 
 
-def _assign_lanes(host_entries, host_threads):
+def _assign_lanes(non_device_entries, non_device_threads):
     """Choose a lane per span, and a name per lane.
 
     A thread that interleaved runs is split by pipeline slot (see
@@ -849,21 +850,21 @@ def _assign_lanes(host_entries, host_threads):
     """
     lane_of = {}
     lane_names = {}
-    next_synthetic_tid = max(tid for _, tid in host_threads) + 1
-    ours = [entry for entry in host_entries if span_family(entry[0].name) != "external"]
+    next_synthetic_tid = max(tid for _, tid in non_device_threads) + 1
+    ours = [entry for entry in non_device_entries if span_family(entry[0].name) != "external"]
     slot_by_invocation = _slot_by_invocation(ours)
-    for pid, tid in host_threads:
-        on_thread = [entry for entry in host_entries if entry[0].pid == pid and entry[0].tid == tid]
+    for pid, tid in non_device_threads:
+        on_thread = [entry for entry in non_device_entries if entry[0].pid == pid and entry[0].tid == tid]
         ours_on_thread = [entry for entry in on_thread if span_family(entry[0].name) != "external"]
         slot_lanes = _slot_lanes(ours_on_thread, slot_by_invocation)
         if slot_lanes is None:
-            lane_names[(pid, tid)] = _host_thread_name(on_thread)
+            lane_names[(pid, tid)] = _lane_name(on_thread)
             for span, _ in on_thread:
                 lane_of[id(span)] = tid
             continue
         external_on_thread = [entry for entry in on_thread if span_family(entry[0].name) == "external"]
         if external_on_thread:
-            lane_names[(pid, tid)] = _host_thread_name(external_on_thread)
+            lane_names[(pid, tid)] = _lane_name(external_on_thread)
             for span, _ in external_on_thread:
                 lane_of[id(span)] = tid
         for slot_id, group in slot_lanes.items():
@@ -1037,8 +1038,8 @@ def _process_label(pid, process_spans):
     and then the label carries no `simpler` prefix — it is not our process.
     """
     families = {span_family(span.name) for span in process_spans}
-    if "host" in families:
-        return f"simpler host (pid={pid})"
+    if "node" in families:
+        return f"simpler node (pid={pid})"
     if families == {"external"}:
         producers = sorted({producer for span in process_spans if (producer := external_producer(span.name))})
         named = "/".join(producers) if producers else "unattributed"
@@ -1063,15 +1064,18 @@ def to_host_swimlane(spans, anchors=None):
     entries = [(span, _parsed_attrs(span)) for span in spans]
     events = []
 
-    host_entries = [entry for entry in entries if not entry[0].is_device]
+    non_device_entries = [entry for entry in entries if not entry[0].is_device]
     device_entries = [entry for entry in entries if entry[0].is_device]
-    host_pids = sorted({span.pid for span, _ in host_entries})
-    host_threads = sorted({(span.pid, span.tid) for span, _ in host_entries})
+    non_device_pids = sorted({span.pid for span, _ in non_device_entries})
+    non_device_threads = sorted({(span.pid, span.tid) for span, _ in non_device_entries})
 
-    lane_of, lane_names = _assign_lanes(host_entries, host_threads)
+    lane_of, lane_names = _assign_lanes(non_device_entries, non_device_threads)
 
-    for pid in host_pids:
-        process_spans = [span for span, _ in host_entries if span.pid == pid]
+    for pid in non_device_pids:
+        # Every span the process emitted, device-clock ones included: a `clk=dev`
+        # span is ours too, so it is evidence about whose process this is even
+        # though it never reaches the visible timeline.
+        process_spans = [span for span in spans if span.pid == pid]
         events.append(
             {
                 "ph": "M",
@@ -1091,7 +1095,9 @@ def to_host_swimlane(spans, anchors=None):
                 "args": {"name": name},
             }
         )
-    for span, parsed in sorted(host_entries, key=lambda item: (item[0].ts, item[0].pid, item[0].tid, item[0].name)):
+    for span, parsed in sorted(
+        non_device_entries, key=lambda item: (item[0].ts, item[0].pid, item[0].tid, item[0].name)
+    ):
         event_args = {
             "inv": span.inv,
             "hid": span.hid,
@@ -1114,8 +1120,8 @@ def to_host_swimlane(spans, anchors=None):
         )
 
     submits = defaultdict(list)
-    for span, attrs in host_entries:
-        if host_span_leaf(span.name) != "submit":
+    for span, attrs in non_device_entries:
+        if node_span_leaf(span.name) != "submit":
             continue
         key = _flow_key(span, attrs)
         if key is not None:
@@ -1124,8 +1130,8 @@ def to_host_swimlane(spans, anchors=None):
         candidates.sort(key=lambda item: item.ts)
 
     dispatches = []
-    for span, attrs in host_entries:
-        if host_span_leaf(span.name) != "dispatch":
+    for span, attrs in non_device_entries:
+        if node_span_leaf(span.name) != "dispatch":
             continue
         key = _flow_key(span, attrs)
         source = None

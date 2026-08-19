@@ -10,18 +10,25 @@
 """One word per level of the worker hierarchy, and the trace prefix derived from it.
 
 `[STRACE]` span names lead with the level that emitted them, so a reader can tell
-a chip-runtime span from a host-scheduler one without consulting the tree. The
+a chip-runtime span from a node-scheduler one without consulting the tree. The
 words live here because the emitting code cannot supply them: `Orchestrator` and
 `WorkerThread` are level-agnostic — the same code runs at every level above the
 chip — so the word is a property of the process, resolved once from its Worker's
 level.
 
-Above `host` the physical layer is not fixed: sometimes a host sits under a pod,
-sometimes directly under a supernode. Naming those levels after a specific
-interconnect does not work either (mostly SU, sometimes RoCE). So they are named
-by how many network hops separate them from the host — `network1` is one hop up,
-whatever hardware implements it. The digit counts hops, not the level number:
+**Every word names a topology position, never a processor or a deployment fact.**
+`node` is one machine's orchestration; above it the physical layer is not fixed —
+sometimes a node sits under a pod, sometimes directly under a supernode — and
+naming those levels after an interconnect does not work either (mostly SU,
+sometimes RoCE). So they count network hops from the node: `network1` is one hop
+up, whatever hardware implements it. The digit counts hops, not the level number:
 `network1` is L4.
+
+`host` is deliberately absent. It names a *processor* — the CPU that `HostLogger`,
+`host_span` and `host_runtime.so` all belong to — and L3 merely happens to run
+there. So does L4, and so does part of the chip runtime, which is why a level word
+taken from a deployment location cannot be exclusive. That is the same reason L4
+is not called `pod`.
 
 `docs/hierarchical-level-runtime.md` is the one place that maps these words onto
 physical entities; this module deliberately does not repeat that mapping, so the
@@ -49,14 +56,14 @@ class WorkerLevel(IntEnum):
 
     core = 0
     chip = 2
-    host = 3
+    node = 3
     network1 = 4
     network2 = 5
     network3 = 6
 
 
 def span_prefix(level: int) -> str:
-    """Return the `[STRACE]` name prefix for `level`, e.g. 3 -> ``"host"``.
+    """Return the `[STRACE]` name prefix for `level`, e.g. 3 -> ``"node"``.
 
     Raises `ValueError` for a level the ladder does not name, rather than
     inventing a word. L5 and L6 run what
@@ -67,7 +74,7 @@ def span_prefix(level: int) -> str:
 
     Note `WorkerLevel(level).name`, not `str(WorkerLevel(level))`: this project
     targets Python 3.10, where `enum.StrEnum` does not exist and `str()` on any
-    `Enum` yields ``"WorkerLevel.host"``.
+    `Enum` yields ``"WorkerLevel.node"``.
     """
     try:
         return WorkerLevel(level).name

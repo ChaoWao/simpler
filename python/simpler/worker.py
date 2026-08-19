@@ -4399,7 +4399,7 @@ class Worker:
         self.level = level
         # Rebound from the level in `init()`; the default matches the C++ table's
         # so a span emitted before init names L3 rather than nothing.
-        self._host_span_prefix = _span_prefix(WorkerLevel.host)
+        self._host_span_prefix = _span_prefix(WorkerLevel.node)
         self._config = config
         self._callable_registry: dict[int, Any] = {}
         self._identity_registry: dict[bytes, _CallableIdentityState] = {}

@@ -56,11 +56,13 @@ inline constexpr std::array<const char *, static_cast<size_t>(HostSpan::kCount)>
     ".graph_build", ".submit", ".dispatch", ".frame_submit", ".activate", ".complete", ".post_fence_retirement",
 };
 
-/// The bound level word. Defaults to `host`: L3 is the only level that has ever
+/// The bound level word. Defaults to `node`: L3 is the only level that has ever
 /// driven this code in a shipped configuration, so an unset prefix names the
-/// truth rather than an arbitrary placeholder.
+/// truth rather than an arbitrary placeholder. The word names a topology
+/// position, so it is never the processor name `host` — that belongs to the
+/// `host_span` ABI this file implements, which every level above the chip uses.
 inline std::string &level_word() {
-    static std::string word = "host";
+    static std::string word = "node";
     return word;
 }
 
@@ -87,7 +89,7 @@ inline bool &prefix_bound() {
 }  // namespace detail
 
 /**
- * Bind this process's level word, e.g. `"host"` or `"network1"`.
+ * Bind this process's level word, e.g. `"node"` or `"network1"`.
  *
  * **The first non-empty word wins; every later one is refused.** Two reasons,
  * and neither is enforceable by documentation alone:

@@ -158,7 +158,7 @@ def test_exclude_level4_keeps_unlevelled_functions():
 
 
 def test_sorting_uses_function_level_metadata():
-    @scene_level(SceneTestLevel.HOST)
+    @scene_level(SceneTestLevel.NODE)
     def host_fn():
         return None
 

@@ -2755,7 +2755,7 @@ class TestRunHandle:
         with pytest.raises(ValueError, match="bad graph"):
             worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
 
-        assert emitted == [("host.graph_build", 1, 0, 0, 100, 175, "run_id=1 role=facade")]
+        assert emitted == [("node.graph_build", 1, 0, 0, 100, 175, "run_id=1 role=facade")]
 
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)

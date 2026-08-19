@@ -1210,13 +1210,13 @@ TEST(WorkerManagerTest, DispatchAndCompletionEmitHostSpans) {
 
     worker.dispatch(WorkerDispatch{slot, 0});
     ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
-    EXPECT_TRUE(captured_host_span("host.dispatch"));
+    EXPECT_TRUE(captured_host_span("node.dispatch"));
 
     const WorkerDispatch submitted = endpoint_ptr->submitted().front();
     endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted);
     worker.progress();
     ASSERT_EQ(completed.size(), 1u);
-    EXPECT_TRUE(captured_host_span("host.complete"));
+    EXPECT_TRUE(captured_host_span("node.complete"));
 
     worker.stop();
     allocator.shutdown();
@@ -1474,8 +1474,8 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
-    EXPECT_TRUE(captured_host_span("host.frame_submit"));
-    EXPECT_TRUE(captured_host_span("host.activate"));
+    EXPECT_TRUE(captured_host_span("node.frame_submit"));
+    EXPECT_TRUE(captured_host_span("node.activate"));
     allocator.shutdown();
 }
 
@@ -2042,10 +2042,10 @@ TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleInde
     );
     orchestrator.close_run_submission(run);
 
-    ASSERT_TRUE(captured_host_span("host.submit"));
+    ASSERT_TRUE(captured_host_span("node.submit"));
     std::ostringstream expected;
     expected << "run_id=" << run << " task_slot=" << group.task_slot << " group_index=-1 group_size=2 role=facade";
-    EXPECT_EQ(captured_host_span_attrs("host.submit"), expected.str());
+    EXPECT_EQ(captured_host_span_attrs("node.submit"), expected.str());
 }
 
 TEST_F(ProgressSchedulerFixture, SuccessorStagesButActivatesOnlyAfterFifoPromotion) {
@@ -2506,7 +2506,7 @@ TEST_F(SchedulerFixture, ACancellationThatWinsTheClaimStopsTheDispatch) {
     }
 }
 
-// `host.submit` is what a dispatch arrow is drawn back to, so the swimlane can
+// `node.submit` is what a dispatch arrow is drawn back to, so the swimlane can
 // only pair the two if these attributes carry the same run/slot the dispatch
 // reports. A SUB submission is deliberately silent: it has no NEXT_LEVEL worker
 // to hand off to.
@@ -2515,11 +2515,11 @@ TEST_F(SchedulerFixture, NextLevelSubmitEmitsAPairableHostSpan) {
 
     auto submitted = orch.submit_next_level(C(0x42), single_tensor_args(0xCAFE, TensorArgType::OUTPUT), cfg, 0);
 
-    ASSERT_TRUE(captured_host_span("host.submit"));
+    ASSERT_TRUE(captured_host_span("node.submit"));
     std::ostringstream expected;
     expected << "run_id=" << run_id << " task_slot=" << submitted.task_slot
              << " group_index=0 group_size=1 worker_id=0 role=facade";
-    EXPECT_EQ(captured_host_span_attrs("host.submit"), expected.str());
+    EXPECT_EQ(captured_host_span_attrs("node.submit"), expected.str());
 
     mock_worker.wait_running();
     mock_worker.complete();

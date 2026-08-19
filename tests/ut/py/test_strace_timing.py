@@ -18,7 +18,7 @@ from simpler.worker_level import WorkerLevel
 from simpler_setup.tools.strace_timing import (
     _CHIP_WORD,
     _CORE_WORD,
-    _HOST_WORDS,
+    _NODE_WORDS,
     NativeOverlapError,
     assert_native_overlap,
     bucket_by_hid,
@@ -26,10 +26,10 @@ from simpler_setup.tools.strace_timing import (
     external_producer,
     group_invocations,
     host_record_spans,
-    host_span_leaf,
     invocation_spans,
     load_host_phase_records,
     main,
+    node_span_leaf,
     parse_clock_anchors,
     parse_spans,
     print_rounds_table,
@@ -219,10 +219,10 @@ def test_wall_time_uses_the_matching_anchor_for_each_pid():
     spans = list(
         parse_spans(
             [
-                _span_record(pid=41, tid=410, inv=1, name="host.submit", ts=1_500, dur=10),
-                _span_record(pid=52, tid=520, inv=1, name="host.submit", ts=1_500, dur=10),
-                _span_record(pid=63, tid=630, inv=1, name="host.submit", ts=1_500, dur=10),
-                _span_record(pid=64, tid=640, inv=1, name="host.submit", ts=1_500, dur=10),
+                _span_record(pid=41, tid=410, inv=1, name="node.submit", ts=1_500, dur=10),
+                _span_record(pid=52, tid=520, inv=1, name="node.submit", ts=1_500, dur=10),
+                _span_record(pid=63, tid=630, inv=1, name="node.submit", ts=1_500, dur=10),
+                _span_record(pid=64, tid=640, inv=1, name="node.submit", ts=1_500, dur=10),
             ]
         )
     )
@@ -253,7 +253,7 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
             pid=41,
             tid=410,
             inv=7,
-            name="host.graph_build",
+            name="node.graph_build",
             ts=1_000,
             dur=900,
             attrs="run_id=7 role=facade",
@@ -262,7 +262,7 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
             pid=41,
             tid=410,
             inv=7,
-            name="host.submit",
+            name="node.submit",
             ts=1_100,
             dur=100,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 role=facade",
@@ -271,7 +271,7 @@ def test_host_swimlane_keeps_real_host_lanes_and_builds_dispatch_flow():
             pid=41,
             tid=411,
             inv=7,
-            name="host.dispatch",
+            name="node.dispatch",
             ts=1_400,
             dur=80,
             attrs=(
@@ -306,8 +306,8 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
     """The scheduler thread emits `role=worker` spans before its first `role=scheduler` one.
 
     `scheduler.cpp`'s loop is the only caller of both `dispatch_ready()` and
-    `manager->progress()`, and inside `submit_dispatch` the `host.frame_submit`
-    scope closes within `submit_progress` — before the `host.dispatch` record
+    `manager->progress()`, and inside `submit_dispatch` the `node.frame_submit`
+    scope closes within `submit_progress` — before the `node.dispatch` record
     emitted after the admission lock is released. Naming the lane from the
     first span it emitted therefore labels the scheduler `worker 3`.
     """
@@ -316,7 +316,7 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
             pid=41,
             tid=411,
             inv=7,
-            name="host.frame_submit",
+            name="node.frame_submit",
             ts=1_410,
             dur=40,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=worker",
@@ -325,7 +325,7 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
             pid=41,
             tid=411,
             inv=7,
-            name="host.dispatch",
+            name="node.dispatch",
             ts=1_400,
             dur=80,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=scheduler",
@@ -334,7 +334,7 @@ def test_host_swimlane_names_the_scheduler_lane_from_every_role_it_emits():
             pid=41,
             tid=411,
             inv=7,
-            name="host.complete",
+            name="node.complete",
             ts=2_000,
             dur=30,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=worker",
@@ -381,7 +381,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=410,
             inv=7,
-            name="host.submit",
+            name="node.submit",
             ts=100,
             dur=20,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 role=facade",
@@ -390,7 +390,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=411,
             inv=7,
-            name="host.dispatch",
+            name="node.dispatch",
             ts=200,
             dur=10,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=1 role=scheduler",
@@ -399,7 +399,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=410,
             inv=7,
-            name="host.submit",
+            name="node.submit",
             ts=300,
             dur=20,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 role=facade",
@@ -408,7 +408,7 @@ def test_host_swimlane_pairs_dispatch_with_latest_preceding_submit():
             pid=41,
             tid=411,
             inv=7,
-            name="host.dispatch",
+            name="node.dispatch",
             ts=400,
             dur=10,
             attrs="run_id=7 task_slot=12 group_index=0 worker_id=3 dispatch_id=2 role=scheduler",
@@ -436,7 +436,7 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
                     pid=41,
                     tid=410,
                     inv=7,
-                    name="host.graph_build",
+                    name="node.graph_build",
                     ts=1_000_000_000,
                     dur=900,
                     attrs="run_id=7 role=facade",
@@ -458,7 +458,7 @@ def test_host_swimlane_keeps_unaligned_device_clock_out_of_visible_timeline():
     visible_slices = [event for event in trace["traceEvents"] if event.get("ph") == "X"]
 
     assert [(event["name"], event["ts"], event["dur"]) for event in visible_slices] == [
-        ("host.graph_build", 1_000_000.0, 0.9)
+        ("node.graph_build", 1_000_000.0, 0.9)
     ]
     assert trace["unalignedDeviceSpans"] == [
         {
@@ -493,7 +493,7 @@ def test_invocation_views_ignore_host_swimlane_markers():
                     pid=61,
                     tid=611,
                     inv=9,
-                    name="host.dispatch",
+                    name="node.dispatch",
                     ts=900,
                     dur=20,
                     attrs="run_id=9 task_slot=4 group_index=0 worker_id=0 dispatch_id=1",
@@ -522,16 +522,16 @@ def test_span_family_classifies_the_level_words_and_reserves_ext():
     # Every level at or above L3 runs the same orchestrator and scheduler code,
     # so they answer as one family whichever word the process resolved to.
     for level in WorkerLevel:
-        if level.value >= WorkerLevel.host.value:
-            assert span_family(f"{level.name}.dispatch") == "host"
+        if level.value >= WorkerLevel.node.value:
+            assert span_family(f"{level.name}.dispatch") == "node"
     # A caller cannot land in ours, which is what `ext.` is reserved for.
     assert span_family("ext.pypto.decode_layer") == "external"
     assert span_family("something_else.foo") == "unknown"
     # The leaf is what the swimlane's flow pairing matches on, so it resolves for
     # every host level word and for nothing else.
-    assert host_span_leaf("host.dispatch") == "dispatch"
-    assert host_span_leaf("network1.submit") == "submit"
-    assert host_span_leaf("chip.run") is None
+    assert node_span_leaf("node.dispatch") == "dispatch"
+    assert node_span_leaf("network1.submit") == "submit"
+    assert node_span_leaf("chip.run") is None
 
 
 def test_every_level_word_the_ladder_names_is_a_word_this_parser_knows():
@@ -545,7 +545,7 @@ def test_every_level_word_the_ladder_names_is_a_word_this_parser_knows():
     under a forged ``(pid, 0)`` key. No error anywhere, just wrong tables.
     """
     ladder = {level.name for level in WorkerLevel}
-    parser = set(_HOST_WORDS) | {_CHIP_WORD, _CORE_WORD}
+    parser = set(_NODE_WORDS) | {_CHIP_WORD, _CORE_WORD}
 
     assert ladder == parser, (
         f"the ladder and this parser disagree: ladder-only={sorted(ladder - parser)}, "
@@ -554,7 +554,7 @@ def test_every_level_word_the_ladder_names_is_a_word_this_parser_knows():
     # Each word also has to reach the family the ladder position implies, not
     # merely be present in some list.
     for level in WorkerLevel:
-        expected = "host" if level.value >= WorkerLevel.host.value else level.name
+        expected = "node" if level.value >= WorkerLevel.node.value else level.name
         assert span_family(f"{level.name}.something") == expected
         # A level word is never mistaken for the external namespace.
         assert external_producer(f"{level.name}.something") is None
@@ -580,14 +580,14 @@ def test_swimlane_cli_writes_trace(tmp_path):
     output_path = tmp_path / "host_swimlane.json"
     log_path.write_text(
         _anchor_record(71, 50, 1_700_000_000_000_000_000)
-        + _span_record(pid=71, tid=710, inv=2, name="host.graph_build", ts=100, dur=25, attrs="run_id=2 role=facade"),
+        + _span_record(pid=71, tid=710, inv=2, name="node.graph_build", ts=100, dur=25, attrs="run_id=2 role=facade"),
         encoding="utf-8",
     )
 
     assert main([str(log_path), "--swimlane", str(output_path)]) == 0
 
     trace = json.loads(output_path.read_text(encoding="utf-8"))
-    event = next(event for event in trace["traceEvents"] if event.get("name") == "host.graph_build")
+    event = next(event for event in trace["traceEvents"] if event.get("name") == "node.graph_build")
     assert event["args"]["wall_ts_ns"] == "1700000000000000050"
 
 
@@ -909,35 +909,39 @@ def test_host_record_spans_drop_passes_with_no_matching_bind(tmp_path):
 
 
 def test_ext_name_attributes_a_producer_and_refuses_a_malformed_one():
-    """``ext.<producer>.<span>`` — all three segments are required for attribution.
+    """``ext.<producer>.<span>`` — three present, non-empty segments to attribute.
 
     Family and attribution answer different questions. A name under ``ext.`` is
     never ours whatever follows it, so a malformed one still classifies as
     external; it simply lands in an unattributed lane rather than another
-    producer's.
+    producer's. A present-but-empty segment counts as malformed either side of
+    the producer: ``ext..foo`` names nobody, and ``ext.pypto.`` names a producer
+    with no span of its own.
     """
     assert external_producer("ext.pypto.decode_layer") == "pypto"
     assert external_producer("ext.pypto.attention.qk") == "pypto"
 
-    for malformed in ("ext.pypto", "ext.", "ext..decode_layer"):
+    for malformed in ("ext.pypto", "ext.", "ext..decode_layer", "ext.pypto.", "ext.pypto..detail"):
         assert span_family(malformed) == "external"
         assert external_producer(malformed) is None
 
     # Not external at all, so no producer.
-    assert external_producer("host.dispatch") is None
+    assert external_producer("node.dispatch") is None
     assert external_producer("chip.run") is None
 
 
 def test_ext_name_cannot_impersonate_one_of_our_level_words():
-    """The reason the namespace exists: a caller's ``host.foo`` must not parse as ours.
+    """The reason the namespace exists: a caller's ``node.foo`` must not parse as ours.
 
     Every level word is reachable as a producer segment, and none of them
-    promotes the span into our family.
+    promotes the span into our family. ``host`` is included precisely because it
+    is *not* a level word — it names a processor, so a producer may legitimately
+    be called that, and it must be treated as any other producer name.
     """
-    for word in ("core", "chip", "host", "network1", "network2", "network3"):
+    for word in [level.name for level in WorkerLevel] + ["host"]:
         assert span_family(f"ext.{word}.foo") == "external"
         assert external_producer(f"ext.{word}.foo") == word
-        assert host_span_leaf(f"ext.{word}.foo") is None
+        assert node_span_leaf(f"ext.{word}.foo") is None
 
 
 def test_ext_spans_stay_out_of_the_invocation_keyed_views():
@@ -991,14 +995,35 @@ def test_a_shared_process_stays_ours_when_a_producer_emits_into_it():
     keeps the process labelled as ours.
     """
     lines = [
-        _span_record(pid=41, tid=410, inv=7, name="host.graph_build", ts=100, dur=200, attrs="run_id=7 role=facade"),
+        _span_record(pid=41, tid=410, inv=7, name="node.graph_build", ts=100, dur=200, attrs="run_id=7 role=facade"),
         _span_record(pid=41, tid=411, inv=0, name="ext.pypto.decode_layer", ts=120, dur=60),
     ]
 
     trace = to_host_swimlane(list(parse_spans(lines)))
 
-    assert _metadata(trace, "process_name") == ["simpler host (pid=41)"]
+    assert _metadata(trace, "process_name") == ["simpler node (pid=41)"]
     assert _lanes(trace) == {410: "orchestrator / facade", 411: "ext pypto"}
+
+
+def test_a_device_clock_span_still_proves_the_process_is_ours():
+    """A `clk=dev` span never reaches the visible timeline, but it is still ours.
+
+    So it is evidence about whose process this is. Classifying from the visible
+    spans alone would label a process that emitted one of our device spans and
+    one external host span as the producer's.
+    """
+    lines = [
+        _span_record(pid=41, tid=410, inv=0, name="ext.pypto.decode_layer", ts=120, dur=60),
+        _span_record(
+            pid=41, tid=410, inv=7, name="chip.run.runner_run.device_wall", ts=300, dur=40, attrs="clk=dev", depth=1
+        ),
+    ]
+
+    trace = to_host_swimlane(list(parse_spans(lines)))
+
+    assert _metadata(trace, "process_name") == ["simpler chip child (pid=41)"]
+    # The device span stays off the visible timeline all the same.
+    assert {event["name"] for event in trace["traceEvents"] if event["ph"] == "X"} == {"ext.pypto.decode_layer"}
 
 
 def test_ext_attributes_cannot_take_over_one_of_our_lane_names():
