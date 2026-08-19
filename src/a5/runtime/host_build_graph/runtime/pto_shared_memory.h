@@ -48,28 +48,23 @@ struct PTO2SharedMemoryHandle;
  * Written/read by Orchestrator and Scheduler for synchronization.
  */
 struct alignas(64) PTO2RingFlowControl {
-    // === Cache Line 0: Written by Orchestrator, Read by Scheduler ===
+    // Written by Orchestrator, read by Scheduler. There is no reverse channel:
+    // the ring is whole-graph-resident, so the scheduler never reclaims task
+    // slots and has nothing to publish back.
     alignas(64) std::atomic<int32_t> current_task_index;  // Task ring head (next to allocate)
 
-    // === Cache Line 1: Written by Scheduler, Read by Orchestrator (for back-pressure) ===
-    alignas(64) std::atomic<int32_t> last_task_alive;  // Task ring tail (oldest active task)
-
     // Per-boot SM reset. PTO2TaskAllocator::init() seeds its private
-    // local_task_id_ from initial_local_task_id (default 0 in production)
-    // *without* dereferencing current_task_index — it relies on this reset
-    // running on every AICPU boot so 0 stays in sync. If you ever change
-    // the initial fc value or the boot ordering, update the default in
+    // local_task_id_ to 0 *without* dereferencing current_task_index — it
+    // relies on this reset running on every AICPU boot so 0 stays in sync. If
+    // you ever change the initial fc value or the boot ordering, update
     // PTO2TaskAllocator::init (pto_ring_buffer.h) in the same change, or
     // submit IDs will be off by the divergence.
-    void init() {
-        current_task_index.store(0, std::memory_order_relaxed);
-        last_task_alive.store(0, std::memory_order_relaxed);
-    }
+    void init() { current_task_index.store(0, std::memory_order_relaxed); }
 
     bool validate(PTO2SharedMemoryHandle *handle, int32_t ring_id) const;
 };
 
-static_assert(sizeof(PTO2RingFlowControl) == 128, "PTO2RingFlowControl must be exactly 2 cache lines (128B)");
+static_assert(sizeof(PTO2RingFlowControl) == 64, "PTO2RingFlowControl must be exactly one cache line (64B)");
 
 /**
  * Per-ring shared memory header section.
@@ -159,9 +154,9 @@ struct alignas(64) PTO2SharedMemoryRingHeader {
     }
 };
 
-static_assert(sizeof(PTO2SharedMemoryRingHeader) == 256, "PTO2SharedMemoryRingHeader layout drift");
+static_assert(sizeof(PTO2SharedMemoryRingHeader) == 192, "PTO2SharedMemoryRingHeader layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 216,
+    offsetof(PTO2SharedMemoryRingHeader, task_descriptors_offset) == 152,
     "PTO2SharedMemoryRingHeader task_descriptors_offset layout drift"
 );
 
@@ -193,10 +188,10 @@ struct alignas(PTO2_ALIGN_SIZE) PTO2SharedMemoryHeader {
     std::atomic<int32_t> sched_error_thread;   // Thread index of last error writer
 };
 
-static_assert(sizeof(PTO2SharedMemoryHeader) == 320, "PTO2SharedMemoryHeader layout drift");
-static_assert(offsetof(PTO2SharedMemoryHeader, total_size) == 264, "PTO2SharedMemoryHeader total_size layout drift");
+static_assert(sizeof(PTO2SharedMemoryHeader) == 256, "PTO2SharedMemoryHeader layout drift");
+static_assert(offsetof(PTO2SharedMemoryHeader, total_size) == 200, "PTO2SharedMemoryHeader total_size layout drift");
 static_assert(
-    offsetof(PTO2SharedMemoryHeader, orch_error_code) == 272, "PTO2SharedMemoryHeader orch_error_code layout drift"
+    offsetof(PTO2SharedMemoryHeader, orch_error_code) == 208, "PTO2SharedMemoryHeader orch_error_code layout drift"
 );
 
 // =============================================================================
@@ -295,13 +290,6 @@ inline std::atomic<int32_t> *ring_current_task_index_addr(void *sm_dev_base) noe
     );
 }
 
-inline std::atomic<int32_t> *ring_last_task_alive_addr(void *sm_dev_base) noexcept {
-    return reinterpret_cast<std::atomic<int32_t> *>(
-        reinterpret_cast<char *>(ring_header_addr(sm_dev_base)) + offsetof(PTO2SharedMemoryRingHeader, fc) +
-        offsetof(PTO2RingFlowControl, last_task_alive)
-    );
-}
-
 // Byte offsets (from the SM base) of the ring's three segments. The layout is:
 // header, then descriptors -> payloads -> slot_states, every segment
 // PTO2_ALIGN_UP-padded.
@@ -341,8 +329,7 @@ inline PTO2TaskDescriptor *ring_task_descriptors_addr(void *sm_dev_base, uint64_
     );
 }
 
-// Device address of the slot_states array (used by the allocator's deadlock
-// detector to inspect the head task's state/fanout).
+// Device address of the slot_states array used by host/device pointer wiring.
 inline PTO2TaskSlotState *ring_slot_states_addr(void *sm_dev_base, uint64_t task_window_size) noexcept {
     return reinterpret_cast<PTO2TaskSlotState *>(
         static_cast<char *>(sm_dev_base) + ring_segment_offsets(task_window_size).slot_states

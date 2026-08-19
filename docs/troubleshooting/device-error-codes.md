@@ -135,7 +135,7 @@ always *fallout* — scroll up for the first failure on that device. For classif
 
 | You have | Go to |
 | -------- | ----- |
-| a capacity code — 1, 2, 4 | [Capacity](device-error-codes/capacity.md) |
+| a capacity code — 1, 2, 3, 4, 11 | [Capacity](device-error-codes/capacity.md) |
 | a stall — 100, or code 8 | [Stalls](device-error-codes/stall.md) |
 | a `VEC`/`CUBE` instruction error or UB out of bounds in the device log | [AICore faults](device-error-codes/aicore-fault.md) |
 | 10, 11, 103, S4, S5 or unknown | [Codes with no end-to-end test](device-error-codes/untested.md) — and it is a runtime bug |

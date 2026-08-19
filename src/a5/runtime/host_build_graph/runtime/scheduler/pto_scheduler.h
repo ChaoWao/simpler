@@ -22,8 +22,9 @@
  * 4. Two-stage mixed-task completion (subtask done bits -> mixed-task complete)
  *
  * The Scheduler runs on Device AI_CPU. host_build_graph is scheduler-only (the
- * orchestrator runs to completion on the host); there is no on-device slot
- * reclaim (whole-graph-resident), so last_task_alive is not advanced here.
+ * orchestrator runs to completion on the host) and whole-graph-resident, so no
+ * task slot or heap byte is reclaimed on device; the scheduler owns completion
+ * state only.
  *
  * Based on: docs/RUNTIME_LOGIC.md
  */
@@ -477,7 +478,6 @@ struct PTO2SchedulerState {
     struct alignas(64) RingSchedState {
         // --- Cache Line 0: ring pointer (read-only) + hot path (read-write) ---
         PTO2SharedMemoryRingHeader *ring;
-        int32_t last_task_alive;
         std::atomic<int32_t> advance_lock;  // multi-thread CAS
 
         // Polling: no per-ring dep_pool. Readiness is derived from the SM ring's

@@ -169,7 +169,6 @@ struct PTO2OrchestratorState {
 
 #if SIMPLER_ORCH_PROFILING
 struct PTO2OrchProfilingData {
-    uint64_t sync_cycle;
     uint64_t alloc_cycle;  // Combined task slot + heap allocation
     uint64_t args_cycle;
     uint64_t lookup_cycle;
@@ -178,10 +177,8 @@ struct PTO2OrchProfilingData {
     uint64_t scope_end_cycle;
     int64_t submit_count;
     // Wait time tracking for blocking phases
-    uint64_t alloc_wait_cycle;  // Cycles spent waiting in unified alloc
     uint64_t fanin_wait_cycle;  // Legacy (wiring): fanout_lock wait; polling has no such lock
     // Atomic operation counts per phase
-    uint64_t alloc_atomic_count;
     uint64_t args_atomic_count;
     uint64_t scope_end_atomic_count;
 };

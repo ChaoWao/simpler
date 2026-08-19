@@ -83,7 +83,6 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     // ring stores the device address of the SM ring header — pure offset
     // arithmetic, no SM load.
     ring = pto2_sm_layout::ring_header_addr(sm_dev_base);
-    last_task_alive = 0;
     advance_lock.store(0, std::memory_order_relaxed);
 
     // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
@@ -254,15 +253,9 @@ bool PTO2OrchestratorState::init_data_from_layout(
     orch->fatal = false;
 
     auto *orch_err = pto2_sm_layout::orch_error_code_addr(sm_dev_base);
-    auto *task_descs_dev = pto2_sm_layout::ring_task_descriptors_addr(sm_dev_base, task_window_size);
-    auto *slot_states_dev = pto2_sm_layout::ring_slot_states_addr(sm_dev_base, task_window_size);
     auto *cur_idx_dev = pto2_sm_layout::ring_current_task_index_addr(sm_dev_base);
-    auto *last_alive_dev = pto2_sm_layout::ring_last_task_alive_addr(sm_dev_base);
 
-    orch->ring.task_allocator.init(
-        task_descs_dev, static_cast<int32_t>(task_window_size), cur_idx_dev, last_alive_dev, gm_heap, heap_size,
-        orch_err, slot_states_dev
-    );
+    orch->ring.task_allocator.init(static_cast<int32_t>(task_window_size), cur_idx_dev, gm_heap, heap_size, orch_err);
 
     const size_t seen_epoch_bytes =
         PTO2_ALIGN_UP(static_cast<size_t>(layout.tensor_map.task_window_size) * sizeof(uint32_t), PTO2_ALIGN_SIZE);

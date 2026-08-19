@@ -103,3 +103,35 @@ TEST_F(HbgGraphSubmitFailureTest, FaninFailureLatchesFatalWithoutPartialUpload) 
     EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_DEP_POOL_OVERFLOW);
     EXPECT_EQ(graph_host_upload_count(*graph_state), uploads_before_failure);
 }
+
+TEST_F(HbgGraphSubmitFailureTest, CachedGraphUsesFinalTaskWindowSlot) {
+    std::array<uint32_t, 16> storage{};
+    uint32_t shape[] = {static_cast<uint32_t>(storage.size())};
+    ChipTensor boundary = make_tensor_external(storage.data(), shape, 1);
+
+    orch.begin_scope();
+    CoreTaskArgs boundary_args;
+    boundary_args.add_input(boundary);
+    const GraphScopeResult graph = orch.graph_begin(0x1716, boundary_args, 0x1736);
+    ASSERT_TRUE(graph.recording);
+
+    CoreTaskArgs node_args;
+    node_args.add_input(boundary);
+    ASSERT_TRUE(orch.submit_dummy_task(node_args).task_id().is_valid());
+    ASSERT_TRUE(orch.graph_end());
+    ASSERT_EQ(orch.ring.task_allocator.active_count(), 1);
+
+    PTO2TaskAllocator &allocator = orch.ring.task_allocator;
+    while (allocator.active_count() < allocator.window_size() - 1) {
+        ASSERT_FALSE(allocator.alloc(0).failed());
+    }
+
+    const GraphScopeResult replay = orch.graph_begin(0x1716, boundary_args, 0x1736);
+
+    EXPECT_FALSE(replay.execute_block);
+    ASSERT_TRUE(replay.task_id.is_valid());
+    EXPECT_EQ(replay.task_id.local(), static_cast<uint32_t>(allocator.window_size() - 1));
+    EXPECT_EQ(allocator.active_count(), allocator.window_size());
+    EXPECT_EQ(sm_handle->header->ring.fc.current_task_index.load(std::memory_order_acquire), allocator.window_size());
+    EXPECT_EQ(sm_handle->header->orch_error_code.load(std::memory_order_acquire), PTO2_ERROR_NONE);
+}

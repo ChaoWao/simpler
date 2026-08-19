@@ -9,16 +9,19 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 /**
- * cleanup_retired tests for the host_build_graph copy of PTO2TensorMap.
+ * Entry-lifetime tests for the host_build_graph copy of PTO2TensorMap.
  *
  * This is a distinct type from the tensormap_and_ringbuffer PTO2TensorMap
- * covered by a2a3/test_tensormap.cpp: single-ring, no entry epochs. Only the
- * per-task entry reclamation path is covered here — the hash / overlap /
- * lazy-invalidation surface is shared logic already exercised by that suite.
+ * covered by a2a3/test_tensormap.cpp: single-ring, no entry epochs, and — the
+ * subject of this file — no completion-watermark retirement. A registered
+ * output stays visible until dependency computation explicitly removes it as
+ * semantically covered; time and task-slot aliases alone never invalidate it.
+ * The hash / overlap surface is shared logic already exercised by that suite.
  */
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "utils/device_arena.h"
@@ -70,56 +73,72 @@ protected:
     }
 };
 
-TEST_F(HbgTensorMapTest, CleanupRetiredRemovesEntriesForRetiredTasks) {
+// Completion progress alone cannot make an older producer disappear. Direct
+// inserts remain visible until dependency computation explicitly removes one.
+TEST_F(HbgTensorMapTest, EveryProducerOfARegionStaysVisible) {
     ChipTensor t = make_test_tensor(0x1000, 256);
     tmap.insert(t, PTO2TaskId::make(0, 0));
     tmap.insert(t, PTO2TaskId::make(0, 1));
     tmap.insert(t, PTO2TaskId::make(0, 2));
     EXPECT_EQ(tmap.valid_count(), 3);
 
-    tmap.cleanup_retired(0, 2);
-
-    EXPECT_EQ(tmap.valid_count(), 1);
     TestLookupResult result;
     run_lookup(tmap, t, result);
-    ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, 2));
+    ASSERT_EQ(result.count, 3);
+    std::vector<PTO2TaskId> producers;
+    for (const auto &e : result.entries) {
+        producers.push_back(e.entry->producer_task_id);
+    }
+    EXPECT_NE(std::find(producers.begin(), producers.end(), PTO2TaskId::make(0, 0)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), PTO2TaskId::make(0, 1)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), PTO2TaskId::make(0, 2)), producers.end());
 }
 
-TEST_F(HbgTensorMapTest, CleanupRetiredFreesEveryOutputOfOneTask) {
-    ChipTensor t1 = make_test_tensor(0x1000, 256);
-    ChipTensor t2 = make_test_tensor(0x2000, 128);
-    PTO2TaskId tid = PTO2TaskId::make(0, 5);
-
-    tmap.insert(t1, tid);
-    tmap.insert(t2, tid);
-    EXPECT_EQ(tmap.valid_count(), 2);
-
-    tmap.cleanup_retired(5, 6);
-    EXPECT_EQ(tmap.valid_count(), 0);
-    EXPECT_EQ(tmap.free_num, 2);
-}
-
-// A later task that reuses a slot (local_id + WINDOW_SIZE) before cleanup has
-// run on the earlier task chains its entries under the same task_entry_head.
-// cleanup_retired retiring only the earlier task must free that earlier task's
-// entries alone and leave the still-live (later) task's entries intact.
-TEST_F(HbgTensorMapTest, CleanupRetiredSparesLaterTaskReusingSlot) {
+// Two tasks whose local ids alias to the same task slot both keep their entries;
+// slot reuse is not retirement.
+TEST_F(HbgTensorMapTest, SlotAliasingTasksBothKeepTheirEntries) {
     ChipTensor t = make_test_tensor(0x1000, 256);
     // Task 0 and task 0 + WINDOW_SIZE share slot 0 (local_id & (WINDOW_SIZE-1)).
     tmap.insert(t, PTO2TaskId::make(0, 0));
     tmap.insert(t, PTO2TaskId::make(0, WINDOW_SIZE));
-    ASSERT_EQ(tmap.valid_count(), 2);
 
-    // Retire only task 0.
-    tmap.cleanup_retired(0, 1);
-
-    // Only task 0's entry is freed; task WINDOW_SIZE's entry survives.
-    EXPECT_EQ(tmap.valid_count(), 1);
+    EXPECT_EQ(tmap.valid_count(), 2);
     TestLookupResult result;
     run_lookup(tmap, t, result);
-    ASSERT_EQ(result.count, 1);
-    EXPECT_EQ(result.entries[0].entry->producer_task_id, PTO2TaskId::make(0, WINDOW_SIZE));
+    ASSERT_EQ(result.count, 2);
+    std::vector<PTO2TaskId> producers;
+    for (const auto &e : result.entries) {
+        producers.push_back(e.entry->producer_task_id);
+    }
+    EXPECT_NE(std::find(producers.begin(), producers.end(), PTO2TaskId::make(0, 0)), producers.end());
+    EXPECT_NE(std::find(producers.begin(), producers.end(), PTO2TaskId::make(0, WINDOW_SIZE)), producers.end());
+}
+
+// Without an explicit semantic removal, direct inserts consume one pool entry
+// each. free_entries() is what the orchestrator's pre-registration capacity
+// check reads, so it must track those inserts exactly.
+TEST_F(HbgTensorMapTest, PoolOccupancyOnlyGrows) {
+    EXPECT_EQ(tmap.current_used(), 0);
+    EXPECT_EQ(tmap.pool_capacity(), POOL_SIZE);
+    EXPECT_EQ(tmap.free_entries(), POOL_SIZE);
+
+    for (int32_t i = 0; i < 8; i++) {
+        tmap.insert(make_test_tensor(0x1000 + 0x100 * i, 64), PTO2TaskId::make(0, i));
+        EXPECT_EQ(tmap.current_used(), i + 1);
+        EXPECT_EQ(tmap.free_entries(), POOL_SIZE - (i + 1));
+    }
+}
+
+// Filling the pool drives free_entries() to zero. No device-completion watermark
+// can free it, so ensure_tensormap_capacity() must fail immediately instead of
+// waiting for asynchronous reclaim that HBG does not have.
+TEST_F(HbgTensorMapTest, ExhaustedPoolStaysExhausted) {
+    for (int32_t i = 0; i < POOL_SIZE; i++) {
+        tmap.insert(make_test_tensor(0x10000 + 0x100 * i, 64), PTO2TaskId::make(0, i % WINDOW_SIZE));
+    }
+    EXPECT_EQ(tmap.current_used(), POOL_SIZE);
+    EXPECT_EQ(tmap.free_entries(), 0);
+    EXPECT_EQ(tmap.valid_count(), POOL_SIZE);
 }
 
 }  // namespace

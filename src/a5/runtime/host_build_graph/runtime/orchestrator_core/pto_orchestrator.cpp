@@ -82,11 +82,6 @@ __attribute__((weak, visibility("hidden"))) void dep_gen_host_graph_add_tensorma
 // cross-agent occupancy reads that feed the sample when scope_stats is disabled.
 extern "C" __attribute__((weak, visibility("hidden"))) bool is_scope_stats_enabled() { return false; }
 
-// Heap-ring wrap report, called from the allocator (pto_ring_buffer.h) on each
-// wrap. Strong definition lives in the AICPU collector; host builds fall back to
-// this weak no-op so the runtime translation unit stays self-contained.
-extern "C" __attribute__((weak, visibility("hidden"))) void scope_stats_note_heap_wrap(int) {}
-
 // AICore register accessor (aicpu/platform_regs.h). The host orchestrator's
 // route_ready_once path transitively ODR-uses the early-dispatch doorbell inline
 // (pto_scheduler.h ring_one_doorbell), but no core is gated during host
@@ -131,7 +126,6 @@ __attribute__((weak, visibility("hidden"))) uint64_t get_sys_cnt_aicpu() {
 // The strong symbol from the AICPU build wins when profiling is available.
 // Also hidden to prevent HOST .so from polluting the global symbol table.
 // Accumulated cycles per sub-step (only needed for ORCH_PROFILING export)
-static uint64_t g_orch_sync_cycle = 0;       // tensormap sync
 static uint64_t g_orch_alloc_cycle = 0;      // unified task+heap alloc
 static uint64_t g_orch_args_cycle = 0;       // param copy
 static uint64_t g_orch_lookup_cycle = 0;     // tensormap lookup + dep building
@@ -140,9 +134,7 @@ static uint64_t g_orch_fanin_cycle = 0;      // fanin list + early-return check
 static uint64_t g_orch_scope_end_cycle = 0;  // scope_end overhead
 static int64_t g_orch_submit_count = 0;
 static uint32_t g_orch_submit_idx = 0;
-uint64_t g_orch_alloc_wait_cycle = 0;
 uint64_t g_orch_fanin_wait_cycle = 0;
-uint64_t g_orch_alloc_atomic_count = 0;
 uint64_t g_orch_args_atomic_count = 0;
 uint64_t g_orch_scope_end_atomic_count = 0;
 // Cycle accumulation is unconditional under SIMPLER_ORCH_PROFILING (that's what
@@ -765,6 +757,16 @@ static bool append_fanin_or_fail(
         return true;
     }
     if (fanin_builder->count >= PTO2_MAX_FANIN) {
+        LOG_ERROR("========================================");
+        LOG_ERROR("FATAL: Fanin Capacity Exhausted!");
+        LOG_ERROR("========================================");
+        LOG_ERROR("HBG stores every producer dependency inline on the consumer task.");
+        LOG_ERROR("  Fanin:     used=%d/%d", fanin_builder->count, PTO2_MAX_FANIN);
+        LOG_ERROR("  Requested: at least %d distinct producer dependencies", fanin_builder->count + 1);
+        LOG_ERROR("Solution:");
+        LOG_ERROR("  Reduce the task fanin to at most PTO2_MAX_FANIN=%d.", PTO2_MAX_FANIN);
+        LOG_ERROR("  HBG has no dependency spill pool; PTO2_RING_DEP_POOL does not apply.");
+        LOG_ERROR("========================================");
         orch_mark_fatal(orch, PTO2_ERROR_DEP_POOL_OVERFLOW);
         return false;
     }
@@ -802,43 +804,11 @@ static PTO2OutputLayout calculate_output_layout(const CoreTaskArgs &args) {
     return layout;
 }
 
-static bool check_scope_can_accept_task(PTO2OrchestratorState *orch, PTO2TaskAllocator &allocator, uint8_t ring_id) {
-    always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
-
-    int32_t scope_task_count = orch->scope_tasks_size - orch->scope_begins[orch->scope_stack_top];
-    if (scope_task_count < allocator.window_size() - 1) {
-        return true;
-    }
-
-    int32_t active_count = allocator.active_count();
-
-    LOG_ERROR("========================================");
-    LOG_ERROR("FATAL: Scope Deadlock Detected! (ring %d)", ring_id);
-    LOG_ERROR("========================================");
-    LOG_ERROR("Tasks in current scope (%d) >= task_window_size (%d).", scope_task_count, allocator.window_size());
-    LOG_ERROR("  scope_depth:        %d", orch->scope_stack_top + 1);
-    LOG_ERROR("  ring_id:            %d", ring_id);
-    LOG_ERROR("  scope_task_count:   %d", scope_task_count);
-    LOG_ERROR("  active_tasks:       %d / %d", active_count, allocator.window_size());
-    LOG_ERROR("Root Cause:");
-    LOG_ERROR("  host_build_graph is whole-graph-resident: the host builds the entire");
-    LOG_ERROR("  scope before the device runs, so no slots reclaim during the build.");
-    LOG_ERROR("  When scope task count >= window_size the ring overflows.");
-    LOG_ERROR("Solution:");
-    LOG_ERROR("  1. Reduce tasks per scope (use batching/unroll)");
-    LOG_ERROR("  2. Increase task window (current: %d)", allocator.window_size());
-    LOG_ERROR("     Compile-time: PTO2_TASK_WINDOW_SIZE in pto_runtime2_types.h");
-    LOG_ERROR("     Runtime env:  PTO2_RING_TASK_WINDOW=<power-of-2>");
-    LOG_ERROR("  3. Split work across multiple scopes");
-    LOG_ERROR("========================================");
-    orch_mark_fatal(orch, PTO2_ERROR_SCOPE_DEADLOCK);
-    return false;
-}
-
 static bool prepare_task(
     PTO2OrchestratorState *orch, const CoreTaskArgs &args, int32_t total_output_size, ActiveMask active_mask,
     TaskAttrs task_attrs, PTO2PreparedTask *out
 ) {
+    always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
     uint8_t ring_id = 0;
     auto &allocator = orch->ring.task_allocator;
 
@@ -851,10 +821,6 @@ static bool prepare_task(
             "block_num=%d with %d active slots requires %d subtasks; expected block_num >= 1 and total <= %d",
             block_num, active_subtasks_per_block, total_required_subtasks, std::numeric_limits<int16_t>::max()
         );
-        return false;
-    }
-
-    if (!check_scope_can_accept_task(orch, allocator, ring_id)) {
         return false;
     }
 
@@ -973,8 +939,9 @@ void PTO2OrchestratorState::begin_scope(PTO2ScopeMode mode) {
         // Polling: no dep_pool to report (readiness is via completion_flags).
         int32_t dep_pool_tail = 0;
         int32_t dep_pool_top = 0;
+        // Both rings are forward-only here, so their reclaim ends stay at 0.
         scope_stats_begin(
-            ring_id, alloc.task_tail(), alloc.task_head(), alloc.heap_tail(), alloc.heap_top(), dep_pool_tail,
+            ring_id, /*task_start=*/0, alloc.task_head(), /*heap_start=*/0, alloc.heap_top(), dep_pool_tail,
             dep_pool_top, orch->tensor_map.current_used()
         );
     }
@@ -1005,8 +972,9 @@ void PTO2OrchestratorState::end_scope() {
         // Polling: no dep_pool to report (readiness is via completion_flags).
         int32_t dep_pool_tail = 0;
         int32_t dep_pool_top = 0;
+        // Both rings are forward-only here, so their reclaim ends stay at 0.
         scope_stats_end(
-            ring_id, alloc.task_tail(), alloc.task_head(), alloc.heap_tail(), alloc.heap_top(), dep_pool_tail,
+            ring_id, /*task_start=*/0, alloc.task_head(), /*heap_start=*/0, alloc.heap_top(), dep_pool_tail,
             dep_pool_top, orch->tensor_map.current_used()
         );
     }
@@ -1041,97 +1009,34 @@ void PTO2OrchestratorState::end_scope() {
 // =============================================================================
 
 // Ensure the tensormap entry pool has room for `needed` inserts before STEP 4
-// registers this task's outputs. The pool is watermark-reclaimed like the
-// task/heap/fanin pools — retired tasks' entries free once last_task_alive
-// advances — so an exhausted pool is back-pressure, not a hard error. Reclaim
-// against the single ring's watermark; if still short,
-// spin until reclaim actually frees entries, with the same 500 ms wall-clock
-// backstop as the task allocator and fanin spill pool. A pool that stays full
-// (no entry freed) is a genuine deadlock: latch PTO2_ERROR_TENSORMAP_OVERFLOW
-// and bail. Returns false on deadlock or on a fatal already latched by another
-// party. Cold path — the fast path returns immediately when the pool has room.
+// registers this task's outputs. Device completion never reclaims TensorMap
+// entries; only synchronous dependency computation can remove a covered
+// producer before this check. A pool that is still short here therefore cannot
+// become large enough while the host waits: latch
+// PTO2_ERROR_TENSORMAP_OVERFLOW and bail rather than letting new_entry()'s hard
+// assert fire mid-registration. Returns false when the pool is exhausted or a
+// fatal is already latched by another party.
 static bool ensure_tensormap_capacity(PTO2OrchestratorState *orch, int32_t needed) {
     PTO2TensorMap &tm = orch->tensor_map;
     if (tm.free_entries() >= needed) {
         return true;
     }
-
-    int32_t alive;
-    auto read_alive = [&]() {
-        // Relaxed: a self-correcting poll re-read every reclaim tick, so a stale
-        // watermark only defers reclaim one tick and never over-frees.
-        alive = orch->sm_header->ring.fc.last_task_alive.load(std::memory_order_relaxed);
-    };
-
-    read_alive();
-    int64_t cur_alive_sum = tm.reclaim_retired_all(alive);  // kept for the deadlock diagnostic
-    int32_t prev_free = tm.free_entries();
-    if (prev_free >= needed) {
-        return true;
+    if (orch->sm_header->orch_error_code.load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
+        return false;
     }
 
-    int spin_count = 0;
-    uint64_t block_cycle0 = 0;  // wall-clock anchor for the deadlock backstop
-    bool block_timing = false;  // false until the first no-reclaim-progress tick
-    while (tm.free_entries() < needed) {
-        spin_count++;
-
-        // Reclaim (and the all-ring watermark reads it needs) is the costly part of
-        // this spin and the only path that frees entries; gate it to a periodic tick.
-        // Cold path, but the spin itself is tight.
-        if ((spin_count & 31) == 0) {
-            read_alive();
-            cur_alive_sum = tm.reclaim_retired_all(alive);
-            int32_t cur_free = tm.free_entries();
-            if (cur_free >= needed) {
-                return true;
-            }
-            // Progress is entries actually freed, NOT watermark movement: a ring can
-            // retire zero-output tasks (count_registrable_outputs == 0), advancing
-            // last_task_alive without freeing any entry. Gating the backstop on
-            // free_entries() keeps a wedged pool from dodging the timeout while some
-            // unrelated ring keeps draining.
-            if (cur_free > prev_free) {
-                spin_count = 0;
-                prev_free = cur_free;
-                block_timing = false;
-            }
-        }
-
-        if ((spin_count & 1023) == 0) {
-            // A fatal latched elsewhere breaks this otherwise-unbounded spin.
-            if (orch->sm_header->orch_error_code.load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
-                return false;
-            }
-            // Absolute-time backstop, matching the task allocator: stable across
-            // chips/contention, unlike a fixed spin count. get_sys_cnt_aicpu()
-            // is an MMIO read, so sample it only once per 1024 spins.
-            uint64_t now = get_sys_cnt_aicpu();
-            if (!block_timing) {
-                block_cycle0 = now;
-                block_timing = true;
-            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
-                LOG_ERROR("========================================");
-                LOG_ERROR("FATAL: TensorMap Entry Pool Deadlock Detected!");
-                LOG_ERROR("========================================");
-                LOG_ERROR("TensorMap entry pool freed no entries for ~500 ms while a task waits.");
-                LOG_ERROR("  - Pool used:   %d / %d", tm.current_used(), tm.pool_capacity());
-                LOG_ERROR("  - Needed:      %d entries", needed);
-                LOG_ERROR("  - last_task_alive: %" PRId64, cur_alive_sum);
-                LOG_ERROR("Diagnosis:");
-                LOG_ERROR("  No retiring task is freeing tensormap entries (last_task_alive may");
-                LOG_ERROR("  still move on rings with no registered outputs). Check TaskRing");
-                LOG_ERROR("  diagnostics for the stalled producer.");
-                LOG_ERROR("Solution:");
-                LOG_ERROR("  Increase PTO2_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
-                LOG_ERROR("========================================");
-                orch_mark_fatal(orch, PTO2_ERROR_TENSORMAP_OVERFLOW);
-                return false;
-            }
-        }
-        SPIN_WAIT_HINT();
-    }
-    return true;
+    LOG_ERROR("========================================");
+    LOG_ERROR("FATAL: TensorMap Entry Pool Exhausted!");
+    LOG_ERROR("========================================");
+    LOG_ERROR("Device completion does not reclaim HBG TensorMap entries.");
+    LOG_ERROR("  - Pool used:   %d / %d", tm.current_used(), tm.pool_capacity());
+    LOG_ERROR("  - Free:        %d entries", tm.free_entries());
+    LOG_ERROR("  - Needed:      %d entries", needed);
+    LOG_ERROR("Solution:");
+    LOG_ERROR("  Increase PTO2_TENSORMAP_POOL_SIZE (current: %d).", tm.pool_capacity());
+    LOG_ERROR("========================================");
+    orch_mark_fatal(orch, PTO2_ERROR_TENSORMAP_OVERFLOW);
+    return false;
 }
 
 // Shared body for submit_task / submit_dummy_task. Caller has already validated
@@ -1152,7 +1057,6 @@ static TaskOutputTensors submit_task_common(
         return result;
     }
     PTO2SchedulerState *sched = orch->scheduler;
-    PTO2RingFlowControl &fc = orch->sm_header->ring.fc;
     PTO2TaskId task_id = prepared.task_id;
     PTO2TaskDescriptor &task = *prepared.task;
     PTO2TaskPayload &payload = *prepared.payload;
@@ -1187,14 +1091,6 @@ static TaskOutputTensors submit_task_common(
     }
 #endif
 
-    // === STEP 2: Sync TensorMap validity and optional cleanup ===
-    // Read current last_task_alive from shared memory for this ring
-    int32_t sm_last_task_alive = fc.last_task_alive.load(std::memory_order_acquire);
-
-    orch->tensor_map.sync_tensormap(task_id, sm_last_task_alive);
-
-    CYCLE_COUNT_LAP(g_orch_sync_cycle);
-
     for (uint32_t i = 0; i < args.explicit_dep_count(); i++) {
         PTO2TaskId dep_task_id = args.explicit_dep(i);
         if (!dep_task_id.is_valid()) {
@@ -1203,18 +1099,12 @@ static TaskOutputTensors submit_task_common(
             );
             return result;
         }
-        // Declared dependencies are graph edges even when the producer already
-        // retired below last_task_alive and needs no fanin wiring.
         if (capture_dep_graph) {
             dep_gen_host_graph_add_explicit_edge(dep_task_id.raw);
         }
         uint8_t dep_ring_id = dep_task_id.ring();
         PTO2SharedMemoryRingHeader &dep_ring = orch->sm_header->ring;
         int32_t dep_local_task_id = static_cast<int32_t>(dep_task_id.local());
-        int32_t dep_last_task_alive = dep_ring.fc.last_task_alive.load(std::memory_order_acquire);
-        if (dep_local_task_id < dep_last_task_alive) {
-            continue;
-        }
         int32_t dep_slot = dep_ring.get_slot_by_task_id(dep_local_task_id);
         PTO2TaskSlotState *producer_slot_state = &dep_ring.get_slot_state_by_slot(dep_slot);
         if (!append_fanin_or_fail(orch, dep_ring_id, dep_slot, producer_slot_state, dep_task_id, &fanin_builder)) {
@@ -1266,10 +1156,9 @@ static TaskOutputTensors submit_task_common(
     CYCLE_COUNT_LAP(g_orch_lookup_cycle);
 
     // === STEP 4: Register outputs/inouts in TensorMap (must be separate from lookup) ===
-    // Reserve pool capacity for this task's inserts before registering. The pool
-    // is reclaimed as last_task_alive advances; an
-    // exhausted pool back-pressures here (and detects a wedged watermark) rather
-    // than tripping new_entry()'s hard assert mid-registration.
+    // Reserve pool capacity for this task's inserts before registering, so an
+    // exhausted pool reports here rather than tripping new_entry()'s hard assert
+    // mid-registration.
     int32_t tensormap_needed = count_registrable_outputs(dep_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) {
         return result;
@@ -1463,6 +1352,7 @@ bool graph_submit_definition(
     PTO2OrchestratorState *orch, GraphHostState *state, const std::vector<std::byte> &definition_image,
     const CoreTaskArgs &args, PTO2TaskId *submitted_id
 ) {
+    always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
     const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
         definition->execution_storage_bytes == 0) {
@@ -1478,7 +1368,7 @@ bool graph_submit_definition(
         return false;
     }
     auto &allocator = orch->ring.task_allocator;
-    if (allocator.active_count() + 1 >= allocator.window_size() || owned_heap > allocator.heap_available()) {
+    if (allocator.active_count() >= allocator.window_size() || owned_heap > allocator.heap_available()) {
         LOG_WARN("%s", "[GraphExecution] task-window/heap preflight failed; using ordinary path");
         return false;
     }
@@ -1491,8 +1381,6 @@ bool graph_submit_definition(
     };
     const int32_t tensormap_needed = count_registrable_outputs(boundary_inputs, orch->in_manual_scope());
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) return false;
-    if (!check_scope_can_accept_task(orch, allocator, 0)) return false;
-
     const PTO2TaskAllocResult allocation = allocator.alloc(static_cast<int32_t>(owned_heap));
     if (allocation.failed()) {
         orch_mark_fatal(orch, PTO2_ERROR_HEAP_RING_DEADLOCK);
@@ -1522,7 +1410,6 @@ bool graph_submit_definition(
     graph_reset_outer_payload(payload);
 
     PTO2FaninBuilder fanin_builder(orch, &payload, static_cast<int32_t>(task_id.local()), next_fanin_seen_epoch(orch));
-    orch->tensor_map.sync_tensormap(task_id, ring.fc.last_task_alive.load(std::memory_order_acquire));
     auto emit = [&](PTO2TaskId producer_id) -> bool {
         const int32_t producer_local = static_cast<int32_t>(producer_id.local());
         const int32_t producer_slot = ring.get_slot_by_task_id(producer_local);
@@ -2093,7 +1980,6 @@ void PTO2OrchestratorState::mark_done() {
 #if SIMPLER_ORCH_PROFILING
 PTO2OrchProfilingData orchestrator_get_profiling() {
     PTO2OrchProfilingData d;
-    d.sync_cycle = g_orch_sync_cycle;
     d.alloc_cycle = g_orch_alloc_cycle;
     d.args_cycle = g_orch_args_cycle;
     d.lookup_cycle = g_orch_lookup_cycle;
@@ -2101,21 +1987,17 @@ PTO2OrchProfilingData orchestrator_get_profiling() {
     d.fanin_cycle = g_orch_fanin_cycle;
     d.scope_end_cycle = g_orch_scope_end_cycle;
     d.submit_count = g_orch_submit_count;
-    d.alloc_wait_cycle = g_orch_alloc_wait_cycle;
     d.fanin_wait_cycle = g_orch_fanin_wait_cycle;
-    d.alloc_atomic_count = g_orch_alloc_atomic_count;
     d.args_atomic_count = g_orch_args_atomic_count;
     d.scope_end_atomic_count = g_orch_scope_end_atomic_count;
 
     // Reset
-    g_orch_sync_cycle = g_orch_alloc_cycle = g_orch_args_cycle = 0;
+    g_orch_alloc_cycle = g_orch_args_cycle = 0;
     g_orch_lookup_cycle = g_orch_insert_cycle = 0;
     g_orch_fanin_cycle = g_orch_scope_end_cycle = 0;
     g_orch_submit_count = 0;
     g_orch_submit_idx = 0;
-    g_orch_alloc_wait_cycle = 0;
     g_orch_fanin_wait_cycle = 0;
-    g_orch_alloc_atomic_count = 0;
     g_orch_args_atomic_count = 0;
     g_orch_scope_end_atomic_count = 0;
     return d;

@@ -119,10 +119,6 @@
 // flooding the AICPU hot-path device log.
 #define PTO2_DEP_DEGREE_WARN_THRESHOLD 16
 
-// TensorMap cleanup interval
-#define PTO2_TENSORMAP_CLEANUP_INTERVAL 64  // Cleanup every N retired tasks
-#define PTO2_DEP_POOL_CLEANUP_INTERVAL 64   // Cleanup every N retired tasks
-
 // get_tensor_data/set_tensor_data spin-wait timeout, expressed in time. The cycle
 // count (PTO2_TENSOR_DATA_TIMEOUT_CYCLES) is derived from this in pto_runtime2.cpp
 // — its only user — by scaling with the platform counter frequency, like
