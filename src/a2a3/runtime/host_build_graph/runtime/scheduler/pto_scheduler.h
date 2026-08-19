@@ -86,12 +86,26 @@ struct alignas(64) PTO2ReadyQueue {
     char _pad1[64 - sizeof(std::atomic<uint64_t>)];  // Own cache line
 
     std::atomic<uint64_t> dequeue_pos;
-    char _pad2[64 - sizeof(std::atomic<uint64_t>)];  // Own cache line
+    // Occupancy high-water, for teardown reporting only. Atomic because pushes
+    // are concurrent; relaxed throughout, so it is ordered against nothing.
+    std::atomic<uint64_t> max_occupancy;
+    char _pad2[64 - 2 * sizeof(std::atomic<uint64_t>)];  // Own cache line
 
     uint64_t size() {
         uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
         uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
         return (e >= d) ? (e - d) : 0;
+    }
+
+    // Raise the high-water to the occupancy left by a push that published up to
+    // `published_pos`. Off the fast path it is a load and a compare; the CAS runs
+    // only on a new maximum, so a contended push never pays for it.
+    void note_occupancy(uint64_t published_pos) {
+        const uint64_t occ = published_pos - dequeue_pos.load(std::memory_order_relaxed);
+        uint64_t observed = max_occupancy.load(std::memory_order_relaxed);
+        while (occ > observed && !max_occupancy.compare_exchange_weak(
+                                     observed, occ, std::memory_order_relaxed, std::memory_order_relaxed
+                                 )) {}
     }
 
     bool push(PTO2TaskSlotState *slot_state) { return push_tagged(slot_state, 0); }
@@ -118,6 +132,7 @@ struct alignas(64) PTO2ReadyQueue {
         slot->slot_state = slot_state;
         slot->task_id_snapshot = task_id_snapshot;
         slot->sequence.store(static_cast<int64_t>(pos + 1), std::memory_order_release);
+        note_occupancy(pos + 1);
         return true;
     }
 
@@ -165,6 +180,7 @@ struct alignas(64) PTO2ReadyQueue {
             slot->task_id_snapshot = task_id_snapshots == nullptr ? 0 : task_id_snapshots[i];
             slot->sequence.store(static_cast<int64_t>(pos + i + 1), std::memory_order_release);
         }
+        note_occupancy(pos + static_cast<uint64_t>(count));
         return true;
     }
 
