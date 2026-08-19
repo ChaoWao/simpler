@@ -101,7 +101,7 @@ static GraphScopeResult graph_begin_impl(PTO2Runtime *rt, uint64_t graph_key, co
     return rt->orchestrator.graph_begin(graph_key, args, rt->active_callable_hash);
 }
 
-static bool graph_prepare_impl(PTO2Runtime *rt, const CoreTaskArgs &args) {
+static bool graph_prepare_impl(PTO2Runtime *rt, const GraphTaskArgs &args) {
     return rt != nullptr && rt->orchestrator.graph_prepare(args);
 }
 

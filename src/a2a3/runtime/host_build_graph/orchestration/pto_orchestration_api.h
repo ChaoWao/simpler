@@ -128,18 +128,10 @@ struct PTO2Runtime {
 
 class GraphOwnedArgs {
 public:
-    // A CoreTaskArgs cannot report more args than its own capacity, so the loops
-    // below need no runtime bound — but only while these arrays are at least as
-    // large as that capacity. GRAPH_MAX_TENSOR_ARGS and MAX_TENSOR_ARGS are
-    // independent constants that merely happen to agree, so shrinking the Graph
-    // one would silently turn the tensor loop into an overflow that a release
-    // build cannot catch.
-    static_assert(
-        GRAPH_MAX_TENSOR_ARGS >= static_cast<uint32_t>(MAX_TENSOR_ARGS),
-        "GraphOwnedArgs must hold every tensor a CoreTaskArgs can carry"
-    );
-
-    explicit GraphOwnedArgs(const CoreTaskArgs &source) {
+    // The arrays below are sized to the Graph boundary's own capacity, so a
+    // source GraphTaskArgs cannot report more args than they hold and the copy
+    // loops need no runtime bound.
+    explicit GraphOwnedArgs(const GraphTaskArgs &source) {
         for (int32_t i = 0; i < source.tensor_count(); ++i) {
             tensors_[static_cast<size_t>(i)].copy(source.tensor(i).ref());
             switch (source.tag(i)) {
@@ -172,12 +164,12 @@ public:
         args_.set_predicate(source.predicate());
     }
 
-    CoreTaskArgs &args() { return args_; }
+    GraphTaskArgs &args() { return args_; }
 
 private:
     std::array<ChipTensor, GRAPH_MAX_TENSOR_ARGS> tensors_{};
-    std::array<uint64_t, MAX_SCALAR_ARGS> scalars_{};
-    CoreTaskArgs args_;
+    std::array<uint64_t, GRAPH_MAX_SCALAR_ARGS> scalars_{};
+    GraphTaskArgs args_;
 };
 
 class GraphAsyncRecordingState {
@@ -395,7 +387,7 @@ static inline GraphScopeResult rt_graph_begin(uint64_t graph_key, const GraphTas
     return rt->ops->graph_begin(rt, graph_key, args);
 }
 
-static inline bool rt_graph_prepare(const CoreTaskArgs &args) {
+static inline bool rt_graph_prepare(const GraphTaskArgs &args) {
     PTO2Runtime *rt = current_runtime();
     return rt->ops->graph_prepare != nullptr && rt->ops->graph_prepare(rt, args);
 }
@@ -662,7 +654,7 @@ static inline GraphSubmitResult rt_submit_graph_impl(uint64_t graph_key, const G
 static inline GraphSubmitResult rt_submit_graph(uint64_t graph_id, GraphFunction function, const GraphTaskArgs &args) {
     debug_assert(function != nullptr && "Graph function must not be null");
     if (function == nullptr) return GraphSubmitResult{};
-    return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [function](const CoreTaskArgs &record_args) {
+    return rt_submit_graph_impl(rt_graph_make_key(graph_id), args, [function](const GraphTaskArgs &record_args) {
         function(record_args);
     });
 }
@@ -682,7 +674,7 @@ static inline GraphSubmitResult rt_submit_graph(
     if (function == nullptr) return GraphSubmitResult{};
     auto configs = std::make_tuple(config...);
     return rt_submit_graph_impl(
-        rt_graph_make_key(graph_id, config...), args, [function, configs](const CoreTaskArgs &record_args) {
+        rt_graph_make_key(graph_id, config...), args, [function, configs](const GraphTaskArgs &record_args) {
             std::apply(
                 [&](auto... values) {
                     function(record_args, values...);
