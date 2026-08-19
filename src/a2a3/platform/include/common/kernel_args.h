@@ -108,8 +108,8 @@ struct KernelArgs {
                                         // Allocated by host's ScopeStatsCollector, read+written by AICPU's
                                         // scope_stats_collector via set_platform_scope_stats_base.
     // Device ptr to a uint64_t[num_aicore] table holding each core's
-    // ChipSwimlaneAicoreTaskBuffer address. AICore kernel entry indexes by block_idx
-    // and forwards into platform set/get state. 0 when chip swimlane is off.
+    // ChipSwimlaneActiveHead address (rotation channel). AICore kernel entry indexes
+    // by block_idx and forwards into platform set/get state. 0 when chip swimlane is off.
     uint64_t chip_swimlane_aicore_rotation_table{0};
     // Device pointer to the run-wall buffer the platform AICPU entry writes.
     // Allocated once and kept resident, reset each run. Onboard AICPU receives

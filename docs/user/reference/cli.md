@@ -36,14 +36,17 @@ cases use `"manual": True` or a platform list such as
 All off by default. Each also exists as a `CallConfig` field for direct-`Worker`
 programs — see the [Python API reference](python-api.md).
 
+**Every flag in this table is disabled when `--rounds > 1`**, so benchmark
+rounds stay uninstrumented. The harness warns for each one it switches off.
+
 | Flag | Meaning |
 | ---- | ------- |
 | `--enable-chip-swimlane` | Per-task timing. Bare flag = level 4 (full); `1` AICore timing, `2` + dispatch/fanout, `3` + scheduler phases, `4` + orchestration. **L2 only** |
 | `--enable-swimlane-overhead` | Adds the 8 Overhead Analysis counter tracks. Requires `--enable-chip-swimlane` **and** a `deps.json` — add `--enable-dep-gen` if absent |
 | `--enable-pmu` | AICore hardware counters. Bare flag = `PIPE_UTILIZATION` (2); pass an event type to override, e.g. `--enable-pmu 4` |
 | `--dump-args` | Capture per-task arguments. `0` off; `1` partial; `2` full; `3` hybrid (all metadata plus payload selected via `Arg::dump(...)`) |
-| `--enable-dep-gen` | Capture the dependency graph (first round only) |
-| `--enable-scope-stats` | Per-scope peaks to `<output_prefix>/scope_stats.jsonl` |
+| `--enable-dep-gen` | Capture the dependency graph |
+| `--enable-scope-stats` | Per-scope peaks to `<output_prefix>/scope_stats/scope_stats.jsonl` |
 
 Which flag answers which question is tabulated in
 [How-to: profile a kernel](../how-to/profile-a-kernel.md).

@@ -42,6 +42,56 @@ logger = logging.getLogger(__name__)
 _compile_cache: dict[tuple, object] = {}
 
 
+class _DiagnosticOptions(NamedTuple):
+    chip_swimlane: int
+    dump_args: int
+    pmu: int
+    dep_gen: bool
+    scope_stats: bool
+    swimlane_overhead: bool
+
+
+def _validate_diagnostic_flags(*, chip_swimlane: int, swimlane_overhead: bool) -> None:
+    """Reject diagnostic combinations that can never produce their artifact.
+
+    Raises ``ValueError``; each CLI front-end translates it into that
+    front-end's own usage error (``parser.error`` standalone,
+    ``pytest.UsageError`` under pytest).
+    """
+    if swimlane_overhead and not chip_swimlane:
+        raise ValueError("--enable-swimlane-overhead requires --enable-chip-swimlane")
+
+
+def _effective_diagnostic_options(
+    rounds: int,
+    *,
+    chip_swimlane: int,
+    dump_args: int,
+    pmu: int,
+    dep_gen: bool,
+    scope_stats: bool,
+    swimlane_overhead: bool,
+    warn: bool = True,
+) -> _DiagnosticOptions:
+    """Return the diagnostics that may run for the requested round count."""
+    _validate_diagnostic_flags(chip_swimlane=chip_swimlane, swimlane_overhead=swimlane_overhead)
+    if rounds <= 1:
+        return _DiagnosticOptions(chip_swimlane, dump_args, pmu, dep_gen, scope_stats, swimlane_overhead)
+
+    disabled = (
+        ("chip swimlane", chip_swimlane),
+        ("args dump", dump_args),
+        ("PMU", pmu),
+        ("dep_gen", dep_gen),
+        ("scope_stats", scope_stats),
+        ("swimlane overhead", swimlane_overhead),
+    )
+    for name, enabled in disabled:
+        if warn and enabled:
+            logger.warning("%s disabled: --rounds > 1", name)
+    return _DiagnosticOptions(0, 0, 0, False, False, False)
+
+
 def _pto_isa_compile_cache_token() -> str:
     """Pin SHA included in session compile-cache keys.
 
@@ -1108,9 +1158,8 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
         case_label = f"{cls_name}_{case['name']}"
         # Per-case directory the runtime writes into. Required (non-empty) when
         # any diagnostic flag is on; CallConfig::validate() throws otherwise.
-        # scope_stats now writes <prefix>/scope_stats/scope_stats.jsonl (sibling of
-        # chip_swimlane_records.json / deps.json), so it pulls output_prefix the
-        # same way the other DFX flags do.
+        # scope_stats writes below the per-case output prefix, so it uses the
+        # same output-prefix allocation as the other diagnostics.
         prefix = _build_output_prefix(case_label) if diagnostics_on else Path("")
         try:
             cls_inst._run_and_validate(
@@ -1534,11 +1583,9 @@ class SceneTestCase:
                 for name, initial in initial_outputs.items():
                     getattr(test_args, name).copy_(initial)
 
-            # enable_chip_swimlane / enable_dep_gen are already forced False by
-            # the upstream gate in test_run / run_module when rounds > 1, so an
-            # extra `and round_idx == 0` here is dead code; pass them through
-            # verbatim. (If the upstream gate is ever relaxed, restore the
-            # per-round masking here.)
+            # Every diagnostic reaching this loop is already multi-round-safe:
+            # _effective_diagnostic_options zeroes all of them when rounds > 1,
+            # so no per-round masking belongs here.
             config = self._build_config(
                 config_dict,
                 enable_chip_swimlane=enable_chip_swimlane,
@@ -1656,20 +1703,23 @@ class SceneTestCase:
 
     @staticmethod
     def _effective_enable_dep_gen(request, *, warn: bool = False) -> bool:
-        """``--enable-dep-gen`` CLI value after applying the ``--rounds > 1``
-        disable. Single source of truth so the framework's ``test_run`` loop
-        and any subclass override (e.g. ``TestDepGenCapture``'s post-validate
-        hook) can't drift on the gating rule. Pass ``warn=True`` from the
-        framework's first call — it owns the user-facing "disabled because
-        rounds > 1" message; subclass overrides leave ``warn`` off since
-        ``super().test_run()`` already warned."""
-        if not request.config.getoption("--enable-dep-gen", default=False):
-            return False
-        if request.config.getoption("--rounds", default=1) > 1:
-            if warn:
-                logger.warning("dep_gen disabled: --rounds > 1")
-            return False
-        return True
+        """Return the multi-round-safe dep-gen setting for extension hooks.
+
+        Shares the gating rule with ``test_run`` so a subclass hook (e.g.
+        ``TestDepGenCapture``'s post-validate step) cannot drift from it.
+        ``warn`` stays off by default because ``test_run`` already emitted the
+        user-facing "disabled: --rounds > 1" line before any hook runs.
+        """
+        return _effective_diagnostic_options(
+            request.config.getoption("--rounds", default=1),
+            chip_swimlane=0,
+            dump_args=0,
+            pmu=0,
+            dep_gen=request.config.getoption("--enable-dep-gen", default=False),
+            scope_stats=False,
+            swimlane_overhead=False,
+            warn=warn,
+        ).dep_gen
 
     def test_run(self, st_platform, st_worker, request):
         """Auto test method — runs matching cases for the current platform."""
@@ -1681,22 +1731,24 @@ class SceneTestCase:
         enable_chip_swimlane = request.config.getoption("--enable-chip-swimlane", default=0)
         enable_dump_args = request.config.getoption("--dump-args", default=0)
         enable_pmu = request.config.getoption("--enable-pmu", default=0)
-        enable_dep_gen = self._effective_enable_dep_gen(request, warn=True)
+        enable_dep_gen = request.config.getoption("--enable-dep-gen", default=False)
         enable_scope_stats = request.config.getoption("--enable-scope-stats", default=False)
         enable_swimlane_overhead = request.config.getoption("--enable-swimlane-overhead", default=False)
-        if rounds > 1:
-            if enable_chip_swimlane:
-                logger.warning("Profiling disabled: --rounds > 1")
-                enable_chip_swimlane = 0
-            if enable_dump_args:
-                logger.warning("Dump args disabled: --rounds > 1")
-                enable_dump_args = 0
-            if enable_pmu:
-                logger.warning("PMU disabled: --rounds > 1")
-                enable_pmu = 0
-            if enable_scope_stats:
-                logger.warning("scope_stats disabled: --rounds > 1")
-                enable_scope_stats = False
+        diagnostics = _effective_diagnostic_options(
+            rounds,
+            chip_swimlane=enable_chip_swimlane,
+            dump_args=enable_dump_args,
+            pmu=enable_pmu,
+            dep_gen=enable_dep_gen,
+            scope_stats=enable_scope_stats,
+            swimlane_overhead=enable_swimlane_overhead,
+        )
+        enable_chip_swimlane = diagnostics.chip_swimlane
+        enable_dump_args = diagnostics.dump_args
+        enable_pmu = diagnostics.pmu
+        enable_dep_gen = diagnostics.dep_gen
+        enable_scope_stats = diagnostics.scope_stats
+        enable_swimlane_overhead = diagnostics.swimlane_overhead
 
         cls_name = type(self).__name__
         callable_obj = self.build_callable(st_platform)
@@ -1814,7 +1866,7 @@ class SceneTestCase:
         parser.add_argument(
             "--enable-dep-gen",
             action="store_true",
-            help="Enable dep_gen capture (SubmitTrace ring, first round only)",
+            help="Enable dep_gen capture (disabled when --rounds > 1)",
         )
         parser.add_argument(
             "--enable-pmu",
@@ -1898,22 +1950,30 @@ class SceneTestCase:
                     f"  {_san.preload_command(_san_tokens, args.platform)} python {module_name} ..."
                 )
 
+        # Resolved before the eager PTO-ISA checkout below so a rejected flag
+        # combination costs no clone.
+        try:
+            diagnostics = _effective_diagnostic_options(
+                args.rounds,
+                chip_swimlane=args.enable_chip_swimlane,
+                dump_args=args.dump_args,
+                pmu=args.enable_pmu,
+                dep_gen=args.enable_dep_gen,
+                scope_stats=args.enable_scope_stats,
+                swimlane_overhead=args.enable_swimlane_overhead,
+            )
+        except ValueError as e:
+            parser.error(str(e))
+        args.enable_chip_swimlane = diagnostics.chip_swimlane
+        args.dump_args = diagnostics.dump_args
+        args.enable_pmu = diagnostics.pmu
+        args.enable_dep_gen = diagnostics.dep_gen
+        args.enable_scope_stats = diagnostics.scope_stats
+        args.enable_swimlane_overhead = diagnostics.swimlane_overhead
+
         # Eager pin checkout for kernel/orchestration compiles that pass
         # pto_isa_root explicitly. Do not export PTO_ISA_ROOT (#1403).
         ensure_pto_isa_root(verbose=True)
-
-        if args.rounds > 1 and args.enable_chip_swimlane:
-            logger.warning("Profiling disabled: --rounds > 1")
-            args.enable_chip_swimlane = 0
-        if args.rounds > 1 and args.enable_dep_gen:
-            logger.warning("dep_gen disabled: --rounds > 1")
-            args.enable_dep_gen = False
-        if args.rounds > 1 and args.dump_args:
-            logger.warning("Dump args disabled: --rounds > 1")
-            args.dump_args = 0
-        if args.rounds > 1 and args.enable_scope_stats:
-            logger.warning("scope_stats disabled: --rounds > 1")
-            args.enable_scope_stats = False
 
         from .parallel_scheduler import default_max_parallel, device_range_to_list  # noqa: PLC0415
 
@@ -2084,6 +2144,8 @@ def _dispatch_test_phases_standalone(module_name, selected_by_cls, args):  # noq
         common += ["--enable-chip-swimlane", str(args.enable_chip_swimlane)]
     if args.dump_args:
         common += ["--dump-args", str(args.dump_args)]
+    if args.enable_pmu:
+        common += ["--enable-pmu", str(args.enable_pmu)]
     if args.enable_dep_gen:
         common.append("--enable-dep-gen")
     if args.enable_scope_stats:

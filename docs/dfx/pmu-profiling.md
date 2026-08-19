@@ -65,8 +65,8 @@ SIMPLER_PMU_EVENT_TYPE=4 \
 python tests/st/<case>/test_<name>.py -p a2a3 -d 0 --enable-pmu
 ```
 
-`--rounds > 1` disables PMU collection in the test harness so warm-up
-rounds are not double-counted.
+`--rounds > 1` disables PMU collection in the test harness so benchmark
+rounds stay uninstrumented.
 
 ### 3.2 Output
 

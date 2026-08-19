@@ -148,9 +148,9 @@
  *     `free_queue.tail` + `buffer_ptrs[]` after refill) back as narrow
  *     `write_range_to_device` writes. A bulk host→device write-back is
  *     intentionally avoided: it would race with AICPU writes to
- *     device-only fields (current_buf_ptr, total/dropped/mismatch
- *     counters, queue_tails, free_queue.head, and on a5
- *     ChipSwimlaneAicpuPhaseHeader::magic) and roll them back to the
+ *     device-only fields (current_buf_ptr, current_buf_seq,
+ *     total/dropped/mismatch counters, queue_tails, free_queue.head, and
+ *     the subsystem's device-written header fields) and roll them back to the
  *     host-shadow values mirrored in at the top of the tick. Buffer
  *     contents are mirrored on demand inside ProfilerAlgorithms.
  *   - On these platforms `reg` always allocates a paired host shadow; the

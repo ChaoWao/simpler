@@ -731,7 +731,7 @@ inline const char *host_phase_kind_name(HostPhaseKind kind) {
     return "unknown";
 }
 
-constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 16384;  // ~512KB per sched thread, ~512KB per orch thread
+constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 16384;  // 1 MiB per sched thread, 512 KiB per orch thread
 
 // Fixed-size phase record buffers. Same TypedBuffer template as the task
 // buffers — keeps the drain machinery uniform.

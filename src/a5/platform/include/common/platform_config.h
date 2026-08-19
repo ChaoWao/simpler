@@ -329,7 +329,7 @@ constexpr int PLATFORM_PMU_RECORDS_PER_BUFFER = 512;
 /**
  * Per-core PMU staging ring depth (AICore-side dual-issue slots).
  *
- * Same constraints as PLATFORM_L2_AICORE_RING_SIZE: ≥ in-flight task
+ * Constraints: ≥ in-flight task
  * depth on a single core, and ideally a power of two so the
  * `task_id % RING_SIZE` slot index compiles to a mask. Decoupled from
  * the rotating PmuBuffer so the AICore write address is stable across
