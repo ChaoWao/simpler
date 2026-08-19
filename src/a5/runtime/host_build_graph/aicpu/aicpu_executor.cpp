@@ -265,12 +265,27 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 
             void *sm_ptr = runtime->get_gm_sm_ptr();
             uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.task_window_sizes);
+            // sm_handle and the scheduler state are the device-only zone: their
+            // bytes never travel, so they start as whatever the pooled arena last
+            // held. Zeroing the handle first is what makes attach_populated's
+            // assignment of every field checkable here rather than by inspecting
+            // attach_populated.
             memset(rt->sm_handle, 0, sizeof(*rt->sm_handle));
             if (!rt->sm_handle->attach_populated(sm_ptr, sm_size, rt->prebuilt_layout.task_window_sizes)) {
                 LOG_ERROR("Thread %d: host-orch: sm_handle->attach_populated failed", thread_idx);
                 rt = nullptr;
                 run_rc = -1;
                 boot_ok = false;
+            } else if (!rt->scheduler->init_data_from_layout(rt->prebuilt_layout.sched, runtime_arena_, sm_ptr)) {
+                LOG_ERROR("Thread %d: host-orch: scheduler init_data_from_layout failed", thread_idx);
+                rt = nullptr;
+                run_rc = -1;
+                boot_ok = false;
+            } else {
+                // Queue headers are set, so the slot arrays can take their ramp.
+                // Both precede runtime_init_ready_, which is what releases the peer
+                // threads into the dispatch loop, so no push sees either unset.
+                rt->scheduler->seed_queue_slots();
             }
         }
 
@@ -364,7 +379,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         // Destroy the host_build_graph runtime. sm_handle / rt are recreated
         // every run, so always tear them down here.
         if (rt != nullptr) {
-            rt->scheduler.print_queues();
+            rt->scheduler->print_queues();
             // Clear g_current_runtime in this DSO before destroying rt.
             framework_bind_runtime(nullptr);
             // A Graph's expansion storage is the tail of its outer task's heap

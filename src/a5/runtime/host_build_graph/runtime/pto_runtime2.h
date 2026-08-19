@@ -116,11 +116,26 @@ struct PTO2RuntimeArenaLayout {
     size_t off_sm_handle{0};
     PTO2OrchestratorLayout orch;
     PTO2SchedulerLayout sched;
+    size_t off_scheduler{0};
     size_t off_runtime{0};
     size_t off_mailbox{0};
-    // First offset past the skipped orchestrator block: the start of the single
-    // contiguous range bind uploads after [0, orch.off_fanin_seen_epoch).
-    size_t off_uploaded_tail_begin{0};
+    // The arena is reserved in three zones and the offsets above land in exactly
+    // one of them:
+    //
+    //   host-only    the orchestrator block. Dep-computation scratch the AICPU
+    //                never reads, so it is never copied.
+    //   copied       [off_copied_begin, off_copied_end). Every byte carries this
+    //                run's own content, so bind ships the whole zone as one
+    //                contiguous range.
+    //   device-only  sm_handle, the scheduler state and its queue slot arrays.
+    //                Reachable storage whose content is a function of the layout,
+    //                not of the run, so the device writes it at boot instead of
+    //                receiving an initialization pattern over PCIe.
+    //
+    // Placing the copied zone in the middle is what keeps the upload a single
+    // range: the two zones that are not copied sit on either side of it.
+    size_t off_copied_begin{0};
+    size_t off_copied_end{0};
 
     // Cached parameters (re-used by init_data + wire stages).
     uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH]{};
@@ -145,7 +160,9 @@ struct PTO2Runtime {
     // Components
     PTO2SharedMemoryHandle *sm_handle;
     PTO2OrchestratorState orchestrator;
-    PTO2SchedulerState scheduler;
+    // Device-only zone: the scheduler state holds no per-run content, so it is
+    // addressed through the arena rather than carried inside this header.
+    PTO2SchedulerState *scheduler;
     AICoreCompletionMailbox *aicore_mailbox;
 
     // GM Heap for output buffers

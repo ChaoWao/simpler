@@ -842,6 +842,18 @@ add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp
 add_a2a3_hbg_runtime_test(test_dispatch_table a2a3/test_dispatch_table.cpp
     ${HBG_RUNTIME_DIR}/shared/runtime.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp)
+# The seed test calls the real ready_queue_init_data_from_layout, so it links the
+# shared init TU (and the orchestrator/SM members that TU refers to).
+add_a2a3_hbg_runtime_test(test_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
+target_sources(test_hbg_ready_queue_seed PRIVATE
+    ${HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
+    ${HBG_RUNTIME_DIR}/orchestrator_core/pto_ring_buffer.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_shared_memory.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_tensormap.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_runtime2_init.cpp
+    ${HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 # The submit-poison test drives the real orchestrator submit path, so it links the
 # orchestrator + shared runtime out-of-line members (mirrors a2a3_rt_objs for hbg).
 add_a2a3_hbg_runtime_test(test_hbg_submit_poison a2a3/test_hbg_submit_poison.cpp)
@@ -875,6 +887,16 @@ target_sources(test_a5_hbg_graph_submit_failure PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
 )
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
+add_a5_hbg_runtime_test(test_a5_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
+target_sources(test_a5_hbg_ready_queue_seed PRIVATE
+    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/pto_orchestrator.cpp
+    ${A5_HBG_RUNTIME_DIR}/orchestrator_core/pto_ring_buffer.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/pto_shared_memory.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/pto_tensormap.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/pto_runtime2_init.cpp
+    ${A5_HBG_RUNTIME_DIR}/shared/runtime.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a5_hbg_runtime_test(test_a5_hbg_aicore_completion_mailbox a5/test_aicore_completion_mailbox.cpp)
 set(HBG_A5_RUNTIME_DIR ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime)
 # The submit-poison test drives the real orchestrator submit path, so it links the

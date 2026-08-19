@@ -551,7 +551,7 @@ int32_t run_host_orchestration(
         LOG_ERROR("host-orch: orchestrator re-init against host SM failed");
         return -1;
     }
-    rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, &rt->scheduler);
+    rt->orchestrator.wire_arena_pointers(layout.orch, host_arena, rt->scheduler);
 
     PTO2SharedMemoryHandle host_sm_handle;
     if (!host_sm_handle.init_per_ring(host_sm, sm_size, eff_task_window_sizes, eff_heap_sizes)) {
@@ -1072,29 +1072,25 @@ extern "C" int bind_callable_to_runtime_impl(
     // *before* it can dereference the image.
     rt->prebuilt_layout = layout;
 
-    // Skip uploading the orchestrator block (fanin_seen_epoch / scope / tensormap,
-    // ~8.5 MB): it is host-only dep-computation scratch that the AICPU scheduler
-    // never reads. Ship [0, orch_start) (sm_handle) and
-    // [orch_end, arena_size) (runtime header + mailbox + every scheduler queue)
-    // whole; the orch block between them is not sent. The boundary is the
-    // layout's own, not inferred from a reservation order here.
-    const size_t orch_start = layout.orch.off_fanin_seen_epoch;
-    const size_t orch_end = layout.off_uploaded_tail_begin;
-    always_assert(orch_start <= orch_end);
+    // The arena is partitioned into three zones (see PTO2RuntimeArenaLayout) and
+    // only the middle one is copied: the host-only orchestrator block sits before
+    // it, and the regions the device initializes itself (sm_handle, scheduler
+    // state, queue slot arrays) sit after it. So bind is one copy of one range,
+    // with both bounds taken from the layout rather than inferred from a
+    // reservation order here.
+    const size_t copied_begin = layout.off_copied_begin;
+    const size_t copied_end = layout.off_copied_end;
+    always_assert(copied_begin <= copied_end && copied_end <= layout.arena_size);
     char *arena_host = static_cast<char *>(host_arena.base());
     char *arena_dev = static_cast<char *>(runtime_arena_dev);
     const int64_t t_arena_h2d_ns = bind_now_ns();
-    int rc_upload = api->copy_to_device(arena_dev, arena_host, orch_start);
-    if (rc_upload == 0) {
-        rc_upload = api->copy_to_device(arena_dev + orch_end, arena_host + orch_end, layout.arena_size - orch_end);
-    }
+    int rc_upload = api->copy_to_device(arena_dev + copied_begin, arena_host + copied_begin, copied_end - copied_begin);
     if (rc_upload != 0) {
         LOG_ERROR("Failed to rtMemcpy prebuilt runtime arena to device (rc=%d)", rc_upload);
         return -1;
     }
     {
-        const uint64_t arena_h2d_bytes =
-            static_cast<uint64_t>(orch_start) + static_cast<uint64_t>(layout.arena_size - orch_end);
+        const uint64_t arena_h2d_bytes = static_cast<uint64_t>(copied_end - copied_begin);
         char attrs[96];
         snprintf(attrs, sizeof(attrs), "bytes=%" PRIu64, arena_h2d_bytes);
         record_bind_phase(HostPhaseKind::BindArenaH2d, t_arena_h2d_ns, attrs, arena_h2d_bytes);

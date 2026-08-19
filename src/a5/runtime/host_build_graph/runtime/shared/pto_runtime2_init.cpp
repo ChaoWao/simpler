@@ -55,22 +55,15 @@ size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity) {
     return arena.reserve(capacity * sizeof(PTO2ReadyQueueSlot), PTO2_ALIGN_SIZE);
 }
 
-bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity) {
-    // Address the slots region for data writes without storing the pointer in
-    // queue->slots — that field is set by ready_queue_wire_arena_pointers.
-    auto *slots_arena = static_cast<PTO2ReadyQueueSlot *>(arena.region_ptr(slots_off));
+// Initialize the queue header only. slots[] carries the sequence ramp push
+// compares against, but it lives past the uploaded range and is seeded on the
+// device by PTO2SchedulerState::seed_queue_slots(), so nothing writes it here.
+void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity) {
     queue->capacity = capacity;
     queue->mask = capacity - 1;
     queue->enqueue_pos.store(0, std::memory_order_relaxed);
     queue->dequeue_pos.store(0, std::memory_order_relaxed);
     queue->max_occupancy.store(0, std::memory_order_relaxed);
-
-    for (uint64_t i = 0; i < capacity; i++) {
-        slots_arena[i].sequence.store((int64_t)i, std::memory_order_relaxed);
-        slots_arena[i].slot_state = nullptr;
-    }
-
-    return true;
 }
 
 void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off) {
@@ -142,49 +135,44 @@ bool PTO2SchedulerState::init_data_from_layout(
     }
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        if (!ready_queue_init_data_from_layout(
-                &sched->ready_queues[i], arena, layout.off_ready_queue_slots[i], layout.ready_queue_capacity
-            )) {
-            return false;
-        }
+        ready_queue_init_data_from_layout(&sched->ready_queues[i], layout.ready_queue_capacity);
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        if (!ready_queue_init_data_from_layout(
-                &sched->ready_sync_queues[i], arena, layout.off_ready_sync_queue_slots[i], layout.ready_queue_capacity
-            )) {
-            return false;
-        }
+        ready_queue_init_data_from_layout(&sched->ready_sync_queues[i], layout.ready_queue_capacity);
     }
-    if (!ready_queue_init_data_from_layout(
-            &sched->dummy_ready_queue, arena, layout.off_dummy_ready_queue_slots, layout.ready_queue_capacity
-        )) {
-        return false;
-    }
-    if (!ready_queue_init_data_from_layout(
-            &sched->graph_ready_queue, arena, layout.off_graph_ready_queue_slots, layout.ready_queue_capacity
-        ) ||
-        !ready_queue_init_data_from_layout(
-            &sched->graph_prepare_queue, arena, layout.off_graph_prepare_queue_slots, layout.ready_queue_capacity
-        )) {
-        return false;
-    }
+    ready_queue_init_data_from_layout(&sched->dummy_ready_queue, layout.ready_queue_capacity);
+    ready_queue_init_data_from_layout(&sched->graph_ready_queue, layout.ready_queue_capacity);
+    ready_queue_init_data_from_layout(&sched->graph_prepare_queue, layout.ready_queue_capacity);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        if (!ready_queue_init_data_from_layout(
-                &sched->early_dispatch_queues[i], arena, layout.off_early_dispatch_queue_slots[i],
-                PTO2_EARLY_DISPATCH_QUEUE_SIZE
-            )) {
-            return false;
-        }
+        ready_queue_init_data_from_layout(&sched->early_dispatch_queues[i], PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     }
-    if (!ready_queue_init_data_from_layout(
-            &sched->early_sync_start_queue, arena, layout.off_early_sync_start_queue_slots,
-            PTO2_EARLY_DISPATCH_QUEUE_SIZE
-        )) {
-        return false;
-    }
+    ready_queue_init_data_from_layout(&sched->early_sync_start_queue, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
 
     // Polling: no dep_pool arena region to initialize.
+    (void)arena;
+    (void)layout;
     return true;
+}
+
+// Device-only: establish every queue's empty ramp. Mirrors the enumeration in
+// wire_arena_pointers / destroy — a queue whose slots[] is never seeded accepts
+// one push and then reports full, since push claims a slot only when its
+// sequence already equals the position being claimed.
+void PTO2SchedulerState::seed_queue_slots() {
+    PTO2SchedulerState *sched = this;
+    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+        sched->ready_queues[i].seed_slots();
+    }
+    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+        sched->ready_sync_queues[i].seed_slots();
+    }
+    sched->dummy_ready_queue.seed_slots();
+    sched->graph_ready_queue.seed_slots();
+    sched->graph_prepare_queue.seed_slots();
+    for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+        sched->early_dispatch_queues[i].seed_slots();
+    }
+    sched->early_sync_start_queue.seed_slots();
 }
 
 void PTO2SchedulerState::wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena) {
@@ -341,15 +329,20 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
         layout.heap_sizes[r] = heap_sizes[r];
     }
 
-    // Reservation order defines the two ranges bind uploads. The orchestrator
-    // block is host-only dep-computation scratch the AICPU never reads, so it is
-    // skipped; everything the device does read is placed after it, which is what
-    // makes [off_uploaded_tail_begin, ...) a single range.
-    layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    // Reservation order is the zone partition (see PTO2RuntimeArenaLayout): the
+    // host-only orchestrator block, then the one copied range, then everything
+    // the device initializes itself. Each zone is contiguous, so bind is a single
+    // copy and no consumer has to infer a boundary from what happens to come
+    // first.
     layout.orch = PTO2OrchestratorState::reserve_layout(arena, static_cast<int32_t>(task_window_sizes[0]));
+
+    layout.off_copied_begin = arena.total_size();
     layout.off_runtime = arena.reserve(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE);
-    layout.off_uploaded_tail_begin = layout.off_runtime;
     layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
+    layout.off_copied_end = arena.total_size();
+
+    layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
+    layout.off_scheduler = arena.reserve(sizeof(PTO2SchedulerState), alignof(PTO2SchedulerState));
     layout.sched = PTO2SchedulerState::reserve_layout(arena);
 
     layout.arena_size = arena.total_size();
@@ -387,9 +380,6 @@ PTO2Runtime *runtime_init_data_from_layout(
     PTO2Runtime *rt = static_cast<PTO2Runtime *>(arena.region_ptr(layout.off_runtime));
     memset(rt, 0, sizeof(*rt));
 
-    auto *sm_wrap = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
-    memset(sm_wrap, 0, sizeof(*sm_wrap));
-
     // rt->ops is filled by the AICPU at boot.
     rt->mode = mode;
     rt->gm_heap = gm_heap_dev_base;
@@ -402,16 +392,18 @@ PTO2Runtime *runtime_init_data_from_layout(
     rt->total_cycles = 0;
     rt->active_callable_hash = 0;
 
+    // Two components are deliberately not initialized here.
+    //
     // The orchestrator is initialized by the host-orch path
     // (run_host_orchestration) against the host SM once it is allocated, then
-    // relocated for the device. Initializing it here would be dead work: its
-    // arena content (tensormap + seen_epoch memset) is immediately overwritten by
-    // that re-init, and the orchestrator arena block is not uploaded to the device
-    // (the scheduler boots without it). So only the scheduler is initialized here;
-    // rt->orchestrator stays zeroed (from the memset above) until run_host_orchestration.
-    if (!rt->scheduler.init_data_from_layout(layout.sched, arena, sm_dev_base)) {
-        return nullptr;
-    }
+    // relocated for the device. Doing it here would be dead work: its arena
+    // content (tensormap + seen_epoch memset) is immediately overwritten by that
+    // re-init, and the orchestrator block is host-only anyway.
+    //
+    // The scheduler and sm_handle live in the device-only zone, so their bytes
+    // never travel; the AICPU initializes them at boot. Writing them here would
+    // be writing an initialization pattern that nothing reads.
+    (void)sm_dev_base;
 
     auto *mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
     memset(mailbox, 0, sizeof(*mailbox));
@@ -422,14 +414,15 @@ PTO2Runtime *runtime_init_data_from_layout(
 void runtime_wire_arena_pointers(DeviceArena &arena, const PTO2RuntimeArenaLayout &layout, PTO2Runtime *rt) {
     rt->sm_handle = static_cast<PTO2SharedMemoryHandle *>(arena.region_ptr(layout.off_sm_handle));
     rt->aicore_mailbox = static_cast<AICoreCompletionMailbox *>(arena.region_ptr(layout.off_mailbox));
-    rt->orchestrator.wire_arena_pointers(layout.orch, arena, &rt->scheduler);
-    rt->scheduler.wire_arena_pointers(layout.sched, arena);
+    rt->scheduler = static_cast<PTO2SchedulerState *>(arena.region_ptr(layout.off_scheduler));
+    rt->orchestrator.wire_arena_pointers(layout.orch, arena, rt->scheduler);
+    rt->scheduler->wire_arena_pointers(layout.sched, arena);
 }
 
 void runtime_destroy(PTO2Runtime *rt, DeviceArena & /*arena*/) {
     // Arena buffer is pooled across runs by DeviceRunner — never freed here.
     if (!rt) return;
-    rt->scheduler.destroy();
+    rt->scheduler->destroy();
     rt->orchestrator.destroy();
     rt->aicore_mailbox = nullptr;
     rt->sm_handle = nullptr;

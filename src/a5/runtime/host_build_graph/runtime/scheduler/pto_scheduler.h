@@ -91,6 +91,18 @@ struct alignas(64) PTO2ReadyQueue {
     std::atomic<uint64_t> max_occupancy;
     char _pad2[64 - 2 * sizeof(std::atomic<uint64_t>)];  // Own cache line
 
+    // Bring the slots[] array to its empty state: slot i's sequence must equal i
+    // for push_tagged's `diff == 0` claim test to accept the first pass, so an
+    // empty queue is a 0..capacity-1 ramp rather than zeroed memory. Runs on the
+    // device after wire_arena_pointers, before any push — the region is reserved
+    // past the uploaded range, so nothing seeds it on the host.
+    void seed_slots() {
+        for (uint64_t i = 0; i < capacity; i++) {
+            slots[i].sequence.store(static_cast<int64_t>(i), std::memory_order_relaxed);
+            slots[i].slot_state = nullptr;
+        }
+    }
+
     uint64_t size() {
         uint64_t e = enqueue_pos.load(std::memory_order_relaxed);
         uint64_t d = dequeue_pos.load(std::memory_order_relaxed);
@@ -411,16 +423,15 @@ struct alignas(64) PTO2ReadyQueue {
 // as non-member so PTO2ReadyQueue stays a POD-like struct with cache-line
 // alignment. Storage is owned by the caller-supplied arena.
 //   reserve_layout: declare the slots[] region on the arena (must precede commit)
-//   init_from_layout: bind slots pointer from arena.region_ptr(off) and
-//                     initialize sequence counters
+//   init_from_layout: initialize the queue header (capacity, mask, positions)
+//   seed_slots: establish the slot array's empty ramp, on the device only
 //   destroy: forget the slots pointer (arena owns the buffer)
 size_t ready_queue_reserve_layout(DeviceArena &arena, uint64_t capacity);
-// Writes everything *except* the arena-internal `slots` pointer field
-// (sequences/positions on the slot array, capacity, mask). Uses
-// arena.region_ptr(slots_off) only to address the slot array for writes;
-// does NOT store the pointer in `queue->slots`. Call
-// `ready_queue_wire_arena_pointers` afterwards to set the field itself.
-bool ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off, uint64_t capacity);
+// Writes the header fields only: capacity, mask, positions, occupancy counter.
+// The slot array is neither addressed nor written — it lives past the uploaded
+// range and PTO2ReadyQueue::seed_slots() fills it on the device. Call
+// `ready_queue_wire_arena_pointers` to set the `slots` pointer itself.
+void ready_queue_init_data_from_layout(PTO2ReadyQueue *queue, uint64_t capacity);
 // Stores queue->slots = arena.region_ptr(slots_off). Idempotent.
 void ready_queue_wire_arena_pointers(PTO2ReadyQueue *queue, DeviceArena &arena, size_t slots_off);
 void ready_queue_destroy(PTO2ReadyQueue *queue);
@@ -1182,6 +1193,13 @@ struct PTO2SchedulerState {
     // (ready_queues[].slots, dummy_ready_queue.slots, dep_pool.base for each
     // ring). Called on both host and device sides.
     void wire_arena_pointers(const PTO2SchedulerLayout &layout, DeviceArena &arena);
+
+    // Phase 3c, device only: bring every queue's slots[] to its empty ramp. The
+    // slot arrays sit past the uploaded range, so this is the only thing that
+    // establishes the sequence values push compares against. Runs once per arena
+    // after wire_arena_pointers and before any push; a drained queue needs no
+    // repeat, since a free slot's sequence tracks the position it serves.
+    void seed_queue_slots();
 
     // Forget per-region pointers; arena owns the backing memory.
     void destroy();
