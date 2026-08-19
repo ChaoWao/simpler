@@ -136,6 +136,13 @@ struct GraphDefinition {
     uint32_t boundary_scalar_count;
     uint32_t tensor_arg_count;
     uint32_t scalar_arg_count;
+    // Bytes an execution of this Definition needs for its GraphExecution header,
+    // node storage and patch arrays. Derived from task_count / tensor_arg_count /
+    // scalar_arg_count, so host and device read one value instead of each
+    // computing it. The outer GRAPH task's heap allocation covers
+    // required_heap + this, and the execution lives at
+    // packed_buffer_base + required_heap.
+    uint32_t execution_storage_bytes;
     uint32_t off_fanout_offsets;
     uint32_t off_fanout_indices;
     uint32_t off_fanin_offsets;
@@ -150,10 +157,13 @@ struct GraphDefinition {
     uint32_t off_boundary_signatures;
 };
 
+// One submission of a Graph. The static Definition is a shared device object
+// this references by address; the execution storage is not referenced at all —
+// it sits at outer_slot.task->packed_buffer_base + definition->required_heap,
+// so both sides derive it from the Definition rather than carrying it on the
+// wire.
 struct GraphSubmission {
     uint64_t graph_key;
-    uint64_t execution_storage;
-    uint64_t execution_storage_bytes;
     uint64_t local_execution;
     // Device GM address of the shared Definition object this replay references
     // (an integer-typed absolute address per the wire rules) plus the content

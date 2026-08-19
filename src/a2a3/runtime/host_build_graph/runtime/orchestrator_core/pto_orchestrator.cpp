@@ -635,6 +635,15 @@ bool graph_build_definition(const GraphRecording &recording, std::vector<std::by
     definition.boundary_scalar_count = static_cast<uint32_t>(recording.boundary_args->scalar_count());
     definition.tensor_arg_count = static_cast<uint32_t>(tensors.size());
     definition.scalar_arg_count = static_cast<uint32_t>(scalars.size());
+    size_t execution_storage_bytes = 0;
+    if (!graph_execution_storage_bytes(
+            static_cast<int32_t>(definition.task_count), definition.tensor_arg_count, definition.scalar_arg_count,
+            &execution_storage_bytes
+        ) ||
+        execution_storage_bytes > UINT32_MAX) {
+        return false;
+    }
+    definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
     definition.off_fanout_offsets = graph_append_section(image, fanout_offsets);
     definition.off_fanout_indices = graph_append_section(image, fanout_indices);
     definition.off_fanin_offsets = graph_append_section(image, fanin_offsets);
@@ -1459,12 +1468,20 @@ bool graph_submit_definition(
 ) {
     const GraphDefinition *definition = graph_definition(definition_image);
     if (definition == nullptr || !graph_boundary_matches(*definition, args) ||
-        definition->required_heap > static_cast<uint64_t>(INT32_MAX)) {
+        definition->execution_storage_bytes == 0) {
+        return false;
+    }
+    // One allocation covers both halves the outer task owns: the nodes' packed
+    // outputs, then the execution storage the device materializes into. They
+    // share the task's lifetime, and node_offsets stay relative to the base, so
+    // the execution simply starts past required_heap.
+    const uint64_t owned_heap = definition->required_heap + definition->execution_storage_bytes;
+    if (definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
+        owned_heap > static_cast<uint64_t>(INT32_MAX)) {
         return false;
     }
     auto &allocator = orch->ring.task_allocator;
-    if (allocator.active_count() + 1 >= allocator.window_size() ||
-        definition->required_heap > allocator.heap_available()) {
+    if (allocator.active_count() + 1 >= allocator.window_size() || owned_heap > allocator.heap_available()) {
         LOG_WARN("%s", "[GraphExecution] task-window/heap preflight failed; using ordinary path");
         return false;
     }
@@ -1479,7 +1496,7 @@ bool graph_submit_definition(
     if (tensormap_needed > 0 && !ensure_tensormap_capacity(orch, tensormap_needed)) return false;
     if (!check_scope_can_accept_task(orch, allocator, 0)) return false;
 
-    const PTO2TaskAllocResult allocation = allocator.alloc(static_cast<int32_t>(definition->required_heap));
+    const PTO2TaskAllocResult allocation = allocator.alloc(static_cast<int32_t>(owned_heap));
     if (allocation.failed()) {
         orch_mark_fatal(orch, PTO2_ERROR_HEAP_RING_DEADLOCK);
         return false;

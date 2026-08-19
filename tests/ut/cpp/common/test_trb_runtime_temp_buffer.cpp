@@ -214,7 +214,6 @@ HostApi make_host_api() {
         .device_memset = fake_device_memset,
         .get_retained_temp_buffer = fake_get_retained_temp_buffer,
         .set_retained_temp_buffer = fake_set_retained_temp_buffer,
-        .acquire_graph_execution_buffer = nullptr,
         .setup_static_arena = fake_setup_static_arena,
         .acquire_pooled_gm_heap = fake_acquire_pooled_gm_heap,
         .acquire_pooled_gm_sm = fake_acquire_pooled_gm_sm,

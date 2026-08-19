@@ -419,7 +419,6 @@ static bool relocate_host_orch_image(
 bool upload_graph_submissions(
     Runtime *runtime, const HostApi *api, GraphHostState &graph_state, uint64_t &uploaded_bytes
 ) {
-    std::unordered_map<uint64_t, uint32_t> occurrences;
     uploaded_bytes = 0;
     const size_t count = graph_host_upload_count(graph_state);
     // Pass 1: upload each distinct Definition once as a shared device object
@@ -484,34 +483,18 @@ bool upload_graph_submissions(
             LOG_ERROR("host-orch: Graph submission has no uploaded Definition object");
             return false;
         }
-        // Capacities come from the host-side Definition image the device
-        // object was built from; the GM object itself is never dereferenced
-        // on the host.
+        // Checked against the host-side Definition image the device object was
+        // built from; the GM object itself is never dereferenced on the host.
+        // Execution storage needs no retained buffer: it is the tail of the
+        // outer task's own heap allocation, which graph_submit_definition sized
+        // to required_heap + execution_storage_bytes.
         const GraphDefinition *definition = object_it->second.host_view;
-        size_t execution_bytes = 0;
         if (definition->task_count == 0 || definition->task_count > GRAPH_MAX_NODES ||
-            definition->full_key != submission->graph_key ||
-            !graph_execution_storage_bytes(
-                static_cast<int32_t>(definition->task_count), definition->tensor_arg_count,
-                definition->scalar_arg_count, &execution_bytes
-            )) {
-            LOG_ERROR("host-orch: invalid Graph execution storage request");
-            return false;
-        }
-        const uint32_t occurrence = occurrences[submission->graph_key]++;
-        void *execution_storage = api->acquire_graph_execution_buffer(
-            submission->graph_key, occurrence, execution_bytes, alignof(GraphNodeStorage)
-        );
-        if (execution_storage == nullptr) {
-            LOG_ERROR(
-                "host-orch: failed to retain %zu bytes for Graph execution key=%#llx occurrence=%u", execution_bytes,
-                static_cast<unsigned long long>(submission->graph_key), occurrence
-            );
+            definition->full_key != submission->graph_key || definition->execution_storage_bytes == 0) {
+            LOG_ERROR("host-orch: invalid Graph Definition for submission");
             return false;
         }
         submission->definition_addr = reinterpret_cast<uint64_t>(object_it->second.device_object);
-        submission->execution_storage = reinterpret_cast<uint64_t>(execution_storage);
-        submission->execution_storage_bytes = execution_bytes;
         submission->local_execution = 0;
         submission->activation_gate = 0;
 
@@ -636,8 +619,11 @@ int32_t run_host_orchestration(
 
     const int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
     {
-        char attrs[64];
-        snprintf(attrs, sizeof(attrs), "tasks=%" PRId32, total_tasks);
+        char attrs[96];
+        snprintf(
+            attrs, sizeof(attrs), "tasks=%" PRId32 " heap_used=%" PRIu64, total_tasks,
+            rt->orchestrator.ring.task_allocator.heap_used_bytes()
+        );
         record_bind_phase(HostPhaseKind::BindHostOrch, t_orch_ns, attrs);
     }
     // After the span closes: the reduction walks a few hundred records and emits

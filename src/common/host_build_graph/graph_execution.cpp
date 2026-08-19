@@ -99,23 +99,28 @@ bool reusable_execution_header_valid(const GraphExecution &execution, size_t sto
            execution.allocation_bytes == expected_bytes && expected_bytes <= storage_bytes;
 }
 
+// The storage is the tail of the outer GRAPH task's heap allocation, so its
+// bytes are whatever that region last held. A stale GRAPH_EXECUTION_STORAGE_MAGIC
+// there is harmless: reusing a block additionally requires its recorded
+// materialized_graph_key / materialized_definition_hash / node and patch counts
+// to match this Definition (reset_execution below), which only a genuine
+// completed execution of the same Graph satisfies. Anything else falls through
+// to a full rebuild.
 GraphExecution *acquire_host_execution_storage(
-    GraphSubmission &submission, int32_t node_count, uint64_t graph_key, uint64_t definition_hash,
+    uintptr_t storage_addr, size_t storage_bytes, int32_t node_count, uint64_t graph_key, uint64_t definition_hash,
     uint32_t tensor_patch_count, uint32_t scalar_patch_count
 ) {
-    if (node_count <= 0 || node_count > static_cast<int32_t>(GRAPH_MAX_NODES) || submission.execution_storage == 0 ||
-        submission.execution_storage_bytes > SIZE_MAX ||
-        submission.execution_storage % alignof(GraphNodeStorage) != 0) {
+    if (node_count <= 0 || node_count > static_cast<int32_t>(GRAPH_MAX_NODES) || storage_addr == 0 ||
+        storage_addr % alignof(GraphNodeStorage) != 0) {
         return nullptr;
     }
-    const size_t storage_bytes = static_cast<size_t>(submission.execution_storage_bytes);
     size_t required_bytes = 0;
     if (!graph_execution_storage_bytes(node_count, tensor_patch_count, scalar_patch_count, &required_bytes) ||
         required_bytes > storage_bytes) {
         return nullptr;
     }
 
-    auto *execution = reinterpret_cast<GraphExecution *>(static_cast<uintptr_t>(submission.execution_storage));
+    auto *execution = reinterpret_cast<GraphExecution *>(storage_addr);
     uint64_t observed_magic = 0;
     std::memcpy(&observed_magic, execution, sizeof(observed_magic));
     const bool has_existing_execution = observed_magic == GRAPH_EXECUTION_STORAGE_MAGIC;
@@ -351,13 +356,20 @@ GraphExecution *graph_execution_localize(PTO2TaskSlotState &outer_slot) {
     }
     const uintptr_t outer_base = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_base);
     const uintptr_t outer_end = reinterpret_cast<uintptr_t>(outer_slot.task->packed_buffer_end);
-    if (outer_end < outer_base || definition->required_heap > outer_end - outer_base) {
+    // The outer task's allocation covers the nodes' packed outputs followed by
+    // this execution's storage, so the span must hold both and the execution
+    // starts past required_heap.
+    const uint64_t owned_bytes = definition->required_heap + static_cast<uint64_t>(definition->execution_storage_bytes);
+    if (outer_end < outer_base || definition->execution_storage_bytes == 0 ||
+        definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
+        owned_bytes > outer_end - outer_base) {
         __atomic_store_n(&submission->local_execution, 0, __ATOMIC_RELEASE);
         return nullptr;
     }
 
     GraphExecution *execution = acquire_host_execution_storage(
-        *submission, static_cast<int32_t>(definition->task_count), submission->graph_key, definition->content_hash,
+        outer_base + definition->required_heap, definition->execution_storage_bytes,
+        static_cast<int32_t>(definition->task_count), submission->graph_key, definition->content_hash,
         definition->tensor_arg_count, definition->scalar_arg_count
     );
     if (execution == nullptr) {
