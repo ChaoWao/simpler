@@ -585,12 +585,12 @@ int DeviceRunner::drain_execution(ActiveExecution &active) {
         recover_device_or_mark_unusable(rc);
         // Emergency shutdown may already have flushed diagnostics. Export the
         // manifest on the error path exactly once.
-        teardown_shared_collectors_after_run();
+        teardown_shared_collectors_after_run(false);
         return rc;
     }
 
     read_device_wall_ns();
-    teardown_shared_collectors_after_run();
+    teardown_shared_collectors_after_run(true);
 
     // a5-specific dep_gen teardown: stop + reconcile + replay emit.
     if (enable_dep_gen_) {

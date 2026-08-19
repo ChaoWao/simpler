@@ -17,6 +17,7 @@
  */
 
 #include "aicpu/device_log.h"
+#include "common/host_log_binding.h"
 
 #include <cerrno>
 #include <cstdarg>
@@ -34,6 +35,10 @@ bool g_is_log_enable_timing = true;
 bool g_is_log_enable_warn = true;
 bool g_is_log_enable_error = true;
 
+namespace {
+SimplerHostLogState *g_host_log_state = nullptr;
+}
+
 // =============================================================================
 // Setters (called by AICPU init from KernelArgs)
 // =============================================================================
@@ -46,9 +51,15 @@ extern "C" void set_log_level(int level) {
     g_is_log_enable_error = level <= 40;
 }
 
+extern "C" void set_host_log_state(SimplerHostLogState *state) { g_host_log_state = state; }
+
+int bind_orchestration_host_log_state(void *handle, const char **error) {
+    return simpler::log::bind_loaded_host_log_state(handle, g_host_log_state, error);
+}
+
 // =============================================================================
-// init_log_switch: sim respects host-pushed config — this is now a no-op
-// (kept for ABI compatibility with onboard, where it queries CANN dlog).
+// init_log_switch: sim respects host-pushed config. The no-op entry point is
+// retained for ABI compatibility with onboard, where it queries CANN dlog.
 // =============================================================================
 
 void init_log_switch() {

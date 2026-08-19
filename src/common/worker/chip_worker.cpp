@@ -12,6 +12,8 @@
 #include "chip_worker.h"
 
 #include "chip_run_lane.h"
+#include "common/host_log_binding.h"
+#include "host_log.h"
 #include "pipeline_contract.h"
 
 #include <dlfcn.h>
@@ -21,13 +23,34 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
+
+class DlHandleGuard {
+public:
+    explicit DlHandleGuard(void *handle = nullptr) :
+        handle_(handle) {}
+    ~DlHandleGuard() {
+        if (handle_ != nullptr) dlclose(handle_);
+    }
+    DlHandleGuard(const DlHandleGuard &) = delete;
+    DlHandleGuard &operator=(const DlHandleGuard &) = delete;
+    void *release() {
+        void *handle = handle_;
+        handle_ = nullptr;
+        return handle;
+    }
+
+private:
+    void *handle_;
+};
 
 template <typename T>
 T load_symbol(void *handle, const char *name) {
@@ -39,10 +62,42 @@ T load_symbol(void *handle, const char *name) {
         msg += name;
         msg += "': ";
         msg += err;
-        msg += "; every host runtime built from this source tree exports it, so rebuild the runtime";
+        msg += "; every compatible module built from this source tree exports it, so rebuild the module";
         throw std::runtime_error(msg);
     }
     return reinterpret_cast<T>(sym);
+}
+
+void bind_host_log_state(void *handle, const char *module_name) {
+    const char *error = nullptr;
+    if (simpler::log::bind_loaded_host_log_state(handle, HostLogger::get_instance().state(), &error) != 0) {
+        throw std::runtime_error(
+            std::string(module_name) + " failed to bind host-log state: " + (error != nullptr ? error : "unknown error")
+        );
+    }
+}
+
+void load_sim_context(const std::string &path) {
+    static std::mutex registry_mutex;
+    // Raw handles keep simulator globals and pthread keys alive until process
+    // exit; the registry container itself owns no dlclose responsibility.
+    static std::unordered_map<std::string, void *> registry;
+
+    std::scoped_lock lock(registry_mutex);
+    if (registry.find(path) != registry.end()) return;
+
+    dlerror();
+    void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (handle == nullptr) {
+        const char *error = dlerror();
+        throw std::runtime_error(
+            std::string("dlopen sim context failed: ") + (error != nullptr ? error : "unknown error")
+        );
+    }
+    DlHandleGuard guard(handle);
+    bind_host_log_state(handle, "sim context");
+    registry.emplace(path, handle);
+    (void)guard.release();
 }
 
 uint64_t next_native_run_epoch() {
@@ -109,7 +164,8 @@ ChipWorker::~ChipWorker() { finalize(); }
 
 void ChipWorker::init(
     const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
-    const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config, uint32_t dma_workspace_mask
+    const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config, uint32_t dma_workspace_mask,
+    const std::string &sim_context_path
 ) {
     if (finalized_) {
         throw std::runtime_error("ChipWorker already finalized; cannot reinitialize");
@@ -122,12 +178,10 @@ void ChipWorker::init(
     }
     pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
 
-    // libsimpler_log.so (RTLD_GLOBAL, with HostLogger already seeded via
-    // simpler_log_init) and — on sim — libcpu_sim_context.so (RTLD_GLOBAL) must
-    // already be loaded by the caller; host_runtime.so resolves its undefined
-    // HostLogger / unified_log_* (and, on sim, sim_context_*) symbols against
-    // those globals. The Python `ChipWorker` wrapper does this preload.
-    //
+    if (!sim_context_path.empty()) {
+        load_sim_context(sim_context_path);
+    }
+
     // Host runtime SO is loaded with RTLD_LOCAL so that different runtimes'
     // identically-named symbols (simpler_init, simpler_register_callable,
     // simpler_run, etc.) do not collide when switching runtimes within the
@@ -143,6 +197,8 @@ void ChipWorker::init(
         err += msg ? msg : "unknown error";
         throw std::runtime_error(err);
     }
+    DlHandleGuard host_guard(handle);
+    bind_host_log_state(handle, "host runtime");
 
     GetPipelineContractFn get_pipeline_contract_fn = nullptr;
     try {
@@ -199,23 +255,17 @@ void ChipWorker::init(
         comm_barrier_fn_ = load_symbol<CommBarrierFn>(handle, "comm_barrier");
         comm_destroy_fn_ = load_symbol<CommDestroyFn>(handle, "comm_destroy");
     } catch (...) {
-        dlclose(handle);
         throw;
     }
 
     const PipelineContract *contract = get_pipeline_contract_fn();
     if (!is_valid_pipeline_contract(contract) || !has_serviceable_arena_topology(*contract)) {
-        dlclose(handle);
         throw std::runtime_error("host runtime returned a PipelineContract this build cannot accept");
     }
     const PipelineContract resolved_contract = *contract;
 
-    lib_handle_ = handle;
-
     device_ctx_ = create_device_context_fn_();
     if (device_ctx_ == nullptr) {
-        dlclose(handle);
-        lib_handle_ = nullptr;
         throw std::runtime_error("create_device_context returned null");
     }
 
@@ -241,8 +291,6 @@ void ChipWorker::init(
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
-        dlclose(handle);
-        lib_handle_ = nullptr;
         throw;
     }
 
@@ -280,8 +328,6 @@ void ChipWorker::init(
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
-        dlclose(handle);
-        lib_handle_ = nullptr;
         create_device_context_fn_ = nullptr;
         destroy_device_context_fn_ = nullptr;
         device_malloc_ctx_fn_ = nullptr;
@@ -333,8 +379,6 @@ void ChipWorker::init(
         // initialized_=true point, so device-side teardown is unnecessary).
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
-        dlclose(handle);
-        lib_handle_ = nullptr;
         create_device_context_fn_ = nullptr;
         destroy_device_context_fn_ = nullptr;
         device_malloc_ctx_fn_ = nullptr;
@@ -380,6 +424,7 @@ void ChipWorker::init(
         throw std::runtime_error("simpler_init failed with code " + std::to_string(init_rc));
     }
 
+    lib_handle_ = host_guard.release();
     device_id_ = device_id;
     // Published only once the runtime is up: the rollback paths above leave the
     // default K=1 contract in place, so a failed init never reports the counts

@@ -15,6 +15,8 @@ import sys
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 
+from ..compile_pool import compile_worker_budget, default_compile_workers
+
 try:
     from _pytest.skipping import evaluate_skip_marks
 except ImportError:
@@ -22,7 +24,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_COMPILE_WORKERS = 1
+_DEFAULT_COMPILE_WORKERS = None
 
 
 def _is_skipped(item) -> bool:
@@ -45,7 +47,7 @@ def _compile_scene_test_class(cls, platform: str) -> None:
 
 
 def compile_collected_scene_tests(
-    items, platform: str, *, max_workers: int = _DEFAULT_COMPILE_WORKERS
+    items, platform: str, *, max_workers: int | None = _DEFAULT_COMPILE_WORKERS
 ) -> tuple[int, list[tuple[str, Exception]]]:
     """Compile each non-skipped scene-test class represented by ``items``.
 
@@ -76,8 +78,10 @@ def compile_collected_scene_tests(
             return (cls.__name__, error)
         return None
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(compile_one, selected_classes))
+    resolved_workers = default_compile_workers() if max_workers is None else max_workers
+    with compile_worker_budget(resolved_workers):
+        with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+            results = list(executor.map(compile_one, selected_classes))
     failures = [result for result in results if result is not None]
     return len(selected_classes) - len(failures), failures
 
@@ -90,7 +94,7 @@ class _CompilePlugin:
             action="store",
             type=int,
             default=_DEFAULT_COMPILE_WORKERS,
-            help="Maximum concurrent SceneTestCase compilations (default: 1)",
+            help="Maximum compiler processes across all SceneTestCase compilations (default: auto)",
         )
 
     def pytest_collection_finish(self, session):
@@ -100,7 +104,7 @@ class _CompilePlugin:
 
             raise pytest.UsageError("--platform is required for scene-test compilation")
         max_workers = session.config.getoption("--compile-workers")
-        if max_workers < 1:
+        if max_workers is not None and max_workers < 1:
             import pytest  # noqa: PLC0415
 
             raise pytest.UsageError("--compile-workers must be at least 1")

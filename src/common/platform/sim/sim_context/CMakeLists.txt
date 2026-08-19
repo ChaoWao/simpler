@@ -11,11 +11,13 @@ project(cpu_sim_context CXX)
 
 add_library(cpu_sim_context SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/cpu_sim_context.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../log/host_log.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../log/unified_log_host.cpp"
 )
 
 target_include_directories(cpu_sim_context
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
-    # libsimpler_log public header (LOG_* macros used here for diagnostics).
+    # Host logger and LOG_* headers used by this self-contained consumer.
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../log/include"
 )
 
@@ -26,15 +28,11 @@ target_compile_options(cpu_sim_context PRIVATE
     -Wall
     -Wextra
 )
+target_compile_features(cpu_sim_context PRIVATE cxx_std_17)
 
 target_link_libraries(cpu_sim_context PRIVATE pthread)
 
 
-# Allow undefined HostLogger / unified_log_* symbols — resolved at runtime
-# via libsimpler_log.so loaded with RTLD_GLOBAL by ChipWorker.
-if(APPLE)
-    target_link_options(cpu_sim_context PRIVATE -undefined dynamic_lookup)
-endif()
 set_target_properties(cpu_sim_context PROPERTIES
     OUTPUT_NAME "cpu_sim_context"
     SUFFIX ".so"

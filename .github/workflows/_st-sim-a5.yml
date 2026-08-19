@@ -61,19 +61,9 @@ jobs:
 
       - name: Set up C++ compiler
         if: inputs.setup_variant == 'github'
-        run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-            sudo apt-get update
-            sudo apt-get install -y ninja-build
-            sudo apt-get install -y g++-15 || sudo apt-get install -y g++
-            if ! command -v g++-15; then sudo ln -s $(which g++) /usr/local/bin/g++-15; fi
-            sudo apt-get install -y graphviz
-          else
-            brew install ninja
-            brew install gcc@15 || brew install gcc
-            brew install graphviz
-          fi
+        uses: ./.github/actions/setup-gcc-15
+        with:
+          install-graphviz: "true"
 
       - name: Verify provisioned toolchain
         if: inputs.setup_variant == 'self-cpu'
@@ -111,27 +101,28 @@ jobs:
       - name: dep_gen smoke (a5)
         if: inputs.include_dfx_smokes
         run: |
-          .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/test_dep_gen.py \
+          .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/dep_gen/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-dep-gen
+            --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" --enable-dep-gen
 
       - name: chip_swimlane smoke (a5)
         if: inputs.include_dfx_smokes
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/chip_swimlane/ \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-chip-swimlane --enable-dep-gen
+            --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" \
+            --enable-chip-swimlane --enable-dep-gen
 
       - name: PMU smoke (a5)
         if: inputs.include_dfx_smokes
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/pmu/test_pmu.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --enable-pmu 2
+            --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" --enable-pmu 2
 
       - name: args_dump smoke (a5)
         if: inputs.include_dfx_smokes
         run: |
           .venv/bin/python -m pytest tests/st/a5/tensormap_and_ringbuffer/dfx/args_dump/test_args_dump.py \
             --platform a5sim --device 0-15 -p no:xdist --pto-session-timeout 600 \
-            --require-pto-isa --dump-args
+            --require-pto-isa --manual "${{ inputs.manual_mode == 'only' && 'only' || 'include' }}" --dump-args

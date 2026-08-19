@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "common/host_span_names.h"
 #include "common/host_span_scope.h"
 #include "worker_manager.h"
 
@@ -135,6 +136,7 @@ void Orchestrator::finish_run_if_ready(const std::shared_ptr<RunState> &run) {
             return;
         }
         bool failed = run->submission_failed || static_cast<bool>(run->first_error);
+        run->trace_terminal_ns = simpler::host_trace::now_ns();
         run->phase.store(failed ? RunPhase::FAILED : RunPhase::COMPLETED, std::memory_order_release);
         notify = true;
     }
@@ -356,6 +358,8 @@ void Orchestrator::compact_if_quiescent() {
 }
 
 void Orchestrator::release_run(RunId run_id) {
+    int64_t terminal_ns = 0;
+    PipelineSlotLease lease{};
     {
         std::lock_guard<std::mutex> lk(runs_mu_);
         auto it = runs_.find(run_id);
@@ -363,10 +367,21 @@ void Orchestrator::release_run(RunId run_id) {
         if (!is_terminal(it->second->phase.load(std::memory_order_acquire))) {
             throw std::logic_error("Orchestrator::release_run: run is not terminal");
         }
+        terminal_ns = it->second->trace_terminal_ns;
+        lease = it->second->lease;
         runs_.erase(it);
     }
 
     compact_if_quiescent();
+#if SIMPLER_HOST_STRACE
+    std::ostringstream retire_attrs;
+    retire_attrs << "run_id=" << run_id << " slot_id=" << lease.slot_id << " generation=" << lease.generation
+                 << " role=facade";
+    simpler::host_trace::emit(
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::PostFenceRetirement), run_id, 0, 0,
+        terminal_ns, simpler::host_trace::now_ns() - terminal_ns, retire_attrs.str().c_str()
+    );
+#endif
 }
 
 void Orchestrator::register_run_slot(const std::shared_ptr<RunState> &run, TaskSlot slot) {
@@ -725,7 +740,10 @@ SubmitResult Orchestrator::submit_impl(
                     << " group_index=" << (args_list.size() == 1 ? 0 : -1) << " group_size=" << args_list.size();
         if (target_worker_ids.size() == 1) trace_attrs << " worker_id=" << target_worker_ids.front();
         trace_attrs << " role=facade";
-        submit_trace.emplace("l3.submit", run->id, trace_callable_hash, 0, trace_attrs.str());
+        submit_trace.emplace(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Submit), run->id, trace_callable_hash, 0,
+            trace_attrs.str()
+        );
     }
 #endif
 

@@ -17,6 +17,7 @@ registry and the Buffer constructors that are genuinely defined there.
 """
 
 import ctypes
+from multiprocessing.shared_memory import SharedMemory
 from unittest.mock import patch
 
 import pytest
@@ -126,7 +127,7 @@ def test_descriptor_rejects_oversized_body():
 def test_create_export_import_resolve_zero_copy():
     oid = mint_owner_instance_id()
     buffer = create_host_shared_buffer(nbytes=256, owner_instance_id=oid, buffer_id=1, owner_worker_path="L4")
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     try:
         assert buffer.backend_kind == BackendKind.POSIX_SHM
         imported = reg.materialize(buffer.to_descriptor())
@@ -165,6 +166,41 @@ def test_close_unlinks_even_when_shm_close_raises():
     shm.unlink()  # the mock above swallowed the real unlink; do it for real so the test leaves no /dev/shm litter
 
 
+def test_close_retries_the_unlink_that_failed():
+    # The named backing is what outlives the process, so an unlink that fails must stay pending: the
+    # cleanup journal keeps a failed buffer's registry entry precisely so close() runs again, and a
+    # retry that returns without re-attempting the unlink leaves the name in /dev/shm forever.
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=mint_owner_instance_id(), buffer_id=1)
+    shm = buffer.shm
+    assert shm is not None
+    name = shm.name
+    with patch.object(shm, "unlink", side_effect=OSError("injected unlink failure")) as unlink:
+        with pytest.raises(OSError, match="injected unlink failure"):
+            buffer.close()
+        unlink.assert_called_once()
+    assert buffer.closed  # the derivation gate shuts on the first attempt, successful release or not
+    assert not buffer.unlinked
+    buffer.close()
+    assert buffer.unlinked
+    with pytest.raises(FileNotFoundError):
+        SharedMemory(name=name)
+
+
+def test_close_does_not_unlink_twice_after_a_failed_close():
+    # The retry above must not re-run an unlink that already succeeded: a close() failure leaves the
+    # name already removed by the finally, so a second unlink would raise FileNotFoundError over a
+    # backing that is simply gone -- turning a recoverable state into a permanent error.
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=mint_owner_instance_id(), buffer_id=1)
+    shm = buffer.shm
+    assert shm is not None
+    with patch.object(shm, "close", side_effect=OSError("injected close failure")):
+        with pytest.raises(OSError, match="injected close failure"):
+            buffer.close()
+    assert buffer.unlinked
+    buffer.close()  # the retry: closes the mapping for real, and leaves the unlink alone
+    assert buffer.shm is None
+
+
 def test_closed_buffer_refuses_to_derive_a_tensor():
     # A released Buffer's identity may already be unlinked, so deriving a Tensor from it would embed
     # a descriptor for memory that no longer exists.
@@ -178,7 +214,7 @@ def test_closed_buffer_refuses_to_derive_a_tensor():
 
 
 def test_resolve_unregistered_raises():
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     with pytest.raises(KeyError):
         reg.resolve(_identity())
 
@@ -186,7 +222,7 @@ def test_resolve_unregistered_raises():
 def test_unregister_drops_a_materialized_mapping():
     oid = mint_owner_instance_id()
     buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=oid, buffer_id=1)
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     try:
         reg.materialize(buffer.to_descriptor())
         reg.unregister(buffer.identity)
@@ -201,8 +237,71 @@ def test_unregister_drops_a_materialized_mapping():
 
 
 def test_unregister_is_a_no_op_for_an_identity_never_materialized():
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     reg.unregister(_identity())  # must not raise
+
+
+def test_unregister_keeps_a_mapping_it_could_not_close():
+    # shm.close() raises BufferError while a consumer still holds a memoryview derived from the
+    # mapping. An entry dropped at that point names a mapping nothing can reach again, so this
+    # endpoint's close() could never retry it -- the entry has to survive the failure.
+    oid = mint_owner_instance_id()
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=oid, buffer_id=1)
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    try:
+        imported = reg.materialize(buffer.to_descriptor())
+        assert imported.shm is not None
+        with patch.object(imported.shm, "close", side_effect=BufferError("cannot close exported pointers exist")):
+            with pytest.raises(BufferError):
+                reg.unregister(buffer.identity)
+        assert reg.resolve(buffer.identity) is imported
+        reg.unregister(buffer.identity)  # the retry, once the view is gone
+        with pytest.raises(KeyError):
+            reg.resolve(buffer.identity)
+    finally:
+        reg.close()
+        buffer.close()
+
+
+def test_close_attempts_every_mapping_and_reports_the_first_failure():
+    # One endpoint holding an exported view must not strand the mappings behind it in iteration
+    # order: every mapping is attempted, the ones that closed are dropped, and the caller still
+    # learns about the leak instead of seeing a silent success.
+    oid = mint_owner_instance_id()
+    first = create_host_shared_buffer(nbytes=64, owner_instance_id=oid, buffer_id=1)
+    second = create_host_shared_buffer(nbytes=64, owner_instance_id=oid, buffer_id=2)
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    try:
+        imported_first = reg.materialize(first.to_descriptor())
+        imported_second = reg.materialize(second.to_descriptor())
+        assert imported_first.shm is not None
+        assert imported_second.shm is not None
+        with (
+            patch.object(imported_first.shm, "close", side_effect=BufferError("injected close failure")),
+            patch.object(imported_second.shm, "close") as second_close,
+        ):
+            with pytest.raises(BufferError, match="injected close failure"):
+                reg.close()
+            second_close.assert_called_once()
+        assert reg.resolve(first.identity) is imported_first  # the one that failed is kept
+        with pytest.raises(KeyError):
+            reg.resolve(second.identity)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_materialize_after_release_says_the_owner_released_it():
+    # A missing shm name is the expected shape of "this identity was released", and the bare
+    # FileNotFoundError the OS raises names only /psm_xxxx -- which identity, and why it is gone,
+    # are exactly what the reader needs.
+    oid = mint_owner_instance_id()
+    buffer = create_host_shared_buffer(nbytes=64, owner_instance_id=oid, buffer_id=1)
+    descriptor = buffer.to_descriptor()
+    buffer.close()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
+    with pytest.raises(FileNotFoundError, match="released the buffer"):
+        reg.materialize(descriptor)
 
 
 def test_tensor_full_view_is_contiguous():
@@ -290,7 +389,7 @@ def test_materialize_remote_sidecar_rejected():
         backend_kind=BackendKind.REMOTE_SIDECAR,
         nbytes=8,
     )
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     with pytest.raises(ValueError, match="REMOTE_SIDECAR"):
         reg.materialize(desc)
 
@@ -341,7 +440,7 @@ def test_materialize_rejects_an_shm_object_shorter_than_its_descriptor():
     # of them vacuous. The object's real size is the one thing here the owner cannot overstate.
     oid = mint_owner_instance_id()
     buffer = create_host_shared_buffer(nbytes=128, owner_instance_id=oid, buffer_id=1)
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     try:
         honest = buffer.to_descriptor()
         assert reg.materialize(honest).nbytes == 128  # the truthful one maps
@@ -520,7 +619,7 @@ def test_mapped_arg_buffer_is_read_only_for_a_read_access_descriptor():
     addr = ctypes.addressof((ctypes.c_char * 16).from_buffer(data))
     oid = mint_owner_instance_id()
     buf = wrap_fork_inherited(addr, 16, oid, buffer_id=1)  # default: access=READ, backend=FORK_COW
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     imported = reg.materialize(buf.to_descriptor())
     arg = MappedArg(imported, byte_offset=0, shapes=(16,), strides=(1,), dtype=DataType.UINT8)
 

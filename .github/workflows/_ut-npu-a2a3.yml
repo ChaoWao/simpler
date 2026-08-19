@@ -53,6 +53,12 @@ jobs:
           cmake -B tests/ut/cpp/build -S tests/ut/cpp -DSIMPLER_ENABLE_HARDWARE_TESTS=ON
           cmake --build tests/ut/cpp/build --target test_comm_lifecycle
 
+      # `ctest --timeout 300` matches the no-hardware lane. It is not a budget:
+      # the only test in this label set, test_comm_lifecycle, runs in 2.4-3.2 s
+      # across sampled CI runs, so 300 s is ~90x its slowest observed run and
+      # cannot fail a healthy one. It exists so a hung test reports
+      # `test_comm_lifecycle (Timeout)` in five minutes instead of consuming the
+      # 45-minute job budget while holding this lane's exclusive device lock.
       - name: Run Python and C++ hardware unit tests (a2a3)
         run: |
           source /usr/local/Ascend/cann/set_env.sh
@@ -66,10 +72,10 @@ jobs:
           json.dump({'version': {'major': 1, 'minor': 0}, 'local': [{'npus': npus}]},
                     open('tests/ut/cpp/build/resources.json', 'w'))
           "
-            ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure
+            ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure --timeout 300
           else
             task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
-              --run "python -m pytest tests/ut -m requires_hardware --platform a2a3 --device \$TASK_DEVICE -v && python3 -c \"import json,os; ids=os.environ['TASK_DEVICE'].split(','); json.dump({'version':{'major':1,'minor':0},'local':[{'npus':[{'id':i,'slots':1} for i in ids]}]}, open('tests/ut/cpp/build/resources.json','w'))\" && ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure"
+              --run "python -m pytest tests/ut -m requires_hardware --platform a2a3 --device \$TASK_DEVICE -v && python3 -c \"import json,os; ids=os.environ['TASK_DEVICE'].split(','); json.dump({'version':{'major':1,'minor':0},'local':[{'npus':[{'id':i,'slots':1} for i in ids]}]}, open('tests/ut/cpp/build/resources.json','w'))\" && ctest --test-dir tests/ut/cpp/build -L '^requires_hardware(_a2a3)?\$' --resource-spec-file $PWD/tests/ut/cpp/build/resources.json -j$(nproc) --output-on-failure --timeout 300"
           fi
 
       - name: Build cann-examples/query

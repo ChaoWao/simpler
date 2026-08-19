@@ -115,7 +115,7 @@ class DevicePool:
 _device_pool: DevicePool | None = None
 
 
-class PodPeer(typing.NamedTuple):
+class Network1Peer(typing.NamedTuple):
     endpoint: str
     remote_device_ids: tuple[int, ...]
     session_timeout_s: float
@@ -477,7 +477,7 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "pod_remote_device_count(n): number of remote NPU devices needed on the peer machine",
+        "network1_remote_device_count(n): number of remote NPU devices needed on the peer machine",
     )
     config.addinivalue_line(
         "markers",
@@ -1127,7 +1127,7 @@ def pytest_runtestloop(session):
 
     Child mode (runtime-filtered runs, L2/L3 level-filtered runs, or
     --collect-only) skips the dispatcher and falls through to pytest's
-    default runtestloop. Level 4 pod selection is not child mode; it still
+    default runtestloop. Level 4 network1 selection is not child mode; it still
     uses the Resource dispatcher.
     """
     runtime_filter = session.config.getoption("--runtime")
@@ -1363,54 +1363,53 @@ def st_platform(request):
 
 
 @pytest.fixture(scope="session")
-def st_pod_peer():
-    """Pod endpoint and remote device pool from the pod runner environment."""
-    endpoint = os.environ.get("POD_REMOTE_ENDPOINT")
+def st_network1_peer():
+    """Network1 endpoint and remote device pool from the network1 runner environment."""
+    endpoint = os.environ.get("NETWORK1_REMOTE_ENDPOINT")
     if not endpoint:
-        pytest.skip("POD_REMOTE_ENDPOINT is required for pod tests")
-    remote_devices = os.environ.get("POD_REMOTE_DEVICES")
+        pytest.skip("NETWORK1_REMOTE_ENDPOINT is required for network1 tests")
+    remote_devices = os.environ.get("NETWORK1_REMOTE_DEVICES")
     if not remote_devices:
-        pytest.skip("POD_REMOTE_DEVICES is required for pod tests")
+        pytest.skip("NETWORK1_REMOTE_DEVICES is required for network1 tests")
     try:
-        session_timeout_s = float(os.environ.get("POD_L3_SESSION_TIMEOUT_S", "120"))
+        session_timeout_s = float(os.environ.get("NETWORK1_L3_SESSION_TIMEOUT_S", "120"))
     except ValueError as e:
-        pytest.fail(f"POD_L3_SESSION_TIMEOUT_S must be a float: {e}")
+        pytest.fail(f"NETWORK1_L3_SESSION_TIMEOUT_S must be a float: {e}")
     # The remote peer connects back to the parent session runner.
-    return PodPeer(
+    return Network1Peer(
         endpoint=endpoint,
         remote_device_ids=tuple(_parse_device_range(remote_devices)),
         session_timeout_s=session_timeout_s,
-        session_listen_host=os.environ.get("POD_L3_SESSION_LISTEN_HOST", "0.0.0.0"),  # noqa: S104
+        session_listen_host=os.environ.get("NETWORK1_L3_SESSION_LISTEN_HOST", "0.0.0.0"),  # noqa: S104
     )
 
 
 @pytest.fixture()
-def st_pod_remote_device_ids(request, st_pod_peer):
-    """Allocate remote device IDs from the pod peer's default device pool.
+def st_network1_remote_device_ids(request, st_network1_peer):
+    """Allocate remote device IDs from the network1 peer's default device pool.
 
-    Every pod test gets the same leading slice, so this is collision-free only
-    while the pod job serializes the sweep with ``--max-parallel 1``.
+    Every network1 test gets the same leading slice, so this is collision-free only
+    while the network1 job serializes the sweep with ``--max-parallel 1``.
     """
-    marker = request.node.get_closest_marker("pod_remote_device_count")
+    marker = request.node.get_closest_marker("network1_remote_device_count")
     n = marker.args[0] if marker else 1
-    if n > len(st_pod_peer.remote_device_ids):
-        pytest.fail(
-            f"need {n} remote devices but POD_REMOTE_DEVICES only has {len(st_pod_peer.remote_device_ids)} entries"
-        )
-    return list(st_pod_peer.remote_device_ids[:n])
+    if n > len(st_network1_peer.remote_device_ids):
+        available = len(st_network1_peer.remote_device_ids)
+        pytest.fail(f"need {n} remote devices but NETWORK1_REMOTE_DEVICES only has {available} entries")
+    return list(st_network1_peer.remote_device_ids[:n])
 
 
 @pytest.fixture()
-def st_pod_logs(request, monkeypatch):
-    """Per-test parent log directory for pod scene tests."""
-    if _item_scene_level(request.node) != SceneTestLevel.POD:
-        pytest.fail("st_pod_logs requires SceneTestLevel.POD")
+def st_network1_logs(request, monkeypatch):
+    """Per-test parent log directory for network1 scene tests."""
+    if _item_scene_level(request.node) != SceneTestLevel.NETWORK1:
+        pytest.fail("st_network1_logs requires SceneTestLevel.NETWORK1")
     run_dir = os.environ.get("RUN_DIR")
     if not run_dir:
-        if not os.environ.get("POD_REMOTE_ENDPOINT") or not os.environ.get("POD_REMOTE_DEVICES"):
-            pytest.skip("pod runner environment is required for pod tests")
-        pytest.fail("RUN_DIR is required for pod tests")
-    machine = os.environ.get("POD_MACHINE", "parent")
+        if not os.environ.get("NETWORK1_REMOTE_ENDPOINT") or not os.environ.get("NETWORK1_REMOTE_DEVICES"):
+            pytest.skip("network1 runner environment is required for network1 tests")
+        pytest.fail("RUN_DIR is required for network1 tests")
+    machine = os.environ.get("NETWORK1_MACHINE", "parent")
     nodeid = re.sub(r"[^A-Za-z0-9_.-]+", "_", request.node.nodeid)
     log_path = os.path.join(run_dir, "pytest", f"parent-{machine}", "ascend", nodeid)
     os.makedirs(log_path, exist_ok=True)

@@ -35,6 +35,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from simpler_setup.tools.clock_correlation import build_clock_alignment
+
 
 def _func_id_to_letter(func_id):
     """Map a non-negative integer func_id to a numeric+letter label.
@@ -230,7 +232,8 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
                             end_cycles, receive_to_start_cycles], ...],
           "aicpu_tasks":  [[core_id, reg_task_id, dispatch_cycles, finish_cycles], ...],
           "aicpu_scheduler_phases":     [ [ {kind, start_cycles, end_cycles, ...}, ... ], ... ],
-          "aicpu_orchestrator_phases":  [ [ {submit_idx, task_id, start_cycles, end_cycles}, ... ], ... ]
+          "aicpu_orchestrator_phases":  [ [ {submit_idx, task_id, start_cycles, end_cycles}, ... ], ... ],
+          "host_orchestrator_phases":   [ [ {submit_idx, task_id, start_host_ns, end_host_ns}, ... ], ... ]
         }
 
     aicore_tasks columns (v3 schema): the trailing receive_to_start_cycles
@@ -284,6 +287,65 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     aicpu_rows = data.get("aicpu_tasks") or []
     sched_phases_raw = data.get("aicpu_scheduler_phases") or []
     orch_phases_raw = data.get("aicpu_orchestrator_phases") or []
+    host_orch_phases_raw = data.get("host_orchestrator_phases") or []
+    raw_host_capture = metadata.get("host_capture")
+    host_mode = (
+        metadata.get("orchestrator_source") == "host"
+        or bool(host_orch_phases_raw)
+        or isinstance(raw_host_capture, dict)
+    )
+    if orch_phases_raw and host_mode:
+        raise ValueError("both AICPU and host orchestrator phases are present; clock-domain source is ambiguous")
+
+    actual_host_record_count = sum(len(records) for records in host_orch_phases_raw)
+    if isinstance(raw_host_capture, dict):
+        host_capture = dict(raw_host_capture)
+        capture_status = str(host_capture.get("status") or "unknown")
+        raw_dropped_records = host_capture.get("dropped_records")
+        dropped_records = int(raw_dropped_records) if raw_dropped_records is not None else None
+        reported_records = host_capture.get("recorded_records")
+        count_matches = reported_records is None or int(reported_records) == actual_host_record_count
+        # Completeness is per kind: the producer records every timed host
+        # operation, of which this file carries the ones that submit a task, so
+        # `expected_records` is the pass's task count and not its record count.
+        # `pool_records`, when present, is the whole population and is carried
+        # through for context rather than checked here.
+        expected_records = host_capture.get("expected_records")
+        expected_count_matches = expected_records is not None and int(expected_records) == actual_host_record_count
+        host_capture_complete = (
+            capture_status == "complete" and dropped_records == 0 and count_matches and expected_count_matches
+        )
+        validation_errors = []
+        if not count_matches:
+            validation_errors.append("recorded_record_count_mismatch")
+        if expected_records is None:
+            validation_errors.append("expected_record_count_missing")
+        elif not expected_count_matches:
+            validation_errors.append("expected_record_count_mismatch")
+        if validation_errors:
+            host_capture["converter_validation_errors"] = validation_errors
+    elif host_mode:
+        host_capture = {
+            "status": "unknown",
+            "recorded_records": actual_host_record_count,
+            "dropped_records": None,
+            "error": "legacy_capture_status_missing",
+        }
+        host_capture_complete = False
+    else:
+        host_capture = None
+        host_capture_complete = False
+
+    host_timestamps = [
+        int(pr[field])
+        for thread_records in host_orch_phases_raw
+        for pr in thread_records
+        for field in ("start_host_ns", "end_host_ns")
+    ]
+    host_origin_ns = int(metadata.get("host_orchestration_origin_ns") or 0)
+    if host_timestamps and host_origin_ns == 0:
+        host_origin_ns = min(host_timestamps)
+    host_composite_end_us = (max(host_timestamps) - host_origin_ns) / 1000.0 if host_timestamps else 0.0
 
     # AICore lookup keyed by (core_id, reg_task_id). Two dispatches of the
     # same PTO2 task_token_raw to the same core (SPMD over-subscription, MIX
@@ -339,12 +401,43 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     if base_time_cycles is None:
         base_time_cycles = 0
 
+    device_timestamps = []
+    for row in aicore_rows:
+        start_cycles = int(row[3])
+        receive_to_start_cycles = int(row[5]) if len(row) > 5 else 0
+        device_timestamps.extend((start_cycles - receive_to_start_cycles, start_cycles, int(row[4])))
+    for _, _, dispatch_cycles, finish_cycles in aicpu_rows:
+        device_timestamps.extend((int(dispatch_cycles), int(finish_cycles)))
+    for phase_threads in (sched_phases_raw, orch_phases_raw):
+        for thread_records in phase_threads:
+            for phase in thread_records:
+                device_timestamps.extend((int(phase.get("start_cycles", 0)), int(phase.get("end_cycles", 0))))
+
+    clock_alignment = None
+    if host_mode:
+        clock_alignment = build_clock_alignment(
+            metadata.get("clock_anchors"),
+            clock_freq_hz,
+            device_timestamps,
+            metadata.get("host_timestamp_quantization_ns", 0),
+        )
+        if host_origin_ns == 0 and clock_alignment.start is not None:
+            host_origin_ns = clock_alignment.start.host_mid_ns
+
     cycles_to_us_factor = 1_000_000.0 / float(clock_freq_hz)
 
     def _to_us(cycles):
         if cycles <= 0:
             return 0.0
-        return (cycles - base_time_cycles) * cycles_to_us_factor
+        if clock_alignment is not None and clock_alignment.status == "calibrated":
+            return (clock_alignment.map_cycles_to_host_ns(cycles) - host_origin_ns) / 1000.0
+        relative_device_us = (cycles - base_time_cycles) * cycles_to_us_factor
+        if host_mode:
+            # Fail-soft diagnostic layout: preserve both clock domains and only
+            # encode the known happens-before relation. The physical gap at
+            # this seam is unknown and must never feed cross-domain latency.
+            return host_composite_end_us + relative_device_us
+        return relative_device_us
 
     def _core_type(core_id):
         if 0 <= core_id < len(core_types):
@@ -367,11 +460,8 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             start_us = _to_us(start_cycles)
             end_us = _to_us(end_cycles)
             dispatch_us = _to_us(int(dispatch_cycles))
-            # receive_to_start delta is in cycles; convert via the same
-            # cycles_to_us_factor that drives the absolute timestamps. No
-            # base_time subtraction — this is a delta.
-            local_setup_us = r2s_cycles * cycles_to_us_factor
-            receive_us = start_us - local_setup_us
+            receive_us = _to_us(start_cycles - r2s_cycles)
+            local_setup_us = start_us - receive_us
             tasks.append(
                 {
                     "task_id": task_token_raw,
@@ -399,7 +489,8 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             task_token_raw = int(task_token_raw)
             start_us = _to_us(int(start_cycles))
             end_us = _to_us(int(end_cycles))
-            local_setup_us = r2s_cycles * cycles_to_us_factor
+            receive_us = _to_us(int(start_cycles) - r2s_cycles)
+            local_setup_us = start_us - receive_us
             tasks.append(
                 {
                     "task_id": task_token_raw,
@@ -412,7 +503,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
                     "duration_us": end_us - start_us,
                     "dispatch_time_us": 0.0,
                     "finish_time_us": 0.0,
-                    "receive_time_us": start_us - local_setup_us,
+                    "receive_time_us": receive_us,
                     "local_setup_us": local_setup_us,
                     # propagation_us requires AICPU dispatch_ts; absent at level 1.
                 }
@@ -463,6 +554,39 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             converted.append(out)
         aicpu_orchestrator_phases.append(converted)
 
+    host_device_uploads = []
+    for pr in data.get("host_device_uploads") or []:
+        start_ns = int(pr.get("start_host_ns", 0))
+        end_ns = int(pr.get("end_host_ns", 0))
+        if start_ns < host_origin_ns or end_ns < start_ns:
+            raise ValueError(f"invalid host device upload: origin={host_origin_ns}, start={start_ns}, end={end_ns}")
+        out = dict(pr)
+        out["start_time_us"] = (start_ns - host_origin_ns) / 1000.0
+        out["end_time_us"] = (end_ns - host_origin_ns) / 1000.0
+        out.pop("start_host_ns", None)
+        out.pop("end_host_ns", None)
+        host_device_uploads.append(out)
+
+    host_orchestrator_phases = []
+    for thread_records in host_orch_phases_raw:
+        converted = []
+        for pr in thread_records:
+            start_ns = int(pr.get("start_host_ns", 0))
+            end_ns = int(pr.get("end_host_ns", 0))
+            if start_ns < host_origin_ns or end_ns < start_ns:
+                raise ValueError(
+                    f"invalid host orchestrator phase: origin={host_origin_ns}, start={start_ns}, end={end_ns}"
+                )
+            out = dict(pr)
+            out["start_time_us"] = (start_ns - host_origin_ns) / 1000.0
+            out["end_time_us"] = (end_ns - host_origin_ns) / 1000.0
+            out["phase"] = "orch_submit"
+            out.pop("start_host_ns", None)
+            out.pop("end_host_ns", None)
+            converted.append(out)
+        if converted:
+            host_orchestrator_phases.append(converted)
+
     out = {
         "chip_swimlane_level": level,
         "tasks": tasks,
@@ -471,6 +595,35 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         out["aicpu_scheduler_phases"] = aicpu_scheduler_phases
     if aicpu_orchestrator_phases:
         out["aicpu_orchestrator_phases"] = aicpu_orchestrator_phases
+        out["orchestrator_source"] = "aicpu"
+    if host_device_uploads:
+        out["host_device_uploads"] = host_device_uploads
+    if host_mode:
+        if clock_alignment is None:
+            raise RuntimeError("host timeline is missing its clock-alignment result")
+        out["orchestrator_source"] = "host"
+        calibrated = clock_alignment.status == "calibrated"
+        trace_status = "complete" if host_capture_complete else "partial"
+        out["timeline_metadata"] = {
+            "layout": "clock_aligned" if calibrated else "causal_composite",
+            "trace_status": trace_status,
+            "relation": metadata.get("timeline_relation", "host_orchestration_precedes_device"),
+            "clock_alignment": clock_alignment.metadata(),
+            "host_capture": host_capture,
+            "host_records_complete": host_capture_complete,
+            "cross_domain_latency_available": calibrated and host_capture_complete,
+        }
+        if not calibrated:
+            out["timeline_metadata"].update(
+                {
+                    "cross_domain_gap_unknown": True,
+                    "logical_seam_us": host_composite_end_us,
+                }
+            )
+        if host_orchestrator_phases:
+            out["aicpu_orchestrator_phases"] = host_orchestrator_phases
+        else:
+            out["timeline_metadata"]["host_records_missing"] = True
     if core_to_thread:
         out["core_to_thread"] = core_to_thread
     return out
@@ -1185,10 +1338,13 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     orchestrator_phases=None,
     core_to_thread=None,
     orchestrator_name=None,
+    orchestrator_source=None,
+    timeline_metadata=None,
     deps_edges=None,
     deps_kernel_map=None,
     deps_block_map=None,
     emit_overhead=False,
+    host_device_uploads=None,
 ):
     """Generate Chrome Trace Event Format JSON from task data.
 
@@ -1207,7 +1363,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
 
     Generates processes in the trace:
         - pid=5 "Graph Execution": one end-to-end envelope per Graph task
-        - pid=1 "AICPU Orchestrator": orchestrator phase bars (chip_swimlane_level >= 4)
+        - pid=1 "Host/AICPU Orchestrator": orchestrator phase bars (chip_swimlane_level >= 4)
         - pid=2 "AICPU Scheduler": scheduler phase bars (chip_swimlane_level >= 3)
         - pid=3 "Scheduler View": dispatch_time_us to finish_time_us (AICPU perspective)
         - pid=4 "Worker View": per-subtask kernel execution on physical cores
@@ -1857,6 +2013,34 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
 
+    # Host-to-device transfer lane. These are bind segments, not orchestrator
+    # operations, and they are the ones a device timeline can say something about:
+    # drawn beside the device lanes they show the handover the device waits on,
+    # where the rest of the bind stage is host-only setup with no counterpart here.
+    if host_device_uploads:
+        events.append(
+            {"args": {"name": "Host Prepare"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 1}
+        )
+        events.append(
+            {"args": {"name": "H2D"}, "cat": "__metadata", "name": "thread_name", "ph": "M", "pid": 1, "tid": 4100}
+        )
+        for upload in host_device_uploads:
+            start_us = float(upload.get("start_time_us", 0.0))
+            end_us = float(upload.get("end_time_us", start_us))
+            events.append(
+                {
+                    "name": str(upload.get("phase", "upload")),
+                    "cat": "host_h2d",
+                    "ph": "X",
+                    "pid": 1,
+                    "tid": 4100,
+                    "ts": start_us,
+                    "dur": max(0.0, end_us - start_us),
+                    "cname": "thread_state_iowait",
+                    "args": {"bytes": upload.get("detail", 0)},
+                }
+            )
+
     # AICPU Orchestrator lane (chip_swimlane_level >= 4)
     #
     # Per-event AicpuPhaseRecord[] is the single source of truth for
@@ -1865,7 +2049,10 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     # line covers the run-window envelope for debugging without swimlane.
     if orchestrator_phases:
         # Process metadata
-        orch_process_label = f"AICPU {orchestrator_name}" if orchestrator_name else "AICPU Orchestrator"
+        if orchestrator_source == "host":
+            orch_process_label = "Host Orchestrator"
+        else:
+            orch_process_label = f"AICPU {orchestrator_name}" if orchestrator_name else "AICPU Orchestrator"
         events.append(
             {"args": {"name": orch_process_label}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 1}
         )
@@ -1876,7 +2063,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         # Thread name metadata for each orchestrator thread
         for orch_idx in range(len(orchestrator_phases)):
             tid = 4000 + orch_idx
-            name = f"Orch_{orch_idx}"
+            name = f"Host_{orch_idx}" if orchestrator_source == "host" else f"Orch_{orch_idx}"
             events.append(
                 {"args": {"name": name}, "cat": "__metadata", "name": "thread_name", "ph": "M", "pid": 1, "tid": tid}
             )
@@ -2503,7 +2690,12 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     # Anchor each task's dispatch arrow on the end of its orch_submit record
     # (covers the entire submit_task() span). Legacy captures with the older
     # per-sub-step phases (orch_fanin / orch_params) are accepted as fallbacks.
-    if orchestrator_phases and scheduler_phases:
+    cross_domain_aligned = not (
+        orchestrator_source == "host"
+        and timeline_metadata
+        and not timeline_metadata.get("cross_domain_latency_available", False)
+    )
+    if orchestrator_phases and scheduler_phases and cross_domain_aligned:
         orch_anchor_by_task = {}
         for orch_idx, thread_records in enumerate(orchestrator_phases):
             for record in thread_records:
@@ -2588,8 +2780,11 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         if verbose:
             print(f"  Overhead Analysis: {sum(1 for e in oh if e.get('ph') == 'C')} counter points (8 tracks)")
 
+    trace = {"traceEvents": events}
+    if timeline_metadata:
+        trace["metadata"] = timeline_metadata
     with open(output_path, "w") as f:
-        json.dump({"traceEvents": events}, f, indent=2)
+        json.dump(trace, f, indent=2)
 
     if verbose:
         print(f"JSON written to: {output_path}")
@@ -2809,7 +3004,10 @@ def main():
             orchestrator_name=orchestrator_name,
             scheduler_phases=data.get("aicpu_scheduler_phases"),
             orchestrator_phases=data.get("aicpu_orchestrator_phases"),
+            orchestrator_source=data.get("orchestrator_source"),
+            timeline_metadata=data.get("timeline_metadata"),
             core_to_thread=data.get("core_to_thread"),
+            host_device_uploads=data.get("host_device_uploads"),
             deps_edges=deps_edges,
             deps_kernel_map=deps_kernel_map,
             deps_block_map=deps_block_map,

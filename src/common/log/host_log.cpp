@@ -130,7 +130,7 @@ size_t format_record(
     return length;
 }
 
-void write_stderr(const char *record, size_t size) {
+bool write_stderr(const char *record, size_t size) {
     size_t offset = 0;
     while (offset < size) {
         const ssize_t written = ::write(STDERR_FILENO, record + offset, size - offset);
@@ -139,9 +139,10 @@ void write_stderr(const char *record, size_t size) {
         } else if (written < 0 && errno == EINTR) {
             continue;
         } else {
-            break;
+            return false;
         }
     }
+    return true;
 }
 
 long host_trace_tid() {
@@ -154,25 +155,53 @@ long host_trace_tid() {
 
 }  // namespace
 
+namespace {
+
+SimplerHostLogState g_module_log_state{
+    SIMPLER_HOST_LOG_STATE_ABI_VERSION,
+    sizeof(SimplerHostLogState),
+    static_cast<int32_t>(LogLevel::TIMING),
+    0,
+};
+
+int32_t atomic_load_i32(const int32_t *value) { return __atomic_load_n(value, __ATOMIC_ACQUIRE); }
+
+void atomic_store_i32(int32_t *value, int32_t desired) { __atomic_store_n(value, desired, __ATOMIC_RELEASE); }
+
+bool atomic_compare_exchange_i32(int32_t *value, int32_t *expected, int32_t desired) {
+    return __atomic_compare_exchange_n(value, expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+}  // namespace
+
 HostLogger &HostLogger::get_instance() {
     static HostLogger instance;
     return instance;
 }
 
 HostLogger::HostLogger() :
-    current_level_(LogLevel::TIMING) {}
+    state_(&g_module_log_state) {}
+
+int HostLogger::bind_state(SimplerHostLogState *state) {
+    if (state == nullptr || state->abi_version != SIMPLER_HOST_LOG_STATE_ABI_VERSION ||
+        state->struct_size < sizeof(SimplerHostLogState) ||
+        !simpler::log::is_valid_level(atomic_load_i32(&state->threshold))) {
+        return -1;
+    }
+    state_.store(state, std::memory_order_release);
+    return 0;
+}
+
+SimplerHostLogState *HostLogger::state() const { return state_.load(std::memory_order_acquire); }
 
 void HostLogger::set_level(LogLevel level) {
-    {
-        std::scoped_lock lock(mutex_);
-        current_level_ = level;
-    }
+    atomic_store_i32(&state()->threshold, static_cast<int32_t>(level));
     emit_clock_anchor_if_needed();
 }
 
-int HostLogger::level() const { return static_cast<int>(current_level_); }
+int HostLogger::level() const { return atomic_load_i32(&state()->threshold); }
 
-int HostLogger::cann_level() const { return simpler::log::to_cann_log_level(current_level_); }
+int HostLogger::cann_level() const { return simpler::log::to_cann_log_level(static_cast<LogLevel>(level())); }
 
 void HostLogger::configure_cann_log_level(int (*set_level)(int, int, int)) const {
     if (std::getenv("ASCEND_GLOBAL_LOG_LEVEL") == nullptr) {
@@ -181,8 +210,9 @@ void HostLogger::configure_cann_log_level(int (*set_level)(int, int, int)) const
 }
 
 bool HostLogger::is_enabled(LogLevel level) const {
-    // current_level_ is the floor: messages with severity >= floor are kept.
-    return static_cast<int>(level) >= static_cast<int>(current_level_) && current_level_ != LogLevel::NUL;
+    // threshold is the floor: messages with severity >= floor are kept.
+    const int current_level = this->level();
+    return static_cast<int>(level) >= current_level && current_level != static_cast<int>(LogLevel::NUL);
 }
 
 const char *HostLogger::level_name(LogLevel level) const {
@@ -203,7 +233,7 @@ const char *HostLogger::level_name(LogLevel level) const {
     return "?";
 }
 
-void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args) {
+bool HostLogger::emit(const char *level_tag, const char *func, const char *fmt, va_list args) {
     const int64_t monotonic_ns = simpler::log::monotonic_now_ns();
     auto tid = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(pthread_self()));
 
@@ -220,8 +250,7 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
     );
     if (length < sizeof(stack_buffer)) {
         std::scoped_lock lock(mutex_);
-        write_stderr(stack_buffer, length);
-        return;
+        return write_stderr(stack_buffer, length);
     }
 
     std::vector<char> heap_buffer(length + 1);
@@ -229,34 +258,39 @@ void HostLogger::emit(const char *level_tag, const char *func, const char *fmt, 
         heap_buffer.data(), heap_buffer.size(), monotonic_ns, tid, level_tag, func, fmt, args, append_newline
     );
     std::scoped_lock lock(mutex_);
-    write_stderr(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length);
+    return write_stderr(heap_buffer.data(), heap_length < heap_buffer.size() ? heap_length : length);
 }
 
-void HostLogger::emit_ungated(const char *level_tag, const char *func, const char *fmt, ...) {
+bool HostLogger::emit_ungated(const char *level_tag, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    emit(level_tag, func, fmt, args);
+    const bool written = emit(level_tag, func, fmt, args);
     va_end(args);
+    return written;
 }
 
 void HostLogger::emit_clock_anchor_if_needed() {
     if (!is_enabled(LogLevel::TIMING)) return;
 
     const pid_t pid = getpid();
-    if (clock_anchor_pid_.load(std::memory_order_acquire) == pid) return;
-
-    std::scoped_lock lock(clock_anchor_mutex_);
-    if (clock_anchor_pid_.load(std::memory_order_relaxed) == pid) return;
+    SimplerHostLogState *shared = state();
+    const int32_t pid_value = static_cast<int32_t>(pid);
+    int32_t observed = atomic_load_i32(&shared->clock_anchor_pid);
+    if (observed == pid_value || observed == -pid_value) return;
+    if (!atomic_compare_exchange_i32(&shared->clock_anchor_pid, &observed, -pid_value)) {
+        return;
+    }
 
     const int64_t monotonic_ns = simpler::log::monotonic_now_ns();
     const int64_t wall_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
             .count();
-    emit_ungated(
+    const bool written = emit_ungated(
         level_name(LogLevel::TIMING), "clock_anchor", "[CLOCK_ANCHOR] v=1 pid=%d mono_ns=%lld wall_ns=%lld",
         static_cast<int>(pid), static_cast<long long>(monotonic_ns), static_cast<long long>(wall_ns)
     );
-    clock_anchor_pid_.store(pid, std::memory_order_release);
+    int32_t claim = -pid_value;
+    (void)atomic_compare_exchange_i32(&shared->clock_anchor_pid, &claim, written ? pid_value : 0);
 }
 
 void HostLogger::vlog(LogLevel level, const char *func, const char *fmt, va_list args) {
@@ -274,28 +308,7 @@ void HostLogger::log(LogLevel level, const char *func, const char *fmt, ...) {
     va_end(args);
 }
 
-// ---------------------------------------------------------------------------
-// C ABI entry — resolved by ChipWorker via dlsym from libsimpler_log.so.
-//
-// Called once early in ChipWorker::init (before host_runtime.so is even
-// dlopen'd) to seed the process-wide HostLogger from the user's
-// `simpler` Python logger snapshot. Consumers that need the current value
-// later (host_runtime.so populating InitArgs.log_level at device init) read it
-// via HostLogger::get_instance().level() directly; the value never
-// has to travel through any other SO's C ABI.
-//
-// Level values match Python logging thresholds.
-// Returns 0 on success, negative for an unsupported threshold.
-// ---------------------------------------------------------------------------
-extern "C" int simpler_log_init(int log_level) {
-    if (!simpler::log::is_valid_level(log_level)) {
-        return -1;
-    }
-    HostLogger::get_instance().set_level(static_cast<LogLevel>(log_level));
-    return 0;
-}
-
-extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
+void HostLogger::log_host_span(const SimplerHostSpan *span) {
     if (span == nullptr || span->abi_version != SIMPLER_HOST_SPAN_ABI_VERSION ||
         span->struct_size < sizeof(SimplerHostSpan) || span->name == nullptr) {
         return;
@@ -303,11 +316,13 @@ extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
     const std::string name = encode_host_span_field(span->name, kHostSpanNameCapacity, false);
     const std::string attributes =
         encode_host_span_field(span->attributes == nullptr ? "" : span->attributes, kHostSpanAttributesCapacity, true);
-    HostLogger::get_instance().log(
-        LogLevel::TIMING, "emit_host_span",
+    log(LogLevel::TIMING, "emit_host_span",
         "[STRACE] v=1 pid=%d tid=%ld inv=%" PRIu64 " hid=%" PRIx64 " depth=%d name=%s ts=%" PRId64 " dur=%" PRId64
         " %s",
         static_cast<int>(getpid()), host_trace_tid(), span->invocation_id, span->callable_hash, span->depth,
-        name.c_str(), span->timestamp_ns, span->duration_ns, attributes.c_str()
-    );
+        name.c_str(), span->timestamp_ns, span->duration_ns, attributes.c_str());
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_host_log_bind_state(SimplerHostLogState *state) {
+    return HostLogger::get_instance().bind_state(state);
 }

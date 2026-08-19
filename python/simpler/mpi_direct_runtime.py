@@ -382,7 +382,7 @@ class _ExecutorFrameSocket:
                 frame = bytearray(count)
                 message.Recv([frame, self._MPI.BYTE])
             tag = int(status.Get_tag())
-            decoded = decode_frame(frame)
+            decoded = decode_frame(bytes(frame))
             expected_tag = LIFECYCLE_TAG if decoded.header.frame_type == FrameType.SHUTDOWN else COMMAND_REQUEST_TAG
             if tag != expected_tag:
                 raise RuntimeError("controller MPI tag does not match SLR3 request type")
@@ -455,13 +455,13 @@ def _run_executor(MPI, world, topology: MpiDirectTopology, session_id: int, spec
         "global_device_ranks": list(spec.global_device_ranks),
     }
     try:
-        _run_command_loop(channel, manifest, worker, {}, {})
+        _run_command_loop(channel, manifest, worker, {}, {})  # type: ignore[arg-type]
     finally:
         channel.close()
         worker.close()
 
 
-def run_runtime(
+def run_runtime(  # noqa: PLR0912 -- startup gate, role dispatch, and MPI teardown are one ordered lifecycle
     topology_path: str | None,
     session_id: int | None,
     controller: str,

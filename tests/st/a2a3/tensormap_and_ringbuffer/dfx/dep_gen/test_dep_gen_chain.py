@@ -87,9 +87,12 @@ class TestDepGenChain(SceneTestCase):
         {
             "name": "n_64_no_chain",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {"n": 64},
         },
+        # Keep one representative boundary in the default Sim sweep; the
+        # dedicated DFX step reruns it with dep-gen capture/replay enabled.
         {
             "name": "n_65_single_overflow",
             "platforms": ["a2a3sim", "a2a3"],
@@ -99,12 +102,14 @@ class TestDepGenChain(SceneTestCase):
         {
             "name": "n_200_single_overflow",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {"n": 200},
         },
         {
             "name": "n_391_two_overflow",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {"n": 391},
         },
@@ -136,9 +141,8 @@ class TestDepGenChain(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
         if not self._effective_enable_dep_gen(request):
             return
-        for case in self.CASES:
-            if st_platform in case.get("platforms", []):
-                self._post_validate(case, run_marker)
+        for case in self._matching_cases(st_platform, request):
+            self._post_validate(case, run_marker)
 
     def _post_validate(self, case, run_marker):
         """Verify every explicit dep edge survived the writer → replay round-trip.

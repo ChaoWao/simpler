@@ -248,6 +248,7 @@ Applies to all 4 runtime executors: a2a3 (hbg, tmr), a5 (hbg, tmr).
 
 | SO | Caching | Lifecycle |
 | -- | ------- | --------- |
+| Sim context | Process registry keyed by path | Process lifetime: loaded once with `RTLD_GLOBAL`, never explicitly closed |
 | Host runtime | `ChipWorker::lib_handle_` | Per-init: dlopen in `init()`, dlclose in `finalize()` |
 | AICPU | `DeviceRunner::aicpu_so_handle_` | Per-init: loaded lazily by the first `prepare_execution()`, retained across runs, closed by `finalize()` |
 | AICore | `DeviceRunner::aicore_so_handle_` | Per-run: reloaded for the run's kernel binary, closed after a successful `drain_execution()` (or by final cleanup) |
@@ -287,11 +288,14 @@ AICore receives only a device copy of that same `KernelArgs` payload.
 
 ```text
 ChipWorker.init(device_id, bins)                       # Python wrapper
-  ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)          # once per process
-  simpler_log_init(log_level)                          seeds HostLogger before host_runtime
-  ctypes.CDLL(libcpu_sim_context.so, RTLD_GLOBAL)      # sim only, once per process
-  _ChipWorker.init(host_path, aicpu_path, aicore_path, device_id)   # C++
+  _initialize_host_log(log_level)                      seeds extension-owned state
+  _ChipWorker.init(host_path, aicpu_path, aicore_path,
+                   dispatcher_path, device_id, ...,
+                   sim_context_path)                   # C++
+    process registry loads cpu_sim_context.so once      RTLD_GLOBAL PTO hooks
+    dlsym(handle, simpler_host_log_bind_state)(state)   first load only
     dlopen(host_runtime.so, RTLD_LOCAL)
+    dlsym(handle, simpler_host_log_bind_state)(state)
     dlsym every required export declared in pto_runtime_c_api.h, including:
            create_device_context, destroy_device_context, simpler_init,
            get_runtime_size, get_runtime_alignment, simpler_register_callable,
@@ -303,7 +307,7 @@ ChipWorker.init(device_id, bins)                       # Python wrapper
            finalize_device
     create_device_context() → DeviceContextHandle
     allocate zeroed, aligned, stable native-run storage per pipeline slot
-    simpler_init(ctx, device_id, aicpu*, aicpu_size, aicore*, aicore_size)
+    simpler_init(ctx, device_id, aicpu*, aicpu_size, aicore*, aicore_size, ...)
       DeviceRunner::attach_current_thread(device_id)
         pto_cpu_sim_bind_device(device_id)
         pto_cpu_sim_acquire_device(device_id)
@@ -342,15 +346,15 @@ ChipWorker.finalize()
 device_worker_main(device_id)
   for each runtime_group:
     ChipWorker.init(device_id, bins)                    # Python wrapper
-      ctypes.CDLL(libsimpler_log.so, RTLD_GLOBAL)       # once per process
-      simpler_log_init(log_level)
+      _initialize_host_log(log_level)                   # seed shared host state
       _ChipWorker.init(host_path, aicpu_path, aicore_path,
                        dispatcher_path, device_id)       # C++
         dlopen(host_runtime.so, RTLD_LOCAL)
+        dlsym(handle, simpler_host_log_bind_state)(state)
         create_device_context()
         simpler_init(ctx, device_id,
                      aicpu*, aicpu_size, aicore*, aicore_size,
-                     dispatcher*, dispatcher_size)
+                     dispatcher*, dispatcher_size, ...)
           dlog_setlevel(HostLogger.cann_level())          sync CANN dlog before context open
           DeviceRunner::attach_current_thread(device_id)  rtSetDevice()
           DeviceRunner::set_executors(aicpu, aicore)

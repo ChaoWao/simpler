@@ -100,6 +100,7 @@ class TestBatchPagedAttentionHostBuildGraph(SceneTestCase):
         {
             "name": "CaseSmall1",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "params": {
                 "batch": 1,
                 "num_heads": 16,

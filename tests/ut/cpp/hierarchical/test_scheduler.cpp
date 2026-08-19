@@ -61,10 +61,9 @@ public:
         std::lock_guard<std::mutex> lk(captured_host_spans_mu);
         captured_host_span_names.clear();
         captured_host_span_attributes.clear();
-        simpler::host_trace::bind_sink(&simpler_log_emit_host_span);
     }
 
-    ~ScopedHostSpanCapture() { simpler::host_trace::bind_sink(nullptr); }
+    ~ScopedHostSpanCapture() = default;
 
     ScopedHostSpanCapture(const ScopedHostSpanCapture &) = delete;
     ScopedHostSpanCapture &operator=(const ScopedHostSpanCapture &) = delete;
@@ -87,7 +86,7 @@ std::string captured_host_span_attrs(const std::string &name) {
 
 }  // namespace
 
-extern "C" void simpler_log_emit_host_span(const SimplerHostSpan *span) {
+extern "C" void unified_log_host_span(const SimplerHostSpan *span) {
     if (span == nullptr || span->name == nullptr) return;
     std::lock_guard<std::mutex> lk(captured_host_spans_mu);
     captured_host_span_names.emplace_back(span->name);
@@ -1211,13 +1210,13 @@ TEST(WorkerManagerTest, DispatchAndCompletionEmitHostSpans) {
 
     worker.dispatch(WorkerDispatch{slot, 0});
     ASSERT_TRUE(endpoint_ptr->wait_submitted(1));
-    EXPECT_TRUE(captured_host_span("l3.dispatch"));
+    EXPECT_TRUE(captured_host_span("host.dispatch"));
 
     const WorkerDispatch submitted = endpoint_ptr->submitted().front();
     endpoint_ptr->emit(WorkerProgressKind::COMPLETED, submitted);
     worker.progress();
     ASSERT_EQ(completed.size(), 1u);
-    EXPECT_TRUE(captured_host_span("l3.complete"));
+    EXPECT_TRUE(captured_host_span("host.complete"));
 
     worker.stop();
     allocator.shutdown();
@@ -1475,8 +1474,8 @@ TEST(WorkerManagerTest, TwoFrameLeaseSlotsDoNotDefineFifoOrAcceptance) {
     ASSERT_TRUE(endpoint.poll_progress(progress));
     EXPECT_EQ(progress.kind, WorkerProgressKind::ACCEPTED);
     EXPECT_EQ(progress.dispatch.dispatch_id, 42u);
-    EXPECT_TRUE(captured_host_span("l3.frame_submit"));
-    EXPECT_TRUE(captured_host_span("l3.activate"));
+    EXPECT_TRUE(captured_host_span("host.frame_submit"));
+    EXPECT_TRUE(captured_host_span("host.activate"));
     allocator.shutdown();
 }
 
@@ -2043,10 +2042,10 @@ TEST_F(ProgressSchedulerFixture, GroupSubmitReportsNoSingleWorkerAndNoSingleInde
     );
     orchestrator.close_run_submission(run);
 
-    ASSERT_TRUE(captured_host_span("l3.submit"));
+    ASSERT_TRUE(captured_host_span("host.submit"));
     std::ostringstream expected;
     expected << "run_id=" << run << " task_slot=" << group.task_slot << " group_index=-1 group_size=2 role=facade";
-    EXPECT_EQ(captured_host_span_attrs("l3.submit"), expected.str());
+    EXPECT_EQ(captured_host_span_attrs("host.submit"), expected.str());
 }
 
 TEST_F(ProgressSchedulerFixture, SuccessorStagesButActivatesOnlyAfterFifoPromotion) {
@@ -2507,7 +2506,7 @@ TEST_F(SchedulerFixture, ACancellationThatWinsTheClaimStopsTheDispatch) {
     }
 }
 
-// `l3.submit` is what a dispatch arrow is drawn back to, so the swimlane can
+// `host.submit` is what a dispatch arrow is drawn back to, so the swimlane can
 // only pair the two if these attributes carry the same run/slot the dispatch
 // reports. A SUB submission is deliberately silent: it has no NEXT_LEVEL worker
 // to hand off to.
@@ -2516,11 +2515,11 @@ TEST_F(SchedulerFixture, NextLevelSubmitEmitsAPairableHostSpan) {
 
     auto submitted = orch.submit_next_level(C(0x42), single_tensor_args(0xCAFE, TensorArgType::OUTPUT), cfg, 0);
 
-    ASSERT_TRUE(captured_host_span("l3.submit"));
+    ASSERT_TRUE(captured_host_span("host.submit"));
     std::ostringstream expected;
     expected << "run_id=" << run_id << " task_slot=" << submitted.task_slot
              << " group_index=0 group_size=1 worker_id=0 role=facade";
-    EXPECT_EQ(captured_host_span_attrs("l3.submit"), expected.str());
+    EXPECT_EQ(captured_host_span_attrs("host.submit"), expected.str());
 
     mock_worker.wait_running();
     mock_worker.complete();

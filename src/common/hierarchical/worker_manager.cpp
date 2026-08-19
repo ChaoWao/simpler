@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/host_span_names.h"
 #include "common/host_span_scope.h"
 #include "ring.h"
 
@@ -90,6 +91,17 @@ trace_dispatch_attrs(RunId run_id, const WorkerDispatch &dispatch, const WorkerE
           << " worker_id=" << caps.worker_id << " dispatch_id=" << dispatch.dispatch_id
           << " endpoint_kind=" << endpoint_kind_name(caps.kind)
           << " prepare_only=" << static_cast<int>(dispatch.prepare_only) << " role=" << role;
+    return attrs.str();
+}
+
+// The lease the dispatch's slot holds, read from the ring. Callers read this
+// before publishing the frame: past that point the endpoint may retire the slot.
+std::string trace_lease_attrs(Ring *ring, TaskSlot task_slot) {
+    if (ring == nullptr) return "";
+    const TaskSlotState *state = ring->slot_state(task_slot);
+    if (state == nullptr) return "";
+    std::ostringstream attrs;
+    attrs << " slot_id=" << state->pipeline_lease.slot_id << " generation=" << state->pipeline_lease.generation;
     return attrs.str();
 }
 #endif
@@ -454,6 +466,7 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
 #if SIMPLER_HOST_STRACE
     const RunId trace_run = trace_run_id(ring_, d.task_slot);
     const uint64_t trace_hash = trace_callable_hash(ring_, d.task_slot);
+    const std::string trace_lease = trace_lease_attrs(ring_, d.task_slot);
 #endif
     try {
         endpoint_->submit_progress(ring_, d);
@@ -465,9 +478,10 @@ WorkerThread::submit_dispatch(WorkerDispatch d, LaneKind lane_kind, RunId expect
     admission_lk.unlock();
 #if SIMPLER_HOST_STRACE
     const int64_t trace_end_ns = simpler::host_trace::now_ns();
-    const std::string trace_attrs = trace_dispatch_attrs(trace_run, d, endpoint_->caps(), "scheduler");
+    const std::string trace_attrs = trace_dispatch_attrs(trace_run, d, endpoint_->caps(), "scheduler") + trace_lease;
     simpler::host_trace::emit(
-        "l3.dispatch", trace_run, trace_hash, 0, trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Dispatch), trace_run, trace_hash, 0,
+        trace_start_ns, trace_end_ns - trace_start_ns, trace_attrs.c_str()
     );
 #endif
     return SubmitDispatchResult::SUBMITTED;
@@ -659,7 +673,10 @@ void WorkerThread::finish_progress_dispatch(const WorkerEndpointProgress &progre
 
 #if SIMPLER_HOST_STRACE
     complete_attrs += " outcome=" + std::to_string(static_cast<int32_t>(completion.outcome));
-    simpler::host_trace::SpanScope complete_trace("l3.complete", trace_run, trace_hash, 0, std::move(complete_attrs));
+    simpler::host_trace::SpanScope complete_trace(
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Complete), trace_run, trace_hash, 0,
+        std::move(complete_attrs)
+    );
 #endif
     on_complete_(std::move(completion));
     {
@@ -706,8 +723,8 @@ void LocalMailboxEndpoint::submit_progress(Ring *ring, const WorkerDispatch &dis
 
 #if SIMPLER_HOST_STRACE
     simpler::host_trace::SpanScope frame_submit_trace(
-        "l3.frame_submit", state.run_id, trace_callable_hash(ring, dispatch.task_slot), 0,
-        trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
+        simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::FrameSubmit), state.run_id,
+        trace_callable_hash(ring, dispatch.task_slot), 0, trace_dispatch_attrs(state.run_id, dispatch, caps_, "worker")
     );
 #endif
 
@@ -975,7 +992,10 @@ bool LocalMailboxEndpoint::activate_progress(RunId run_id) {
                        << " dispatch_id=" << record.dispatch.dispatch_id
                        << " endpoint_kind=" << endpoint_kind_name(caps_.kind)
                        << " prepare_only=" << static_cast<int>(record.dispatch.prepare_only) << " role=worker";
-        simpler::host_trace::SpanScope activate_trace("l3.activate", run_id, 0, 0, activate_attrs.str());
+        simpler::host_trace::SpanScope activate_trace(
+            simpler::host_trace::host_span_name(simpler::host_trace::HostSpan::Activate), run_id, 0, 0,
+            activate_attrs.str()
+        );
 #endif
         record.activation_requested = true;
         char *frame = task_frame(index);

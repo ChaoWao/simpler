@@ -304,8 +304,8 @@ runtime-inapplicable columns are not zero measurements and must not be printed.
 
 | Metric | Source | What it captures |
 | ------ | ------ | ---------------- |
-| Host | `[STRACE]` `run_prepared` span | steady_clock around dispatch (Python overhead included); rendered from markers by `strace_timing --rounds-table` |
-| Device | `[STRACE]` `run_prepared.runner_run.device_wall` span | full on-NPU AICPU run wall (`AicpuPhase::RunWall`, `max(end) − min(start)` across threads); on TMR this whole run + teardown is strictly larger than the windows below |
+| Host | `[STRACE]` `chip.run` span | steady_clock around dispatch (Python overhead included); rendered from markers by `strace_timing --rounds-table` |
+| Device | `[STRACE]` `chip.run.runner_run.device_wall` span | full on-NPU AICPU run wall (`AicpuPhase::RunWall`, `max(end) − min(start)` across threads); on TMR this whole run + teardown is strictly larger than the windows below |
 | Effective | TMR orch/sched markers' device-domain `ts`+`dur` | TMR only: `max(orch_end,sched_end) − min(orch_start,sched_start)` — the orch∪sched merged window |
 | Orch | `[STRACE]` `…device_wall.orch` span (`--rounds-table`) | TMR only: device orchestrator (graph-build) window |
 | Sched | `[STRACE]` `…device_wall.sched` span (`--rounds-table`) | TMR only: scheduler dispatch/execution window |

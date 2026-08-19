@@ -18,6 +18,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from simpler.mpi_direct_supervisor import run_supervisor
 from simpler.remote_l3_session import get_inner_handle
@@ -97,7 +98,7 @@ def _build_chip_callable(platform: str, runtime: str) -> ChipCallable:
     )
 
 
-def _array(value: float) -> FloatArray:
+def _array(value: float) -> Any:
     return FloatArray(*([value] * ELEMENTS))
 
 
@@ -131,7 +132,7 @@ def controller(context) -> None:
         worker.init()
 
         digest = bytes(chip_handle.digest)
-        expected: dict[int, tuple[FloatArray, float]] = {}
+        expected: dict[int, tuple[Any, float]] = {}
         task_inputs: dict[int, list] = {}
         for index, worker_id in enumerate(worker_ids):
             lhs = float(2 + index * 4)

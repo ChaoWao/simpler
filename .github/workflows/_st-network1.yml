@@ -1,0 +1,225 @@
+name: NPU Network1 Scene Tests
+
+permissions:
+  contents: read
+
+# A network1 job spans two machines: the runner it lands on drives its peer entirely
+# over ssh, and the peer runs no workflow code. Every value that identifies
+# either machine — addresses, device split, ports, staging root, proxy — comes
+# from the runner's own .env, so nothing machine-specific lives in this file.
+# See docs/ci.md for the action boundaries and examples/workers/README.md for
+# how an example plugs into it.
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: false
+        type: string
+      ref:
+        required: false
+        type: string
+      platform:
+        description: a2a3 or a5.
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+
+jobs:
+  run:
+    name: st-network1-onboard-${{ inputs.platform }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 60
+    env:
+      SIMPLER_SCHEDULER_TIMEOUT_MS: "2000"
+      SIMPLER_OP_EXECUTE_TIMEOUT_US: "3000000"
+      SIMPLER_STREAM_SYNC_TIMEOUT_MS: "4000"
+
+    steps:
+      # Each network1 machine carries one .env describing itself and its peer, so
+      # this job never has to work out which machine it landed on.
+      - name: Load network1 machine config
+        run: |
+          set -euo pipefail
+
+          # The runner root holds .env and sits two levels above
+          # RUNNER_WORKSPACE (<root>/_work/<repo>). NETWORK1_ENV_FILE overrides the
+          # derivation for a runner laid out differently; POD_ENV_FILE is the older
+          # spelling and still works, for the same reason the key loop below reads
+          # both.
+          ENV_FILE="${NETWORK1_ENV_FILE:-${POD_ENV_FILE:-$(dirname "$(dirname "$RUNNER_WORKSPACE")")/.env}}"
+          if [ ! -r "$ENV_FILE" ]; then
+            echo "::error::network1 config not readable: $ENV_FILE (set NETWORK1_ENV_FILE to override)"
+            exit 1
+          fi
+          echo "network1 config: $ENV_FILE"
+
+          # The runner service reads this same file for its own settings, so only
+          # the level-scoped prefix is accepted here — an unrelated key in it must
+          # not reach the job environment through this step.
+          #
+          # Both spellings are read and every key is exported as NETWORK1_*, so
+          # the rest of this job and the tests see exactly one name. POD_* is the
+          # older spelling and is still what the runners' .env files carry; a
+          # machine can be converted at any time, independently of this repo,
+          # because both land on the same variable here. Drop the POD_ branch once
+          # no .env still uses it.
+          while IFS= read -r line || [ -n "$line" ]; do
+            line=${line%$'\r'}
+            line=${line#"${line%%[![:space:]]*}"}
+            case "$line" in ''|'#'*) continue ;; esac
+            [[ "$line" == *=* ]] || continue
+            key=${line%%=*}
+            value=${line#*=}
+            [[ "$key" =~ ^(POD|NETWORK1)_[A-Z0-9_]+$ ]] || continue
+            key="NETWORK1_${key#*_}"
+            value=${value%"${value##*[![:space:]]}"}
+            case "$value" in
+              \"*\") value=${value#\"}; value=${value%\"} ;;
+              \'*\') value=${value#\'}; value=${value%\'} ;;
+            esac
+            printf -v "$key" '%s' "$value"
+          done < "$ENV_FILE"
+
+          set_default() {
+            local name=$1
+            shift
+            [ -n "${!name-}" ] || printf -v "$name" '%s' "$*"
+          }
+          set_default NETWORK1_LOCAL_IP ""
+          set_default NETWORK1_REMOTE_USER ""
+          set_default NETWORK1_REMOTE_SSH_PORT 22
+          set_default NETWORK1_L3_DAEMON_PORT 19073
+          set_default NETWORK1_L3_SESSION_TIMEOUT_S 180
+          set_default NETWORK1_L3_SESSION_LISTEN_HOST 0.0.0.0
+          set_default NETWORK1_REMOTE_STAGING_ROOT /data/workspace/ci-runner/network1-ci
+          set_default NETWORK1_REMOTE_STAGING_TTL_DAYS 2
+          set_default NETWORK1_DAEMON_WAIT_S 120
+          set_default NETWORK1_SMOKE_TIMEOUT_S 2400
+          set_default NETWORK1_CANN_ENV /usr/local/Ascend/cann/set_env.sh
+          set_default NETWORK1_REMOTE_CANN_ENV "$NETWORK1_CANN_ENV"
+          set_default NETWORK1_HTTP_PROXY ""
+          set_default NETWORK1_HTTPS_PROXY ""
+          set_default NETWORK1_NO_PROXY ""
+          # Each machine runs its own proxy on its own port, and the peer's
+          # values are evaluated on the peer — a loopback address here and
+          # there name two different proxies. Unset means "same as this
+          # machine's", which only holds for a shared LAN proxy.
+          set_default NETWORK1_REMOTE_HTTP_PROXY "$NETWORK1_HTTP_PROXY"
+          set_default NETWORK1_REMOTE_HTTPS_PROXY "$NETWORK1_HTTPS_PROXY"
+          set_default NETWORK1_REMOTE_NO_PROXY "$NETWORK1_NO_PROXY"
+
+          # A proxy nothing listens on turns every pip call into five retries
+          # ending in an opaque ProxyError, several steps from the setting that
+          # caused it. Name the address here instead — host and port only, since
+          # a proxy URL may carry `user:password@` and this runs in a public log.
+          proxy_hostport() {
+            local hostport=${1#*://}
+            hostport=${hostport##*@}
+            hostport=${hostport%%/*}
+            case "$hostport" in
+              *:*) printf '%s' "$hostport" ;;
+              *)   printf '%s:80' "$hostport" ;;
+            esac
+          }
+          proxy_reachable() {
+            local hostport host port
+            hostport=$(proxy_hostport "$1")
+            host=${hostport%:*}
+            port=${hostport##*:}
+            (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null
+          }
+          for key in NETWORK1_HTTP_PROXY NETWORK1_HTTPS_PROXY; do
+            if [ -n "${!key}" ] && ! proxy_reachable "${!key}"; then
+              echo "::error::$key names $(proxy_hostport "${!key}"), which is not reachable from this machine"
+              exit 1
+            fi
+          done
+
+          MISSING=0
+          for key in NETWORK1_MACHINE NETWORK1_LOCAL_DEVICES NETWORK1_REMOTE_MACHINE NETWORK1_REMOTE_HOST NETWORK1_REMOTE_DEVICES; do
+            if [ -z "${!key-}" ]; then
+              echo "::error::$key is missing from $ENV_FILE"
+              MISSING=1
+            fi
+          done
+          [ "$MISSING" = 0 ] || exit 1
+
+          # The file is the source of truth for identity; this only catches the
+          # wrong machine's .env having been copied onto this runner.
+          if [ -n "$NETWORK1_LOCAL_IP" ] && ! hostname -I | tr ' ' '\n' | grep -qx "$NETWORK1_LOCAL_IP"; then
+            echo "::error::NETWORK1_LOCAL_IP=$NETWORK1_LOCAL_IP is not an address of this host"
+            hostname -I || true
+            exit 1
+          fi
+
+          for key in NETWORK1_MACHINE NETWORK1_LOCAL_IP NETWORK1_LOCAL_DEVICES \
+                     NETWORK1_REMOTE_MACHINE NETWORK1_REMOTE_HOST NETWORK1_REMOTE_DEVICES \
+                     NETWORK1_REMOTE_USER NETWORK1_REMOTE_SSH_PORT \
+                     NETWORK1_L3_DAEMON_PORT NETWORK1_L3_SESSION_TIMEOUT_S NETWORK1_L3_SESSION_LISTEN_HOST \
+                     NETWORK1_REMOTE_STAGING_ROOT NETWORK1_REMOTE_STAGING_TTL_DAYS \
+                     NETWORK1_DAEMON_WAIT_S NETWORK1_SMOKE_TIMEOUT_S \
+                     NETWORK1_CANN_ENV NETWORK1_REMOTE_CANN_ENV \
+                     NETWORK1_HTTP_PROXY NETWORK1_HTTPS_PROXY NETWORK1_NO_PROXY \
+                     NETWORK1_REMOTE_HTTP_PROXY NETWORK1_REMOTE_HTTPS_PROXY NETWORK1_REMOTE_NO_PROXY; do
+            printf '%s=%s\n' "$key" "${!key-}" >> "$GITHUB_ENV"
+          done
+
+          echo "network1 machine=${NETWORK1_MACHINE} ip=${NETWORK1_LOCAL_IP:-unset} devices=${NETWORK1_LOCAL_DEVICES}"
+          echo "network1 peer=${NETWORK1_REMOTE_MACHINE} host=${NETWORK1_REMOTE_HOST}:${NETWORK1_REMOTE_SSH_PORT} devices=${NETWORK1_REMOTE_DEVICES}"
+
+      - name: Checkout target
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+
+      - name: Set up environment
+        uses: ./.github/actions/setup-venv
+        with:
+          packages: "--config-settings=build.targets=build_package_${{ inputs.platform }} .[test]"
+          install-torch: "false"
+          system-site-packages: "true"
+          source-cann: "true"
+          cann-env: ${{ env.NETWORK1_CANN_ENV }}
+          http-proxy: ${{ env.NETWORK1_HTTP_PROXY }}
+          https-proxy: ${{ env.NETWORK1_HTTPS_PROXY }}
+          no-proxy: ${{ env.NETWORK1_NO_PROXY }}
+
+      # Staging and the peer-side build are per-run: the network1 pytest sweep runs
+      # against the same tree and the same venv, so re-staging per test would
+      # repeat the whole cost of the job.
+      - name: Stage the checkout on the peer
+        uses: ./.github/actions/network1-stage
+        with:
+          platform: ${{ inputs.platform }}
+
+      - name: Run network1 pytest
+        uses: ./.github/actions/network1-run-pytest
+        with:
+          pytest-args: >-
+            examples tests/st
+            --level 4
+            --platform ${{ inputs.platform }}
+            --device ${{ env.NETWORK1_LOCAL_DEVICES }}
+            --max-parallel 1
+            -v
+            --require-pto-isa
+            --pto-session-timeout 1200
+
+      - name: Clear the network1 staging tree
+        if: always()
+        uses: ./.github/actions/network1-teardown
+
+      # Artifact service availability must not override the network1 test result.
+      - name: Upload network1 logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: network1-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/network1-ci-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 7

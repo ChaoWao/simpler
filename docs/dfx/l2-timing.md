@@ -21,8 +21,8 @@ opt-in (`--enable-chip-swimlane`) and documented separately in
 
 | Span | What it measures | Source |
 | ---- | ---------------- | ------ |
-| **`simpler_run`** (host_wall) | Host `steady_clock` delta wrapping the dispatch call — includes Python/host overhead. | host side, around the C-ABI run call |
-| **`simpler_run.runner_run.device_wall`** | **Full on-NPU kernel wall**: earliest `simpler_aicpu_exec` start to latest end across launched threads — i.e. **the whole run + teardown**. | Each `simpler_aicpu_exec` thread stamps its own `AicpuPhase::RunWall` slot in the per-thread `AicpuPhaseRecord` buffer (`KernelArgs.device_wall_data_base`, see `src/{arch}/platform/onboard/aicpu/kernel.cpp`); host reduces `max(end) - min(start)` each run |
+| **`chip.run`** (host_wall) | Host `steady_clock` delta wrapping the dispatch call — includes Python/host overhead. | host side, around the C-ABI run call |
+| **`chip.run.runner_run.device_wall`** | **Full on-NPU kernel wall**: earliest `simpler_aicpu_exec` start to latest end across launched threads — i.e. **the whole run + teardown**. | Each `simpler_aicpu_exec` thread stamps its own `AicpuPhase::RunWall` slot in the per-thread `AicpuPhaseRecord` buffer (`KernelArgs.device_wall_data_base`, see `src/{arch}/platform/onboard/aicpu/kernel.cpp`); host reduces `max(end) - min(start)` each run |
 
 Both are emitted whenever the runtime was built with `SIMPLER_HOST_STRACE` (the
 default) — **independent of `--enable-chip-swimlane`**. The `device_wall` marker is
@@ -81,7 +81,7 @@ invocation).
 
 | Column | Definition |
 | ------ | ---------- |
-| **Host** | `simpler_run` span — host wall incl. Python/dispatch overhead. |
+| **Host** | `chip.run` span — host wall incl. Python/dispatch overhead. |
 | **Device** | `device_wall` span — full on-NPU wall incl. init/teardown. |
 | **Effective** | TMR only: `max(orch_end, sched_end) − min(orch_start, sched_start)` — the orch∪sched merged window (the effective on-device execution window). Computed from the orch/sched markers' **device-domain** `ts`+`dur` (the device spans carry a device-clock start offset, not the host emit time). This is the old device-log "Total", now derived purely from the markers — no device log needed. |
 | **Orch** | TMR only: `…device_wall.orch` span — device orchestrator (graph-build) window. |

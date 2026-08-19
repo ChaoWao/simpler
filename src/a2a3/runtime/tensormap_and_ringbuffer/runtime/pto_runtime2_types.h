@@ -84,8 +84,14 @@
 #define PTO2_SCOPE_TASKS_CAP (PTO2_TASK_WINDOW_SIZE * PTO2_MAX_RING_DEPTH)
 
 // Ready queue
-#define PTO2_READY_QUEUE_SIZE 65536        // Per-shape queue size
-#define PTO2_EARLY_DISPATCH_QUEUE_SIZE 64  // Per-shape early-dispatch candidate queue
+#define PTO2_READY_QUEUE_SIZE 65536  // Per-shape queue size
+
+// Cross-thread early-dispatch candidate queue (power of two). A single wide
+// producer can publish more candidates than there are physical cores, so the
+// capacity tracks the publication burst rather than the simultaneously
+// stageable cohort: a 128-token EP8 routed-expert layer bursts 128 gate/up MM
+// candidates onto one shape, and this holds 2x that.
+#define PTO2_EARLY_DISPATCH_QUEUE_SIZE 256
 
 // Fanin storage
 #define PTO2_FANIN_INLINE_CAP 64

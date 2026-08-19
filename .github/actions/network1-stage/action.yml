@@ -1,7 +1,7 @@
-name: Stage the checkout on the pod peer
+name: Stage the checkout on the network1 peer
 description: >-
   Put this run's source tree on the peer and build it there. Done once per run —
-  the tree and the venv it produces are what every pod example then runs
+  the tree and the venv it produces are what every network1 example then runs
   against, so re-staging per example would repeat the job's whole cost.
 
 inputs:
@@ -15,21 +15,21 @@ runs:
     - shell: bash
       working-directory: ${{ github.workspace }}
       env:
-        POD_PLATFORM: ${{ inputs.platform }}
+        NETWORK1_PLATFORM: ${{ inputs.platform }}
       run: |
         set -euo pipefail
-        case "$POD_PLATFORM" in
+        case "$NETWORK1_PLATFORM" in
           a2a3|a5) ;;
-          *) echo "::error::unsupported pod platform: $POD_PLATFORM"; exit 2 ;;
+          *) echo "::error::unsupported network1 platform: $NETWORK1_PLATFORM"; exit 2 ;;
         esac
         if ! command -v rsync >/dev/null 2>&1; then
-          echo "::error::rsync is required on the pod runner for remote checkout sync"
+          echo "::error::rsync is required on the network1 runner for remote checkout sync"
           exit 1
         fi
 
-        REMOTE_TARGET="${POD_REMOTE_USER:+$POD_REMOTE_USER@}$POD_REMOTE_HOST"
-        REMOTE_WORKDIR="$POD_REMOTE_STAGING_ROOT/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        RUN_DIR="$GITHUB_WORKSPACE/output/pod-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        REMOTE_TARGET="${NETWORK1_REMOTE_USER:+$NETWORK1_REMOTE_USER@}$NETWORK1_REMOTE_HOST"
+        REMOTE_WORKDIR="$NETWORK1_REMOTE_STAGING_ROOT/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        RUN_DIR="$GITHUB_WORKSPACE/output/network1-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
         # The peer's proxy is only reachable from the peer, so its liveness
         # check has to run there; split the address here where the parsing is
@@ -48,49 +48,49 @@ runs:
         REMOTE_PROXY_PORT=""
         REMOTE_PROXY_HTTPS_HOST=""
         REMOTE_PROXY_HTTPS_PORT=""
-        if [ -n "$POD_REMOTE_HTTP_PROXY" ]; then
-          read -r REMOTE_PROXY_HOST REMOTE_PROXY_PORT <<<"$(proxy_hostport "$POD_REMOTE_HTTP_PROXY" 80)"
+        if [ -n "$NETWORK1_REMOTE_HTTP_PROXY" ]; then
+          read -r REMOTE_PROXY_HOST REMOTE_PROXY_PORT <<<"$(proxy_hostport "$NETWORK1_REMOTE_HTTP_PROXY" 80)"
         fi
-        if [ -n "$POD_REMOTE_HTTPS_PROXY" ]; then
-          read -r REMOTE_PROXY_HTTPS_HOST REMOTE_PROXY_HTTPS_PORT <<<"$(proxy_hostport "$POD_REMOTE_HTTPS_PROXY" 443)"
+        if [ -n "$NETWORK1_REMOTE_HTTPS_PROXY" ]; then
+          read -r REMOTE_PROXY_HTTPS_HOST REMOTE_PROXY_HTTPS_PORT <<<"$(proxy_hostport "$NETWORK1_REMOTE_HTTPS_PROXY" 443)"
         fi
 
         {
           echo "REMOTE_TARGET=$REMOTE_TARGET"
           echo "REMOTE_WORKDIR=$REMOTE_WORKDIR"
           echo "RUN_DIR=$RUN_DIR"
-          echo "REMOTE_DAEMON_HOST=$POD_REMOTE_HOST"
-          echo "POD_SSH_HELPER=$RUNNER_TEMP/pod-ssh.sh"
+          echo "REMOTE_DAEMON_HOST=$NETWORK1_REMOTE_HOST"
+          echo "NETWORK1_SSH_HELPER=$RUNNER_TEMP/network1-ssh.sh"
         } >> "$GITHUB_ENV"
 
-        echo "pod parent=${POD_MACHINE} local=${POD_LOCAL_DEVICES} peer=${POD_REMOTE_MACHINE} remote=${POD_REMOTE_DEVICES}"
+        echo "network1 parent=${NETWORK1_MACHINE} local=${NETWORK1_LOCAL_DEVICES} peer=${NETWORK1_REMOTE_MACHINE} remote=${NETWORK1_REMOTE_DEVICES}"
 
         mkdir -p "$RUN_DIR"
         mkdir -p "$HOME/.ssh"
         chmod 700 "$HOME/.ssh"
         touch "$HOME/.ssh/known_hosts"
         chmod 600 "$HOME/.ssh/known_hosts"
-        ssh-keyscan -H -p "$POD_REMOTE_SSH_PORT" "$POD_REMOTE_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+        ssh-keyscan -H -p "$NETWORK1_REMOTE_SSH_PORT" "$NETWORK1_REMOTE_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
 
-        # SSH_OPTS is a bash array and pod_ssh a function, neither of which any
+        # SSH_OPTS is a bash array and network1_ssh a function, neither of which any
         # step or action boundary carries, so they live in a file the rest of
         # the job sources.
-        cat > "$RUNNER_TEMP/pod-ssh.sh" <<'HELPER'
-        SSH_OPTS=(-p "$POD_REMOTE_SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-        RSYNC_SSH="ssh -p $POD_REMOTE_SSH_PORT -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
-        pod_ssh() { ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" "$@"; }
+        cat > "$RUNNER_TEMP/network1-ssh.sh" <<'HELPER'
+        SSH_OPTS=(-p "$NETWORK1_REMOTE_SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+        RSYNC_SSH="ssh -p $NETWORK1_REMOTE_SSH_PORT -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+        network1_ssh() { ssh "${SSH_OPTS[@]}" "$REMOTE_TARGET" "$@"; }
         HELPER
-        source "$RUNNER_TEMP/pod-ssh.sh"
+        source "$RUNNER_TEMP/network1-ssh.sh"
 
         # Each run stages a full source tree plus its own venv on the peer, so
-        # the staging root grows without a reclaim step. pod-teardown removes
+        # the staging root grows without a reclaim step. network1-teardown removes
         # this run's directory, but a cancelled job is SIGKILLed and never
         # reaches it — the age sweep is what reclaims those. The TTL must stay
         # well above the job's timeout so a live run is never swept out from
         # under itself.
-        pod_ssh "
-          mkdir -p '$POD_REMOTE_STAGING_ROOT'
-          find '$POD_REMOTE_STAGING_ROOT' -mindepth 1 -maxdepth 1 -type d -mtime +${POD_REMOTE_STAGING_TTL_DAYS} -exec rm -rf {} + || true
+        network1_ssh "
+          mkdir -p '$NETWORK1_REMOTE_STAGING_ROOT'
+          find '$NETWORK1_REMOTE_STAGING_ROOT' -mindepth 1 -maxdepth 1 -type d -mtime +${NETWORK1_REMOTE_STAGING_TTL_DAYS} -exec rm -rf {} + || true
           rm -rf '$REMOTE_WORKDIR' && mkdir -p '$REMOTE_WORKDIR'
         "
         rsync -a --delete -e "$RSYNC_SSH" \
@@ -102,27 +102,27 @@ runs:
         # nothing pins the peer's login shell to bash. Stdin also keeps the
         # script one argument — ssh concatenates argv into a command string,
         # which would re-split a multi-line `bash -c` payload on whitespace.
-        pod_ssh bash -s <<REMOTE_STAGE
+        network1_ssh bash -s <<REMOTE_STAGE
           set -eo pipefail
           cd '$REMOTE_WORKDIR'
           if [ -n '$REMOTE_PROXY_HOST' ] && ! (exec 3<>'/dev/tcp/$REMOTE_PROXY_HOST/$REMOTE_PROXY_PORT') 2>/dev/null; then
-            echo '::error::POD_REMOTE_HTTP_PROXY=$POD_REMOTE_HTTP_PROXY is not reachable from machine $POD_REMOTE_MACHINE'
+            echo '::error::NETWORK1_REMOTE_HTTP_PROXY names $REMOTE_PROXY_HOST:$REMOTE_PROXY_PORT, which is not reachable from machine $NETWORK1_REMOTE_MACHINE'
             exit 1
           fi
           if [ -n '$REMOTE_PROXY_HTTPS_HOST' ] && ! (exec 3<>'/dev/tcp/$REMOTE_PROXY_HTTPS_HOST/$REMOTE_PROXY_HTTPS_PORT') 2>/dev/null; then
-            echo '::error::POD_REMOTE_HTTPS_PROXY=$POD_REMOTE_HTTPS_PROXY is not reachable from machine $POD_REMOTE_MACHINE'
+            echo '::error::NETWORK1_REMOTE_HTTPS_PROXY names $REMOTE_PROXY_HTTPS_HOST:$REMOTE_PROXY_HTTPS_PORT, which is not reachable from machine $NETWORK1_REMOTE_MACHINE'
             exit 1
           fi
           export PYTHONPATH="\${PYTHONPATH:-}"
           export CMAKE_PREFIX_PATH="\${CMAKE_PREFIX_PATH:-}"
-          export http_proxy='$POD_REMOTE_HTTP_PROXY' https_proxy='$POD_REMOTE_HTTPS_PROXY' no_proxy='$POD_REMOTE_NO_PROXY'
-          export HTTP_PROXY='$POD_REMOTE_HTTP_PROXY' HTTPS_PROXY='$POD_REMOTE_HTTPS_PROXY' NO_PROXY='$POD_REMOTE_NO_PROXY'
-          source '$POD_REMOTE_CANN_ENV'
+          export http_proxy='$NETWORK1_REMOTE_HTTP_PROXY' https_proxy='$NETWORK1_REMOTE_HTTPS_PROXY' no_proxy='$NETWORK1_REMOTE_NO_PROXY'
+          export HTTP_PROXY='$NETWORK1_REMOTE_HTTP_PROXY' HTTPS_PROXY='$NETWORK1_REMOTE_HTTPS_PROXY' NO_PROXY='$NETWORK1_REMOTE_NO_PROXY'
+          source '$NETWORK1_REMOTE_CANN_ENV'
           set -u
           python3 -m venv --system-site-packages .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install --config-settings=build.targets=build_package_$POD_PLATFORM '.[test]'
+          pip install --config-settings=build.targets=build_package_$NETWORK1_PLATFORM '.[test]'
         REMOTE_STAGE
 
         # One mpirun command line launches an L3 rank on each machine, so the
@@ -131,21 +131,21 @@ runs:
         # this run's tree (rank-side orchestration imports resolve from the
         # cwd), and execs that machine's venv python. mpirun/mpi4py are
         # machine-provisioned; tests skip when they are absent.
-        MPI_PYTHON="/tmp/simpler-pod-mpi-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        MPI_PYTHON="/tmp/simpler-network1-mpi-python-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         cat > "$MPI_PYTHON" <<LOCAL_LAUNCHER
         #!/usr/bin/env bash
-        source '$POD_CANN_ENV'
+        source '$NETWORK1_CANN_ENV'
         cd '$GITHUB_WORKSPACE'
         exec '$GITHUB_WORKSPACE/.venv/bin/python' "\$@"
         LOCAL_LAUNCHER
         chmod +x "$MPI_PYTHON"
-        pod_ssh "
+        network1_ssh "
           cat > '$MPI_PYTHON' <<'REMOTE_LAUNCHER'
         #!/usr/bin/env bash
-        source '$POD_REMOTE_CANN_ENV'
+        source '$NETWORK1_REMOTE_CANN_ENV'
         cd '$REMOTE_WORKDIR'
         exec '$REMOTE_WORKDIR/.venv/bin/python' \"\$@\"
         REMOTE_LAUNCHER
           chmod +x '$MPI_PYTHON'
         "
-        echo "POD_MPI_PYTHON=$MPI_PYTHON" >> "$GITHUB_ENV"
+        echo "NETWORK1_MPI_PYTHON=$MPI_PYTHON" >> "$GITHUB_ENV"

@@ -59,13 +59,10 @@ public:
     /// calling thread to `device_id`. Can only be called once per lifetime —
     /// the runtime and device cannot be changed after init.
     ///
-    /// The process-wide RTLD_GLOBAL bootstrap loads (libsimpler_log.so, and on
-    /// sim libcpu_sim_context.so — plus seeding HostLogger via simpler_log_init)
-    /// are the caller's responsibility and must already have happened before
-    /// this call: host_runtime.so resolves its undefined HostLogger /
-    /// unified_log_* (and, on sim, sim_context_*) symbols against those
-    /// globals. The Python `ChipWorker` wrapper does this with `ctypes.CDLL(...,
-    /// mode=RTLD_GLOBAL)`.
+    /// Every host module contains its own logger implementation and binds it to
+    /// the process-owned state before use. On sim, libcpu_sim_context.so is
+    /// retained in a process-wide registry because host_runtime.so resolves PTO
+    /// simulator hooks from its RTLD_GLOBAL symbol scope.
     /// `prewarm_config`, when non-null, builds + caches the prebuilt
     /// runtime-arena for its ring sizing right after the device comes up (the
     /// sizing is fork-constant, delivered by COW into init). A no-op for
@@ -80,7 +77,7 @@ public:
     void init(
         const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
         const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config = nullptr,
-        uint32_t dma_workspace_mask = 0
+        uint32_t dma_workspace_mask = 0, const std::string &sim_context_path = ""
     );
 
     /// Tear down everything: device resources and runtime library.
@@ -161,10 +158,11 @@ public:
     /// `aicpu_dlopen_count` for the trb path; returns 0 on device-orch variants.
     size_t host_dlopen_count() const;
 
-    /// Number of AICore run streams the bound runner has created. AICPU streams
-    /// belong to slots for the worker's lifetime; each run gets a freshly
-    /// created AICore stream, so this advances once per run. Platforms using
-    /// the persistent bootstrap pair report 0.
+    /// Number of AICore run streams the bound runner has created. One AICPU +
+    /// AICore pair serves every run for the runner's lifetime. The AICPU stream
+    /// persists; the AICore stream is recreated when a new code upload makes it
+    /// stale, and destroyed when an unproven completion retires it. Platforms
+    /// using the persistent bootstrap pair report 0.
     size_t run_stream_set_create_count() const;
 
     uint64_t malloc(size_t size);
@@ -253,9 +251,7 @@ private:
     // From host_runtime.so. Single platform-side init that does (a) thread
     // attach + device-id record, (b) executor binary takeover, (c) onboard
     // CANN dlog sync. Reads the current log level off HostLogger itself.
-    using SimplerInitFn = int (*)(
-        void *, int, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t, const CallConfig *
-    );
+    using SimplerInitFn = decltype(&simpler_init);
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = decltype(&simpler_run);
     using SimplerPrepareRunFn = decltype(&simpler_prepare_run);

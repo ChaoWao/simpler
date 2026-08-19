@@ -11,16 +11,20 @@
 
 // Sim device-log atomicity: every dev_vlog_* call emits exactly one intact
 // physical line, even when many AICPU sim threads or forked chip workers write
-// the shared stderr concurrently. Each record is <= PIPE_BUF, so a single
-// write(2) to a pipe is atomic and cannot interleave with another writer.
+// the shared stderr concurrently. A record no larger than the pipe's PIPE_BUF
+// reaches it in one indivisible write(2), so it cannot interleave with another
+// writer. The records here are ~30 bytes, inside even the portable
+// _POSIX_PIPE_BUF floor of 512 that macOS uses.
 
 #include <cstdarg>
 #include <cstdio>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -61,11 +65,24 @@ std::string record(int level_idx, const char *func, const std::string &body) {
     return std::string("[") + kTags[level_idx % 5] + "] " + func + ": " + body;
 }
 
-// Redirect stderr onto a fresh pipe. All writers stay well under the pipe's
-// 64 KiB capacity, so they never block before the reader drains.
+// Redirect stderr onto a fresh pipe, drained from the moment it is installed.
+//
+// A pipe holds a bounded amount of unread data — 16 KiB on macOS, 64 KiB on
+// Linux — and these tests emit ~19-23 KiB. Draining only after the writers
+// finish therefore deadlocks wherever the total exceeds the capacity: the
+// writers block in write(2) while the parent waits for them. The reader thread
+// runs concurrently so the writers never block, whatever they emit.
+//
+// The reader owns the buffer through a shared_ptr, so returning `Capture` by
+// value cannot leave the thread writing into a moved-from string. `fork` is safe
+// alongside it because the record path allocates nothing: it formats into a
+// stack buffer and calls write(2), so a child cannot deadlock on a malloc lock
+// this thread happened to hold.
 struct Capture {
     int read_fd = -1;
     int saved_stderr = -1;
+    std::shared_ptr<std::string> out = std::make_shared<std::string>();
+    std::thread reader;
 };
 
 Capture begin_capture() {
@@ -78,24 +95,25 @@ Capture begin_capture() {
     EXPECT_GE(dup2(fds[1], STDERR_FILENO), 0);
     close(fds[1]);  // STDERR_FILENO is now the sole write handle
     cap.read_fd = fds[0];
+    cap.reader = std::thread([fd = cap.read_fd, out = cap.out] {
+        char buf[4096];
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            out->append(buf, static_cast<size_t>(n));
+        }
+    });
     return cap;
 }
 
-// Restore stderr (closing the last write handle so read hits EOF) and slurp
-// everything the pipe holds.
+// Restore stderr, which drops this process's last write handle; with every child
+// already reaped the reader then sees EOF and finishes.
 std::string end_capture(Capture &cap) {
     fflush(stderr);
     EXPECT_GE(dup2(cap.saved_stderr, STDERR_FILENO), 0);
     close(cap.saved_stderr);
-
-    std::string out;
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(cap.read_fd, buf, sizeof(buf))) > 0) {
-        out.append(buf, static_cast<size_t>(n));
-    }
+    cap.reader.join();
     close(cap.read_fd);
-    return out;
+    return std::move(*cap.out);
 }
 
 // Assert the captured stream is exactly `expected`, one intact record per
@@ -184,3 +202,54 @@ TEST(SimDeviceLogTest, ForkedProcessesEmitWholeRecords) {
 
     ASSERT_NO_FATAL_FAILURE(expect_intact(captured, std::move(expected)));
 }
+
+#ifdef F_SETPIPE_SZ
+// The deadlock this guards against is capacity-dependent, so Linux's 64 KiB
+// default pipe hides it while macOS's 16 KiB does not. Shrinking the pipe to one
+// page makes the condition reproducible on either: the writers emit an order of
+// magnitude more than fits, so they can only finish if something drains while
+// they run. Without the concurrent reader this test hangs rather than fails,
+// which is why the ctest timeout in CMakeLists is part of the same guard.
+TEST(SimDeviceLogTest, WritersOutrunASmallPipeWithoutDeadlocking) {
+    constexpr int kChildren = 4;
+    constexpr int kPerChild = 400;
+
+    std::multiset<std::string> expected;
+    for (int c = 0; c < kChildren; ++c) {
+        for (int i = 0; i < kPerChild; ++i) {
+            char body[32];
+            snprintf(body, sizeof(body), "c%d-r%03d", c, i);
+            expected.insert(record(c, "chip_worker", body));
+        }
+    }
+
+    Capture cap = begin_capture();
+    if (fcntl(cap.read_fd, F_SETPIPE_SZ, 4096) < 0) {
+        std::string discard = end_capture(cap);
+        GTEST_SKIP() << "cannot shrink the pipe on this kernel";
+    }
+
+    std::vector<pid_t> pids;
+    pids.reserve(kChildren);
+    for (int c = 0; c < kChildren; ++c) {
+        pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            for (int i = 0; i < kPerChild; ++i) {
+                emit(c, "chip_worker", "c%d-r%03d", c, i);
+            }
+            _exit(0);
+        }
+        pids.push_back(pid);
+    }
+    for (pid_t pid : pids) {
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        ASSERT_TRUE(WIFEXITED(status)) << "child terminated abnormally";
+        EXPECT_EQ(WEXITSTATUS(status), 0);
+    }
+    std::string captured = end_capture(cap);
+
+    ASSERT_NO_FATAL_FAILURE(expect_intact(captured, std::move(expected)));
+}
+#endif  // F_SETPIPE_SZ

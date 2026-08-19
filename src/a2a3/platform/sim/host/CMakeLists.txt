@@ -19,6 +19,8 @@ cmake_minimum_required(VERSION 3.16.3)
 
 project(host_runtime_sim LANGUAGES C CXX)
 
+include("${SIMPLER_CMAKE_DIR}/host_log_sources.cmake")
+
 # Build complete include list
 set(CMAKE_CUSTOM_INCLUDE_DIRS "")
 list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
@@ -40,12 +42,15 @@ endif()
 
 # Build complete source list
 set(HOST_RUNTIME_SOURCES "")
+list(APPEND HOST_RUNTIME_SOURCES ${SIMPLER_HOST_LOG_SOURCES})
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/profiling_copy.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/pto_runtime_c_api.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/platform_compile_info.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/chip_swimlane_collector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/host_phase_records.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/clock_correlation.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/args_dump_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/host/pmu_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/dep_gen_collector.cpp"
@@ -57,6 +62,7 @@ list(APPEND HOST_RUNTIME_SOURCES
 # linked once per arch's libhost_runtime.so. Mirrors the onboard split.
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/host/device_runner_base.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/host/clock_correlation.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/host/c_api_shared.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/sim/host/memory_allocator.cpp"
 )
@@ -72,7 +78,7 @@ endif()
 
 # Create shared library
 add_library(host_runtime SHARED ${HOST_RUNTIME_SOURCES})
-include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/profiling_config.cmake")
+include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
 simpler_configure_profiling(host_runtime)
 
 # C++ standard (applied only to C++ files)

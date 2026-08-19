@@ -16,8 +16,8 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import Optional
 
 import pytest
+from simpler import comm_region, worker_chip_orch_comm
 from simpler import worker as worker_module
-from simpler import worker_chip_orch_comm
 from simpler.buffer import AccessMode, BackendKind, CanonicalIdentity, mint_owner_instance_id, wrap_fork_inherited
 from simpler.orchestrator import Orchestrator
 from simpler.task_interface import DataType, get_element_size
@@ -280,6 +280,11 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
             "_worker_host_mapped_region_close",
             worker_chip_orch_comm._worker_host_mapped_region_close,
         ),
+        (comm_region, "_host_vmm_copy_to", comm_region._host_vmm_copy_to),
+        (comm_region, "_host_vmm_copy_from", comm_region._host_vmm_copy_from),
+        (comm_region, "_region_counter_notify", comm_region._region_counter_notify),
+        (comm_region, "_region_counter_test", comm_region._region_counter_test),
+        (comm_region, "_region_counter_wait", comm_region._region_counter_wait),
     ]
     worker._lifecycle = worker_module._Lifecycle.READY
     worker._worker = _FakeCWorker()
@@ -292,6 +297,11 @@ def _make_orchestrator() -> tuple[Orchestrator, Worker, SharedMemory, _FakeClien
     worker_chip_orch_comm._worker_host_mapped_counter_test = fake_client.counter_test
     worker_chip_orch_comm._worker_host_mapped_counter_wait = fake_client.counter_wait
     worker_chip_orch_comm._worker_host_mapped_region_close = lambda _handle: None
+    comm_region._host_vmm_copy_to = fake_client.payload_write
+    comm_region._host_vmm_copy_from = fake_client.payload_read
+    comm_region._region_counter_notify = fake_client.counter_notify
+    comm_region._region_counter_test = fake_client.counter_test
+    comm_region._region_counter_wait = fake_client.counter_wait
     return Orchestrator(_FakeCOrch(), worker), worker, shm, fake_client
 
 
@@ -580,13 +590,13 @@ def test_worker_host_mapped_queue_ordinary_input_uses_direct_payload_write(monke
     def counter_notify(_handle: int, offset: int, value: int, _op: int) -> None:
         counters[int(offset)] = int(value)
 
-    monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_payload_write", payload_write)
+    monkeypatch.setattr(comm_region, "_host_vmm_copy_to", payload_write)
     monkeypatch.setattr(
-        worker_chip_orch_comm,
-        "_worker_host_mapped_counter_test",
+        comm_region,
+        "_region_counter_test",
         lambda _h, off, _v, _cmp: (False, counters.get(off, 0)),
     )
-    monkeypatch.setattr(worker_chip_orch_comm, "_worker_host_mapped_counter_notify", counter_notify)
+    monkeypatch.setattr(comm_region, "_region_counter_notify", counter_notify)
 
     queue.input.enqueue(b"ordinary", nbytes=8, timeout=0.001)
 

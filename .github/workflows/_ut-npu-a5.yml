@@ -49,8 +49,8 @@ jobs:
       - name: Run Python hardware unit tests (a5)
         run: |
           source .venv/bin/activate
-          DEVICE_LIST=$(python -c "p='${DEVICE_RANGE}'.split('-'); s,e=p[0],p[-1]; print(','.join(str(i) for i in range(int(s),int(e)+1)))")
-          task-submit --timeout 1800 --max-time 1800 --device "$DEVICE_LIST" --run "python -m pytest tests/ut -m requires_hardware --platform a5 --device ${DEVICE_RANGE} -v"
+          task-submit --timeout 1800 --max-time 1800 --device auto --device-num "$DEVICE_NUM" \
+            --run "python -m pytest tests/ut -m requires_hardware --platform a5 --device \$TASK_DEVICE -v"
 
       - name: Build cann-examples/query
         if: inputs.include_cann_examples

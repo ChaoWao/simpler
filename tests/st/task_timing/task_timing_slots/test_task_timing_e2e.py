@@ -11,7 +11,7 @@
 A two-task chain (`c = a + b` tagged slot 0, `out = c + b` tagged slot 1) is
 run with chip swimlane OFF. The contract being verified:
 
-    * both `simpler_run.runner_run.device_wall.task_slot_0` and `..._1`
+    * both `chip.run.runner_run.device_wall.task_slot_0` and `..._1`
       [STRACE] markers are present with strictly positive duration — proving
       the whole path (Arg tag -> descriptor pad -> Scheduler dispatch/finish
       fold -> host H2D reset / D2H readback -> marker emit) works with the
@@ -60,7 +60,7 @@ _STRACE_RE = re.compile(r"\[STRACE\] .*\bname=(?P<name>\S+)\b.*\bts=(?P<ts>\d+)\
 
 def _slot_spans(captured: str, slot: int) -> list:
     """Return (ts, dur) for every task_slot_<slot> [STRACE] marker."""
-    name = f"simpler_run.runner_run.device_wall.task_slot_{slot}"
+    name = f"chip.run.runner_run.device_wall.task_slot_{slot}"
     out = []
     for line in captured.splitlines():
         m = _STRACE_RE.search(line)

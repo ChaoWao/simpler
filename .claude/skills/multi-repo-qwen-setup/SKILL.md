@@ -126,8 +126,8 @@ task-submit --timeout 2400 --max-time 2400 --device auto --device-num 1 --run "\
   host wall, per-step layer breakdown) plus `strace_timing --rounds-table`
   (§2–§5).
 - Decode dispatches through the **L3 `DistributedWorker`**, which forks a
-  **chip-child (L2)** that runs `run_prepared`. The per-step timing lives at
-  **L2**: `run_prepared` computes both host (`host_wall`) and device
+  **chip-child (L2)** that runs `simpler_run`. The per-step timing lives at
+  **L2**: `simpler_run` computes both host (`host_wall`) and device
   (`device_wall` = the fused-decode orchestrator wall, ~40 ms at 3.5k context —
   nonzero) plus the device orch/sched markers. The L3 parent's `Worker.run`
   returns `RunTiming(python_wall, 0)` — its `device_wall=0` is **expected** (L3
@@ -237,14 +237,14 @@ The full per-token decomposition (what each layer means / how to get it):
 | ④ attach+bind+validate | `host_wall − runner_run` | `strace_timing` (`bind`/`validate` spans) |
 | ⑤ python/executor wrap | `end-to-end − host_wall` | `npu_generate --profile` |
 
-②③④ come from the **L2 chip-child** `run_prepared`'s `host_wall` /
+②③④ come from the **L2 chip-child** `simpler_run`'s `host_wall` /
 `runner_run` / `device_wall`. `host_wall` and `device_wall` are already
 computed there (and `device_wall` is nonzero, ~40 ms at 3.5k context — it is the
 L2 orchestrator wall, *not* the L3 parent's `RunTiming.device_wall=0`); the L3
 parent drops the child's `RunTiming`, so they never reach a return value.
 
 Simpler surfaces them instead as **`[STRACE]` host-trace markers** — one
-line per `run_prepared` stage
+line per `chip.run` stage
 (`bind`/`bind.args`/`bind.prebuilt`/`runner_run`/`validate`) plus the AICPU
 device-phase subdivision (`preamble`/`so_load`/`graph_build` — with
 `config_validate`/`arena_wire`/`sm_reset` prep sub-phases — /`post_orch`,

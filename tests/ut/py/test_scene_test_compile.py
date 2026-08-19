@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from threading import Barrier
 
 import pytest
@@ -118,7 +119,28 @@ def test_compile_collected_scene_tests_runs_classes_concurrently():
     )
 
 
-@pytest.mark.parametrize(("max_workers", "expected"), [(None, 1), (8, 8)])
+def test_compile_collected_scene_tests_shares_worker_budget_with_callable_compiles(monkeypatch):
+    captured = []
+
+    @contextmanager
+    def recording_budget(max_workers):
+        captured.append(max_workers)
+        yield
+
+    class Scene:
+        _st_level = 2
+
+        @classmethod
+        def compile_chip_callable(cls, platform):
+            return None
+
+    monkeypatch.setattr(scene_test_compile, "compile_worker_budget", recording_budget)
+
+    assert scene_test_compile.compile_collected_scene_tests([_Item(Scene)], "a2a3", max_workers=3) == (1, [])
+    assert captured == [3]
+
+
+@pytest.mark.parametrize(("max_workers", "expected"), [(None, 3), (8, 8)])
 def test_compile_collected_scene_tests_uses_configured_workers(monkeypatch, max_workers, expected):
     captured = {}
 
@@ -143,6 +165,7 @@ def test_compile_collected_scene_tests_uses_configured_workers(monkeypatch, max_
             return None
 
     monkeypatch.setattr(scene_test_compile, "ThreadPoolExecutor", RecordingExecutor, raising=False)
+    monkeypatch.setattr(scene_test_compile, "default_compile_workers", lambda: 3)
 
     kwargs = {} if max_workers is None else {"max_workers": max_workers}
     assert scene_test_compile.compile_collected_scene_tests([_Item(Scene)], "a2a3", **kwargs) == (1, [])

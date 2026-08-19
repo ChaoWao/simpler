@@ -3,9 +3,9 @@
 This document describes the substantive differences in the current code under
 `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/`.
 
-> **Maintenance baseline:** This document uses commit
-> `317a19c2ee04bcc3e36d1cb49d2037084455a3ad` as its baseline. Update this
-> document whenever the files or constants it describes change.
+> **Maintenance baseline:** The source layout and classifications were verified
+> on 2026-08-17. Recompute the counts and update the affected sections whenever
+> the files or constants described here change.
 
 ## Comparison Boundary and Classification
 
@@ -17,9 +17,9 @@ categories:
 
 | Category | Count | Definition |
 | -------- | ----: | ---------- |
-| Byte-identical | 28 | The files at the same relative path have identical bytes |
-| Compile-time or non-functional differences | 12 | Text differs, but the generated runtime behavior and data semantics are equivalent |
-| Functional differences | 15 | Thirteen matching paths and two A5-only paths encode or document differences in runtime behavior, capacity, diagnostics, or supported backends |
+| Byte-identical | 24 | The files at the same relative path have identical bytes |
+| Compile-time or non-functional differences | 11 | Text differs, but the generated runtime behavior and data semantics are equivalent |
+| Functional differences | 20 | Eighteen matching paths and two A5-only paths encode or document differences in runtime behavior, capacity, diagnostics, or supported backends |
 
 A file is classified as functional when any part of its diff changes behavior,
 even if the same diff also contains include-order, comment, or formatting
@@ -28,19 +28,18 @@ PMU collector implementations, are cited only as supporting evidence.
 
 ## Byte-Identical Files
 
-The following 28 files are byte-identical:
+The following 24 files are byte-identical:
 
 ```text
 build_config.py
-docs/{MULTI_RING.md,SCALAR_DATA_ACCESS.md,SUBMIT_BY_CLUSTER.md,device_log_profiling.md,
-      profiling_levels.md}
+docs/{SCALAR_DATA_ACCESS.md,SUBMIT_BY_CLUSTER.md,device_log_profiling.md,profiling_levels.md}
 host/{dep_gen_replay.cpp,runtime_compile_info.cpp}
 orchestration/{common.cpp,pto_arg_with_deps.h,pto_orchestration_api.h}
 runtime/{common.h,pto_async_kernel_api.h,pto_dep_compute.h,pto_orchestrator.h,
-         pto_ring_buffer.cpp,pto_ring_buffer.h,pto_runtime2.cpp,pto_runtime2.h,
-         pto_shared_memory.h,pto_tensormap.h,tensor_create_info.h}
+         pto_runtime2.cpp,pto_runtime2.h,pto_shared_memory.h,pto_tensormap.h,
+         tensor_create_info.h}
 runtime/scheduler/{pto_scheduler.cpp,scheduler_types.h}
-runtime/shared/{pto_runtime2_init.cpp,pto_shared_memory.cpp,pto_tensormap.cpp,runtime.cpp}
+runtime/shared/{pto_shared_memory.cpp,pto_tensormap.cpp,runtime.cpp}
 ```
 
 Byte identity is a textual result only. A shared file may still consume
@@ -49,7 +48,7 @@ boundary.
 
 ## Compile-Time or Non-Functional Differences
 
-The following 12 matching paths differ textually without changing runtime
+The following 11 matching paths differ textually without changing runtime
 behavior:
 
 | Files | Difference |
@@ -62,7 +61,6 @@ behavior:
 | `runtime/pto_completion_token.h` | Path-derived include guards and an A2/A3-only explanatory comment |
 | `runtime/pto_runtime2_types.h` | Comments state the corresponding 72- or 108-worker capacity; the mask remains two 64-bit words on both platforms |
 | `runtime/pto_submit_types.h` | The launch accessor and backing field are named `block_num` on A2/A3 and `core_num` on A5; both represent the logical SPMD block count |
-| `runtime/pto_orchestrator.cpp` | Calls the corresponding launch accessor; the remaining differences are equivalent expression layout and comments |
 
 The first two rows, covering five files, are the strict "compile macro only"
 subset. The `s_block_*` names are also a compile-time constraint rather than a
@@ -72,22 +70,27 @@ modified.
 
 ## Files with Functional Differences
 
-The following 13 matching paths have at least one functional difference:
+The following 18 matching paths have at least one functional difference:
 
 ```text
 aicore/aicore_executor.cpp
 aicpu/aicpu_executor.cpp
+docs/MULTI_RING.md
 docs/RUNTIME_LOGIC.md
 host/runtime_maker.cpp
 runtime/aicore_completion_mailbox_types.h
 runtime/backend/sdma/sdma_completion_scheduler.h
 runtime/pto_async_wait.h
+runtime/pto_orchestrator.cpp
+runtime/pto_ring_buffer.cpp
+runtime/pto_ring_buffer.h
 runtime/runtime.h
 runtime/scheduler/pto_scheduler.h
 runtime/scheduler/scheduler_cold_path.cpp
 runtime/scheduler/scheduler_completion.cpp
 runtime/scheduler/scheduler_context.h
 runtime/scheduler/scheduler_dispatch.cpp
+runtime/shared/pto_runtime2_init.cpp
 ```
 
 A5 also has two backend files with no A2/A3 counterpart:
@@ -108,6 +111,7 @@ The functional differences group into the following themes:
 | System counter and DMB | Hardware timing and register layout | Yes | Use the constants for each platform |
 | URMA completion | A5-specific implementation and product capability gate | Yes, for now | Retain the A5 path; do not claim that URMA is available in the default build |
 | Next-block prefetch | A2/A3-only performance optimization | No | Retain on A2/A3; validate on A5 before considering a port |
+| Scheduler progress publication | AICPU topology and measured publication cost | No | Retain A5's 16-task batching; keep per-advance publication on A2/A3, where the portable implementation showed no significant benefit |
 | Fatal teardown | Software reliability strategy | No | Retain the current implementations; decide whether to converge after measuring the worst-case A5 teardown time |
 | Scheduler trace attribution | Software diagnostic strategy | No | Preserve the current traces; converge only after comparing generated timelines |
 
@@ -219,6 +223,75 @@ cache capacity. The repository does not contain an A5 measurement that
 establishes a benefit, so the optimization should not be ported mechanically.
 This is a platform-sensitive performance strategy, not a different scheduler
 architecture.
+
+### Scheduler Progress Publication: Why A5 Only
+
+A2/A3 publishes `ring->fc.last_task_alive` after every local ring-pointer
+advance. A5 tracks `last_published_to_sm` and publishes the shared watermark
+every 16 local advances while no reclaim consumer is blocked. This reduces
+Scheduler-to-Orchestrator cache-line transfers while allowing the shared
+watermark to trail local reclamation by at most 15 tasks on the non-blocking
+path.
+
+The optimization is portable, but its benefit is topology-specific. A2/A3 has
+four physical AICPU cores per cluster and runs four active roles by default
+(`1 Orchestrator + 3 Schedulers`). Its affinity policy prefers one cluster that
+can hold all four roles, so progress publication is normally cluster-local. A5
+has two physical AICPU cores per cluster and runs five active roles by default
+(`1 Orchestrator + 4 Schedulers`). Even with SMT, those five roles cannot all
+fit in one cluster. They must span clusters and, depending on SMT and the
+available CPU pool, may span dies.
+
+Any A5 Scheduler may win `advance_lock`, advance the authoritative
+Scheduler-side `last_task_alive`, and publish `ring->fc.last_task_alive` for the
+Orchestrator. A remote publisher transfers or invalidates a cache line that the
+Orchestrator repeatedly reads for slot, heap, and TensorMap reclamation. K=16
+does not remove Scheduler-to-Scheduler contention on `advance_lock`; it reduces
+the frequency of Scheduler-to-Orchestrator publication by up to 16x.
+
+| Property | A2/A3 | A5 |
+| -------- | ----- | -- |
+| Physical AICPU cores per cluster | 4 | 2 |
+| Default active roles | 1 Orchestrator + 3 Schedulers = 4 | 1 Orchestrator + 4 Schedulers = 5 |
+| Normal placement | All active roles fit in one cluster | Active roles must span clusters and may span dies |
+| Shared-watermark publication | Normally cluster-local | Can require cross-cluster or cross-die cache-line transfer |
+| Port benchmark | Mean Effective change `-0.24%`; all workloads within approximately +/-2% | Mean Effective change `-2.81%`; all eight workloads improved |
+| Decision | Keep per-advance publication | Enable K=16 batching |
+
+A5 force-publishes when the local watermark reaches `current_task_index` or an
+orchestrator reclaim consumer has observed no reclaim progress for 10 ms and
+requests an exact watermark. Task-slot, heap, dependency-list, fanin-spill, and
+TensorMap pressure then set per-ring request bits; scheduler thread 0 services
+them under `advance_lock` from both productive and idle iterations, publishes
+the local watermark, and acknowledges completion. Structural deadlock checks
+run only after this acknowledgment, so their reclaim head is not a batched
+lower bound. These request bits are cache-line-isolated from scheduler
+lock-contention retries, which remain deferred to idle loops. K=16 batching is
+enabled only after all reclaim request/ack pointers are wired to the current
+scheduler; incomplete wiring keeps per-advance publication. Initialization,
+arena relocation, and ring reuse reset local progress and disable batching
+until that validation succeeds again.
+
+This pressure handshake follows the same liveness rule recorded in
+[`2026-06-cross-task-batched-publish.md`](investigations/2026-06-cross-task-batched-publish.md):
+delaying a publication is safe only while no peer is waiting on it for forward
+progress.
+
+| File | A5-only difference introduced by PR #1575 |
+| ---- | ----------------------------------------- |
+| `runtime/pto_ring_buffer.{h,cpp}` | A5 reclaim consumers request and await exact watermark publication after 10 ms without progress and before structural classification |
+| `runtime/pto_orchestrator.cpp` | A5 TensorMap pressure requests publication from every ring after the same 10 ms no-progress interval |
+| `runtime/scheduler/{pto_scheduler.h,scheduler_dispatch.cpp}` | A5 batches non-blocking publication at K=16 and services pressure requests in productive and idle loops; A2/A3 continues to publish every local advance |
+| `runtime/shared/pto_runtime2_init.cpp` | A5 initializes, resets, and wires the publication shadow and pressure handshake |
+
+The A2/A3 result is not a correctness limitation. A local port passed targeted
+and complete non-hardware tests, but its eight workload deltas were all within
+the approximately +/-2% noise band, with an unweighted mean of `-0.24%`.
+Batching would therefore add up to 15 tasks of non-blocking reclamation lag
+without a demonstrated payoff. The same-device A5
+measurements instead showed lower Effective time in all eight workloads, with
+an unweighted mean reduction of `2.81%`. Full A2/A3 measurements are recorded
+in the [PR benchmark follow-up](https://github.com/hw-native-sys/simpler/pull/1575#issuecomment-5310909143).
 
 ### Fatal Teardown
 

@@ -91,7 +91,7 @@ def test_sub_worker_materialization_refuses_a_device_tensor():
     assert dev.address_space == AddressSpace.DEVICE
     blob = encode_blob([dev.tensor(shapes=(16,), dtype=DataType.FLOAT32)])
     src = ctypes.create_string_buffer(blob, len(blob))
-    reg = ImportRegistry()
+    reg = ImportRegistry(ImportContext(is_host_endpoint=True))
     try:
         with pytest.raises(ValueError, match="DEVICE-space"):
             reg.mapped_args_from_blob(ctypes.addressof(src), len(blob))

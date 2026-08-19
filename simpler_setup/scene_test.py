@@ -28,14 +28,21 @@ import logging
 import os
 import platform as host_platform
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import IntEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .compile_pool import compile_slot, current_compile_workers
 from .log_config import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, configure_logging
 from .pto_isa import ensure_pto_isa_root
-from .scene_test_cache import compile_artifact_key, get_or_compile
+from .scene_test_cache import (
+    compile_artifact_key,
+    compile_incore_artifact_key,
+    get_or_compile,
+    get_or_compile_incore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +152,7 @@ def _golden_thread_cap():
 class SceneTestLevel(IntEnum):
     CHIP = 2
     HOST = 3
-    POD = 4
+    NETWORK1 = 4
 
 
 def _normalize_scene_level(level: int | SceneTestLevel) -> SceneTestLevel:
@@ -880,6 +887,19 @@ def _select_cases(test_classes, platform: str, selectors: list[tuple], manual_mo
     return selected
 
 
+def _discover_module_test_classes(module):
+    """Return scene-test classes defined by ``module``, excluding imported helpers."""
+    return [
+        value
+        for value in vars(module).values()
+        if isinstance(value, type)
+        and issubclass(value, SceneTestCase)
+        and value is not SceneTestCase
+        and value.__module__ == module.__name__
+        and hasattr(value, "CASES")
+    ]
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -1160,25 +1180,34 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
     inc_dirs = kc.get_orchestration_include_dirs(runtime)
     orch_include_dirs, orch_sources = kc.get_orchestration_cache_inputs(runtime)
     orch_units = [orch["source"], *orch_sources]
-    compilation_units: list[tuple[str | Path, list[str | Path]]] = [
+    orchestration_units: list[tuple[str | Path, list[str | Path]]] = [
         (source, orch_include_dirs) for source in orch_units
     ]
     resolved_extra_dirs = []
+    incore_artifact_keys = []
     for k in incores:
         extra = _resolve_incore_include_dirs(k["extra_include_dirs"], k) if k.get("extra_include_dirs") else []
         resolved_extra_dirs.append(extra)
-        compilation_units.append(
-            (
+        include_dirs = [
+            Path(pto_isa_root) / "include",
+            Path(pto_isa_root) / "include" / "pto",
+            *kc.get_incore_include_dirs(),
+            *inc_dirs,
+            *extra,
+        ]
+        incore_artifact_keys.append(
+            compile_incore_artifact_key(
+                {
+                    "platform": platform,
+                    "host_platform": sys.platform,
+                    "host_machine": host_platform.machine(),
+                    "compiler": kc.incore_compile_cache_token(k["core_type"]),
+                },
                 k["source"],
-                [
-                    Path(pto_isa_root) / "include",
-                    Path(pto_isa_root) / "include" / "pto",
-                    *kc.get_incore_include_dirs(),
-                    *inc_dirs,
-                    *extra,
-                ],
+                include_dirs,
             )
         )
+    compiler_token = kc.compile_cache_token(runtime, [k["core_type"] for k in incores])
     artifact_key = compile_artifact_key(
         {
             "cache_key": cache_key,
@@ -1187,7 +1216,7 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
             "host_platform": sys.platform,
             "host_machine": host_platform.machine(),
             "sanitizers": KernelCompiler._sanitizers,
-            "compiler": kc.compile_cache_token(runtime, [k["core_type"] for k in incores]),
+            "compiler": compiler_token,
             "orchestration": {
                 "function_name": orch["function_name"],
                 "config_name": orch.get("config_name", ""),
@@ -1198,30 +1227,58 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
                     "func_id": k["func_id"],
                     "core_type": k["core_type"],
                     "signature": k.get("signature", []),
+                    "artifact_key": incore_artifact_key,
                 }
-                for k in incores
+                for k, incore_artifact_key in zip(incores, incore_artifact_keys, strict=True)
             ],
         },
-        compilation_units,
+        orchestration_units,
     )
 
     def compile_callable():
-        orch_binary = kc.compile_orchestration(runtime, orch["source"])
+        def compile_orchestration():
+            with compile_slot():
+                return kc.compile_orchestration(runtime, orch["source"])
+
+        def compile_one_incore(k, extra, incore_artifact_key):
+            def compile_missing_incore():
+                with compile_slot():
+                    binary = kc.compile_incore(
+                        k["source"],
+                        core_type=k["core_type"],
+                        pto_isa_root=pto_isa_root,
+                        extra_include_dirs=inc_dirs + extra,
+                    )
+                # The cached representation is determined only by platform, which is in the artifact key.
+                return binary if is_sim else extract_text_section(binary)
+
+            return get_or_compile_incore(incore_artifact_key, compile_missing_incore)
+
+        max_workers = min(current_compile_workers(), len(incores) + 1)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            orch_future = executor.submit(compile_orchestration)
+            incore_futures = [
+                executor.submit(
+                    compile_one_incore,
+                    k,
+                    extra,
+                    incore_artifact_key,
+                )
+                for k, extra, incore_artifact_key in zip(
+                    incores, resolved_extra_dirs, incore_artifact_keys, strict=True
+                )
+            ]
+            orch_binary = orch_future.result()
+            incores_binary = [future.result() for future in incore_futures]
+
+        if len(incores_binary) != len(incores):
+            raise AssertionError("compiled incore binaries must match the incore specification")
         kernel_binaries = []
-        for k, extra in zip(incores, resolved_extra_dirs, strict=True):
-            signature = k.get("signature", [])
-            incore = kc.compile_incore(
-                k["source"],
-                core_type=k["core_type"],
-                pto_isa_root=pto_isa_root,
-                extra_include_dirs=inc_dirs + extra,
-            )
-            if not is_sim:
-                incore = extract_text_section(incore)
+        for k, incore in zip(incores, incores_binary):
             kernel_binaries.append(
                 (
                     k["func_id"],
-                    CoreCallable.build(signature=signature, binary=incore),
+                    CoreCallable.build(signature=k.get("signature", []), binary=incore),
                 )
             )
 
@@ -1660,9 +1717,15 @@ class SceneTestCase:
 
     def test_run(self, st_platform, st_worker, request):
         """Auto test method — runs matching cases for the current platform."""
-        raw_selectors = request.config.getoption("--case", default=None) or []
-        selectors = [_parse_case_selector(v) for v in raw_selectors]
+        matched = self._matching_cases(st_platform, request)
         manual_mode = request.config.getoption("--manual", default="exclude")
+        if not matched:
+            # Skip before building and before control returns to subclass
+            # overrides: no case ran, so their post-run validators must not run.
+            import pytest  # noqa: PLC0415
+
+            pytest.skip(f"No cases matched {type(self).__name__} (platform={st_platform}, manual={manual_mode})")
+
         rounds = request.config.getoption("--rounds", default=1)
         skip_golden = request.config.getoption("--skip-golden", default=False)
         enable_chip_swimlane = request.config.getoption("--enable-chip-swimlane", default=0)
@@ -1685,7 +1748,6 @@ class SceneTestCase:
                 logger.warning("scope_stats disabled: --rounds > 1")
                 enable_scope_stats = False
 
-        cls_name = type(self).__name__
         callable_obj = self.build_callable(st_platform)
         sub_handles = getattr(type(self), "_st_sub_handles", {})
         # For L3, use registered chip handles instead of raw ChipCallable
@@ -1693,24 +1755,6 @@ class SceneTestCase:
         chip_handles = getattr(type(self), "_st_chip_handles", {})
         if self._st_level == 3 and chip_handles:
             callable_obj = {**chip_handles}
-
-        matched = []
-        for case in self.CASES:
-            if st_platform not in case["platforms"]:
-                continue
-            if not _match_selectors(cls_name, case["name"], selectors):
-                continue
-            is_manual = is_manual_for_platform(case.get("manual"), st_platform)
-            if manual_mode == "exclude" and is_manual:
-                continue
-            if manual_mode == "only" and not is_manual:
-                continue
-            matched.append(case)
-
-        if not matched:
-            import pytest  # noqa: PLC0415
-
-            pytest.skip(f"No cases matched {cls_name} (platform={st_platform}, manual={manual_mode})")
 
         run_class_cases(
             st_worker,
@@ -1727,6 +1771,26 @@ class SceneTestCase:
             enable_scope_stats=enable_scope_stats,
             enable_swimlane_overhead=enable_swimlane_overhead,
         )
+
+    def _matching_cases(self, st_platform, request):
+        """Return cases selected by the platform, case, and manual filters."""
+        raw_selectors = request.config.getoption("--case", default=None) or []
+        selectors = [_parse_case_selector(v) for v in raw_selectors]
+        manual_mode = request.config.getoption("--manual", default="exclude")
+        cls_name = type(self).__name__
+        matched = []
+        for case in self.CASES:
+            if st_platform not in case["platforms"]:
+                continue
+            if not _match_selectors(cls_name, case["name"], selectors):
+                continue
+            is_manual = is_manual_for_platform(case.get("manual"), st_platform)
+            if manual_mode == "exclude" and is_manual:
+                continue
+            if manual_mode == "only" and not is_manual:
+                continue
+            matched.append(case)
+        return matched
 
     # ------------------------------------------------------------------
     # Standalone entry point
@@ -1932,11 +1996,7 @@ class SceneTestCase:
         # artifacts land in distinct directories with no shared filenames.
 
         module = sys.modules[module_name]
-        test_classes = [
-            v
-            for v in vars(module).values()
-            if isinstance(v, type) and issubclass(v, SceneTestCase) and v is not SceneTestCase and hasattr(v, "CASES")
-        ]
+        test_classes = _discover_module_test_classes(module)
 
         # Apply --runtime/--level filters (child mode sets both; parent may also
         # use them when the user wants a narrow run).

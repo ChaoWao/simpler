@@ -251,8 +251,8 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     monkeypatch.setattr(worker_mod._simpler_log, "get_current_config", lambda: 60)
     monkeypatch.setattr(
         worker_mod,
-        "_initialize_simpler_log",
-        lambda bins, level: startup_events.append(("log", bins, level)),
+        "_initialize_host_log",
+        lambda level: startup_events.append(("log", level)),
         raising=False,
     )
     monkeypatch.setattr(worker, "_await_children_ready", fake_await_children_ready)
@@ -267,7 +267,7 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     assert fake_parent.configured_depths == [1]
     assert [call[1:] for call in fake_parent.next_level_calls] == [(12001, 2), (12002, 1)]
     assert fake_parent.initialized
-    assert startup_events[0] == ("log", "bins", 60)
+    assert startup_events[0] == ("log", 60)
     assert startup_events[1:] == [("fork",), ("fork",)]
 
 
@@ -275,7 +275,7 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
     """A chipless hierarchical process still runs a scheduler that emits host spans.
 
     `init()` rejects `device_ids` above L3, so gating the seeding on them would
-    leave exactly the pod processes unseeded — and their `HostLogger` would keep
+    leave exactly the network1 processes unseeded — and their `HostLogger` would keep
     its constructor default however the `simpler` logger is configured.
     """
 
@@ -316,8 +316,8 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
     monkeypatch.setattr(worker_mod._simpler_log, "get_current_config", lambda: 60)
     monkeypatch.setattr(
         worker_mod,
-        "_initialize_simpler_log",
-        lambda bins, level: startup_events.append(("log", bins, level)),
+        "_initialize_host_log",
+        lambda level: startup_events.append(("log", level)),
         raising=False,
     )
     monkeypatch.setattr(worker, "_await_children_ready", lambda *args, **kwargs: None)
@@ -329,9 +329,7 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
             shm.close()
             shm.unlink()
 
-    # bins is None: this process loads no chip binaries, so the copy the package
-    # already preloaded is the one to seed.
-    assert startup_events[0] == ("log", None, 60)
+    assert startup_events[0] == ("log", 60)
     assert startup_events[1:] == [("fork",)]
 
 
@@ -2757,7 +2755,7 @@ class TestRunHandle:
         with pytest.raises(ValueError, match="bad graph"):
             worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
 
-        assert emitted == [("l3.graph_build", 1, 0, 0, 100, 175, "run_id=1 role=facade")]
+        assert emitted == [("host.graph_build", 1, 0, 0, 100, 175, "run_id=1 role=facade")]
 
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)

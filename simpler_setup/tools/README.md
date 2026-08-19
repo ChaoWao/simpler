@@ -13,7 +13,7 @@ no repo checkout required.
 - **[swimlane_converter](#swimlane_converter)** — perf JSON → Chrome Trace Event (Perfetto)
 - **[sched_overhead_analysis](#sched_overhead_analysis)** — scheduler overhead / Tail OH breakdown
 - **[critical_path](#critical_path)** — chip swimlane critical-path compute/stall analysis
-- **[strace_timing](#strace_timing)** — per-stage `simpler_run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
+- **[strace_timing](#strace_timing)** — per-stage `chip.run` breakdown (host + AICPU phases) from `[STRACE]` log markers → TPOT table, per-round table (`--rounds-table`), nested tree (`--tree`), or Perfetto JSON
 - **[dump_viewer](#dump_viewer)** — inspect / export args dumps (see [docs/args-dump.md](../../docs/dfx/args-dump.md) for full workflow)
 - **[deps_viewer](#deps_viewer)** — `deps.json` (dep_gen) → text or pan/zoom HTML dependency graph
 
@@ -37,14 +37,23 @@ python -m simpler_setup.tools.scene_test_compile examples tests/st \
     -m "not sdma" --platform a2a3 --require-pto-isa --compile-workers 8
 ```
 
-Compiled `ChipCallable` blobs are stored under `build/cache/kernels/`. A normal
-pytest or standalone scene-test run loads a matching blob from that directory;
-source, transitive-include, compiler, or compilation-logic changes produce a
-different content key, and entries unused for 14 days are pruned. Cache misses
-compile serially by default; pass `--compile-workers N` to opt into compiling
-up to `N` test classes concurrently, one compiler process per worker. A class
-that fails to compile is reported without aborting the rest of the pass. The
-warm-up does not inspect or access NPU devices.
+Compiled `ChipCallable` blobs are stored under `build/cache/kernels/`, with
+independent incore artifacts under `build/cache/kernels/incore/`. A normal
+pytest or standalone scene-test run first loads a matching callable blob. On a
+callable miss, unchanged incore artifacts are reused and only missing kernels
+are compiled before assembly. Source, transitive-include, compiler,
+compilation-logic, or compiler-visible path changes produce the corresponding
+new content key. The compiler runs from the checkout root, so checkout-local
+paths are stable relative paths: path-sensitive macros remain correct and cache
+entries can move between CI runners. Paths outside the checkout remain absolute.
+Entries unused for 14 days are pruned. Cache misses compile with an automatic
+process-wide budget: two logical CPUs remain available to pytest/Python and at
+most eight compiler processes run across all test classes and callable artifacts.
+`--compile-workers N` overrides that budget. Class-level and per-callable
+parallelism share it, so their worker counts never multiply into additional
+compiler processes in one process. A class that fails to compile is reported
+without aborting the rest of the pass. The warm-up does not inspect or access
+NPU devices.
 
 ---
 
@@ -321,7 +330,7 @@ python -m simpler_setup.tools.strace_timing path/to/log
 # Per-round Host/Device/Orch/Sched table (the benchmark/--rounds N view)
 python -m simpler_setup.tools.strace_timing path/to/log --rounds-table
 
-# Indented nested span tree per callable (simpler_run → bind / runner_run →
+# Indented nested span tree per callable (chip.run → bind / runner_run →
 # device_wall → preamble/config_validate/arena_wire/sm_reset/orch/sched/post_orch)
 python -m simpler_setup.tools.strace_timing path/to/log --tree
 
@@ -334,7 +343,7 @@ python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane
 ```
 
 Groups spans by `(pid, inv)`, rebuilds each invocation's tree from `depth`,
-buckets by callable hash `hid`, and reports each callable's mean `simpler_run`
+buckets by callable hash `hid`, and reports each callable's mean `chip.run`
 plus per-stage means. It reads the host-emitted `[STRACE]` lines and shows the
 host stages (`bind`/`runner_run`/`validate`) alongside the AICPU phases.
 
@@ -358,7 +367,7 @@ here. Because grouping is per `(pid, inv)`, this captures **L3 multi-round**
 (every chip-child invocation), not just round 0.
 
 `--swimlane` consumes both the `l3.*` scheduler markers and child
-`simpler_run` markers. Host lanes retain their OS pid/tid. Because Chrome Trace
+`chip.run` markers. Host lanes retain their OS pid/tid. Because Chrome Trace
 JSON has one visible timestamp axis, raw device-domain `clk=dev` slices are
 stored in the top-level `unalignedDeviceSpans` array rather than placed beside
 the unrelated host clock and stretching Perfetto into an empty-looking

@@ -36,15 +36,6 @@ from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-# `preload_global` is the process-wide RTLD_GLOBAL dlopen registry.
-# host_runtime.so resolves its undefined HostLogger / unified_log_* (and, on sim,
-# sim_context_*) symbols against those globals, so each must be loaded — exactly
-# once — before any host_runtime.so dlopen. The registry lives in _log_preload so
-# the import-time logger preload and _initialize_simpler_log share one entry per path.
-from ._log_preload import host_span_sink_address as _host_span_sink_address
-from ._log_preload import preload as _preload_simpler_log
-from ._log_preload import preload_global as _preload_global
-
 if TYPE_CHECKING:
     # Annotation-only: `CallableHandle` is imported lazily at its use site, and
     # PEP 563 keeps these annotations as strings, so nothing is imported at
@@ -79,6 +70,9 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     get_dtype_name,
     get_element_size,
     read_args_from_blob,
+)
+from _task_interface import (
+    _initialize_host_log as _native_initialize_host_log,
 )
 
 from .buffer import Buffer, Tensor
@@ -148,7 +142,7 @@ def _assert_bindings_match_source_tree() -> None:
 
 _assert_bindings_match_source_tree()
 
-from .global_comm_domain import GlobalDomainBuffer, GlobalDomainMember  # noqa: E402
+from .global_comm_domain import GlobalDomainAttachment, GlobalDomainBuffer, GlobalDomainMember  # noqa: E402
 
 __all__ = [
     "DataType",
@@ -1103,14 +1097,16 @@ class CommDomainHandle:
 class GlobalCommDomainHandle:
     """L4-owned handle for one CommDomain spanning local and/or remote L3 nodes.
 
-    The handle contains stable topology and buffer offsets only. Device
-    addresses remain in the L3/L2 process that imported the transport handles.
+    The handle contains stable topology, attachment metadata, and buffer
+    offsets only. Device addresses remain in the L3/L2 process that imported
+    the transport handles.
     """
 
     __slots__ = (
         "_freed",
         "_release_fn",
         "_released",
+        "attachments",
         "buffers",
         "domain_id",
         "generation",
@@ -1131,10 +1127,12 @@ class GlobalCommDomainHandle:
         mapping_size: int,
         retain_after_run: bool,
         _release_fn,
+        attachments: tuple[GlobalDomainAttachment, ...] = (),
     ) -> None:
         self.name = str(name)
         self.members = tuple(members)
         self.buffers = tuple(buffers)
+        self.attachments = tuple(attachments)
         self.domain_id = int(domain_id)
         self.generation = int(generation)
         self.mapping_size = int(mapping_size)
@@ -1186,10 +1184,11 @@ class GlobalCommDomainHandle:
 
 
 class GlobalCommDomainView:
-    """L3-local imported view exposed to remote orchestration callables."""
+    """L3-local imported view and its receiving-node attachment row."""
 
     __slots__ = (
         "_committed",
+        "attachments",
         "contexts",
         "domain_id",
         "generation",
@@ -1207,9 +1206,11 @@ class GlobalCommDomainView:
         domain_id: int,
         generation: int,
         mapping_size: int,
+        attachments: tuple[GlobalDomainAttachment, ...] = (),
     ) -> None:
         self.name = str(name)
         self.members = tuple(members)
+        self.attachments = tuple(attachments)
         self.contexts = dict(contexts)
         self.domain_id = int(domain_id)
         self.generation = int(generation)
@@ -1226,46 +1227,14 @@ class GlobalCommDomainView:
         return self._committed
 
 
-# Process-wide RTLD_GLOBAL preload registry. host_runtime.so resolves its
-# undefined HostLogger / unified_log_* (and, on sim, sim_context_*) symbols
-# against these globals, so they must be loaded — exactly once — before any
-# host_runtime.so dlopen. The registry lives in _log_preload so the import-time
-# logger preload and ChipWorker.init below share one entry per path: a second
-# dlopen of an already-registered path is skipped rather than repeated.
-
-
-def _initialize_simpler_log(bins: Any | None, log_level: int | None = None) -> ctypes.CDLL | None:
-    """Seed this process's logger threshold, before any runtime use or fork.
-
-    ``bins`` names the copy a chip child must load, which is the one its
-    host_runtime.so resolves against. A Worker process that owns no chips has no
-    ``bins`` and passes None: the library the package already preloaded at import
-    is seeded instead, and a process where that preload found nothing keeps a
-    null host-span sink and emits nothing.
-    """
+def _initialize_host_log(log_level: int | None = None) -> None:
+    """Seed the extension-owned host-log state before runtime use or fork."""
     if log_level is None:
         from . import _log  # noqa: PLC0415
 
         log_level = _log.get_current_config()
-
-    if bins is None:
-        log_handle = _preload_simpler_log()
-        if log_handle is None:
-            return None
-    else:
-        if not bins.simpler_log_path:
-            raise ValueError("simpler log init: bins.simpler_log_path is required")
-        log_handle = _preload_global(str(bins.simpler_log_path))
-
-    bind_host_span_sink = getattr(_ti_module, "_bind_host_span_sink", None)
-    if bind_host_span_sink is not None:
-        bind_host_span_sink(_host_span_sink_address(log_handle))
-    log_handle.simpler_log_init.argtypes = [ctypes.c_int]
-    log_handle.simpler_log_init.restype = ctypes.c_int
-    rc = log_handle.simpler_log_init(int(log_level))
-    if rc != 0:
-        raise RuntimeError(f"simpler_log_init failed with code {rc}")
-    return log_handle
+    if not _native_initialize_host_log(int(log_level)):
+        raise ValueError(f"unsupported simpler log threshold: {log_level}")
 
 
 class ChipWorker:
@@ -1315,19 +1284,17 @@ class ChipWorker:
         Can only be called once — the runtime and device cannot be changed
         after init.
 
-        Performs the process-wide RTLD_GLOBAL bootstrap (libsimpler_log.so,
-        plus libcpu_sim_context.so on sim platforms) and seeds the HostLogger
-        via ``simpler_log_init`` *before* the C++ ``_ChipWorker.init`` dlopens
-        host_runtime.so — host_runtime.so resolves its undefined HostLogger /
-        unified_log_* (and, on sim, sim_context_*) symbols against those
-        globals, and any LOG_* macro firing during its dlopen-time
-        constructors must already see the right filter.
+        Seeds the extension-owned HostLogger state before C++ loads any
+        consumer. Each consumer contains its own logger implementation and
+        receives that state pointer during module init. On sim, C++ retains
+        libcpu_sim_context.so in a process-wide RTLD_GLOBAL registry so
+        host_runtime.so can resolve the PTO simulator hooks.
 
         Args:
             device_id: NPU device ID to attach the calling thread to.
             bins: A `simpler_setup.runtime_builder.RuntimeBinaries` (or any
                 object exposing host_path / aicpu_path / aicore_path /
-                simpler_log_path / sim_context_path / dispatcher_path).
+                sim_context_path / dispatcher_path).
                 ``dispatcher_path`` is required for onboard platforms and
                 ignored on sim (set to None).
             log_level: Threshold (10=DEBUG, 20=INFO, 25=TIMING, 30=WARN,
@@ -1348,16 +1315,13 @@ class ChipWorker:
             self._init_in_progress = True
 
         try:
-            # 1. libsimpler_log.so — RTLD_GLOBAL singleton, before host_runtime.so.
-            _initialize_simpler_log(bins, log_level)
+            _initialize_host_log(log_level)
 
-            # 2. libcpu_sim_context.so — sim platforms only.
-            if bins.sim_context_path:
-                _preload_global(str(bins.sim_context_path))
-
-            # 3. host_runtime.so is dlopen'd RTLD_LOCAL inside _impl.init.
+            # C++ retains libcpu_sim_context.so in the sim process registry,
+            # loads host_runtime.so, and binds both private logger copies.
             # dispatcher_path is empty on sim; onboard consumes the real path.
             dispatcher_path = getattr(bins, "dispatcher_path", None)
+            sim_context_path = getattr(bins, "sim_context_path", None)
             self._impl.init(
                 str(bins.host_path),
                 str(bins.aicpu_path),
@@ -1366,6 +1330,7 @@ class ChipWorker:
                 int(device_id),
                 prewarm_config,
                 bool(enable_sdma),
+                "" if sim_context_path is None else str(sim_context_path),
             )
             for slot_id, callable_obj in list(self._callable_registry.items()):
                 self._impl.register_callable(int(slot_id), callable_obj)

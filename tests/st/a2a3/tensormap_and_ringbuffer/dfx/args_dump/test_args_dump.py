@@ -87,6 +87,7 @@ class TestArgsDump(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "params": {},
         },
     ]
@@ -106,11 +107,17 @@ class TestArgsDump(SceneTestCase):
         # Marker taken before the run so we bind to this invocation's output dir
         # rather than a stale same-label leftover from a prior run/session.
         run_marker = int(time.time())  # floor to whole seconds: safe if outputs/ ever lands on a coarse-mtime fs
-        super().test_run(st_platform, st_worker, request)
         level = int(request.config.getoption("--dump-args", default=0))
+        if level:
+            matched = self._matching_cases(st_platform, request)
+            assert len(matched) <= 1, (
+                "args-dump artifact assertions describe one case; add a case-specific "
+                "validator before extending TestArgsDump.CASES"
+            )
+        super().test_run(st_platform, st_worker, request)
         if not level:
             return
-        safe_label = _sanitize_for_filename("TestArgsDump_default")
+        safe_label = _sanitize_for_filename(f"TestArgsDump_{matched[0]['name']}")
         matches = [p for p in _outputs_dir().glob(f"{safe_label}_*") if p.stat().st_mtime >= run_marker]
         assert matches, "no args dump output directory created this run"
         out_dir = max(matches, key=lambda p: p.stat().st_mtime)

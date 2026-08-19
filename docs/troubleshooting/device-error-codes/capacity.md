@@ -8,7 +8,9 @@ how strong that diagnosis is:
 
 - `Provable head-of-line deadlock` is a structural proof: in TRB the reclaim head
   is the oldest task owned by an open scope on that ring, and the blocked
-  orchestrator cannot end the scope that pins it.
+  orchestrator cannot end the scope that pins it. On A5, this verdict is reached
+  only after at least 10 ms without reclaim progress and an exact-watermark
+  publication acknowledgment.
 - `No reclaim progress for ~500 ms` or `cannot reclaim space after ~500 ms` is
   the backstop. It proves that reclaim remained stalled, but not whether the root
   cause is undersizing, a stuck consumer, or a stalled scheduler.

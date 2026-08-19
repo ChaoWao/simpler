@@ -51,16 +51,16 @@ struct HostApiOps {
     // {nullptr, 0} when nothing is retained yet.
     void (*get_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *runner_ctx, uint32_t pipeline_slot, void *addr, size_t size);
-    // Runner-owned Graph execution storage. The platform keeps one grow-only
-    // block per (pipeline slot, Graph key, occurrence index), allocates it
-    // through the tracked device MemoryAllocator, and releases every block at
-    // Worker finalization. `alignment` must be a power of two. Repeated calls
-    // return the same aligned GM address while the retained capacity is large
-    // enough; a growth request replaces only that entry. Unused by runtimes
-    // without host-built Graph execution.
-    void *(*acquire_graph_execution_buffer)(
-        void *runner_ctx, uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes,
-        size_t alignment
+    // Runner-owned Graph Definition storage, keyed by the Definition's content
+    // identity (full_key, content_hash, total_bytes folded into one key by the
+    // caller). Grow-only retention: one block per key, reused while capacity
+    // fits, a growth request replaces the entry, all blocks released at Worker
+    // finalization. `alignment` must be a power of two. Lets every submission
+    // of one run reference a single device-resident Definition instead of each
+    // carrying a full copy. Execution storage needs no counterpart here — it is
+    // the tail of the outer Graph task's own heap allocation.
+    void *(*acquire_graph_definition_buffer)(
+        void *runner_ctx, uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
     );
     // Commit the three pooled regions (GM heap, runtime shared memory, and
     // prebuilt runtime arena) of the arena bank selected by this run, as three
@@ -110,6 +110,15 @@ struct HostApiOps {
     // DeviceRunner::bind_callable_to_runtime replays onto the runtime's
     // func_id_to_addr_ before each run.
     uint64_t (*upload_chip_callable_buffer)(void *runner_ctx, const void *callable);
+    // Host phase records. The pool is platform-allocated but written directly by
+    // the runtime through the inline path in host/host_phase_records.h, so these
+    // two run once per prepare pass rather than once per record. Arming is the
+    // union of the two enabling conditions: the runner contributes the
+    // chip-swimlane level, `producer_wants_records` carries the producer's own
+    // (a runtime knob the platform does not read).
+    uint32_t (*get_chip_swimlane_level)(void *runner_ctx);
+    void *(*host_phase_pool_arm)(void *runner_ctx, int producer_wants_records);
+    void (*host_phase_pool_finish)(void *runner_ctx, uint64_t submitted_tasks, uint64_t invocation_id);
 };
 
 /**
@@ -149,12 +158,9 @@ public:
     void set_retained_temp_buffer(void *addr, size_t size) const {
         ops_->set_retained_temp_buffer(runner_ctx_, pipeline_slot_, addr, size);
     }
-    void *
-    acquire_graph_execution_buffer(uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment) const {
-        if (ops_->acquire_graph_execution_buffer == nullptr) return nullptr;
-        return ops_->acquire_graph_execution_buffer(
-            runner_ctx_, pipeline_slot_, graph_key, occurrence, bytes, alignment
-        );
+    void *acquire_graph_definition_buffer(uint64_t key, size_t bytes, size_t alignment) const {
+        if (ops_->acquire_graph_definition_buffer == nullptr) return nullptr;
+        return ops_->acquire_graph_definition_buffer(runner_ctx_, pipeline_slot_, key, bytes, alignment);
     }
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) const {
         return ops_->setup_static_arena(runner_ctx_, arena_bank_, gm_heap_size, gm_sm_size, runtime_arena_size);
@@ -182,6 +188,27 @@ public:
     }
     uint64_t upload_chip_callable_buffer(const void *callable) const {
         return ops_->upload_chip_callable_buffer(runner_ctx_, callable);
+    }
+    uint32_t chip_swimlane_level() const {
+        return ops_->get_chip_swimlane_level != nullptr ? ops_->get_chip_swimlane_level(runner_ctx_) : 0;
+    }
+    /**
+     * Arm this pass's host phase pool.
+     *
+     * @param producer_wants_records  the producer's own enabling condition; the
+     *                                runner ORs it with the chip-swimlane level
+     * @return HostPhaseRecordPool* to record into, or nullptr when this pass
+     *         collects no records (typed void* to keep the profiling headers out
+     *         of this one)
+     */
+    void *host_phase_pool_arm(bool producer_wants_records) const noexcept {
+        if (ops_->host_phase_pool_arm == nullptr) return nullptr;
+        return ops_->host_phase_pool_arm(runner_ctx_, producer_wants_records ? 1 : 0);
+    }
+    void host_phase_pool_finish(uint64_t submitted_tasks, uint64_t invocation_id) const noexcept {
+        if (ops_->host_phase_pool_finish != nullptr) {
+            ops_->host_phase_pool_finish(runner_ctx_, submitted_tasks, invocation_id);
+        }
     }
 
 private:

@@ -49,6 +49,12 @@ struct CannLogLevelCall {
 };
 
 CannLogLevelCall g_cann_log_level_call{};
+SimplerHostLogState g_shared_log_state{
+    SIMPLER_HOST_LOG_STATE_ABI_VERSION,
+    sizeof(SimplerHostLogState),
+    static_cast<int32_t>(LogLevel::TIMING),
+    0,
+};
 
 int capture_cann_log_level(int module_id, int level, int enable_event) {
     g_cann_log_level_call.count++;
@@ -95,6 +101,31 @@ CapturedStdio run_with_config(LogLevel level, Fn &&fn) {
 }
 
 }  // namespace
+
+TEST(HostLogTest, SharedStateBindingValidatesAbiAndOwnsThreshold) {
+    SimplerHostLogState bad_version = g_shared_log_state;
+    bad_version.abi_version++;
+    EXPECT_NE(simpler_host_log_bind_state(nullptr), 0);
+    EXPECT_NE(simpler_host_log_bind_state(&bad_version), 0);
+
+    SimplerHostLogState bad_size = g_shared_log_state;
+    bad_size.struct_size = sizeof(SimplerHostLogState) - 1;
+    EXPECT_NE(simpler_host_log_bind_state(&bad_size), 0);
+
+    SimplerHostLogState bad_threshold = g_shared_log_state;
+    bad_threshold.threshold = 26;
+    EXPECT_NE(simpler_host_log_bind_state(&bad_threshold), 0);
+
+    g_shared_log_state.threshold = static_cast<int32_t>(LogLevel::ERROR);
+    g_shared_log_state.clock_anchor_pid = 0;
+    ASSERT_EQ(simpler_host_log_bind_state(&g_shared_log_state), 0);
+    EXPECT_EQ(HostLogger::get_instance().state(), &g_shared_log_state);
+    EXPECT_EQ(HostLogger::get_instance().level(), static_cast<int>(LogLevel::ERROR));
+    EXPECT_FALSE(HostLogger::get_instance().is_enabled(LogLevel::WARN));
+
+    HostLogger::get_instance().set_level(LogLevel::WARN);
+    EXPECT_EQ(g_shared_log_state.threshold, static_cast<int32_t>(LogLevel::WARN));
+}
 
 TEST(HostLogTest, NulLevelMutesAllSeverities) {
     auto captured = run_with_config(LogLevel::NUL, [] {
@@ -290,7 +321,7 @@ TEST(HostLogTest, HostSpanEscapesDelimitersAndFitsAtomicPipeRecord) {
                                attributes.c_str()};
 
     auto captured = run_with_config(LogLevel::TIMING, [&] {
-        simpler_log_emit_host_span(&span);
+        unified_log_host_span(&span);
     });
 
     const size_t marker = captured.err.find("[STRACE]");
@@ -324,7 +355,7 @@ TEST(HostLogTest, AllHostSpanEmitPathsPreserve64BitInvocationIds) {
                                    30,
                                    "c_abi_path",
                                    ""};
-        simpler_log_emit_host_span(&span);
+        unified_log_host_span(&span);
     });
 
     const std::string expected_inv = "inv=" + std::to_string(invocation_id);
@@ -353,11 +384,11 @@ TEST(HostLogTest, HostSpanTruncationDropsAWholeEscapeRatherThanItsLastByte) {
                                0,
                                100,
                                25,
-                               "l3.dispatch",
+                               "host.dispatch",
                                attributes.c_str()};
 
     auto captured = run_with_config(LogLevel::TIMING, [&] {
-        simpler_log_emit_host_span(&span);
+        unified_log_host_span(&span);
     });
 
     EXPECT_EQ(captured.err.find("%0~"), std::string::npos) << "truncation marker landed inside an escape";

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "common/chip_swimlane_profiling.h"
+#include "host/clock_correlation.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
@@ -408,6 +409,44 @@ public:
     void set_core_types(const CoreType *types, int n);
 
     /**
+     * Whether this run's orchestrator phases come from a host orchestrator.
+     *
+     * Known when the runner arms the host phase pool, which is during bind and
+     * therefore before initialize() — early enough for the device orch-phase
+     * pool to be left unallocated, which is the point. The records themselves
+     * arrive later, via set_host_phase_records().
+     */
+    void set_host_orchestrated(bool host_orchestrated) noexcept { host_orchestrated_ = host_orchestrated; }
+
+    /**
+     * Supply this run's host phase records, projected to the ones the swimlane
+     * places against device timestamps.
+     *
+     * The records are the platform runner's, not this collector's: their other
+     * reader is enabled independently. The runner hands them over before
+     * export_swimlane_json(), which is also after initialize() — unlike the
+     * records themselves, which a host-orchestrating runtime writes during bind,
+     * before the device collector is provisioned.
+     *
+     * @param submit_records   records whose kind submits a task, in order
+     * @param upload_records   records whose kind is a host-to-device transfer, in
+     *                         order; host work the device waits on, so it belongs
+     *                         beside the device lanes
+     * @param submitted_tasks  what the producer reported submitting, for the
+     *                         completeness check
+     * @param total_records    every record the producer attempted, of any kind
+     * @param dropped_records  records the pool could not store
+     */
+    void set_host_phase_records(
+        std::vector<HostPhaseRecord> submit_records, std::vector<HostPhaseRecord> upload_records,
+        uint64_t submitted_tasks, uint64_t total_records, uint64_t dropped_records
+    );
+    void begin_clock_correlation_session(const char *provider_name, const char *raw_device_timestamp_unit);
+    void record_clock_anchor_samples(std::vector<simpler::dfx::ClockAnchorSample> samples);
+    void finish_clock_correlation_session();
+    bool clock_correlation_active() const { return clock_correlation_session_.active(); }
+
+    /**
      * Export collected records as a Chrome Trace Event JSON (swimlane view).
      * Writes <output_prefix>/chip_swimlane_records.json — directory is captured at
      * initialize() time.
@@ -528,6 +567,9 @@ private:
     // orch records (kind-tagged at routing time; no parse-time discrimination).
     std::vector<std::vector<ChipSwimlaneAicpuSchedPhaseRecord>> collected_sched_phase_records_;
     std::vector<std::vector<ChipSwimlaneAicpuOrchPhaseRecord>> collected_orch_phase_records_;
+    std::vector<HostPhaseRecord> host_submit_records_;
+    std::vector<HostPhaseRecord> host_upload_records_;
+    simpler::dfx::ClockCorrelationSession clock_correlation_session_;
 
     // Core-to-thread mapping (core_id → scheduler thread index, -1 = unassigned)
     std::vector<int8_t> core_to_thread_;
@@ -544,6 +586,13 @@ private:
     uint64_t total_orch_phase_collected_{0};
     bool has_phase_data_{false};
     bool collector_shards_merged_{false};
+    // Set once the runner has handed over a pass's host phase records, which is
+    // also what makes the host orchestrator this run's record source.
+    bool host_orchestrated_{false};
+    bool host_phase_records_present_{false};
+    uint64_t host_phase_total_records_{0};
+    uint64_t host_phase_dropped_records_{0};
+    uint64_t host_phase_submitted_tasks_{0};
 
     size_t normalize_collector_shard(int collector_shard) const;
     void reset_collector_shards();

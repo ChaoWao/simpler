@@ -23,6 +23,7 @@
 #endif
 
 #include "aicpu/device_time.h"
+#include "aicpu/device_log.h"
 #include "aicpu/device_phase_aicpu.h"
 #include "aicpu/orch_so_file.h"
 #include "callable_protocol.h"
@@ -416,6 +417,17 @@ int32_t AicpuExecutor::load_orch_so(
         return -1;
     }
     LOG_DEBUG("Thread %d: dlopen succeeded, handle=%p", thread_idx, handle);
+
+    const char *bind_log_error = nullptr;
+    if (bind_orchestration_host_log_state(handle, &bind_log_error) != 0) {
+        LOG_ERROR(
+            "Thread %d: failed to bind orchestration host-log state: %s", thread_idx,
+            bind_log_error ? bind_log_error : "invalid shared state"
+        );
+        dlclose(handle);
+        unlink(so_path);
+        return -1;
+    }
 
     unlink(so_path);
 

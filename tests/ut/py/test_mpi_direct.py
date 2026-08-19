@@ -198,7 +198,7 @@ def test_pre_mpi_gate_releases_all_ready_ranks():
         def poll():
             return None
 
-    _startup_gate(topology, "token", listener, RunningProcess())
+    _startup_gate(topology, "token", listener, RunningProcess())  # type: ignore[arg-type]
     for thread in threads:
         thread.join(3.0)
     assert not errors

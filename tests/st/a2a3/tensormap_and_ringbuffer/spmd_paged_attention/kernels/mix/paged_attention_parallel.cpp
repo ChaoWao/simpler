@@ -113,6 +113,7 @@ template <int QT>
 struct PAConfig {
     static constexpr int Q_TILE = QT;
     static constexpr int SUB_QT = QT / 2;
+    static constexpr uint32_t LOCAL_SLOT_NUM = 2;
 
     // GM FIFO slot sizes (full tile per slot, sized for max block_size to allow
     // the same FIFO to host both block_size=64 and block_size=128 cases).
@@ -120,20 +121,23 @@ struct PAConfig {
     static constexpr uint32_t PIJ_SLOT_SIZE = QT * MAX_BLOCK_SIZE * sizeof(bfloat16_t);
     static constexpr uint32_t OI_SLOT_SIZE = QT * HEAD_DIM * sizeof(float);
 
-    using SijPipeT = TPipe<SIJ_FLAG_ID, Direction::DIR_C2V, SIJ_SLOT_SIZE, FIFO_DEPTH>;
-    using PijPipeT = TPipe<PIJ_FLAG_ID, Direction::DIR_V2C, PIJ_SLOT_SIZE, FIFO_DEPTH>;
-    using OiPipeT = TPipe<OI_FLAG_ID, Direction::DIR_C2V, OI_SLOT_SIZE, FIFO_DEPTH>;
+    using SijPipeT = TPipe<SIJ_FLAG_ID, Direction::DIR_C2V, SIJ_SLOT_SIZE, FIFO_DEPTH, LOCAL_SLOT_NUM>;
+    using PijPipeT = TPipe<PIJ_FLAG_ID, Direction::DIR_V2C, PIJ_SLOT_SIZE, FIFO_DEPTH, LOCAL_SLOT_NUM>;
+    using OiPipeT = TPipe<OI_FLAG_ID, Direction::DIR_C2V, OI_SLOT_SIZE, FIFO_DEPTH, LOCAL_SLOT_NUM>;
 
-    // AIV UB consumer buffer layout (sized for SUB_QT rows per AIV lane)
+    // Local TPOP slots start SLOT_SIZE bytes apart; the final slot only needs
+    // the lane-local tile footprint.
     static constexpr uint32_t SIJ_UB_BASE = 0x0;
-    static constexpr uint32_t SIJ_UB_SIZE = 2 * SUB_QT * MAX_BLOCK_SIZE * sizeof(float);
+    static constexpr uint32_t SIJ_LOCAL_TILE_SIZE = SUB_QT * MAX_BLOCK_SIZE * sizeof(float);
+    static constexpr uint32_t SIJ_UB_SIZE = (LOCAL_SLOT_NUM - 1) * SIJ_SLOT_SIZE + SIJ_LOCAL_TILE_SIZE;
     static constexpr uint32_t OI_UB_BASE = SIJ_UB_BASE + SIJ_UB_SIZE;
-    static constexpr uint32_t OI_UB_SIZE = 2 * SUB_QT * HEAD_DIM * sizeof(float);
+    static constexpr uint32_t OI_LOCAL_TILE_SIZE = SUB_QT * HEAD_DIM * sizeof(float);
+    static constexpr uint32_t OI_UB_SIZE = (LOCAL_SLOT_NUM - 1) * OI_SLOT_SIZE + OI_LOCAL_TILE_SIZE;
     static constexpr uint32_t WORK_UB_BASE = OI_UB_BASE + OI_UB_SIZE;
 
     // AIC L1 consumer buffer for V2C pij pipe (full QT * MAX_BLOCK_SIZE rows)
     static constexpr uint32_t PIJ_L1_BASE = 0x40000;
-    static constexpr uint32_t PIJ_L1_SIZE = 2 * QT * MAX_BLOCK_SIZE * sizeof(bfloat16_t);
+    static constexpr uint32_t PIJ_L1_SIZE = LOCAL_SLOT_NUM * PIJ_SLOT_SIZE;
 };
 
 // ============================================================================
@@ -383,13 +387,14 @@ static __aicore__ void aiv_sf_step(
     using SijPipeT = typename Cfg::SijPipeT;
     using PijPipeT = typename Cfg::PijPipeT;
 
+    const uint32_t sij_slot = static_cast<uint32_t>(sij_pipe.cons.getTileId()) % Cfg::LOCAL_SLOT_NUM;
     TPOP<SijPipeT, SijVecTile, TileSplitAxis::TILE_UP_DOWN>(sij_pipe, sijTile);
 
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
     if (is_last_partial) {
-        int sij_addr = Cfg::SIJ_UB_BASE + static_cast<int>((i % 2) * TM * TN * static_cast<int>(sizeof(float)));
+        int sij_addr = Cfg::SIJ_UB_BASE + static_cast<int>(sij_slot * Cfg::SIJ_SLOT_SIZE);
         TASSIGN(sijPadTile, sij_addr);
         TileSijDyn sijDynTile(static_cast<size_t>(valid_len_last));
         TASSIGN(sijDynTile, sij_addr);

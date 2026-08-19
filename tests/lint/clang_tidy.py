@@ -26,12 +26,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from clang_tidy_paths import should_run_clang_tidy
+
 _ROOT = Path(__file__).resolve().parents[2]
 _BUILD_RUNTIMES = _ROOT / "simpler_setup" / "build_runtimes.py"
 _CACHE_DIR = _ROOT / "build" / "cache"
-
-from simpler_setup.platform_info import load_build_config, to_platform  # noqa: E402
-from simpler_setup.runtime_compiler import RuntimeCompiler  # noqa: E402
 
 
 def _macos_isysroot_args() -> list[str]:
@@ -159,6 +158,9 @@ def _parse_db_path(db_file: Path) -> tuple[str, str, str, str]:
 
 def _reconfigure_compile_database(db_file: Path) -> None:
     """Delete the broken target build dir and rerun CMake configure for it."""
+    from simpler_setup.platform_info import load_build_config, to_platform  # noqa: PLC0415
+    from simpler_setup.runtime_compiler import RuntimeCompiler  # noqa: PLC0415
+
     arch, variant, runtime_name, target = _parse_db_path(db_file)
     platform = to_platform(arch, variant)
     config_path = _ROOT / "src" / arch / "runtime" / runtime_name / "build_config.py"
@@ -251,7 +253,7 @@ def _build_file_index() -> dict[str, list[Path]]:
 
 
 def main() -> int:
-    changed = [os.path.abspath(f) for f in sys.argv[1:]]
+    changed = [os.path.abspath(path) for path in sys.argv[1:] if should_run_clang_tidy(path)]
     if not changed:
         return 0
 

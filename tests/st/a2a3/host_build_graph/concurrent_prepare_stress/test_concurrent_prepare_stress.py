@@ -20,7 +20,28 @@ the two banks' runtimes/orchestrators (e.g. a shared or under-initialized
 orchestrator) would corrupt a result and fail the golden check. The point is to
 exercise the concurrent-prepare bind path under many alternating-bank
 iterations, not to measure anything.
+
+Three arms drive the same pipeline through :meth:`_drive_pipeline` and read the
+same ``assert_native_overlap`` verdict, so each negative arm differs from the
+positive one in exactly one variable:
+
+* ``inflight_limit=2``, ordinary config — overlap is required.
+* ``inflight_limit=1`` — the lane's capability is untouched and the submissions
+  simply never coexist, so the verdict must be *rejected*. This is what makes
+  the positive arm a detector rather than a formality: the span chain between
+  the pipeline and the verdict (which spans are emitted, where their endpoints
+  land, ``bind`` standing in for preparation, ``runner_run`` being a host wall
+  span) could otherwise report an intersection independent of real concurrency.
+* ``inflight_limit=2`` with a diagnostics config — staging is off because
+  ``allow_prepared_successor`` folds in ``CallConfig::diagnostics_any()``, so the
+  lane admits one run at a time and the verdict must again be rejected. Of the
+  three inputs that can disable staging, this is the only one a submission can
+  reach: the other two are the runtime's contract depth and its capability
+  symbol, both compile-time properties of the runtime.
 """
+
+import contextlib
+import tempfile
 
 import pytest
 import torch
@@ -28,10 +49,21 @@ from simpler.task_interface import ArgDirection as D
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _build_chip_task_args, _compare_outputs
+from simpler_setup.tools.strace_timing import NativeOverlapError, assert_native_overlap, parse_spans
 
 _VECTOR_KERNELS = "../vector_example/kernels"
 _SIZE = 128 * 128
 _ITERS = 40  # 20 reuses per bank
+# A negative arm needs only enough adjacent pairs for the analyzer to have one
+# to reject; the stress count buys nothing once the property is absent.
+_CONTROL_ITERS = 3
+# This class's st_worker is class-scoped (see the sibling conftest, which
+# overrides the pooled default), so all four of its tests share one slot table.
+# The framework's inherited test_run registers through the ordinary path and so
+# holds id 0 for the rest of the class. The arms below therefore own a separate
+# registry id (capacity is 64), which keeps their register/unregister pairs off
+# id 0 whatever order the four tests run in.
+_ARM_CALLABLE_ID = 1
 
 
 @scene_test(level=2, runtime="host_build_graph")
@@ -93,12 +125,84 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         args.f[:] = (a + b + 1) * (a + b + 2)
 
     def _chip_worker(self, worker):
-        """Return the L2 ChipWorker backing ``worker`` (asserts it exists)."""
+        """Return the L2 ChipWorker backing ``worker``, ready to stage a successor.
+
+        The property folds ``initialized_``, the runtime PipelineContract's
+        ``pipeline_depth > 1``, and the runtime's concurrent-prepare capability
+        symbol. On a2a3 host_build_graph all three hold unconditionally — the
+        contract declares depth 2 (as does every onboard runtime, and
+        PTO_PIPELINE_MAX_DEPTH is 2) and the capability impl returns 1 outright —
+        so a false here means one of them regressed, not that this box is
+        differently configured. Neither is reachable from a CallConfig, which is
+        why this is an assert and not a skip: skipping would report green for the
+        one state in which the arms below cannot hold.
+
+        The sim platform hardcodes the capability to 0, so overlap never happens
+        there. Each arm's platform gate runs before this assert for that reason.
+        """
         chip_worker = worker._chip_worker
         assert chip_worker is not None
+        assert chip_worker._impl.supports_concurrent_native_prepare, (
+            f"a2a3 host_build_graph must be able to stage a successor, have pipeline_depth={chip_worker.pipeline_depth}"
+        )
         return chip_worker
 
-    def test_concurrent_prepare_overlap(self, st_platform, st_worker):
+    @contextlib.contextmanager
+    def _registered_callable(self, chip_worker, callable_id, callable_obj):
+        """Hold ``callable_obj`` in one slot for the duration of the block."""
+        chip_worker._register_callable_at_slot(callable_id, callable_obj)
+        try:
+            yield
+        finally:
+            chip_worker._unregister_slot(callable_id)
+
+    def _submit_iteration(self, chip_worker, callable_id, orch_sig, config, iteration):
+        """Submit run ``iteration`` with its own data; return its in-flight entry.
+
+        Each in-flight entry keeps BOTH the encoded chip_args and the backing
+        tensors (test_args) alive until the run reaches terminal: the lane copies
+        inputs but the buffers back the resolved descriptors, and the output is
+        copied back at finalize.
+        """
+        # Distinct inputs per iteration so golden catches cross-bank interference.
+        params = {"a": 1.0 + iteration, "b": 2.0 + 0.5 * iteration}
+        test_args = self.generate_args(params)
+        chip_args, output_names = _build_chip_task_args(test_args, orch_sig)
+        golden_args = test_args.clone()
+        self.compute_golden(golden_args, params)
+        chip_run = chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, config)
+        return (chip_run, test_args, golden_args, output_names, chip_args, iteration)
+
+    def _retire(self, entry):
+        """Block one run to terminal (lane finalizes + copies back) and golden-check it."""
+        chip_run, test_args, golden_args, output_names, _chip_args, _iteration = entry
+        # Block to the completion fence; the lane finalizes (validate +
+        # copy-back) as part of reaching terminal.
+        chip_run.wait(-1.0)
+        # Distinct per-iteration data → a corrupted/aliased bank fails this.
+        _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
+
+    def _drive_pipeline(self, chip_worker, callable_id, orch_sig, config, iters, inflight_limit):
+        """Submit ``iters`` runs, never letting more than ``inflight_limit`` coexist.
+
+        The direct-chip lane is the sole admission authority and follows the
+        runtime PipelineContract: it admits one active plus one prepared
+        compatible successor. At ``inflight_limit=2`` a submission therefore
+        lands while its predecessor is still in flight, and the predecessor's
+        ``wait`` prepares it (its full bind — arena build + host orchestration)
+        against the other bank, i.e. the overlaps_active_run path. At
+        ``inflight_limit=1`` every run reaches terminal before the next is
+        submitted, so no bind can coexist with a device window.
+        """
+        inflight = []
+        for iteration in range(iters):
+            inflight.append(self._submit_iteration(chip_worker, callable_id, orch_sig, config, iteration))
+            if len(inflight) >= inflight_limit:
+                self._retire(inflight.pop(0))
+        while inflight:
+            self._retire(inflight.pop(0))
+
+    def test_concurrent_prepare_overlap(self, st_platform, st_worker, capfd):
         """Golden-check a 2-deep overlapping pipeline over both arena banks.
 
         Each submission prepares (fully binds) its run against one bank while the
@@ -112,50 +216,96 @@ class TestConcurrentPrepareStressHbg(SceneTestCase):
         callable_obj = self.build_callable(st_platform)
         config = self._build_config({})
         chip_worker = self._chip_worker(st_worker)
+        callable_id = _ARM_CALLABLE_ID
 
-        if int(chip_worker.pipeline_depth) < 2:
-            pytest.skip(f"need pipeline_depth >= 2 for overlap, have {chip_worker.pipeline_depth}")
+        with self._registered_callable(chip_worker, callable_id, callable_obj):
+            capfd.readouterr()  # only this arm's spans reach the verdict
+            self._drive_pipeline(chip_worker, callable_id, orch_sig, config, _ITERS, inflight_limit=2)
+            captured = capfd.readouterr().err
 
-        callable_id = 0
-        chip_worker._register_callable_at_slot(callable_id, callable_obj)
+        # Each pair must prove prepare(N+1) ran concurrently with device(N) — the
+        # property this pipeline exists for. Not that prepare *finished* inside
+        # that window (`require_hidden=True`): that additionally depends on how
+        # much host CPU this shared machine gives the preparing thread.
+        checks = assert_native_overlap(parse_spans(captured.splitlines()))
+        assert len(checks) == _ITERS - 1
 
-        # The direct-chip lane is the sole admission authority and follows the
-        # runtime PipelineContract: it admits one active plus one prepared
-        # compatible successor. Submitting run i while run i-1 is still in flight
-        # therefore prepares run i (its full bind — arena build + host
-        # orchestration) against the other bank while run i-1 is active, i.e. the
-        # overlaps_active_run path. Each in-flight entry keeps BOTH the encoded
-        # chip_args and the backing tensors (test_args) alive until the run
-        # reaches terminal (the lane copies inputs but the buffers back the
-        # resolved descriptors, and the output is copied back at finalize).
-        inflight = []  # (chip_run, test_args, golden_args, output_names, chip_args, iteration)
+    def test_serial_submission_is_rejected_as_not_overlapping(self, st_platform, st_worker, capfd):
+        """One run at a time must fail the same assertion the overlapping arm passes.
 
-        def _retire(entry):
-            """Block one run to terminal (lane finalizes + copies back) and golden-check it."""
-            chip_run, test_args, golden_args, output_names, _chip_args, _it = entry
-            # Block to the completion fence; the lane finalizes (validate +
-            # copy-back) as part of reaching terminal.
-            chip_run.wait(-1.0)
-            # Distinct per-iteration data → a corrupted/aliased bank fails this.
-            _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
+        The single-variable control for the positive arm: same lane, same
+        capability, same config, one fewer run in flight. Nothing can then
+        prepare while a device window is open, so an assertion that still
+        reported overlap would be measuring the span chain rather than the
+        pipeline. Matching the message is load-bearing — it separates a real
+        rejection from the vacuous "no pairs to check" one.
 
-        try:
-            for i in range(_ITERS):
-                # Distinct inputs per iteration so golden catches cross-bank interference.
-                params = {"a": 1.0 + i, "b": 2.0 + 0.5 * i}
-                test_args = self.generate_args(params)
-                chip_args, output_names = _build_chip_task_args(test_args, orch_sig)
-                golden_args = test_args.clone()
-                self.compute_golden(golden_args, params)
+        This arm names no mechanism, so it outlives any of them: one run at a
+        time cannot overlap under any admission policy. Contrast the diagnostics
+        arm below, which is tied to a fallback with an expiry date.
+        """
+        if st_platform != "a2a3":
+            pytest.skip("concurrent native prepare / two-bank pipeline is an a2a3 onboard path")
 
-                chip_run = chip_worker._impl._submit_chip_run_direct(callable_id, chip_args, config)
-                inflight.append((chip_run, test_args, golden_args, output_names, chip_args, i))
+        orch_sig = self.CALLABLE["orchestration"]["signature"]
+        callable_obj = self.build_callable(st_platform)
+        config = self._build_config({})
+        chip_worker = self._chip_worker(st_worker)
+        callable_id = _ARM_CALLABLE_ID
 
-                # Keep two runs in flight so each submission overlaps its predecessor.
-                if len(inflight) >= 2:
-                    _retire(inflight.pop(0))
+        with self._registered_callable(chip_worker, callable_id, callable_obj):
+            capfd.readouterr()
+            self._drive_pipeline(chip_worker, callable_id, orch_sig, config, _CONTROL_ITERS, inflight_limit=1)
+            captured = capfd.readouterr().err
 
-            while inflight:
-                _retire(inflight.pop(0))
-        finally:
-            chip_worker._unregister_slot(callable_id)
+        with pytest.raises(NativeOverlapError, match="did not overlap"):
+            assert_native_overlap(parse_spans(captured.splitlines()))
+
+    def test_diagnostics_config_serializes_the_native_lane(self, st_platform, st_worker, capfd):
+        """A diagnostic flag turns staging off, and the log must then be rejected.
+
+        ``allow_prepared_successor`` folds in ``CallConfig::diagnostics_any()`` —
+        the OR of all five diagnostic flags — because a collector's setup mutates
+        runner-global state that is not yet per-epoch, so two overlapping runs
+        would tread on each other. Any one flag therefore keeps a run and its
+        successor on separate device windows even at depth 2.
+
+        Unlike the depth and capability inputs, this one is reachable from a
+        submission, which is what makes it the literal control for "staging
+        disabled". The lane's own check is the polite one: it declines to stage
+        rather than raising, so the submissions still succeed and the goldens
+        still pass and nothing else in the suite would notice.
+
+        Host spans are gated separately (compile-time ``SIMPLER_HOST_STRACE``),
+        so the trace still comes out with device diagnostics on.
+
+        **This arm retires with the fallback it covers.** The serialization is
+        temporary by design — ``concurrent_native_prepare_supported_impl`` in
+        ``runtime_maker.cpp`` keeps collector-bearing configurations sequential
+        only *until their state is per-epoch*. Once it is and
+        ``diagnostics_any()`` leaves ``allow_prepared_successor``, a diagnostic
+        config will overlap like any other and this arm turns red with the same
+        ``did not overlap`` it currently demands. The fix at that point is to
+        delete this test, not to restore the serialization: its value and its
+        lifetime come from the same place, the fallback being silent.
+        """
+        if st_platform != "a2a3":
+            pytest.skip("concurrent native prepare / two-bank pipeline is an a2a3 onboard path")
+
+        orch_sig = self.CALLABLE["orchestration"]["signature"]
+        callable_obj = self.build_callable(st_platform)
+        chip_worker = self._chip_worker(st_worker)
+        callable_id = _ARM_CALLABLE_ID
+
+        with tempfile.TemporaryDirectory(prefix="simpler-serialized-lane-") as output_dir:
+            # scope_stats is the lightest of the five flags; which one is set does
+            # not matter, only that diagnostics_any() becomes true. output_prefix
+            # is required by CallConfig::validate() whenever one of them is.
+            config = self._build_config({}, enable_scope_stats=True, output_prefix=output_dir)
+            with self._registered_callable(chip_worker, callable_id, callable_obj):
+                capfd.readouterr()
+                self._drive_pipeline(chip_worker, callable_id, orch_sig, config, _CONTROL_ITERS, inflight_limit=2)
+                captured = capfd.readouterr().err
+
+        with pytest.raises(NativeOverlapError, match="did not overlap"):
+            assert_native_overlap(parse_spans(captured.splitlines()))

@@ -161,6 +161,22 @@ protected:
 // check_and_handle_consumed
 // =============================================================================
 
+TEST_F(SchedulerStateTest, UnvalidatedWiringPublishesEveryAdvance) {
+    constexpr int32_t ring_id = 0;
+    PTO2SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
+    PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+
+    EXPECT_FALSE(ring_sched.publication_batching_enabled);
+    ring.fc.current_task_index.store(2, std::memory_order_release);
+    init_ring_slot(ring, 0, PTO2_TASK_CONSUMED, ring_id);
+    init_ring_slot(ring, 1, PTO2_TASK_PENDING, ring_id);
+
+    ring_sched.advance_ring_pointers();
+
+    EXPECT_EQ(ring_sched.last_task_alive, 1);
+    EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), 1);
+}
+
 TEST_F(SchedulerStateTest, ConsumedNotReady) {
     alignas(64) PTO2TaskSlotState slot;
     init_slot(slot, PTO2_TASK_COMPLETED, 1, 2);
@@ -250,6 +266,43 @@ TEST_F(SchedulerStateTest, ContendedConsumedHeadSetsPendingAndIdleDrainAdvances)
     EXPECT_TRUE(sched.drain_pending_ring_advances());
     EXPECT_EQ(ring_sched.last_task_alive, head_task_id + 1);
     EXPECT_EQ(ring.fc.last_task_alive.load(std::memory_order_acquire), head_task_id + 1);
+    EXPECT_EQ(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+}
+
+TEST_F(SchedulerStateTest, DeferredAdvanceDoesNotAcknowledgePublication) {
+    constexpr int32_t ring_id = PTO2_MAX_RING_DEPTH - 1;
+    constexpr int32_t head_task_id = 17;
+    setup_contended_head_case(ring_id, head_task_id);
+
+    PTO2SharedMemoryRingHeader &ring = sm_handle->header->rings[ring_id];
+    PTO2SchedulerState::RingSchedState &ring_sched = sched.ring_sched_states[ring_id];
+    PTO2TaskSlotState &head = ring.get_slot_state_by_task_id(head_task_id);
+    uint32_t pending_bit = PTO2SchedulerState::ring_advance_pending_bit(ring_id);
+
+    sched.publication_ack_mask.store(0, std::memory_order_release);
+    ring_sched.advance_lock.store(1, std::memory_order_release);
+    sched.check_and_handle_consumed(head);
+    ring_sched.advance_lock.store(0, std::memory_order_release);
+
+    ASSERT_TRUE(sched.drain_pending_ring_advances());
+    EXPECT_EQ(sched.publication_ack_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_EQ(sched.publication_request_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+}
+
+TEST_F(SchedulerStateTest, PublicationRequestDoesNotConsumeDeferredAdvance) {
+    constexpr int32_t ring_id = PTO2_MAX_RING_DEPTH - 1;
+    setup_ring_for_reclaim_race(ring_id, /*current_task_index=*/1, /*blocked_task_id=*/1);
+
+    uint32_t pending_bit = PTO2SchedulerState::ring_advance_pending_bit(ring_id);
+    sched.advance_pending_mask.fetch_or(pending_bit, std::memory_order_release);
+    sched.publication_request_mask.fetch_or(pending_bit, std::memory_order_release);
+
+    ASSERT_TRUE(sched.drain_publication_requests());
+    EXPECT_EQ(sched.publication_request_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_NE(sched.publication_ack_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+    EXPECT_NE(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
+
+    EXPECT_FALSE(sched.drain_pending_ring_advances());
     EXPECT_EQ(sched.advance_pending_mask.load(std::memory_order_acquire) & pending_bit, 0u);
 }
 

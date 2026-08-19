@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <thread>
 #include <utility>
@@ -108,6 +109,9 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     definition.off_tensor_sources = append_section(image, tensor_sources);
     definition.off_scalars = append_section(image, scalars);
     definition.off_scalar_sources = append_section(image, scalar_sources);
+    size_t execution_storage_bytes = 0;
+    graph_execution_storage_bytes(static_cast<int32_t>(definition.task_count), &execution_storage_bytes);
+    definition.execution_storage_bytes = static_cast<uint32_t>(execution_storage_bytes);
     definition.total_bytes = static_cast<uint32_t>(image.size());
     std::memcpy(image.data(), &definition, sizeof(definition));
 
@@ -116,26 +120,17 @@ std::vector<std::byte> make_test_definition(uint64_t graph_key, uint64_t boundar
     return image;
 }
 
-std::vector<std::byte> make_test_submission(
-    uint64_t graph_key, uint64_t boundary_address, uint64_t boundary_scalar, uint64_t execution_storage,
-    size_t execution_storage_bytes
-) {
-    const std::vector<std::byte> definition = make_test_definition(graph_key, boundary_address);
-    const size_t definition_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphDefinition));
-    const size_t tensors_offset = PTO2_ALIGN_UP(definition_offset + definition.size(), alignof(GraphTensor));
+std::vector<std::byte> make_test_submission(uint64_t graph_key, uint64_t boundary_address, uint64_t boundary_scalar) {
+    const size_t tensors_offset = PTO2_ALIGN_UP(sizeof(GraphSubmission), alignof(GraphTensor));
     const size_t scalars_offset = PTO2_ALIGN_UP(tensors_offset + sizeof(GraphTensor), alignof(uint64_t));
     std::vector<std::byte> image(scalars_offset + sizeof(uint64_t));
-    std::memcpy(image.data() + definition_offset, definition.data(), definition.size());
     const GraphTensor boundary = make_test_tensor(boundary_address);
     std::memcpy(image.data() + tensors_offset, &boundary, sizeof(boundary));
     std::memcpy(image.data() + scalars_offset, &boundary_scalar, sizeof(boundary_scalar));
 
     GraphSubmission submission{};
     submission.graph_key = graph_key;
-    submission.execution_storage = execution_storage;
-    submission.execution_storage_bytes = execution_storage_bytes;
     submission.total_bytes = static_cast<uint32_t>(image.size());
-    submission.definition_offset = static_cast<uint32_t>(definition_offset);
     submission.tensors_offset = static_cast<uint32_t>(tensors_offset);
     submission.tensor_count = 1;
     submission.scalars_offset = static_cast<uint32_t>(scalars_offset);
@@ -144,22 +139,81 @@ std::vector<std::byte> make_test_submission(
     return image;
 }
 
+// A Definition device object exactly as upload_graph_submissions builds it:
+// [GraphDefinitionHeader][Definition image].
+class TestDefinitionObject {
+public:
+    explicit TestDefinitionObject(const std::vector<std::byte> &definition, uint32_t retained_definition_bytes = 0) {
+        const size_t object_bytes = sizeof(GraphDefinitionHeader) + definition.size();
+        data_ = ::operator new(object_bytes, std::align_val_t(alignof(GraphDefinitionHeader)));
+        std::memset(data_, 0, object_bytes);
+        auto *header = static_cast<GraphDefinitionHeader *>(data_);
+        const auto *def = reinterpret_cast<const GraphDefinition *>(definition.data());
+        header->magic = GRAPH_DEFINITION_OBJECT_MAGIC;
+        header->verify_state.store(
+            static_cast<uint32_t>(GraphDefinitionVerifyState::UPLOADED), std::memory_order_relaxed
+        );
+        header->definition_bytes =
+            retained_definition_bytes == 0 ? static_cast<uint32_t>(definition.size()) : retained_definition_bytes;
+        header->content_hash = def->content_hash;
+        header->full_key = def->full_key;
+        std::memcpy(
+            static_cast<uint8_t *>(data_) + sizeof(GraphDefinitionHeader), definition.data(), definition.size()
+        );
+    }
+
+    ~TestDefinitionObject() { ::operator delete(data_, std::align_val_t(alignof(GraphDefinitionHeader))); }
+
+    uint64_t address() const { return reinterpret_cast<uint64_t>(data_); }
+    uint64_t hash() const { return static_cast<GraphDefinitionHeader *>(data_)->content_hash; }
+    GraphDefinitionVerifyState verify_state() const {
+        return static_cast<GraphDefinitionVerifyState>(
+            static_cast<GraphDefinitionHeader *>(data_)->verify_state.load(std::memory_order_acquire)
+        );
+    }
+
+private:
+    void *data_{nullptr};
+};
+
 class AlignedStorage {
 public:
-    explicit AlignedStorage(size_t bytes) :
+    explicit AlignedStorage(size_t bytes, uint8_t fill = 0) :
         bytes_(bytes) {
         data_ = ::operator new(bytes, std::align_val_t(alignof(GraphNodeStorage)));
-        std::memset(data_, 0, bytes);
+        std::memset(data_, fill, bytes);
     }
 
     ~AlignedStorage() { ::operator delete(data_, std::align_val_t(alignof(GraphNodeStorage))); }
 
     void *data() const { return data_; }
+    uint8_t *bytes() const { return static_cast<uint8_t *>(data_); }
     size_t size() const { return bytes_; }
 
 private:
     void *data_{nullptr};
     size_t bytes_{0};
+};
+
+// One outer GRAPH task's heap allocation, laid out as graph_submit_definition
+// sizes it: required_heap bytes of node outputs followed by the execution
+// storage. `fill` stands in for whatever the reclaimed heap last held.
+class OuterHeap {
+public:
+    OuterHeap(const std::vector<std::byte> &definition_image, uint8_t fill = 0) {
+        const auto *definition = reinterpret_cast<const GraphDefinition *>(definition_image.data());
+        heap_bytes_ = static_cast<size_t>(definition->required_heap);
+        storage_ = std::make_unique<AlignedStorage>(heap_bytes_ + definition->execution_storage_bytes, fill);
+    }
+
+    uint8_t *base() const { return storage_->bytes(); }
+    uint8_t *end() const { return storage_->bytes() + storage_->size(); }
+    // Where localize places the GraphExecution.
+    void *execution() const { return storage_->bytes() + heap_bytes_; }
+
+private:
+    size_t heap_bytes_{0};
+    std::unique_ptr<AlignedStorage> storage_;
 };
 
 }  // namespace
@@ -222,59 +276,45 @@ TEST(GraphScalarProvenance, MutableAccessInvalidatesForwardedSource) {
 
 TEST(GraphExecutionStorage, ComputesAlignedExactSize) {
     constexpr int32_t NODE_COUNT = 7;
-    constexpr size_t DEFINITION_BYTES = 321;
-    constexpr uint32_t TENSOR_PATCH_COUNT = 11;
-    constexpr uint32_t SCALAR_PATCH_COUNT = 5;
     size_t nodes_offset = 0;
-    size_t tensor_patches_offset = 0;
-    size_t scalar_patches_offset = 0;
-    size_t definition_offset = 0;
     size_t storage_bytes = 0;
 
-    ASSERT_TRUE(graph_execution_storage_layout(
-        NODE_COUNT, TENSOR_PATCH_COUNT, SCALAR_PATCH_COUNT, DEFINITION_BYTES, &nodes_offset, &tensor_patches_offset,
-        &scalar_patches_offset, &definition_offset, &storage_bytes
-    ));
+    ASSERT_TRUE(graph_execution_storage_layout(NODE_COUNT, &nodes_offset, &storage_bytes));
     EXPECT_EQ(nodes_offset % alignof(GraphNodeStorage), 0U);
-    EXPECT_EQ(tensor_patches_offset % alignof(GraphTensorAddressPatch), 0U);
-    EXPECT_EQ(scalar_patches_offset % alignof(GraphScalarPatch), 0U);
-    EXPECT_EQ(definition_offset % alignof(GraphDefinition), 0U);
-    EXPECT_GE(tensor_patches_offset, nodes_offset + NODE_COUNT * sizeof(GraphNodeStorage));
-    EXPECT_GE(scalar_patches_offset, tensor_patches_offset + TENSOR_PATCH_COUNT * sizeof(GraphTensorAddressPatch));
-    EXPECT_GE(definition_offset, scalar_patches_offset + SCALAR_PATCH_COUNT * sizeof(GraphScalarPatch));
-    EXPECT_GE(storage_bytes, definition_offset + DEFINITION_BYTES);
-    EXPECT_EQ(storage_bytes % alignof(GraphNodeStorage), 0U);
+    EXPECT_GE(nodes_offset, sizeof(GraphExecution));
+    EXPECT_EQ(storage_bytes, nodes_offset + NODE_COUNT * sizeof(GraphNodeStorage));
 }
 
-TEST(GraphExecutionStorage, RejectsInvalidCapacity) {
+TEST(GraphExecutionStorage, RejectsInvalidNodeCount) {
     size_t storage_bytes = 0;
 
-    EXPECT_FALSE(graph_execution_storage_bytes(0, 0, 0, sizeof(GraphDefinition), &storage_bytes));
-    EXPECT_FALSE(graph_execution_storage_bytes(1, 0, 0, SIZE_MAX, &storage_bytes));
+    EXPECT_FALSE(graph_execution_storage_bytes(0, &storage_bytes));
+    EXPECT_FALSE(graph_execution_storage_bytes(-1, &storage_bytes));
+    EXPECT_FALSE(graph_execution_storage_bytes(static_cast<int32_t>(GRAPH_MAX_NODES) + 1, &storage_bytes));
 }
 
-TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
+// A resubmission gets the same heap block back, so the bytes it starts from are
+// the previous execution's. Every field must come from the Definition or this
+// submission's boundary, never from what the block last held.
+TEST(GraphExecutionReplay, ResubmissionRebuildsFromDefinition) {
     constexpr uint64_t GRAPH_KEY_VALUE = 0x1234;
-    std::array<uint8_t, 128> first_heap{};
-    std::array<uint8_t, 128> second_heap{};
     std::array<uint8_t, 64> first_boundary{};
     std::array<uint8_t, 64> second_boundary{};
 
     const std::vector<std::byte> definition =
         make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(first_boundary.data()));
-    size_t execution_bytes = 0;
-    ASSERT_TRUE(graph_execution_storage_bytes(2, 2, 2, definition.size(), &execution_bytes));
-    AlignedStorage execution_storage(execution_bytes);
-    std::vector<std::byte> submission_image = make_test_submission(
-        GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(first_boundary.data()), 17,
-        reinterpret_cast<uint64_t>(execution_storage.data()), execution_storage.size()
-    );
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition, 0xAA);
+    std::vector<std::byte> submission_image =
+        make_test_submission(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(first_boundary.data()), 17);
     auto &submission = *reinterpret_cast<GraphSubmission *>(submission_image.data());
+    submission.definition_addr = definition_object.address();
+    submission.definition_hash = definition_object.hash();
 
     PTO2TaskDescriptor outer_task{};
     outer_task.task_id = PTO2TaskId::make(1, 7);
-    outer_task.packed_buffer_base = first_heap.data();
-    outer_task.packed_buffer_end = first_heap.data() + first_heap.size();
+    outer_task.packed_buffer_base = heap.base();
+    outer_task.packed_buffer_end = heap.end();
     PTO2TaskSlotState outer_slot{};
     outer_slot.task_kind = TaskKind::GRAPH;
     outer_slot.task = &outer_task;
@@ -282,6 +322,9 @@ TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
 
     GraphExecution *execution = graph_execution_localize(outer_slot);
     ASSERT_NE(execution, nullptr);
+    // Execution storage is the heap allocation's tail: anything lower would
+    // overlap the node outputs occupying the leading required_heap bytes.
+    EXPECT_EQ(static_cast<void *>(execution), heap.execution());
     EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
     GraphNodeStorage &node = execution->node_storage[0];
     ASSERT_EQ(node.payload.scalar_count, 1);
@@ -297,20 +340,13 @@ TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
     execution->retired_nodes.store(2, std::memory_order_release);
     submission.local_execution = 0;
     outer_task.task_id = PTO2TaskId::make(1, 8);
-    outer_task.packed_buffer_base = second_heap.data();
-    outer_task.packed_buffer_end = second_heap.data() + second_heap.size();
     auto *boundary = reinterpret_cast<GraphTensor *>(submission_image.data() + submission.tensors_offset);
     boundary->buffer_addr = reinterpret_cast<uint64_t>(second_boundary.data());
     auto *boundary_scalar = reinterpret_cast<uint64_t *>(submission_image.data() + submission.scalars_offset);
     *boundary_scalar = 99;
 
-    execution = graph_execution_localize(outer_slot);
-    ASSERT_NE(execution, nullptr);
-    ASSERT_TRUE(execution->definition_affine_reuse);
-
-    // Write probes make an otherwise same-valued store observable. An affine
-    // replay must not touch these static fields; only the tensor address and
-    // per-run descriptor/scheduling state below are dynamic.
+    // Poison every field the rebuild is responsible for restoring. A replay that
+    // preserved any of them would leave the poison observable.
     node.task.kernel_id[0] = 314;
     node.slot.active_mask = ActiveMask(3);
     node.payload.scalars[0] = 2718;
@@ -319,47 +355,57 @@ TEST(GraphExecutionReplay, AffineHitRefreshesOnlyDynamicFields) {
     node.slot.completed_subtasks.store(1, std::memory_order_relaxed);
     node.payload.dispatch_fanin.store(1, std::memory_order_relaxed);
 
+    execution = graph_execution_localize(outer_slot);
+    ASSERT_NE(execution, nullptr);
+    // Same block: it is this allocation's own tail, so the rebuild lands on the
+    // bytes the previous execution left behind.
+    EXPECT_EQ(static_cast<void *>(execution), heap.execution());
+
     EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
-    EXPECT_EQ(node.task.kernel_id[0], 314);
-    EXPECT_EQ(node.slot.active_mask.raw(), 3);
+    EXPECT_EQ(node.task.kernel_id[0], 42);
+    EXPECT_EQ(node.slot.active_mask.raw(), 1);
     EXPECT_EQ(node.payload.scalars[0], 99U);
-    EXPECT_EQ(execution->node_storage[1].payload.scalars[0], 31415U);
-    EXPECT_EQ(node.payload.tensors[0].version, 1618);
+    EXPECT_EQ(execution->node_storage[1].payload.scalars[0], 18U);
+    EXPECT_EQ(node.payload.tensors[0].version, 0);
     EXPECT_EQ(node.task.task_id, PTO2TaskId::make(1, (8U << 10U)));
-    EXPECT_EQ(node.task.packed_buffer_base, second_heap.data());
+    EXPECT_EQ(node.task.packed_buffer_base, heap.base());
     EXPECT_EQ(node.payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(second_boundary.data()));
-    EXPECT_EQ(
-        execution->node_storage[1].payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(second_heap.data() + 16)
-    );
+    EXPECT_EQ(execution->node_storage[1].payload.tensors[0].buffer.addr, reinterpret_cast<uint64_t>(heap.base() + 16));
     EXPECT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
     EXPECT_EQ(node.payload.dump_metadata.dump_arg_mask, uint64_t{1} << 0);
-
-    graph_execution_mark_completed(*execution);
-    execution->retired_nodes.store(2, std::memory_order_release);
-    submission.local_execution = 0;
-    execution = graph_execution_localize(outer_slot);
-    ASSERT_NE(execution, nullptr);
-    ASSERT_TRUE(execution->definition_affine_reuse);
-    execution->materialized_tensor_patch_count = 1;
-
-    EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::INVALID);
-    EXPECT_EQ(execution->materialized_tensor_patches, 1U);
 }
 
-TEST(GraphSubmissionWire, RejectsDefinitionBeyondSubmission) {
-    constexpr uint64_t GRAPH_KEY_VALUE = 0x3456;
-    std::vector<std::byte> image = make_test_submission(GRAPH_KEY_VALUE, 0x1000, 17, 0x2000, 4096);
-    auto &submission = *reinterpret_cast<GraphSubmission *>(image.data());
-    auto *definition = reinterpret_cast<GraphDefinition *>(image.data() + submission.definition_offset);
-    definition->total_bytes = submission.total_bytes - submission.definition_offset + 1;
+TEST(GraphDefinitionObject, RejectsDefinitionBeyondRetainedBytes) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x4567;
+    std::array<uint8_t, 64> boundary{};
+    const std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()));
+    ASSERT_GT(definition.size(), sizeof(GraphDefinition));
+    const TestDefinitionObject definition_object(definition, sizeof(GraphDefinition));
+    OuterHeap heap(definition);
+    std::vector<std::byte> submission_image =
+        make_test_submission(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), 17);
+    auto &submission = *reinterpret_cast<GraphSubmission *>(submission_image.data());
+    submission.definition_addr = definition_object.address();
+    submission.definition_hash = definition_object.hash();
 
-    EXPECT_EQ(graph_submission_definition(submission), nullptr);
+    PTO2TaskDescriptor outer_task{};
+    outer_task.task_id = PTO2TaskId::make(1, 7);
+    outer_task.packed_buffer_base = heap.base();
+    outer_task.packed_buffer_end = heap.end();
+    PTO2TaskSlotState outer_slot{};
+    outer_slot.task_kind = TaskKind::GRAPH;
+    outer_slot.task = &outer_task;
+    outer_slot.graph_context = &submission;
+
+    EXPECT_EQ(graph_execution_localize(outer_slot), nullptr);
+    EXPECT_EQ(definition_object.verify_state(), GraphDefinitionVerifyState::INVALID);
 }
 
 TEST(GraphSubmissionWire, RequiresExactAvailableSize) {
     constexpr uint64_t GRAPH_KEY_VALUE = 0x4567;
-    std::vector<std::byte> image = make_test_submission(GRAPH_KEY_VALUE, 0x1000, 17, 0x2000, 4096);
+    std::vector<std::byte> image = make_test_submission(GRAPH_KEY_VALUE, 0x1000, 17);
     const auto &submission = *reinterpret_cast<const GraphSubmission *>(image.data());
 
     EXPECT_TRUE(graph_submission_wire_size_valid(submission, image.size()));
@@ -484,4 +530,57 @@ TEST(GraphExecutionProgress, InternalNodeResolutionIsNotAHostCompletion) {
     EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
     EXPECT_EQ(result.resolved, 1);
     EXPECT_EQ(result.completed, 0);
+}
+
+// Device-side execution storage is not guaranteed to be zero-initialized.
+// localize + materialize must produce a fully valid execution from arbitrary
+// initial bytes.
+TEST(GraphExecutionMaterialize, DirtyStorageYieldsValidExecution) {
+    constexpr uint64_t GRAPH_KEY_VALUE = 0x9753;
+    std::array<uint8_t, 64> boundary{};
+
+    const std::vector<std::byte> definition =
+        make_test_definition(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()));
+    const TestDefinitionObject definition_object(definition);
+    OuterHeap heap(definition, 0xAA);
+    std::vector<std::byte> submission_image =
+        make_test_submission(GRAPH_KEY_VALUE, reinterpret_cast<uint64_t>(boundary.data()), 17);
+    auto &submission = *reinterpret_cast<GraphSubmission *>(submission_image.data());
+    submission.definition_addr = definition_object.address();
+    submission.definition_hash = definition_object.hash();
+
+    PTO2TaskDescriptor outer_task{};
+    outer_task.task_id = PTO2TaskId::make(1, 5);
+    outer_task.packed_buffer_base = heap.base();
+    outer_task.packed_buffer_end = heap.end();
+    PTO2TaskSlotState outer_slot{};
+    outer_slot.task_kind = TaskKind::GRAPH;
+    outer_slot.task = &outer_task;
+    outer_slot.graph_context = &submission;
+
+    GraphExecution *execution = graph_execution_localize(outer_slot);
+    ASSERT_NE(execution, nullptr);
+    EXPECT_EQ(static_cast<void *>(execution), heap.execution());
+    EXPECT_EQ(graph_execution_materialize_slice(outer_slot, *execution, 2), GraphMaterializeResult::PREPARED);
+
+    // Every observable scheduling field must be a materialize-written value,
+    // not the 0xAA fill: state machine, counters and atomics all start from
+    // values only the device side wrote.
+    for (int32_t i = 0; i < execution->node_count; ++i) {
+        const GraphNodeStorage &node = execution->node_storage[i];
+        ASSERT_EQ(node.slot.task_state.load(std::memory_order_relaxed), PTO2_TASK_PENDING);
+        ASSERT_EQ(node.slot.task_kind, TaskKind::GRAPH_NODE);
+        ASSERT_EQ(node.slot.completed_subtasks.load(std::memory_order_relaxed), 0);
+        ASSERT_EQ(node.payload.dispatch_fanin.load(std::memory_order_relaxed), 0);
+        ASSERT_EQ(node.payload.tensor_count, 1);
+        ASSERT_EQ(node.payload.scalar_count, 1);
+        // A tensor address of 0xAAAAAAAAAAAAAAAA would mean the fill leaked
+        // through into a field the scheduler later dereferences.
+        ASSERT_NE(node.payload.tensors[0].buffer.addr, 0xAAAAAAAAAAAAAAAAULL);
+        // make_test_definition assigns node i the heap offset 64*i, so the
+        // packed window starts at outer_base + 64*i, not at outer_base.
+        ASSERT_EQ(node.task.packed_buffer_base, static_cast<void *>(heap.base() + static_cast<size_t>(i) * 64));
+    }
+    EXPECT_EQ(execution->materialized_nodes, execution->node_count);
+    EXPECT_EQ(execution->consumed_tensor_args, 2U);
 }

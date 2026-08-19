@@ -303,6 +303,17 @@ public:
      */
     void replay_function_bin_addr(int func_id, uint64_t addr);
 
+    /**
+     * Drop every func_id -> CoreCallable address mapping.
+     *
+     * Each mapping points into one callable's retained ChipCallable buffer,
+     * which unregistering that callable frees. `bind_callable_to_runtime` calls
+     * this before replaying the active callable's addresses so no entry outlives
+     * the buffer it points into: the scheduler dereferences these addresses and
+     * the AICore calls what it finds there.
+     */
+    void clear_function_bin_addrs();
+
     // =========================================================================
     // Deprecated API (for platform compatibility, always returns 0/nullptr)
     // Task graph is now managed by PTO2Runtime, not Runtime

@@ -396,7 +396,10 @@ void SchedulerContext::dispatch_shape(
 
             if (!cores.has_value()) {
                 flush_publish();
-                disp_queues[static_cast<int32_t>(shape)].push_batch(&batch[bi], got - bi);
+                // These came off this queue and no other owner holds them, so a
+                // drop would lose them: retry until the space they vacated is
+                // free again.
+                while (!disp_queues[static_cast<int32_t>(shape)].push_batch(&batch[bi], got - bi)) {}
                 break;
             }
 
@@ -715,7 +718,15 @@ SchedulerContext::early_dispatch_shape(int32_t thread_idx, PTO2ResourceShape sha
         }
         int32_t freecores = bucket.has_value() ? bucket.count() : 0;
         if (freecores == 0) {  // no cores for this shape+phase — give this + the unprocessed rest back
-            sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi);
+            // A dropped candidate keeps its STAGING claim and is recovered by the
+            // producer release: try_early_dispatch_release rings whatever is staged
+            // and routes the unstaged remainder to the ready queue, because it
+            // returns on next_block_idx rather than on the claim state.
+            if (!sched_->early_dispatch_queues[s].push_batch_tagged(&batch[bi], &task_id_snapshots[bi], got - bi))
+                LOG_DEBUG(
+                    "[EARLY_DISPATCH] queue full on batch re-push, dropping %d candidate(s) to normal dispatch",
+                    got - bi
+                );
             break;
         }
         int32_t start = 0;
@@ -1270,6 +1281,13 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         (void)try_pushed;
 #endif
 
+        // One servicer is sufficient because request bits stay latched until
+        // acknowledged. Drain mode can delay thread 0, but its completion
+        // depends on worker-core release rather than orchestrator reclamation.
+        if (thread_idx == 0 && made_progress && sched_->drain_publication_requests()) {
+            last_progress_ts = get_sys_cnt_aicpu();
+        }
+
         if (made_progress) {
             idle_iterations = 0;
             last_progress_ts = get_sys_cnt_aicpu();
@@ -1301,7 +1319,8 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
             // still set means no retry has acquired advance_lock and cleared
             // the request yet. If the bit clears and the watermark remains
             // pinned, the stall is outside this deferred-advance path.
-            bool advanced_reclaim = sched_->drain_pending_ring_advances();
+            bool advanced_reclaim = thread_idx == 0 && sched_->drain_publication_requests();
+            advanced_reclaim = sched_->drain_pending_ring_advances() || advanced_reclaim;
             if (advanced_reclaim) {
                 idle_iterations = 0;
                 last_progress_ts = get_sys_cnt_aicpu();

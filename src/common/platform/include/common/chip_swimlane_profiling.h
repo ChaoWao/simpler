@@ -613,6 +613,124 @@ struct ChipSwimlaneAicpuOrchPhaseRecord {
 };
 static_assert(sizeof(ChipSwimlaneAicpuOrchPhaseRecord) == 32, "ChipSwimlaneAicpuOrchPhaseRecord layout drift");
 
+/**
+ * Host phase record (32 bytes).
+ *
+ * One record per timed host operation on host_build_graph's prepare path —
+ * both the bind stage's segments and the host orchestrator's submit-level
+ * operations, distinguished by `kind`. Timestamps are host monotonic
+ * nanoseconds, the clock the `[STRACE]` host spans use, so records and spans
+ * read against each other with no alignment step.
+ *
+ * `payload` is kind-discriminated: a task id for the kinds that submit a task
+ * (see host_phase_kind_submits_task), otherwise a per-kind detail count such as
+ * a byte or node count. Readers must consult `kind` before interpreting it.
+ */
+struct HostPhaseRecord {
+    uint64_t start_ns;
+    uint64_t end_ns;
+    uint64_t payload;
+    uint32_t kind;   // HostPhaseKind
+    uint32_t index;  // submit_idx for orchestrator operations, 0 for bind segments
+};
+static_assert(sizeof(HostPhaseRecord) == 32, "HostPhaseRecord layout drift");
+
+/**
+ * What one HostPhaseRecord measured.
+ *
+ * The bind kinds partition the bind stage: their durations sum to the
+ * `chip.run.bind` span. The orchestrator kinds are nested inside BindHostOrch
+ * and do not partition it — some are sub-operations of others.
+ */
+enum class HostPhaseKind : uint32_t {
+    BindArgs = 0,
+    BindArenaBuild,
+    BindStaticArena,
+    BindGmHeap,
+    BindSharedMem,
+    BindRuntimeInit,
+    BindHostOrch,
+    BindGraphUpload,
+    BindRelocate,
+    BindSmH2d,
+    BindArenaH2d,
+    BindHostViewClose,
+    OrchSubmitTask,
+    OrchAllocTensors,
+    OrchRecordNode,
+    OrchGraphSubmit,
+    OrchBuildDefinition,
+    Count
+};
+
+constexpr uint32_t kHostPhaseKindCount = static_cast<uint32_t>(HostPhaseKind::Count);
+
+/**
+ * Whether this kind ends with a task submitted to the runtime, i.e. whether its
+ * record's `payload` is a task id and whether it counts towards the pass's
+ * total_tasks. The three that do are what a per-submit consumer sees; the rest
+ * are sub-operations of a submit, or bind work with no task at all.
+ */
+inline bool host_phase_kind_submits_task(HostPhaseKind kind) {
+    return kind == HostPhaseKind::OrchSubmitTask || kind == HostPhaseKind::OrchAllocTensors ||
+           kind == HostPhaseKind::OrchGraphSubmit;
+}
+
+/**
+ * Whether this kind is a host-to-device transfer, i.e. host work that has to
+ * finish before the device can start on what it produced.
+ *
+ * These are the bind segments a device timeline can say something about: drawn
+ * beside the device lanes they show the handover, where the rest of the bind
+ * stage is host-only setup with no device counterpart.
+ */
+inline bool host_phase_kind_is_device_upload(HostPhaseKind kind) {
+    return kind == HostPhaseKind::BindGraphUpload || kind == HostPhaseKind::BindSmH2d ||
+           kind == HostPhaseKind::BindArenaH2d;
+}
+
+inline const char *host_phase_kind_name(HostPhaseKind kind) {
+    switch (kind) {
+    case HostPhaseKind::BindArgs:
+        return "args";
+    case HostPhaseKind::BindArenaBuild:
+        return "arena_build";
+    case HostPhaseKind::BindStaticArena:
+        return "static_arena";
+    case HostPhaseKind::BindGmHeap:
+        return "gm_heap";
+    case HostPhaseKind::BindSharedMem:
+        return "shared_mem";
+    case HostPhaseKind::BindRuntimeInit:
+        return "runtime_init";
+    case HostPhaseKind::BindHostOrch:
+        return "host_orch";
+    case HostPhaseKind::BindGraphUpload:
+        return "graph_upload";
+    case HostPhaseKind::BindRelocate:
+        return "relocate";
+    case HostPhaseKind::BindSmH2d:
+        return "sm_h2d";
+    case HostPhaseKind::BindArenaH2d:
+        return "arena_h2d";
+    case HostPhaseKind::BindHostViewClose:
+        return "host_view_close";
+    case HostPhaseKind::OrchSubmitTask:
+        return "submit_task";
+    case HostPhaseKind::OrchAllocTensors:
+        return "alloc_tensors";
+    case HostPhaseKind::OrchRecordNode:
+        return "record_node";
+    case HostPhaseKind::OrchGraphSubmit:
+        return "graph_submit";
+    case HostPhaseKind::OrchBuildDefinition:
+        return "build_definition";
+    case HostPhaseKind::Count:
+        break;
+    }
+    return "unknown";
+}
+
 constexpr int PLATFORM_PHASE_RECORDS_PER_THREAD = 16384;  // ~512KB per sched thread, ~512KB per orch thread
 
 // Fixed-size phase record buffers. Same TypedBuffer template as the task
@@ -627,6 +745,15 @@ using ChipSwimlaneAicpuOrchPhaseBuffer =
 // identical. Aliasing keeps the drain machinery polymorphic.
 using ChipSwimlaneAicpuSchedPhasePool = ChipSwimlaneAicpuTaskPool;
 using ChipSwimlaneAicpuOrchPhasePool = ChipSwimlaneAicpuTaskPool;
+
+// The host phase pool is the same head + free_queue plumbing over host DDR
+// instead of device shared memory: one producer rotates through a fixed set of
+// fixed-size buffers, and a reader walks them in rotation order. Its buffers are
+// smaller and fewer than a device thread's because its producer emits hundreds
+// of records per pass rather than tens of thousands (see
+// PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER).
+using HostPhaseRecordBuffer = TypedBuffer<HostPhaseRecord, PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER>;
+using HostPhaseRecordPool = ChipSwimlaneAicpuTaskPool;
 
 // =============================================================================
 // Helper Functions - Memory Layout

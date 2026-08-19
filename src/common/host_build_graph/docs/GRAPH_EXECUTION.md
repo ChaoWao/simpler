@@ -237,39 +237,27 @@ For a cache hit, the Host Orchestrator:
 
 1. validates the fixed boundary contract;
 2. reserves one task-window slot;
-3. reserves one heap block large enough for every internal intermediate;
+3. reserves one heap block large enough for every internal intermediate, plus
+   the Definition's `execution_storage_bytes` for the execution the device
+   materializes into;
 4. computes only external fanin and boundary tensormap effects;
 5. emits one outer `GRAPH` task;
-6. stages the exact-size POD submission image for upload after orchestration;
-7. asks the host runtime for an aligned execution block sized from the recorded
-   node count, Tensor-address and scalar patch capacities, and Definition
-   bytes, then writes that device address into the submission wire image.
+6. stages the exact-size POD submission image for upload after orchestration.
 
 Internal nodes consume no ring task-window slots. Their descriptor, payload,
-and slot state are built in host-owned GM. The runtime retains one grow-only
-block per `(pipeline slot, Graph key, occurrence index)`: repeated runs on the
-same slot reuse the allocation, repeated uses of one key within a run receive
-distinct blocks, and the two pipeline slots never share an active block. Every
-allocation goes through the Worker's tracked `MemoryAllocator`, contributes to
-`committed_device_memory()`, and is released when the Worker is finalized.
+and slot state live in the tail of the outer `GRAPH` task's own heap block,
+past `required_heap`: one `PTO2TaskAllocator::alloc` covers both halves the
+task owns, so the storage is reclaimed with the task's packed outputs and
+needs no separate device allocation, retention keying or release path.
 
-The `GraphSubmission` wire POD carries the aligned device address and usable
-byte capacity explicitly. The Scheduler validates both before placement-
-constructing `GraphExecution`; it never allocates execution storage from the
-AICPU process heap. A block whose prior Definition key and content hash match
-retains the local Definition, static node fields, and the Tensor-address and
-scalar patch tables generated during its first materialization. That
-graph-affine replay skips
-topology binding, per-node count/offset validation, tensor-source
-classification, tensor wire validation, static field stores, and static scalar
-copies. It refreshes only task IDs, packed-buffer bases, boundary/internal
-tensor addresses, boundary scalar bindings, scheduling state, dispatch
-atomics, and wake registrations.
-
-The retained blocks are addressed directly by `(pipeline slot, Graph key,
-occurrence index)`. Occurrence numbering restarts deterministically for every
-run, so repeated layers map back to the same block in their pipeline slot;
-affinity does not depend on a recycler selecting a recently freed block.
+The execution address is therefore not on the wire — both sides compute
+`packed_buffer_base + required_heap` and read the size from the Definition. The
+Scheduler validates that the region lies inside the outer task's allocation and
+then placement-constructs `GraphExecution` there; it never allocates execution
+storage from the AICPU process heap, and it never reads the block's prior
+contents. Every submission materializes from the Definition, so a resubmission
+of the same Graph rebuilds rather than replaying the previous expansion: the
+bytes it starts from are whatever that heap region last held.
 
 ## Scheduler flow
 
@@ -307,9 +295,9 @@ Internal dependency readiness borrows the completion-state polling idea, but
 dependency wiring remains an Orchestrator responsibility:
 
 - recording constructs both fanin and fanout CSR in the immutable Definition;
-- first materialization builds static runnable node state plus compact Tensor
-  address and scalar patch tables; affine replay applies those tables and
-  resets only dynamic runnable state;
+- materialization builds each node's runnable state from the Definition,
+  resolving its Tensor addresses against the boundary image and its producers'
+  packed windows;
 - materialization registers each non-root on one producer selected from its
   saved fanin CSR;
 - a node's release/acquire `task_state` is its Graph-local completion flag, so

@@ -24,6 +24,13 @@ the wrong device and fails with ``halMemCtl rc=42`` in
 onboard chip bring-up, so *any* scene test launched under the variable covers
 all of those call sites. ``dummy_task`` is the cheapest one.
 
+Allocating a comm domain crosses a second, independent device-id layer that chip
+init never reaches, so it gets its own case: ``aclrtMemAccessDesc::location.id``
+is consumed in the driver-visible space even though ``aclrtMemSetAccess`` is an
+ACL entry point, and a logical id there fails with 507899. Its sibling
+``aclrtPhysicalMemProp::location.id`` is logical, so the two must not be treated
+alike — see ``common/acl_hal_device.h``.
+
 The scene test runs in a subprocess: the variable has to be set before the
 process performing ACL init starts, and mutating it in-process would leak into
 the pooled workers the rest of the session shares.
@@ -46,8 +53,29 @@ _DUMMY_TASK = {
     "a5": _ST_ROOT / "a5" / RUNTIME / "dummy_task" / "test_dummy_task.py",
 }
 
+# A comm domain maps device memory, which is a second device-id layer the chip-init path never
+# reaches: `aclrtMemAccessDesc::location.id` is consumed in the driver-visible space, so a logical id
+# there fails with 507899 on every card pair except an identity mapping. Both ranks take part, so
+# this one runs on all the granted cards rather than a single logical id.
+_COMM_DOMAIN = _ST_ROOT / "worker" / "comm_domain" / "async_notify" / "test_async_notify.py"
+
 # The subprocess re-runs a full scene test (build cache hit + one chip bring-up).
 _TIMEOUT_S = 600
+
+
+def _remapped_visible(st_device_ids):
+    """Return the granted cards as an ascending list, skipping if they map to themselves.
+
+    The list must be ascending: CANN rejects any other order outright
+    (`Runtime::GetVisibleDevices`, RT_ALL_ORDER_ERROR), which voids the whole mapping and makes even
+    rtSetDevice fail with 107001. Position i is logical id i, so a card whose id differs from its
+    position is what makes a translation observable — under an identity grant both id spaces hold
+    the same number and the test would pass without proving anything.
+    """
+    visible = sorted(int(d) for d in st_device_ids)
+    if all(card == i for i, card in enumerate(visible)):
+        pytest.skip(f"granted cards {visible} map to themselves; no remap to verify")
+    return visible
 
 
 @pytest.mark.platforms(["a2a3", "a5"])
@@ -58,18 +86,8 @@ def test_chip_init_under_visible_devices(st_platform, st_device_ids):
     scene_test = _DUMMY_TASK[st_platform]
     assert scene_test.is_file(), f"missing scene test: {scene_test}"
 
-    # The list must be ascending: CANN rejects any other order outright
-    # (`Runtime::GetVisibleDevices`, RT_ALL_ORDER_ERROR), which voids the whole
-    # mapping and makes even rtSetDevice fail with 107001.
-    visible = sorted(int(d) for d in st_device_ids)
-
-    # Position i in the list is logical id i, so a card whose id differs from
-    # its position is what makes the translation observable. Addressing one
-    # where they coincide would pass under the identity mapping this test
-    # exists to reject.
-    logical = next((i for i, card in enumerate(visible) if card != i), None)
-    if logical is None:
-        pytest.skip(f"granted cards {visible} map to themselves; no remap to verify")
+    visible = _remapped_visible(st_device_ids)
+    logical = next(i for i, card in enumerate(visible) if card != i)
     expected = visible[logical]
 
     env = {**os.environ, "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(d) for d in visible)}
@@ -87,4 +105,35 @@ def test_chip_init_under_visible_devices(st_platform, st_device_ids):
     assert proc.returncode == 0, (
         f"dummy_task failed under ASCEND_RT_VISIBLE_DEVICES={env['ASCEND_RT_VISIBLE_DEVICES']} "
         f"(logical {logical} -> driver-visible {expected}), rc={proc.returncode}"
+    )
+
+
+@pytest.mark.platforms(["a2a3", "a5"])
+@pytest.mark.device_count(2)
+@pytest.mark.runtime(RUNTIME)
+def test_comm_domain_under_visible_devices(st_platform, st_device_ids):
+    """A comm domain allocates and maps its windows when the cards are renumbered."""
+    assert _COMM_DOMAIN.is_file(), f"missing scene test: {_COMM_DOMAIN}"
+
+    visible = _remapped_visible(st_device_ids)
+    # Every rank participates, and under isolation the ranks are logical 0..N-1 whatever the
+    # granted cards are.
+    logical = ",".join(str(i) for i in range(len(visible)))
+
+    env = {**os.environ, "ASCEND_RT_VISIBLE_DEVICES": ",".join(str(d) for d in visible)}
+    proc = subprocess.run(
+        [sys.executable, str(_COMM_DOMAIN), "-p", st_platform, "-d", logical],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=_TIMEOUT_S,
+        check=False,
+    )
+    if proc.returncode != 0:
+        print(proc.stdout, file=sys.stderr)
+    assert proc.returncode == 0, (
+        f"comm_domain/async_notify failed under "
+        f"ASCEND_RT_VISIBLE_DEVICES={env['ASCEND_RT_VISIBLE_DEVICES']} "
+        f"(logical {logical} -> driver-visible {visible}), rc={proc.returncode}"
     )

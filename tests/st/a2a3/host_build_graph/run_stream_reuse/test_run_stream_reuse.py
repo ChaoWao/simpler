@@ -7,19 +7,20 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A2A3 gives every run a freshly created AICore stream.
+"""A2A3 reuses one AICore stream between code publications.
 
-A2A3 submits each run's AICore and AICPU kernels on the stream set of the
-selected pipeline slot rather than on the persistent bootstrap pair. The AICPU
-stream carries no instruction-cache state and belongs to the slot for the
-worker's lifetime. The AICore stream belongs to one run: the platform offers no
-instruction-cache invalidation for code replaced at a reused GM address, and
-creating the stream is the only operation known to leave a core free of the
-previous image's instructions — selecting an already-existing stream is not, so
-reuse cannot be made safe by tracking which image a stream last ran.
+A2A3 submits every run's AICore and AICPU kernels on its own run stream pair
+rather than on the persistent bootstrap pair. One pair carries all runs: the
+execution claim is exclusive, so runs reach the device one at a time and the
+stream orders them. A pipeline slot indexes the resources preparation mutates,
+and preparing a run writes nothing to a stream.
 
-`Worker.run_stream_set_create_count` counts those creations, so it advances once
-per run.
+The AICPU stream carries no instruction-cache state. The AICore stream stays
+reusable until a new AICore code buffer is uploaded, which marks it stale; the
+next launch then replaces it.
+
+`Worker.run_stream_set_create_count` counts AICore stream creations, so runs
+plateau after the first launch until another code publication.
 """
 
 import itertools
@@ -69,7 +70,7 @@ class _SubtractCallable(SceneTestCase):
 
 @scene_test(level=2, runtime="host_build_graph")
 class TestRunStreamReuseHbg(SceneTestCase):
-    """Each run gets its own AICore stream; its pipeline slot owns the rest."""
+    """One run stream pair serves every slot until a code publication."""
 
     RTOL = 1e-5
     ATOL = 1e-5
@@ -119,25 +120,58 @@ class TestRunStreamReuseHbg(SceneTestCase):
             TensorArg("f", torch.zeros(size, dtype=torch.float32)),
         )
 
-    def compute_golden(self, args, params):
+    def compute_golden(self, args, params, *, subtract=False):
         a, b = args.a, args.b
-        args.f[:] = (a + b + 1) * (a + b + 2)
+        base = a - b if subtract else a + b
+        args.f[:] = (base + 1) * (base + 2)
 
-    def test_every_run_creates_its_own_aicore_stream(self, st_platform, st_worker):
-        """N runs create N AICore streams, and every result is right."""
+    def test_repeated_runs_without_publication_reuse_aicore_stream(self, st_platform, st_worker):
+        """Repeated runs preserve a warm stream while no code is published."""
         if st_platform != "a2a3":
             pytest.skip("run stream sets are an a2a3 onboard resource")
 
-        callable_obj = self.build_callable(st_platform)
-        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=1)
-        after_first = st_worker.run_stream_set_create_count
-        rounds = _REPEATED_RUNS - 1
-        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=rounds)
+        handle = st_worker.register(self.build_callable(st_platform))
+        try:
+            self._run_registered(st_worker, handle, subtract=False)
+            after_first = st_worker.run_stream_set_create_count
+            for _ in range(_REPEATED_RUNS - 1):
+                self._run_registered(st_worker, handle, subtract=False)
+            assert st_worker.run_stream_set_create_count == after_first, (
+                f"runs without code publication recreated their AICore stream: "
+                f"{after_first} -> {st_worker.run_stream_set_create_count}"
+            )
+        finally:
+            st_worker.unregister(handle)
 
-        assert st_worker.run_stream_set_create_count == after_first + rounds, (
-            f"{rounds} runs did not each create an AICore stream: "
-            f"{after_first} -> {st_worker.run_stream_set_create_count}"
-        )
+    def test_deduplicated_registration_does_not_invalidate_stream(self, st_platform, st_worker):
+        """A content-hash dedup hit does not publish code or stale a stream."""
+        if st_platform != "a2a3":
+            pytest.skip("AICore code publication is an a2a3 onboard resource")
+
+        chip_callable = self.build_callable(st_platform)
+        first_handle = st_worker.register(chip_callable)
+        duplicate_handle = None
+        try:
+            self._run_registered_with_lease(
+                st_worker,
+                first_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            warmed = st_worker.run_stream_set_create_count
+
+            duplicate_handle = st_worker.register(chip_callable)
+            self._run_registered_with_lease(
+                st_worker,
+                duplicate_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            assert st_worker.run_stream_set_create_count == warmed
+        finally:
+            if duplicate_handle is not None:
+                st_worker.unregister(duplicate_handle)
+            st_worker.unregister(first_handle)
 
     def _run_registered(self, worker, handle, *, subtract):
         params = self.CASES[0]["params"]
@@ -146,9 +180,7 @@ class TestRunStreamReuseHbg(SceneTestCase):
         # the direct chip API's shape, used by the lease path below.
         args, output_names = _build_l2_ref_args(test_args, self.CALLABLE["orchestration"]["signature"], worker)
         golden_args = test_args.clone()
-        a, b = golden_args.a, golden_args.b
-        base = a - b if subtract else a + b
-        golden_args.f[:] = (base + 1) * (base + 2)
+        self.compute_golden(golden_args, params, subtract=subtract)
         worker.run(handle, args, config=self._build_config(self.CASES[0]["config"]))
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
@@ -161,11 +193,11 @@ class TestRunStreamReuseHbg(SceneTestCase):
     def _next_generation(cls):
         return next(cls._generation_counter)
 
-    def _run_registered_with_lease(self, worker, handle, *, slot_id, generation):
+    def _run_registered_with_lease(self, worker, handle, *, slot_id, generation, subtract=False):
         params = self.CASES[0]["params"]
         test_args = self.generate_args(params)
         golden_args = test_args.clone()
-        self.compute_golden(golden_args, params)
+        self.compute_golden(golden_args, params, subtract=subtract)
         chip_args, output_names = _build_chip_task_args(test_args, self.CALLABLE["orchestration"]["signature"])
         state = worker._resolve_handle(handle)
         worker._chip_worker._run_slot_with_pipeline_lease(
@@ -177,8 +209,8 @@ class TestRunStreamReuseHbg(SceneTestCase):
         )
         _compare_outputs(test_args, golden_args, output_names, self.RTOL, self.ATOL)
 
-    def test_alternating_code_images_never_execute_stale_instructions(self, st_platform, st_worker):
-        """A→B→A→B at one reused GM code address always runs the selected image.
+    def test_resident_code_images_reuse_one_stream(self, st_platform, st_worker):
+        """A->B->A->B reuses one slot stream when no code is published.
 
         Each result is compared against the golden for the image that run asked
         for, so an AICore that executed the previous image's instructions shows
@@ -190,17 +222,107 @@ class TestRunStreamReuseHbg(SceneTestCase):
         add_handle = st_worker.register(self.build_callable(st_platform))
         sub_handle = st_worker.register(_SubtractCallable.compile_chip_callable(st_platform))
         try:
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            warmed = st_worker.run_stream_set_create_count
             for handle, subtract in (
-                (add_handle, False),
                 (sub_handle, True),
                 (add_handle, False),
                 (sub_handle, True),
             ):
-                before = st_worker.run_stream_set_create_count
-                self._run_registered(st_worker, handle, subtract=subtract)
-                assert st_worker.run_stream_set_create_count == before + 1
+                self._run_registered_with_lease(
+                    st_worker,
+                    handle,
+                    slot_id=0,
+                    generation=self._next_generation(),
+                    subtract=subtract,
+                )
+                assert st_worker.run_stream_set_create_count == warmed
         finally:
             st_worker.unregister(sub_handle)
+            st_worker.unregister(add_handle)
+
+    def test_depth_two_slots_reuse_one_pair_across_resident_images(self, st_platform, st_worker):
+        """Both slots submit on the one pair while resident images alternate."""
+        if st_platform != "a2a3":
+            pytest.skip("AICore code images are an a2a3 onboard resource")
+
+        add_handle = st_worker.register(self.build_callable(st_platform))
+        sub_handle = st_worker.register(_SubtractCallable.compile_chip_callable(st_platform))
+        try:
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            # The pair is warm after the first launch. A slot is an index into
+            # the resources preparation mutates, not into the stream set.
+            warmed = st_worker.run_stream_set_create_count
+            for slot_id, handle, subtract in (
+                (1, sub_handle, True),
+                (0, sub_handle, True),
+                (1, add_handle, False),
+                (0, add_handle, False),
+            ):
+                self._run_registered_with_lease(
+                    st_worker,
+                    handle,
+                    slot_id=slot_id,
+                    generation=self._next_generation(),
+                    subtract=subtract,
+                )
+                assert st_worker.run_stream_set_create_count == warmed
+        finally:
+            st_worker.unregister(sub_handle)
+            st_worker.unregister(add_handle)
+
+    def test_code_publication_invalidates_the_pair_across_reregistration(self, st_platform, st_worker):
+        """A->B->A uploads invalidate the pair a run on either slot warmed."""
+        if st_platform != "a2a3":
+            pytest.skip("AICore code publication is an a2a3 onboard resource")
+
+        add_callable = self.build_callable(st_platform)
+        add_handle = st_worker.register(add_callable)
+        try:
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+        finally:
+            st_worker.unregister(add_handle)
+
+        sub_handle = st_worker.register(_SubtractCallable.compile_chip_callable(st_platform))
+        try:
+            before_sub = st_worker.run_stream_set_create_count
+            self._run_registered_with_lease(
+                st_worker,
+                sub_handle,
+                slot_id=1,
+                generation=self._next_generation(),
+                subtract=True,
+            )
+            assert st_worker.run_stream_set_create_count == before_sub + 1
+        finally:
+            st_worker.unregister(sub_handle)
+
+        add_handle = st_worker.register(add_callable)
+        try:
+            before_add = st_worker.run_stream_set_create_count
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            assert st_worker.run_stream_set_create_count == before_add + 1
+        finally:
             st_worker.unregister(add_handle)
 
     def test_depth_two_slots_own_separate_resources(self, st_platform, st_worker):
@@ -225,8 +347,30 @@ class TestRunStreamReuseHbg(SceneTestCase):
 
         add_handle = st_worker.register(self.build_callable(st_platform))
         try:
-            self._run_registered(st_worker, add_handle, subtract=False)
+            stream_sets = st_worker.run_stream_set_create_count
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            after_slot0 = st_worker.run_stream_set_create_count
+            # Registering the callable published its code, so the first launch
+            # replaces the pair. Slot 1 then submits on that same pair: the
+            # stream set is not part of what a slot indexes.
+            expected_increment = 1 if st_platform == "a2a3" else 0
+            assert after_slot0 == stream_sets + expected_increment
             self._run_registered_with_lease(st_worker, add_handle, slot_id=1, generation=self._next_generation())
+            assert st_worker.run_stream_set_create_count == after_slot0
+
+            self._run_registered_with_lease(
+                st_worker,
+                add_handle,
+                slot_id=0,
+                generation=self._next_generation(),
+            )
+            self._run_registered_with_lease(st_worker, add_handle, slot_id=1, generation=self._next_generation())
+            assert st_worker.run_stream_set_create_count == after_slot0
 
             # hbg declares its GM heap HOST_PER_RUN, so a run on slot 1 must
             # commit a second device allocation rather than reuse slot 0's.
@@ -290,22 +434,26 @@ class TestRunStreamReuseHbg(SceneTestCase):
 
 
 @scene_test(level=2, runtime="tensormap_and_ringbuffer")
-class TestRunStreamFreshTmr(SceneTestCase):
-    """TMR preparation keeps the same fresh run-owned AICore stream rule."""
+class TestRunStreamReuseTmr(SceneTestCase):
+    """TMR preparation keeps the same publication-aware stream rule."""
 
     CALLABLE = TestRunStreamReuseHbg.CALLABLE
     CASES = TestRunStreamReuseHbg.CASES
 
     generate_args = TestRunStreamReuseHbg.generate_args
     compute_golden = TestRunStreamReuseHbg.compute_golden
+    _run_registered = TestRunStreamReuseHbg._run_registered
 
-    def test_every_run_creates_its_own_aicore_stream(self, st_platform, st_worker):
+    def test_repeated_runs_without_publication_reuse_aicore_stream(self, st_platform, st_worker):
         if st_platform != "a2a3":
             pytest.skip("run stream sets are an a2a3 onboard resource")
 
-        callable_obj = self.build_callable(st_platform)
-        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=1)
-        after_first = st_worker.run_stream_set_create_count
-        rounds = _REPEATED_RUNS - 1
-        self._run_and_validate_l2(st_worker, callable_obj, self.CASES[0], rounds=rounds)
-        assert st_worker.run_stream_set_create_count == after_first + rounds
+        handle = st_worker.register(self.build_callable(st_platform))
+        try:
+            self._run_registered(st_worker, handle, subtract=False)
+            after_first = st_worker.run_stream_set_create_count
+            for _ in range(_REPEATED_RUNS - 1):
+                self._run_registered(st_worker, handle, subtract=False)
+            assert st_worker.run_stream_set_create_count == after_first
+        finally:
+            st_worker.unregister(handle)

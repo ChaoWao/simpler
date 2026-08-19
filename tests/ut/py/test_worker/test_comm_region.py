@@ -14,16 +14,24 @@ from typing import Any, Optional, Union
 import pytest
 from simpler import comm_endpoints as ce
 from simpler.comm_region import (
+    CounterPart,
+    HostVmmCopyAccess,
     MaterializationContext,
     MaterializationError,
     MaterializationRefusal,
+    NotifyOp,
+    PayloadPart,
     RefusalReason,
+    RegionCounter,
+    RegionInstance,
     RegionInstanceState,
+    RegionPartSpan,
+    SignalTestResult,
+    WaitCmp,
     validate_single_owner_region_shape,
 )
 from simpler.orchestrator import _callback_frame_for, _callback_run
 from simpler.worker import Worker, _Lifecycle, _RunResources
-from simpler.worker_chip_orch_comm import NotifyOp, WaitCmp
 
 
 def _ready(worker: Worker) -> Worker:
@@ -125,6 +133,97 @@ def _manual_two_member_context(
         topology_plan=ce.SingleOwnerPlan(provider_endpoint=provider.identity),
     )
     return MaterializationContext(worker=worker, registry=registry, plan=plan, layout=layout)
+
+
+def test_payload_part_validates_before_issue_and_uses_byte_span():
+    access = _FakeAccess()
+    part = PayloadPart(RegionPartSpan(offset=16, nbytes=8), access)
+    payload = bytearray(b"abcdefgh")
+
+    part.write(4, payload, 4)
+
+    assert len(access.write_calls) == 1
+    span, offset, _host_ptr, nbytes = access.write_calls[0]
+    assert span == RegionPartSpan(offset=16, nbytes=8)
+    assert (offset, nbytes) == (4, 4)
+
+    with pytest.raises(ValueError, match="payload range"):
+        part.write(6, payload, 4)
+    assert len(access.write_calls) == 1
+
+
+def test_host_vmm_copy_access_passes_absolute_mapping_offsets(monkeypatch):
+    calls: list[tuple[str, int, int, int, int]] = []
+
+    monkeypatch.setattr(
+        "simpler.comm_region._host_vmm_copy_to",
+        lambda handle, offset, host_ptr, nbytes: calls.append(("write", handle, offset, host_ptr, nbytes)),
+    )
+    monkeypatch.setattr(
+        "simpler.comm_region._host_vmm_copy_from",
+        lambda handle, offset, host_ptr, nbytes: calls.append(("read", handle, offset, host_ptr, nbytes)),
+    )
+
+    access = HostVmmCopyAccess(handle=7)
+    span = RegionPartSpan(offset=64, nbytes=16)
+    access.write_bytes(span, 4, 1234, 8)
+    access.read_bytes(span, 8, 5678, 4)
+
+    assert calls == [("write", 7, 68, 1234, 8), ("read", 7, 72, 5678, 4)]
+
+
+def test_counter_part_owns_signal_semantics(monkeypatch):
+    access = _FakeAccess()
+    part = CounterPart(RegionPartSpan(offset=64, nbytes=16), access, handle=11)
+    calls: list[tuple[Any, ...]] = []
+
+    monkeypatch.setattr(
+        "simpler.comm_region._region_counter_notify",
+        lambda handle, offset, value, op: calls.append(("notify", handle, offset, value, op)),
+    )
+    monkeypatch.setattr(
+        "simpler.comm_region._region_counter_test",
+        lambda handle, offset, value, cmp: calls.append(("test", handle, offset, value, cmp)) or (False, 3),
+    )
+    monkeypatch.setattr(
+        "simpler.comm_region._region_counter_wait",
+        lambda handle, offset, value, cmp, timeout_ns: calls.append(("wait", handle, offset, value, cmp, timeout_ns))
+        or (0, 0, 9, True, ""),
+    )
+
+    counter = part.counter(4)
+    assert isinstance(counter, RegionCounter)
+    counter.notify(5, NotifyOp.Set)
+    result = counter.test(7, WaitCmp.GE)
+    observed = counter.wait(9, WaitCmp.EQ, 0.25)
+
+    assert result == SignalTestResult(matched=False, observed=3)
+    assert observed == 9
+    assert calls == [
+        ("notify", 11, 68, 5, int(NotifyOp.Set)),
+        ("test", 11, 68, 7, int(WaitCmp.GE)),
+        ("wait", 11, 68, 9, int(WaitCmp.EQ), 250_000_000),
+    ]
+
+    with pytest.raises(ValueError, match="counter offset"):
+        part.counter(2)
+    with pytest.raises(ValueError, match="positive timeout"):
+        counter.wait(1, WaitCmp.EQ, 0)
+
+
+class _FakeAccess:
+    def __init__(self) -> None:
+        self.write_calls: list[tuple[RegionPartSpan, int, int, int]] = []
+        self.read_calls: list[tuple[RegionPartSpan, int, int, int]] = []
+        self.fail_write = False
+
+    def write_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
+        self.write_calls.append((span, int(offset), int(host_ptr), int(nbytes)))
+        if self.fail_write:
+            raise RuntimeError("issued write failed")
+
+    def read_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
+        self.read_calls.append((span, int(offset), int(host_ptr), int(nbytes)))
 
 
 def test_shape_validation_accepts_l3_host_to_local_l2_aicpu_copy_plan():
@@ -368,6 +467,15 @@ class _FakeRegion:
         self._expired = True
 
 
+class _FakeMapping:
+    def __init__(self) -> None:
+        self.handle = 33
+        self.payload_offset = 0
+        self.payload_bytes = 64
+        self.counter_offset = 64
+        self.counter_bytes = 128
+
+
 class _FakeNativeWorker:
     def __init__(self, calls: list[tuple], *, fail_release: bool = False) -> None:
         self._calls = calls
@@ -434,6 +542,61 @@ def test_worker_materializes_region_instance_and_closes_single_region(region_wor
         ("free",),
         ("expire",),
     ]
+
+
+def test_region_instance_constructs_separate_w4_part_slots_and_routes_access(region_worker, monkeypatch):
+    worker, _calls, fake_region = region_worker()
+    fake_region._worker_host_mapping = _FakeMapping()
+    instance = _materialize_default_region(worker)
+    routed: list[tuple[Any, ...]] = []
+
+    def payload_write(self, offset, host_buffer, nbytes=None):
+        routed.append(("payload_write", self.span, offset, host_buffer, nbytes))
+
+    def payload_read(self, offset, host_buffer, nbytes=None):
+        routed.append(("payload_read", self.span, offset, host_buffer, nbytes))
+
+    def counter(self, offset):
+        routed.append(("counter", self.span, offset))
+        return "w4-counter"
+
+    monkeypatch.setattr(PayloadPart, "write", payload_write)
+    monkeypatch.setattr(PayloadPart, "read", payload_read)
+    monkeypatch.setattr(CounterPart, "counter", counter)
+
+    assert instance._payload_part is not instance._counter_part
+    with worker._control_reservation("test_region_instance"):
+        instance.payload_write(4, "src", nbytes=8)
+        instance.payload_read(12, "dst")
+        assert instance.counter(16) == "w4-counter"
+
+    assert routed == [
+        ("payload_write", RegionPartSpan(offset=0, nbytes=64), 4, "src", 8),
+        ("payload_read", RegionPartSpan(offset=0, nbytes=64), 12, "dst", None),
+        ("counter", RegionPartSpan(offset=64, nbytes=128), 16),
+    ]
+
+
+def test_region_instance_rejects_access_construction_from_non_host_vmm_copy_attachment():
+    ctx = _accepted_context()
+    shape = validate_single_owner_region_shape(ctx)
+    consumer = shape.consumer.identity
+    payload_by_member = _attachments(ctx.plan.payload)
+    payload_by_member[consumer] = dataclasses.replace(
+        payload_by_member[consumer],
+        adapter_kind=ce.AdapterKind.DIRECT_MAP,
+        adapter_profile=ce.AdapterProfile.HOST_SHM_MAP,
+    )
+    bad_payload = dataclasses.replace(ctx.plan.payload, attachments=tuple(payload_by_member.values()))
+    bad_ctx = dataclasses.replace(ctx, plan=dataclasses.replace(ctx.plan, payload=bad_payload))
+    fake_region = _FakeRegion([])
+    fake_region._worker_host_mapping = _FakeMapping()
+
+    instance = RegionInstance.planned(bad_ctx, shape)
+    with pytest.raises(MaterializationRefusal) as excinfo:
+        instance._adopt_worker_chip_region(fake_region)
+
+    assert excinfo.value.reason is RefusalReason.UNSUPPORTED_ATTACHMENT
 
 
 def test_live_region_instance_rollback_reuses_single_region_cleanup(region_worker):

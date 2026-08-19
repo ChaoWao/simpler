@@ -126,7 +126,6 @@ class RuntimeBinaries:
     host_path: Path
     aicpu_path: Path
     aicore_path: Path
-    simpler_log_path: Path
     sim_context_path: Optional[Path] = None
     dispatcher_path: Optional[Path] = None
 
@@ -284,14 +283,6 @@ class RuntimeBuilder:
                 "Run 'pip install --no-build-isolation .' to compile it."
             )
 
-        # Validate libsimpler_log.so exists (built once per arch/variant).
-        simpler_log_path = self._resolve_simpler_log_path()
-        if not simpler_log_path.is_file():
-            raise FileNotFoundError(
-                f"Pre-built libsimpler_log.so not found at {simpler_log_path}.\n"
-                "Run 'pip install --no-build-isolation .' to compile it."
-            )
-
         # Resolve and validate libsimpler_aicpu_dispatcher.so for onboard
         # platforms. runtime_compiler stages one copy per arch into
         # <LIB_DIR>/<arch>/dispatcher/ (shared across all runtimes); sim
@@ -307,7 +298,6 @@ class RuntimeBuilder:
             host_path=paths["host"],
             aicpu_path=paths["aicpu"],
             aicore_path=paths["aicore"],
-            simpler_log_path=simpler_log_path,
             sim_context_path=sim_context_path,
             dispatcher_path=dispatcher_path,
         )
@@ -413,10 +403,6 @@ class RuntimeBuilder:
 
         logger.info("Compiling AICore, AICPU, Host in parallel...")
 
-        # libsimpler_log.so must finish before the host runtime is built —
-        # the host CMake links against it via -lsimpler_log -L<output_dir>.
-        simpler_log_path = self.ensure_simpler_log(build=build_shared)
-
         with ThreadPoolExecutor(max_workers=4) as executor:
             fut_host = executor.submit(_compile_target, "host")
             fut_aicpu = executor.submit(_compile_target, "aicpu")
@@ -450,7 +436,6 @@ class RuntimeBuilder:
             host_path=host_path,
             aicpu_path=aicpu_path,
             aicore_path=aicore_path,
-            simpler_log_path=simpler_log_path,
             sim_context_path=sim_context_path,
             dispatcher_path=dispatcher_path,
         )
@@ -471,46 +456,13 @@ class RuntimeBuilder:
     def _resolve_sim_context_path(self) -> Optional[Path]:
         """Return path to libcpu_sim_context.so for sim platforms, None for onboard.
 
-        Like libsimpler_log.so, the library is process-global — its source has
-        no arch-specific code, so one shared copy per host toolchain is enough.
+        The library is process-global and has no arch-specific code, so one
+        shared copy per host toolchain is enough.
         Lives at build/lib/libcpu_sim_context.so.
         """
         if self._variant != "sim":
             return None
         return self._LIB_DIR / "libcpu_sim_context.so"
-
-    def _resolve_simpler_log_path(self) -> Path:
-        """Return path to libsimpler_log.so.
-
-        Process-global, not arch- or variant-specific — the source is plain
-        C++ with no platform conditionals, so one shared copy per host
-        toolchain is sufficient. Lives at build/lib/libsimpler_log.so.
-        """
-        return self._LIB_DIR / "libsimpler_log.so"
-
-    def ensure_simpler_log(self, build: bool = False) -> Path:
-        """Build or locate the process-global libsimpler_log.so."""
-        output_dir = self._LIB_DIR
-        so_path = output_dir / "libsimpler_log.so"
-
-        if not build and so_path.is_file():
-            return so_path
-        if not build:
-            raise FileNotFoundError(
-                f"Pre-built libsimpler_log.so not found at {so_path}.\n"
-                "Run 'pip install --no-build-isolation .' to compile it."
-            )
-
-        cache_dir = self._CACHE_DIR
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = cache_dir / ".simpler_log.lock"
-        with open(lock_path, "w") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            result = self._runtime_compiler.compile_simpler_log(
-                build_dir=str(cache_dir),
-                output_dir=output_dir,
-            )
-            return Path(result)  # type: ignore[arg-type]
 
     def ensure_sim_context(self, build: bool = False) -> Optional[Path]:
         """Build or locate the process-global cpu_sim_context SO (sim only)."""

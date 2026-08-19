@@ -374,16 +374,14 @@ void SimDeviceRunnerBase::set_retained_temp_buffer(uint32_t pipeline_slot, void 
     retained_temp_sizes_[pipeline_slot] = size;
 }
 
-void *SimDeviceRunnerBase::acquire_graph_execution_buffer(
-    uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
+void *SimDeviceRunnerBase::acquire_graph_definition_buffer(
+    uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
 ) {
-    if (pipeline_slot >= graph_execution_buffers_.size() || bytes == 0 || alignment == 0 ||
+    if (pipeline_slot >= graph_definition_buffers_.size() || bytes == 0 || alignment == 0 ||
         (alignment & (alignment - 1)) != 0 || bytes > SIZE_MAX - (alignment - 1)) {
         return nullptr;
     }
-    std::vector<RetainedGraphExecutionBuffer> &buffers = graph_execution_buffers_[pipeline_slot][graph_key];
-    if (occurrence >= buffers.size()) buffers.resize(static_cast<size_t>(occurrence) + 1);
-    RetainedGraphExecutionBuffer &buffer = buffers[occurrence];
+    RetainedGraphBuffer &buffer = graph_definition_buffers_[pipeline_slot][key];
     if (buffer.aligned_addr != nullptr && buffer.capacity >= bytes &&
         reinterpret_cast<uintptr_t>(buffer.aligned_addr) % alignment == 0) {
         return buffer.aligned_addr;
@@ -406,16 +404,14 @@ void *SimDeviceRunnerBase::acquire_graph_execution_buffer(
         mem_alloc_.free(allocation);
         return nullptr;
     }
-    buffer = RetainedGraphExecutionBuffer{allocation, aligned_addr, bytes};
+    buffer = RetainedGraphBuffer{allocation, aligned_addr, bytes};
     return aligned_addr;
 }
 
-void SimDeviceRunnerBase::release_graph_execution_buffers() {
-    for (GraphExecutionBufferMap &by_key : graph_execution_buffers_) {
+void SimDeviceRunnerBase::release_graph_definition_buffers() {
+    for (GraphDefinitionBufferMap &by_key : graph_definition_buffers_) {
         for (auto &entry : by_key) {
-            for (RetainedGraphExecutionBuffer &buffer : entry.second) {
-                if (buffer.allocation != nullptr) mem_alloc_.free(buffer.allocation);
-            }
+            if (entry.second.allocation != nullptr) mem_alloc_.free(entry.second.allocation);
         }
         by_key.clear();
     }
@@ -673,6 +669,78 @@ void SimDeviceRunnerBase::apply_call_config(const CallConfig &config) {
     set_dep_gen_enabled(config.enable_dep_gen != 0);
     set_scope_stats_enabled(config.enable_scope_stats != 0);
     set_output_prefix(config.output_prefix);
+}
+
+HostPhaseRecordPool *SimDeviceRunnerBase::host_phase_pool_arm(bool producer_wants_records) noexcept {
+    if (clock_correlation_provider_ != nullptr) {
+        clock_correlation_provider_->release(false);
+        clock_correlation_provider_.reset();
+    }
+    const bool swimlane_wants_records = chip_swimlane_level_ == ChipSwimlaneLevel::ORCH_PHASES;
+    chip_swimlane_collector_.set_host_orchestrated(swimlane_wants_records);
+    // arm() allocates the pool's buffers, so it can throw; this path is noexcept,
+    // where an escaping exception is std::terminate. A pass that cannot get its
+    // storage collects no records and says so by handing back nullptr.
+    HostPhaseRecordPool *pool = nullptr;
+    try {
+        pool = host_phase_records_.arm(producer_wants_records || swimlane_wants_records);
+    } catch (...) {
+        LOG_WARN("Host phase pool could not be armed; this pass collects no per-event records");
+    }
+    if (!swimlane_wants_records) return pool;
+
+    // Only the chip-swimlane reader places these records against device
+    // timestamps, so only it needs the two clocks anchored.
+    try {
+        clock_correlation_provider_ = simpler::dfx::make_clock_correlation_provider();
+        chip_swimlane_collector_.begin_clock_correlation_session(
+            clock_correlation_provider_->name(), clock_correlation_provider_->raw_device_timestamp_unit()
+        );
+        chip_swimlane_collector_.record_clock_anchor_samples(
+            simpler::dfx::capture_clock_anchor_group(
+                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin
+            )
+        );
+    } catch (...) {
+        clock_correlation_provider_.reset();
+        try {
+            chip_swimlane_collector_.begin_clock_correlation_session("unavailable", "unknown");
+        } catch (...) {
+            // begin() stores diagnostic strings and can still fail under
+            // allocation pressure. Keep this noexcept path fail-closed.
+            chip_swimlane_collector_.finish_clock_correlation_session();
+        }
+    }
+    return pool;
+}
+
+void SimDeviceRunnerBase::publish_host_phase_records_to_swimlane() {
+    if (!host_phase_records_.finished()) return;
+    chip_swimlane_collector_.set_host_phase_records(
+        host_phase_records_.submit_records(), host_phase_records_.device_upload_records(),
+        host_phase_records_.submitted_tasks(), host_phase_records_.total_records(),
+        host_phase_records_.dropped_records()
+    );
+}
+
+void SimDeviceRunnerBase::finish_clock_correlation_session(bool capture_device_complete) noexcept {
+    if (!chip_swimlane_collector_.clock_correlation_active()) {
+        if (clock_correlation_provider_ != nullptr) clock_correlation_provider_->release(false);
+        clock_correlation_provider_.reset();
+        return;
+    }
+    if (capture_device_complete && clock_correlation_provider_ != nullptr) {
+        try {
+            chip_swimlane_collector_.record_clock_anchor_samples(
+                simpler::dfx::capture_clock_anchor_group(
+                    *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::DeviceExecutionComplete
+                )
+            );
+        } catch (...) {}
+    }
+    chip_swimlane_collector_.finish_clock_correlation_session();
+    if (clock_correlation_provider_ != nullptr) clock_correlation_provider_->release(false);
+    clock_correlation_provider_.reset();
 }
 
 uint64_t SimDeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *callable) {

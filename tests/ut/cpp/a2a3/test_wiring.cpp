@@ -406,6 +406,102 @@ TEST_F(WiringTest, EarlyDispatchWaitsForAllProducerBlocksPublished) {
     EXPECT_EQ(payload.dispatch_fanin.load(), payload.fanin_actual_count);
 }
 
+TEST_F(WiringTest, BatchPushReportsFullInsteadOfSpinning) {
+    alignas(64) PTO2TaskSlotState filler;
+    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
+    for (uint64_t i = 0; i < queue.capacity; i++) {
+        ASSERT_TRUE(queue.push_tagged(&filler, i));
+    }
+
+    PTO2TaskSlotState *items[1] = {&filler};
+    uint64_t tags[1] = {queue.capacity};
+    // A full queue must end the call, not spin waiting for a consumer. Reaching
+    // the next line at all is the assertion.
+    EXPECT_FALSE(queue.push_batch_tagged(items, tags, 1));
+    EXPECT_EQ(queue.size(), queue.capacity);
+
+    // A batch larger than the queue can never be satisfied and must not spin.
+    EXPECT_FALSE(queue.push_batch_tagged(items, tags, static_cast<int>(queue.capacity) + 1));
+}
+
+TEST_F(WiringTest, BatchPushSucceedsAfterSpaceIsReclaimed) {
+    alignas(64) PTO2TaskSlotState filler;
+    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(filler.active_mask.to_shape())];
+    for (uint64_t i = 0; i < queue.capacity; i++) {
+        ASSERT_TRUE(queue.push_tagged(&filler, i));
+    }
+    ASSERT_NE(queue.pop(), nullptr);
+    ASSERT_NE(queue.pop(), nullptr);
+
+    PTO2TaskSlotState *items[2] = {&filler, &filler};
+    uint64_t tags[2] = {7, 8};
+    EXPECT_TRUE(queue.push_batch_tagged(items, tags, 2));
+    EXPECT_EQ(queue.size(), queue.capacity);
+}
+
+TEST_F(WiringTest, EarlyDispatchQueueOverflowRollsBackStagingClaim) {
+    alignas(64) PTO2TaskSlotState filler, consumer;
+    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    init_slot(consumer, PTO2_TASK_PENDING, 0, 1);
+
+    auto shape = static_cast<int32_t>(consumer.active_mask.to_shape());
+    auto &queue = sched.early_dispatch_queues[shape];
+    for (uint64_t i = 0; i < queue.capacity; i++) {
+        ASSERT_TRUE(queue.push_tagged(&filler, i));
+    }
+
+    sched.try_enqueue_early_dispatch_candidate(consumer);
+
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    EXPECT_EQ(queue.size(), queue.capacity);
+}
+
+TEST_F(WiringTest, EarlyDispatchQueueOverflowFallsBackToNormalDispatch) {
+    alignas(64) PTO2TaskSlotState filler, consumer;
+    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
+
+    PTO2ResourceShape shape = consumer.active_mask.to_shape();
+    auto &queue = sched.early_dispatch_queues[static_cast<int32_t>(shape)];
+    for (uint64_t i = 0; i < queue.capacity; i++) {
+        ASSERT_TRUE(queue.push_tagged(&filler, i));
+    }
+
+    sched.try_enqueue_early_dispatch_candidate(consumer);
+    ASSERT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+
+    // The overflowed candidate carries no early-dispatch claim, so the producer
+    // release routes every block through the ordinary ready queue.
+    EXPECT_TRUE(sched.route_ready_once(consumer));
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_DISPATCHED);
+    EXPECT_EQ(sched.ready_queues[static_cast<int32_t>(shape)].pop(), &consumer);
+}
+
+TEST_F(WiringTest, EarlyDispatchSyncStartQueueOverflowFallsBackToSyncReadyQueue) {
+    alignas(64) PTO2TaskSlotState filler, consumer;
+    init_slot(filler, PTO2_TASK_PENDING, 0, 1);
+    init_slot(consumer, PTO2_TASK_PENDING, 1, 1);
+    consumer.task_attrs.set_sync_start();
+    ASSERT_TRUE(consumer.task_attrs.requires_sync_start());
+
+    auto &queue = sched.early_sync_start_queue;
+    for (uint64_t i = 0; i < queue.capacity; i++) {
+        ASSERT_TRUE(queue.push_tagged(&filler, i));
+    }
+
+    sched.try_enqueue_early_dispatch_candidate(consumer);
+    EXPECT_EQ(consumer.payload->early_dispatch_state.load(), PTO2_EARLY_DISPATCH_NONE);
+    EXPECT_EQ(queue.size(), queue.capacity);
+
+    // A sync_start cohort that never reached its drain falls back to the
+    // shape's sync ready queue, not the plain one.
+    PTO2ResourceShape shape = consumer.active_mask.to_shape();
+    EXPECT_TRUE(sched.route_ready_once(consumer));
+    EXPECT_EQ(sched.ready_sync_queues[static_cast<int32_t>(shape)].pop(), &consumer);
+}
+
 TEST_F(WiringTest, LateWiredFullyPublishedProducerStillSeedsEarlyDispatch) {
     alignas(64) PTO2TaskSlotState producer, consumer;
     alignas(64) PTO2TaskPayload consumer_payload;

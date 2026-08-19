@@ -176,8 +176,6 @@ public:
 
 private:
     // Kernel binary tracking for cleanup
-    int registered_kernel_func_ids_[RUNTIME_MAX_FUNC_ID];
-    int registered_kernel_count_;
 
     void *gm_sm_ptr_;                        // GM pointer to PTO2 shared memory (device)
     void *gm_heap_ptr_;                      // GM heap for orchestrator output buffers (device)
@@ -268,18 +266,23 @@ public:
     void set_device_orch_config_name(const char *name);
 
     uint64_t get_function_bin_addr(int func_id) const;
-    void set_function_bin_addr(int func_id, uint64_t addr);
     /**
-     * Replay a previously-uploaded kernel address onto a fresh Runtime
-     * without recording it in registered_kernel_func_ids_. Used by
-     * DeviceRunner::bind_callable_to_runtime so prepared kernel
-     * binaries are not freed by validate_runtime_impl across runs.
+     * Map a func_id onto the device address of its CoreCallable. Used by
+     * DeviceRunner::bind_callable_to_runtime for each of the active callable's
+     * child kernels, after clear_function_bin_addrs() has emptied the table.
      */
     void replay_function_bin_addr(int func_id, uint64_t addr);
 
-    int get_registered_kernel_count() const;
-    int get_registered_kernel_func_id(int index) const;
-    void clear_registered_kernels();
+    /**
+     * Drop every func_id -> CoreCallable address mapping.
+     *
+     * Each mapping points into one callable's retained ChipCallable buffer,
+     * which unregistering that callable frees. `bind_callable_to_runtime` calls
+     * this before replaying the active callable's addresses so no entry outlives
+     * the buffer it points into: the scheduler dereferences these addresses and
+     * the AICore calls what it finds there.
+     */
+    void clear_function_bin_addrs();
 
     // =========================================================================
     // Deprecated API (for platform compatibility, always returns 0/nullptr)

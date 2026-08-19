@@ -290,14 +290,28 @@ that window needs the admission layer to gate dispatch on `pool.owns(lease)`
 before handing work down, which is whole-run admission's job, not this
 layer's.
 
-AICore streams are outside that lease. The instruction cache belongs to the
-cores, every slot publishes its image to the same GM code address, and the
-platform offers no cache invalidation for code replaced there. Creating a
-stream is the only operation known to leave a core free of the previous image's
-instructions; selecting an already-existing one is not. So each run creates its
-own AICore stream and retires it on every exit path, and no record of which
-image a stream last ran is load-bearing. The AICPU stream carries no such state
-and stays with its slot.
+Run streams are outside that lease, and there is one pair of them per runner
+rather than one per slot. A slot indexes the resources *preparation* mutates,
+and preparing a run writes nothing to a stream: only launch submits, and launch
+holds the exclusive execution claim, so runs reach the device one at a time and
+the stream orders them. The two streams stay distinct because the AICPU Run
+kernel spins in the handshake waiting for the AICore workers — one queue would
+leave the AICore submission behind a spin that never ends.
+
+The AICore stream carries instruction-cache state. Registered callables keep
+content-hash deduplicated GM allocations: simultaneously resident code images
+occupy different allocations, while unregister frees an allocation that a later
+registration may reuse. A dedup miss is the only repeatable path that publishes
+new AICore instruction bytes; after that H2D copy succeeds the pair is marked
+stale, and the next launch destroys the AICore stream and creates a replacement.
+(The `kernel_entry` ELF that `rtRegisterAllKernel` publishes needs no such mark:
+CANN offers no unregister, so it is registered once per runner and released with
+the streams at finalize.) Without a new publication the pair stays warm even
+when two resident callables alternate. Unproven completion still destroys the
+AICore stream conservatively, and only the run that submitted the pair may
+retire it — a prepared successor overlaps its predecessor's execution and must
+leave the live pair alone. The AICPU stream carries no instruction cache state
+and lives for the runner.
 
 #### Whole-run FIFO admission
 

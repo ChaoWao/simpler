@@ -310,7 +310,7 @@ def run(
         # zip() truncates to the shorter side, which would leave a remote input
         # silently uninitialised if TENSOR_COUNT and this tuple ever disagree.
         # zip(strict=True) says the same thing in one word but needs 3.10, and
-        # the pod runners are on 3.9.
+        # the network1 runners are on 3.9.
         if len(remote_inputs) != TENSOR_COUNT:
             raise AssertionError(f"expected {TENSOR_COUNT} remote inputs, got {len(remote_inputs)}")
         for handle, array in zip(remote_handles, remote_inputs):
@@ -351,7 +351,7 @@ def run(
                 try:
                     worker.remote_free(handle)
                 except Exception as exc:  # noqa: BLE001
-                    # The pod job diagnoses this example from stdout alone, so a
+                    # The network1 job diagnoses this example from stdout alone, so a
                     # leaked peer buffer has to name itself here or leave no trace.
                     print(f"[vector-add-mixed-l3] remote_free failed: {exc}")
         # close() unlinks the owner Buffers, which fails while any view still aliases their shm.

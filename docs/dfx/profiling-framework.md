@@ -24,7 +24,7 @@ For everyday per-run timing (no collector, always on under `SIMPLER_HOST_STRACE`
 [l2-timing.md](l2-timing.md) covers host_wall / device_wall (`[STRACE]` markers) +
 device-log Orch/Sched/Total, and [host-trace.md](host-trace.md) +
 [device-phases.md](device-phases.md) cover the `[STRACE]` per-stage
-breakdown of `simpler_run` (host stages + AICPU phase subdivision).
+breakdown of `chip.run` (host stages + AICPU phase subdivision).
 
 ## 1. Why a shared framework
 

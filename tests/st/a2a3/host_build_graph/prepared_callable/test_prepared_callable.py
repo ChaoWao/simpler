@@ -90,6 +90,7 @@ class TestPreparedCallableHbg(SceneTestCase):
         {
             "name": "prepare_run_twice",
             "platforms": _PLATFORMS,
+            "manual": ["a2a3sim"],
             "params": {"a": 2.0, "b": 3.0},
         },
     ]

@@ -156,13 +156,13 @@ static void set_retained_temp_buffer(void *runner_ctx, uint32_t pipeline_slot, v
     } catch (...) {}
 }
 
-static void *acquire_graph_execution_buffer(
-    void *runner_ctx, uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
+static void *acquire_graph_definition_buffer(
+    void *runner_ctx, uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
 ) {
     if (runner_ctx == nullptr) return nullptr;
     try {
         return static_cast<DeviceRunnerBase *>(runner_ctx)
-            ->acquire_graph_execution_buffer(pipeline_slot, graph_key, occurrence, bytes, alignment);
+            ->acquire_graph_definition_buffer(pipeline_slot, key, bytes, alignment);
     } catch (...) {
         return nullptr;
     }
@@ -176,6 +176,21 @@ static uint64_t upload_chip_callable_buffer_wrapper(void *runner_ctx, const void
     } catch (...) {
         return 0;
     }
+}
+
+static uint32_t get_chip_swimlane_level(void *runner_ctx) {
+    if (runner_ctx == nullptr) return 0;
+    return static_cast<DeviceRunnerBase *>(runner_ctx)->chip_swimlane_level();
+}
+
+static void *host_phase_pool_arm(void *runner_ctx, int producer_wants_records) {
+    if (runner_ctx == nullptr) return nullptr;
+    return static_cast<DeviceRunnerBase *>(runner_ctx)->host_phase_pool_arm(producer_wants_records != 0);
+}
+
+static void host_phase_pool_finish(void *runner_ctx, uint64_t submitted_tasks, uint64_t invocation_id) {
+    if (runner_ctx == nullptr) return;
+    static_cast<DeviceRunnerBase *>(runner_ctx)->host_phase_pool_finish(submitted_tasks, invocation_id);
 }
 
 static int setup_static_arena_wrapper(
@@ -266,7 +281,7 @@ static const HostApiOps g_host_api_ops = {
     .device_memset = device_memset,
     .get_retained_temp_buffer = get_retained_temp_buffer,
     .set_retained_temp_buffer = set_retained_temp_buffer,
-    .acquire_graph_execution_buffer = acquire_graph_execution_buffer,
+    .acquire_graph_definition_buffer = acquire_graph_definition_buffer,
     .setup_static_arena = setup_static_arena_wrapper,
     .acquire_pooled_gm_heap = acquire_pooled_gm_heap_wrapper,
     .acquire_pooled_gm_sm = acquire_pooled_gm_sm_wrapper,
@@ -274,6 +289,9 @@ static const HostApiOps g_host_api_ops = {
     .lookup_prebuilt_runtime_arena_cache = lookup_prebuilt_runtime_arena_cache_wrapper,
     .mark_prebuilt_runtime_arena_cached = mark_prebuilt_runtime_arena_cached_wrapper,
     .upload_chip_callable_buffer = upload_chip_callable_buffer_wrapper,
+    .get_chip_swimlane_level = get_chip_swimlane_level,
+    .host_phase_pool_arm = host_phase_pool_arm,
+    .host_phase_pool_finish = host_phase_pool_finish,
 };
 
 /* ===========================================================================
@@ -358,9 +376,8 @@ int simpler_init(
     // (rtSetDevice inside attach_current_thread): CANN snapshots the
     // device-side log session's level at context-open time, so a later
     // dlog_setlevel is a no-op for the device side. HostLogger is already
-    // seeded here by libsimpler_log.so's simpler_log_init() (runs earlier in
-    // ChipWorker::init). Skipped when ASCEND_GLOBAL_LOG_LEVEL is externally
-    // configured — CANN keeps that.
+    // bound to the process-owned state by ChipWorker before this call. Skipped
+    // when ASCEND_GLOBAL_LOG_LEVEL is externally configured — CANN keeps that.
     HostLogger::get_instance().configure_cann_log_level(dlog_setlevel);
 
     int rc;
@@ -511,22 +528,22 @@ static void emit_device_phase_markers(DeviceRunnerBase *runner) {
     if (!device_phase_capture_enabled()) return;
     const uint64_t run_wall_ns = runner->last_device_phase_ns(AicpuPhase::RunWall);
     if (run_wall_ns != 0) {
-        STRACE_DEV_SPAN_AT("simpler_run.runner_run.device_wall", 0, static_cast<long long>(run_wall_ns), 2);
+        STRACE_DEV_SPAN_AT("chip.run.runner_run.device_wall", 0, static_cast<long long>(run_wall_ns), 2);
     }
     struct PhaseName {
         AicpuPhase phase;
         const char *name;
     };
     static const PhaseName kPhases[] = {
-        {AicpuPhase::Preamble, "simpler_run.runner_run.device_wall.preamble"},
-        {AicpuPhase::SoLoad, "simpler_run.runner_run.device_wall.so_load"},
-        {AicpuPhase::GraphBuild, "simpler_run.runner_run.device_wall.graph_build"},
-        {AicpuPhase::ConfigValidate, "simpler_run.runner_run.device_wall.config_validate"},
-        {AicpuPhase::ArenaWire, "simpler_run.runner_run.device_wall.arena_wire"},
-        {AicpuPhase::SmReset, "simpler_run.runner_run.device_wall.sm_reset"},
-        {AicpuPhase::PostOrch, "simpler_run.runner_run.device_wall.post_orch"},
-        {AicpuPhase::OrchWindow, "simpler_run.runner_run.device_wall.orch"},
-        {AicpuPhase::SchedWindow, "simpler_run.runner_run.device_wall.sched"},
+        {AicpuPhase::Preamble, "chip.run.runner_run.device_wall.preamble"},
+        {AicpuPhase::SoLoad, "chip.run.runner_run.device_wall.so_load"},
+        {AicpuPhase::GraphBuild, "chip.run.runner_run.device_wall.graph_build"},
+        {AicpuPhase::ConfigValidate, "chip.run.runner_run.device_wall.config_validate"},
+        {AicpuPhase::ArenaWire, "chip.run.runner_run.device_wall.arena_wire"},
+        {AicpuPhase::SmReset, "chip.run.runner_run.device_wall.sm_reset"},
+        {AicpuPhase::PostOrch, "chip.run.runner_run.device_wall.post_orch"},
+        {AicpuPhase::OrchWindow, "chip.run.runner_run.device_wall.orch"},
+        {AicpuPhase::SchedWindow, "chip.run.runner_run.device_wall.sched"},
     };
     // RunWall is emitted above as device_wall; every other phase is in the table.
     static_assert(
@@ -548,14 +565,14 @@ static void emit_device_phase_markers(DeviceRunnerBase *runner) {
     // intervals (e.g. finish(slot_1) - dispatch(slot_0)) stay recoverable.
     // Untagged / incomplete slots read back 0/0 and are skipped.
     static const char *const kTaskSlotNames[NUM_TASK_TIMING_SLOTS] = {
-        "simpler_run.runner_run.device_wall.task_slot_0",  "simpler_run.runner_run.device_wall.task_slot_1",
-        "simpler_run.runner_run.device_wall.task_slot_2",  "simpler_run.runner_run.device_wall.task_slot_3",
-        "simpler_run.runner_run.device_wall.task_slot_4",  "simpler_run.runner_run.device_wall.task_slot_5",
-        "simpler_run.runner_run.device_wall.task_slot_6",  "simpler_run.runner_run.device_wall.task_slot_7",
-        "simpler_run.runner_run.device_wall.task_slot_8",  "simpler_run.runner_run.device_wall.task_slot_9",
-        "simpler_run.runner_run.device_wall.task_slot_10", "simpler_run.runner_run.device_wall.task_slot_11",
-        "simpler_run.runner_run.device_wall.task_slot_12", "simpler_run.runner_run.device_wall.task_slot_13",
-        "simpler_run.runner_run.device_wall.task_slot_14", "simpler_run.runner_run.device_wall.task_slot_15",
+        "chip.run.runner_run.device_wall.task_slot_0",  "chip.run.runner_run.device_wall.task_slot_1",
+        "chip.run.runner_run.device_wall.task_slot_2",  "chip.run.runner_run.device_wall.task_slot_3",
+        "chip.run.runner_run.device_wall.task_slot_4",  "chip.run.runner_run.device_wall.task_slot_5",
+        "chip.run.runner_run.device_wall.task_slot_6",  "chip.run.runner_run.device_wall.task_slot_7",
+        "chip.run.runner_run.device_wall.task_slot_8",  "chip.run.runner_run.device_wall.task_slot_9",
+        "chip.run.runner_run.device_wall.task_slot_10", "chip.run.runner_run.device_wall.task_slot_11",
+        "chip.run.runner_run.device_wall.task_slot_12", "chip.run.runner_run.device_wall.task_slot_13",
+        "chip.run.runner_run.device_wall.task_slot_14", "chip.run.runner_run.device_wall.task_slot_15",
     };
     for (int s = 0; s < NUM_TASK_TIMING_SLOTS; ++s) {
         const uint64_t dispatch_ns = runner->last_task_slot_dispatch_ns(s);
@@ -590,16 +607,14 @@ static void
 emit_native_run_host_wall(uint64_t trace_inv, uint64_t trace_hid, long long trace_start_ns, const char *trace_attrs) {
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(trace_inv, trace_hid, 0);
-    STRACE_HOST_SPAN_AT_A("simpler_run", trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
+    STRACE_HOST_SPAN_AT_A("chip.run", trace_start_ns, end_ns - trace_start_ns, 0, trace_attrs);
 }
 
 static void emit_native_run_runner_wall(OnboardNativeRunContext *state) {
     if (state->runner_trace_start_ns == 0) return;
     const long long end_ns = STRACE_NOW_NS();
     STRACE_CONTEXT(state->trace_inv, state->trace_hid, 1);
-    STRACE_HOST_SPAN_AT(
-        "simpler_run.runner_run", state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1
-    );
+    STRACE_HOST_SPAN_AT("chip.run.runner_run", state->runner_trace_start_ns, end_ns - state->runner_trace_start_ns, 1);
     state->runner_trace_start_ns = 0;
 }
 
@@ -614,6 +629,7 @@ static int cleanup_failed_prepare(OnboardNativeRunContext *state, int execution_
     char trace_attrs[sizeof(state->trace_attrs)];
     std::memcpy(trace_attrs, state->trace_attrs, sizeof(trace_attrs));
     if (clear_gm_sm) state->runtime.set_gm_sm_ptr(nullptr);
+    state->runner->finish_clock_correlation_session(false, !state->runner->can_accept_run());
     int validation_rc = -1;
     try {
         validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, execution_rc);
@@ -696,10 +712,10 @@ int simpler_prepare_run(
         state = new (runtime) OnboardNativeRunContext(runner, *config, trace_hid, *descriptor, &g_host_api_ops);
         std::snprintf(
             state->trace_attrs, sizeof(state->trace_attrs),
-            "run_id=%llu slot=%u generation=%llu dispatch_id=%llu run_epoch=%llu",
-            static_cast<unsigned long long>(state->descriptor.run_id), state->descriptor.pipeline_slot,
+            "run_id=%llu dispatch_id=%llu slot_id=%u generation=%llu run_epoch=%llu",
+            static_cast<unsigned long long>(state->descriptor.run_id),
+            static_cast<unsigned long long>(state->descriptor.dispatch_id), state->descriptor.pipeline_slot,
             static_cast<unsigned long long>(state->descriptor.generation),
-            static_cast<unsigned long long>(state->descriptor.dispatch_id),
             static_cast<unsigned long long>(state->descriptor.run_epoch)
         );
         const bool allow_prepared_successor =
@@ -723,7 +739,7 @@ int simpler_prepare_run(
         if (overlaps_active_run) {
             int compatibility_rc = 0;
             {
-                STRACE("simpler_run.bind.compatibility");
+                STRACE("chip.run.bind.compatibility");
                 compatibility_rc = prepared_run_config_compatible_impl(
                     &state->host_api, config->runtime_env.ring_task_window, config->runtime_env.ring_heap,
                     config->runtime_env.ring_dep_pool
@@ -766,7 +782,7 @@ int simpler_prepare_run(
         if (!overlaps_active_run) runner->apply_call_config(state->config);
 
         {
-            STRACE("simpler_run.bind");
+            STRACE("chip.run.bind");
             rc = runner->bind_callable_to_runtime(
                 state->runtime, callable_id, &state->host_api, args, state->config.runtime_env.ring_task_window,
                 state->config.runtime_env.ring_heap, state->config.runtime_env.ring_dep_pool
@@ -932,7 +948,7 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         if (!launched) state->runtime.set_gm_sm_ptr(nullptr);
         if (attach_rc == 0) {
             {
-                STRACE("simpler_run.validate");
+                STRACE("chip.run.validate");
                 validation_rc = validate_runtime_impl(&state->runtime, &state->host_api, launched ? execution_rc : -1);
             }
             if (launched && execution_rc == 0) emit_device_phase_markers(state->runner);
@@ -961,7 +977,15 @@ int simpler_finalize_run(DeviceContextHandle ctx, RuntimeHandle runtime) {
         state->runner_resources_owned = false;
     }
 
+    // Correlation state is runner-wide. Finish it before releasing either
+    // ownership token, after which a successor may begin capture and replace
+    // the provider/session.
+    state->runner->finish_clock_correlation_session(false, !state->runner->can_accept_run());
     if (state->runner_claimed) {
+        // The point a successor's launch becomes admissible. Ordering a
+        // successor's device work against this boundary is what separates a
+        // pipelined launch from a reordered one, and no other span marks it.
+        STRACE("chip.run.claim_release");
         state->runner->release_native_run(state);
         state->runner_claimed = false;
     }

@@ -187,6 +187,8 @@ advance_ring_pointers(ring_id):  // protected by per-ring advance_lock
 
 Per-ring try-locks in the scheduler state prevent concurrent scheduler threads from interleaving heap_tail writes within the same ring. A scheduler thread that changes a ring head to `CONSUMED` but fails to acquire that ring's `advance_lock` records a coalesced request in `advance_pending_mask`. Scheduler no-progress iterations retry pending rings under the same lock; a busy lock leaves the bit set, and a successful retry clears the bit before rescanning.
 
+Orchestrator reclaim consumers that see no reclaim progress for 10 ms use the separate `publication_request_mask`. Scheduler thread 0 polls only this mask in productive and no-progress iterations, force-publishes the requested ring watermark, and sets `publication_ack_mask`. Scheduler lock-contention retries never acknowledge an orchestrator request. K=16 batching is enabled only after every reclaim consumer is wired to the current request/ack masks; otherwise each local advance is published.
+
 For ring-heap stall triage, a `CONSUMED` head whose ring bit remains set means the deferred request has not yet been cleared by a retry that acquired `advance_lock`. If the bit clears and `last_task_alive` is still pinned, the stall is not caused by this deferred advance path.
 
 ### 5.2 Cross-Ring Dependencies

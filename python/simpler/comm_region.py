@@ -10,11 +10,21 @@
 
 from __future__ import annotations
 
+import ctypes
 import itertools
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any
 
+from _task_interface import (  # pyright: ignore[reportMissingImports]
+    _host_vmm_copy_from,
+    _host_vmm_copy_to,
+    _region_counter_notify,
+    _region_counter_test,
+    _region_counter_wait,
+)
+
+from .buffer import AddressSpace, Buffer
 from .comm_endpoints import (
     DEVICE_AICPU,
     HOST_CPU,
@@ -34,6 +44,205 @@ from .comm_endpoints import (
 )
 
 _GENERATION_COUNTER = itertools.count(1)
+_MAX_SIGNED_CHRONO_TIMEOUT_NS = 2**63 - 1
+_WAIT_STATUS_TIMEOUT = -1
+_WAIT_ERROR_SIGNAL_TIMEOUT = 7
+
+
+class NotifyOp(IntEnum):
+    Set = 0
+    Add = 1
+
+
+class WaitCmp(IntEnum):
+    EQ = 0
+    NE = 1
+    GT = 2
+    GE = 3
+    LT = 4
+    LE = 5
+
+
+@dataclass(frozen=True)
+class SignalTestResult:
+    matched: bool
+    observed: int
+
+
+@dataclass(frozen=True)
+class RegionPartSpan:
+    offset: int
+    nbytes: int
+
+    def validate_range(self, offset: int, nbytes: int, label: str) -> None:
+        offset = int(offset)
+        nbytes = int(nbytes)
+        if offset < 0 or nbytes <= 0:
+            raise ValueError(f"{label} offset must be non-negative and nbytes must be positive")
+        if offset + nbytes > int(self.nbytes):
+            raise ValueError(f"{label} range [{offset}, {offset + nbytes}) exceeds part size {int(self.nbytes)}")
+
+
+class _PinnedBuffer:
+    def __init__(self, obj: Any, *, writable: bool = False) -> None:
+        self._keepalive: Any = obj
+        if isinstance(obj, Buffer):
+            if obj.address_space != AddressSpace.HOST:
+                raise ValueError("region payload buffer must be host storage, not device storage")
+            self.addr = int(obj.base)
+            self.nbytes = int(obj.nbytes)
+            return
+
+        try:
+            view = memoryview(obj)
+        except TypeError as exc:
+            raise ValueError("region payload buffer must be a contiguous host-accessible byte span") from exc
+        if not view.c_contiguous:
+            raise ValueError("region payload buffer must be contiguous")
+        try:
+            byte_view = view if view.itemsize == 1 and view.format in {"B", "b", "c"} else view.cast("B")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("region payload buffer must be viewable as bytes") from exc
+        if writable and byte_view.readonly:
+            raise ValueError("region payload read destination must be writable")
+        self.nbytes = int(byte_view.nbytes)
+        if byte_view.readonly:
+            staging = ctypes.create_string_buffer(byte_view.tobytes())
+            self._keepalive = staging
+            self.addr = ctypes.addressof(staging)
+            return
+        exported = ctypes.c_char.from_buffer(byte_view)
+        self._keepalive = (byte_view, exported)
+        self.addr = ctypes.addressof(exported)
+
+    def close(self) -> None:
+        self._keepalive = None
+
+    def __enter__(self) -> _PinnedBuffer:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
+class HostVmmCopyAccess:
+    def __init__(self, handle: Any) -> None:
+        self._handle = int(handle)
+
+    @classmethod
+    def from_mapping(cls, mapping: Any) -> HostVmmCopyAccess:
+        return cls(getattr(mapping, "handle"))
+
+    @property
+    def handle(self) -> int:
+        return self._handle
+
+    def write_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
+        span.validate_range(offset, nbytes, "region byte write")
+        _host_vmm_copy_to(self._handle, int(span.offset) + int(offset), int(host_ptr), int(nbytes))
+
+    def read_bytes(self, span: RegionPartSpan, offset: int, host_ptr: int, nbytes: int) -> None:
+        span.validate_range(offset, nbytes, "region byte read")
+        _host_vmm_copy_from(self._handle, int(span.offset) + int(offset), int(host_ptr), int(nbytes))
+
+
+class PayloadPart:
+    def __init__(self, span: RegionPartSpan, access: Any) -> None:
+        self._span = span
+        self._access = access
+
+    @property
+    def span(self) -> RegionPartSpan:
+        return self._span
+
+    def write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
+        with _PinnedBuffer(host_buffer) as pinned:
+            size = pinned.nbytes if nbytes is None else int(nbytes)
+            self._validate_payload_range(offset, size, pinned.nbytes)
+            self._access.write_bytes(self._span, int(offset), pinned.addr, size)
+
+    def read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
+        with _PinnedBuffer(host_buffer, writable=True) as pinned:
+            size = pinned.nbytes if nbytes is None else int(nbytes)
+            self._validate_payload_range(offset, size, pinned.nbytes)
+            self._access.read_bytes(self._span, int(offset), pinned.addr, size)
+
+    def _validate_payload_range(self, offset: int, nbytes: int, buffer_nbytes: int) -> None:
+        if int(nbytes) > int(buffer_nbytes):
+            raise ValueError(f"region payload nbytes={int(nbytes)} exceeds host buffer size {int(buffer_nbytes)}")
+        self._span.validate_range(offset, nbytes, "region payload")
+
+
+class CounterPart:
+    def __init__(self, span: RegionPartSpan, access: Any, handle: Any | None = None) -> None:
+        self._span = span
+        self._access = access
+        resolved_handle = getattr(access, "handle", handle)
+        if resolved_handle is None:
+            raise ValueError("region counter access requires a native mapped-region handle")
+        self._handle = int(resolved_handle)
+
+    @property
+    def span(self) -> RegionPartSpan:
+        return self._span
+
+    def counter(self, offset: int) -> RegionCounter:
+        self._validate_counter_offset(offset)
+        return RegionCounter(self, int(offset))
+
+    def notify(self, offset: int, value: int, op: NotifyOp) -> None:
+        self._validate_counter_offset(offset)
+        op = NotifyOp(op)
+        _region_counter_notify(self._handle, self._mapping_offset(offset), int(value), int(op))
+
+    def test(self, offset: int, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
+        self._validate_counter_offset(offset)
+        cmp = WaitCmp(cmp)
+        matched, observed = _region_counter_test(self._handle, self._mapping_offset(offset), int(cmp_value), int(cmp))
+        return SignalTestResult(matched=bool(matched), observed=int(observed))
+
+    def wait(self, offset: int, cmp_value: int, cmp: WaitCmp, timeout: float) -> int:
+        self._validate_counter_offset(offset)
+        cmp = WaitCmp(cmp)
+        if timeout is None or float(timeout) <= 0:
+            raise ValueError("region counter wait requires a positive timeout")
+        timeout_ns = min(int(float(timeout) * 1_000_000_000), _MAX_SIGNED_CHRONO_TIMEOUT_NS)
+        status, error_kind, observed, _matched, message = _region_counter_wait(
+            self._handle, self._mapping_offset(offset), int(cmp_value), int(cmp), int(timeout_ns)
+        )
+        if int(status) == 0:
+            return int(observed)
+        msg = str(message) if message else "region counter wait timed out"
+        if int(status) == _WAIT_STATUS_TIMEOUT and int(error_kind) == _WAIT_ERROR_SIGNAL_TIMEOUT:
+            raise TimeoutError(f"{msg}; observed={int(observed)}")
+        raise AssertionError(f"unexpected region counter wait result status={int(status)} error_kind={int(error_kind)}")
+
+    def _mapping_offset(self, offset: int) -> int:
+        return int(self._span.offset) + int(offset)
+
+    def _validate_counter_offset(self, offset: int) -> None:
+        offset = int(offset)
+        if offset < 0 or offset % 4 != 0 or offset + 4 > int(self._span.nbytes):
+            raise ValueError("region counter offset must be 4-byte aligned and inside the counter range")
+
+
+class RegionCounter:
+    def __init__(self, part: CounterPart, offset: int) -> None:
+        self._part = part
+        self._offset = int(offset)
+
+    @property
+    def offset(self) -> int:
+        return self._offset
+
+    def notify(self, value: int, op: NotifyOp = NotifyOp.Set) -> None:
+        self._part.notify(self._offset, int(value), op)
+
+    def test(self, cmp_value: int, cmp: WaitCmp) -> SignalTestResult:
+        return self._part.test(self._offset, int(cmp_value), cmp)
+
+    def wait(self, cmp_value: int, cmp: WaitCmp, timeout: float) -> int:
+        return self._part.wait(self._offset, int(cmp_value), cmp, timeout)
 
 
 class RegionInstanceState(str, Enum):
@@ -109,6 +318,8 @@ class RegionInstance:
         self._worker = ctx.worker
         self._cleanup_resources = getattr(ctx.worker, "_building_run_resources", None)
         self._region = None
+        self._payload_part: PayloadPart | None = None
+        self._counter_part: CounterPart | None = None
         self._state = RegionInstanceState.PLANNED
         self._cleanup_error: BaseException | None = None
 
@@ -122,27 +333,52 @@ class RegionInstance:
 
     def _adopt_worker_chip_region(self, region: Any) -> None:
         self._region = region
+        mapping = getattr(region, "_worker_host_mapping", None)
+        if mapping is None:
+            return
+        plan = self.plan
+        if not isinstance(plan, BackendPlan):
+            raise MaterializationRefusal(RefusalReason.UNSUPPORTED_PLAN, "materialized region requires a BackendPlan")
+        payload_access = _select_host_vmm_copy_access(plan.payload, self.provider, self.consumer, mapping)
+        counter_access = _select_host_vmm_copy_access(plan.counter, self.provider, self.consumer, mapping)
+        self._payload_part = PayloadPart(
+            RegionPartSpan(offset=int(mapping.payload_offset), nbytes=int(mapping.payload_bytes)), payload_access
+        )
+        self._counter_part = CounterPart(
+            RegionPartSpan(offset=int(mapping.counter_offset), nbytes=int(mapping.counter_bytes)), counter_access
+        )
 
     def payload_write(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         self._worker._require_region_control_context("region_instance.payload_write")
-        region = self._region
-        assert region is not None
-        region.payload_write(offset, host_buffer, nbytes)
+        payload_part = self._payload_part
+        if payload_part is None:
+            region = self._region
+            assert region is not None
+            region.payload_write(offset, host_buffer, nbytes)
+            return
+        payload_part.write(offset, host_buffer, nbytes)
 
     def payload_read(self, offset: int, host_buffer: Any, nbytes: int | None = None) -> None:
         self._ensure_live()
         self._worker._require_region_control_context("region_instance.payload_read")
-        region = self._region
-        assert region is not None
-        region.payload_read(offset, host_buffer, nbytes)
+        payload_part = self._payload_part
+        if payload_part is None:
+            region = self._region
+            assert region is not None
+            region.payload_read(offset, host_buffer, nbytes)
+            return
+        payload_part.read(offset, host_buffer, nbytes)
 
     def counter(self, offset: int):
         self._ensure_live()
         self._worker._require_region_control_context("region_instance.counter")
-        region = self._region
-        assert region is not None
-        return region.counter(offset)
+        counter_part = self._counter_part
+        if counter_part is None:
+            region = self._region
+            assert region is not None
+            return region.counter(offset)
+        return counter_part.counter(offset)
 
     def close(self) -> None:
         if self._state is RegionInstanceState.CLOSED:
@@ -231,8 +467,8 @@ def validate_single_owner_region_shape(ctx: MaterializationContext) -> SingleOwn
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint") from exc
     if len(provider_path.segments) != 2:
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
-    root, child = provider_path.segments
-    if root.level != 3 or root.index is not None or child.level != 2 or child.index is None:
+    _root, child = provider_path.segments
+    if child.level != 2 or child.index is None:
         raise MaterializationRefusal(RefusalReason.NEEDS_DELEGATION, "provider is not a local L3/L2 endpoint")
     worker_id = int(child.index)
     try:
@@ -293,6 +529,16 @@ def _record_for(ctx: MaterializationContext, endpoint: Any) -> EndpointRecord:
         return ctx.registry.record_for(endpoint)
     except ValueError as exc:
         raise MaterializationRefusal(RefusalReason.REGISTRY_MISMATCH, str(exc)) from exc
+
+
+def _select_host_vmm_copy_access(
+    part: RegionPartPlan,
+    provider: EndpointRecord,
+    consumer: EndpointRecord,
+    mapping: Any,
+) -> HostVmmCopyAccess:
+    _validate_part(part, provider, consumer)
+    return HostVmmCopyAccess.from_mapping(mapping)
 
 
 def _validate_registry_matches_worker(ctx: MaterializationContext) -> None:

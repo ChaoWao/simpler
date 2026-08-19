@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from _pytest.outcomes import Failed
 
-from simpler_setup import SceneTestLevel, scene_level, scene_test
+from simpler_setup import SceneTestCase, SceneTestLevel, scene_level, scene_test
+from simpler_setup.scene_test import _discover_module_test_classes
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SPEC = importlib.util.spec_from_file_location("_root_conftest_for_scene_level_tests", _ROOT / "conftest.py")
@@ -70,14 +71,14 @@ class _FakeConfig:
 
 def test_scene_level_normalizes_int_and_enum():
     @scene_level(4)
-    def pod_fn():
+    def network1_fn():
         return None
 
     @scene_level(SceneTestLevel.CHIP)
     def chip_fn():
         return None
 
-    assert pod_fn._st_level is SceneTestLevel.POD
+    assert network1_fn._st_level is SceneTestLevel.NETWORK1
     assert chip_fn._st_level is SceneTestLevel.CHIP
 
 
@@ -89,6 +90,18 @@ def test_scene_test_accepts_int_levels():
 
     assert L2._st_level is SceneTestLevel.CHIP
     assert L2._st_runtime == "tensormap_and_ringbuffer"
+
+
+def test_standalone_discovery_excludes_imported_scene_test_classes():
+    imported_module = ModuleType("tmr_case")
+    current_module = ModuleType("hbg_case")
+
+    imported_cls = type("TestTmr", (SceneTestCase,), {"__module__": imported_module.__name__, "CASES": []})
+    local_cls = type("TestHbg", (SceneTestCase,), {"__module__": current_module.__name__, "CASES": []})
+    current_module._ImportedTmr = imported_cls
+    current_module.TestHbg = local_cls
+
+    assert _discover_module_test_classes(current_module) == [local_cls]
 
 
 def test_invalid_scene_level_rejected():
@@ -103,13 +116,13 @@ def test_level4_filter_keeps_only_explicit_level4_functions():
     def plain_fn():
         return None
 
-    @scene_level(SceneTestLevel.POD)
-    def pod_fn():
+    @scene_level(SceneTestLevel.NETWORK1)
+    def network1_fn():
         return None
 
     items = [
         _FakeItem("tests::plain", function=plain_fn),
-        _FakeItem("tests::pod", function=pod_fn),
+        _FakeItem("tests::network1", function=network1_fn),
     ]
     config = _FakeConfig(
         platform="a2a3",
@@ -119,20 +132,20 @@ def test_level4_filter_keeps_only_explicit_level4_functions():
 
     root_conftest.pytest_collection_modifyitems(None, config, items)
 
-    assert [item.nodeid for item in items] == ["tests::pod"]
+    assert [item.nodeid for item in items] == ["tests::network1"]
 
 
 def test_exclude_level4_keeps_unlevelled_functions():
     def plain_fn():
         return None
 
-    @scene_level(SceneTestLevel.POD)
-    def pod_fn():
+    @scene_level(SceneTestLevel.NETWORK1)
+    def network1_fn():
         return None
 
     items = [
         _FakeItem("tests::plain", function=plain_fn),
-        _FakeItem("tests::pod", function=pod_fn),
+        _FakeItem("tests::network1", function=network1_fn),
     ]
     config = _FakeConfig(
         platform="a2a3",
@@ -176,12 +189,12 @@ def test_level_filters_are_mutually_exclusive():
         root_conftest._validate_level_filters(config)
 
 
-def test_pod_logs_requires_pod_level(monkeypatch):
+def test_network1_logs_requires_network1_level(monkeypatch):
     @scene_level(SceneTestLevel.CHIP)
     def chip_fn():
         return None
 
     request = SimpleNamespace(node=_FakeItem("tests::chip", function=chip_fn))
 
-    with pytest.raises(Failed, match="SceneTestLevel\\.POD"):
-        root_conftest.st_pod_logs.__wrapped__(request, monkeypatch)
+    with pytest.raises(Failed, match="SceneTestLevel\\.NETWORK1"):
+        root_conftest.st_network1_logs.__wrapped__(request, monkeypatch)

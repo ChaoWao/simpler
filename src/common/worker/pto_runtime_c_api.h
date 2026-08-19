@@ -228,8 +228,9 @@ int copy_to_device_ctx(DeviceContextHandle ctx, void *dev_ptr, const void *host_
 int copy_from_device_ctx(DeviceContextHandle ctx, void *host_ptr, const void *dev_ptr, size_t size);
 
 /**
- * One-shot platform-side init. Called once by ChipWorker::init() right
- * after dlopen, before any other entry. Three responsibilities, in order:
+ * One-shot platform-side init. Called once by ChipWorker::init() after the
+ * runtime module's private HostLogger has been bound to process-owned state.
+ * Its responsibilities, in order:
  *
  *   1. (Onboard only) Sync CANN dlog with
  *      HostLogger::get_instance().cann_level() via
@@ -238,8 +239,8 @@ int copy_from_device_ctx(DeviceContextHandle ctx, void *host_ptr, const void *de
  *      This must run before step 2 because CANN snapshots the device-side
  *      log session's level at context-open time (rtSetDevice); a later
  *      dlog_setlevel would not re-level the already-opened device session.
- *      The log level itself is owned by libsimpler_log.so (seeded earlier
- *      by simpler_log_init); it never travels through this ABI.
+ *      The threshold is read from the state bound by ChipWorker immediately
+ *      after dlopen.
  *
  *   2. Attach the calling thread to `device_id` (rtSetDevice on onboard,
  *      pto_cpu_sim_bind_device + pto_cpu_sim_acquire_device on sim) and
@@ -447,10 +448,13 @@ size_t get_aicpu_dlopen_count(DeviceContextHandle ctx);
 size_t get_host_dlopen_count(DeviceContextHandle ctx);
 
 /**
- * Number of AICore run streams the runner bound to `ctx` has created. AICPU
- * streams belong to pipeline slots for the worker's lifetime; each run gets a
- * freshly created AICore stream, so this advances once per run. Returns 0 on
- * platforms whose runs use the persistent bootstrap pair.
+ * Number of AICore run streams the runner bound to `ctx` has created. One
+ * AICPU + AICore pair serves every run for the runner's lifetime. The AICPU
+ * stream persists; the AICore stream is recreated when a new code upload makes
+ * it stale, and destroyed when an unproven completion retires it, so this
+ * advances per publication or unproven retirement rather than once per run or
+ * per pipeline slot. Returns 0 on platforms whose runs use the persistent
+ * bootstrap pair.
  */
 size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
 

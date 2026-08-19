@@ -268,8 +268,9 @@ struct PTO2TaskPayload {
     int32_t fanin_count{0};  // Producer dependency count (raw, no +1 redundance)
     // Producer dependencies as position-independent local task ids. Single-ring
     // hbg: every producer is ring 0, so no per-edge ring id is stored. Scanned
-    // by fanin_satisfied / classify_fanin_state against the ring completion_flags.
-    // Hard-capped at PTO2_MAX_FANIN (no dep-pool spill).
+    // by classify_fanin_state against the ring completion_flags. A -1 result
+    // means every fanin is complete; otherwise it is the first unmet
+    // fanin index. Hard-capped at PTO2_MAX_FANIN (no dep-pool spill).
     int32_t fanin_local_ids[PTO2_MAX_FANIN];
     // Reserved: preserves the early-dispatch block and tensors[] offsets. tensors
     // must stay at byte 576 (AICore arg-materialization contract), so this fanin
@@ -552,25 +553,22 @@ struct alignas(64) PTO2TaskSlotState {
     bool has_any_subtask_deferred() const { return any_subtask_deferred.load(std::memory_order_acquire); }
 
     /**
-     * Reset dynamic scheduling fields to their pristine values. Runs once per
-     * slot at init (pto_shared_memory.cpp) and again during affine Graph replay;
-     * whole-graph-resident hbg has no execution-time slot recycle. Skips
-     * payload/task (bound once) and
+     * Reset dynamic scheduling fields to their pristine values. Called once per
+     * slot as the orchestrator claims it in prepare_task, and again as a Graph
+     * node's storage is materialized — whole-graph-resident hbg has no
+     * execution-time slot recycle. Skips payload/task (bound once) and
      * task_state (the orchestrator sets PENDING when it populates the slot).
      * wake_list_head starts nullptr (open for registration), NOT SENTINEL.
-     * Affine Graph replay preserves the node's retained execution binding.
      */
-    void reset_for_reuse(bool preserve_graph_binding = false) {
+    void reset_for_reuse() {
         wake_list_head.store(nullptr, std::memory_order_relaxed);
         next_in_wake_list = nullptr;
         any_subtask_deferred.store(false, std::memory_order_relaxed);
         completed_subtasks.store(0, std::memory_order_relaxed);
         next_block_idx.store(0, std::memory_order_relaxed);
-        if (!preserve_graph_binding) {
-            graph_node_index = -1;
-            graph_context = nullptr;
-            task_kind = TaskKind::KERNEL;
-        }
+        graph_node_index = -1;
+        graph_context = nullptr;
+        task_kind = TaskKind::KERNEL;
         // Note: active_mask and task_attrs are per-submit-constant fields
         // rewritten in prepare_task on every reuse, so they are not reset here.
         // last_consumer_local_id is seeded in prepare_task once the id is known.

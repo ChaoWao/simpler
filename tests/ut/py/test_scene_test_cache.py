@@ -25,7 +25,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 
 import pytest
 from _task_interface import ArgDirection, ChipCallable  # pyright: ignore[reportMissingImports]
@@ -33,7 +33,8 @@ from _task_interface import ArgDirection, ChipCallable  # pyright: ignore[report
 # ``simpler_setup/__init__.py`` re-exports the ``scene_test`` *decorator*,
 # which shadows the submodule attribute when accessed via ``simpler_setup``.
 # Importing the names directly from the submodule avoids that ambiguity.
-from simpler_setup import scene_test_cache
+from simpler_setup import compile_paths, scene_test_cache
+from simpler_setup.compile_pool import compile_worker_budget
 from simpler_setup.scene_test import (
     SceneTestCase,
     _compile_cache,
@@ -110,6 +111,7 @@ class _FakeKernelCompiler:
     cache_schema = 1
     orchestration_compiles = 0
     incore_compiles = 0
+    compile_barrier = None
 
     def __init__(self, platform):
         self.platform = platform
@@ -126,12 +128,19 @@ class _FakeKernelCompiler:
     def compile_cache_token(self, runtime, core_types):
         return {"schema": self.cache_schema}
 
+    def incore_compile_cache_token(self, core_type):
+        return {"schema": self.cache_schema, "core_type": core_type}
+
     def compile_orchestration(self, runtime, source):
         type(self).orchestration_compiles += 1
+        if type(self).compile_barrier is not None:
+            type(self).compile_barrier.wait()
         return Path(source).read_bytes()
 
     def compile_incore(self, source, **kwargs):
         type(self).incore_compiles += 1
+        if type(self).compile_barrier is not None:
+            type(self).compile_barrier.wait()
         return Path(source).read_bytes()
 
 
@@ -170,7 +179,74 @@ def _configure_fake_compilation(monkeypatch, tmp_path):
     _FakeKernelCompiler.cache_schema = 1
     _FakeKernelCompiler.orchestration_compiles = 0
     _FakeKernelCompiler.incore_compiles = 0
+    _FakeKernelCompiler.compile_barrier = None
     clear_compile_cache()
+
+
+def test_callable_compiles_orchestration_and_incore_concurrently(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+    _FakeKernelCompiler.compile_barrier = Barrier(2, timeout=2)
+
+    with compile_worker_budget(2):
+        compiled = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert compiled.child_count == 1
+
+
+def test_callable_preserves_spec_order_when_kernels_finish_out_of_order(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    second = tmp_path / "kernel_second.cpp"
+    second.write_text('extern "C" void kernel_entry() {}\n')
+    spec["incores"].append(
+        {
+            "source": str(second),
+            "func_id": 7,
+            "core_type": "aiv",
+            "signature": [ArgDirection.OUT],
+            "extra_include_dirs": [],
+        }
+    )
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+    second_finished = Event()
+    original_compile_incore = _FakeKernelCompiler.compile_incore
+
+    def finish_second_first(self, source, **kwargs):
+        if Path(source) == second:
+            result = original_compile_incore(self, source, **kwargs)
+            second_finished.set()
+            return result
+        assert second_finished.wait(timeout=2)
+        return original_compile_incore(self, source, **kwargs)
+
+    monkeypatch.setattr(_FakeKernelCompiler, "compile_incore", finish_second_first)
+    with compile_worker_budget(3):
+        compiled = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert [compiled.child_func_id(index) for index in range(compiled.child_count)] == [0, 7]
+
+
+def test_callable_key_reuses_precomputed_incore_keys(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+    captured = {}
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    original = scene_test_module.compile_artifact_key
+
+    def recording_key(metadata, compilation_units):
+        captured["metadata"] = metadata
+        captured["units"] = list(compilation_units)
+        return original(metadata, captured["units"])
+
+    monkeypatch.setattr(scene_test_module, "compile_artifact_key", recording_key)
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert [Path(source).name for source, _include_dirs in captured["units"]] == ["orchestration.cpp"]
+    assert len(captured["metadata"]["incores"]) == 1
+    assert len(captured["metadata"]["incores"][0]["artifact_key"]) == 64
 
 
 def test_compile_cache_survives_session_cache_clear(monkeypatch, tmp_path):
@@ -206,6 +282,85 @@ def test_compile_cache_invalidates_transitive_include(monkeypatch, tmp_path):
     assert _FakeKernelCompiler.incore_compiles == 2
 
 
+def test_orchestration_change_reuses_incore_artifact(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    clear_compile_cache()
+    Path(spec["orchestration"]["source"]).write_text('extern "C" void orchestration_changed() {}\n')
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert _FakeKernelCompiler.orchestration_compiles == 2
+    assert _FakeKernelCompiler.incore_compiles == 1
+
+
+def test_only_changed_incore_recompiles(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    second = tmp_path / "kernel_second.cpp"
+    second.write_text('extern "C" void kernel_entry() {}\n')
+    spec["incores"].append(
+        {
+            "source": str(second),
+            "func_id": 1,
+            "core_type": "aiv",
+            "signature": [ArgDirection.OUT],
+            "extra_include_dirs": [],
+        }
+    )
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    clear_compile_cache()
+    second.write_text('extern "C" void kernel_entry() { int changed = 1; }\n')
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert _FakeKernelCompiler.orchestration_compiles == 2
+    assert _FakeKernelCompiler.incore_compiles == 3
+
+
+def test_callables_share_incore_artifact_across_case_directories(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    shared_dir = tmp_path / "shared_case" / "kernels"
+    shared_dir.mkdir(parents=True)
+    shared_kernel = shared_dir / "kernel.cpp"
+    shared_kernel.write_text('extern "C" void kernel_entry() {}\n')
+
+    specs = []
+    for index in range(2):
+        case_dir = tmp_path / f"case_{index}"
+        case_dir.mkdir()
+        orchestration = case_dir / "orchestration.cpp"
+        orchestration.write_text(f'extern "C" void orchestration_{index}() {{}}\n')
+        specs.append(
+            {
+                "orchestration": {
+                    "source": str(orchestration),
+                    "function_name": f"orchestration_{index}",
+                    "signature": [ArgDirection.IN],
+                },
+                "incores": [
+                    {
+                        "source": str(shared_kernel),
+                        "func_id": index,
+                        "core_type": "aiv",
+                        "signature": [ArgDirection.IN if index == 0 else ArgDirection.OUT],
+                        "extra_include_dirs": [],
+                    }
+                ],
+            }
+        )
+
+    for index, spec in enumerate(specs):
+        cache_key = (f"TestScene{index}", "a2a3sim", "host_build_graph", "pin")
+        _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert _FakeKernelCompiler.orchestration_compiles == 2
+    assert _FakeKernelCompiler.incore_compiles == 1
+
+
 def test_compile_cache_invalidates_compiler_schema(monkeypatch, tmp_path):
     _configure_fake_compilation(monkeypatch, tmp_path)
     spec, _header = _cacheable_spec(tmp_path)
@@ -221,7 +376,7 @@ def test_compile_cache_invalidates_compiler_schema(monkeypatch, tmp_path):
     assert _FakeKernelCompiler.incore_compiles == 2
 
 
-def test_compile_cache_rebuilds_incomplete_entry(monkeypatch, tmp_path):
+def test_compile_cache_rebuilds_incomplete_callable_and_reuses_incore(monkeypatch, tmp_path):
     _configure_fake_compilation(monkeypatch, tmp_path)
     spec, _header = _cacheable_spec(tmp_path)
     cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
@@ -233,10 +388,26 @@ def test_compile_cache_rebuilds_incomplete_entry(monkeypatch, tmp_path):
     _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
 
     assert _FakeKernelCompiler.orchestration_compiles == 2
+    assert _FakeKernelCompiler.incore_compiles == 1
+
+
+def test_compile_cache_rebuilds_incomplete_incore_artifact(monkeypatch, tmp_path):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+    incore_path = next((tmp_path / "cache" / "incore").glob("*/artifact.bin"))
+    incore_path.write_bytes(b"incomplete")
+    clear_compile_cache()
+    Path(spec["orchestration"]["source"]).write_text('extern "C" void orchestration_changed() {}\n')
+    _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    assert _FakeKernelCompiler.orchestration_compiles == 2
     assert _FakeKernelCompiler.incore_compiles == 2
 
 
-def test_compile_artifact_key_is_independent_of_checkout_path(tmp_path):
+def test_compile_artifact_key_includes_checkout_path_seen_by_compiler(tmp_path):
     keys = []
     for root_name in ("runner-a", "runner-b"):
         root = tmp_path / root_name
@@ -246,7 +417,77 @@ def test_compile_artifact_key_is_independent_of_checkout_path(tmp_path):
         source.write_text('#include "shared.h"\nextern "C" void kernel_entry() {}\n')
         keys.append(scene_test_cache.compile_artifact_key({"platform": "a2a3"}, [(source, [root])]))
 
+    assert keys[0] != keys[1]
+
+
+def test_incore_artifact_key_distinguishes_identical_sources_at_different_paths(tmp_path):
+    keys = []
+    for case_name in ("case-a", "case-b"):
+        case_dir = tmp_path / case_name
+        case_dir.mkdir()
+        source = case_dir / "kernel.cpp"
+        source.write_text('extern "C" const char *source_path() { return __FILE__; }\n')
+        keys.append(scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, source, []))
+
+    assert keys[0] != keys[1]
+
+
+def test_incore_artifact_key_reuses_identical_sources_from_different_checkout_roots(monkeypatch, tmp_path):
+    roots = [tmp_path / name for name in ("runner-a", "runner-b")]
+    keys = []
+    for root in roots:
+        root.mkdir()
+        source = root / "kernel.cpp"
+        source.write_text('extern "C" const char *source_path() { return __FILE__; }\n')
+        monkeypatch.setattr(compile_paths, "PROJECT_ROOT", root)
+        keys.append(scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, source, []))
+
     assert keys[0] == keys[1]
+
+
+def test_incore_artifact_key_distinguishes_identical_dependencies_at_different_paths(tmp_path):
+    source = tmp_path / "kernel.cpp"
+    source.write_text('#include <shared.h>\nextern "C" void kernel_entry() {}\n')
+    keys = []
+    for include_name in ("include-a", "include-b"):
+        include_dir = tmp_path / include_name
+        include_dir.mkdir()
+        (include_dir / "shared.h").write_text("constexpr const char *HEADER_PATH = __FILE__;\n")
+        keys.append(scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, source, [include_dir]))
+
+    assert keys[0] != keys[1]
+
+
+def test_incore_artifact_key_includes_search_paths_used_by_has_include(tmp_path):
+    source = tmp_path / "kernel.cpp"
+    source.write_text(
+        '#if __has_include("feature_flag.h")\n'
+        'extern "C" int kernel_entry() { return 1; }\n'
+        "#else\n"
+        'extern "C" int kernel_entry() { return 0; }\n'
+        "#endif\n"
+    )
+    without_feature = tmp_path / "without-feature"
+    with_feature = tmp_path / "with-feature"
+    without_feature.mkdir()
+    with_feature.mkdir()
+    (with_feature / "feature_flag.h").write_text("// selected by __has_include\n")
+
+    without_key = scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, source, [without_feature])
+    with_key = scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, source, [with_feature])
+
+    assert without_key != with_key
+
+
+def test_incore_artifact_key_normalizes_relative_source_path(monkeypatch, tmp_path):
+    source = tmp_path / "kernel.cpp"
+    source.write_text('extern "C" const char *source_path() { return __FILE__; }\n')
+    monkeypatch.chdir(tmp_path)
+
+    relative = scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, Path("kernel.cpp"), [])
+    absolute = scene_test_cache.compile_incore_artifact_key({"platform": "a2a3"}, source, [])
+
+    assert relative == absolute
 
 
 def test_compile_artifact_key_includes_callable_abi(monkeypatch, tmp_path):
@@ -259,6 +500,18 @@ def test_compile_artifact_key_includes_callable_abi(monkeypatch, tmp_path):
     second = scene_test_cache.compile_artifact_key({}, [(source, [])])
 
     assert first != second
+
+
+def test_incore_artifact_key_is_independent_of_callable_abi(monkeypatch, tmp_path):
+    source = tmp_path / "kernel.cpp"
+    source.write_text('extern "C" void kernel_entry() {}\n')
+
+    monkeypatch.setattr(scene_test_cache, "_chip_callable_abi_token", lambda: "abi-a")
+    first = scene_test_cache.compile_incore_artifact_key({"core_type": "aiv"}, source, [])
+    monkeypatch.setattr(scene_test_cache, "_chip_callable_abi_token", lambda: "abi-b")
+    second = scene_test_cache.compile_incore_artifact_key({"core_type": "aiv"}, source, [])
+
+    assert first == second
 
 
 def test_concurrent_cache_misses_compile_once(monkeypatch, tmp_path):
@@ -284,10 +537,38 @@ def test_concurrent_cache_misses_compile_once(monkeypatch, tmp_path):
     assert [callable_obj.func_name for callable_obj in callables] == ["shared", "shared"]
 
 
+def test_concurrent_incore_cache_misses_compile_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(scene_test_cache, "KERNEL_CACHE_DIR", tmp_path / "cache")
+    start = Barrier(2)
+    count_lock = Lock()
+    compile_count = 0
+
+    def compile_incore():
+        nonlocal compile_count
+        with count_lock:
+            compile_count += 1
+        return b"shared-incore"
+
+    def load_or_compile():
+        start.wait()
+        return scene_test_cache.get_or_compile_incore("f" * 64, compile_incore)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        artifacts = list(executor.map(lambda _: load_or_compile(), range(2)))
+
+    assert compile_count == 1
+    assert artifacts == [b"shared-incore", b"shared-incore"]
+
+
 def test_artifact_logic_token_covers_the_compilation_modules(monkeypatch):
     from simpler_setup import kernel_compiler
 
-    assert set(kernel_compiler._ARTIFACT_LOGIC_MODULES) == {"kernel_compiler.py", "toolchain.py", "elf_parser.py"}
+    assert set(kernel_compiler._ARTIFACT_LOGIC_MODULES) == {
+        "kernel_compiler.py",
+        "toolchain.py",
+        "compile_paths.py",
+        "elf_parser.py",
+    }
 
     def token_over(modules):
         monkeypatch.setattr(kernel_compiler, "_ARTIFACT_LOGIC_MODULES", modules)
@@ -309,16 +590,20 @@ def test_publish_prunes_entries_past_the_retention_window(monkeypatch, tmp_path)
     stale = cache_dir / ("b" * 64)
     stale.mkdir(parents=True)
     (stale / "callable.bin").write_bytes(b"stale")
+    stale_incore = cache_dir / "incore" / ("d" * 64)
+    stale_incore.mkdir(parents=True)
+    (stale_incore / "artifact.bin").write_bytes(b"stale")
     stale_lock = cache_dir / ".locks" / "old.lock"
     stale_lock.parent.mkdir(parents=True)
     stale_lock.write_text("")
     expired = time.time() - scene_test_cache._ENTRY_RETENTION_S - 60
-    for path in (stale, stale_lock):
+    for path in (stale, stale_incore, stale_lock):
         os.utime(path, (expired, expired))
 
     scene_test_cache.get_or_compile("c" * 64, lambda: _build_chip_callable("fresh"))
 
     assert not stale.exists()
+    assert not stale_incore.exists()
     assert not stale_lock.exists()
     assert (cache_dir / ("c" * 64) / "callable.bin").is_file()
 
@@ -347,6 +632,31 @@ def test_unwritable_cache_dir_falls_back_to_plain_compilation(monkeypatch, tmp_p
 
     assert compiled.func_name == "uncached"
     assert not (read_only / "kernels").exists()
+
+
+def test_unwritable_cache_warns_once_for_callable_and_incore(monkeypatch, tmp_path, caplog):
+    _configure_fake_compilation(monkeypatch, tmp_path)
+    spec, _header = _cacheable_spec(tmp_path)
+    cache_dir = tmp_path / "unwritable-cache"
+    monkeypatch.setattr(scene_test_cache, "KERNEL_CACHE_DIR", cache_dir)
+    original_mkdir = Path.mkdir
+
+    def reject_lock_dir(path, *args, **kwargs):
+        if path == cache_dir / ".locks":
+            raise PermissionError("cache directory is read-only")
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", reject_lock_dir)
+    cache_key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
+
+    with caplog.at_level("WARNING"):
+        callable_obj = _compile_chip_callable_from_spec(spec, "a2a3sim", "host_build_graph", cache_key)
+
+    disabled_messages = [record.message for record in caplog.records if "[SceneTestCache] disabled:" in record.message]
+    assert callable_obj.func_name == "orchestration"
+    assert _FakeKernelCompiler.orchestration_compiles == 1
+    assert _FakeKernelCompiler.incore_compiles == 1
+    assert len(disabled_messages) == 1
 
 
 def test_source_scan_is_memoized_per_file(monkeypatch, tmp_path):

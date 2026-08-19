@@ -232,6 +232,111 @@ Thread X:   overlap checks : XXX, hits=XXX (XX.X%)
 
 ---
 
+## Prepare-Path Timing: One Pool, Three Views
+
+`host_build_graph` times its prepare path — the `chip.run.bind` stage's
+segments, and the host orchestrator's submit-level operations inside it. One
+recorder feeds three views, and two independent switches decide which of them
+appear.
+
+### What is recorded
+
+Seventeen kinds, all on the host monotonic clock the `[STRACE]` host spans use,
+so records and spans read against each other with no alignment step.
+
+| Group | Kinds |
+| ----- | ----- |
+| Bind segments (partition the stage) | `args`, `arena_build`, `static_arena`, `gm_heap`, `shared_mem`, `runtime_init`, `host_orch`, `graph_upload`, `relocate`, `sm_h2d`, `arena_h2d`, `host_view_close` |
+| Orchestrator operations (inside `host_orch`) | `submit_task`, `alloc_tensors`, `record_node`, `graph_submit`, `build_definition` |
+
+Three of the orchestrator kinds end with a task submitted — `submit_task`,
+`alloc_tensors`, `graph_submit` — so their count is the pass's `total_tasks`.
+The other two are sub-operations of one of those, which is why a per-kind total
+is a **cost share, not an interval**: a per-event mean is `total_ns / count`, and
+the spread is not recoverable from it.
+
+### The two switches
+
+| Switch | Turns on |
+| ------ | -------- |
+| `SIMPLER_HBG_BIND_BREAKDOWN_ENABLE` (env, off unless it starts with `1`, `t` or `T`) | the `LOG_TIMING` breakdown; needs no rebuild and works at any `--rounds` |
+| `--enable-chip-swimlane 4` (CallConfig `chip_swimlane_level`) | the host lane in `chip_swimlane_records.json`, with its records clock-aligned against the device timeline |
+
+Collection is armed by **either** — a level-4 run collects records with the
+variable unset, and the variable collects them with the level at 0. What is
+recorded does not depend on which one armed the pass: the swimlane's share is a
+projection at export, not a branch at record time, so the two configurations
+measure the same overhead and their numbers are comparable.
+
+```bash
+# breakdown only, any --rounds, no rebuild
+SIMPLER_HBG_BIND_BREAKDOWN_ENABLE=1 python -m pytest <case> --platform <platform> --device 0
+
+# host lane on the chip swimlane, aligned against the device timeline
+python -m pytest <case> --platform <platform> --device 0 --enable-chip-swimlane 4
+```
+
+### The three views
+
+- **`LOG_TIMING` lines**, at the default log threshold, gated by the env
+  variable. One `bind phase=<p> start_ns=<n> dur_ns=<n> <attrs>` line per
+  segment, plus one `host-orch phase=<p> total_ns=<n> count=<k> detail_sum=<n>
+  dropped=<n>` line per orchestrator kind. They come from per-kind counters, not
+  from the record pool, so a total stays exact even if the pool was never armed or
+  overflowed — that is what makes this the channel for steady state, where
+  `--rounds > 1` switches every artifact collector off.
+
+  Every line is written at the end of the pass, keeping the log write off the path
+  being measured. The line therefore carries its own `start_ns`; the log prefix
+  timestamps the write, not the segment.
+
+- **`host_phase_records.jsonl`** in the per-case output directory, when the run
+  has one. One JSON Lines object per pass carrying `pid` / `inv` — the identity
+  the `[STRACE]` tree groups by — and one record per operation. This is the
+  channel to read for a distribution or a per-event timeline; the summed lines
+  cannot express either. `strace_timing.py --swimlane --host-phase-records <path>`
+  draws each record inside the matching `chip.run.bind`.
+
+- **The host lanes of `chip_swimlane_records.json`**, at level 4 only, joined to
+  the device timeline through the clock anchors (see `host/clock_correlation.h`).
+  Two projections of the pool land there:
+
+  | Key | Kinds | Rendered as |
+  | --- | ----- | ----------- |
+  | `host_orchestrator_phases` | the task-submitting kinds | `Host Orchestrator` process |
+  | `host_device_uploads` | `graph_upload`, `sm_h2d`, `arena_h2d`, with byte counts | `Host Prepare` / `H2D` lane |
+
+  The upload lane is the one place the whole question — orchestration plus H2D
+  inside a millisecond — is visible against the device execution it precedes; the
+  rest of the bind stage is host-only setup with no device counterpart.
+
+  The `host_capture` block reports `expected_records` (the pass's task count)
+  against `recorded_records` (the submit projection), plus `pool_records` for the
+  whole population — a pool count above the projection is normal, not incomplete.
+
+The stage's *duration* is already published as the `chip.run.bind` `[STRACE]`
+marker, so the marker and this breakdown are a total and its parts rather than two
+spellings of one number. The parts are not markers themselves: the marker grammar
+is the platform's public per-run-stage contract (see `pto_runtime_c_api.h` and
+[docs/dfx/host-trace.md](../../../../../docs/dfx/host-trace.md)), whose consumers
+key off a fixed stage set, and a runtime's internal breakdown of one stage does
+not belong in it.
+
+### Cost and capacity
+
+A record costs two clock reads, a store and two counter updates — roughly 47 ns
+on an aarch64 host, for ~337 operations in a 40-layer decode pass. Cheap, but it
+sits on the path being measured, which is why neither switch is on by default.
+
+The pool holds `PLATFORM_HOST_PHASE_BUFFERS × PLATFORM_HOST_PHASE_RECORDS_PER_BUFFER`
+records (5 × 1024 = 5120, 160 KB) in fixed-size buffers rotated in index order,
+the same shape as the device sched/orch pools with host DDR as its backing.
+Beyond that, records are dropped from the tail and counted: the per-event views
+truncate, the per-kind totals stay exact, and `dropped=` on every `host-orch` line
+plus `dropped_records` in `host_capture` say so.
+
+---
+
 ## Runtime Flag: enable_chip_swimlane (perf_level)
 
 `--enable-chip-swimlane` accepts an integer perf_level (0–4). Transport

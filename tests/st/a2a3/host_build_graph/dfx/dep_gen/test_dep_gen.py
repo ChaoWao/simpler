@@ -124,6 +124,7 @@ class TestDepGenHostBuildGraph(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "params": {},
         },
     ]
@@ -148,9 +149,8 @@ class TestDepGenHostBuildGraph(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
         if not self._effective_enable_dep_gen(request):
             return
-        for case in self.CASES:
-            if st_platform in case.get("platforms", []):
-                self._post_validate(case, run_marker)
+        for case in self._matching_cases(st_platform, request):
+            self._post_validate(case, run_marker)
 
     def _post_validate(self, case, run_marker):
         """Assert deps.json holds the 6 edges of example_orchestration.cpp."""
@@ -236,6 +236,7 @@ class TestDepGenHostBuildGraphEdgeSources(SceneTestCase):
         {
             "name": "gate_open",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {"case": 2},
         },
@@ -260,9 +261,8 @@ class TestDepGenHostBuildGraphEdgeSources(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
         if not self._effective_enable_dep_gen(request):
             return
-        for case in self.CASES:
-            if st_platform in case.get("platforms", []):
-                self._post_validate(case, run_marker)
+        for case in self._matching_cases(st_platform, request):
+            self._post_validate(case, run_marker)
 
     def _post_validate(self, case, run_marker):
         deps = _load_deps("TestDepGenHostBuildGraphEdgeSources", case["name"], run_marker)

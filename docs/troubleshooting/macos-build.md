@@ -34,8 +34,9 @@ compilers. They get loaded into the same Python process at test time.
 
 Phase 1 produces the long-lived runtime libs (`libhost_runtime.so`,
 `libaicpu_runtime.so`, `libaicore_runtime.so`, `libsim_context.so`,
-`libsimpler_log.so`) plus the nanobind Python extension
-(`_task_interface.cpython-*.so`). Phase 2a produces a
+plus the nanobind Python extension (`_task_interface.cpython-*.so`). The host
+logging implementation is compiled into each host consumer rather than built
+as a separate library. Phase 2a produces a
 per-test `libexample_orchestration.so`, dlopened by phase-1 runtime
 libs. Phase 2b produces per-task AIC / AIV / AICPU `.so` files for sim
 runs, also dlopened by the runtime libs.

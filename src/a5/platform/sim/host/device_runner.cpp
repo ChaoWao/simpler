@@ -33,11 +33,13 @@
 #include "aicpu/platform_aicpu_affinity.h"
 #include "call_config.h"
 #include "callable_protocol.h"
+#include "common/host_log_binding.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "cpu_sim_context.h"
 #include "host_log.h"
+#include "host/host_phase_records_artifact.h"
 #include "host/raii_scope_guard.h"
 #include "host/runtime_timeout_config.h"
 #include "runtime.h"
@@ -185,6 +187,10 @@ int DeviceRunner::ensure_binaries_loaded() {
         SetLogLevelFunc set_log_level_func = nullptr;
         if (!load_sym("set_log_level", reinterpret_cast<void **>(&set_log_level_func))) return -1;
         set_log_level_func(HostLogger::get_instance().level());
+        using SetHostLogStateFunc = void (*)(SimplerHostLogState *);
+        SetHostLogStateFunc set_host_log_state_func = nullptr;
+        if (!load_sym("set_host_log_state", reinterpret_cast<void **>(&set_host_log_state_func))) return -1;
+        set_host_log_state_func(HostLogger::get_instance().state());
 
         aicpu_so_loaded_ = true;
         LOG_INFO("DeviceRunner(sim): Loaded aicpu_execute from %s", aicpu_so_path_.c_str());
@@ -212,6 +218,19 @@ int DeviceRunner::ensure_binaries_loaded() {
         aicore_so_handle_ = dlopen(aicore_so_path_.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (aicore_so_handle_ == nullptr) {
             LOG_ERROR("dlopen failed for AICore SO: %s", dlerror());
+            return -1;
+        }
+
+        const char *bind_log_error = nullptr;
+        if (simpler::log::bind_loaded_host_log_state(
+                aicore_so_handle_, HostLogger::get_instance().state(), &bind_log_error
+            ) != 0) {
+            LOG_ERROR(
+                "AICore SO failed to bind host-log state: %s",
+                bind_log_error != nullptr ? bind_log_error : "unknown error"
+            );
+            dlclose(aicore_so_handle_);
+            aicore_so_handle_ = nullptr;
             return -1;
         }
 
@@ -594,15 +613,18 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     int runtime_rc = run_completion_.first_error();
     if (runtime_rc != 0) {
         LOG_ERROR("AICPU execution failed with rc=%d", runtime_rc);
+        finish_clock_correlation_session(false);
         return runtime_rc;
     }
 
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
+    finish_clock_correlation_session(true);
     if (enable_chip_swimlane_) {
         chip_swimlane_collector_.stop();
         chip_swimlane_collector_.read_phase_header_metadata();
         chip_swimlane_collector_.reconcile_counters();
+        publish_host_phase_records_to_swimlane();
         chip_swimlane_collector_.export_swimlane_json();
     }
 
@@ -627,6 +649,14 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
                 LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", replay_rc);
             }
         }
+    }
+
+    // Per-event view of the prepare path. Keyed on output_prefix_ rather than a
+    // flag because it is non-empty exactly when this run produces diagnostic
+    // artifacts, and on the store having finished a pass, which is what a
+    // host-orchestrating runtime leaves behind.
+    if (!output_prefix_.empty() && host_phase_records_.finished()) {
+        (void)host_phase_records_.write_records_jsonl(make_host_phase_records_path(output_prefix_));
     }
 
     if (enable_scope_stats_) {
@@ -705,7 +735,7 @@ int DeviceRunner::finalize() {
     release_callable_state();
 
     unload_executor_binaries();
-    release_graph_execution_buffers();
+    release_graph_definition_buffers();
 
     for (auto &bank : arena_banks_) {
         bank->gm_heap.release();

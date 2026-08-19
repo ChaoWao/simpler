@@ -73,48 +73,48 @@ class TestNativeRunLifecycle(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
 
         spans = list(parse_spans(capfd.readouterr().err.splitlines()))
-        invocations = [inv for inv in group_invocations(spans) if "simpler_run" in inv.by_name()]
+        invocations = [inv for inv in group_invocations(spans) if "chip.run" in inv.by_name()]
         # Two of these are the abandoned diagnostic prepares below, which record a
-        # simpler_run invocation without ever reaching simpler_run.runner_run.
+        # chip.run invocation without ever reaching chip.run.runner_run.
         expected_invocations = 5 if st_platform.endswith("sim") else 9
         assert len(invocations) == expected_invocations
 
         common_depths = {
-            "simpler_run": 0,
-            "simpler_run.bind": 1,
-            "simpler_run.validate": 1,
+            "chip.run": 0,
+            "chip.run.bind": 1,
+            "chip.run.validate": 1,
         }
         launched_depths = {
             **common_depths,
-            "simpler_run.runner_run": 1,
-            "simpler_run.runner_run.device_wall": 2,
+            "chip.run.runner_run": 1,
+            "chip.run.runner_run.device_wall": 2,
         }
         launched_count = 0
         for invocation in invocations:
             by_name = invocation.by_name()
-            expected_depths = launched_depths if "simpler_run.runner_run" in by_name else common_depths
-            launched_count += "simpler_run.runner_run" in by_name
+            expected_depths = launched_depths if "chip.run.runner_run" in by_name else common_depths
+            launched_count += "chip.run.runner_run" in by_name
             assert expected_depths.keys() <= by_name.keys()
             assert len({span.hid for span in invocation.spans}) == 1
-            assert sum(span.name == "simpler_run" for span in invocation.spans) == 1
+            assert sum(span.name == "chip.run" for span in invocation.spans) == 1
             for name, depth in expected_depths.items():
                 assert by_name[name].depth == depth
 
-            root = by_name["simpler_run"]
+            root = by_name["chip.run"]
             root_end = root.ts + root.dur
-            for name in expected_depths.keys() - {"simpler_run", "simpler_run.runner_run.device_wall"}:
+            for name in expected_depths.keys() - {"chip.run", "chip.run.runner_run.device_wall"}:
                 stage = by_name[name]
                 assert root.ts <= stage.ts <= stage.ts + stage.dur <= root_end
         expected_launched = 2 if st_platform.endswith("sim") else 6
         assert launched_count == expected_launched
         if not st_platform.endswith("sim"):
-            root_attrs = [inv.by_name()["simpler_run"].attrs for inv in invocations]
+            root_attrs = [inv.by_name()["chip.run"].attrs for inv in invocations]
             assert all(
                 key in attrs
                 for attrs in root_attrs
-                for key in ("run_id=", "slot=", "generation=", "dispatch_id=", "run_epoch=")
+                for key in ("run_id=", "slot_id=", "generation=", "dispatch_id=", "run_epoch=")
             )
-            assert any("slot=1" in attrs and "generation=1" in attrs for attrs in root_attrs)
+            assert any("slot_id=1" in attrs and "generation=1" in attrs for attrs in root_attrs)
 
     def _run_and_validate_l2(  # noqa: PLR0913, PLR0915 -- lifecycle contract is intentionally sequential
         self,
@@ -150,8 +150,11 @@ class TestNativeRunLifecycle(SceneTestCase):
                 _SLOT, chip_args, _SLOT, _GENERATION, config=config
             )
             first_run = native_run
-            expected_stream_count = stream_count_before_prepare + int(supports_concurrent_prepare)
-            assert chip_worker.run_stream_set_create_count == expected_stream_count
+            # Preparation stops short of the device launch fence, and that
+            # includes the run streams: the pair is readied by launch, under the
+            # execution claim, because a prepared successor overlaps its
+            # predecessor's execution.
+            assert chip_worker.run_stream_set_create_count == stream_count_before_prepare
             assert torch.count_nonzero(test_args.out) == 0, "prepare crossed the device launch fence"
             with pytest.raises(RuntimeError, match="unfinished native run|owns the runner|active predecessor"):
                 chip_worker._prepare_native_run_with_pipeline_lease(_SLOT, chip_args, 1, _GENERATION, config=config)
@@ -227,22 +230,24 @@ class TestNativeRunLifecycle(SceneTestCase):
                     self.compute_golden(run_golden, case["params"])
                     return run_args, run_chip_args, run_output_names, run_golden
 
-                # The successor owns a distinct bank and fresh stream while A
-                # still owns the execution claim. A failed early launch must
-                # leave B prepared so the same token can launch after A's
-                # complete fence and finalization.
+                # The successor owns a distinct bank while A still owns the
+                # execution claim. Preparation touches no stream — the run pair
+                # is readied at launch, under the claim — so neither prepare
+                # advances the creation count. A failed early launch must leave B
+                # prepared so the same token can launch after A's complete fence
+                # and finalization.
                 active_args, active_chip_args, active_outputs, active_golden = build_run_args()
                 successor_args, successor_chip_args, successor_outputs, successor_golden = build_run_args()
                 stream_count = chip_worker.run_stream_set_create_count
                 native_run = chip_worker._prepare_native_run_with_pipeline_lease(
                     _SLOT, active_chip_args, 0, _GENERATION + 1, config=config
                 )
-                assert chip_worker.run_stream_set_create_count == stream_count + 1
+                assert chip_worker.run_stream_set_create_count == stream_count
                 chip_worker._launch_native_run(native_run)
                 successor_run = chip_worker._prepare_native_run_with_pipeline_lease(
                     _SLOT, successor_chip_args, 1, _GENERATION, config=config
                 )
-                assert chip_worker.run_stream_set_create_count == stream_count + 2
+                assert chip_worker.run_stream_set_create_count == stream_count
                 bank0 = chip_worker.arena_bank_gm_heap_base(0)
                 bank1 = chip_worker.arena_bank_gm_heap_base(1)
                 assert bank0 != 0

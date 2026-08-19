@@ -88,6 +88,7 @@ class TestDepGen(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a2a3sim", "a2a3"],
+            "manual": ["a2a3sim"],
             "params": {},
         },
     ]
@@ -117,15 +118,15 @@ class TestDepGen(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
         if not self._effective_enable_dep_gen(request):
             return
-        for case in self.CASES:
-            if st_platform in case.get("platforms", []):
-                self._post_validate(case, run_marker)
+        for case in self._matching_cases(st_platform, request):
+            self._post_validate(case, run_marker)
 
     def _post_validate(self, case, run_marker):
         """Assert deps.json for this invocation contains the 6 edges documented
         in example_orchestration.cpp. Reached only with dep_gen effectively on
-        and the case's platform matching, so the run must have produced an
-        output dir; a missing one is a capture regression, not a skip.
+        and the case selected by the active filters, so the run must have
+        produced an output dir; a missing one is a capture regression, not a
+        skip.
         """
         case_name = case["name"]
         safe_label = _sanitize_for_filename(f"TestDepGen_{case_name}")

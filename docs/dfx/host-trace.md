@@ -41,6 +41,14 @@ calculations remain entirely on the monotonic clock and are unaffected by
 wall-clock corrections. Records tagged `clk=dev` use the separate device-clock
 domain described below and do not use this anchor.
 
+`strace_timing.py` applies that mapping to both `--trace-out` and `--swimlane`.
+The visible Perfetto axis remains monotonic; each mapped host event exposes the
+exact decimal `wall_ts_ns` and a UTC `wall_time` in its arguments, while the JSON
+top level retains the source mappings in `clockAnchors`. Nanosecond epoch values
+are strings because JSON consumers commonly use IEEE-754 numbers, which cannot
+represent current epoch nanoseconds exactly. Old logs without an anchor retain
+their existing output, and `clk=dev` records never receive host wall time.
+
 One line per span, emitted on scope exit
 (`src/common/log/include/common/strace.h`):
 
@@ -68,15 +76,15 @@ output sees the original text; a consumer reading the raw log does not.
 ## Span tree
 
 ```text
-simpler_run                                   (= host_wall)
-├─ simpler_run.bind
-│  ├─ simpler_run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
-│  └─ simpler_run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
-├─ simpler_run.runner_run          (device enqueue + completion drain)
-│  └─ simpler_run.runner_run.device_wall      (whole on-NPU AICPU wall)
+chip.run                                      (= host_wall)
+├─ chip.run.bind
+│  ├─ chip.run.bind.args        (ntensor=N: per-tensor device_malloc + H2D)
+│  └─ chip.run.bind.prebuilt    (prebuilt runtime-arena cache hit or build + upload)
+├─ chip.run.runner_run          (device enqueue + completion drain)
+│  └─ chip.run.runner_run.device_wall      (whole on-NPU AICPU wall)
 │     └─ .{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}
 │           TMR device-domain (clk=dev): AICPU subdivision of the on-NPU wall
-└─ simpler_run.validate
+└─ chip.run.validate
 ```
 
 The `device_wall` span exists for both runtimes. Its
@@ -95,7 +103,7 @@ The phased native-run interface preserves this same marker contract. Prepare
 allocates one `inv` and records the host-wall start; prepare, the child progress
 path's launch/drain lifecycle, and finalize bind that `(inv, hid)` while
 emitting their spans. Finalize releases the runner claim, destroys the per-run
-state, and then emits the stored `simpler_run` wall, so the root includes that
+state, and then emits the stored `chip.run` wall, so the root includes that
 cleanup tail.
 No trace scope or synthetic nesting remains active between C API calls. For
 direct phased use the host wall is the full prepare-to-finalize lifetime,
@@ -104,51 +112,58 @@ including time the caller spends polling or doing other host work; blocking
 
 | Depth | Span names |
 | ----- | ---------- |
-| 0 | `simpler_run` |
-| 1 | `simpler_run.bind`, `simpler_run.runner_run`, `simpler_run.validate` |
-| 2 | `simpler_run.bind.args`, `simpler_run.bind.prebuilt`, `simpler_run.runner_run.device_wall` |
-| 3 | TMR phase spans `simpler_run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
+| 0 | `chip.run` |
+| 1 | `chip.run.bind`, `chip.run.runner_run`, `chip.run.claim_release`, `chip.run.validate` |
+| 2 | `chip.run.bind.args`, `chip.run.bind.prebuilt`, `chip.run.runner_run.device_wall` |
+| 3 | TMR phase spans `chip.run.runner_run.device_wall.{preamble,so_load,graph_build,config_validate,arena_wire,sm_reset,post_orch,orch,sched}` and optional `task_slot_*` spans |
 
-## L3/L4 host scheduler spans
+## Host scheduler spans
 
 Every hierarchical worker that drives next-level children emits these spans
-through the same process-global `libsimpler_log.so` sink — an L3 with chips and
-an L4 pod alike, since the orchestrator and scheduler code they run is the same:
+through the logger compiled into `_task_interface`, since the orchestrator and
+scheduler code they run is the same at every level above the chip. **The leading
+word names the level that emitted them**, so `<level>` below is one of `host`
+(L3), `network1` (L4), `network2` (L5) or `network3` (L6) — see
+[`python/simpler/worker_level.py`](../../python/simpler/worker_level.py) for the
+ladder:
 
 | Span | Host decision point |
 | ---- | ------------------- |
-| `l3.graph_build` | serialized Python graph callback |
-| `l3.submit` | next-level task publication after slot allocation |
-| `l3.dispatch` | scheduler handoff to a worker thread |
-| `l3.frame_submit` | local child mailbox-frame publication |
-| `l3.activate` | prepared-frame activation |
-| `l3.complete` | terminal child progress handling |
+| `<level>.graph_build` | serialized Python graph callback |
+| `<level>.submit` | next-level task publication after slot allocation |
+| `<level>.dispatch` | scheduler handoff to a worker thread |
+| `<level>.frame_submit` | local child mailbox-frame publication |
+| `<level>.activate` | prepared-frame activation |
+| `<level>.complete` | terminal child progress handling |
+| `<level>.post_fence_retirement` | run erase + quiescent compaction, after the completion fence |
 
 Their attributes carry the available `run_id`, `task_slot`, `group_index`,
-`worker_id`, `dispatch_id`, and endpoint kind.
+`worker_id`, `dispatch_id`, endpoint kind, and the dispatch's pipeline lease
+(`slot_id` / `generation`).
 
-Because the names do not encode which level emitted them, a pod run puts the L4
-process and each of its L3 processes on lanes that differ only by pid. The
-per-level vocabulary that resolves this is tracked in
-[#1793](https://github.com/hw-native-sys/simpler/issues/1793).
+The word is resolved once per process, from its Worker's level, and the **first
+binding wins**: a `SpanScope` keeps the name pointer it was handed, so a process
+that inits Workers at two levels keeps the first one's word and logs a warning
+rather than relabelling spans that are still open. One process therefore carries
+one vocabulary — which is what makes an L4 run readable, since its own spans say
+`network1.` while each of its L3 children says `host.`.
 
 One process contributes at most two host lanes, because the scheduler runs on
-one thread: the facade thread emits `l3.graph_build` and `l3.submit`, and the
-scheduler thread emits the other four. `role=worker` on `l3.frame_submit`,
-`l3.activate` and `l3.complete` names the worker a dispatch targets, not the
-thread that ran it.
+one thread: the facade thread emits `<level>.graph_build` and `<level>.submit`,
+and the scheduler thread emits the other four. `role=worker` on
+`<level>.frame_submit`, `<level>.activate` and `<level>.complete` names the
+worker a dispatch targets, not the thread that ran it.
 
-The spans reach the logger over a fixed POD C ABI, `SimplerHostSpan` in
-`common/host_span.h`. `_task_interface` cannot link `libsimpler_log.so` — that
-library is reached by `RTLD_GLOBAL` dlopen at runtime — so each extension/DSO
-owns its own nullable sink function pointer instead of an undefined link symbol.
-`simpler._log_preload` loads the library, and `simpler._log` passes the exported
-entry-point address into `_task_interface` before Worker initialization. Every later
-`fork()` therefore inherits the bound pointer and logger mapping, so parent and
-child markers reach one sink. A process that never loads the logger leaves the
-extension-local pointer null, which disables host spans without failing anything. A later
-`ChipWorker.init` refreshes the binding after loading the required runtime
-logger. `host_runtime.so` links the library directly and needs none of this.
+The spans reach the logger over the fixed POD `SimplerHostSpan` ABI in
+`common/host_span.h`. `_task_interface` compiles the host logger directly, so
+there is no nullable sink and host-span support cannot disappear because a
+separate logger DSO was absent. Every other host consumer also compiles a
+private logger implementation, then binds it to the
+`SimplerHostLogState` owned by `_task_interface`. The hierarchical parent seeds
+that state before `fork()`; a chip child re-seeds its inherited copy and passes
+the same pointer to every runtime module it loads. The threshold and one-anchor
+coordination are therefore shared within each process without relying on
+`RTLD_GLOBAL` logger symbols.
 
 ## Reading the markers — `strace_timing.py`
 
@@ -161,23 +176,144 @@ python -m simpler_setup.tools.strace_timing path/to/log --trace-out strace.json
 
 # emit the L3/L4 host scheduler timeline on real OS pid/tid lanes
 python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane.json
+
+# ... and subdivide the bind stage with a runtime's own per-event records
+python -m simpler_setup.tools.strace_timing path/to/log --swimlane host_swimlane.json \
+    --host-phase-records outputs/<case>/host_phase_records.jsonl
 ```
 
 The tool groups by `(pid, inv)`, rebuilds each invocation's tree from `depth`,
-buckets by `hid`, and prints each callable's mean `simpler_run` plus per-stage
+buckets by `hid`, and prints each callable's mean `chip.run` plus per-stage
 means. With `--trace-out` it writes one `ph:"X"` event per span on a synthetic
 per-invocation lane, so each call renders as an isolated nested tree in
 [Perfetto](https://ui.perfetto.dev) / `chrome://tracing`.
 
 `--swimlane` is a separate view. Host slices keep their real OS pid/tid, and
-task submission-to-dispatch handoffs render as flow arrows. Chrome Trace JSON
-has only one visible timestamp axis, so putting the raw per-invocation device
-clock beside `CLOCK_MONOTONIC` would create a multi-day empty interval. The
-converter therefore keeps `clk=dev` records, with their original ns timestamps,
-in the top-level `unalignedDeviceSpans` array instead of `traceEvents`; it does
-not guess a clock offset. Perfetto opens directly on the host activity, while
-the existing tables, tree, and `--trace-out` still provide the device-phase
-timing views.
+task submission-to-dispatch handoffs render as flow arrows.
+
+A runtime may subdivide a stage it owns, which the markers deliberately do not
+describe — the marker grammar is a fixed per-run-stage contract, and a runtime's
+internal breakdown of one stage does not belong in it. `--host-phase-records`
+takes such a breakdown from the artifact the runtime wrote and draws each record
+inside its `chip.run.bind`, matched on `(pid, inv)`. Both sides are the same
+`CLOCK_MONOTONIC` axis, so nothing is converted. Without the artifact the tool
+still recovers the stage's own segments from the runtime's timing log lines; where
+both are present the artifact wins, so a segment is not drawn twice. See
+[host_build_graph's profiling levels](../../src/a2a3/runtime/host_build_graph/docs/profiling_levels.md)
+for what that runtime records.
+
+**One exception, because a K-deep pipeline is not K threads.** The direct-chip
+lane drives prepare(N+1) and finalize(N) from the *same* OS thread, so a 40-run
+K=2 stress produces 40 overlapping run lifetimes on one tid. Perfetto nests
+slices by timestamp containment within a track, so flattening them there puts
+run N+1's spans *inside* run N's root — false nesting that hides the very
+overlap the view exists to show. A thread whose depth-0 spans overlap is
+therefore split into one lane per pipeline slot (`pipeline slot 0 (tid …)`),
+which reads as a plain sequence because a run holds its slot exclusively. The
+overlap then shows where it belongs: across lanes. Each slice keeps `os_tid` in
+its args, and a thread that ran sequentially — the L3 scheduler, which carries a
+slot but never interleaves — keeps its real tid.
+
+Chrome Trace JSON has only one visible timestamp axis, so putting the raw
+per-invocation device clock beside `CLOCK_MONOTONIC` would create a multi-day
+empty interval. The converter therefore keeps `clk=dev` records, with their
+original ns timestamps, in the top-level `unalignedDeviceSpans` array instead of
+`traceEvents`; it does not guess a clock offset. Perfetto opens directly on the
+host activity, while the existing tables, tree, and `--trace-out` still provide
+the device-phase timing views.
+
+## Async pipeline proof
+
+The phased native lane claims that run N+1's preparation runs *concurrently*
+with run N's device execution. That claim is checkable from a captured log
+without any new marker family: the windows are already in the `chip.run`
+tree, and the root span already carries the identity that tells two runs apart.
+
+| Property | Read from |
+| -------- | --------- |
+| successor's preparation | `chip.run.bind` — its arena build + host orchestration |
+| predecessor's device work | `chip.run.runner_run` |
+| when a successor may launch | `chip.run.claim_release` |
+| which run each belongs to | root `chip.run` attrs, joined by `(pid, inv)` |
+
+Only `claim_release` was added for this: it wraps `release_native_run` inside
+finalize, the point a successor's launch becomes admissible, and no other span
+marks that boundary. `host.post_fence_retirement` covers the L3 orchestrator's
+`release_run` tail for the same reason.
+
+The identity is `run_id / dispatch_id / run_epoch / slot_id / generation`. Each
+field means one thing: `run_id` and `dispatch_id` are zero on the direct-chip
+lane, which allocates neither, and `run_epoch` is a per-process monotonic counter
+that is always set — so it is what orders runs when the other two are absent.
+`NativeDispatchIdentity.sequence` makes that choice in the parser, where it is
+visible, rather than in the record.
+
+```bash
+python -m simpler_setup.tools.strace_timing path/to/log --assert-native-overlap
+```
+
+Per adjacent run on one child process, the command requires `bind(N+1)` to
+**overlap** `runner_run(N)` — the intervals intersect — and `runner_run(N+1)` not
+to start before `claim_release(N)`. It exits nonzero on a missing identity, a
+missing span, or an ordering violation.
+
+Reading `bind` rather than the whole prepare is deliberate: `bind` sits inside
+prepare, so an overlap it reports is one the prepare certainly had.
+
+`--require-hidden-prepare` adds the stronger claim that the preparation also
+*finishes* inside the predecessor's device window — fully hidden rather than
+merely concurrent. That is a statement about pipeline depth and it is sensitive
+to host scheduling, so it is opt-in and the scene test asserts only the overlap
+property.
+
+### The scene test carries its own negative controls
+
+`tests/st/a2a3/host_build_graph/concurrent_prepare_stress` drives three arms
+through one pipeline driver and reads this same verdict, so each control differs
+from the positive arm in exactly one variable:
+
+| Arm | Variable moved | Required verdict |
+| --- | -------------- | ---------------- |
+| overlap stress | — | accepted, one check per adjacent pair |
+| serial submission | one run in flight instead of two | rejected, `did not overlap` |
+| diagnostics config | `enable_scope_stats` set | rejected, `did not overlap` |
+
+The second arm is what makes the first a detector rather than a formality.
+Between the pipeline and the verdict sits a chain — which spans are emitted,
+where their endpoints land, `bind` standing in for preparation, `runner_run`
+being a host wall span that includes caller polling — and if any link reported an
+intersection independent of real concurrency, the positive arm would still be
+green. Matching the message matters: it separates a real rejection from the
+vacuous "need at least two complete native runs" one.
+
+The third arm covers a fallback that is otherwise silent. `allow_prepared_successor`
+folds in `CallConfig::diagnostics_any()` — the OR of all five diagnostic flags —
+because a collector's setup mutates runner-global state that is not yet
+per-epoch, so *any* one of them keeps a run and its successor on separate device
+windows even at depth 2. The lane's own check declines to stage rather than
+raising, so the submissions still succeed and the goldens still pass; nothing
+else would notice. Which flag is set does not matter, only that
+`diagnostics_any()` becomes true, so the arm picks the lightest.
+
+Staging has three inputs and only that one is reachable from a submission. The
+other two — the runtime PipelineContract's `pipeline_depth` and the runtime's
+concurrent-prepare capability symbol — are compile-time properties: every onboard
+runtime declares depth 2 (`PTO_PIPELINE_MAX_DEPTH` is 2) and returns 1 from the
+capability impl, while the sim platform hardcodes 0, so overlap never happens
+under simulation. Because neither is configurable, being unable to stage a
+successor is a **failure** in the scene test rather than a skip — a skip would
+report green for the one state in which the property cannot hold. The platform
+gate runs first, so the sim path never reaches that assert.
+
+The two negative arms differ in how long they are meant to last. The serial one
+names no mechanism — one run in flight cannot overlap under any admission policy
+— so it is permanent. The diagnostics one is deliberately perishable:
+`concurrent_native_prepare_supported_impl` keeps collector-bearing configurations
+sequential only *until their state is per-epoch*, and once that lands and
+`diagnostics_any()` leaves `allow_prepared_successor`, this arm fails with the
+very `did not overlap` it now requires. **Delete it then; do not restore the
+serialization** — its value and its lifetime both come from the fallback being
+silent.
 
 ## Why markers, not a return value
 

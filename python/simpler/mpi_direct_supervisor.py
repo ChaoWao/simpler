@@ -99,8 +99,7 @@ def _detect_mpi4py_family(python_executable: str | None = None) -> tuple[str, st
     try:
         result = subprocess.run(
             [python_executable or sys.executable, "-c", script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=10.0,
             check=False,
@@ -157,7 +156,7 @@ def _family_launcher_args(
     raise ValueError(f"unsupported MPI launcher family {launcher_family!r}")
 
 
-def _build_command(
+def _build_command(  # noqa: PLR0913 -- launcher construction mirrors the complete MPI CLI surface
     topology: MpiDirectTopology,
     *,
     mpirun_path: str,
@@ -259,7 +258,7 @@ def _startup_gate(
                 message = _gate_recv(peer)
                 if message.get("token") != token:
                     raise RuntimeError("MPI startup gate token mismatch")
-                rank = int(message.get("rank", -1))
+                rank = int(message.get("rank", -1))  # type: ignore[arg-type]
                 if rank < 0 or rank >= topology.world_size or rank in peers:
                     raise RuntimeError(f"invalid or duplicate MPI startup rank {rank}")
                 if message.get("state") == "failed":

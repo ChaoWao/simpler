@@ -41,6 +41,7 @@
 #include "common/platform_config.h"
 #include "common/unified_log.h"
 #include "host/acl_error_log.h"
+#include "host/host_phase_records_artifact.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
 #include "platform_comm/comm.h"
@@ -170,16 +171,14 @@ void DeviceRunnerBase::set_retained_temp_buffer(uint32_t pipeline_slot, void *ad
     retained_temp_sizes_[pipeline_slot] = size;
 }
 
-void *DeviceRunnerBase::acquire_graph_execution_buffer(
-    uint32_t pipeline_slot, uint64_t graph_key, uint32_t occurrence, size_t bytes, size_t alignment
+void *DeviceRunnerBase::acquire_graph_definition_buffer(
+    uint32_t pipeline_slot, uint64_t key, size_t bytes, size_t alignment
 ) {
-    if (pipeline_slot >= graph_execution_buffers_.size() || bytes == 0 || alignment == 0 ||
+    if (pipeline_slot >= graph_definition_buffers_.size() || bytes == 0 || alignment == 0 ||
         (alignment & (alignment - 1)) != 0 || bytes > SIZE_MAX - (alignment - 1)) {
         return nullptr;
     }
-    std::vector<RetainedGraphExecutionBuffer> &buffers = graph_execution_buffers_[pipeline_slot][graph_key];
-    if (occurrence >= buffers.size()) buffers.resize(static_cast<size_t>(occurrence) + 1);
-    RetainedGraphExecutionBuffer &buffer = buffers[occurrence];
+    RetainedGraphBuffer &buffer = graph_definition_buffers_[pipeline_slot][key];
     if (buffer.aligned_addr != nullptr && buffer.capacity >= bytes &&
         reinterpret_cast<uintptr_t>(buffer.aligned_addr) % alignment == 0) {
         return buffer.aligned_addr;
@@ -202,23 +201,21 @@ void *DeviceRunnerBase::acquire_graph_execution_buffer(
         mem_alloc_.free(allocation);
         return nullptr;
     }
-    buffer = RetainedGraphExecutionBuffer{allocation, aligned_addr, bytes};
+    buffer = RetainedGraphBuffer{allocation, aligned_addr, bytes};
     return aligned_addr;
 }
 
-void DeviceRunnerBase::release_graph_execution_buffers() {
-    for (GraphExecutionBufferMap &by_key : graph_execution_buffers_) {
+void DeviceRunnerBase::release_graph_definition_buffers() {
+    for (GraphDefinitionBufferMap &by_key : graph_definition_buffers_) {
         for (auto &entry : by_key) {
-            for (RetainedGraphExecutionBuffer &buffer : entry.second) {
-                if (buffer.allocation != nullptr) mem_alloc_.free(buffer.allocation);
-            }
+            if (entry.second.allocation != nullptr) mem_alloc_.free(entry.second.allocation);
         }
         by_key.clear();
     }
 }
 
-void DeviceRunnerBase::abandon_graph_execution_buffers() {
-    for (GraphExecutionBufferMap &by_key : graph_execution_buffers_) {
+void DeviceRunnerBase::abandon_graph_definition_buffers() {
+    for (GraphDefinitionBufferMap &by_key : graph_definition_buffers_) {
         by_key.clear();
     }
 }
@@ -696,6 +693,7 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
         mem_alloc_.free(gm_addr);
         return 0;
     }
+    mark_run_streams_stale();
 
     chip_callable_buffers_.emplace(layout.content_hash, ChipCallableBuffer{chip_dev, layout.total_size, 1});
     LOG_DEBUG(
@@ -998,9 +996,17 @@ int DeviceRunnerBase::bind_callable_to_runtime(
     }
     const auto &state = it->second;
 
-    // Replay each prepared kernel address into runtime.func_id_to_addr_.
-    // The kernel binaries live in the retained ChipCallable buffer for this
-    // callable_id and stay valid until `unregister_callable` or `finalize`.
+    // runtime.func_id_to_addr_ holds exactly the active callable's mappings.
+    //
+    // Each entry is an address inside that callable's retained ChipCallable
+    // buffer, which `unregister_callable` frees once its last handle goes away.
+    // The table is zeroed only in Runtime's constructor and a Runtime outlives
+    // many register/unregister cycles, so an entry left behind by a previous
+    // callable dangles into GM the allocator can hand out again. The scheduler
+    // dereferences that address to read CoreCallable::resolved_addr() and the
+    // AICore calls the result, so a stale entry is executed as code. Replaying
+    // only this callable's func_ids would leave every other entry standing.
+    runtime.clear_function_bin_addrs();
     for (const auto &kv : state.kernel_addrs) {
         if (kv.first < 0 || kv.first >= RUNTIME_MAX_FUNC_ID) {
             LOG_ERROR("bind_callable_to_runtime: func_id=%d out of range", kv.first);
@@ -1048,6 +1054,85 @@ void DeviceRunnerBase::apply_call_config(const CallConfig &config) {
     set_output_prefix(config.output_prefix);
 }
 
+HostPhaseRecordPool *DeviceRunnerBase::host_phase_pool_arm(bool producer_wants_records) noexcept {
+    if (clock_correlation_provider_ != nullptr) {
+        clock_correlation_provider_->release(false);
+        clock_correlation_provider_.reset();
+    }
+    const bool swimlane_wants_records = chip_swimlane_level_ == ChipSwimlaneLevel::ORCH_PHASES;
+    chip_swimlane_collector_.set_host_orchestrated(swimlane_wants_records);
+    // arm() allocates the pool's buffers, so it can throw; this path is noexcept,
+    // where an escaping exception is std::terminate. A pass that cannot get its
+    // storage collects no records and says so by handing back nullptr.
+    HostPhaseRecordPool *pool = nullptr;
+    try {
+        pool = host_phase_records_.arm(producer_wants_records || swimlane_wants_records);
+    } catch (...) {
+        LOG_WARN("Host phase pool could not be armed; this pass collects no per-event records");
+    }
+    if (!swimlane_wants_records) return pool;
+
+    // Only the chip-swimlane reader places these records against device
+    // timestamps, so only it needs the two clocks anchored.
+    try {
+        clock_correlation_provider_ = simpler::dfx::make_clock_correlation_provider();
+        chip_swimlane_collector_.begin_clock_correlation_session(
+            clock_correlation_provider_->name(), clock_correlation_provider_->raw_device_timestamp_unit()
+        );
+        chip_swimlane_collector_.record_clock_anchor_samples(
+            simpler::dfx::capture_clock_anchor_group(
+                *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::HostOrchestrationBegin
+            )
+        );
+    } catch (...) {
+        clock_correlation_provider_.reset();
+        try {
+            chip_swimlane_collector_.begin_clock_correlation_session("unavailable", "unknown");
+        } catch (...) {
+            // begin() stores diagnostic strings and can still fail under
+            // allocation pressure. Keep this noexcept path fail-closed.
+            chip_swimlane_collector_.finish_clock_correlation_session();
+        }
+    }
+    return pool;
+}
+
+void DeviceRunnerBase::publish_host_phase_records_to_swimlane() {
+    if (!host_phase_records_.finished()) return;
+    chip_swimlane_collector_.set_host_phase_records(
+        host_phase_records_.submit_records(), host_phase_records_.device_upload_records(),
+        host_phase_records_.submitted_tasks(), host_phase_records_.total_records(),
+        host_phase_records_.dropped_records()
+    );
+}
+
+void DeviceRunnerBase::finish_clock_correlation_session(
+    bool capture_device_complete, bool abandon_device_resources
+) noexcept {
+    if (!chip_swimlane_collector_.clock_correlation_active()) {
+        if (clock_correlation_provider_ != nullptr) {
+            clock_correlation_provider_->release(abandon_device_resources);
+            clock_correlation_provider_.reset();
+        }
+        return;
+    }
+
+    if (capture_device_complete && clock_correlation_provider_ != nullptr) {
+        try {
+            chip_swimlane_collector_.record_clock_anchor_samples(
+                simpler::dfx::capture_clock_anchor_group(
+                    *clock_correlation_provider_, simpler::dfx::ClockAnchorPosition::DeviceExecutionComplete
+                )
+            );
+        } catch (...) {}
+    }
+    chip_swimlane_collector_.finish_clock_correlation_session();
+    if (clock_correlation_provider_ != nullptr) {
+        clock_correlation_provider_->release(abandon_device_resources);
+        clock_correlation_provider_.reset();
+    }
+}
+
 // =============================================================================
 // Group E (minimal) — shared AICPU launch helper
 // =============================================================================
@@ -1077,6 +1162,8 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     auto capture = [&rc](int err) {
         if (err != 0 && rc == 0) rc = err;
     };
+
+    finish_clock_correlation_session(false, abandon_device_resources);
 
     // Teardown invariant: finalize_common() is the single place that releases
     // every RTS/device-owning resource, and the subclass runs it BEFORE its
@@ -1200,11 +1287,11 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     prebuilt_runtime_arena_cache_image_.clear();
 
     if (abandon_device_resources) {
-        abandon_graph_execution_buffers();
+        abandon_graph_definition_buffers();
         retained_temp_addrs_.fill(nullptr);
         retained_temp_sizes_.fill(0);
     } else {
-        release_graph_execution_buffers();
+        release_graph_definition_buffers();
         clear_temporary_buffer();
     }
 
@@ -1576,16 +1663,28 @@ void DeviceRunnerBase::start_shared_collectors_for_run() {
     }
 }
 
-void DeviceRunnerBase::teardown_shared_collectors_after_run() {
+void DeviceRunnerBase::teardown_shared_collectors_after_run(bool device_execution_complete) {
     // Tear down collectors. stop() joins mgmt then collector in the only safe
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     // Diagnostic exports use the per-task `output_prefix_` directory the user
     // set on CallConfig (CallConfig::validate() enforces non-empty upstream).
+    finish_clock_correlation_session(device_execution_complete, !can_accept_run());
     if (enable_chip_swimlane_) {
         chip_swimlane_collector_.stop();
         chip_swimlane_collector_.read_phase_header_metadata();
         chip_swimlane_collector_.reconcile_counters();
+        publish_host_phase_records_to_swimlane();
         chip_swimlane_collector_.export_swimlane_json();
+    }
+
+    // Per-event view of the prepare path. Written here rather than in the reap
+    // tail because a device error reaches this teardown but not that tail, and a
+    // failed run is when the prepare timing is worth having. Keyed on
+    // output_prefix_ because it is non-empty exactly when this run produces
+    // diagnostic artifacts, and on the store having finished a pass, which is what
+    // a host-orchestrating runtime leaves behind.
+    if (!output_prefix_.empty() && host_phase_records_.finished()) {
+        (void)host_phase_records_.write_records_jsonl(make_host_phase_records_path(output_prefix_));
     }
 
     if (enable_dump_args_) {

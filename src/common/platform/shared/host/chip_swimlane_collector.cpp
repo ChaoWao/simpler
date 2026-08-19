@@ -398,8 +398,9 @@ int ChipSwimlaneCollector::initialize(
     // first `aicpu_thread_num` of them ever get a producer — so buffers are
     // allocated for those alone. Seeding a pool at t >= aicpu_thread_num would
     // also push its surplus into recycled lane `t`, which no drain thread owns.
-    // Orch: a single instance (pool 0), so allocate buffers for just one pool
-    // while still zeroing all MAX states.
+    // Device-orchestrated level 4 uses one orch instance (pool 0). HBG starts
+    // its host capture before collector initialize(), so it needs no device
+    // orch buffers at all; the fixed pool-state layout is still zeroed.
     if (init_phase_pools(
             static_cast<ChipSwimlaneAicpuSchedPhaseBuffer *>(nullptr), get_sched_phase_buffer_state,
             /*state_count=*/num_phase_threads, /*buffer_count=*/aicpu_thread_num,
@@ -410,16 +411,17 @@ int ChipSwimlaneCollector::initialize(
     auto orch_get_state = [](void *base, int n_cores, int t) {
         return get_orch_phase_buffer_state(base, n_cores, t);
     };
+    const int orch_buffer_count = chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES && !host_orchestrated_ ? 1 : 0;
     if (init_phase_pools(
             static_cast<ChipSwimlaneAicpuOrchPhaseBuffer *>(nullptr), orch_get_state,
-            /*state_count=*/num_phase_threads, /*buffer_count=*/1,
+            /*state_count=*/num_phase_threads, /*buffer_count=*/orch_buffer_count,
             /*buffers_per_thread=*/PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD, ProfBufferType::AICPU_ORCH_PHASE, "orch"
         ) != 0) {
         return -1;
     }
     LOG_DEBUG(
-        "Initialized %d sched (%d buf/thread) + 1 orch (%d buf) PhaseBufferStates", num_phase_threads,
-        PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD, PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD
+        "Initialized %d sched (%d buf/thread) + %d orch (%d buf/thread) PhaseBufferStates", num_phase_threads,
+        PLATFORM_PROF_SCHED_BUFFERS_PER_THREAD, orch_buffer_count, PLATFORM_PROF_ORCH_BUFFERS_PER_THREAD
     );
 
     wmb();
@@ -896,6 +898,30 @@ void ChipSwimlaneCollector::set_core_types(const CoreType *types, int n) {
     core_types_.assign(types, types + n);
 }
 
+void ChipSwimlaneCollector::set_host_phase_records(
+    std::vector<HostPhaseRecord> submit_records, std::vector<HostPhaseRecord> upload_records, uint64_t submitted_tasks,
+    uint64_t total_records, uint64_t dropped_records
+) {
+    host_submit_records_ = std::move(submit_records);
+    host_upload_records_ = std::move(upload_records);
+    host_phase_submitted_tasks_ = submitted_tasks;
+    host_phase_total_records_ = total_records;
+    host_phase_dropped_records_ = dropped_records;
+    host_phase_records_present_ = true;
+}
+
+void ChipSwimlaneCollector::begin_clock_correlation_session(
+    const char *provider_name, const char *raw_device_timestamp_unit
+) {
+    clock_correlation_session_.begin(provider_name, raw_device_timestamp_unit);
+}
+
+void ChipSwimlaneCollector::record_clock_anchor_samples(std::vector<simpler::dfx::ClockAnchorSample> samples) {
+    clock_correlation_session_.append(std::move(samples));
+}
+
+void ChipSwimlaneCollector::finish_clock_correlation_session() { clock_correlation_session_.finish(); }
+
 // JSON v2 emit: the host now dumps raw cycle-domain per-stream records plus
 // metadata, and `swimlane_converter.py` performs the join (AICore↔AICPU on
 // reg_task_id, base_time normalization, cycles→µs conversion, sort, core_type
@@ -908,10 +934,11 @@ int ChipSwimlaneCollector::export_swimlane_json() {
     }
     merge_collector_shards();
 
-    // Empty-export guard: nothing useful on disk if every per-stream source is
-    // empty. AICPU_TIMING+ relies on `collected_perf_records_`; AICORE_TIMING
-    // (level=1) relies on `collected_aicore_records_` alone.
-    bool has_any_records = false;
+    // Every stream is independently useful for DFX. In particular, a legal
+    // HBG can contain only host-side dummy/hidden-allocation records and no
+    // AICore dispatch at all.
+    bool has_any_records =
+        !host_submit_records_.empty() || !host_upload_records_.empty() || clock_correlation_session_.started();
     for (const auto &core_records : collected_perf_records_) {
         if (!core_records.empty()) {
             has_any_records = true;
@@ -926,8 +953,20 @@ int ChipSwimlaneCollector::export_swimlane_json() {
             }
         }
     }
+    auto any_phase_records = [](const auto &per_thread_records) {
+        for (const auto &records : per_thread_records) {
+            if (!records.empty()) return true;
+        }
+        return false;
+    };
+    const bool has_aicpu_orch_phases = any_phase_records(collected_orch_phase_records_);
+    has_any_records = has_any_records || any_phase_records(collected_sched_phase_records_) || has_aicpu_orch_phases;
     if (!has_any_records) {
         LOG_WARN("Warning: No performance data to export.");
+        return -1;
+    }
+    if (has_aicpu_orch_phases && host_orchestrated_) {
+        LOG_ERROR("Both host and AICPU orchestrator records are present; refusing mixed clock-domain export");
         return -1;
     }
 
@@ -963,6 +1002,89 @@ int ChipSwimlaneCollector::export_swimlane_json() {
         outfile << "\"" << ((ct == CoreType::AIC) ? "aic" : "aiv") << "\"";
     }
     outfile << "]";
+    if (host_phase_records_present_) {
+        // Earliest of both projections: an upload segment can start before the
+        // first submit, and a negative offset from the origin is not renderable.
+        uint64_t host_origin_ns = 0;
+        for (const auto *population : {&host_submit_records_, &host_upload_records_}) {
+            for (const auto &record : *population) {
+                if (host_origin_ns == 0 || record.start_ns < host_origin_ns) host_origin_ns = record.start_ns;
+            }
+        }
+        outfile << ",\n    \"orchestrator_source\": \"host\"";
+        outfile << ",\n    \"orchestrator_clock_domain\": \"host_monotonic_ns\"";
+        outfile << ",\n    \"device_clock_domain\": \"device_syscnt_cycles\"";
+        // The producer stamps records straight from the host monotonic clock, so
+        // a record's resolution is the clock's nanosecond and nothing is
+        // quantized away on top of it.
+        outfile << ",\n    \"host_timestamp_resolution_ns\": 1";
+        outfile << ",\n    \"host_timestamp_quantization_ns\": 0";
+        outfile << ",\n    \"host_orchestration_origin_ns\": " << host_origin_ns;
+        outfile << ",\n    \"timeline_relation\": \"host_orchestration_precedes_device\"";
+        // Completeness is per kind, not per record: the pool holds every timed
+        // host operation, of which the task-submitting kinds are the projection
+        // this file carries. Comparing the pool's total against total_tasks would
+        // count the sub-operations of a submit as if each were a submit.
+        const bool host_record_count_matches = host_submit_records_.size() == host_phase_submitted_tasks_;
+        const bool host_capture_complete = host_phase_dropped_records_ == 0 && host_record_count_matches;
+        const char *host_capture_status = host_capture_complete           ? "complete" :
+                                          host_phase_dropped_records_ > 0 ? "dropped" :
+                                                                            "incomplete";
+        outfile << ",\n    \"host_capture\": {\"status\": \"" << host_capture_status
+                << "\", \"expected_records\": " << host_phase_submitted_tasks_
+                << ", \"recorded_records\": " << host_submit_records_.size()
+                << ", \"pool_records\": " << host_phase_total_records_
+                << ", \"dropped_records\": " << host_phase_dropped_records_ << ", \"error\": ";
+        if (host_capture_complete) {
+            outfile << "null}";
+        } else if (host_phase_dropped_records_ > 0) {
+            outfile << "\"pool_overflow\"}";
+        } else {
+            outfile << "\"record_count_mismatch\"}";
+        }
+    }
+    if (clock_correlation_session_.started()) {
+        outfile << ",\n    \"clock_anchors\": {";
+        outfile << "\n      \"schema_version\": 1,";
+        outfile << "\n      \"provider\": \"" << clock_correlation_session_.provider_name() << "\",";
+        outfile << "\n      \"device_timestamp_unit\": \"syscnt_cycles\",";
+        outfile << "\n      \"raw_device_timestamp_unit\": \"" << clock_correlation_session_.raw_device_timestamp_unit()
+                << "\",";
+        outfile << "\n      \"samples_per_position\": " << simpler::dfx::kClockAnchorSamplesPerPosition << ",";
+        outfile << "\n      \"samples\": [";
+        bool first_anchor = true;
+        for (const auto &sample : clock_correlation_session_.samples()) {
+            if (!first_anchor) outfile << ",";
+            const uint64_t rtt_ns =
+                sample.host_after_ns >= sample.host_before_ns ? sample.host_after_ns - sample.host_before_ns : 0;
+            outfile << "\n        {\"position\": \"" << simpler::dfx::clock_anchor_position_name(sample.position)
+                    << "\", \"sample_idx\": " << sample.sample_idx << ", \"host_before_ns\": " << sample.host_before_ns
+                    << ", \"raw_device_timestamp\": ";
+            if (sample.raw_device_timestamp == 0) {
+                outfile << "null";
+            } else {
+                outfile << sample.raw_device_timestamp;
+            }
+            outfile << ", \"device_cycles\": ";
+            if (sample.device_cycles == 0) {
+                outfile << "null";
+            } else {
+                outfile << sample.device_cycles;
+            }
+            outfile << ", \"host_after_ns\": " << sample.host_after_ns << ", \"rtt_ns\": " << rtt_ns
+                    << ", \"uncertainty_ns\": " << (rtt_ns + 1) / 2 << ", \"error\": ";
+            if (sample.error_stage == simpler::dfx::ClockAnchorErrorStage::None && sample.error_code == 0) {
+                outfile << "null";
+            } else {
+                outfile << "{\"stage\": \"" << simpler::dfx::clock_anchor_error_stage_name(sample.error_stage)
+                        << "\", \"code\": " << sample.error_code << "}";
+            }
+            outfile << "}";
+            first_anchor = false;
+        }
+        if (!first_anchor) outfile << "\n      ";
+        outfile << "]\n    }";
+    }
     if (!core_to_thread_.empty()) {
         outfile << ",\n    \"core_to_thread\": [";
         for (size_t i = 0; i < core_to_thread_.size(); i++) {
@@ -1093,16 +1215,7 @@ int ChipSwimlaneCollector::export_swimlane_json() {
         }
         outfile << "  ]";
 
-        bool has_orch_phases = false;
-        if (chip_swimlane_level_ >= ChipSwimlaneLevel::ORCH_PHASES) {
-            for (const auto &v : collected_orch_phase_records_) {
-                if (!v.empty()) {
-                    has_orch_phases = true;
-                    break;
-                }
-            }
-        }
-        if (has_orch_phases) {
+        if (has_aicpu_orch_phases) {
             size_t orch_lanes = static_cast<size_t>(get_chip_swimlane_header(shm_host_)->num_orch_phase_threads);
             if (orch_lanes == 0 || orch_lanes > collected_orch_phase_records_.size()) {
                 orch_lanes = collected_orch_phase_records_.size();
@@ -1123,6 +1236,31 @@ int ChipSwimlaneCollector::export_swimlane_json() {
                 outfile << "\n";
             }
             outfile << "  ]";
+        }
+        if (!host_submit_records_.empty()) {
+            outfile << ",\n  \"host_orchestrator_phases\": [[";
+            bool first = true;
+            for (const auto &record : host_submit_records_) {
+                if (!first) outfile << ",";
+                outfile << "\n      {\"submit_idx\": " << record.index << ", \"task_id\": " << record.payload
+                        << ", \"start_host_ns\": " << record.start_ns << ", \"end_host_ns\": " << record.end_ns << "}";
+                first = false;
+            }
+            if (!first) outfile << "\n    ";
+            outfile << "]]";
+        }
+        if (!host_upload_records_.empty()) {
+            outfile << ",\n  \"host_device_uploads\": [";
+            bool first = true;
+            for (const auto &record : host_upload_records_) {
+                if (!first) outfile << ",";
+                outfile << "\n      {\"phase\": \"" << host_phase_kind_name(static_cast<HostPhaseKind>(record.kind))
+                        << "\", \"start_host_ns\": " << record.start_ns << ", \"end_host_ns\": " << record.end_ns
+                        << ", \"detail\": " << record.payload << "}";
+                first = false;
+            }
+            if (!first) outfile << "\n    ";
+            outfile << "]";
         }
     }
 
@@ -1253,6 +1391,9 @@ int ChipSwimlaneCollector::finalize(
     collected_aicore_records_.clear();
     collected_sched_phase_records_.clear();
     collected_orch_phase_records_.clear();
+    host_submit_records_.clear();
+    host_upload_records_.clear();
+    clock_correlation_session_.reset();
     perf_records_by_collector_.clear();
     aicore_records_by_collector_.clear();
     sched_phase_records_by_collector_.clear();
@@ -1264,6 +1405,11 @@ int ChipSwimlaneCollector::finalize(
     total_sched_phase_collected_ = 0;
     total_orch_phase_collected_ = 0;
     collector_shards_merged_ = false;
+    host_orchestrated_ = false;
+    host_phase_records_present_ = false;
+    host_phase_total_records_ = 0;
+    host_phase_dropped_records_ = 0;
+    host_phase_submitted_tasks_ = 0;
     clear_memory_context();
 
     LOG_DEBUG("Performance profiling cleanup complete");

@@ -76,12 +76,14 @@ class TestChipSwimlane(SceneTestCase):
         {
             "name": "default",
             "platforms": ["a5sim", "a5"],
+            "manual": ["a5sim"],
             "params": {},
             "required_sched_phases": ("release",),
         },
         {
             "name": "aicpu_threads_2",
             "platforms": ["a5sim", "a5"],
+            "manual": ["a5sim"],
             "config": {"aicpu_thread_num": 2},
             "params": {},
             "required_sched_phases": ("release",),
@@ -106,14 +108,13 @@ class TestChipSwimlane(SceneTestCase):
         super().test_run(st_platform, st_worker, request)
         if not request.config.getoption("--enable-chip-swimlane", default=0):
             return
-        for case in self.CASES:
-            if st_platform in case["platforms"]:
-                validate_perf_artifact(
-                    f"TestChipSwimlane_{case['name']}",
-                    since=run_marker,
-                    expected_task_count=_EXPECTED_TASK_COUNT,
-                    required_sched_phases=case["required_sched_phases"],
-                )
+        for case in self._matching_cases(st_platform, request):
+            validate_perf_artifact(
+                f"TestChipSwimlane_{case['name']}",
+                since=run_marker,
+                expected_task_count=_EXPECTED_TASK_COUNT,
+                required_sched_phases=case["required_sched_phases"],
+            )
 
 
 if __name__ == "__main__":
