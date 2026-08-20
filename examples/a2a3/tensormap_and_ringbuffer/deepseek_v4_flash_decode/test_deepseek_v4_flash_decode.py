@@ -25,11 +25,11 @@ This is a completion/smoke case (``skip_golden``): upstream pypto-lib runs the
 same fixture with ``golden_fn=None`` (component-level golden checks live with
 the standalone kernels there); a full-network torch reference does not exist
 in either repo. The case validates that the harvested distributed program —
-367 incore kernels plus a 7.8k-line chip orchestration per rank — compiles,
+368 incore kernels plus a 7.8k-line chip orchestration per rank — compiles,
 dispatches across both dies, drives the comm-window protocol to completion,
 and terminates cleanly.
 
-The case is marked ``manual`` (compiling 367 kernels takes several minutes);
+The case is marked ``manual`` (compiling 368 kernels takes several minutes);
 run it explicitly:
 
     python examples/a2a3/tensormap_and_ringbuffer/deepseek_v4_flash_decode/\
@@ -423,6 +423,7 @@ _KERNELS = [
     (364, "lm_head_combine_gather", "aiv", "oi"),
     (365, "lm_head_signal_clear", "aiv", "ioo"),
     (366, "lm_head_greedy_sample", "aiv", "ix"),
+    (367, "hc_head_mixes_zero", "aiv", "o"),
 ]
 
 # Chip orchestration tensor-argument directions (scalars excluded), from kernel_config.py.

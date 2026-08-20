@@ -1986,7 +1986,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             TensorCreateInfo h_tile_i8_inline2663_inline9173_ci(
                 h_tile_i8_inline2663_inline9173_ci_shapes, 2, DataType::INT8
             );
-            h_tile_i8_inline2663_inline9173_ci.set_initial_value(0);
             uint32_t h_tile_scale_dq_inline2676_inline9243_ci_shapes[2] = {16, 8};
             TensorCreateInfo h_tile_scale_dq_inline2676_inline9243_ci(
                 h_tile_scale_dq_inline2676_inline9243_ci_shapes, 2, DataType::FLOAT32, /*manual_dep=*/true
@@ -3417,7 +3416,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             TensorCreateInfo h_tile_i8_inline2663_inline9935_ci(
                 h_tile_i8_inline2663_inline9935_ci_shapes, 2, DataType::INT8
             );
-            h_tile_i8_inline2663_inline9935_ci.set_initial_value(0);
             uint32_t h_tile_scale_dq_inline2676_inline10005_ci_shapes[2] = {16, 8};
             TensorCreateInfo h_tile_scale_dq_inline2676_inline10005_ci(
                 h_tile_scale_dq_inline2676_inline10005_ci_shapes, 2, DataType::FLOAT32, /*manual_dep=*/true
@@ -6051,7 +6049,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 TensorCreateInfo h_tile_i8_inline2663_inline10980_ci(
                     h_tile_i8_inline2663_inline10980_ci_shapes, 2, DataType::INT8
                 );
-                h_tile_i8_inline2663_inline10980_ci.set_initial_value(0);
                 uint32_t h_tile_scale_dq_inline2676_inline11050_ci_shapes[2] = {16, 8};
                 TensorCreateInfo h_tile_scale_dq_inline2676_inline11050_ci(
                     h_tile_scale_dq_inline2676_inline11050_ci_shapes, 2, DataType::FLOAT32, /*manual_dep=*/true
@@ -8192,7 +8189,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
                 TensorCreateInfo h_tile_i8_inline2663_inline11859_ci(
                     h_tile_i8_inline2663_inline11859_ci_shapes, 2, DataType::INT8
                 );
-                h_tile_i8_inline2663_inline11859_ci.set_initial_value(0);
                 uint32_t h_tile_scale_dq_inline2676_inline11929_ci_shapes[2] = {16, 8};
                 TensorCreateInfo h_tile_scale_dq_inline2676_inline11929_ci(
                     h_tile_scale_dq_inline2676_inline11929_ci_shapes, 2, DataType::FLOAT32, /*manual_dep=*/true
@@ -10762,7 +10758,6 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             TensorCreateInfo h_tile_i8_inline2663_inline12904_ci(
                 h_tile_i8_inline2663_inline12904_ci_shapes, 2, DataType::INT8
             );
-            h_tile_i8_inline2663_inline12904_ci.set_initial_value(0);
             uint32_t h_tile_scale_dq_inline2676_inline12974_ci_shapes[2] = {16, 8};
             TensorCreateInfo h_tile_scale_dq_inline2676_inline12974_ci(
                 h_tile_scale_dq_inline2676_inline12974_ci_shapes, 2, DataType::FLOAT32, /*manual_dep=*/true
@@ -11313,9 +11308,14 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         rt_submit_aiv_task(354, params_t342);
         uint32_t mixes_raw_inline13234_ci_shapes[2] = {static_cast<uint32_t>(t_linear_inline13230), 16};
         TensorCreateInfo mixes_raw_inline13234_ci(mixes_raw_inline13234_ci_shapes, 2, DataType::FLOAT32);
-        mixes_raw_inline13234_ci.set_initial_value(0);
-        TaskOutputTensors alloc_144 = alloc_tensors(mixes_raw_inline13234_ci);
-        const ChipTensor &mixes_raw_inline13234 = alloc_144.get_ref(0);
+
+        // Seed the split-K AtomicAdd destination on device before any contributor runs.
+        CoreTaskArgs params_hc_head_mixes_zero;
+        params_hc_head_mixes_zero.add_output(mixes_raw_inline13234_ci);
+        params_hc_head_mixes_zero.launch_spec.set_block_num(((t_linear_inline13230 + 15) / 16));
+        TaskOutputTensors hc_head_mixes_zero_outs = rt_submit_aiv_task(367, params_hc_head_mixes_zero);
+        const ChipTensor &mixes_raw_inline13234 = hc_head_mixes_zero_outs.get_ref(0);
+        PTO2TaskId hc_head_mixes_zero_tid = hc_head_mixes_zero_outs.task_id();
 
         // Spmd hc_head_linear_spmd: hc_head_linear
         CoreTaskArgs params_t343;
@@ -11323,6 +11323,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
         params_t343.add_input(ext_hc_head_fn);
         params_t343.add_inout(mixes_raw_inline13234);
         params_t343.launch_spec.set_block_num(((t_linear_inline13230 / 16) * 16));
+        PTO2TaskId params_t343_deps[1];
+        params_t343_deps[0] = hc_head_mixes_zero_tid;
+        params_t343.set_dependencies(params_t343_deps, 1);
         rt_submit_aic_task(355, params_t343);
 
         // Spmd hc_head_reduce_spmd: hc_head_reduce
