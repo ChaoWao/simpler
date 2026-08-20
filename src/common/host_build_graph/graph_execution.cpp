@@ -143,6 +143,13 @@ bool graph_definition_hash_matches(const GraphDefinition &definition, uint32_t d
     }
     constexpr size_t HASH_OFFSET = offsetof(GraphDefinition, content_hash);
     constexpr size_t HASH_END = HASH_OFFSET + sizeof(GraphDefinition::content_hash);
+    // graph_hash_bytes mixes eight bytes per step, so a chunked update matches a
+    // single update over the concatenation only when every chunk boundary is a
+    // multiple of eight. The host hashes the whole image in one call; this side
+    // splits it in three to substitute a zeroed content_hash, so both splits have
+    // to land on a word boundary.
+    static_assert(HASH_OFFSET % sizeof(uint64_t) == 0);
+    static_assert(HASH_END % sizeof(uint64_t) == 0);
     const auto *bytes = reinterpret_cast<const uint8_t *>(&definition);
     uint64_t hash = graph_hash_bytes(1469598103934665603ULL, bytes, HASH_OFFSET);
     const uint64_t zero_hash = 0;
