@@ -19,6 +19,7 @@ import gc
 import inspect
 import multiprocessing.shared_memory as shared_memory_mod
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -65,6 +66,7 @@ from simpler.worker import (
     _mailbox_store_i32,
     _pack_py_callable_payload,
 )
+from simpler.worker_level import WorkerLevel
 
 from ._harness import chip_callable, fake_chip_l3, requires_sim_binaries
 
@@ -2755,7 +2757,8 @@ class TestRunHandle:
         with pytest.raises(ValueError, match="bad graph"):
             worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
 
-        assert emitted == [("node.graph_build", 1, 0, 0, 100, 175, "run_id=1 role=facade")]
+        expected_name = f"{worker._host_span_prefix}.graph_build"
+        assert emitted == [(expected_name, 1, 0, 0, 100, 175, "run_id=1 role=facade")]
 
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)
@@ -7655,3 +7658,25 @@ class TestChipMainLoopDigestRegister:
             shm.unlink()
             payload_shm.close()
             payload_shm.unlink()
+
+
+def test_the_cpp_pre_bind_level_word_is_the_ladder_word_for_l3():
+    """`host_span_names.h` hand-writes the L3 word a third time, as its pre-bind default.
+
+    `WorkerLevel` is the source of truth and `strace_timing.py`'s copy is pinned to
+    it by its own test, but the C++ default is pinned to nothing — so a level word
+    could be renamed in Python while C++ keeps emitting the old one until a Worker
+    binds the prefix. Every span emitted before that binding would carry the stale
+    word, and no test would notice.
+
+    Read in a child process on purpose: the prefix freezes on first bind, so any
+    test in this process that constructed a Worker would leave the *bound* word
+    here instead of the default. Passing an empty word binds nothing (the setter
+    returns early) while the binding still reports what is currently in effect.
+    """
+    source = "from _task_interface import _set_host_span_level_prefix as bind; print(bind(''), end='')"
+    completed = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True, check=True, timeout=120)
+
+    assert completed.stdout == WorkerLevel.node.name, (
+        f"C++ pre-bind level word is {completed.stdout!r}, ladder says {WorkerLevel.node.name!r}"
+    )
