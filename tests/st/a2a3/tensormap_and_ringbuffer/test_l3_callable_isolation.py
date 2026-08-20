@@ -178,18 +178,23 @@ def test_dispatch_runs_the_named_callable(st_platform, st_device_ids, isolation_
     """One worker serves several callables, including a callable dispatched again later."""
     device = int(st_device_ids[0])
     worker = Worker(level=3, device_ids=[device], num_sub_workers=0, platform=st_platform, runtime=_RUNTIME)
-    handles = {kind: worker.register(isolation_callables[kind]) for kind in sorted(set(sequence))}
-    if len(handles) > 1:
-        hashids = {kind: h.hashid for kind, h in handles.items()}
-        assert len(set(hashids.values())) == len(hashids), (
-            f"callables that compute different functions share a hashid: {hashids}"
-        )
-
-    argsets = [_make_args(*_INPUTS[i % len(_INPUTS)]) for i in range(len(sequence))]
-    chip_args = [_build_l3_task_args(a, _ORCH_SIG, worker)[0] for a in argsets]
-
-    worker.init()
+    # Guard from construction, not from init(): a register() or init() that raises
+    # still owes teardown. init() "raises after a bounded rollback that reaps the
+    # children it forked best-effort" and leaves the worker FAILED ("close this
+    # Worker and create a new one"); the debt is re-driven only by a later close().
+    # Skipping it would keep the device held and fail every later case on that card.
     try:
+        handles = {kind: worker.register(isolation_callables[kind]) for kind in sorted(set(sequence))}
+        if len(handles) > 1:
+            hashids = {kind: h.hashid for kind, h in handles.items()}
+            assert len(set(hashids.values())) == len(hashids), (
+                f"callables that compute different functions share a hashid: {hashids}"
+            )
+
+        argsets = [_make_args(*_INPUTS[i % len(_INPUTS)]) for i in range(len(sequence))]
+        chip_args = [_build_l3_task_args(a, _ORCH_SIG, worker)[0] for a in argsets]
+
+        worker.init()
         for i, kind in enumerate(sequence):
             handle, args = handles[kind], chip_args[i]
 
@@ -217,12 +222,12 @@ def test_dispatch_runs_the_named_callable_fresh_worker_each(st_platform, st_devi
         worker = Worker(
             level=3, device_ids=[int(st_device_ids[0])], num_sub_workers=0, platform=st_platform, runtime=_RUNTIME
         )
-        handle = worker.register(isolation_callables[kind])
         a, b = _INPUTS[i % len(_INPUTS)]
         argset = _make_args(a, b)
-        args, _ = _build_l3_task_args(argset, _ORCH_SIG, worker)
-        worker.init()
         try:
+            handle = worker.register(isolation_callables[kind])
+            args, _ = _build_l3_task_args(argset, _ORCH_SIG, worker)
+            worker.init()
 
             def orch(o, _args, _cfg, _handle=handle, _args_i=args):
                 o.submit_next_level(_handle, _args_i, CallConfig(), worker=0)
